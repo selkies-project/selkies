@@ -289,6 +289,44 @@ def striped_block(engine: str) -> "H.Results":
     return res
 
 
+def sink_block(engine: str) -> "H.Results":
+    """Where frames are presented is said, including when the sink is not the
+    one asked for.
+
+    The video worker is the first choice on every engine, so a session that
+    ends up on the page canvas because the worker could not start is the one
+    whose sink most needs naming -- and the one that used to say nothing. The
+    worker is blocked the way a content policy that forbids blob workers
+    blocks it: the constructor throws.
+    """
+    res = H.Results(f"sink-{engine}")
+    H.server_start(mode="websockets", wayland=False)
+    try:
+        with sync_playwright() as p:
+            browser = C.launch_browser(p, engine)
+            try:
+                ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+                ctx.add_init_script("window.Worker = function () { throw new Error('blocked'); };")
+                page = ctx.new_page()
+                said = []
+                page.on("console", lambda m: said.append(m.text))
+                page.goto(H.BASE_URL, wait_until="load")
+                res.check(f"[{engine}] the stream plays without the worker",
+                          bool(C.wait_ws_video(page, timeout=45)), "")
+                sinks = [t for t in said if "video sink:" in t]
+                res.check(f"[{engine}] the sink it fell back to is named",
+                          any("canvas on the page" in t or "MediaStreamTrackGenerator" in t
+                              for t in sinks), sinks[:2])
+                res.check(f"[{engine}] and named once, not per handshake",
+                          len(sinks) == len(set(sinks)), sinks)
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
 def main() -> None:
     """Run the engine blocks named on argv (default: all available)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -300,6 +338,9 @@ def main() -> None:
             blocks.append(engine_block("firefox", "websockets"))
         if which in ("all", "webkit-ws"):
             blocks.append(engine_block("webkit", "websockets"))
+        if which in ("all", "sink"):
+            blocks.append(sink_block("webkit"))
+            blocks.append(sink_block("chromium"))
         if which in ("all", "striped"):
             blocks.append(striped_block("chromium"))
             blocks.append(striped_block("firefox"))

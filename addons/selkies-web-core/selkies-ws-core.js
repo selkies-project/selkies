@@ -243,9 +243,9 @@ window.currentAudioDropped = 0;
  * Track-generator sink: decoded VideoFrames are presented through a `<video>`
  * element (GPU-composited, no per-frame 2D-canvas draw) by
  * MediaStreamTrackGenerator on the main thread (Chromium) or the standard
- * worker-only VideoTrackGenerator whose track is transferred back here
- * (Safari). Full-frame H.264 modes only; striped and JPEG modes, and browsers
- * with neither generator, keep the canvas path.
+ * worker-only VideoTrackGenerator whose track is transferred back here.
+ * Full-frame H.264 modes only; striped and JPEG modes, and browsers with
+ * neither generator, keep the canvas path.
  */
 let videoElement = null;
 let videoFrameWriter = null;
@@ -1086,16 +1086,16 @@ const isChromium = (() => {
  * report it, which is why the worker is started before this is consulted.
  *
  * Sink priority: the worker's VideoTrackGenerator, then this, then the worker's
- * OffscreenCanvas, then the page's own canvas. Safari has the worker generator,
- * Chromium this one, Firefox neither.
+ * OffscreenCanvas, then the page's own canvas. Chromium has this one; an engine
+ * with neither composites in the worker instead.
  */
 const supportsWindowMSTG = (typeof MediaStreamTrackGenerator !== 'undefined');
 
 /**
  * Whether the worker video sink is enabled (`?offscreen_worker=false` turns
- * it off). The worker hosts either the standard VideoTrackGenerator (Safari),
- * whose MediaStreamTrack is transferred back for `<video>.srcObject`, or an
- * OffscreenCanvas it composites onto (Firefox).
+ * it off). The worker hosts either the standard VideoTrackGenerator, whose
+ * MediaStreamTrack is transferred back for `<video>.srcObject`, or, where the
+ * engine has none, an OffscreenCanvas it composites onto.
  */
 let USE_OFFSCREEN_WORKER = false;
 let videoWorker = null;
@@ -1859,6 +1859,21 @@ function updateVideoDivert(force) {
   }
 }
 
+/** Sink descriptions already announced, so a re-handshake never repeats one. */
+const announcedSinks = new Set();
+/**
+ * Says where frames are being presented, once per distinct sink. Every path
+ * that settles presentation announces through this, including the fall back to
+ * the page canvas when a worker sink fails: a session whose sink is not the one
+ * it asked for says so as plainly as one that got it.
+ * @param {string} description
+ */
+function announceSink(description) {
+  if (announcedSinks.has(description)) return;
+  announcedSinks.add(description);
+  console.info(`[Selkies] video sink: ${description}`);
+}
+
 /**
  * Lazily creates the video worker and completes its capability handshake.
  * The worker self-probes VideoTrackGenerator on startup and reports `vtg`
@@ -1948,7 +1963,7 @@ function ensureVideoWorker() {
             videoElement.srcObject = new MediaStream([m.track]);
             const p = videoElement.play(); if (p && p.catch) p.catch(() => {});
           } catch (err) { console.warn('VTG srcObject failed:', err); deactivateVideoWorker(); return; }
-          console.info('[Selkies] video sink: VideoTrackGenerator in the video worker.');
+          announceSink('VideoTrackGenerator in the video worker.');
           decodeInWorker = true;
           videoWorkerReady = true;
           videoWorkerSpawnAttempts = 0;
@@ -1958,16 +1973,16 @@ function ensureVideoWorker() {
             currentEncoderMode !== 'h264enc-striped' && currentEncoderMode !== 'jpeg') {
           // No worker generator, but the page has one: it feeds a <video>
           // element, which beats compositing a canvas by hand.
-          console.info('[Selkies] video sink: MediaStreamTrackGenerator on the page — '
+          announceSink('MediaStreamTrackGenerator on the page — '
             + 'this browser exposes no VideoTrackGenerator to a worker.');
           deactivateVideoWorker();
           return;
         } else {
           videoWorkerMode = 'canvas';
-          console.info(supportsWindowMSTG
-            ? '[Selkies] video sink: OffscreenCanvas in the video worker for the striped '
+          announceSink(supportsWindowMSTG
+            ? 'OffscreenCanvas in the video worker for the striped '
               + 'codecs; full-frame H.264 presents through the page MediaStreamTrackGenerator.'
-            : '[Selkies] video sink: OffscreenCanvas in the video worker — '
+            : 'OffscreenCanvas in the video worker — '
               + 'this browser exposes no VideoTrackGenerator to a worker and no '
               + 'MediaStreamTrackGenerator on the page, so frames are composited rather '
               + 'than handed to a <video> element.');
@@ -1999,10 +2014,16 @@ function ensureVideoWorker() {
  * Terminates the video worker and returns presentation to the main canvas.
  * The worker decoder config is forgotten so a recreated worker is configured
  * afresh, and a transferred OffscreenCanvas, which can never be transferred
- * again, is replaced by a fresh `<canvas>` element.
+ * again, is replaced by a fresh `<canvas>` element. The sink is announced from
+ * here as well: this is where a worker that failed to start or died hands
+ * presentation back, and a session that ends up somewhere other than where it
+ * asked to be is the one that most needs to say so.
  */
 function deactivateVideoWorker() {
   const wasVtg = (videoWorkerMode === 'vtg');
+  announceSink(supportsWindowMSTG
+    ? 'MediaStreamTrackGenerator on the page.'
+    : '2D canvas on the page — no video worker sink.');
   const wasTransferred = videoWorkerCanvasTransferred;
   videoWorkerActive = false; videoWorkerReady = false; videoWorkerMode = null;
   decodeInWorker = false;
@@ -2907,9 +2928,9 @@ const initializeUI = () => {
   USE_OFFSCREEN_WORKER = offscreenWorkerEnabled;
   stripeCompositeEnabled = offscreenWorkerEnabled;
   if (!USE_OFFSCREEN_WORKER && supportsWindowMSTG) {
-    console.info('[Selkies] video sink: MediaStreamTrackGenerator on the page.');
+    announceSink('MediaStreamTrackGenerator on the page.');
   } else if (!USE_OFFSCREEN_WORKER) {
-    console.info('[Selkies] video sink: 2D canvas on the page — '
+    announceSink('2D canvas on the page — '
       + (offscreenWorkerEnabled
           ? 'no MediaStreamTrackGenerator in this browser and no video worker.'
           : 'the video worker is disabled (offscreen_worker=false).')
