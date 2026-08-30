@@ -223,20 +223,26 @@ RUN set -eu; \
 # hibernate address an init this container does not run.
 #
 # Every one of those entries runs the one lxqt-leave binary, and the panel's own
-# power button calls it directly rather than through an entry, so both are
-# shadowed: the entries so nothing offers the actions, and the binary so nothing
-# performs them. Shadowing rather than deleting keeps lxqt-session's package
-# intact, and a later upgrade of it does not undo either half.
-RUN mkdir -pm755 /usr/local/share/applications /usr/local/bin && \
-    for leave in leave logout lockscreen reboot shutdown suspend hibernate; do \
-        entry="/usr/share/applications/lxqt-${leave}.desktop"; \
-        [ -f "${entry}" ] || continue; \
-        sed '/^NoDisplay=/d' "${entry}" > "/usr/local/share/applications/lxqt-${leave}.desktop"; \
-        printf 'NoDisplay=true\n' >> "/usr/local/share/applications/lxqt-${leave}.desktop"; \
+# menu offers a button that runs it directly rather than through an entry, so
+# both halves are covered: the entries are hidden so nothing offers the actions,
+# and the binary is replaced so nothing performs them.
+#
+# Which entries those are is read from the entries themselves rather than
+# listed, so one renamed or added upstream is covered too. Hiding them uses the
+# XDG rule that the first entry of a given file name across XDG_DATA_DIRS wins,
+# and /usr/local/share precedes /usr/share; replacing the binary uses dpkg's own
+# diversion, so an upgrade of lxqt-session reinstalls to the diverted path and
+# leaves this in place. No lxqt-panel release exposes a setting for the button.
+RUN mkdir -pm755 /usr/local/share/applications && \
+    grep -lE '^Exec=[^=]*lxqt-leave' /usr/share/applications/*.desktop | while read -r entry; do \
+        hidden="/usr/local/share/applications/$(basename "${entry}")"; \
+        sed '/^NoDisplay=/d' "${entry}" > "${hidden}"; \
+        printf 'NoDisplay=true\n' >> "${hidden}"; \
     done && \
-    printf '#!/bin/sh\n# Shadows lxqt-leave: this desktop has no session to leave.\nnotify-send -i dialog-information "Not available here" "This desktop runs in a container: there is no session to log out of, lock or shut down." 2>/dev/null || true\nexit 0\n' \
-        > /usr/local/bin/lxqt-leave && \
-    chmod 755 /usr/local/bin/lxqt-leave
+    dpkg-divert --divert /usr/bin/lxqt-leave.real --rename /usr/bin/lxqt-leave && \
+    printf '#!/bin/sh\n# See the Dockerfile: this desktop has no session to leave.\nnotify-send -i dialog-information "Not available here" "This desktop runs in a container: there is no session to log out of, lock, or shut down." 2>/dev/null || true\nexit 0\n' \
+        > /usr/bin/lxqt-leave && \
+    chmod 755 /usr/bin/lxqt-leave
 
 # The session's own s6 service, supervised beside the base container's
 COPY --chown=1000:1000 addons/desktop/services/ /etc/service/

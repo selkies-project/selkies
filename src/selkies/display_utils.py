@@ -429,28 +429,23 @@ def _resize_on_display(
     return mode_w, mode_h
 
 
-def wayland_output_id(display_id: Optional[str]) -> int:
-    """Stable compositor output id for a display name, shared by both transports.
+#: The compositor output every display is cut from. The session sees this one
+#: screen however many displays the client is shown, which is what lets a window
+#: be dragged from one to the next: the pointer grab a drag runs under stays
+#: inside one surface for the whole desk.
+WAYLAND_SCREEN_OUTPUT_ID = 0
 
-    'primary' maps to 0 (the pixelflux primary output) and 'displayN' to N. A
-    secondary name without a numeric suffix falls back to 2 (one secondary is
-    supported).
+
+def wayland_output_id(display_id: Optional[str]) -> int:
+    """Stable compositor id for a display name, shared by both transports.
+
+    'primary' maps to 1 and 'displayN' to N, leaving 0 to the screen they are
+    all views of. A secondary name without a numeric suffix falls back to 2.
     """
     if not display_id or display_id == "primary":
-        return 0
+        return 1
     m = re.search(r"(\d+)$", str(display_id))
     return int(m.group(1)) if m else 2
-
-
-def session_screen_index(display_id: Optional[str]) -> int:
-    """Position of a display among a nested session compositor's screens.
-
-    'primary' maps to 0 and 'displayN' to N-1. The session opens one screen
-    per capture output in that order, and its output management addresses
-    them by position rather than by the compositor output id above.
-    """
-    return max(0, wayland_output_id(display_id) - 1) if display_id not in (
-        None, "", "primary") else 0
 
 
 async def wayland_reposition_primary(module: Any, x: int, y: int) -> bool:
