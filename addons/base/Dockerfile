@@ -453,10 +453,9 @@ ENV SELKIES_PORT="8080"
 # deployment that terminates TLS in front of the container.
 ENV SELKIES_ENABLE_HTTPS="true"
 
-# The snakeoil pair ssl-cert generated above was generated during the image
-# build: every pull of this image holds that private key, so serving on it
-# would let any of them impersonate any other. Removed, so the per-install
-# pair is what a deployment falls back to.
+# ssl-cert generates its snakeoil pair during the image build, so every pull
+# would hold the same private key and any of them could impersonate any other.
+# Dropping it leaves the per-install pair as what a deployment falls back to.
 RUN rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoil.pem
 # AppImages mount themselves through FUSE, which a container is usually not
 # given; extracting instead is what makes them run at all here.
