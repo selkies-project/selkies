@@ -53,16 +53,22 @@ async def main() -> None:
     h = make_handler()
     started = []
 
-    async def realize(dpi, size=None):
+    async def hold():
+        started.append("hold")
+        await asyncio.sleep(0.05)
+
+    async def realize(dpi, display_index=0, size=None):
         started.append(("dpi", dpi))
         await asyncio.sleep(0.05)
         return 1.0
+    h._hold_spare_screens = hold
     h.realize_wayland_dpi = realize
+    h._schedule_spare_screen_hold()
     h._schedule_session_scale()
-    check("the session scale is referenced while it runs",
-          len(h._bg_tasks) == 1, str(h._bg_tasks))
+    check("spare-screen hold and session scale are referenced while running",
+          len(h._bg_tasks) == 2, str(h._bg_tasks))
     await asyncio.sleep(0.15)
-    check("it ran and dropped its reference", started == [("dpi", 120)]
+    check("both ran and dropped their reference", started == ["hold", ("dpi", 120)]
           and not h._bg_tasks, str(started))
 
     # The xdotool type fallback ends its options before the text.

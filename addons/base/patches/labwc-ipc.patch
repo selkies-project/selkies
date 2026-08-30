@@ -1,0 +1,438 @@
+diff --git a/include/ipc.h b/include/ipc.h
+new file mode 100644
+index 00000000..7be67068
+--- /dev/null
++++ b/include/ipc.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef LABWC_IPC_H
++#define LABWC_IPC_H
++
++struct server;
++
++void ipc_init(struct server *server);
++void ipc_finish(struct server *server);
++
++#endif /* LABWC_IPC_H */
+diff --git a/include/labwc.h b/include/labwc.h
+index 88860de2..9235aa2b 100644
+--- a/include/labwc.h
++++ b/include/labwc.h
+@@ -311,6 +311,7 @@ struct server {
+ 	struct sfdo *sfdo;
+ 
+ 	pid_t primary_client_pid;
++	bool ipc;
+ };
+ 
+ void xdg_popup_create(struct view *view, struct wlr_xdg_popup *wlr_popup);
+diff --git a/src/ipc.c b/src/ipc.c
+new file mode 100644
+index 00000000..e763d9e3
+--- /dev/null
++++ b/src/ipc.c
+@@ -0,0 +1,298 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#define _POSIX_C_SOURCE 200809L
++#include "config.h"
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++#include <wlr/util/log.h>
++#include "ipc.h"
++#include "labwc.h"
++#include "view.h"
++
++#define IPC_BUF_SIZE 4096
++
++static int listen_fd = -1;
++static struct wl_event_source *listen_source;
++static struct server *ipc_server;
++
++struct ipc_client {
++	int fd;
++	struct wl_event_source *source;
++	struct server *server;
++	char buf[IPC_BUF_SIZE];
++	size_t buf_len;
++};
++
++static void
++ipc_client_destroy(struct ipc_client *client)
++{
++	wl_event_source_remove(client->source);
++	close(client->fd);
++	free(client);
++}
++
++static void
++json_escape(char *dst, size_t dst_size, const char *src)
++{
++	size_t j = 0;
++	for (size_t i = 0; src[i] && j < dst_size - 2; i++) {
++		char c = src[i];
++		if (c == '"' || c == '\\') {
++			if (j + 2 >= dst_size) {
++				break;
++			}
++			dst[j++] = '\\';
++			dst[j++] = c;
++		} else if (c >= 0x20) {
++			dst[j++] = c;
++		}
++	}
++	dst[j] = '\0';
++}
++
++static void
++view_to_json(struct wl_array *out, struct view *view, struct server *server)
++{
++	char title_esc[512];
++	char app_id_esc[512];
++	pid_t pid = view->impl->get_pid(view);
++
++	json_escape(title_esc, sizeof(title_esc),
++		view->title ? view->title : "");
++	json_escape(app_id_esc, sizeof(app_id_esc),
++		view->app_id ? view->app_id : "");
++
++	char entry[2048];
++	int len = snprintf(entry, sizeof(entry),
++		"{\"pid\":%d,"
++		"\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d,"
++		"\"title\":\"%s\",\"app_id\":\"%s\","
++		"\"minimized\":%s,\"fullscreen\":%s,"
++		"\"maximized\":%s,\"tiled\":%s,\"focused\":%s}",
++		(int)pid,
++		view->current.x, view->current.y,
++		view->current.width, view->current.height,
++		title_esc, app_id_esc,
++		view->minimized ? "true" : "false",
++		view->fullscreen ? "true" : "false",
++		view->maximized != VIEW_AXIS_NONE ? "true" : "false",
++		view->tiled != LAB_EDGE_NONE ? "true" : "false",
++		view == server->active_view ? "true" : "false");
++
++	char *p = wl_array_add(out, len);
++	if (p) {
++		memcpy(p, entry, len);
++	}
++}
++
++static void
++ipc_respond(int fd, const char *data, size_t len)
++{
++	size_t total = len;
++	const char *ptr = data;
++	while (total > 0) {
++		ssize_t n = write(fd, ptr, total);
++		if (n <= 0) {
++			break;
++		}
++		ptr += n;
++		total -= n;
++	}
++}
++
++static void
++ipc_handle_command(struct ipc_client *client, const char *cmd)
++{
++	struct server *server = client->server;
++	struct wl_array buf;
++	wl_array_init(&buf);
++
++	if (strncmp(cmd, "GET_WINDOWS", 11) == 0) {
++		char *p = wl_array_add(&buf, 1);
++		*p = '[';
++		bool first = true;
++		struct view *view;
++		wl_list_for_each(view, &server->views, link) {
++			if (!first) {
++				p = wl_array_add(&buf, 1);
++				*p = ',';
++			}
++			first = false;
++			view_to_json(&buf, view, server);
++		}
++		p = wl_array_add(&buf, 1);
++		*p = ']';
++
++	} else if (strncmp(cmd, "GET_WINDOW_BY_PID ", 18) == 0) {
++		int target_pid = atoi(cmd + 18);
++		struct view *view;
++		bool found = false;
++		wl_list_for_each(view, &server->views, link) {
++			pid_t pid = view->impl->get_pid(view);
++			if (pid == (pid_t)target_pid) {
++				view_to_json(&buf, view, server);
++				found = true;
++				break;
++			}
++		}
++		if (!found) {
++			char *p = wl_array_add(&buf, 4);
++			memcpy(p, "null", 4);
++		}
++
++	} else if (strncmp(cmd, "GET_FOCUSED_WINDOW", 18) == 0) {
++		if (server->active_view) {
++			view_to_json(&buf, server->active_view, server);
++		} else {
++			char *p = wl_array_add(&buf, 4);
++			memcpy(p, "null", 4);
++		}
++	} else {
++		const char *err = "{\"error\":\"unknown command\"}";
++		size_t err_len = strlen(err);
++		char *p = wl_array_add(&buf, err_len);
++		memcpy(p, err, err_len);
++	}
++
++	ipc_respond(client->fd, buf.data, buf.size);
++	char nl = '\n';
++	ipc_respond(client->fd, &nl, 1);
++	wl_array_release(&buf);
++}
++
++static int
++ipc_client_readable(int fd, uint32_t mask, void *data)
++{
++	struct ipc_client *client = data;
++
++	if (mask & WL_EVENT_HANGUP) {
++		ipc_client_destroy(client);
++		return 0;
++	}
++
++	if (mask & WL_EVENT_READABLE) {
++		size_t space = sizeof(client->buf) - client->buf_len - 1;
++		if (space == 0) {
++			ipc_client_destroy(client);
++			return 0;
++		}
++		ssize_t n = read(fd, client->buf + client->buf_len, space);
++		if (n <= 0) {
++			ipc_client_destroy(client);
++			return 0;
++		}
++		client->buf_len += n;
++		client->buf[client->buf_len] = '\0';
++
++		char *newline = strchr(client->buf, '\n');
++		if (newline) {
++			*newline = '\0';
++			ipc_handle_command(client, client->buf);
++			ipc_client_destroy(client);
++		}
++	}
++	return 0;
++}
++
++static int
++ipc_listen_readable(int fd, uint32_t mask, void *data)
++{
++	if (!(mask & WL_EVENT_READABLE)) {
++		return 0;
++	}
++
++	int client_fd = accept(fd, NULL, NULL);
++	if (client_fd < 0) {
++		wlr_log_errno(WLR_ERROR, "ipc: accept");
++		return 0;
++	}
++
++	int flags = fcntl(client_fd, F_GETFL, 0);
++	fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
++
++	struct ipc_client *client = calloc(1, sizeof(*client));
++	if (!client) {
++		close(client_fd);
++		return 0;
++	}
++	client->fd = client_fd;
++	client->server = ipc_server;
++	client->source = wl_event_loop_add_fd(
++		ipc_server->wl_event_loop, client_fd,
++		WL_EVENT_READABLE | WL_EVENT_HANGUP,
++		ipc_client_readable, client);
++
++	return 0;
++}
++
++void
++ipc_init(struct server *server)
++{
++	ipc_server = server;
++
++	const char *runtime = getenv("XDG_RUNTIME_DIR");
++	if (!runtime) {
++		wlr_log(WLR_ERROR, "ipc: XDG_RUNTIME_DIR not set");
++		return;
++	}
++
++	char path[256];
++	snprintf(path, sizeof(path), "%s/labwc.sock", runtime);
++
++	unlink(path);
++
++	struct sockaddr_un addr;
++	memset(&addr, 0, sizeof(addr));
++	addr.sun_family = AF_UNIX;
++	strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
++
++	listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
++	if (listen_fd < 0) {
++		wlr_log_errno(WLR_ERROR, "ipc: socket");
++		return;
++	}
++
++	if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
++		wlr_log_errno(WLR_ERROR, "ipc: bind %s", path);
++		close(listen_fd);
++		listen_fd = -1;
++		return;
++	}
++
++	if (listen(listen_fd, 5) < 0) {
++		wlr_log_errno(WLR_ERROR, "ipc: listen");
++		close(listen_fd);
++		listen_fd = -1;
++		return;
++	}
++
++	listen_source = wl_event_loop_add_fd(
++		server->wl_event_loop, listen_fd,
++		WL_EVENT_READABLE, ipc_listen_readable, NULL);
++
++	wlr_log(WLR_INFO, "ipc: listening on %s", path);
++}
++
++void
++ipc_finish(struct server *server)
++{
++	if (listen_source) {
++		wl_event_source_remove(listen_source);
++		listen_source = NULL;
++	}
++	if (listen_fd >= 0) {
++		close(listen_fd);
++		listen_fd = -1;
++	}
++	const char *runtime = getenv("XDG_RUNTIME_DIR");
++	if (runtime) {
++		char path[256];
++		snprintf(path, sizeof(path), "%s/labwc.sock", runtime);
++		unlink(path);
++	}
++}
+diff --git a/src/main.c b/src/main.c
+index 755a0a0c..a9906e9f 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -9,6 +9,7 @@
+ #include "common/spawn.h"
+ #include "config/rcxml.h"
+ #include "config/session.h"
++#include "ipc.h"
+ #include "labwc.h"
+ #include "theme.h"
+ #include "translate.h"
+@@ -22,6 +23,7 @@ static const struct option long_options[] = {
+ 	{"debug", no_argument, NULL, 'd'},
+ 	{"exit", no_argument, NULL, 'e'},
+ 	{"help", no_argument, NULL, 'h'},
++	{"ipc", no_argument, NULL, 'i'},
+ 	{"merge-config", no_argument, NULL, 'm'},
+ 	{"reconfigure", no_argument, NULL, 'r'},
+ 	{"startup", required_argument, NULL, 's'},
+@@ -38,6 +40,7 @@ static const char labwc_usage[] =
+ "  -d, --debug              Enable full logging, including debug information\n"
+ "  -e, --exit               Exit the compositor\n"
+ "  -h, --help               Show help message and quit\n"
++"  -i, --ipc                Accepted for compatibility; the IPC socket is always on\n"
+ "  -m, --merge-config       Merge user config files/theme in all XDG Base Dirs\n"
+ "  -r, --reconfigure        Reload the compositor configuration\n"
+ "  -s, --startup <command>  Run command on startup\n"
+@@ -154,12 +157,13 @@ main(int argc, char *argv[])
+ {
+ 	char *startup_cmd = NULL;
+ 	char *primary_client = NULL;
++	bool ipc_enabled = true;
+ 	enum wlr_log_importance verbosity = WLR_ERROR;
+ 
+ 	int c;
+ 	while (1) {
+ 		int index = 0;
+-		c = getopt_long(argc, argv, "c:C:dehmrs:S:vV", long_options, &index);
++		c = getopt_long(argc, argv, "c:C:dehimrs:S:vV", long_options, &index);
+ 		if (c == -1) {
+ 			break;
+ 		}
+@@ -195,6 +199,10 @@ main(int argc, char *argv[])
+ 			verbosity = WLR_INFO;
+ 			break;
+ 		case 'h':
++			usage();
++		case 'i':
++			ipc_enabled = true;
++			break;
+ 		default:
+ 			usage();
+ 		}
+@@ -247,6 +255,7 @@ main(int argc, char *argv[])
+ 	increase_nofile_limit();
+ 
+ 	struct server server = { 0 };
++	server.ipc = ipc_enabled;
+ 	server_init(&server);
+ 	server_start(&server);
+ 
+diff --git a/src/meson.build b/src/meson.build
+index a9afdc4f..65dbde3c 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -7,6 +7,7 @@ labwc_sources = files(
+   'edges.c',
+   'idle.c',
+   'interactive.c',
++  'ipc.c',
+   'layers.c',
+   'magnifier.c',
+   'main.c',
+diff --git a/src/server.c b/src/server.c
+index b8abc633..e7559ec7 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -52,6 +52,7 @@
+ #include "desktop-entry.h"
+ #include "idle.h"
+ #include "input/keyboard.h"
++#include "ipc.h"
+ #include "labwc.h"
+ #include "layers.h"
+ #include "magnifier.h"
+@@ -729,6 +730,10 @@ server_init(struct server *server)
+ #if HAVE_XWAYLAND
+ 	xwayland_server_init(server, server->compositor);
+ #endif
++
++	if (server->ipc) {
++		ipc_init(server);
++	}
+ }
+ 
+ void
+@@ -763,6 +768,8 @@ server_start(struct server *server)
+ void
+ server_finish(struct server *server)
+ {
++	ipc_finish(server);
++
+ #if HAVE_XWAYLAND
+ 	xwayland_server_finish(server);
+ #endif

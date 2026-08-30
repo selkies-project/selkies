@@ -41,6 +41,8 @@ ARG PYPI_PACKAGE="selkies"
 # the tree addons/base/patches/xvfb-dri3.patch edits moves within the 21.1
 # series; the pair moves together when it is rebased.
 ARG XORG_SERVER_VERSION="21.1.24"
+ARG WLROOTS_VERSION="0.19.3"
+ARG LABWC_VERSION="0.9.7"
 ARG XORG_SERVER_SHA256="1a4eb36ca65cc3b1b936566d677a9786e13c11cd5806e951ac55f3f5ce3984af"
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS xvfb
@@ -152,6 +154,85 @@ RUN set -e; \
         ln -sf libudev.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so.1"; \
         ln -sf libudev.so.1.0.0-fake "/opt/add-ons/lib/${LIB32DIR}/libudev.so"; \
     fi
+
+# Session compositor for the Wayland backend, built from source so it carries
+# the Selkies patches: a control socket at `$XDG_RUNTIME_DIR/labwc.sock`, served
+# unconditionally, over which Selkies adds a screen when a second display
+# attaches and removes it when that display disconnects (window queries ride the
+# same socket), and a cursor path that carries a held drag across the screen
+# boundary instead of clamping it at the edge. wlroots is built first at the
+# version this labwc pins; both install under /usr/lib unqualified so the copy
+# into the runtime stage is the same on every architecture.
+FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS labwc
+ARG DEBIAN_FRONTEND="noninteractive"
+ARG WLROOTS_VERSION
+ARG LABWC_VERSION
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
+        > /etc/apt/apt.conf.d/99-selkies-retries
+RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+        build-essential \
+        ca-certificates \
+        gettext \
+        git \
+        glslang-tools \
+        hwdata \
+        meson \
+        ninja-build \
+        pkg-config \
+        libcairo2-dev \
+        libdisplay-info-dev \
+        libdrm-dev \
+        libgbm-dev \
+        libglib2.0-dev \
+        libglvnd-dev \
+        libinput-dev \
+        liblcms2-dev \
+        libliftoff-dev \
+        libpango1.0-dev \
+        libpixman-1-dev \
+        libpng-dev \
+        librsvg2-dev \
+        libseat-dev \
+        libsfdo-dev \
+        libudev-dev \
+        libvulkan-dev \
+        libwayland-dev \
+        libxcb1-dev \
+        libxcb-composite0-dev \
+        libxcb-dri3-dev \
+        libxcb-errors-dev \
+        libxcb-ewmh-dev \
+        libxcb-icccm4-dev \
+        libxcb-present-dev \
+        libxcb-randr0-dev \
+        libxcb-render0-dev \
+        libxcb-render-util0-dev \
+        libxcb-res0-dev \
+        libxcb-shape0-dev \
+        libxcb-shm0-dev \
+        libxcb-sync-dev \
+        libxcb-xfixes0-dev \
+        libxcb-xinput-dev \
+        libxkbcommon-dev \
+        wayland-protocols \
+        xwayland && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
+RUN set -e; \
+    git clone --depth 1 --branch "${WLROOTS_VERSION}" \
+        https://gitlab.freedesktop.org/wlroots/wlroots.git /tmp/wlroots; \
+    cd /tmp/wlroots; \
+    meson setup build --prefix=/usr --libdir=lib --buildtype=release -Dxwayland=enabled; \
+    ninja -C build; \
+    ninja -C build install
+COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-seam.patch addons/base/patches/labwc-screens.patch /patches/
+RUN set -e; \
+    git clone --depth 1 --branch "${LABWC_VERSION}" \
+        https://github.com/labwc/labwc.git /tmp/labwc; \
+    cd /tmp/labwc; \
+    git apply /patches/labwc-ipc.patch /patches/labwc-seam.patch /patches/labwc-screens.patch; \
+    meson setup build --prefix=/usr --libdir=lib --buildtype=release -Dxwayland=enabled -Dnls=enabled; \
+    ninja -C build; \
+    ninja -C build install
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
 
@@ -375,10 +456,12 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # Session compositor for the Wayland backend: labwc, which draws
         # server-side titlebars with the iconify/maximize/close buttons a desktop
         # session is expected to have and performs the maximize and minimize
-        # requests a Wayland taskbar sends over wlr-foreign-toplevel. Its screen
-        # count is fixed at startup, which is what the wayland service and
-        # Selkies' spare-screen hold are built around. Not wayfire: it demands a
-        # DRM file descriptor the nested Wayland backend has none of without a GPU
+        # requests a Wayland taskbar sends over wlr-foreign-toplevel. The
+        # distribution package supplies the runtime libraries; the binary itself
+        # is replaced below by the source build carrying the Selkies patches,
+        # whose control socket grows and shrinks the screen count as displays
+        # come and go. Not wayfire: it demands a DRM file descriptor the nested
+        # Wayland backend has none of without a GPU
         labwc && \
     # The Intel media stack exists for amd64 alone
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
@@ -436,6 +519,12 @@ RUN --mount=type=bind,source=addons/base/wheels,target=/tmp/wheels \
 # to the session user like the rest of the image so fakeroot-sudo apt can
 # still write under /usr after the copy
 COPY --from=xvfb --chown=1000:1000 /build-out/usr/bin/Xvfb /usr/bin/Xvfb
+
+# The patched labwc replaces the distribution binary, and the wlroots it was
+# built against comes along; the distribution labwc package above keeps every
+# other runtime library in place
+COPY --from=labwc --chown=1000:1000 /usr/bin/labwc /usr/bin/labwc
+COPY --from=labwc --chown=1000:1000 /usr/lib/libwlroots-0.19.so* /usr/lib/
 
 # Install the joystick and webcam interposers and fake-udev (container-only)
 COPY --from=add-ons --chown=1000:1000 /opt/add-ons/lib/ /usr/lib/

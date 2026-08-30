@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""Two displays cut out of one Wayland screen, and the seam between them.
+"""The seam between two Wayland displays is continuous, so a window crosses it.
 
-Each display is a view of one screen rather than a screen of its own, so the
-session sees a single desk: a window that overlaps the boundary is composited
-onto both views, each drawing the part that falls in its own rectangle, and --
-the point of the whole arrangement -- a pointer grab crosses the boundary
-instead of stopping at it. A drag runs under such a grab, so with a screen per
-display a window cannot be dragged from one to the next: the grab clamps at the
-first screen's edge, which is what this pins against.
+Each display is a screen of the capture compositor's own, and the nested
+session opens one screen per capture output: two capture outputs side by side
+are still one compositor space, not two desktops, so an element that overlaps
+both is composited onto both, each output drawing the part that falls in its
+own rectangle. That is checked from the pixels each display's capture actually
+delivers -- a window walked across the boundary has to appear on the first,
+then on both, then on the second.
 
-The pixels come from what each display's capture actually delivers, and the
-grab from a client of the NESTED compositor, since that is the chain a desktop
-session runs through.
+The pointer that would drive such a drag is checked too: a button held on the
+first screen keeps the host delivering motion to that screen's window past its
+edge, and the nested compositor has to carry its cursor -- and the window a
+drag holds -- onto the second screen rather than clamp it at the first one's
+last column. That is the labwc seam patch the container images carry
+(`labwc-seam.patch`): an unpatched labwc fails this check by design. The grab
+is observed from a client of the NESTED compositor, since that is the chain a
+desktop session runs through.
 
 Usage: python3 tests/integration/test_wayland_seam.py
 """
@@ -28,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
 RUNTIME = os.path.join(H.WORKDIR, "wl-seam")
-#: One display's size; the screen the two are cut from is twice as wide.
+#: One display's size; the two screens sit side by side, twice as wide in all.
 DISPLAY = (1920, 1080)
 SPAN = (DISPLAY[0] * 2, DISPLAY[1])
 # The colour the walked window is painted, and how much of a display it has to
@@ -69,7 +74,8 @@ class Sink:
 
 
 def settings(display_id: int):
-    """A JPEG capture of one display-sized view."""
+    """A JPEG capture of one display: the primary's view of screen 0, or a
+    secondary's own screen."""
     import pixelflux
 
     cs = pixelflux.CaptureSettings()
@@ -85,16 +91,15 @@ def settings(display_id: int):
 
 
 def nested(socket: str, config: str) -> subprocess.Popen:
-    """Start a decorated nested labwc on the one screen, with XWayland."""
+    """Start a decorated nested labwc spanning both screens, with XWayland."""
     startup = os.path.join(RUNTIME, "startup.sh")
     with open(startup, "w") as fh:
         fh.write(f"#!/bin/bash\nenv | grep ^DISPLAY= > {RUNTIME}/env\nexec sleep 3600\n")
     os.chmod(startup, 0o755)
-    # No screen count is set: a nested wlroots opens one by default, which is
-    # what the displays are cut from.
+    # One screen per capture output: the session cannot gain one while it runs.
     env = dict(os.environ, WAYLAND_DISPLAY=socket, WLR_BACKENDS="wayland",
                XDG_RUNTIME_DIR=RUNTIME, WLR_RENDERER="pixman", XDG_CONFIG_HOME=config,
-               LIBGL_ALWAYS_SOFTWARE="1")
+               LIBGL_ALWAYS_SOFTWARE="1", WLR_WL_OUTPUTS="2")
     env.pop("DISPLAY", None)
     # Xwayland inherits this: its glamor probe segfaults inside the NVIDIA EGL
     # vendor when the renderer underneath is software.
@@ -176,15 +181,15 @@ def main() -> "H.Results":
     import pixelflux
 
     res = H.Results("wl-seam")
-    socket = pixelflux.ensure_wayland_display(width=SPAN[0], height=SPAN[1],
+    socket = pixelflux.ensure_wayland_display(width=DISPLAY[0], height=DISPLAY[1],
                                               render_node="", auto_gpu="", cursor_size=-1)
     left_cap, right_cap = pixelflux.ScreenCapture(), pixelflux.ScreenCapture()
-    # The screen carries the first display from the start; the second is cut
-    # from it beside the first.
+    # The primary's screen carries its view from the start; the second display
+    # is a screen of its own beside it.
     default = [o[0] for o in left_cap.list_outputs()]
-    res.check("the screen comes with one display on it", default == [0, 1], default)
-    res.check("a second display is cut from the same screen",
-              left_cap.create_view(2, 0, DISPLAY[0], 0, *DISPLAY))
+    res.check("the primary's screen comes with its view on it", default == [0, 1], default)
+    res.check("a second display gets a screen of its own",
+              left_cap.create_output(2, DISPLAY[0], DISPLAY[1], DISPLAY[0], 0, 1.0))
     left, right = Sink(), Sink()
     left_cap.start_capture(left, settings(1))
     right_cap.start_capture(right, settings(2))
@@ -196,7 +201,14 @@ def main() -> "H.Results":
         inner, display = session(socket)
         if not inner or not display:
             H.skip_suite("the nested compositor did not come up")
+        # The session arranges the screens it opened by its own rule; it is
+        # told the capture arrangement the way Selkies tells it.
+        pixelflux.ScreenCapture().set_app_screen_layout(
+            inner, [(0, 0, DISPLAY[0], DISPLAY[1]), (DISPLAY[0], 0, DISPLAY[0], DISPLAY[1])])
         time.sleep(1.5)
+        screens = pixelflux.ScreenCapture().list_app_screens(inner)
+        res.check("the session's screens sit side by side",
+                  [(x, y) for _n, x, y in screens] == [(0, 0), (DISPLAY[0], 0)], screens)
         patch = Patch(display, WIN_RGB)
 
         def settled(want, x, deadline=15.0):
@@ -228,9 +240,10 @@ def main() -> "H.Results":
         res.check("a window past the boundary shows only on the second",
                   second[0] <= PRESENT and second[1] > PRESENT, second)
 
-        # What a drag rides on. The grab is held across the boundary: with a
-        # screen per display it clamps at the first screen's last column, and
-        # the window being dragged stops there with it.
+        # What a drag rides on. The grab is held across the boundary: the host
+        # keeps sending the first screen's window motion past its edge, and the
+        # nested compositor has to carry its cursor onto the second screen
+        # (labwc-seam.patch) rather than clamp it at the first one's last column.
         obs = H.WlObs(inner)
         if not obs.ready(20):
             res.skip("a held grab crosses the boundary", "no observer surface")

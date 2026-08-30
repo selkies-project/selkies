@@ -2,15 +2,17 @@
 """A second display opens where the client asked for it, on the Wayland backend.
 
 "Left", "up" and "down" have to place the second screen there, not beside the
-first: a session that arranges its own screens does so by its own rule -- side
-by side, in the order they were opened -- and every arrangement then comes out
-looking like "right". Here each display is a view of one screen instead, placed
-at the rectangle the layout says, so the asked-for position is the one the
-compositor shows.
+first: each display is a screen of the capture compositor's own, the secondary
+created at the rectangle the layout says and the primary's screen moved off the
+origin for the arrangements that put something left of or above it, so the
+asked-for position is the one the compositor captures. (The session compositor
+nested inside arranges its own screens by its own rule -- side by side, in the
+order they were opened -- until Selkies mirrors this arrangement into it, which
+is the nested session's business and not checked here.)
 
 Both halves are checked for each position: the layout the server computes, and
-where the compositor actually put the views. Driven with raw websockets clients
-against the in-process pixelflux compositor, no browser.
+where the compositor actually put the screens. Driven with raw websockets
+clients against the in-process pixelflux compositor, no browser.
 
 Usage: python3 tests/e2e/test_display_positions.py
 """
@@ -93,17 +95,18 @@ def beside(position: str, first: Dict[str, int], second: Dict[str, int]) -> bool
     return second["y"] + second["h"] <= first["y"]
 
 
-def views_from(log: str) -> Dict[int, Tuple[int, int]]:
-    """Where the compositor last put each display's view, by display id.
+def outputs_from(log: str) -> Dict[int, Tuple[int, int]]:
+    """Where the compositor last put each display's screen, by output id.
 
     Read from the compositor's own log lines, since it runs inside the server
-    rather than in this process.
+    rather than in this process. The primary's screen (output 0) boots at the
+    origin and logs only its moves; a secondary is recreated wherever it goes.
     """
     import re
 
-    where: Dict[int, Tuple[int, int]] = {}
+    where: Dict[int, Tuple[int, int]] = {0: (0, 0)}
     for oid, x, y in re.findall(
-            r"View (\d+) (?:created over output \d+: \d+x\d+ @ |moved to )\((-?\d+), (-?\d+)\)",
+            r"Output (\d+) (?:created: \d+x\d+ @ |repositioned to )\((-?\d+), (-?\d+)\)",
             log):
         where[int(oid)] = (int(x), int(y))
     return where
@@ -126,7 +129,7 @@ async def drive(res: "H.Results") -> None:
     time: the server debounces reconnects, and a live position change is what a
     client does anyway.
     """
-    from selkies.display_utils import wayland_output_id
+    from selkies.display_utils import WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id
 
     uri = f"ws://localhost:{H.PORT}/api/websockets"
     async with websockets.connect(uri, max_size=None) as primary:
@@ -157,13 +160,14 @@ async def drive(res: "H.Results") -> None:
                 res.check(f"the layout puts a '{position}' display there", placed,
                           got or reconfigure_trail(mark))
 
-                want = {wayland_output_id(did): (rect["x"], rect["y"])
+                want = {(WAYLAND_SCREEN_OUTPUT_ID if did == "primary"
+                         else wayland_output_id(did)): (rect["x"], rect["y"])
                         for did, rect in got.items()} if got else {}
-                where = views_from(H.server_log())
-                res.check(f"the compositor's views follow it for '{position}'",
+                where = outputs_from(H.server_log())
+                res.check(f"the compositor's screens follow it for '{position}'",
                           bool(want) and all(where.get(oid) == pos
                                              for oid, pos in want.items()),
-                          f"views={where} layout={want}")
+                          f"screens={where} layout={want}")
             pump2.cancel()
         pump.cancel()
 

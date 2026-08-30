@@ -83,9 +83,6 @@ services:
       # Session compositor nested in the capture compositor, supplying window
       # management, decorations and XWayland; empty picks labwc, "none" drops it
       SELKIES_WAYLAND_COMPOSITOR: ${SELKIES_WAYLAND_COMPOSITOR:-}
-      # Screens the session opens, which is as many as it will ever have; empty
-      # opens the two Selkies can show and holds the second small until used
-      SELKIES_WAYLAND_OUTPUTS: ${SELKIES_WAYLAND_OUTPUTS:-}
       # Render/encode GPU selection; empty means auto-detect
       SELKIES_RENDER_DRI: ${SELKIES_RENDER_DRI:-}
       DRI_NODE: ${DRI_NODE:-}

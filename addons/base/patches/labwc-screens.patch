@@ -1,0 +1,159 @@
+diff -ruN a/include/output-wl.h b/include/output-wl.h
+--- a/include/output-wl.h
++++ b/include/output-wl.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef LABWC_OUTPUT_WL_H
++#define LABWC_OUTPUT_WL_H
++
++#include <stdbool.h>
++
++struct server;
++struct wlr_output;
++
++/**
++ * output_wl_add - add a screen on the Wayland backend at runtime, the same
++ * call the backend makes at startup for WLR_WL_OUTPUTS. NULL when the
++ * compositor is not nested (no Wayland backend) or the host refused it.
++ */
++struct wlr_output *output_wl_add(struct server *server);
++
++/**
++ * output_wl_remove - destroy the named Wayland-backend screen, or the newest
++ * one when output_name is NULL. Windows on it are evacuated by the normal
++ * output-destroy path. Refuses to remove the last screen.
++ */
++bool output_wl_remove(struct server *server, const char *output_name);
++
++#endif /* LABWC_OUTPUT_WL_H */
+diff -ruN a/src/ipc.c b/src/ipc.c
+--- a/src/ipc.c
++++ b/src/ipc.c
+@@ -9,9 +9,11 @@
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <unistd.h>
++#include <wlr/types/wlr_output.h>
+ #include <wlr/util/log.h>
+ #include "ipc.h"
+ #include "labwc.h"
++#include "output-wl.h"
+ #include "view.h"
+ 
+ #define IPC_BUF_SIZE 4096
+@@ -152,6 +154,36 @@
+ 			char *p = wl_array_add(&buf, 4);
+ 			memcpy(p, "null", 4);
+ 		}
++	} else if (strncmp(cmd, "ADD_SCREEN", 10) == 0) {
++		struct wlr_output *wlr_output = output_wl_add(server);
++		char entry[128];
++		int len;
++		if (wlr_output) {
++			len = snprintf(entry, sizeof(entry),
++				"{\"ok\":true,\"output\":\"%s\"}", wlr_output->name);
++		} else {
++			len = snprintf(entry, sizeof(entry),
++				"{\"error\":\"no screen could be added\"}");
++		}
++		char *p = wl_array_add(&buf, len);
++		if (p) {
++			memcpy(p, entry, len);
++		}
++
++	} else if (strncmp(cmd, "REMOVE_SCREEN", 13) == 0) {
++		const char *name = cmd + 13;
++		while (*name == ' ') {
++			name++;
++		}
++		const char *msg = output_wl_remove(server, *name ? name : NULL)
++			? "{\"ok\":true}"
++			: "{\"error\":\"no such screen or last screen\"}";
++		size_t mlen = strlen(msg);
++		char *p = wl_array_add(&buf, mlen);
++		if (p) {
++			memcpy(p, msg, mlen);
++		}
++
+ 	} else {
+ 		const char *err = "{\"error\":\"unknown command\"}";
+ 		size_t err_len = strlen(err);
+diff -ruN a/src/meson.build b/src/meson.build
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -15,6 +15,7 @@
+   'output.c',
+   'output-state.c',
+   'output-virtual.c',
++  'output-wl.c',
+   'overlay.c',
+   'placement.c',
+   'regions.c',
+diff -ruN a/src/output-wl.c b/src/output-wl.c
+--- a/src/output-wl.c
++++ b/src/output-wl.c
+@@ -0,0 +1,64 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include "output-wl.h"
++#include <string.h>
++#include <wlr/backend/multi.h>
++#include <wlr/backend/wayland.h>
++#include <wlr/types/wlr_output.h>
++#include <wlr/util/log.h>
++#include "labwc.h"
++#include "output.h"
++
++static void
++get_wl_backend(struct wlr_backend *backend, void *data)
++{
++	if (wlr_backend_is_wl(backend)) {
++		struct wlr_backend **wl = data;
++		*wl = backend;
++	}
++}
++
++struct wlr_output *
++output_wl_add(struct server *server)
++{
++	struct wlr_backend *wl_backend = NULL;
++	if (wlr_backend_is_multi(server->backend)) {
++		wlr_multi_for_each_backend(server->backend,
++			get_wl_backend, &wl_backend);
++	} else if (wlr_backend_is_wl(server->backend)) {
++		wl_backend = server->backend;
++	}
++	if (!wl_backend) {
++		wlr_log(WLR_ERROR, "cannot add a screen: no wayland backend");
++		return NULL;
++	}
++	return wlr_wl_output_create(wl_backend);
++}
++
++bool
++output_wl_remove(struct server *server, const char *output_name)
++{
++	int have = 0;
++	struct output *output;
++	wl_list_for_each(output, &server->outputs, link) {
++		if (wlr_output_is_wl(output->wlr_output)) {
++			have++;
++		}
++	}
++	/* The session's last screen is not for removing */
++	if (have <= 1) {
++		return false;
++	}
++	/* Outputs are head-inserted at creation, so the list runs newest first */
++	wl_list_for_each(output, &server->outputs, link) {
++		if (!wlr_output_is_wl(output->wlr_output)) {
++			continue;
++		}
++		if (output_name
++				&& strcmp(output->wlr_output->name, output_name) != 0) {
++			continue;
++		}
++		wlr_output_destroy(output->wlr_output);
++		return true;
++	}
++	return false;
++}

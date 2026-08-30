@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """A primary that shrinks beside a secondary keeps the second screen (Wayland).
 
-Both displays are views of one screen, so the secondary only has to move into
-the room the primary gives up -- no output is destroyed and none can collide
-with another, and the screen the two are cut from is resized around them. What
-this pins is that the move happens and that the second display survives it,
-since dropping it on every primary shrink is what a screen-per-display arrangement would do.
-Driven with raw websockets clients on the websockets transport against the
-in-process pixelflux compositor, no browser.
+Each display is a screen of the session compositor's own, so the secondary's
+output has to move into the room the primary gives up, and the compositor
+refuses an output rectangle that overlaps a live one: the layout pass must
+therefore shrink the primary's screen before it recreates the secondary at its
+new offset, or the second screen is dropped on every primary shrink. Driven with
+raw websockets clients on the websockets transport against the in-process
+pixelflux compositor, no browser.
 """
 import asyncio
 import importlib.util
@@ -101,17 +101,14 @@ async def drive(res: "H.Results") -> None:
 
             mark = loglen()
             await primary.send("r,1280x720,primary")
-            res.check("the shrink moves the secondary's view to its new offset",
-                      await wait_log_from(mark, "View 2 moved to (1280, 0).", 30), "")
+            res.check("the shrink recreates the secondary output at its new offset",
+                      await wait_log_from(mark, "Wayland output 2 moves to +1280+0; recreating it.", 30), "")
+            res.check("secondary capture comes back after the shrink",
+                      await wait_log_from(mark, "SUCCESS: Capture started for 'display2'", 45), "")
             secondary_msgs = await drain(secondary, 3.0)
             tail = H.server_log()[mark:]
-            # Moving a view does not disturb what it captures, so the second
-            # display streams across the shrink rather than being torn down and
-            # rebuilt as a screen-per-display arrangement would leave it.
-            res.check("the secondary streams across the shrink without a restart",
-                      "Stopping all streams for display 'display2'" not in tail, "")
-            res.check("no view placement was refused",
-                      "rejected" not in tail and "cannot place a view" not in tail, "")
+            res.check("no output creation was refused",
+                      "CreateOutput 2: rejected" not in tail and "cannot create an output" not in tail, "")
             res.check("the secondary was not dropped",
                       "dropped on Wayland" not in tail
                       and not any(m.startswith("KILL") for m in secondary_msgs), secondary_msgs[:3])

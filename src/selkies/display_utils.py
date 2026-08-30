@@ -435,27 +435,60 @@ def _resize_on_display(
     return mode_w, mode_h
 
 
-#: The compositor output every display is cut from. The session sees this one
-#: screen however many displays the client is shown, which is what lets a window
-#: be dragged from one to the next: the pointer grab a drag runs under stays
-#: inside one surface for the whole desk.
+#: The compositor screen the primary display shows: the output the session
+#: compositor boots on, which is never destroyed. Its size is the primary's,
+#: and every secondary display is a screen of its own beside it.
 WAYLAND_SCREEN_OUTPUT_ID = 0
 
 
 def wayland_output_id(display_id: Optional[str]) -> int:
     """Stable compositor id for a display name, shared by both transports.
 
-    'primary' maps to 1 and 'displayN' to N, leaving 0 to the screen they are
-    all views of. A secondary name without a numeric suffix falls back to 2,
-    and so does one whose digits would land on the screen or the primary's
-    view ('display0', 'display1'): a client-chosen name must never address
-    the session's own nodes.
+    'primary' maps to 1, the view covering screen 0 that its capture binds
+    to, and 'displayN' to N, the screen that display owns. A secondary name
+    without a numeric suffix falls back to 2, and so does one whose digits
+    would land on the primary's screen or view ('display0', 'display1'): a
+    client-chosen name must never address the session's own nodes.
     """
     if not display_id or display_id == "primary":
         return 1
     m = re.search(r"(\d+)$", str(display_id))
     n = int(m.group(1)) if m else 2
     return n if n >= 2 else 2
+
+
+def session_screen_index(display_id: Optional[str]) -> int:
+    """Position of a display among a nested session compositor's screens.
+
+    'primary' maps to 0 and 'displayN' to N-1. The session opens one screen
+    per capture output in that order, and its output management addresses
+    them by position rather than by the compositor output id above.
+    """
+    if display_id in (None, "", "primary"):
+        return 0
+    return max(0, wayland_output_id(display_id) - 1)
+
+
+async def wayland_reposition_primary(module: Any, x: int, y: int) -> bool:
+    """Move the pixelflux primary screen (output 0) to a union-layout offset.
+
+    The Wayland counterpart of laying the primary at a non-origin xrandr
+    position for 'left'/'up' arrangements (and of re-anchoring it at the
+    origin on teardown). The compositor remaps the screen, the view its
+    capture binds to, its windows, and the input offset live; the capture
+    follows without a restart.
+
+    Returns:
+        True on success; False when the compositor refuses the move.
+    """
+    if module is None:
+        return False
+    try:
+        return bool(await asyncio.to_thread(
+            module.reposition_output, WAYLAND_SCREEN_OUTPUT_ID, int(x), int(y)))
+    except Exception as e:
+        logger_app_resize.error(f"Wayland primary reposition to +{x}+{y} failed: {e}")
+        return False
 
 
 def compute_dual_layout(

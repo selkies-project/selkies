@@ -88,6 +88,8 @@ from .display_utils import (
     unpremultiply_rgba,
     cursor_content_handle,
     layout_extent,
+    session_screen_index,
+    wayland_output_id,
 )
 from .media_pipeline import RateControlMode
 from .settings import settings
@@ -5477,6 +5479,7 @@ class WebRTCInput:
                 logger_webrtc_input.debug(
                     f"pixelflux set_app_wayland_display failed: {e}")
             self._schedule_session_scale()
+            self._schedule_spare_screen_hold()
             self._schedule_seat_layout_restore()
         return resolved
 
@@ -5633,10 +5636,137 @@ class WebRTCInput:
         self._app_wayland_display()
         return self._app_wl_is_separate
 
-    def _size_session_screen(self, display: str, scale: float,
+    #: Basename of the session compositor's control socket in XDG_RUNTIME_DIR
+    #: (the labwc IPC patch the container images carry). Its presence is what
+    #: enables a second display on the nested-Wayland backend: no Wayland
+    #: protocol can create a screen at runtime, so a session compositor
+    #: without the socket cannot grow one.
+    SESSION_IPC_SOCKET = "labwc.sock"
+
+    def _session_ipc_path(self) -> Optional[str]:
+        """The session compositor's control socket path, or None off Wayland."""
+        if not self.is_wayland:
+            return None
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or ""
+        return os.path.join(runtime, self.SESSION_IPC_SOCKET) if runtime else None
+
+    def session_screen_ipc_available(self) -> bool:
+        """The last probed answer to whether the session compositor's control
+        socket accepts connections; False until a probe ran."""
+        return bool(getattr(self, "_session_ipc_ok", False))
+
+    async def probe_session_screen_ipc(self) -> bool:
+        """Probe the session compositor's control socket and cache the answer.
+
+        A connect rather than a stat, so a socket file a dead compositor left
+        behind reads as absent.
+        """
+        path = self._session_ipc_path()
+
+        def _probe() -> bool:
+            probe_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            probe_sock.settimeout(1.0)
+            try:
+                probe_sock.connect(path)
+                return True
+            except OSError:
+                return False
+            finally:
+                probe_sock.close()
+
+        ok = False
+        if path:
+            try:
+                ok = await asyncio.to_thread(_probe)
+            except Exception:
+                ok = False
+        self._session_ipc_ok = ok
+        return ok
+
+    async def _session_ipc_command(self, command: str) -> dict:
+        """One command over the session compositor's control socket.
+
+        The socket serves one newline-terminated command per connection and
+        answers a JSON line (the labwc IPC contract), so each call connects
+        fresh. Bounded; an unreachable or silent compositor yields `{}`.
+
+        Returns:
+            The decoded reply, empty on any failure.
+        """
+        path = self._session_ipc_path()
+        if not path:
+            return {}
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(path), timeout=2.0)
+        except (OSError, asyncio.TimeoutError) as e:
+            logger_webrtc_input.debug(f"Session IPC connect failed: {e}")
+            return {}
+        try:
+            writer.write(command.encode() + b"\n")
+            await writer.drain()
+            line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+            return json.loads(line.decode() or "{}")
+        except (OSError, ValueError, asyncio.TimeoutError) as e:
+            logger_webrtc_input.debug(f"Session IPC '{command}' failed: {e}")
+            return {}
+        finally:
+            writer.close()
+
+    async def ensure_session_screens(self, target: int) -> None:
+        """Converge the session compositor's screen count on `target`.
+
+        A screen is added the moment a display needs one and destroyed when its
+        display disconnects, so the session has monitors only for what is being
+        shown: the compositor's own output-destroy path evacuates the removed
+        screen's windows to the primary, which is the X11 behaviour. Screens
+        are removed newest-first by name, and the compositor refuses to drop
+        its last one. A session without the control socket keeps the screens it
+        was started with; the spare-screen hold covers those.
+        """
+        if self.wayland_input is None or not self.session_screen_ipc_available():
+            return
+        if (getattr(settings, "wayland_host_display", "") or "").strip():
+            # Host capture: the session compositor owns its screens outright.
+            return
+        target = max(1, int(target))
+        lock = self.__dict__.setdefault("_session_screen_lock", asyncio.Lock())
+        async with lock:
+            display = self._app_wayland_display()
+            try:
+                screens = await asyncio.to_thread(
+                    self.wayland_input.list_app_screens, display)
+            except Exception as e:
+                logger_webrtc_input.debug(f"Session screen list failed: {e}")
+                return
+            names = [name for name, _x, _y in screens]
+            while len(names) < target:
+                reply = await self._session_ipc_command("ADD_SCREEN")
+                if not reply.get("ok"):
+                    logger_webrtc_input.warning(
+                        f"Session compositor could not add screen {len(names) + 1}: "
+                        f"{reply.get('error', 'no reply')}")
+                    return
+                names.append(str(reply.get("output", "")))
+                logger_webrtc_input.info(
+                    f"Session compositor added screen '{names[-1]}'.")
+            while len(names) > target:
+                name = names.pop()
+                reply = await self._session_ipc_command(
+                    f"REMOVE_SCREEN {name}" if name else "REMOVE_SCREEN")
+                if not reply.get("ok"):
+                    logger_webrtc_input.warning(
+                        f"Session compositor could not remove screen '{name}': "
+                        f"{reply.get('error', 'no reply')}")
+                    return
+                logger_webrtc_input.info(
+                    f"Session compositor removed screen '{name}'; its windows "
+                    "return to the primary.")
+
+    def _size_session_screen(self, display: str, display_index: int, scale: float,
                              size: Optional[Tuple[int, int]]) -> bool:
-        """Give the session compositor's screen its scale, and its mode too when
-        the caller knows the size the screen is about to carry. Blocking.
+        """Give one of the session compositor's screens its scale, and its mode
+        too when the caller knows the size the screen is about to carry. Blocking.
 
         A session lays its desktop out once per applied configuration, so a scale
         that arrives on its own leaves the screen at the old mode under the new
@@ -5645,10 +5775,11 @@ class WebRTCInput:
         """
         if size and size[0] > 0 and size[1] > 0:
             return bool(self.wayland_input.set_app_screen_geometry(
-                display, int(size[0]), int(size[1]), scale))
-        return bool(self.wayland_input.set_app_output_scale(display, scale))
+                display, int(size[0]), int(size[1]), scale, display_index))
+        return bool(self.wayland_input.set_app_output_scale(
+            display, scale, display_index))
 
-    async def realize_wayland_dpi(self, dpi: Any,
+    async def realize_wayland_dpi(self, dpi: Any, display_index: int = 0,
                                   size: Optional[Tuple[int, int]] = None) -> float:
         """Apply a DPI on the Wayland backend and return the capture output
         scale it leaves behind.
@@ -5665,7 +5796,9 @@ class WebRTCInput:
 
         Args:
             dpi: The desktop DPI to realize; 96 is unity.
-            size: The pixel size the screen is about to carry, when the caller
+            display_index: Which of the session's screens backs this display
+                (`session_screen_index`).
+            size: The pixel size that screen is about to carry, when the caller
                 already knows it, so the mode and the scale land together.
 
         Returns:
@@ -5681,14 +5814,118 @@ class WebRTCInput:
                 return scale
             display = self._app_wayland_display()
             applied = await asyncio.to_thread(
-                self._size_session_screen, display, scale, size)
+                self._size_session_screen, display, display_index, scale, size)
         except Exception as e:
             logger_webrtc_input.debug(f"Session output scale failed: {e}")
             return scale
         if applied:
-            logger_webrtc_input.info(f"Session compositor screen scaled to {scale}.")
+            logger_webrtc_input.info(
+                f"Session compositor screen {display_index} scaled to {scale}.")
             return 1.0
         return scale
+
+    # Size of a held spare session screen: small enough to leave the desktop's
+    # centre on the screen that is shown, large enough for a compositor to lay out.
+    SPARE_SCREEN_SIZE = (320, 240)
+
+    def resync_session_screens(self) -> None:
+        """Re-hold the session's spare screens after the output set changed.
+
+        The nested session opens the screens it was started with, and which of
+        them a capture drives changes as displays come and go, so the hold is
+        recomputed whenever a layout pass creates or destroys an output.
+        """
+        if self.wayland_input is None:
+            return
+        self._schedule_spare_screen_hold()
+
+    def _schedule_spare_screen_hold(self) -> None:
+        """A nested session opens the screens it was started with, whether or
+        not the capture drives that many: the extra ones stretch its desktop
+        onto a screen nobody sees, which is where a client that centres itself
+        then lands. Hold them small until a display arrives for them —
+        pixelflux resizes one to its full size the moment it gets an output,
+        and back when it loses one.
+
+        Only for a session whose screens are pre-provisioned: when the control
+        socket manages them (`ensure_session_screens`) there is never a spare
+        to hold, and a hold computed before a layout pass created its capture
+        output would land late and shrink the screen that output just adopted.
+        """
+        if self.session_screen_ipc_available():
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._spawn_task(self._hold_spare_screens())
+
+    def schedule_session_screen_layout(self, layouts: dict) -> None:
+        """Lay the session's own screens out the way the capture outputs were placed.
+
+        The session compositor arranges the screens it opens by its own rule
+        (wlroots puts them side by side, in the order they were opened), and
+        that layout is what places windows and carries the pointer between
+        screens, not the capture one — so a desktop asked for a display above
+        or to the left of the primary would get one to the right of it. Every
+        screen is positioned in one configuration, since an arrangement applied
+        a screen at a time passes through a state where two overlap and the
+        compositor reflows around it.
+
+        Args:
+            layouts: Display id to its `{x, y, w, h}` rectangle, as the capture
+                outputs were placed.
+        """
+        if self.wayland_input is None or not layouts:
+            return
+        rects = []
+        for display_id in sorted(layouts, key=session_screen_index):
+            rect = layouts[display_id]
+            rects.append((int(rect.get('x') or 0), int(rect.get('y') or 0),
+                          int(rect.get('w') or 0), int(rect.get('h') or 0)))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._spawn_task(self._apply_session_screen_layout(rects))
+
+    async def _apply_session_screen_layout(self, rects: list) -> None:
+        """Hand the arrangement to the session compositor, logging what it did."""
+        display = self._app_wayland_display()
+        try:
+            placed = await asyncio.to_thread(
+                self.wayland_input.set_app_screen_layout, display, rects)
+        except Exception as e:
+            logger_webrtc_input.debug(f"Session screen layout failed: {e}")
+            return
+        if placed:
+            logger_webrtc_input.info(
+                f"Session compositor laid {placed} screen(s) out at {rects}.")
+        else:
+            # A compositor without zwlr_output_management_v1 (KWin, which offers
+            # kde_output_management_v2) arranges its screens itself.
+            logger_webrtc_input.info(
+                "Session compositor manages no outputs for clients; its screen "
+                "arrangement is its own.")
+
+    async def _hold_spare_screens(self) -> None:
+        """Hold every session screen without a capture output at SPARE_SCREEN_SIZE."""
+        display = self._app_wayland_display()
+        try:
+            # The primary's screen and every secondary's own screen count; the
+            # primary's default view is a capture over screen 0, not a screen.
+            outputs = await asyncio.to_thread(self.wayland_input.list_outputs)
+            keep = max(1, len([o for o in outputs if o[0] != wayland_output_id('primary')]))
+            held = await asyncio.to_thread(
+                self.wayland_input.hold_spare_app_screens, display, keep,
+                *self.SPARE_SCREEN_SIZE)
+        except Exception as e:
+            logger_webrtc_input.debug(f"Holding spare session screens failed: {e}")
+            return
+        if held:
+            logger_webrtc_input.info(
+                f"Session compositor has {held} screen(s) with no capture output; "
+                f"held at {self.SPARE_SCREEN_SIZE[0]}x{self.SPARE_SCREEN_SIZE[1]}.")
 
     def _schedule_session_scale(self) -> None:
         """A session compositor was just adopted: hand it the effective DPI as
