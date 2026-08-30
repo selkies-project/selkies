@@ -67,13 +67,15 @@ def entrypoint_blocks(*starts: str) -> str:
 
 
 def run(stub: str = "exit 1", env: Optional[dict] = None,
-        blocks: tuple = (FACTS_BLOCK, GL_BLOCK, BACKEND_BLOCK)) -> dict:
+        blocks: tuple = (FACTS_BLOCK, GL_BLOCK, BACKEND_BLOCK),
+        tail: str = STATE) -> dict:
     """Run the entrypoint's GPU blocks with `stub` standing in for the probe.
 
     Args:
         stub: Shell body of the stand-in `selkies-gpu-probe`.
         env: Environment the blocks start from.
         blocks: Which blocks to run, in order.
+        tail: What to print once the blocks have settled.
 
     Returns:
         `state` (the settled variables), `said` (everything printed) and `rc`.
@@ -85,7 +87,7 @@ def run(stub: str = "exit 1", env: Optional[dict] = None,
         os.chmod(probe, 0o755)
         script = os.path.join(tmp, "blocks.sh")
         with open(script, "w") as fh:
-            fh.write("set -e\n" + entrypoint_blocks(*blocks) + "\n" + STATE + "\n")
+            fh.write("set -e\n" + entrypoint_blocks(*blocks) + "\n" + tail + "\n")
         out = subprocess.run(
             ["bash", script], capture_output=True, text=True, timeout=120,
             env=dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"],
@@ -109,6 +111,15 @@ res.check("the GPU the probe reports is the one the session carries",
 skewed = run("echo wayland", WAYLAND)
 res.check("an answer that is not a report is not exported",
           skewed["rc"] == 0 and "NODE=unset" in skewed["state"], skewed["state"])
+
+# A name outside the exported shape is skipped rather than exported or fatal:
+# lower_case passes the shell but not the filter, =orphan has no name at all.
+guarded = run("echo 'lower_case=sneaked'; echo '=orphan'; echo 'no-equals'; " + NVIDIA_FACTS,
+              WAYLAND, tail='echo "SNEAKED=${lower_case-unset}"\n' + STATE)
+res.check("a report line whose name is not an environment name is skipped",
+          "SNEAKED=unset" in guarded["said"], guarded["said"].strip()[:110])
+res.check("and the well-formed lines around it still settle",
+          guarded["rc"] == 0 and "DRIVER=nvidia" in guarded["state"], guarded["state"])
 
 crashed = run("kill -SEGV $$", WAYLAND)
 res.check("a bring-up that dies counts as a GPU the compositor cannot reach",
