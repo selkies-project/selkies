@@ -40,13 +40,18 @@ def settings_for(display_id: str, size: Tuple[int, int], position: str) -> dict:
     }
 
 
-def wait_log_from(mark: int, substr: str, timeout: float = 45) -> bool:
-    """Whether `substr` shows up in the server log at or after byte `mark`."""
+async def wait_log_from(mark: int, substr: str, timeout: float = 45) -> bool:
+    """Whether `substr` shows up in the server log at or after byte `mark`.
+
+    Awaited rather than slept through: the sockets opened here are read by
+    tasks on this loop, and blocking it for the timeout stops them answering
+    the keepalive their peer expects, which drops a connection mid-run.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         if H.server_log().find(substr, mark) >= 0:
             return True
-        time.sleep(0.4)
+        await asyncio.sleep(0.4)
     return False
 
 
@@ -62,6 +67,19 @@ def layouts_from(mark: int) -> list:
             except (ValueError, SyntaxError):
                 continue
     return out
+
+
+def reconfigure_trail(mark: int) -> str:
+    """What the server did about reconfiguring since `mark`, for a run that
+    produced no layout: whether it started a pass at all, what it aborted on,
+    and the layout line itself when one was logged but would not parse."""
+    marks = ("Starting display reconfiguration", "No display clients connected",
+             "Calculating new extended desktop layout", "total display size is zero",
+             "Removing and triggering full display reconfiguration",
+             "dropped on Wayland", "Layout calculated")
+    seen = [line.rsplit(" - ", 1)[-1] for line in H.server_log()[mark:].splitlines()
+            if any(m in line for m in marks)]
+    return " | ".join(seen)[-400:] or "no reconfiguration logged"
 
 
 def beside(position: str, first: Dict[str, int], second: Dict[str, int]) -> bool:
@@ -114,12 +132,12 @@ async def drive(res: "H.Results") -> None:
     async with websockets.connect(uri, max_size=None) as primary:
         await asyncio.wait_for(primary.recv(), timeout=10)
         mark = len(H.server_log())
+        pump = asyncio.create_task(drain(primary))
         await primary.send("SETTINGS," + json.dumps(
             settings_for("primary", PRIMARY, "right")))
-        if not wait_log_from(mark, "SUCCESS: Capture started for 'primary'"):
+        if not await wait_log_from(mark, "SUCCESS: Capture started for 'primary'"):
             res.check("the primary streams", False, "no capture")
             return
-        pump = asyncio.create_task(drain(primary))
         # The server debounces reconnects from one address; the second client is
         # a fresh connection from the same one.
         await asyncio.sleep(1.0)
@@ -130,13 +148,14 @@ async def drive(res: "H.Results") -> None:
                 mark = len(H.server_log())
                 await secondary.send("SETTINGS," + json.dumps(
                     settings_for("display2", SECONDARY, position)))
-                wait_log_from(mark, "SUCCESS: Capture started for 'display2'", 20)
+                await wait_log_from(mark, "SUCCESS: Capture started for 'display2'", 20)
                 await asyncio.sleep(4.0)
                 layouts = layouts_from(mark)
                 got = layouts[-1] if layouts else {}
                 placed = (got.get("primary") and got.get("display2")
                           and beside(position, got["primary"], got["display2"]))
-                res.check(f"the layout puts a '{position}' display there", placed, got)
+                res.check(f"the layout puts a '{position}' display there", placed,
+                          got or reconfigure_trail(mark))
 
                 want = {wayland_output_id(did): (rect["x"], rect["y"])
                         for did, rect in got.items()} if got else {}
