@@ -6,8 +6,9 @@ transfer written as fast as the socket accepts it leaves megabytes in front of
 the next audio packet -- and the socket buffer absorbs them without the
 application ever seeing backpressure, so on a real link the stream stops for
 as long as the buffer takes to drain. The measurement needs a link that is not
-loopback: a metered relay stands in for one, and the check is the worst gap
-between audio frames while the transfer runs.
+loopback: a metered relay stands in for one, holding no more than that link
+would, and the check is the worst gap between audio frames while the transfer
+runs.
 
 A raw client, so what is measured is the connection's own delivery rather than
 a browser's jitter buffer smoothing it over.
@@ -32,6 +33,11 @@ except ImportError:
 # The link the relay meters, in bytes per second. Slow enough that a transfer
 # left unpaced is unmistakable, fast enough to carry the stream itself.
 LINK_BYTES_PER_S = 1_250_000
+# Socket buffers for the relay's own two connections, about 25 ms of the link
+# in flight. Loopback autotunes to megabytes, and a relay holding one meters no
+# link: the sender's queue stays empty however fast it writes, so the gap below
+# would be that buffer draining, as deep as the host's tcp_rmem allows.
+RELAY_BUFFER_BYTES = 32 * 1024
 RELAY_PORT = int(os.environ.get("E2E_PACING_PORT", "18197"))
 CLIPBOARD_MB = 8
 # What a jitter buffer of a few 10 ms packets absorbs. An unpaced transfer
@@ -46,7 +52,17 @@ SETTINGS = {
 }
 
 RELAY = r"""
-import asyncio, sys, time
+import asyncio, socket, sys, time
+
+def meter(writer, size):
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return
+    for opt in (socket.SO_RCVBUF, socket.SO_SNDBUF):
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, opt, size)
+        except OSError:
+            pass
 
 async def pump(reader, writer, rate, mtu=1500):
     allowance, last = 0.0, time.monotonic()
@@ -72,19 +88,21 @@ async def pump(reader, writer, rate, mtu=1500):
         except Exception:
             pass
 
-async def main(listen, target, rate):
+async def main(listen, target, rate, bufsize):
     async def handle(cr, cw):
+        meter(cw, bufsize)
         try:
             sr, sw = await asyncio.open_connection("127.0.0.1", target)
         except OSError:
             cw.close()
             return
+        meter(sw, bufsize)
         await asyncio.gather(pump(cr, sw, rate), pump(sr, cw, rate))
     server = await asyncio.start_server(handle, "127.0.0.1", listen)
     async with server:
         await server.serve_forever()
 
-asyncio.run(main(int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3])))
+asyncio.run(main(int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])))
 """
 
 
@@ -162,7 +180,8 @@ def block(wayland: bool) -> "H.Results":
     try:
         H.server_start(mode="websockets", wayland=wayland)
         relay = H.spawn([sys.executable, "-c", RELAY, str(RELAY_PORT),
-                         str(H.PORT), str(LINK_BYTES_PER_S)])
+                         str(H.PORT), str(LINK_BYTES_PER_S),
+                         str(RELAY_BUFFER_BYTES)])
         time.sleep(1.0)
         idle, during, frames = asyncio.run(measure(RELAY_PORT, wayland))
         res.check("audio streams over the metered link", frames > 100 and idle,
