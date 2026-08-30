@@ -66,12 +66,14 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # expect a session to provide. pavucontrol-qt is the panel volume plugin's
         # mixer, and lximage-qt the image handler and screenshot tool. Deliberately
         # still dropped: screen lockers and power management (a container session
-        # suspends nothing), the gvfs backends, and the KDE portal.
+        # suspends nothing), the gvfs mount backends, and the KDE portal.
         adwaita-icon-theme \
         # A file manager keeps whether a desktop entry may be launched in GIO
-        # metadata, and that is stored by this daemon: without it every entry on
-        # the desktop is drawn as untrusted, however it got there. The mount and
-        # network backends of gvfs stay out; this is the metadata store alone.
+        # metadata: gvfs carries the client module that implements that
+        # attribute namespace, gvfs-daemons the store behind it. Without both,
+        # every entry on the desktop is drawn as untrusted, however it got
+        # there.
+        gvfs \
         gvfs-daemons \
         lxqt-qtplugin \
         lxqt-config \

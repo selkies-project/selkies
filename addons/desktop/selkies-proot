@@ -48,20 +48,29 @@ explain_denial() {
 # A file manager will not launch a desktop entry it has not been told to trust,
 # and draws it with a warning until then: the entries this runner puts on the
 # desktop are trusted here, so an application the user just installed is one they
-# can start. The mark is GIO metadata, which every file manager that has the
-# notion reads, and it is kept by a daemon on the session bus -- so this is
-# best-effort, and silent where either is absent.
+# can start. The mark is GIO metadata under two names -- libfm-qt reads
+# metadata::trust, the GNOME family metadata::trusted -- kept by a daemon on
+# the session bus, so this is best-effort and silent where either is absent.
+# Both semantics also require the entry to be executable.
 #
 # Which entries those are is read from the entries themselves: whatever the
 # runner names them, they are the ones that run it.
 trust_desktop_entries() {
     command -v gio > /dev/null 2>&1 || return 0
+    # The desktop directory is configuration, not a fixed name: xdg-user-dirs
+    # localizes it.
+    config="${XDG_CONFIG_HOME:-${HOME}/.config}/user-dirs.dirs"
+    if [ -f "${config}" ]; then
+        # shellcheck disable=SC1090
+        . "${config}" 2>/dev/null || true
+    fi
     desktop="${XDG_DESKTOP_DIR:-${HOME}/Desktop}"
     [ -d "${desktop}" ] || return 0
     for entry in "${desktop}"/*.desktop; do
         [ -f "${entry}" ] || continue
         grep -q "proot-apps" "${entry}" || continue
         chmod +x "${entry}" 2>/dev/null || true
+        gio set "${entry}" metadata::trust true > /dev/null 2>&1 || true
         gio set "${entry}" metadata::trusted true > /dev/null 2>&1 || true
     done
     return 0
