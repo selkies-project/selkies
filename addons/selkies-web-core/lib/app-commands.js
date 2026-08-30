@@ -26,13 +26,15 @@ const LAUNCH_FAILURE_WINDOW_MS = 15 * 1000;
  *
  * A launch runs the application directly, the way its desktop entry does. It
  * draws its own window, so a terminal wrapped around it is the only thing the
- * user sees come up.
+ * user sees come up. Every action goes through the same wrapper, which is on
+ * PATH: where the runner keeps an application is the runner's business, and
+ * nothing here needs a path to it.
  */
 const appCommandBuilders = {
     install: (app) => `selkies-proot install ${app}`,
     remove: (app) => `selkies-proot remove ${app}`,
     update: (app) => `selkies-proot update ${app}`,
-    launch: (app) => `~/.local/bin/${app}-pa`,
+    launch: (app) => `selkies-proot run ${app}`,
 };
 
 const pendingAppCommands = new Map();

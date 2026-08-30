@@ -105,8 +105,8 @@ check('an untracked completion changes nothing',
       `${pendingAppAction('gimp')} ${stateEvents}`);
 
 postAppCommand('launch', 'geany');
-check('a launch runs the application, not a terminal wrapped around it',
-      posted.at(-1) && posted.at(-1).value === '~/.local/bin/geany-pa',
+check('a launch runs the application through the runner, by name and not by path',
+      posted.at(-1) && posted.at(-1).value === 'selkies-proot run geany',
       JSON.stringify(posted.at(-1)));
 
 process.exit(failed ? 1 : 0);
