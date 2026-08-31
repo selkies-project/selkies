@@ -103,6 +103,7 @@ SUITES: list = [
     {"path": "integration/test_webrtc_unix_socket.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_wayland_multi_output.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_wayland_seam.py", "tier": "integration", "timeout": 600},
+    {"path": "integration/test_wayland_session_screens.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_gpu_probe.py", "tier": "integration", "timeout": 180},
     {"path": "integration/test_two_display_pixels.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_extended_monitor_outputs.py", "tier": "integration", "timeout": 300},
