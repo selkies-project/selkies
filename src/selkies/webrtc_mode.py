@@ -61,7 +61,7 @@ from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_
                             clear_selkies_monitors, clamp_primary_feedback,
                             MultiMonitorWindowManager,
                             WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id,
-                            session_screen_index, wayland_reposition_primary,
+                            wayland_reposition_primary,
                             parse_resize_dims, cursor_size_for_dpi, align_dims_16)
 from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
 from .settings import (settings, AppSettings, SETTING_DEFINITIONS,
@@ -1177,8 +1177,8 @@ class WebRTCService(BaseStreamingService):
         except Exception as e:
             logger.error(f"Wayland resize_output failed: {e}")
 
-    async def _destroy_wayland_secondary_outputs(self, keep_oid: Optional[int] = None) -> None:
-        """Retire every secondary display's compositor screen except `keep_oid`.
+    async def _destroy_wayland_secondary_outputs(self, keep_did: Optional[str] = None) -> None:
+        """Retire every secondary display's compositor screen except `keep_did`'s.
 
         The primary's screen (output 0) and the view its capture binds to
         always persist -- the primary is the session, not an extension of it.
@@ -1186,7 +1186,9 @@ class WebRTCService(BaseStreamingService):
         module = self._wayland_capture_handle()
         if module is None:
             return
-        keep = {WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id("primary"), keep_oid}
+        keep = {WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id("primary")}
+        if keep_did:
+            keep.add(wayland_output_id(keep_did))
         try:
             for out in await asyncio.to_thread(module.list_outputs):
                 if out[0] not in keep:
@@ -1194,10 +1196,11 @@ class WebRTCService(BaseStreamingService):
         except Exception as e:
             logger.warning(f"Wayland output teardown failed: {e}")
         if self.input_handler:
-            # The session keeps a screen per surviving display -- two while a
-            # secondary is being (re)placed, one on teardown, where the removed
-            # screen's windows return to the primary.
-            await self.input_handler.ensure_session_screens(2 if keep_oid else 1)
+            # The session keeps a screen per surviving display: the kept
+            # secondary's while it is being (re)placed, only the primary's on
+            # teardown, where a removed screen's windows return to the primary.
+            await self.input_handler.ensure_session_screens(
+                [keep_did] if keep_did else [])
             # Which of the session's own screens a capture drives changed.
             self.input_handler.resync_session_screens()
 
@@ -1228,7 +1231,7 @@ class WebRTCService(BaseStreamingService):
         except Exception as e:
             logger.error(f"Wayland list_outputs failed: {e}")
             outputs = {}
-        await self._destroy_wayland_secondary_outputs(keep_oid=oid)
+        await self._destroy_wayland_secondary_outputs(keep_did=did)
         existing = outputs.get(oid)
         if existing is not None and (existing[1], existing[2]) != (s["x"], s["y"]):
             logger.info(f"Wayland output {oid} moves to +{s['x']}+{s['y']}; recreating it.")
@@ -1242,6 +1245,10 @@ class WebRTCService(BaseStreamingService):
                 return False
         if existing is not None:
             return True
+        if self.input_handler:
+            # The screen this display owns, grown just ahead of the output
+            # that adopts its host window.
+            await self.input_handler.ensure_session_screen(did)
         try:
             created = bool(await asyncio.to_thread(
                 module.create_output, oid, s["w"], s["h"], s["x"], s["y"], scale))
@@ -1566,7 +1573,7 @@ class WebRTCService(BaseStreamingService):
                 pass
             await wayland_reposition_primary(module, 0, 0)
         if self.input_handler:
-            await self.input_handler.ensure_session_screens(1)
+            await self.input_handler.ensure_session_screens([])
             self.input_handler.resync_session_screens()
         if self.peer_manager is not None:
             async with self.peer_manager.lock:
@@ -1792,7 +1799,7 @@ class WebRTCService(BaseStreamingService):
                     pipeline.scale = await self.input_handler.realize_wayland_dpi(
                         getattr(self, "_last_applied_dpi", None)
                         or getattr(settings, "scaling_dpi", 96) or 96,
-                        session_screen_index(did), (s["w"], s["h"]))
+                        did, (s["w"], s["h"]))
                 else:
                     pipeline.scale = getattr(self.media_pipeline, "scale", 1.0)
                 # The native-cursor toggle is global across displays.
@@ -1961,8 +1968,7 @@ class WebRTCService(BaseStreamingService):
                 if pipeline is None:
                     continue
                 new_scale = (await self.input_handler.realize_wayland_dpi(
-                    dpi_value, session_screen_index(did),
-                    (pipeline.width, pipeline.height))
+                    dpi_value, did, (pipeline.width, pipeline.height))
                     if self.input_handler else float(dpi_value) / 96.0)
                 if pipeline.scale == new_scale:
                     continue

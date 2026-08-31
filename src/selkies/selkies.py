@@ -79,7 +79,6 @@ from .display_utils import (
     MultiMonitorWindowManager,
     WAYLAND_SCREEN_OUTPUT_ID,
     wayland_output_id,
-    session_screen_index,
     wayland_reposition_primary,
     grow_framebuffer,
     set_dpi,
@@ -2875,7 +2874,7 @@ class DataStreamingServer(BaseStreamingService):
                         # scale, which the 'scale' restart trigger below reads.
                         display_state['scale'] = (
                             await self.input_handler.realize_wayland_dpi(
-                                new_dpi, session_screen_index(display_id),
+                                new_dpi, display_id,
                                 (display_state.get('width'), display_state.get('height')))
                             if self.input_handler else float(new_dpi) / 96.0)
                         self._update_cursor_cap(new_dpi)
@@ -3589,7 +3588,7 @@ class DataStreamingServer(BaseStreamingService):
                                     self.display_clients[display_id]['scale'] = (
                                         await self.input_handler.realize_wayland_dpi(
                                             getattr(app_settings, "scaling_dpi", "96") or 96,
-                                            session_screen_index(display_id)))
+                                            display_id))
                             else:
                                 data_logger.info(f"Client is taking over existing display '{display_id}'. Updating state for new connection.")
                                 display_state = self.display_clients[display_id]
@@ -4010,7 +4009,7 @@ class DataStreamingServer(BaseStreamingService):
                                 entry = self.display_clients.get(client_display_id)
                                 size = ((entry or {}).get('width'), (entry or {}).get('height'))
                                 scale_val = await self.input_handler.realize_wayland_dpi(
-                                    dpi_value, session_screen_index(client_display_id), size)
+                                    dpi_value, client_display_id, size)
                                 capture_scale_changed = (
                                     entry is not None and entry.get('scale') != scale_val)
                                 if entry is not None:
@@ -4409,7 +4408,7 @@ class DataStreamingServer(BaseStreamingService):
         getattr(self, 'display_layouts', {}).pop(display_id, None)
         if self.input_handler:
             await self.input_handler.ensure_session_screens(
-                max(1, len(self.display_clients)))
+                [d for d in self.display_clients if d != 'primary'])
         dropped_ws = dropped_client.get('ws') if dropped_client else None
         data_logger.error(f"Secondary display '{display_id}' dropped on Wayland: {reason}")
         if dropped_ws is not None:
@@ -4524,7 +4523,7 @@ class DataStreamingServer(BaseStreamingService):
             await self._stop_capture_for_display(did)
             outputs.pop(oid, None)
 
-        for oid, did in wanted.items():
+        for oid, did in sorted(wanted.items()):
             layout = layouts[did]
             existing = outputs.get(oid)
             if existing is not None and (existing[1], existing[2]) != (layout['x'], layout['y']):
@@ -4536,7 +4535,7 @@ class DataStreamingServer(BaseStreamingService):
         if target != current:
             moved = await wayland_reposition_primary(module, target[0], target[1])
             if not moved and any(outputs.get(oid) is not None for oid in wanted):
-                for oid, did in wanted.items():
+                for oid, did in sorted(wanted.items()):
                     if outputs.get(oid) is not None:
                         await recreate_later(oid, did, "blocks the primary's move")
                 moved = await wayland_reposition_primary(module, target[0], target[1])
@@ -4553,11 +4552,12 @@ class DataStreamingServer(BaseStreamingService):
             await self._size_wayland_screen(primary_layout['w'], primary_layout['h'],
                                             grow_only=True)
         if self.input_handler:
-            # The session grows a screen for every laid-out display and loses
-            # the ones whose displays are gone -- their windows return to the
-            # primary; a new screen's host window parks until
-            # _create_wayland_outputs gives it its output.
-            await self.input_handler.ensure_session_screens(len(layouts) or 1)
+            # The session keeps a screen per laid-out display: the ones whose
+            # displays left are retired here -- their windows return to the
+            # primary -- and _create_wayland_outputs grows each new display's
+            # screen right before the output that adopts its host window.
+            await self.input_handler.ensure_session_screens(
+                [d for d in layouts if d != 'primary'])
             # Which of the session's own screens a capture drives has just changed.
             self.input_handler.resync_session_screens()
 
@@ -4596,12 +4596,17 @@ class DataStreamingServer(BaseStreamingService):
             outputs = {}
         primary_layout = layouts.get('primary')
         created_any = False
-        for oid, did in wanted.items():
+        # Descending: adoption hands the newest parked host window over, so
+        # windows a recreation parked in ascending order pair with their own
+        # outputs, and each fresh screen is claimed before the next is grown.
+        for oid, did in sorted(wanted.items(), reverse=True):
             if did not in layouts or outputs.get(oid) is not None:
                 continue
             layout = layouts[did]
             client = self.display_clients.get(did) or {}
             scale = float(client.get('scale', 1.0) or 1.0)
+            if self.input_handler:
+                await self.input_handler.ensure_session_screen(did)
             created = False
             try:
                 created = bool(await asyncio.to_thread(

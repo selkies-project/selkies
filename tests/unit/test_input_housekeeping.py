@@ -57,7 +57,7 @@ async def main() -> None:
         started.append("hold")
         await asyncio.sleep(0.05)
 
-    async def realize(dpi, display_index=0, size=None):
+    async def realize(dpi, display_id=None, size=None):
         started.append(("dpi", dpi))
         await asyncio.sleep(0.05)
         return 1.0

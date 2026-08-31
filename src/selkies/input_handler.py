@@ -88,7 +88,6 @@ from .display_utils import (
     unpremultiply_rgba,
     cursor_content_handle,
     layout_extent,
-    session_screen_index,
     wayland_output_id,
 )
 from .media_pipeline import RateControlMode
@@ -5768,25 +5767,36 @@ class WebRTCInput:
         finally:
             writer.close()
 
-    async def ensure_session_screens(self, target: int) -> None:
-        """Converge the session compositor's screen count on `target`.
+    async def ensure_session_screens(self, secondaries) -> None:
+        """Retire the session screens whose displays are gone.
 
-        A screen is added the moment a display needs one and destroyed when its
-        display disconnects, so the session has monitors only for what is being
-        shown: the compositor's own output-destroy path evacuates the removed
-        screen's windows to the primary, which is the X11 behaviour. Screens
-        are removed newest-first by name, and the compositor refuses to drop
-        its last one. A session without the control socket keeps the screens it
-        was started with; the spare-screen hold covers those.
+        Each attached secondary display owns one session screen, grown by
+        `ensure_session_screen` as its capture output is created and removed
+        here -- by the name the compositor coined for it -- once its display
+        disconnects. Removing by name means an older display's departure
+        never costs a newer display its screen; the compositor's own
+        output-destroy path evacuates only the removed screen's windows to
+        the primary, which is the X11 behaviour. A screen owned by no
+        display is retired the same way, so a session that was also started
+        with pre-provisioned screens converges on one screen per display. A
+        session without the control socket keeps the screens it was started
+        with; the spare-screen hold covers those.
+
+        Args:
+            secondaries: The display ids still attached ('primary' and empty
+                ids are ignored).
         """
+        wanted = sorted({str(d) for d in secondaries if d and d != "primary"},
+                        key=wayland_output_id)
+        self._session_display_order = wanted
         if self.wayland_input is None or not self.session_screen_ipc_available():
             return
         if (getattr(settings, "wayland_host_display", "") or "").strip():
             # Host capture: the session compositor owns its screens outright.
             return
-        target = max(1, int(target))
         lock = self.__dict__.setdefault("_session_screen_lock", asyncio.Lock())
         async with lock:
+            owned = self.__dict__.setdefault("_session_screens", {})
             display = self._app_wayland_display()
             try:
                 screens = await asyncio.to_thread(
@@ -5795,28 +5805,115 @@ class WebRTCInput:
                 logger_webrtc_input.debug(f"Session screen list failed: {e}")
                 return
             names = [name for name, _x, _y in screens]
-            while len(names) < target:
-                reply = await self._session_ipc_command("ADD_SCREEN")
-                if not reply.get("ok"):
-                    logger_webrtc_input.warning(
-                        f"Session compositor could not add screen {len(names) + 1}: "
-                        f"{reply.get('error', 'no reply')}")
-                    return
-                names.append(str(reply.get("output", "")))
-                logger_webrtc_input.info(
-                    f"Session compositor added screen '{names[-1]}'.")
-            while len(names) > target:
-                name = names.pop()
-                reply = await self._session_ipc_command(
-                    f"REMOVE_SCREEN {name}" if name else "REMOVE_SCREEN")
+            for did in [d for d, n in owned.items() if n not in names]:
+                del owned[did]
+            doomed = [(owned[d], d) for d in list(owned) if d not in wanted]
+            claimed = set(owned.values())
+            doomed += [(n, None) for n in names[1:] if n not in claimed]
+            for name, did in doomed:
+                reply = await self._session_ipc_command(f"REMOVE_SCREEN {name}")
                 if not reply.get("ok"):
                     logger_webrtc_input.warning(
                         f"Session compositor could not remove screen '{name}': "
                         f"{reply.get('error', 'no reply')}")
-                    return
+                    continue
+                if did is not None:
+                    del owned[did]
                 logger_webrtc_input.info(
                     f"Session compositor removed screen '{name}'; its windows "
                     "return to the primary.")
+
+    async def ensure_session_screen(self, display_id: str) -> None:
+        """Grow the session screen a display owns, right before its capture
+        output is created.
+
+        The compositor hands the newest parked host window to the next
+        capture output that asks, so a screen is added one at a time, each
+        claimed by its own display's output creation before the next is
+        grown -- that pairing is what keeps every screen showing the display
+        it was grown for. The reply names the screen; the name is what
+        `ensure_session_screens` later removes and what positional
+        addressing resolves through. Waits (bounded) for the new screen's
+        host window to park so the output created next adopts it.
+        """
+        did = str(display_id or "")
+        if (not did or did == "primary" or self.wayland_input is None
+                or not self.session_screen_ipc_available()):
+            return
+        if (getattr(settings, "wayland_host_display", "") or "").strip():
+            return
+        lock = self.__dict__.setdefault("_session_screen_lock", asyncio.Lock())
+        async with lock:
+            owned = self.__dict__.setdefault("_session_screens", {})
+            if did in owned:
+                return
+
+            async def parked() -> int:
+                try:
+                    wins = await asyncio.to_thread(self.wayland_input.list_windows)
+                except Exception:
+                    return 0
+                return sum(1 for w in wins if w[4])
+
+            before = await parked()
+            reply = await self._session_ipc_command("ADD_SCREEN")
+            if not reply.get("ok"):
+                logger_webrtc_input.warning(
+                    f"Session compositor could not add a screen for '{did}': "
+                    f"{reply.get('error', 'no reply')}")
+                return
+            owned[did] = str(reply.get("output", ""))
+            logger_webrtc_input.info(
+                f"Session compositor added screen '{owned[did]}' for '{did}'.")
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while await parked() <= before:
+                if asyncio.get_running_loop().time() > deadline:
+                    logger_webrtc_input.warning(
+                        f"Screen '{owned[did]}' produced no host window to adopt.")
+                    break
+                await asyncio.sleep(0.05)
+
+    async def _session_screen_positions(self, display_ids) -> dict:
+        """Position of each display's screen among the session's screens,
+        resolved in one read.
+
+        'primary' is position 0, the screen the session booted with. A
+        secondary whose screen this handler grew is found by the name the
+        ADD_SCREEN reply coined; on a session whose screens were
+        pre-provisioned instead, the attached secondaries hold them in the
+        order they were laid out, after the primary, so a display's rank in
+        that order is its position.
+        """
+        wanted = [str(d) if d else "primary" for d in display_ids]
+        owned = getattr(self, "_session_screens", None) or {}
+        names: list = []
+        if self.wayland_input is not None and any(
+                owned.get(d) for d in wanted if d != "primary"):
+            try:
+                names = [n for n, _x, _y in await asyncio.to_thread(
+                    self.wayland_input.list_app_screens,
+                    self._app_wayland_display())]
+            except Exception as e:
+                logger_webrtc_input.debug(f"Session screen list failed: {e}")
+        order = list(getattr(self, "_session_display_order", None) or [])
+        order += sorted({d for d in wanted if d != "primary"} - set(order),
+                        key=wayland_output_id)
+        ranks = {d: i + 1 for i, d in enumerate(order)}
+        positions = {}
+        for d in wanted:
+            name = owned.get(d)
+            if d == "primary":
+                positions[d] = 0
+            elif name and name in names:
+                positions[d] = names.index(name)
+            else:
+                positions[d] = ranks[d]
+        return positions
+
+    async def session_screen_position(self, display_id) -> int:
+        """Which of the session's screens backs `display_id`; 0 is the primary's."""
+        did = str(display_id) if display_id else "primary"
+        return (await self._session_screen_positions([did]))[did]
 
     def _size_session_screen(self, display: str, display_index: int, scale: float,
                              size: Optional[Tuple[int, int]]) -> bool:
@@ -5834,7 +5931,7 @@ class WebRTCInput:
         return bool(self.wayland_input.set_app_output_scale(
             display, scale, display_index))
 
-    async def realize_wayland_dpi(self, dpi: Any, display_index: int = 0,
+    async def realize_wayland_dpi(self, dpi: Any, display_id: Optional[str] = None,
                                   size: Optional[Tuple[int, int]] = None) -> float:
         """Apply a DPI on the Wayland backend and return the capture output
         scale it leaves behind.
@@ -5851,8 +5948,8 @@ class WebRTCInput:
 
         Args:
             dpi: The desktop DPI to realize; 96 is unity.
-            display_index: Which of the session's screens backs this display
-                (`session_screen_index`).
+            display_id: The display whose screen takes the scale; None or
+                'primary' is the primary's.
             size: The pixel size that screen is about to carry, when the caller
                 already knows it, so the mode and the scale land together.
 
@@ -5868,14 +5965,16 @@ class WebRTCInput:
             if not self._has_separate_app_compositor():
                 return scale
             display = self._app_wayland_display()
+            index = await self.session_screen_position(display_id)
             applied = await asyncio.to_thread(
-                self._size_session_screen, display, display_index, scale, size)
+                self._size_session_screen, display, index, scale, size)
         except Exception as e:
             logger_webrtc_input.debug(f"Session output scale failed: {e}")
             return scale
         if applied:
             logger_webrtc_input.info(
-                f"Session compositor screen {display_index} scaled to {scale}.")
+                f"Session compositor screen {index} "
+                f"('{display_id or 'primary'}') scaled to {scale}.")
             return 1.0
         return scale
 
@@ -5933,20 +6032,22 @@ class WebRTCInput:
         """
         if self.wayland_input is None or not layouts:
             return
-        rects = []
-        for display_id in sorted(layouts, key=session_screen_index):
-            rect = layouts[display_id]
-            rects.append((int(rect.get('x') or 0), int(rect.get('y') or 0),
-                          int(rect.get('w') or 0), int(rect.get('h') or 0)))
         try:
             asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._spawn_task(self._apply_session_screen_layout(rects))
+        self._spawn_task(self._apply_session_screen_layout(dict(layouts)))
 
-    async def _apply_session_screen_layout(self, rects: list) -> None:
-        """Hand the arrangement to the session compositor, logging what it did."""
+    async def _apply_session_screen_layout(self, layouts: dict) -> None:
+        """Hand the arrangement to the session compositor, each rectangle on
+        the screen its display owns, logging what it did."""
         display = self._app_wayland_display()
+        positions = await self._session_screen_positions(list(layouts))
+        rects = []
+        for display_id in sorted(layouts, key=lambda d: positions[d]):
+            rect = layouts[display_id]
+            rects.append((int(rect.get('x') or 0), int(rect.get('y') or 0),
+                          int(rect.get('w') or 0), int(rect.get('h') or 0)))
         try:
             placed = await asyncio.to_thread(
                 self.wayland_input.set_app_screen_layout, display, rects)

@@ -17,10 +17,17 @@ must carry the session's cursor across the boundary onto a screen that did
 not exist at the session's start (`labwc-seam.patch`; an unpatched labwc
 clamps at the first screen's last column).
 
+The same rig then drives selkies' own session-screen logic: displays own
+screens by the names `ADD_SCREEN` coined, so a removal never picks a
+survivor's screen, addressing never assumes display numbers are contiguous,
+and an arrangement follows ownership even when displays attached out of
+number order.
+
 Skips on a labwc without the control socket, which cannot grow a screen.
 
 Usage: python3 tests/integration/test_wayland_session_screens.py
 """
+import asyncio
 import json
 import os
 import shutil
@@ -227,6 +234,101 @@ def main() -> "H.Results":
 
         reply = ipc("REMOVE_SCREEN")
         res.check("the last screen is refused removal", not reply.get("ok"), reply)
+
+        # The session-screen logic selkies runs, bound to this rig through a
+        # bare handler: the methods under test manage session screens and
+        # touch nothing else of the handler's state.
+        from selkies.input_handler import WebRTCInput
+
+        def handler(ipc_ok: bool) -> WebRTCInput:
+            h = WebRTCInput.__new__(WebRTCInput)
+            h.is_wayland = True
+            h.wayland_input = ctl
+            h._session_ipc_ok = ipc_ok
+            h._app_wayland_display = lambda: inner
+            h._has_separate_app_compositor = lambda: True
+            return h
+
+        async def handler_phase() -> None:
+            h = handler(ipc_ok=True)
+
+            # A display numbered past the screen count still finds its screen.
+            await h.ensure_session_screen("display7")
+            ok7 = ctl.create_output(7, W, HGT, W, 0, 1.0)
+            pos7 = await h.session_screen_position("display7")
+            res.check("a display named past the count owns the one new screen",
+                      ok7 and pos7 == 1, f"created={ok7} position={pos7}")
+            scale7 = await h.realize_wayland_dpi(120, "display7", (W, HGT))
+            res.check("its scale lands on that screen, absorbed by the session",
+                      scale7 == 1.0, scale7)
+            await h._apply_session_screen_layout(
+                {"primary": {"x": 0, "y": 0, "w": W, "h": HGT},
+                 "display7": {"x": W, "y": 0, "w": W, "h": HGT}})
+            got = poll(lambda: [(x, y) for _n, x, y in ctl.list_app_screens(inner)],
+                       lambda v: v == [(0, 0), (W, 0)])
+            res.check("the layout lands on the screen the display owns",
+                      got == [(0, 0), (W, 0)], got)
+            ctl.destroy_output(7)
+            await h.ensure_session_screens([])
+            poll(ctl.list_windows, lambda v: len(v) == 1)
+
+            # Displays attach newest-first; each output adopts its own screen.
+            await h.ensure_session_screen("display3")
+            ok3 = ctl.create_output(3, W, HGT, 2 * W, 0, 1.0)
+            win3 = poll(ctl.list_windows, lambda v: any(w[3] == 3 for w in v))
+            id3 = next((w[0] for w in win3 if w[3] == 3), None) if win3 else None
+            await h.ensure_session_screen("display2")
+            ok2 = ctl.create_output(2, W, HGT, W, 0, 1.0)
+            poll(ctl.list_windows,
+                 lambda v: len(v) == 3 and not any(w[4] for w in v))
+            pos = await h._session_screen_positions(["display2", "display3"])
+            res.check("out-of-order attach pairs each screen with its display",
+                      ok3 and ok2 and pos == {"display3": 1, "display2": 2}, pos)
+            await h._apply_session_screen_layout(
+                {"primary": {"x": 0, "y": 0, "w": W, "h": HGT},
+                 "display2": {"x": W, "y": 0, "w": W, "h": HGT},
+                 "display3": {"x": 2 * W, "y": 0, "w": W, "h": HGT}})
+            got = poll(lambda: [(x, y) for _n, x, y in ctl.list_app_screens(inner)],
+                       lambda v: v == [(0, 0), (2 * W, 0), (W, 0)])
+            res.check("the arrangement follows ownership, not screen order",
+                      got == [(0, 0), (2 * W, 0), (W, 0)], got)
+
+            # An older display's departure keeps the newer display's screen.
+            name3 = h._session_screens.get("display3", "")
+            ctl.destroy_output(2)
+            await h.ensure_session_screens(["display3"])
+            scr = poll(lambda: [n for n, _x, _y in ctl.list_app_screens(inner)],
+                       lambda v: len(v) == 2)
+            wins = poll(ctl.list_windows,
+                        lambda v: len(v) == 2 and not any(w[4] for w in v))
+            kept = next((w for w in wins if w[3] == 3), None) if wins else None
+            res.check("an older display's departure keeps the newer one's screen",
+                      scr is not None and len(scr) == 2 and scr[1] == name3,
+                      f"screens={scr} owned={name3}")
+            res.check("the survivor's window never left its output",
+                      kept is not None and kept[0] == id3, f"was={id3} now={kept}")
+            res.check("the survivor's screen compacts to the next position",
+                      await h.session_screen_position("display3") == 1)
+            ctl.destroy_output(3)
+            await h.ensure_session_screens([])
+            poll(ctl.list_windows, lambda v: len(v) == 1)
+
+            # A screen nobody owns (a pre-provisioned spare) is converged away.
+            ipc("ADD_SCREEN")
+            poll(ctl.list_windows, lambda v: len(v) == 2)
+            await h.ensure_session_screens([])
+            scr = poll(lambda: ctl.list_app_screens(inner), lambda v: len(v) == 1)
+            res.check("a screen owned by no display is retired",
+                      scr is not None and len(scr) == 1, scr)
+
+            # Without the socket, positions fall back to attach-order ranks.
+            h2 = handler(ipc_ok=False)
+            await h2.ensure_session_screens(["display7"])
+            res.check("a socket-less session ranks displays by presence",
+                      await h2.session_screen_position("display7") == 1)
+
+        asyncio.run(handler_phase())
+
         res.check("the session compositor survived the lifecycle",
                   proc.poll() is None)
     finally:

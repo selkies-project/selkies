@@ -457,18 +457,6 @@ def wayland_output_id(display_id: Optional[str]) -> int:
     return n if n >= 2 else 2
 
 
-def session_screen_index(display_id: Optional[str]) -> int:
-    """Position of a display among a nested session compositor's screens.
-
-    'primary' maps to 0 and 'displayN' to N-1. The session opens one screen
-    per capture output in that order, and its output management addresses
-    them by position rather than by the compositor output id above.
-    """
-    if display_id in (None, "", "primary"):
-        return 0
-    return max(0, wayland_output_id(display_id) - 1)
-
-
 async def wayland_reposition_primary(module: Any, x: int, y: int) -> bool:
     """Move the pixelflux primary screen (output 0) to a union-layout offset.
 

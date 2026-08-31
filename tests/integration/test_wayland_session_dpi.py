@@ -80,9 +80,9 @@ def make_handler(separate: bool, answer=True, session=FakeSession) -> WebRTCInpu
     return h
 
 
-def realize(handler: WebRTCInput, dpi: float, index: int = 0, size=None) -> float:
+def realize(handler: WebRTCInput, dpi: float, display=None, size=None) -> float:
     """Run the async DPI realization policy and return the capture scale."""
-    return asyncio.run(handler.realize_wayland_dpi(dpi, index, size))
+    return asyncio.run(handler.realize_wayland_dpi(dpi, display, size))
 
 
 nested = make_handler(True)
@@ -90,9 +90,13 @@ check("a nested session takes the scale on its own screen",
       realize(nested, 192) == 1.0
       and nested.wayland_input.calls == [("wayland-9", 0, 2.0)])
 second = make_handler(True)
-realize(second, 144, 1)
+realize(second, 144, "display2")
 check("a second display scales the session's second screen",
       second.wayland_input.calls == [("wayland-9", 1, 1.5)])
+seventh = make_handler(True)
+realize(seventh, 144, "display7")
+check("a display named past the count scales the screen it holds",
+      seventh.wayland_input.calls == [("wayland-9", 1, 1.5)])
 check("a session that manages no outputs keeps the capture scale",
       realize(make_handler(True, answer=False), 192) == 2.0)
 check("a refused configuration keeps the capture scale",
@@ -107,12 +111,12 @@ check("scale floor guards degenerate DPI",
 # the size sends both in one configuration and the session lays out once.
 sized = make_handler(True)
 check("a known size lands with the scale in one configuration",
-      realize(sized, 192, 0, (2864, 1656)) == 1.0
+      realize(sized, 192, None, (2864, 1656)) == 1.0
       and sized.wayland_input.calls == [("wayland-9", 0, 2864, 1656, 2.0)],
       sized.wayland_input.calls)
 for label, size in (("no size", None), ("an unrealized size", (0, 0))):
     unsized = make_handler(True)
-    realize(unsized, 192, 0, size)
+    realize(unsized, 192, None, size)
     check(f"{label} takes the scale alone", unsized.wayland_input.calls
           == [("wayland-9", 0, 2.0)], unsized.wayland_input.calls)
 

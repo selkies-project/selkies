@@ -97,7 +97,8 @@ def nested(socket: str, config: str) -> subprocess.Popen:
     with open(startup, "w") as fh:
         fh.write(f"#!/bin/bash\nenv | grep ^DISPLAY= > {RUNTIME}/env\nexec sleep 3600\n")
     os.chmod(startup, 0o755)
-    # One screen per capture output: the session cannot gain one while it runs.
+    # Two screens from the start: pre-provisioning is the one road a stock
+    # labwc has, and the patched one takes a startup count the same way.
     env = dict(os.environ, WAYLAND_DISPLAY=socket, WLR_BACKENDS="wayland",
                XDG_RUNTIME_DIR=RUNTIME, WLR_RENDERER="pixman", XDG_CONFIG_HOME=config,
                LIBGL_ALWAYS_SOFTWARE="1", WLR_WL_OUTPUTS="2")
