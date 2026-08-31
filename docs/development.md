@@ -218,6 +218,25 @@ EXPOSE 8080
 ENTRYPOINT ["/etc/container-entrypoint.sh"]
 ```
 
+A layer that installs packages needs one more pair. The images are rootless -- every layer runs as uid 1000 through fakeroot -- while their setuid and setgid files (`mount`, `su`, `sudo`, `fusermount3`, the PAM helpers) belong to root, and dpkg replaces a file by hardlinking the old one aside first, which the kernel denies uid 1000 on a setuid file it does not own. An archive update to one of those packages therefore fails the layer that takes it, so bracket the package work with the pair the image ships for it:
+
+```dockerfile
+USER 0
+SHELL ["/bin/sh", "-c"]
+RUN selkies-privileged-files release
+
+USER 1000
+SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
+RUN apt-get update && apt-get install --no-install-recommends -y <packages>
+
+USER 0
+SHELL ["/bin/sh", "-c"]
+RUN selkies-privileged-files restore
+USER 1000
+```
+
+`restore` gives back every owner and bit `release` recorded. A setuid or setgid helper the new packages bring is in no record and needs its own `chown root:root` and `chmod` beside it, since the kernel honours neither bit on a file uid 1000 owns. Inside a running session the same work goes through `sudo-root selkies-privileged-files run apt-get install -y <packages>`: `sudo` is itself one of the files a release hands over, so one root process holds both ends and runs the command as the session user under fakeroot, the way an in-session `sudo apt-get` does.
+
 The entrypoint script of the base images launches `s6-svscan /etc/service` itself, so it does not need to be PID 1 and the image keeps working when another init or launcher is injected above it.
 
 ## Container Guide

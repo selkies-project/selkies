@@ -1,0 +1,57 @@
+#!/bin/sh
+
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# The image's setuid and setgid files, across the layers that run as the
+# session user through fakeroot.
+#
+# dpkg replaces a file by hardlinking the old one aside first, and the kernel
+# refuses a hardlink to a setuid file owned by somebody else, so an archive
+# update to any package owning one -- util-linux, shadow, sudo, fuse3, dbus --
+# fails such a layer outright. `release` records what is privileged and hands
+# it to the session user; `restore` puts every recorded owner and bit back.
+#
+# Both need the real chown syscall, which a build stage has before `USER 1000`.
+# A running session reaches it through `sudo-root`, which is itself one of the
+# files a release hands over -- nothing could then climb back to root to
+# restore them -- so a session uses `run`, where one root process holds both
+# ends around a command it runs as the session user under fakeroot.
+
+set -eu
+
+manifest="/var/lib/selkies-privileged-files"
+session="1000:1000"
+
+case "${1:-}" in
+    release)
+        # Releasing twice would record the released state as the truth
+        if [ -e "${manifest}" ]; then exit 0; fi
+        find / -xdev -perm /6000 -printf '%#m %U %G %p\n' | sort -k4 > "${manifest}"
+        cut -d' ' -f4- "${manifest}" | while read -r path; do
+            chown "${session}" "${path}"
+        done
+        ;;
+    restore)
+        while read -r mode owner group path; do
+            [ -e "${path}" ] || continue
+            # chown drops the bits, so the mode goes back after the ownership
+            chown "${owner}:${group}" "${path}" && chmod "${mode}" "${path}" \
+                || echo "Failed to restore ${path}"
+        done < "${manifest}"
+        rm -f "${manifest}"
+        ;;
+    run)
+        shift
+        "$0" release
+        status=0
+        setpriv --reuid=1000 --regid=1000 --init-groups /usr/bin/fakeroot -- "$@" || status=$?
+        "$0" restore
+        exit "${status}"
+        ;;
+    *)
+        echo "usage: ${0##*/} release|restore|run <command>" >&2
+        exit 2
+        ;;
+esac

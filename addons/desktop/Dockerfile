@@ -31,6 +31,18 @@ LABEL org.opencontainers.image.licenses="MPL-2.0"
 
 ARG DEBIAN_FRONTEND="noninteractive"
 
+# The base ships its setuid and setgid files owned by root, and dpkg replaces a
+# file by hardlinking the old one aside first -- which the kernel denies uid
+# 1000 on a setuid file it does not own. Released for the layers below, an
+# archive update to util-linux, shadow, sudo, fuse3 or dbus is just another
+# package; without this it fails the layer that takes it.
+USER 0
+SHELL ["/bin/sh", "-c"]
+# Copied rather than taken from the base, so this image builds on one published
+# before the base carried it
+COPY --chown=1000:1000 addons/base/selkies-privileged-files /usr/local/bin/selkies-privileged-files
+RUN selkies-privileged-files release
+
 # Rootless like the base: layers run as the session user through fakeroot, so
 # the package database and apt cache stay owned by that user and in-session
 # package management behaves like `/usr/bin/sudo` (the fakeroot alias) does at
@@ -264,9 +276,11 @@ USER 0
 # file owned by uid 1000, which the kernel refuses to honour. Without a
 # root-owned chrome-sandbox Chrome aborts at launch wherever unprivileged user
 # namespaces are unavailable (the default Docker seccomp profile), and xterm
-# brings a setgid utempter.
+# brings a setgid utempter. `restore` covers everything released above, which
+# is the base's own set rather than these.
 SHELL ["/bin/sh", "-c"]
-RUN for helper in /opt/google/chrome/chrome-sandbox /usr/lib/polkit-1/polkit-agent-helper-1 /usr/libexec/polkit-agent-helper-1 /usr/bin/pkexec; do \
+RUN selkies-privileged-files restore && \
+    for helper in /opt/google/chrome/chrome-sandbox /usr/lib/polkit-1/polkit-agent-helper-1 /usr/libexec/polkit-agent-helper-1 /usr/bin/pkexec; do \
         if [ -e "$helper" ]; then chown -f root:root "$helper" && chmod -f 4755 "$helper" || echo "Failed to restore setuid for $helper"; fi; \
     done && \
     for helper in /usr/lib/*/utempter/utempter /usr/libexec/utempter/utempter; do \

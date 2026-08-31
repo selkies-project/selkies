@@ -245,6 +245,10 @@ RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https:
         sed -i 's/^Components: .*/& contrib/' /etc/apt/sources.list.d/debian.sources; \
     fi
 
+# Ownership of the image's setuid and setgid files, used at both ends of the
+# rootless build below and by every image layered on this one
+COPY addons/base/selkies-privileged-files /usr/local/bin/selkies-privileged-files
+
 ARG DEBIAN_FRONTEND="noninteractive"
 # Configure rootless user environment for constrained conditions without escalated root privileges inside containers
 ARG TZ="UTC"
@@ -275,21 +279,15 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     usermod -a -G adm,audio,cdrom,dialout,dip,fax,floppy,games,input,lp,plugdev,render,ssl-cert,sudo,tape,tty,video,voice ubuntu && \
     echo "ubuntu ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers && \
     echo "ubuntu:${PASSWD}" | chpasswd && \
-    chown -R -f -h --no-preserve-root ubuntu:ubuntu / || echo 'Failed to set filesystem ownership in some paths to ubuntu user' && \
-    # Preserve setuid/setgid removed by chown; a setuid bit on a file not owned
-    # by root is rejected, so the ownership has to be restored as well.
-    # sudo.ws is the classic sudo binary under the name sudo-rs packaging
-    # gives it; sudo-root is the real sudo, renamed above so that plain `sudo`
-    # reaches fakeroot. /usr/bin/su ships only under its real name from
-    # util-linux. wall and write are setgid tty rather than setuid, and the
-    # two spool directories are setgid to the group that owns their contents.
-    chown root:root /usr/lib/dbus-1.0/dbus-daemon-launch-helper /usr/bin/chfn /usr/bin/chsh /usr/bin/mount /usr/bin/gpasswd /usr/bin/passwd /usr/bin/newgrp /usr/bin/umount /usr/bin/su /usr/bin/sudo.ws /usr/bin/sudo-root /usr/bin/fusermount 2>/dev/null; \
-    chmod -f 4755 /usr/lib/dbus-1.0/dbus-daemon-launch-helper /usr/bin/chfn /usr/bin/chsh /usr/bin/mount /usr/bin/gpasswd /usr/bin/passwd /usr/bin/newgrp /usr/bin/umount /usr/bin/su /usr/bin/sudo.ws /usr/bin/sudo-root /usr/bin/fusermount || echo 'Failed to set chmod setuid for some paths' && \
-    chown root:shadow /usr/sbin/unix_chkpwd /usr/sbin/pam_extrausers_chkpwd /usr/bin/expiry /usr/bin/chage 2>/dev/null; \
-    chown root:tty /usr/bin/wall /usr/bin/write 2>/dev/null; \
-    chown root:staff /var/local 2>/dev/null; \
-    chown root:mail /var/mail 2>/dev/null; \
-    chmod -f 2755 /var/local /var/mail /usr/bin/wall /usr/bin/write /usr/sbin/unix_chkpwd /usr/sbin/pam_extrausers_chkpwd /usr/bin/expiry /usr/bin/chage || echo 'Failed to set chmod setgid for some paths'
+    # The recursive chown clears every setuid and setgid bit, and a bit on a
+    # file uid 1000 owns is refused anyway, so what is privileged is recorded
+    # first and given back by the layer at the end of this file. It stays
+    # released for the whole rootless build in between: dpkg replaces a file by
+    # hardlinking the old one aside, which the kernel denies uid 1000 on a
+    # setuid file it does not own, and an archive update to util-linux, shadow,
+    # sudo, fuse3 or dbus would fail the layer taking it.
+    selkies-privileged-files release && \
+    { chown -R -f -h --no-preserve-root ubuntu:ubuntu / || echo 'Failed to set filesystem ownership in some paths to ubuntu user'; }
 
 # Set locales
 ENV LANG="${LOCALE}"
@@ -546,12 +544,14 @@ USER 0
 # which the kernel refuses to honour.
 SHELL ["/bin/sh", "-c"]
 # Enable sudo through sudo-root with uid 0.
-# The uid-1000 fakeroot layers above install packages whose setuid and setgid
-# helpers (polkit's agent helper and pkexec, utempter) then really belong to
-# uid 1000, and the kernel honours neither bit on a file it does not own, so
-# their ownership is restored here. Every image layered on this one repeats
-# this for the helpers its own packages bring.
-RUN if [ -d "/usr/libexec/sudo" ]; then SUDO_LIB="/usr/libexec/sudo"; else SUDO_LIB="/usr/lib/sudo"; fi && \
+# `restore` returns the owners and bits recorded when the build released them.
+# The uid-1000 fakeroot layers above install helpers of their own (polkit's
+# agent helper and pkexec, utempter) that no record covers and that really
+# belong to uid 1000, and the kernel honours neither bit on a file it does not
+# own, so those are named here. Every image layered on this one releases what
+# it inherits the same way and names the helpers its own packages bring.
+RUN selkies-privileged-files restore && \
+    if [ -d "/usr/libexec/sudo" ]; then SUDO_LIB="/usr/libexec/sudo"; else SUDO_LIB="/usr/lib/sudo"; fi && \
     chown -R -f -h --no-preserve-root root:root /usr/bin/sudo-root /etc/sudo.conf /etc/sudoers /etc/sudoers.d /etc/sudo_logsrvd.conf "${SUDO_LIB}" || echo 'Failed to provide root permissions in some paths relevant to sudo' && \
     chmod -f 4755 /usr/bin/sudo-root || echo 'Failed to set chmod setuid for root' && \
     for helper in /usr/lib/polkit-1/polkit-agent-helper-1 /usr/libexec/polkit-agent-helper-1 /usr/bin/pkexec; do \
