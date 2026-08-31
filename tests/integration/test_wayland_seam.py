@@ -14,9 +14,10 @@ first screen keeps the host delivering motion to that screen's window past its
 edge, and the nested compositor has to carry its cursor -- and the window a
 drag holds -- onto the second screen rather than clamp it at the first one's
 last column. That is the labwc seam patch the container images carry
-(`labwc-seam.patch`): an unpatched labwc fails this check by design. The grab
-is observed from a client of the NESTED compositor, since that is the chain a
-desktop session runs through.
+(`labwc-seam.patch`); a labwc without the patches clamps by design, so the
+crossing is skipped there, keyed off the control socket the same patch set
+adds. The grab is observed from a client of the NESTED compositor, since that
+is the chain a desktop session runs through.
 
 Usage: python3 tests/integration/test_wayland_seam.py
 """
@@ -244,8 +245,16 @@ def main() -> "H.Results":
         # keeps sending the first screen's window motion past its edge, and the
         # nested compositor has to carry its cursor onto the second screen
         # (labwc-seam.patch) rather than clamp it at the first one's last column.
-        obs = H.WlObs(inner)
-        if not obs.ready(20):
+        # The patched labwc announces itself by its control socket; one without
+        # the patches clamps by design, so the crossing is only asked of a
+        # compositor that can cross.
+        if not os.path.exists(os.path.join(RUNTIME, "labwc.sock")):
+            res.skip("a held grab crosses the boundary",
+                     "this labwc carries no selkies patches and clamps at the boundary")
+            res.skip("injected buttons reach the session's clients",
+                     "observed only under the held-grab drive")
+            obs = None
+        elif not (obs := H.WlObs(inner)).ready(20):
             res.skip("a held grab crosses the boundary", "no observer surface")
         else:
             time.sleep(1.0)
