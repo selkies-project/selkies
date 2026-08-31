@@ -252,13 +252,13 @@ def main() -> "H.Results":
             obs.lines.clear()
             left_cap.inject_mouse_move(500.0, 400.0)
             time.sleep(0.4)
-            left_cap.inject_mouse_button(1, 1)
+            left_cap.inject_mouse_button(272, 1)
             time.sleep(0.3)
             for x in range(500, SPAN[0] - 40, 50):
                 left_cap.inject_mouse_move(float(x), 400.0)
                 time.sleep(0.03)
             time.sleep(0.6)
-            left_cap.inject_mouse_button(1, 0)
+            left_cap.inject_mouse_button(272, 0)
             reach, clicks = -1.0, []
             end = time.monotonic() + 10.0
             while time.monotonic() < end:

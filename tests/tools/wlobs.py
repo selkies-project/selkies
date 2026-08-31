@@ -191,34 +191,22 @@ xdg_surf = handles["xdg"].get_xdg_surface(surf)
 toplevel = xdg_surf.get_toplevel()
 toplevel.set_title("selkies-wl-observer")
 
-_tmp = tempfile.TemporaryFile(prefix="wlshm-buf")
-fd = _tmp.fileno()
-# A window sized to the compositor output: every injected pointer motion inside
-# the captured output lands on this surface, so wl_pointer.motion streams.
-W, H = 1280, 2160
-stride = W * 4
-size = stride * H
-os.ftruncate(fd, size)
-if FILL:
-    with mmap.mmap(fd, size) as m:
-        m.write(struct.pack("<I", FILL) * (W * H))
-pool = handles["shm"].create_pool(fd, size)
-buf = pool.create_buffer(0, W, H, stride, 0)
-pool.destroy()
-
-
-def xdg_configure(xsurf, serial):
-    xsurf.ack_configure(serial)
-
-
 got_configure = []
+asked_size = [0, 0]
+
 
 def xdg_configure2(xsurf, serial):
     xsurf.ack_configure(serial)
     got_configure.append(serial)
 
+
+def toplevel_configure(_tl, width, height, _states):
+    if width > 0 and height > 0:
+        asked_size[0], asked_size[1] = width, height
+
+
 xdg_surf.dispatcher["configure"] = xdg_configure2
-del xdg_configure
+toplevel.dispatcher["configure"] = toplevel_configure
 # Fullscreen so pointer motion lands on us regardless of compositor placement.
 toplevel.set_fullscreen(handles["output"])
 surf.commit()
@@ -229,6 +217,22 @@ for _ in range(30):
     if got_configure:
         break
     time.sleep(0.05)
+# The buffer takes the configured fullscreen size: a mismatched buffer is
+# scaled or clipped by the compositor, which skews every surface-local
+# coordinate this observer reports. The fallback covers a compositor that
+# leaves the size to the client.
+W, H = (asked_size[0], asked_size[1]) if asked_size[0] else (1280, 2160)
+stride = W * 4
+size = stride * H
+_tmp = tempfile.TemporaryFile(prefix="wlshm-buf")
+fd = _tmp.fileno()
+os.ftruncate(fd, size)
+if FILL:
+    with mmap.mmap(fd, size) as m:
+        m.write(struct.pack("<I", FILL) * (W * H))
+pool = handles["shm"].create_pool(fd, size)
+buf = pool.create_buffer(0, W, H, stride, 0)
+pool.destroy()
 surf.attach(buf, 0, 0)
 surf.commit()
 display.roundtrip()
