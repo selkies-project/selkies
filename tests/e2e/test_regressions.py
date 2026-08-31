@@ -118,27 +118,29 @@ def block_clipboard(r: "H.Results") -> None:
     transfer is dropped.
     """
     from playwright.sync_api import sync_playwright
-    H.server_start(mode="websockets")
-    try:
-        payload = ("selkies-clip-" + "y" * 200000).encode()
-        ext, stop = H.x_own_clipboard(payload)
+    payload = ("selkies-clip-" + "y" * 200000).encode()
+    for mode in ("websockets", "webrtc"):
+        wait = C.wait_wr_video if mode == "webrtc" else C.wait_ws_video
+        H.server_start(mode=mode)
         try:
-            with sync_playwright() as pw:
-                browser, page, errs, nf = C.launch_chrome(pw, mode="websockets")
-                try:
-                    r.check("first connect streams", bool(C.wait_ws_video(page)))
-                    r.check("multipart clipboard arrives",
-                            _wait_clip(page, payload.decode()))
-                    page.reload(wait_until="load")
-                    r.check("reconnect streams", bool(C.wait_ws_video(page)))
-                    r.check("multipart clipboard arrives after reconnect",
-                            _wait_clip(page, payload.decode()))
-                finally:
-                    browser.close()
+            ext, stop = H.x_own_clipboard(payload)
+            try:
+                with sync_playwright() as pw:
+                    browser, page, errs, nf = C.launch_chrome(pw, mode=mode)
+                    try:
+                        r.check(f"{mode}: first connect streams", bool(wait(page)))
+                        r.check(f"{mode}: multipart clipboard arrives",
+                                _wait_clip(page, payload.decode()))
+                        page.reload(wait_until="load")
+                        r.check(f"{mode}: reconnect streams", bool(wait(page)))
+                        r.check(f"{mode}: multipart clipboard arrives after reconnect",
+                                _wait_clip(page, payload.decode()))
+                    finally:
+                        browser.close()
+            finally:
+                stop["flag"] = True
         finally:
-            stop["flag"] = True
-    finally:
-        H.server_stop()
+            H.server_stop()
 
 
 def block_pacer(r: "H.Results") -> None:

@@ -884,36 +884,48 @@ class SelkiesStreamingApp:
                     f"Attempted to send binary clipboard data ({mime_type}) but feature is disabled on server."
                 )
                 return
-            if reply_to:
-                await _broadcast_to_clients(
-                    self.data_streaming_server.clients,
-                    f"clipboard_reply,{reply_to}", per_client_timeout=2.0,
-                    only=conn_id)
             data_bytes = data.encode('utf-8') if not is_binary and isinstance(data, str) else data
             total_size = len(data_bytes)
-            if total_size < CLIPBOARD_CHUNK_SIZE:
+            clients = self.data_streaming_server.clients
+            # One payload at a time per client: the start/data/finish frames
+            # carry no transfer id, so a send racing another (a clipboard
+            # change during the connect push) would interleave two payloads'
+            # chunks into one assembly -- and a reply tag must precede its own
+            # payload, nothing else's.
+            locks = self.__dict__.setdefault("_clipboard_send_locks", {})
+            live = {id(c) for c in list(clients)}
+            for gone in [k for k in locks if k not in live]:
+                del locks[gone]
+            small = total_size < CLIPBOARD_CHUNK_SIZE
+            if small:
                 encoded_data = base64.b64encode(data_bytes).decode('ascii')
                 if is_binary:
                     message = f"clipboard_binary,{mime_type},{encoded_data}"
                 else:
                     message = f"clipboard,{encoded_data}"
-                await _broadcast_to_clients(self.data_streaming_server.clients, message,
-                                            per_client_timeout=BULK_DRAIN_TIMEOUT_S, only=conn_id)
             else:
                 data_logger.info(f"Sending large clipboard data ({mime_type}, {total_size} bytes) via multipart.")
                 start_message = f"clipboard_start,{mime_type},{total_size}"
-                clients = self.data_streaming_server.clients
 
-                async def deliver(client: Any) -> None:
-                    """One pipeline per client, a chunk at a time: a slow link
-                    paces only its own transfer and a dead one drops out of the
-                    set without touching anyone else's. Each chunk is held
-                    twice, so the audio and input sharing the connection are
-                    never queued behind more than one of them: for this host's
-                    own send queue to drain (`_await_bulk_window`) and for the
-                    rate the whole path has been taking (`_bulk_pace`), which
-                    is the only one of the two a buffer in front can hide."""
-                    cid = id(client)
+            async def deliver(client: Any) -> None:
+                """One pipeline per client, a chunk at a time: a slow link
+                paces only its own transfer and a dead one drops out of the
+                set without touching anyone else's. Each chunk is held
+                twice, so the audio and input sharing the connection are
+                never queued behind more than one of them: for this host's
+                own send queue to drain (`_await_bulk_window`) and for the
+                rate the whole path has been taking (`_bulk_pace`), which
+                is the only one of the two a buffer in front can hide."""
+                cid = id(client)
+                async with locks.setdefault(cid, asyncio.Lock()):
+                    if reply_to:
+                        await _broadcast_to_clients(clients, f"clipboard_reply,{reply_to}",
+                                                    per_client_timeout=2.0, only=cid)
+                    if small:
+                        await _broadcast_to_clients(clients, message,
+                                                    per_client_timeout=BULK_DRAIN_TIMEOUT_S,
+                                                    only=cid)
+                        return
                     if await _broadcast_to_clients(clients, start_message,
                                                    per_client_timeout=2.0, only=cid):
                         return
@@ -934,8 +946,9 @@ class SelkiesStreamingApp:
                     await _broadcast_to_clients(clients, "clipboard_finish",
                                                 per_client_timeout=2.0, only=cid)
 
-                recipients = [c for c in list(clients) if conn_id is None or id(c) == conn_id]
-                await asyncio.gather(*(deliver(c) for c in recipients))
+            recipients = [c for c in list(clients) if conn_id is None or id(c) == conn_id]
+            await asyncio.gather(*(deliver(c) for c in recipients))
+            if not small:
                 data_logger.info("Finished sending multi-part clipboard data.")
         except Exception as e:
             data_logger.error(f"Failed to send clipboard data: {e}", exc_info=True)

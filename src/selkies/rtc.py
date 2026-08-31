@@ -550,6 +550,14 @@ class RTCApp:
                 start_payload["reply_to"] = reply_to
             channels = ([requester] if requester is not None
                         else list(self._iter_open_data_channels()))
+            # One payload at a time per channel: start/data/end carry no
+            # transfer id, so a send racing another would interleave two
+            # payloads' chunks into one assembly.
+            locks = self.__dict__.setdefault("_clipboard_send_locks", {})
+            live = {id(c) for c in self._iter_open_data_channels()}
+            live.update(id(c) for c in channels)
+            for gone in [k for k in locks if k not in live]:
+                del locks[gone]
             offsets = list(range(0, len(data_bytes), clipboard_chunk_size))
             prepared: dict = {}
             prepare_lock = asyncio.Lock()
@@ -578,22 +586,23 @@ class RTCApp:
 
             async def deliver(channel: Any) -> None:
                 want_gz = bool(getattr(channel, "_selkies_gz_tx", False))
-                self.send_message_to_channel(channel, "clipboard-msg-start", start_payload)
-                for offset in offsets:
-                    if channel.readyState != "open":
-                        progress.pop(id(channel), None)
-                        return
-                    payload, gz_payload = await chunk_for(offset, want_gz)
-                    self._send_prepared_to_channel(
-                        channel, "clipboard-msg-data", payload, gz_payload)
-                    if not await drain_data_channel(channel):
-                        logger.warning(
-                            "Data channel did not drain a clipboard chunk within "
-                            f"{BULK_DRAIN_TIMEOUT_S:.0f}s; leaving it out of this payload.")
-                        progress.pop(id(channel), None)
-                        return
-                    passed(channel, offset)
-                self.send_message_to_channel(channel, "clipboard-msg-end", {})
+                async with locks.setdefault(id(channel), asyncio.Lock()):
+                    self.send_message_to_channel(channel, "clipboard-msg-start", start_payload)
+                    for offset in offsets:
+                        if channel.readyState != "open":
+                            progress.pop(id(channel), None)
+                            return
+                        payload, gz_payload = await chunk_for(offset, want_gz)
+                        self._send_prepared_to_channel(
+                            channel, "clipboard-msg-data", payload, gz_payload)
+                        if not await drain_data_channel(channel):
+                            logger.warning(
+                                "Data channel did not drain a clipboard chunk within "
+                                f"{BULK_DRAIN_TIMEOUT_S:.0f}s; leaving it out of this payload.")
+                            progress.pop(id(channel), None)
+                            return
+                        passed(channel, offset)
+                    self.send_message_to_channel(channel, "clipboard-msg-end", {})
 
             await asyncio.gather(*(deliver(c) for c in channels), return_exceptions=True)
 
