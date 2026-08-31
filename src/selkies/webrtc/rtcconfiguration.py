@@ -103,3 +103,6 @@ class RTCConfiguration:
 
     iceHostPublicIps: Optional[list[str]] = None
     "Public IPv4/IPv6 addresses to advertise in host ICE candidates (static 1:1 NAT)."
+
+    icePortRange: Optional[tuple[int, int]] = None
+    "Inclusive UDP port range confining the sockets behind host ICE candidates."

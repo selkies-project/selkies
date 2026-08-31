@@ -34,6 +34,7 @@
 import asyncio
 import copy
 import enum
+import errno
 import ipaddress
 import itertools
 import logging
@@ -415,6 +416,7 @@ class Connection:
         local_username: Optional[str] = None,
         local_password: Optional[str] = None,
         nat1to1_ips: Optional[list[str]] = None,
+        port_range: Optional[tuple[int, int]] = None,
     ) -> None:
         self.ice_controlling = ice_controlling
 
@@ -471,6 +473,21 @@ class Connection:
         self._tie_breaker = secrets.randbits(64)
         self._use_ipv4 = use_ipv4
         self._use_ipv6 = use_ipv6
+
+        # Host-candidate UDP confinement: a scheduler-managed deployment hands
+        # a session a small firewalled port window, so the sockets behind
+        # direct host candidates must bind inside it. Bounds below 1024 are
+        # rejected rather than clamped; STUN/TURN/mDNS sockets stay
+        # unconfined, and the TURN relay keeps its own separate
+        # TURN_MIN_PORT/TURN_MAX_PORT.
+        if port_range is not None:
+            range_min, range_max = port_range
+            if not 1024 <= range_min <= range_max <= 65535:
+                raise ValueError(
+                    "port_range must satisfy 1024 <= min <= max <= 65535, "
+                    f"got {port_range!r}"
+                )
+        self._port_range = port_range
 
         # NAT1TO1: validated public addresses keyed by IP version. A host
         # candidate of a configured family advertises the mapped address in
@@ -1025,21 +1042,41 @@ class Connection:
         loop = asyncio.get_running_loop()
 
         # gather host candidates
+        #
+        # With a configured port range, binding is the reservation: the ports
+        # are tried in random order and the kernel rejects occupied ones, so
+        # concurrent sessions sharing one range spread without coordination.
+        if self._port_range is not None:
+            bind_ports = list(range(self._port_range[0], self._port_range[1] + 1))
+            random.shuffle(bind_ports)
+        else:
+            bind_ports = [0]
         host_protocols = []
         for address in addresses:
             # create transport
-            try:
-                transport, protocol = await loop.create_datagram_endpoint(
-                    lambda: StunProtocol(self), local_addr=(address, 0)
-                )
-                sock = transport.get_extra_info("socket")
-                if sock is not None:
-                    sock.setsockopt(
-                        socket.SOL_SOCKET, socket.SO_RCVBUF, turn.UDP_SOCKET_BUFFER_SIZE
+            protocol = None
+            last_error: Optional[OSError] = None
+            for bind_port in bind_ports:
+                try:
+                    transport, protocol = await loop.create_datagram_endpoint(
+                        lambda: StunProtocol(self), local_addr=(address, bind_port)
                     )
-            except OSError as exc:
-                self.__log_info("Could not bind to %s - %s", address, exc)
+                    break
+                except OSError as exc:
+                    last_error = exc
+                    # Only an occupied port can be cured by trying another
+                    # one; anything else (address gone, permissions) would
+                    # fail across the whole window identically.
+                    if exc.errno != errno.EADDRINUSE:
+                        break
+            if protocol is None:
+                self.__log_info("Could not bind to %s - %s", address, last_error)
                 continue
+            sock = transport.get_extra_info("socket")
+            if sock is not None:
+                sock.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_RCVBUF, turn.UDP_SOCKET_BUFFER_SIZE
+                )
             host_protocols.append(protocol)
 
             # add host candidate
