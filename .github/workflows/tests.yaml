@@ -138,7 +138,46 @@ jobs:
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
             libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
             coturn \
-            labwc
+            xwayland libinput10 libseat1 librsvg2-2 liblcms2-2 libxml2 libvulkan1 \
+            libpixman-1-0 libwayland-server0 libwayland-cursor0 libwayland-egl1
+      # The compositor the Wayland suites drive is the one the images ship:
+      # the pinned wlroots and the patched labwc, built by the same script as
+      # the base image's labwc stage (the distribution's labwc has neither the
+      # control socket nor the seam patch, and the no-skip gate would trip on
+      # the suites that need them). The pins are read from the Dockerfile so
+      # this job can never drift from the image.
+      - name: Resolve the patched labwc pins
+        id: labwc
+        run: |
+          eval "$(grep -E '^ARG (WLROOTS|LABWC)_VERSION=' addons/base/Dockerfile | sed 's/^ARG //')"
+          echo "wlroots=${WLROOTS_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "labwc=${LABWC_VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Cache the patched labwc
+        id: labwc-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/labwc
+          key: labwc-${{ steps.labwc.outputs.wlroots }}-${{ steps.labwc.outputs.labwc }}-${{ hashFiles('addons/base/patches/labwc-*.patch', 'addons/base/build-labwc.sh') }}
+      - name: Build the patched labwc
+        if: steps.labwc-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install --no-install-recommends -y \
+            build-essential gettext git glslang-tools hwdata meson ninja-build pkg-config \
+            libcairo2-dev libdisplay-info-dev libdrm-dev libgbm-dev libglib2.0-dev \
+            libglvnd-dev libinput-dev liblcms2-dev libliftoff-dev libpango1.0-dev \
+            libpixman-1-dev libpng-dev librsvg2-dev libseat-dev libudev-dev libvulkan-dev \
+            libwayland-dev libxcb1-dev libxcb-composite0-dev libxcb-dri3-dev libxcb-ewmh-dev \
+            libxcb-icccm4-dev libxcb-present-dev libxcb-randr0-dev libxcb-render0-dev \
+            libxcb-render-util0-dev libxcb-res0-dev libxcb-shape0-dev libxcb-shm0-dev \
+            libxcb-sync-dev libxcb-xfixes0-dev libxcb-xinput-dev libxkbcommon-dev \
+            wayland-protocols
+          WLROOTS_VERSION="${{ steps.labwc.outputs.wlroots }}" \
+            LABWC_VERSION="${{ steps.labwc.outputs.labwc }}" \
+            PREFIX="$HOME/.local/labwc" addons/base/build-labwc.sh
+      - name: Put the patched labwc on the session paths
+        run: |
+          echo "$HOME/.local/labwc/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$HOME/.local/labwc/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       # The suites have to exercise the pixelflux and pcmflux that the images,
       # packages and AppImages ship, which come from main HEAD rather than the
       # last PyPI release. Whichever job resolved them left them here.
