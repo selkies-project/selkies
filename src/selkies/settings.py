@@ -830,6 +830,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'Public IP address(es) to advertise in WebRTC host ICE candidates (Pion-style NAT1TO1), for a host behind static 1:1 NAT such as a cloud instance whose private address maps to a fixed public/elastic IP with the WebRTC UDP ports forwarded. Accepts one IPv4 and/or one IPv6 address (comma- or space-separated); each replaces the private address of host candidates in its own family, while server-reflexive (STUN) and relay (TURN) candidates are left untouched so hole-punching and TURN fallback still work. Empty (default) keeps the gathered addresses unchanged.',
     },
     {
+        "name": "webrtc_port_range",
+        "type": "str",
+        "default": "",
+        "help": 'Inclusive UDP port range "min-max" (e.g. "50000-50100") that the local sockets behind direct WebRTC host ICE candidates bind into, for scheduler-managed deployments that allot each session a small firewalled window. Both bounds must lie within 1024-65535; a malformed or out-of-range value is rejected rather than clamped. Distinct from TURN_MIN_PORT/TURN_MAX_PORT, which confine the TURN relay allocation on the TURN server. Empty (default) keeps ephemeral OS-assigned ports.',
+    },
+    {
         "name": "enable_cloudflare_turn",
         "type": "bool",
         "default": False,

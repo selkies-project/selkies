@@ -96,6 +96,35 @@ from .input_handler import (
 )
 from .selkies import current_session_tokens
 
+
+def parse_webrtc_port_range(raw: str) -> Optional[Tuple[int, int]]:
+    """Parse the `webrtc_port_range` setting ("min-max") into a tuple.
+
+    Empty input keeps ephemeral ports (None). A malformed or out-of-bounds
+    value raises ValueError so a misconfigured deployment fails loudly on the
+    first peer instead of silently binding outside the operator's firewalled
+    window; the ICE `Connection` re-checks the bounds as its own API guard.
+    """
+    raw = raw.strip()
+    if not raw:
+        return None
+    part_min, sep, part_max = raw.partition("-")
+    try:
+        if not sep:
+            raise ValueError(raw)
+        port_range = (int(part_min), int(part_max))
+    except ValueError:
+        raise ValueError(
+            f'webrtc_port_range must look like "50000-50100", got {raw!r}'
+        ) from None
+    if not 1024 <= port_range[0] <= port_range[1] <= 65535:
+        raise ValueError(
+            "webrtc_port_range must satisfy 1024 <= min <= max <= 65535, "
+            f"got {raw!r}"
+        )
+    return port_range
+
+
 logger = logging.getLogger("rtc")
 logger.setLevel(logging.INFO)
 
@@ -1140,6 +1169,9 @@ class RTCApp:
             iceServers=ice_servers,
             bundlePolicy=RTCBundlePolicy.MAX_BUNDLE,
             iceHostPublicIps=public_ips or None,
+            icePortRange=parse_webrtc_port_range(
+                getattr(app_settings, "webrtc_port_range", "") or ""
+            ),
         )
         return config
 

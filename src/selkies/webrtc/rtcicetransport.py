@@ -220,6 +220,7 @@ class RTCIceGatherer(AsyncIOEventEmitter):
         local_username: Optional[str] = None,
         local_password: Optional[str] = None,
         ice_host_public_ips: Optional[list[str]] = None,
+        ice_port_range: Optional[tuple[int, int]] = None,
     ) -> None:
         super().__init__()
 
@@ -232,6 +233,7 @@ class RTCIceGatherer(AsyncIOEventEmitter):
             local_username=local_username,
             local_password=local_password,
             nat1to1_ips=ice_host_public_ips,
+            port_range=ice_port_range,
             **ice_kwargs,
         )
         self._remote_candidates_end = False

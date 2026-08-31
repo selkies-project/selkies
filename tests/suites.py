@@ -27,6 +27,8 @@ SUITES: list = [
     {"path": "unit/test_keyboard_chords.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_track_transform.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_stripe_clock.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_ice_port_range.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_webrtc_port_range_setting.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_encode_pace.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_clipboard_typing.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_clipboard_ladder.py", "tier": "unit", "timeout": 120},
