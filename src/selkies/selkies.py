@@ -4596,10 +4596,11 @@ class DataStreamingServer(BaseStreamingService):
             outputs = {}
         primary_layout = layouts.get('primary')
         created_any = False
-        # Descending: adoption hands the newest parked host window over, so
-        # windows a recreation parked in ascending order pair with their own
-        # outputs, and each fresh screen is claimed before the next is grown.
-        for oid, did in sorted(wanted.items(), reverse=True):
+        # A recreated output takes back the very window it lost -- parked
+        # windows carry the output they came from -- and each fresh screen is
+        # grown right before its own output, so the newest-parked fallback
+        # claims the window just added, never a waiting leftover.
+        for oid, did in sorted(wanted.items()):
             if did not in layouts or outputs.get(oid) is not None:
                 continue
             layout = layouts[did]

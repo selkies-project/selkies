@@ -293,6 +293,24 @@ def main() -> "H.Results":
             res.check("the arrangement follows ownership, not screen order",
                       got == [(0, 0), (2 * W, 0), (W, 0)], got)
 
+            # Both outputs recreated in one relayout: a parked window carries
+            # the output it came from, so each returns to its own display
+            # however the creates are ordered against attach order.
+            wins = poll(ctl.list_windows,
+                        lambda v: len(v) == 3 and not any(w[4] for w in v))
+            owner = {w[3]: w[0] for w in wins} if wins else {}
+            ctl.destroy_output(2)
+            ctl.destroy_output(3)
+            poll(ctl.list_windows, lambda v: sum(1 for w in v if w[4]) == 2)
+            okb = ctl.create_output(3, W, HGT, 2 * W, 0, 1.0) \
+                and ctl.create_output(2, W, HGT, W, 0, 1.0)
+            wins = poll(ctl.list_windows,
+                        lambda v: len(v) == 3 and not any(w[4] for w in v))
+            back = {w[3]: w[0] for w in wins} if wins else {}
+            res.check("a bulk recreate returns each window to its own display",
+                      okb and owner and back == owner,
+                      f"before={owner} after={back}")
+
             # An older display's departure keeps the newer display's screen.
             name3 = h._session_screens.get("display3", "")
             ctl.destroy_output(2)
