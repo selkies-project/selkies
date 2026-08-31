@@ -5683,6 +5683,61 @@ class WebRTCInput:
         self._session_ipc_ok = ok
         return ok
 
+    def _session_is_nested(self) -> bool:
+        """Whether applications run under a compositor of their own rather than
+        directly on the capture compositor."""
+        try:
+            capture = self._wayland_display_name()
+        except Exception:
+            capture = None
+        app = self._app_wayland_display()
+        return bool(app) and app != (capture or "")
+
+    def session_screen_capability(self) -> Tuple[bool, str]:
+        """Whether this session can show a second display, from the last probes.
+
+        A nested session compositor with the control socket grows a screen on
+        demand; without the socket, spare screens it opened at startup can
+        still be arranged for a display (the spare-screen hold). A session
+        running directly on the capture compositor needs neither: every
+        capture output is a monitor of its own there. Only a nested session
+        holding a single screen with no control socket has nowhere to show a
+        second display.
+
+        Returns:
+            `(available, reason)`; the reason is empty when available.
+        """
+        if not self.is_wayland:
+            return True, ""
+        if self.session_screen_ipc_available():
+            return True, ""
+        if not self._session_is_nested():
+            return True, ""
+        if int(getattr(self, "_session_screen_count", 0) or 0) >= 2:
+            return True, ""
+        return False, ("The session compositor cannot show a second display: "
+                       "it has no control socket and no spare screen.")
+
+    async def probe_session_screen_capability(self) -> Tuple[bool, str]:
+        """Re-probe what backs a second display and return the fresh answer.
+
+        The control socket decides when it answers; a session without one is
+        asked for its screen count instead, so a compositor started with spare
+        screens keeps its second display.
+        """
+        await self.probe_session_screen_ipc()
+        count = 0
+        if (not self._session_ipc_ok and self.wayland_input is not None
+                and self._session_is_nested()):
+            display = self._app_wayland_display()
+            try:
+                count = len(await asyncio.to_thread(
+                    self.wayland_input.list_app_screens, display))
+            except Exception as e:
+                logger_webrtc_input.debug(f"Session screen count probe failed: {e}")
+        self._session_screen_count = count
+        return self.session_screen_capability()
+
     async def _session_ipc_command(self, command: str) -> dict:
         """One command over the session compositor's control socket.
 

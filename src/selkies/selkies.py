@@ -2095,10 +2095,11 @@ class DataStreamingServer(BaseStreamingService):
         The admin flag gates first. Past it X11 mints a RandR monitor on
         demand; host capture is bounded by the host compositor's real output
         count (unknown until the first capture start establishes the host
-        session); and the self-composited Wayland backend needs the session
-        compositor to grow a screen for the display, which only its control
-        socket can ask for -- no Wayland protocol creates a screen -- so the
-        socket's presence is the gate there.
+        session); and the self-composited Wayland backend rides the
+        input handler's session-screen ladder: the session compositor's
+        control socket grows a screen on demand, a spare screen the session
+        already opened is arranged instead without one, and a session running
+        directly on the capture compositor needs neither.
 
         Returns:
             `(available, reason)`; the reason is empty when available.
@@ -2115,11 +2116,9 @@ class DataStreamingServer(BaseStreamingService):
             if capacity < 2:
                 return False, "The host compositor has a single output, so a second display has nothing to capture."
             return True, ""
-        if (self.input_handler is not None
-                and self.input_handler.session_screen_ipc_available()):
-            return True, ""
-        return False, ("The session compositor cannot add a screen for a "
-                       "second display (no control socket).")
+        if self.input_handler is None:
+            return False, "The input system is not up yet."
+        return self.input_handler.session_screen_capability()
 
     async def _refresh_second_screen_capacity(self) -> bool:
         """Re-read what bounds a second display on this backend.
@@ -2137,8 +2136,9 @@ class DataStreamingServer(BaseStreamingService):
         if not (self.cli_args.wayland_host_display or '').strip():
             if self.input_handler is None:
                 return False
-            before = self.input_handler.session_screen_ipc_available()
-            return await self.input_handler.probe_session_screen_ipc() != before
+            before = self.input_handler.session_screen_capability()[0]
+            fresh = await self.input_handler.probe_session_screen_capability()
+            return fresh[0] != before
         module = self._wayland_control_module()
         if module is None:
             return False
