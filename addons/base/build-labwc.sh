@@ -20,6 +20,10 @@ PATCH_DIR="${PATCH_DIR:-$(cd "$(dirname "$0")" && pwd)/patches}"
 SRC="$(mktemp -d)"
 trap 'rm -rf "$SRC"' EXIT
 export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+# Everything built here finds its libraries through its own rpath, so running
+# the result needs no LD_LIBRARY_PATH -- an environment that would leak into
+# every other process a CI job runs.
+export LDFLAGS="-Wl,-rpath,${PREFIX}/lib${LDFLAGS:+ ${LDFLAGS}}"
 
 build() {
     local name="$1" url="$2" ref="$3"
@@ -57,5 +61,4 @@ meson setup "${SRC}/labwc/build" "${SRC}/labwc" \
     -Dxwayland=enabled -Dnls=enabled
 ninja -C "${SRC}/labwc/build"
 ninja -C "${SRC}/labwc/build" install
-LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
-    "${PREFIX}/bin/labwc" --version
+"${PREFIX}/bin/labwc" --version

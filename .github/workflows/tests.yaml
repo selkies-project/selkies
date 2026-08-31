@@ -177,13 +177,14 @@ jobs:
           WLROOTS_VERSION="${{ steps.labwc.outputs.wlroots }}" \
             LABWC_VERSION="${{ steps.labwc.outputs.labwc }}" \
             PREFIX="$HOME/.local/labwc" addons/base/build-labwc.sh
-      - name: Put the patched labwc on the session paths
-        run: |
-          echo "$HOME/.local/labwc/bin" >> "$GITHUB_PATH"
-          echo "LD_LIBRARY_PATH=$HOME/.local/labwc/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Put the patched labwc on the session path
+        run: echo "$HOME/.local/labwc/bin" >> "$GITHUB_PATH"
       # A cache hit skips the build step and with it the build's apt closure,
       # so a runtime library the list above misses would otherwise surface as
       # every nested suite timing out; a loader error here names it instead.
+      # Runs bare on purpose: the build's own rpath has to resolve its
+      # libraries, since an exported LD_LIBRARY_PATH would leak into every
+      # server and browser the suites start.
       - name: Verify the patched labwc
         run: labwc --version
       # The suites have to exercise the pixelflux and pcmflux that the images,
