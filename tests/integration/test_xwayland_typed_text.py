@@ -105,7 +105,7 @@ proc, SOCKET, DISPLAY = boot(RUNTIME)
 try:
     if not SOCKET or not DISPLAY:
         H.skip_suite("the nested compositor did not come up with an XWayland "
-                     "display: " + H.tail(os.path.join(runtime, "labwc.log")))
+                     "display: " + H.tail(os.path.join(RUNTIME, "labwc.log")))
     keysyms = IH.text_to_wayland_keysyms(SAMPLE)
     got = typed_back(RUNTIME, SOCKET, DISPLAY, keysyms)
     res.check("typed text arrives whole in an XWayland client", got == SAMPLE, repr(got))
