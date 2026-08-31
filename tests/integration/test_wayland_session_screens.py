@@ -118,7 +118,8 @@ def main() -> "H.Results":
              if n.startswith("wayland-") and not n.endswith(".lock")
              and n != capture_socket), None), lambda v: v is not None, 30)
         if not inner:
-            H.skip_suite("the nested compositor did not come up")
+            H.skip_suite("the nested compositor did not come up: "
+                         + H.tail(os.path.join(RUNTIME, "labwc.log")))
         if not poll(lambda: os.path.exists(os.path.join(RUNTIME, "labwc.sock")),
                     bool, 10):
             H.skip_suite("this labwc has no control socket")

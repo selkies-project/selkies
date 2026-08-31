@@ -399,6 +399,15 @@ def decode_input_events(path: str) -> list:
 SKIP_EXIT: int = 77
 
 
+def tail(path: str, lines: int = 12) -> str:
+    """The last lines of a log file, one string; empty when unreadable."""
+    try:
+        with open(path, errors="replace") as fh:
+            return "\n".join(fh.read().splitlines()[-lines:])
+    except OSError:
+        return ""
+
+
 def skip_suite(reason: str) -> NoReturn:
     """End the suite as skipped rather than failed. For a capability the
     installed capture stack does not expose at all, where every check would only

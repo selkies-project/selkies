@@ -202,7 +202,8 @@ def main() -> "H.Results":
     try:
         inner, display = session(socket)
         if not inner or not display:
-            H.skip_suite("the nested compositor did not come up")
+            H.skip_suite("the nested compositor did not come up: "
+                         + H.tail(os.path.join(RUNTIME, "labwc.log")))
         # The session arranges the screens it opened by its own rule; it is
         # told the capture arrangement the way Selkies tells it.
         pixelflux.ScreenCapture().set_app_screen_layout(

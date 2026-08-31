@@ -139,7 +139,9 @@ jobs:
             libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
             coturn \
             xwayland libinput10 libseat1 librsvg2-2 liblcms2-2 libxml2 libvulkan1 \
-            libpixman-1-0 libwayland-server0 libwayland-cursor0 libwayland-egl1
+            libpixman-1-0 libwayland-server0 libwayland-cursor0 libwayland-egl1 \
+            libgles2 libxcb-composite0 libxcb-ewmh2 libxcb-icccm4 \
+            libxcb-render-util0 libxcb-res0 libxcb-xinput0
       # The compositor the Wayland suites drive is the one the images ship:
       # the pinned wlroots and the patched labwc, built by the same script as
       # the base image's labwc stage (the distribution's labwc has neither the
@@ -179,6 +181,11 @@ jobs:
         run: |
           echo "$HOME/.local/labwc/bin" >> "$GITHUB_PATH"
           echo "LD_LIBRARY_PATH=$HOME/.local/labwc/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      # A cache hit skips the build step and with it the build's apt closure,
+      # so a runtime library the list above misses would otherwise surface as
+      # every nested suite timing out; a loader error here names it instead.
+      - name: Verify the patched labwc
+        run: labwc --version
       # The suites have to exercise the pixelflux and pcmflux that the images,
       # packages and AppImages ship, which come from main HEAD rather than the
       # last PyPI release. Whichever job resolved them left them here.

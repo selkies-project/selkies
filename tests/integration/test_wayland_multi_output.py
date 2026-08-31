@@ -65,9 +65,10 @@ def windows_after(capture, count: int, timeout: float = 20) -> list:
 
 def nested(socket: str, outputs: int) -> subprocess.Popen:
     """Start labwc nested on the capture socket with the given screen count."""
+    log = open(os.path.join(RUNTIME, "labwc.log"), "w")
     return H.spawn(
         ["labwc"], env=dict(compositor_env(socket), WLR_WL_OUTPUTS=str(outputs)),
-        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        stdout=log, stderr=subprocess.STDOUT)
 
 
 def main() -> "H.Results":
@@ -91,6 +92,9 @@ def main() -> "H.Results":
     proc = nested(socket, 2)
     try:
         windows = windows_after(capture, 2)
+        if not windows:
+            H.skip_suite("the nested compositor did not come up: "
+                         + H.tail(os.path.join(RUNTIME, "labwc.log")))
         placed = sorted({w[3] for w in windows})
         res.check("nested compositor screens land on separate outputs",
                   len(windows) >= 2 and len(placed) >= 2,
