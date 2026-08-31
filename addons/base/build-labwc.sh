@@ -1,0 +1,52 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# Builds the pinned wlroots and the Selkies-patched labwc into PREFIX. One
+# recipe for the base image's labwc stage and the tests workflow, so the
+# compositor the suites drive is the one the images ship. The distribution
+# supplies the toolchain and libraries; the two build-time dependencies the
+# pinned wlroots may need newer than a distribution carries (libliftoff,
+# libdisplay-info) are built from source only where the installed ones are
+# too old.
+#
+# Inputs: WLROOTS_VERSION and LABWC_VERSION (required); PREFIX (default
+# /usr); PATCH_DIR (default: patches/ beside this script).
+set -euo pipefail
+: "${WLROOTS_VERSION:?}" "${LABWC_VERSION:?}"
+PREFIX="${PREFIX:-/usr}"
+PATCH_DIR="${PATCH_DIR:-$(cd "$(dirname "$0")" && pwd)/patches}"
+SRC="$(mktemp -d)"
+trap 'rm -rf "$SRC"' EXIT
+export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+
+build() {
+    local name="$1" url="$2" ref="$3"
+    shift 3
+    git clone --depth 1 --branch "${ref}" "${url}" "${SRC}/${name}"
+    meson setup "${SRC}/${name}/build" "${SRC}/${name}" \
+        --prefix="${PREFIX}" --libdir=lib --buildtype=release "$@"
+    ninja -C "${SRC}/${name}/build"
+    ninja -C "${SRC}/${name}/build" install
+}
+
+pkg-config --exists 'libliftoff >= 0.5.0' || \
+    build libliftoff https://gitlab.freedesktop.org/emersion/libliftoff.git v0.5.0
+pkg-config --exists 'libdisplay-info >= 0.2.0' || \
+    build libdisplay-info https://gitlab.freedesktop.org/emersion/libdisplay-info.git 0.2.0
+
+build wlroots https://gitlab.freedesktop.org/wlroots/wlroots.git "${WLROOTS_VERSION}" \
+    -Dxwayland=enabled
+
+git clone --depth 1 --branch "${LABWC_VERSION}" \
+    https://github.com/labwc/labwc.git "${SRC}/labwc"
+git -C "${SRC}/labwc" apply "${PATCH_DIR}/labwc-ipc.patch" \
+    "${PATCH_DIR}/labwc-seam.patch" "${PATCH_DIR}/labwc-screens.patch"
+meson setup "${SRC}/labwc/build" "${SRC}/labwc" \
+    --prefix="${PREFIX}" --libdir=lib --buildtype=release \
+    -Dxwayland=enabled -Dnls=enabled
+ninja -C "${SRC}/labwc/build"
+ninja -C "${SRC}/labwc/build" install
+LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
+    "${PREFIX}/bin/labwc" --version

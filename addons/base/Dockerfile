@@ -217,22 +217,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         wayland-protocols \
         xwayland && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-RUN set -e; \
-    git clone --depth 1 --branch "${WLROOTS_VERSION}" \
-        https://gitlab.freedesktop.org/wlroots/wlroots.git /tmp/wlroots; \
-    cd /tmp/wlroots; \
-    meson setup build --prefix=/usr --libdir=lib --buildtype=release -Dxwayland=enabled; \
-    ninja -C build; \
-    ninja -C build install
-COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-seam.patch addons/base/patches/labwc-screens.patch /patches/
-RUN set -e; \
-    git clone --depth 1 --branch "${LABWC_VERSION}" \
-        https://github.com/labwc/labwc.git /tmp/labwc; \
-    cd /tmp/labwc; \
-    git apply /patches/labwc-ipc.patch /patches/labwc-seam.patch /patches/labwc-screens.patch; \
-    meson setup build --prefix=/usr --libdir=lib --buildtype=release -Dxwayland=enabled -Dnls=enabled; \
-    ninja -C build; \
-    ninja -C build install
+COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-seam.patch addons/base/patches/labwc-screens.patch /build/patches/
+COPY addons/base/build-labwc.sh /build/
+RUN /build/build-labwc.sh
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
 
