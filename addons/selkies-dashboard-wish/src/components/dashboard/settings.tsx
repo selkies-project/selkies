@@ -34,6 +34,7 @@
 
 import { Card, CardContent } from "@/components/ui/card";
 import { displayLabel, decodableEncoders, canDecodeFullColor } from "../../../../selkies-web-core/lib/util.js";
+import { sessionAuthHeaders } from "../../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
@@ -697,10 +698,10 @@ export function Settings() {
      * Asks the server to swap transports, then lets the core loader persist
      * the mode and reload the page into the new stack.
      *
-     * `/api/switch` is gated on the master token (Bearer) when set, or Basic
-     * credentials via same-origin. With Basic Auth off the Bearer is required
-     * but the dashboard is not given it, so a 401 prompts once, keeps the token
-     * in sessionStorage, and retries.
+     * The request carries this client's own session token, which a controller's
+     * is enough for; a stored master token overrides it, and where neither is
+     * accepted a 401 prompts for the master token once, keeps it in
+     * sessionStorage and retries. A viewer is refused 403 and asked nothing.
      */
     const handleStreamModeChange = async (mode: string) => {
         if (mode === streamMode) return;
@@ -710,7 +711,8 @@ export function Settings() {
         try {
             const MASTER_TOKEN_KEY = "selkies_master_token";
             const doSwitch = () => {
-                const headers: Record<string, string> = { "Content-Type": "application/json" };
+                const headers: Record<string, string> = sessionAuthHeaders(
+                    { "Content-Type": "application/json" });
                 let storedToken: string | null = null;
                 try { storedToken = sessionStorage.getItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ }
                 if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;

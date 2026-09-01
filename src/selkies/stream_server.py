@@ -1657,8 +1657,11 @@ class CentralizedStreamServer:
         the upgrades, since a browser attaches cached Basic credentials to a
         cross-site POST); in secure mode every other API route accepts a
         session token (Bearer header, ``?token=`` query, or the client's
-        cookie), which is the only credential when Basic auth is off; and
-        everything else falls through to Basic Auth when enabled. A cookie-
+        cookie), which is the only credential when Basic auth is off; the mode
+        switch takes the master token ahead of the Origin rule and otherwise
+        authenticates like any other API route, its handler refusing every
+        role but controller; and everything else falls through to Basic Auth
+        when enabled. A cookie-
         carried token on a state-changing request is held to the Origin rule
         too, since the browser attaches it; and with a master token set, the
         WebSocket handshakes skip Basic (a browser cannot attach fresh Basic
@@ -1693,6 +1696,8 @@ class CentralizedStreamServer:
                 return self._bearer_challenge()
             return await handler(request)
 
+        # The operator's own path, ahead of the Origin rule a browser is held
+        # to; a session token reaches the switch through the verdict below.
         is_control_path = path == f"{api_prefix}/api/switch"
         if settings.master_token and is_control_path:
             if any(
@@ -1700,8 +1705,6 @@ class CentralizedStreamServer:
                 for header in (auth_header, request.headers.get(MASTER_TOKEN_HEADER))
             ):
                 return await handler(request)
-            if not settings.enable_basic_auth[0]:
-                return self._bearer_challenge()
         if is_control_path and not self._is_origin_allowed(request, settings):
             logger.warning(
                 "Rejected mode switch from disallowed Origin: %r",
@@ -1710,7 +1713,7 @@ class CentralizedStreamServer:
             return web.Response(status=403, text="Forbidden origin")
 
         if (settings.master_token and not is_ws_handshake and not token_path
-                and not is_control_path and path.startswith(f"{api_prefix}/api/")):
+                and path.startswith(f"{api_prefix}/api/")):
             verdict = self._session_token_verdict(request, settings)
             if verdict is not None:
                 ceiling, source = verdict
@@ -1915,7 +1918,13 @@ class CentralizedStreamServer:
     async def handle_switch(self, request: web.Request) -> web.Response:
         """POST /api/switch: change the active streaming mode.
 
-        Refused for view-only credentials and when dual mode is disabled.
+        A controller may switch: it already drives the desktop, so withholding
+        the transport from it protects nothing. What the credential does decide
+        is who counts as one — view-only credentials and viewer-role tokens are
+        refused here, and the master token remains the operator's way in for a
+        deployment that hands out tokens it does not want switching for
+        everyone (the switch restarts the service under every connected page).
+        Refused as well when dual mode is disabled.
         """
         if self._viewer_ceiling(request):
             return web.json_response(

@@ -44,8 +44,9 @@ export function getSessionToken() {
 
 /**
  * Request headers with the Bearer token added when the page holds one.
- * @param {object} [headers] Headers to extend; copied untouched without a token.
- * @returns {object} A plain header object.
+ * @param {Record<string, string>} [headers] Headers to extend; copied untouched
+ *   without a token, and an Authorization already set is left alone.
+ * @returns {Record<string, string>} A plain header object.
  */
 export function sessionAuthHeaders(headers) {
     const base = Object.assign({}, headers || {});

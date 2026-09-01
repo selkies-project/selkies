@@ -51,7 +51,7 @@
  */
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
 import { displayLabel, decodableEncoders, canDecodeFullColor, getRoutePrefix, getStorageAppName, isMobileClient } from "../../../selkies-web-core/lib/util.js";
-import { withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
+import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
@@ -2402,13 +2402,13 @@ function Sidebar() {
    * core reloads into it. `window.__selkiesModeSwitching` is set before the
    * request because the server tears down the old peer (WebSocket close code
    * 4000) before it responds, and without the flag the active core would
-   * surface a spurious "Server disconnected" alert. The endpoint is gated on
-   * the master token (Bearer) when set, or Basic credentials via same-origin;
-   * with Basic Auth off the dashboard is not given the token, so a 401 prompts
-   * for it once, keeps it in sessionStorage, and retries; a token the server
-   * rejects is dropped so the next attempt re-prompts. A failed switch clears
-   * the flag again, since no reload follows and a kept flag would hide a real
-   * disconnect.
+   * surface a spurious "Server disconnected" alert. The request carries this
+   * client's own session token, which a controller's is enough for; a stored
+   * master token overrides it, and where neither is accepted a 401 prompts for
+   * the master token once, keeps it in sessionStorage and retries, dropping one
+   * the server rejects so the next attempt re-prompts. A viewer is refused 403
+   * and is not asked for anything. A failed switch clears the flag again, since
+   * no reload follows and a kept flag would hide a real disconnect.
    */
   const handleStreamModeChange = async (event) => {
     const newMode = event.target.value;
@@ -2417,7 +2417,7 @@ function Sidebar() {
     try {
       const MASTER_TOKEN_KEY = "selkies_master_token";
       const doSwitch = () => {
-        const headers = { "Content-Type": "application/json" };
+        const headers = sessionAuthHeaders({ "Content-Type": "application/json" });
         let storedToken = null;
         try { storedToken = sessionStorage.getItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ }
         if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;

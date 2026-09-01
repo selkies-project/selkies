@@ -264,13 +264,19 @@ async def secure_basic_off() -> None:
         status, _, challenge = await app.call("POST", "/api/switch", headers=_named(CTRL))
         check("named header on the switch takes only the master token",
               status == 401 and challenge == BEARER_CHALLENGE, f"{status} {challenge!r}")
-        status, _, challenge = await app.call("POST", "/api/switch", headers=_bearer(CTRL))
-        check("session token cannot switch modes (master only without Basic)",
+        status, body, _ = await app.call("POST", "/api/switch", headers=_bearer(CTRL))
+        check("a controller token switches modes", status == 200 and body == "controller",
+              f"{status} {body}")
+        status, _, _ = await app.call("POST", "/api/switch", headers=_bearer(VIEW))
+        check("a viewer token cannot switch modes", status == 403, status)
+        status, _, challenge = await app.call("POST", "/api/switch")
+        check("no token cannot switch modes",
               status == 401 and challenge == BEARER_CHALLENGE, f"{status} {challenge!r}")
-        status, _, challenge = await app.call("POST", "/api/switch", headers=_cookie(CTRL))
-        check("cookie cannot switch modes either", status == 401, status)
         status, _, _ = await app.call("POST", "/api/switch", headers=_bearer(MASTER))
         check("master token switches modes", status == 200, status)
+        status, _, _ = await app.call(
+            "POST", "/api/switch", headers=dict(_cookie(CTRL), Origin="http://evil.example"))
+        check("a cross-site switch is refused whatever it carries", status == 403, status)
 
     S.user_tokens.clear()
     async with _App(_Settings()) as app:
@@ -312,9 +318,11 @@ async def secure_basic_on() -> None:
         status, _, challenge = await app.call("POST", "/api/upload", headers=_bearer(CTRL[:-1]))
         check("Basic+token: an invalid token falls through to the Basic challenge",
               status == 401 and (challenge or "").startswith("Basic"), f"{status} {challenge!r}")
-        status, _, challenge = await app.call("POST", "/api/switch", headers=_bearer(CTRL))
-        check("Basic+token: a session token does not switch modes",
-              status == 401 and (challenge or "").startswith("Basic"), f"{status} {challenge!r}")
+        status, body, _ = await app.call("POST", "/api/switch", headers=_bearer(CTRL))
+        check("Basic+token: a controller token switches modes",
+              status == 200 and body == "controller", f"{status} {body}")
+        status, _, _ = await app.call("POST", "/api/switch", headers=_bearer(VIEW))
+        check("Basic+token: a viewer token still cannot", status == 403, status)
         status, _, _ = await app.call("POST", "/api/switch", headers={"Authorization": _basic("user", "secret")})
         check("Basic+token: Basic credentials switch modes as before", status == 200, status)
         status, _, _ = await app.call(

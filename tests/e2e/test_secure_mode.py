@@ -15,7 +15,10 @@ websockets:  a browser page loaded with ?token= streams over WebSockets,
 webrtc:      the same page over WebRTC fetches its TURN configuration with
              the Bearer header and streams.
 dashboards:  both dashboards open their file manager with the page's token
-             and the listing renders inside the modal.
+             and the listing renders inside the modal; the classic one
+             switches transport on that same token, asking the user for
+             nothing (the master token is the operator's, not a session
+             user's, so a prompt for it would be unanswerable).
 legacy:      without a master token nothing changes: the routes are open with
              Basic auth off and Basic-gated, view-only password included,
              with it on.
@@ -453,9 +456,9 @@ def run_dashboards() -> "H.Results":
                     res.check(f"{dashboard}: the listing's links keep the token",
                               hrefs and all(f"token={CTRL_TOKEN}" in h for h in hrefs), hrefs)
                 if dashboard == "classic":
-                    # The mode switch is the master token's: the dashboard's first POST
-                    # meets the Bearer challenge, which must not reload the page, so its
-                    # master-token prompt comes up and the retry switches the transport.
+                    # A controller switches on the token its own page was opened
+                    # with. Nobody is asked to paste the master token: it is an
+                    # operator credential a session user does not hold.
                     page.locator('.files-modal-close').first.click()
                     time.sleep(0.5)
                     page.locator('.sidebar-section-header:has-text("Video")').first.click()
@@ -465,19 +468,19 @@ def run_dashboards() -> "H.Results":
                     switched = False
                     deadline = time.time() + 20
                     while time.time() < deadline and not switched:
-                        # Yields to Playwright so the prompt's dialog event is
-                        # dispatched to the handler above.
+                        # Yields to Playwright, so a dialog would reach the handler.
                         page.wait_for_timeout(500)
                         status, _, body = request("GET", "/api/status")
                         switched = status == 200 and json.loads(body).get("current_mode") == "webrtc"
-                    res.check("classic: the mode switch prompted for the master token",
-                              prompts and "master token" in prompts[0].lower(), prompts)
-                    res.check("classic: the switch went through on the master token", switched)
-                    res.check("classic: the Bearer refusal did not reload the page",
+                    res.check("classic: the switch went through on the session token", switched)
+                    res.check("classic: nothing asked the user for the master token",
+                              not prompts, prompts)
+                    res.check("classic: the switch did not reload the page",
                               len(navigations) == base_navs, navigations[base_navs:])
                     switch_reqs = [r for r in requests if r[0] == "POST" and "/api/switch" in r[1]]
-                    res.check("classic: the dashboard does not put the session token on the switch (Basic stays usable there)",
-                              switch_reqs and not switch_reqs[0][2].get("authorization"),
+                    res.check("classic: the dashboard presents its own token on the switch",
+                              switch_reqs and switch_reqs[0][2].get("authorization")
+                              == f"Bearer {CTRL_TOKEN}",
                               [r[2].get("authorization") for r in switch_reqs])
             finally:
                 browser.close()
