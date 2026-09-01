@@ -90,6 +90,7 @@ from enum import Enum
 from .media_pipeline import MediaPipeline
 from .input_handler import (
     BULK_DRAIN_TIMEOUT_S,
+    gamepad_slot_denied,
     VIEWER_ALLOWED_PREFIXES,
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
@@ -298,7 +299,8 @@ class RTCApp:
     Attributes:
         peer_connections: Peer id to peer entry, one per connected browser
             page: `peer_conn`, `data_channel`, `client_type`, `display_id`;
-            `client_token` and `client_slot` as held at connect, so a
+            `client_token` and `client_slot` as held at connect — the token's
+            slot in secure mode, else the one the peer claimed at HELLO — so a
             revocation or handoff on `/api/tokens` can find the affected peers
             (per-message checks read the live store); `channel_consumers`,
             cancellable from teardown because a channel that never reached
@@ -1359,34 +1361,44 @@ class RTCApp:
             logger.warning("Dropping unauthorized secure-mode input: %s", msg[:32])
         return not authorized
 
-    def _secure_gamepad_denied(self, msg: str, client_token: Optional[str]) -> bool:
-        """Secure-mode gamepad authority, mirroring the WS gate: a client may only
-        drive its own assigned slot (js index == slot - 1), so a viewer or
-        collaborator can't spoof another player's controller. No slot on the
-        token means no gamepad.
+    def _gamepad_denied(self, msg: str, client_type: Optional[ClientType],
+                        client_token: Optional[str],
+                        client_slot: Optional[int]) -> bool:
+        """Gamepad slot authority, mirroring the WS gate: a client may only drive
+        the slot it holds, so a viewer or collaborator can't spoof another
+        player's controller.
+
+        Under a master token the slot comes from the live token store, so a
+        revocation or re-slot lands on the next message; otherwise from the
+        peer's HELLO claim, which the signaling server validated (`-1` is its
+        unassigned sentinel). A legacy controller's claim of slot 1 is registry
+        identity rather than a gamepad restriction — the websockets handshake
+        gives it no slot at all — and is dropped, so the same client in the
+        same role is governed the same on both transports.
 
         Returns:
             True when the gamepad message must be dropped.
         """
-        if not app_settings.master_token or not msg.startswith("js,"):
+        if not msg.startswith("js,"):
             return False
-        tokens, _ = current_session_tokens()
-        perms = tokens.get(client_token) if client_token else None
-        slot = perms.get("slot") if perms else None
-        if slot is None:
-            return True
-        try:
-            index = int(msg.split(",", 3)[2])
-        except (IndexError, ValueError):
-            return True
-        return int(slot) - 1 != index
+        role = "controller" if client_type is ClientType.CONTROLLER else "viewer"
+        if app_settings.master_token:
+            tokens, _ = current_session_tokens()
+            perms = tokens.get(client_token) if client_token else None
+            slot = perms.get("slot") if perms else None
+        elif role == "viewer":
+            slot = client_slot if (client_slot or 0) > 0 else None
+        else:
+            slot = None
+        return gamepad_slot_denied(msg, role, slot, bool(app_settings.master_token))
 
     def _on_input_channel_message(self, msg: Any,
                                   channel: Optional[RTCDataChannel] = None,
                                   client_type: Optional[ClientType] = None,
                                   client_token: Optional[str] = None,
                                   display_id: str = "primary",
-                                  peer_id: Optional[str] = None) -> Any:
+                                  peer_id: Optional[str] = None,
+                                  client_slot: Optional[int] = None) -> Any:
         """Pre-filter one data-channel message before the input dispatcher.
 
         In order: a gzip'd payload is inflated with a bound (the channel's
@@ -1442,8 +1454,8 @@ class RTCApp:
                 return
         if isinstance(msg, str) and self._secure_input_denied(msg, client_token):
             return
-        if isinstance(msg, str) and self._secure_gamepad_denied(msg, client_token):
-            logger.warning("Dropping gamepad input for unassigned slot: %s", msg[:32])
+        if isinstance(msg, str) and self._gamepad_denied(msg, client_type, client_token, client_slot):
+            logger.warning("Dropping gamepad input for a slot this peer does not hold: %s", msg[:32])
             return
         if msg in ("STOP_VIDEO", "START_VIDEO") and self.on_video_consumer_active is not None:
             return self.on_video_consumer_active(
@@ -1558,6 +1570,7 @@ class RTCApp:
         c_type: str,
         client_token: Optional[str] = None,
         display_id: str = "primary",
+        client_slot: Optional[int] = None,
     ) -> None:
         """Create a peer connection and send its offer over signaling.
 
@@ -1595,6 +1608,8 @@ class RTCApp:
             c_type: Client role string, coerced to `ClientType`.
             client_token: Session token the peer authenticated with, if any.
             display_id: Display this peer attaches to.
+            client_slot: One-based player slot the peer claimed at HELLO, which
+                the gamepad gate holds it to outside secure mode.
 
         Raises:
             RTCAppError: When a viewer joins a secondary display that has no
@@ -1647,7 +1662,7 @@ class RTCApp:
         data_channel.on("error", lambda e=None: self.on_data_error(e))
         input_consumer = self._serialize_channel(
             data_channel,
-            lambda msg, ch=data_channel, ct=client_type, tok=client_token, did=display_id, pid=client_peer_id: self._on_input_channel_message(msg, ch, ct, tok, did, pid),
+            lambda msg, ch=data_channel, ct=client_type, tok=client_token, did=display_id, pid=client_peer_id, slot=client_slot: self._on_input_channel_message(msg, ch, ct, tok, did, pid, slot),
         )
 
         peer_connection.on("connectionstatechange", lambda cid=client_peer_id: asyncio.run_coroutine_threadsafe(self.on_connectionstatechange(cid), loop=self.async_event_loop))
@@ -1684,7 +1699,7 @@ class RTCApp:
                 logger.warning("Failed to close peer connection after failed start", exc_info=True)
             raise
 
-        peer_slot = None
+        peer_slot = client_slot if (client_slot or 0) > 0 else None
         if client_token:
             _perms = current_session_tokens()[0].get(client_token)
             if _perms:
@@ -2084,7 +2099,7 @@ class RTCApp:
             except Exception as e:
                 logger.debug(f"Error closing orphaned viewer '{pid}': {e}")
 
-    async def start_rtc_connection(self, client_peer_id: str, client_type: str, client_token: Optional[str] = None, display_id: str = "primary") -> None:
+    async def start_rtc_connection(self, client_peer_id: str, client_type: str, client_token: Optional[str] = None, display_id: str = "primary", client_slot: Optional[int] = None) -> None:
         """Start a peer connection, cleaning up the half-built state on failure.
 
         A signaling socket that dies mid-handshake (refresh/eviction race) is
@@ -2092,7 +2107,7 @@ class RTCApp:
         """
         try:
             logger.info("Starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
-            await self._start_rtc_pipeline(client_peer_id, client_type, client_token, display_id)
+            await self._start_rtc_pipeline(client_peer_id, client_type, client_token, display_id, client_slot)
         except (aiohttp.ClientConnectionResetError, ConnectionResetError) as e:
             logger.info(f"Peer went away during RTC setup: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._cleanup_failed_start(client_peer_id, client_type, display_id)

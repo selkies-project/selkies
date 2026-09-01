@@ -93,6 +93,7 @@ from .input_handler import (
     BULK_DRAIN_TIMEOUT_S,
     WebRTCInput as InputHandler,
     CLIPBOARD_CHUNK_SIZE,
+    gamepad_slot_denied,
     VIEWER_ALLOWED_PREFIXES,
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
@@ -4104,26 +4105,19 @@ class DataStreamingServer(BaseStreamingService):
                             data_logger.warning("Received 'cmd' message without a command string.")
 
                     else:
-                        if message.startswith("js,") and self.is_secure_mode:
-                            perms = client_permissions.get(websocket)
-                            if not perms or not perms.get("token"):
-                                data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {remote_address} dropped. Client has no token/perms.")
-                                continue
-                            
-                            token = perms.get("token")
-                            current_perms = user_tokens.get(token)
-                            server_slot = current_perms.get("slot") if current_perms else None
-
-                            if server_slot is None:
-                                data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {remote_address} dropped. Client token has no assigned slot.")
-                                continue
-                            try:
-                                client_index = int(message.split(',')[2])
-                                if (int(server_slot) - 1) != client_index:
-                                    data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {remote_address} dropped. Client sent for index {client_index}, but is assigned slot {server_slot}.")
-                                    continue
-                            except (IndexError, ValueError):
-                                data_logger.warning(f"BLOCK (Secure Mode): Malformed gamepad message from {remote_address}: {message}")
+                        if message.startswith("js,"):
+                            # Live store, not the connect-time snapshot: a revoked
+                            # or re-slotted token lands on the next message.
+                            perms = client_permissions.get(websocket) or {}
+                            slot = perms.get("slot")
+                            if self.is_secure_mode:
+                                live = user_tokens.get(perms.get("token")) if perms.get("token") else None
+                                slot = live.get("slot") if live else None
+                            if gamepad_slot_denied(message, perms.get("role"), slot,
+                                                   self.is_secure_mode):
+                                data_logger.warning(
+                                    f"DENIED gamepad input from {remote_address}: "
+                                    f"{message[:32]} does not match slot {slot}.")
                                 continue
 
                         # maxsplit=1: a full split of an 8 MiB clipboard chunk stalls the loop.

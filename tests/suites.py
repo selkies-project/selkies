@@ -22,6 +22,9 @@ SUITES: list = [
     # unit
     {"path": "unit/test_uinput_abi.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_uinput_policy.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_gamepad_authority.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_mode_switch_teardown.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_wayland_resize_session_screen.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_i18n_keys.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_client_typing.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_keyboard_chords.py", "tier": "unit", "timeout": 120},

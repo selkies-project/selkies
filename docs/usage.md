@@ -53,7 +53,7 @@ The side menu's sharing section hands out links to the running session. Each one
 | Viewer | `#shared` | watch the session; no keyboard, mouse or gamepad |
 | Player 2, 3 and 4 | `#player2`, `#player3`, `#player4` | watch, and drive the gamepad in that slot |
 
-Input authority is enforced on the server rather than in the page, so a modified client cannot exceed its role: a viewer's keyboard, mouse, and settings messages are refused whatever it sends.
+Input authority is enforced on the server rather than in the page, so a modified client cannot exceed its role: a viewer's keyboard, mouse, and settings messages are refused whatever it sends, and its gamepad messages are refused unless they drive the slot its own link carries — a `#shared` viewer holds none and drives no gamepad at all.
 
 `--enable-sharing=false` (`SELKIES_ENABLE_SHARING`) turns the feature off, and one page then holds the session: a second one takes it over instead of joining. `--enable-shared` and `--enable-player2` through `--enable-player4` drop individual links, and `--ui-sidebar-show-sharing=false` hides the section while leaving the links working.
 

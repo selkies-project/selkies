@@ -54,6 +54,8 @@ keyboard, mouse and clipboard set, including `co,` because IME commits and
 atomic typing arrive that way. `cmd` and every settings-mutating message stay
 controller-only. Blur/visibility lifecycle noise (`VIEWER_SILENT_DROP_PREFIXES`)
 from a read-only viewer is normal operation and is dropped without a warning.
+A `js,` message names its own gamepad index, so `gamepad_slot_denied` decides
+separately whether its sender holds that slot.
 
 Blocking X and compositor work runs on worker threads or dedicated event
 threads; the asyncio loop only queues, dispatches, and awaits, so input never
@@ -167,6 +169,36 @@ VIEWER_COLLAB_EXTRA_PREFIXES = (
     "REQUEST_CLIPBOARD",
 )
 VIEWER_SILENT_DROP_PREFIXES = ("kr", "cr")
+
+
+def gamepad_slot_denied(msg: str, role: Optional[str], slot: Optional[int],
+                        is_secure: bool) -> bool:
+    """Whether a `js,` message drives a gamepad slot its sender does not hold.
+
+    The index is a field of the client's own message, so the connection decides
+    which one it may name: a slot holder drives index `slot - 1` alone, and a
+    viewer without one drives none. A legacy controller is left unrestricted,
+    since it already holds keyboard and mouse: pinning it to index 0 would buy
+    no guarantee while breaking a client presenting several local pads.
+
+    Args:
+        msg: Raw client message; anything but `js,` is not this gate's business.
+        role: The connection's role, "controller" or "viewer".
+        slot: One-based player slot the connection holds, None when it holds none.
+        is_secure: Whether a master token is set.
+
+    Returns:
+        True when the message must be dropped.
+    """
+    if not msg.startswith("js,"):
+        return False
+    if slot is None:
+        return is_secure or role == "viewer"
+    try:
+        index = int(msg.split(",", 3)[2])
+    except (IndexError, ValueError):
+        return True
+    return int(slot) - 1 != index
 
 
 class _WaylandKeymapOwner:
@@ -7374,7 +7406,8 @@ class WebRTCInput:
                 logger_webrtc_input.error(f"Error audio bitrate change: {e}")
         elif msg_type == "js":
             # Enforced server-side so a client cannot inject controller input
-            # whatever its own UI state.
+            # whatever its own UI state. Which slot it may name is the transport
+            # gates' call (gamepad_slot_denied), since only they know the sender.
             if not settings.gamepad_enabled[0]:
                 return
             cmd = toks[1]

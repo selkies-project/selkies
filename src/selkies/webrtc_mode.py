@@ -469,6 +469,10 @@ class WebRTCService(BaseStreamingService):
             display_position: Where a joining secondary sits relative to the
                 primary ("right", "left", "up", "down").
         """
+        # From the registry, not SESSION_START: the signaling server that validated
+        # the claim is this process, and the relay's fields are positional.
+        peer = self.peer_manager.peers.get(session_peer_id) if self.peer_manager else None
+        client_slot = getattr(peer, "client_slot", None) if peer else None
         logger.info(
             f"starting session for client peer id: {session_peer_id} of type: {client_type} (display '{display_id}')"
         )
@@ -488,7 +492,8 @@ class WebRTCService(BaseStreamingService):
                 entry = self.display_clients.setdefault(display_id, {"width": 0, "height": 0})
                 entry["position"] = display_position
                 self._seed_display_settings(entry)
-            await self.rtc_app.start_rtc_connection(session_peer_id, client_type, client_token, display_id)
+            await self.rtc_app.start_rtc_connection(
+                session_peer_id, client_type, client_token, display_id, client_slot)
             if self.args.enable_webrtc_statistics and self.metrics:
                 await self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
             logger.info(f"started session for client peer id {session_peer_id}")
