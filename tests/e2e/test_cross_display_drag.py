@@ -34,6 +34,8 @@ the two-display union.
 Usage: python3 tests/e2e/test_cross_display_drag.py wl
 """
 import os
+import shutil
+import subprocess
 import sys
 import time
 from typing import Any, Optional, Tuple
@@ -243,6 +245,110 @@ def handoff(res: "H.Results", mode: str, page: Any, dpage: Any, seam: int,
               buttons_held(page, wayland) == (), buttons_held(page, wayland))
 
 
+def managed_window_drag(res: "H.Results", mode: str, page: Any, seam: int,
+                        to_client) -> None:
+    """A window the session's window manager owns follows a held drag across
+    the seam.
+
+    The crossing checked above is the client's half of the gesture. What a user
+    sees is the window under the grab, which the window manager moves itself and
+    which has to travel exactly as far as the pointer -- across the seam, where
+    the overshoot converts at the neighbor's scale rather than the grabbed
+    page's, so equal client steps are not equal remote ones.
+
+    The window manager started here already has both displays, so a monitor set
+    it never re-read is not what this exercises; that lives in
+    `integration/test_monitor_change_announced`, at the layer the re-read
+    happens on.
+
+    X11 only: on the Wayland backend the session compositor owns the window and
+    the seam is its own (`test_wayland_seam`).
+
+    Args:
+        page: The page holding the grab.
+        seam: Remote x where the primary ends and its neighbor begins.
+        to_client: Maps a remote `(x, y)` to the client coordinates that reach
+            it on this page.
+    """
+    wm = next((w for w in ("openbox", "xfwm4") if shutil.which(w)), None)
+    if wm is None or shutil.which("xdotool") is None:
+        res.skip(f"[{mode}] a managed window follows the drag across the seam",
+                 "no window manager or xdotool on PATH")
+        return
+    from selkies.Xlib import X, display as x11_display
+
+    display_name = H.require_display()
+    env = {**os.environ, "DISPLAY": display_name}
+    proc = H.spawn([wm, "--replace"], env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    d = x11_display.Display(display_name)
+    win = None
+    try:
+        screen = d.screen()
+        win = screen.root.create_window(
+            0, 0, 400, 260, 0, screen.root_depth,
+            background_pixel=screen.white_pixel, event_mask=X.StructureNotifyMask)
+        win.set_wm_name("selkies-drag-probe")
+        win.map()
+        d.sync()
+        # The reparent is what says a window manager took it; without one there
+        # is no frame to grab and nothing this check could mean.
+        frame, deadline = None, time.time() + 15
+        while time.time() < deadline:
+            parent = win.query_tree().parent
+            if parent.id != screen.root.id:
+                frame = parent
+                break
+            time.sleep(0.25)
+        if frame is None:
+            res.skip(f"[{mode}] a managed window follows the drag across the seam",
+                     f"{wm} did not take the probe window")
+            return
+        # Placed so the grab point starts inside the primary and the travel
+        # below carries it well past the seam.
+        start_x, start_y = seam - 500, 200
+        subprocess.run(["xdotool", "windowmove", str(win.id), str(start_x), str(start_y)],
+                       env=env, capture_output=True)
+        time.sleep(0.6)
+        before = frame.get_geometry()
+        # A point on the frame's own titlebar, above the client area.
+        grab = (before.x + 60, before.y + max(2, (before.height - 260) // 2))
+        # What the window has to match is the pointer, not the client-side
+        # request: past the seam the overshoot converts at the neighbor's own
+        # scale, so equal client steps are not equal remote ones.
+        travel, last = 800, None
+        mouse(page, "mousedown", *to_client(*grab), True)
+        time.sleep(0.3)
+        pointer_from = C.x11_mouse_pos()
+        for step in range(100, travel + 1, 100):
+            last = to_client(grab[0] + step, grab[1])
+            mouse(page, "mousemove", *last, True)
+            time.sleep(0.12)
+        time.sleep(0.4)
+        pointer_to = C.x11_mouse_pos()
+        mouse(page, "mouseup", *last, False)
+        time.sleep(0.6)
+        after = frame.get_geometry()
+        moved, carried = after.x - before.x, pointer_to[0] - pointer_from[0]
+        res.check(f"[{mode}] a managed window follows the drag across the seam",
+                  abs(moved - carried) <= 12 and pointer_to[0] > seam > pointer_from[0],
+                  f"{wm}: window moved {moved}, pointer {carried} "
+                  f"({pointer_from[0]} -> {pointer_to[0]}), seam={seam}")
+    finally:
+        try:
+            if win is not None:
+                win.destroy()
+            d.sync()
+            d.close()
+        except Exception:
+            pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
+
+
 def drive(res: "H.Results", mode: str, wayland: bool) -> None:
     """One transport's crossing checks; the full set runs on websockets."""
     full = mode == "websockets"
@@ -344,6 +450,12 @@ def drive(res: "H.Results", mode: str, wayland: bool) -> None:
 
                 res.check("vertical and left arrangements map the same way",
                           page.evaluate(SYNTH_JS), "see SYNTH_JS")
+
+            if not wayland:
+                managed_window_drag(
+                    res, mode, page, seam,
+                    lambda sx, sy: (int(round(700 + (sx - p1[0]) / own_scale)),
+                                    int(round(400 + (sy - p1[1]) / own_scale))))
         finally:
             browser.close()
 
