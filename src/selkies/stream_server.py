@@ -26,6 +26,7 @@ import json
 import html
 import stat
 import hashlib
+import ipaddress
 import time
 import shutil
 import base64
@@ -1177,17 +1178,102 @@ class CentralizedStreamServer:
         )
         return cert_pem, key_pem
 
+    def _self_signed_candidates(self) -> List[Tuple[str, str]]:
+        """Where a generated pair may live, most preferred first.
+
+        The configured path leads so an operator who pointed at one gets the
+        pair there; the state directory catches a user install, which for the
+        default `ssl-cert-snakeoil` path means anyone not running as root.
+
+        Returns:
+            `(certificate, key)` absolute path pairs; a pair with no key path
+            is dropped, since a generated key is always written separately.
+        """
+        candidates = []
+        configured = getattr(self.settings, "https_cert", None)
+        if configured:
+            candidates.append((os.path.abspath(configured),
+                               os.path.abspath(getattr(self.settings, "https_key", "") or "")))
+        state = os.path.join(
+            os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+            "selkies")
+        candidates.append((os.path.join(state, "selkies.pem"),
+                           os.path.join(state, "selkies.key")))
+        return [(cert, key) for cert, key in candidates if cert and key]
+
+    def _self_signed_names(self) -> Tuple[list, list]:
+        """The names a generated certificate is issued for.
+
+        Loopback under every spelling, since that is what a published container
+        port is reached by, plus the host's own name. Its routable address is
+        deliberately absent: the pair outlives the address a container is given
+        on each run, and one naming last week's is worse than one claiming none.
+
+        Returns:
+            `(dns names, ip addresses)`, both ready for `SubjectAlternativeName`.
+        """
+        from cryptography import x509
+
+        dns = ["localhost"]
+        hostname = socket.gethostname()
+        if hostname and hostname != "localhost":
+            dns.append(hostname)
+        addresses = [ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1")]
+        return ([x509.DNSName(name) for name in dns],
+                [x509.IPAddress(address) for address in addresses])
+
+    def _self_signed_pair_usable(self, cert_path: str, key_path: str) -> bool:
+        """Whether an existing generated pair can be served again as it is.
+
+        Reused only if it loads, has not expired, and names loopback by address:
+        one issued before those SANs fails hostname verification at 127.0.0.1,
+        and keeping it would carry that forward for the life of the install.
+        Anything unreadable counts as absent, so a truncated file is replaced.
+
+        Args:
+            cert_path: Certificate to examine.
+            key_path: Its private key.
+
+        Returns:
+            True when the pair should be reused instead of regenerated.
+        """
+        from cryptography import x509
+
+        if not (os.path.isfile(cert_path) and os.path.isfile(key_path)):
+            return False
+        try:
+            with open(cert_path, "rb") as handle:
+                cert = x509.load_pem_x509_certificate(handle.read())
+            # not_valid_after_utc where cryptography has it, else the naive
+            # attribute it replaced, read as UTC.
+            expiry = getattr(cert, "not_valid_after_utc", None)
+            now = datetime.now(tz=timezone.utc)
+            if expiry is None:
+                expiry = cert.not_valid_after.replace(tzinfo=timezone.utc)
+            if expiry <= now:
+                return False
+            addresses = cert.extensions.get_extension_for_class(
+                x509.SubjectAlternativeName).value.get_values_for_type(x509.IPAddress)
+            if ipaddress.ip_address("127.0.0.1") not in addresses:
+                return False
+            context = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
+            context.load_cert_chain(cert_path, keyfile=key_path)
+        except Exception:
+            return False
+        return True
+
     def _make_self_signed_cert(self) -> Tuple[str, str]:
-        """Write a self-signed certificate and key, and return their paths.
+        """Return a self-signed certificate and key, writing one where none is usable.
 
         Turning HTTPS on is otherwise a two-step job — make a certificate, then
         point at it — and browsers gate the clipboard, gamepads, pointer lock
         and the camera on a secure context, so the step is in everyone's way.
         The configured paths are used when their directory is writable, which
         for the default `ssl-cert-snakeoil` pair means running as root; a user
-        install falls back to its own state directory. Either way the pair
-        persists, so the exception a browser is told to make survives a
-        restart.
+        install falls back to its own state directory. That directory is not a
+        path `_get_https_certs` consults, so the pair already there is found
+        here instead — and reused, since minting one per start would invalidate
+        the exception the browser was told to make on every restart.
 
         Returns:
             The certificate and key paths, both absolute.
@@ -1199,18 +1285,17 @@ class CentralizedStreamServer:
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import ec
 
-        state = os.path.join(
-            os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
-            "selkies")
-        candidates = []
-        configured = getattr(self.settings, "https_cert", None)
-        if configured:
-            candidates.append((os.path.abspath(configured),
-                               os.path.abspath(getattr(self.settings, "https_key", "") or "")))
-        candidates.append((os.path.join(state, "selkies.pem"), os.path.join(state, "selkies.key")))
+        candidates = self._self_signed_candidates()
+        for cert_path, key_path in candidates:
+            if self._self_signed_pair_usable(cert_path, key_path):
+                logger.info(
+                    "HTTPS is running on the self-signed certificate already at %s.",
+                    cert_path)
+                return cert_path, key_path
 
         key = ec.generate_private_key(ec.SECP256R1())
         name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "localhost")])
+        dns_names, addresses = self._self_signed_names()
         now = datetime.now(tz=timezone.utc)
         cert = (
             x509.CertificateBuilder()
@@ -1220,14 +1305,14 @@ class CentralizedStreamServer:
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - timedelta(days=1))
             .not_valid_after(now + timedelta(days=3650))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+            .add_extension(x509.SubjectAlternativeName(dns_names + addresses), critical=False)
+            # Not a CA: a key sitting in the session container is a far worse
+            # thing to put in a trust store than a leaf is to except.
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .sign(key, hashes.SHA256())
         )
         errors = []
         for cert_path, key_path in candidates:
-            if not cert_path or not key_path:
-                continue
             try:
                 os.makedirs(os.path.dirname(cert_path), exist_ok=True)
                 os.makedirs(os.path.dirname(key_path), exist_ok=True)
@@ -1246,9 +1331,11 @@ class CentralizedStreamServer:
                 continue
             logger.warning(
                 "No certificate at the configured path, so HTTPS runs on a self-signed one "
-                "written to %s. Browsers will warn once until it is trusted; a certificate "
-                "from an authority, or a reverse proxy terminating TLS, avoids that.",
-                cert_path)
+                "written to %s, issued for %s and no other address. Browsers will warn once "
+                "until it is trusted; a certificate from an authority, or a reverse proxy "
+                "terminating TLS, avoids that.",
+                cert_path,
+                ", ".join([n.value for n in dns_names] + [str(a.value) for a in addresses]))
             return cert_path, key_path
         raise OSError("could not write a self-signed certificate: " + "; ".join(errors))
 
@@ -1292,8 +1379,17 @@ class CentralizedStreamServer:
         return sslctx
 
     def _get_cert_mtime(self) -> float:
-        """Return the most recent modification time of the cert and key files."""
+        """Return the most recent modification time of the cert and key files.
+
+        Falls back to the generated pair actually being served, so the reload
+        watcher is not blind to it when the configured path holds nothing.
+        """
         cert_pem, key_pem = self._get_https_certs()
+        if not cert_pem:
+            for candidate_cert, candidate_key in self._self_signed_candidates():
+                if os.path.isfile(candidate_cert):
+                    cert_pem, key_pem = candidate_cert, candidate_key
+                    break
         if not cert_pem:
             return 0.0
         try:
