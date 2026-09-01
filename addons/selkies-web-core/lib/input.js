@@ -3828,7 +3828,8 @@ export class Input {
      * predecessor's listeners and gamepad poller would otherwise keep firing
      * alongside it. The overlay element takes focus, since browsers only run
      * IME composition on the focused editable element, unless the user is in
-     * another field.
+     * another field. Pads are adopted for every role, since a `#playerN` link
+     * grants a gamepad without the rest of the input context.
      */
     attach() {
         if (Input._attachedInstance && Input._attachedInstance !== this) {
@@ -3858,10 +3859,13 @@ export class Input {
             this.listeners.push(addListener(this.element, 'touchend', preventDefaultHandler, this));
             this.listeners.push(addListener(this.element, 'touchmove', preventDefaultHandler, this));
             this.listeners.push(addListener(this.element, 'touchcancel', preventDefaultHandler, this));
-        }    
+        }
+        // After both branches: a #playerN viewer drives a gamepad and nothing
+        // else, so it adopts pads on the same terms a controller does.
+        this.resyncGamepads();
     }
 
-    /** Attaches the keyboard, pointer, touch, wheel and composition listeners, shows the cursor and adopts connected pads. */
+    /** Attaches the keyboard, pointer, touch, wheel and composition listeners and shows the cursor. */
     attach_context() {
         if (this.inputAttached) return;
         this._windowMath();
@@ -3916,15 +3920,16 @@ export class Input {
         }
         this._windowMath();
         this.inputAttached = true;
-        this._resyncGamepads();
     }
 
     /**
      * Adopts pads the browser already exposes: gamepadconnected fires only on
-     * physical connect (or first press), so a re-attach after a mode switch
-     * or reconnect would otherwise leave the pad dead until re-plugged.
+     * physical connect (or first press), so a re-attach would otherwise leave
+     * the pad dead until re-plugged. Public because a channel that opens after
+     * attach must re-announce: the `js,c` it sent into a closed channel was
+     * dropped, leaving the server no association to release when the peer goes.
      */
-    _resyncGamepads() {
+    resyncGamepads() {
         let pads = [];
         try {
             pads = navigator.getGamepads ? Array.from(navigator.getGamepads()) : [];

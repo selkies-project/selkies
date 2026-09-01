@@ -2491,6 +2491,10 @@ export default function webrtc() {
 				} catch (e) {
 					console.warn('Failed to send initial clipboard request (cr):', e);
 				}
+				// Input attaches before negotiation ends, so the pad announcement
+				// it made went into a channel that was not open yet. Every role
+				// re-announces: a #playerN link carries a gamepad and nothing else.
+				if (input) input.resyncGamepads();
 
 				if (isSharedMode) {
 					console.log('Shared mode: skipping loading of last session settings and sending persisted settings to server');
