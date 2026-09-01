@@ -38,6 +38,11 @@ def cursor_withdrawal(res: "H.Results", backend: str, cap) -> None:
     Wayland slot lives on the cursor worker, so the drop lands with the job
     rather than with the call.
 
+    Release is the load-bearing check: the object is reachable only through the
+    callback's defaults, so a weakref outliving the withdrawal is the failure.
+    Delivery is replayed on registration and otherwise follows real cursor
+    changes, so the silence check only guards.
+
     Args:
         res: Results accumulator.
         backend: "x11" or "wayland", for the check labels.
@@ -53,9 +58,9 @@ def cursor_withdrawal(res: "H.Results", backend: str, cap) -> None:
     delivered = []
     held = Held()
     ref = weakref.ref(held)
-    # `held` is named in the closure but never delivered: what the callback
-    # captured is the subject, so nothing outside it may hold the object.
-    cap.set_cursor_callback(lambda mt, data, hx, hy: delivered.append((held is not None, mt)))
+    # A default rather than a closure reference: `del` clears a closure cell,
+    # which would free the object whether or not the callback was released.
+    cap.set_cursor_callback(lambda mt, data, hx, hy, _held=held: delivered.append(mt))
     time.sleep(1.5)
     before = len(delivered)
     del held
@@ -65,7 +70,7 @@ def cursor_withdrawal(res: "H.Results", backend: str, cap) -> None:
     res.check(f"{backend} cursor withdrawal releases the callback", ref() is None)
     res.check(f"{backend} cursor withdrawal stops delivery",
               len(delivered) == before, f"{len(delivered) - before} after")
-    cap.set_cursor_callback(lambda mt, data, hx, hy: delivered.append((False, mt)))
+    cap.set_cursor_callback(lambda mt, data, hx, hy: delivered.append(mt))
     time.sleep(1.5)
     res.check(f"{backend} cursor re-registration delivers again",
               len(delivered) > before, f"{len(delivered) - before} after")
