@@ -148,7 +148,7 @@ def main() -> "H.Results":
 
         placed = ctl.set_app_screen_layout(
             inner, [(0, 0, W, HGT), (W, 0, W, HGT)])
-        got = poll(lambda: [(x, y) for _n, x, y in ctl.list_app_screens(inner)],
+        got = poll(lambda: [(s[1], s[2]) for s in ctl.list_app_screens(inner)],
                    lambda v: v == [(0, 0), (W, 0)])
         res.check("the session lays the two screens side by side",
                   placed == 2 and got == [(0, 0), (W, 0)],
@@ -223,7 +223,7 @@ def main() -> "H.Results":
         poll(ctl.list_windows, lambda v: len(v) == 2 and not any(w[4] for w in v))
         placed = ctl.set_app_screen_layout(
             inner, [(W, 0, W, HGT), (0, 0, W, HGT)])
-        got = poll(lambda: [(x, y) for _n, x, y in ctl.list_app_screens(inner)],
+        got = poll(lambda: [(s[1], s[2]) for s in ctl.list_app_screens(inner)],
                    lambda v: v == [(W, 0), (0, 0)])
         res.check("a later display can take the origin side",
                   ok_l and placed == 2 and got == [(W, 0), (0, 0)],
@@ -265,7 +265,7 @@ def main() -> "H.Results":
             await h._apply_session_screen_layout(
                 {"primary": {"x": 0, "y": 0, "w": W, "h": HGT},
                  "display7": {"x": W, "y": 0, "w": W, "h": HGT}})
-            got = poll(lambda: [(x, y) for _n, x, y in ctl.list_app_screens(inner)],
+            got = poll(lambda: [(s[1], s[2]) for s in ctl.list_app_screens(inner)],
                        lambda v: v == [(0, 0), (W, 0)])
             res.check("the layout lands on the screen the display owns",
                       got == [(0, 0), (W, 0)], got)
@@ -289,7 +289,7 @@ def main() -> "H.Results":
                 {"primary": {"x": 0, "y": 0, "w": W, "h": HGT},
                  "display2": {"x": W, "y": 0, "w": W, "h": HGT},
                  "display3": {"x": 2 * W, "y": 0, "w": W, "h": HGT}})
-            got = poll(lambda: [(x, y) for _n, x, y in ctl.list_app_screens(inner)],
+            got = poll(lambda: [(s[1], s[2]) for s in ctl.list_app_screens(inner)],
                        lambda v: v == [(0, 0), (2 * W, 0), (W, 0)])
             res.check("the arrangement follows ownership, not screen order",
                       got == [(0, 0), (2 * W, 0), (W, 0)], got)
@@ -316,7 +316,7 @@ def main() -> "H.Results":
             name3 = h._session_screens.get("display3", "")
             ctl.destroy_output(2)
             await h.ensure_session_screens(["display3"])
-            scr = poll(lambda: [n for n, _x, _y in ctl.list_app_screens(inner)],
+            scr = poll(lambda: [s[0] for s in ctl.list_app_screens(inner)],
                        lambda v: len(v) == 2)
             wins = poll(ctl.list_windows,
                         lambda v: len(v) == 2 and not any(w[4] for w in v))

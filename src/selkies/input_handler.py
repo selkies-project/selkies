@@ -5905,7 +5905,7 @@ class WebRTCInput:
             except Exception as e:
                 logger_webrtc_input.debug(f"Session screen list failed: {e}")
                 return
-            names = [name for name, _x, _y in screens]
+            names = [screen[0] for screen in screens]
             for did in [d for d, n in owned.items() if n not in names]:
                 del owned[did]
             doomed = [(owned[d], d) for d in list(owned) if d not in wanted]
@@ -5991,7 +5991,7 @@ class WebRTCInput:
         if self.wayland_input is not None and any(
                 owned.get(d) for d in wanted if d != "primary"):
             try:
-                names = [n for n, _x, _y in await asyncio.to_thread(
+                names = [screen[0] for screen in await asyncio.to_thread(
                     self.wayland_input.list_app_screens,
                     self._app_wayland_display())]
             except Exception as e:
