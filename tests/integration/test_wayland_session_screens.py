@@ -32,6 +32,7 @@ import json
 import os
 import shutil
 import socket
+import threading
 import subprocess
 import sys
 import time
@@ -250,6 +251,38 @@ def main() -> "H.Results":
         ctl.destroy_output(2)
         ipc(f"REMOVE_SCREEN {n_right}")
         poll(ctl.list_windows, lambda v: len(v) == 1)
+
+        # A screen arriving or leaving cancels whatever output configuration is
+        # in flight, and that is the same moment a display's mode and scale are
+        # applied. A cancellation says only that the serial went stale, so the
+        # configuration is rebuilt against the new state rather than reported
+        # as a refusal, which would drop the display back to a capture scale.
+        stop = threading.Event()
+
+        def churn() -> None:
+            while not stop.is_set():
+                added = str(ipc("ADD_SCREEN").get("output", ""))
+                if added:
+                    ipc(f"REMOVE_SCREEN {added}")
+
+        def sized() -> bool:
+            # A configuration the compositor did not take reaches Python as a
+            # refusal, whatever the reason it gave.
+            try:
+                return bool(ctl.set_app_screen_geometry(inner, W, HGT, 1.0, 0))
+            except Exception:
+                return False
+
+        churner = threading.Thread(target=churn, daemon=True)
+        churner.start()
+        try:
+            landed = sum(sized() for _ in range(12))
+        finally:
+            stop.set()
+            churner.join(timeout=15)
+        poll(lambda: ctl.list_app_screens(inner), lambda v: len(v) == 1)
+        res.check("a configuration cancelled by a screen change is retried",
+                  landed == 12, f"{landed}/12 landed")
 
         reply = ipc("REMOVE_SCREEN")
         res.check("the last screen is refused removal", not reply.get("ok"), reply)
