@@ -904,8 +904,9 @@ class WebRTCService(BaseStreamingService):
         forever. On Wayland there is no X server to resize: the screen is
         grown ahead of the capture restart, the restarted capture resizes the
         view, the compositor's realized geometry (it may even-mask or refuse
-        the mode) is reconciled and pushed to the client, and the screen is
-        then fitted to it.
+        the mode) is reconciled and pushed to the client, the screen is fitted
+        to it, and a nested session's own screen is re-sized to the same
+        geometry at the DPI in force.
         """
         if self._server_locked_dims() is not None:
             logger.warning(
@@ -947,6 +948,15 @@ class WebRTCService(BaseStreamingService):
                     await self._push_wayland_realized_geometry("primary", self.media_pipeline)
                     await self._size_wayland_screen(
                         self.media_pipeline.width, self.media_pipeline.height)
+                    # A nested session's screen is its own compositor's, not the
+                    # capture's: sizing only the capture leaves its applications
+                    # laid out for the size the last DPI change realized.
+                    if self.input_handler is not None:
+                        await self.input_handler.realize_wayland_dpi(
+                            getattr(self, "_last_applied_dpi", None)
+                            or getattr(settings, "scaling_dpi", 96) or 96,
+                            "primary",
+                            (self.media_pipeline.width, self.media_pipeline.height))
                 self.media_pipeline.last_resize_success = True
                 self._last_resize_request = (target_w, target_h)
                 logger.info(

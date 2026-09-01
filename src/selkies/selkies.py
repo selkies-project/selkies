@@ -5947,8 +5947,9 @@ async def on_resize_handler(
     capture restart with the screen sizing the restart itself does not do (the
     primary's capture is a view over screen 0, and pixelflux sizes only the
     view): the screen is grown first, the realized geometry is read back, and
-    the screen is fitted to it — WebRTC's `_resize_primary_display` parity —
-    so the session compositor lays applications out at the new size.
+    the screen is fitted to it — WebRTC's `_resize_primary_display` parity. A
+    nested session's screen belongs to its own compositor and is sized after,
+    or its applications stay laid out for the size the last DPI change left.
 
     Args:
         res_str: The requested `{width}x{height}` string.
@@ -6033,8 +6034,17 @@ async def on_resize_handler(
                     await data_server_instance._stop_capture_for_display(display_id)
                     await data_server_instance._start_capture_for_display(display_id, target_w, target_h, 0, 0)
                 await data_server_instance._sync_wayland_realized_geometry(display_id)
-                await data_server_instance._size_wayland_screen(
-                    client_info.get('width', target_w), client_info.get('height', target_h))
+                realized = (client_info.get('width', target_w),
+                            client_info.get('height', target_h))
+                await data_server_instance._size_wayland_screen(*realized)
+                # A nested session's screen is its own compositor's, not the
+                # capture's: sizing only the capture leaves its applications laid
+                # out for the size the last DPI change realized.
+                if data_server_instance.input_handler is not None:
+                    await data_server_instance.input_handler.realize_wayland_dpi(
+                        client_info.get('scaling_dpi')
+                        or getattr(settings, 'scaling_dpi', 96) or 96,
+                        display_id, realized)
             else:
                 logger_app_resize.info(f"Display client '{display_id}' dimensions updated to {target_w}x{target_h}. Triggering reconfiguration.")
                 await data_server_instance.reconfigure_displays()
