@@ -361,5 +361,6 @@ if ! is_true "${SELKIES_ENABLE_INTERNAL_TURN}"; then
   drop_service coturn
 fi
 
-# Hand over to s6 service supervision
-exec s6-svscan -t5 /etc/service
+# Hand over to s6 service supervision. -t is a rescan interval in milliseconds,
+# so this is the five seconds daemontools used, not five of them.
+exec s6-svscan -t5000 /etc/service

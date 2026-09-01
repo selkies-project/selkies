@@ -572,6 +572,9 @@ def _unix_socket_is_live(path: str) -> bool:
     return True
 
 
+# sysexits.h EX_CONFIG: the settings are the problem and starting again will not
+# change the answer, so a supervisor can stop instead of respawning forever.
+EXIT_CONFIG_ERROR: int = 78
 # Realm both 401 challenges name; the web client's 401 guard keys on the
 # Bearer one as this server's own token verdict.
 AUTH_REALM: str = "Selkies Restricted"
@@ -1780,6 +1783,12 @@ class CentralizedStreamServer:
         An image that ships its own default is choosing it deliberately, the way most
         container images do, and rejecting known-weak values here would break every one
         of them while stopping nobody who meant it.
+
+        Raises:
+            SystemExit: With `EXIT_CONFIG_ERROR`, which says the settings are the
+                problem and that starting again will not change the answer — a
+                supervisor respawning this forever would otherwise leave a
+                container that looks healthy and never answers.
         """
         if not self.settings.enable_basic_auth[0]:
             return
@@ -1791,7 +1800,7 @@ class CentralizedStreamServer:
             "PASSWD environment variable; or serve without a login by passing "
             "--enable-basic-auth=false."
         )
-        raise SystemExit(1)
+        raise SystemExit(EXIT_CONFIG_ERROR)
 
     async def switch_to_mode(self, mode_name: str) -> None:
         """Stop the active streaming service and start ``mode_name`` in its place.

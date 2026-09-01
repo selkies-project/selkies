@@ -609,4 +609,11 @@ WORKDIR /home/ubuntu
 
 EXPOSE 8080
 
+# s6 respawns a service that cannot start, so "running" says nothing: only the
+# port answering tells a session from a container that never served. /api/health
+# needs no credentials, and only the http-to-TLS direction fails outright.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -fsS -k -o /dev/null "https://localhost:${SELKIES_PORT:-8080}/api/health" || \
+        curl -fsS -o /dev/null "http://localhost:${SELKIES_PORT:-8080}/api/health"
+
 ENTRYPOINT ["/etc/container-entrypoint.sh"]

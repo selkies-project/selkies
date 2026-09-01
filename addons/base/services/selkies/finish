@@ -3,6 +3,14 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
+# A settings refusal (sysexits.h EX_CONFIG) will answer the same next time, so
+# the tree stops and the container exits on the operator's error. Respawning it
+# leaves a container reporting itself running that never answers its port.
+if [ "$1" = 78 ]; then
+    echo "selkies: refused to start on the settings it was given; stopping the container." >&2
+    s6-svscanctl -t /etc/service && exit 0
+    echo "selkies: could not stop the supervision tree; backing off instead." >&2
+fi
 # Restart backoff. A service that cannot run on this base would otherwise be
 # respawned as fast as it exits, and each cycle leaks the resources its startup
 # claimed (a session bus, sockets, file descriptors) until the container runs
