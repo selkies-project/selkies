@@ -696,7 +696,10 @@ class WebRTCService(BaseStreamingService):
         the server would immediately refuse, nor an apps panel whose every
         button would fail. Adds the terminal the apps panel launches in, chosen
         by the session's windowing system (absent when none is installed: the
-        client keeps its default)."""
+        client keeps its default), and what the apps panel already has
+        installed, which no browser's own storage can answer for a session
+        opened somewhere else — absent until the runner has answered, because a
+        client told nothing is installed clears its own record."""
         payload = get_server_settings()
         available, _ = self._second_screen_availability()
         entry = payload.get("settings", {}).get("second_screen")
@@ -706,6 +709,9 @@ class WebRTCService(BaseStreamingService):
         if (isinstance(apps, dict) and apps.get("value")
                 and self.input_handler and not self.input_handler.apps_available()):
             payload["settings"]["ui_sidebar_show_apps"] = dict(apps, value=False)
+        installed = self.input_handler.installed_apps() if self.input_handler else None
+        if installed is not None:
+            payload["settings"]["apps_installed"] = {"value": installed}
         return payload
 
     def handle_data_channel_open(self, channel: Optional[Any] = None) -> None:

@@ -209,7 +209,7 @@ A Wayland session asked for on a GPU it cannot reach starts as X11 instead. The 
 
 `-e SELKIES_WAYLAND_X11_FALLBACK=false` keeps Wayland regardless. The session then renders in software throughout: a compositor without a GPU shares no dmabuf, so applications pointed at the GPU's driver produce buffers it cannot accept and draw nothing at all.
 
-The dashboards' apps panel is backed by [proot-apps](https://github.com/linuxserver/proot-apps): portable per-user applications installed into the home directory rather than the image, so they survive a container replacement and need no root. proot works by tracing every process it starts, so on a host that denies `ptrace` nothing can be installed or launched — Selkies runs the check at startup and the panel is hidden rather than shown failing. `--ui-sidebar-show-apps=false` hides it regardless.
+The dashboards' apps panel is backed by [proot-apps](https://github.com/linuxserver/proot-apps): portable per-user applications installed into the home directory rather than the image, so they survive a container replacement and need no root. proot works by tracing every process it starts, so on a host that denies `ptrace` nothing can be installed or launched — Selkies runs the check at startup and the panel is hidden rather than shown failing. `--ui-sidebar-show-apps=false` hides it regardless. Which applications are installed is read from the runner and sent to the page, so the same session opened in another browser shows what it already has rather than offering to install it again.
 
 Read the [Development](development.md) section for customizing this container for your own usage.
 

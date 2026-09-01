@@ -3666,6 +3666,7 @@ class WebRTCInput:
         self.enable_clipboard = enable_clipboard
         self.enable_binary_clipboard = enable_binary_clipboard
         self._apps_runner_ok: Optional[bool] = None
+        self._apps_installed: Optional[List[str]] = None
         self.enable_cursors = enable_cursors
         self.cursor_scale = cursor_scale
         self.cursor_size = cursor_size
@@ -5607,6 +5608,8 @@ class WebRTCInput:
         host that denies ptrace (Yama restricted, no CAP_SYS_PTRACE) leaves the
         panel with nothing that can work. Only the wrapper knows how to decide
         that for the runner it ships, so it is asked rather than reimplemented.
+        A usable runner is then asked what it already has installed, so the
+        first client to connect is told rather than having to remember.
         """
         runner = shutil.which(APP_RUNNER)
         if runner is None:
@@ -5624,6 +5627,7 @@ class WebRTCInput:
             return
         if self._apps_runner_ok:
             logger_webrtc_input.info("Apps panel enabled: %s can run here.", APP_RUNNER)
+            await self.refresh_installed_apps()
         else:
             detail = (stdout or b"").decode("utf-8", "replace").strip().splitlines()
             logger_webrtc_input.warning(
@@ -5631,6 +5635,71 @@ class WebRTCInput:
                 APP_RUNNER, detail[0] if detail else "")
             for line in detail[1:]:
                 logger_webrtc_input.warning("  %s", line.strip())
+
+    def installed_apps(self) -> Optional[List[str]]:
+        """The app names the runner reports installed, as last read.
+
+        None until a read succeeds, which a caller must not publish as an empty
+        set: a client told nothing is installed clears its own record.
+        """
+        return None if self._apps_installed is None else list(self._apps_installed)
+
+    async def refresh_installed_apps(self) -> bool:
+        """Re-read the runner's installed set.
+
+        Only the runner knows what a session has, and the client cannot run
+        anything, so the server asks. A failed read leaves the last answer
+        standing rather than replacing it with nothing.
+
+        Returns:
+            Whether the set changed, so a caller can skip announcing it.
+        """
+        runner = shutil.which(APP_RUNNER)
+        if runner is None:
+            return False
+        try:
+            proc = await subprocess.create_subprocess_exec(
+                runner, "list", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            stdout, _ = await self._communicate_or_kill(
+                proc, APP_RUNNER_CHECK_TIMEOUT_S, f"{APP_RUNNER} list")
+        except Exception as e:
+            logger_webrtc_input.warning(f"{APP_RUNNER} list failed to run: {e}")
+            return False
+        if proc.returncode != 0:
+            logger_webrtc_input.debug(
+                "%s list exited %s; keeping the installed set as it was",
+                APP_RUNNER, proc.returncode)
+            return False
+        names = [line.strip() for line in
+                 (stdout or b"").decode("utf-8", "replace").splitlines()
+                 if line.strip()]
+        changed = names != self._apps_installed
+        self._apps_installed = names
+        if changed:
+            logger_webrtc_input.info("Apps installed in this session: %s",
+                                     ", ".join(names) or "none")
+        return changed
+
+    async def note_app_command_finished(self, command: str) -> None:
+        """Re-read and announce the installed set after an apps command ran.
+
+        Install, remove and update change it; a launch does not. Broadcast
+        rather than answered to the requester, which already applied the change
+        optimistically: it is the session's other pages that have no other way
+        to hear.
+
+        Args:
+            command: The command string that finished, as the client posted it.
+        """
+        parts = command.split()
+        if len(parts) < 2 or os.path.basename(parts[0]) != APP_RUNNER:
+            return
+        if parts[1] not in ("install", "remove", "update"):
+            return
+        if await self.refresh_installed_apps():
+            # A reported change means the read landed, so the set is a list.
+            self.send_command_status(
+                "apps_installed," + json.dumps(self._apps_installed))
 
     def _invalidate_app_wl_display(self) -> None:
         """Drop the cached app-compositor resolution so the next call re-detects
@@ -7650,6 +7719,7 @@ class WebRTCInput:
 
                 async def _notify_cmd_done(cmd, conn_id=conn_id):
                     self.send_command_status(f"command_done,{cmd}", conn_id)
+                    await self.note_app_command_finished(cmd)
 
                 await run_client_command(
                     command_to_run, logger_webrtc_input, notify=_notify_cmd_error,

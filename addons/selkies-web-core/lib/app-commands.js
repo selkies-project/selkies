@@ -8,6 +8,11 @@
  * echoed command string, and matching that rolls the optimistic update back. Commands run through a shell on the server, in the environment of
  * the session the applications use, so `~` in a launch command is the
  * session user's home.
+ *
+ * Which apps are installed is the server's answer, arriving with the server
+ * settings and again as an `apps_installed` system action when a command
+ * changes it. What is stored locally is a cache of it, so a panel opened before
+ * the server speaks shows the last answer rather than nothing.
  * @module
  */
 
@@ -15,6 +20,9 @@ const INSTALLED_APPS_STORAGE_KEY = "prootInstalledApps";
 
 /** Window event dispatched when a failed install or remove is rolled back. */
 export const INSTALLED_APPS_ROLLBACK_EVENT = "installedAppsRollback";
+
+/** Window event dispatched when the server's installed-apps list replaces the stored one. */
+export const INSTALLED_APPS_SERVER_EVENT = "installedAppsFromServer";
 
 /** Window event dispatched whenever the set of running commands changes. */
 export const APP_COMMAND_STATE_EVENT = "appCommandState";
@@ -88,6 +96,36 @@ export function postAppCommand(action, app) {
     pendingAppCommands.set(command, { app, action, at: now });
     window.postMessage({ type: "command", value: command }, window.location.origin);
     announceState();
+}
+
+/**
+ * Adopts the installed-apps list the server reported.
+ *
+ * A command still in flight is left alone: its optimistic update is newer than
+ * a list read before it ran.
+ * @param {string[]|undefined} apps App names the server reports installed; a
+ *   payload that carries none at all is left to the stored list.
+ * @returns {boolean} Whether the stored list changed.
+ */
+export function applyServerInstalledApps(apps) {
+    if (!Array.isArray(apps)) return false;
+    const names = apps.filter((item) => typeof item === "string");
+    for (const entry of pendingAppCommands.values()) {
+        if (entry.action === "install" && !names.includes(entry.app)) names.push(entry.app);
+        if (entry.action === "remove") {
+            const at = names.indexOf(entry.app);
+            if (at >= 0) names.splice(at, 1);
+        }
+    }
+    const stored = readInstalledApps();
+    if (stored.length === names.length && stored.every((name) => names.includes(name))) {
+        return false;
+    }
+    writeInstalledApps(names);
+    window.dispatchEvent(
+        new CustomEvent(INSTALLED_APPS_SERVER_EVENT, { detail: { apps: names } })
+    );
+    return true;
 }
 
 /**

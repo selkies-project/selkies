@@ -6913,6 +6913,15 @@ class WorkerWebSocket {
                 command: systemMsg.action.slice('command_done,'.length),
               }, window.location.origin);
             }
+            else if (typeof systemMsg.action === 'string' &&
+                systemMsg.action.startsWith('apps_installed,') && !isSharedMode) {
+              // Broadcast when a command changed it: this page may not be the
+              // one that ran it.
+              window.postMessage({
+                type: 'appsInstalled',
+                apps: JSON.parse(systemMsg.action.slice('apps_installed,'.length)),
+              }, window.location.origin);
+            }
           } catch (e) {
             console.error('Error parsing system data:', e);
           }

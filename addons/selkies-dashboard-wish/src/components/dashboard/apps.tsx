@@ -17,6 +17,8 @@ import { getLastServerSettings } from "@/utils";
 import {
     APP_COMMAND_STATE_EVENT,
     INSTALLED_APPS_ROLLBACK_EVENT,
+    INSTALLED_APPS_SERVER_EVENT,
+    applyServerInstalledApps,
     pendingAppAction,
     postAppCommand,
     readInstalledApps,
@@ -29,12 +31,14 @@ import {
  *
  * Actions go through the apps command contract both dashboards share
  * (`selkies-web-core/lib/app-commands.js`): it posts the selkies-proot wrapper
- * commands to the core and tracks them for rollback, and the installed list
- * lives in localStorage under the shared key. Commands run server-side only
- * while the `command_enabled` server setting is on; without it the core
- * suppresses every `cmd,` send, so the modal says why instead of pretending
- * the install happened. Listens for `serverSettings` messages and the
- * rollback event the contract dispatches on a failed command.
+ * commands to the core and tracks them for rollback. Which apps are installed
+ * comes from the server (`apps_installed` in the settings payload, and an
+ * `appsInstalled` message when a command changes it), with localStorage holding
+ * the last answer. Commands run server-side only while the `command_enabled`
+ * server setting is on; without it the core suppresses every `cmd,` send, so
+ * the modal says why instead of pretending the install happened. Listens for
+ * `serverSettings` and `appsInstalled` messages and the rollback event the
+ * contract dispatches on a failed command.
  * @module
  */
 
@@ -125,6 +129,30 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     }, []);
     const commandsKnown = serverSettings != null;
     const commandsAvailable = serverSettings?.command_enabled?.value === true;
+
+    // The runner's answer replaces what this browser remembered, which a private
+    // window or cleared site data leaves empty while the session has apps.
+    const installedFromServer = serverSettings?.apps_installed?.value;
+    useEffect(() => {
+        const adopt = (apps: string[] | undefined) => {
+            if (applyServerInstalledApps(apps)) setInstalledApps(readInstalledApps());
+        };
+        adopt(installedFromServer);
+        const onServerList = (event: Event) =>
+            setInstalledApps((event as CustomEvent).detail?.apps || []);
+        const onWindowMessage = (event: MessageEvent) => {
+            if (event.origin !== window.location.origin) return;
+            const message = event.data;
+            if (typeof message !== 'object' || message === null) return;
+            if (message.type === 'appsInstalled') adopt(message.apps);
+        };
+        window.addEventListener(INSTALLED_APPS_SERVER_EVENT, onServerList);
+        window.addEventListener('message', onWindowMessage);
+        return () => {
+            window.removeEventListener(INSTALLED_APPS_SERVER_EVENT, onServerList);
+            window.removeEventListener('message', onWindowMessage);
+        };
+    }, [installedFromServer]);
 
     const handleModalClose = (open: boolean) => {
         if (!open && onClose) {

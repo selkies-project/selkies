@@ -61,6 +61,8 @@ import { getTranslator } from "../translations";
 import {
   APP_COMMAND_STATE_EVENT,
   INSTALLED_APPS_ROLLBACK_EVENT,
+  INSTALLED_APPS_SERVER_EVENT,
+  applyServerInstalledApps,
   pendingAppAction,
   postAppCommand,
   readInstalledApps,
@@ -491,8 +493,10 @@ function readStreamAudioLevel(meterRef) {
  * @param {Function} props.t Translator.
  * @param {boolean} props.commandsAvailable Whether the server accepts remote commands; actions are disabled otherwise.
  * @param {boolean} props.commandsKnown Whether `serverSettings` have arrived, so the disabled notice is only shown once known.
+ * @param {string[]|undefined} props.installedFromServer App names the runner reports installed; the stored list is only a cache of it.
  */
-function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown }) {
+function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown,
+                    installedFromServer }) {
   const [appData, setAppData] = useState(cachedAppData);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -513,6 +517,28 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown }) {
     return () =>
       window.removeEventListener(APP_COMMAND_STATE_EVENT, onCommandState);
   }, []);
+
+  /* The runner's answer replaces what this browser remembered, which a private
+     window or cleared site data leaves empty while the session has apps. */
+  useEffect(() => {
+    const adopt = (apps) => {
+      if (applyServerInstalledApps(apps)) setInstalledApps(readInstalledApps());
+    };
+    adopt(installedFromServer);
+    const onServerList = (event) => setInstalledApps(event.detail?.apps || []);
+    const onWindowMessage = (event) => {
+      if (event.origin !== window.location.origin) return;
+      const message = event.data;
+      if (typeof message !== "object" || message === null) return;
+      if (message.type === "appsInstalled") adopt(message.apps);
+    };
+    window.addEventListener(INSTALLED_APPS_SERVER_EVENT, onServerList);
+    window.addEventListener("message", onWindowMessage);
+    return () => {
+      window.removeEventListener(INSTALLED_APPS_SERVER_EVENT, onServerList);
+      window.removeEventListener("message", onWindowMessage);
+    };
+  }, [installedFromServer]);
 
   /**
    * A failed install or remove already rolled the stored list back; mirror
@@ -4767,7 +4793,8 @@ function Sidebar() {
       {isAppsModalOpen && (
         <AppsModal isOpen={isAppsModalOpen} onClose={toggleAppsModal} t={t}
           commandsAvailable={serverSettings?.command_enabled?.value === true}
-          commandsKnown={serverSettings != null} />
+          commandsKnown={serverSettings != null}
+          installedFromServer={serverSettings?.apps_installed?.value} />
       )}
 
       {isViewerRole && (

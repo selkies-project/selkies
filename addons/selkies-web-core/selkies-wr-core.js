@@ -2669,6 +2669,13 @@ export default function webrtc() {
 						type: 'commandDone',
 						command: action.slice('command_done,'.length),
 					}, window.location.origin);
+				} else if (action.startsWith('apps_installed,') && !isSharedMode) {
+					// Broadcast when a command changed it: this page may not
+					// be the one that ran it.
+					window.postMessage({
+						type: 'appsInstalled',
+						apps: JSON.parse(action.slice('apps_installed,'.length)),
+					}, window.location.origin);
 				} else if (action.startsWith('auth_success,') || action.startsWith('role_update,')) {
 					const verdict = action.slice(action.indexOf(',') + 1);
 					let perms;

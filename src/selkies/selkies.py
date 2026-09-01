@@ -2177,7 +2177,10 @@ class DataStreamingServer(BaseStreamingService):
         `second_screen` and `ui_sidebar_show_apps` as effective
         availability — the admin flag and what the backend can actually do — so
         dashboards never offer a display the server would immediately kill, nor
-        an apps panel whose every button would fail.
+        an apps panel whose every button would fail; and `apps_installed`, the
+        set the runner reports, which no browser's own storage can answer for a
+        session opened somewhere else — absent until the runner has answered,
+        because a client told nothing is installed clears its own record.
         """
         payload = build_client_settings_payload()
         live_encoder = (self.display_clients.get(display_id) or {}).get('encoder') or self.app.encoder
@@ -2193,6 +2196,9 @@ class DataStreamingServer(BaseStreamingService):
         if (isinstance(apps, dict) and apps.get('value')
                 and self.input_handler and not self.input_handler.apps_available()):
             payload['ui_sidebar_show_apps'] = dict(apps, value=False)
+        installed = self.input_handler.installed_apps() if self.input_handler else None
+        if installed is not None:
+            payload['apps_installed'] = {"value": installed}
         return payload
 
     async def _broadcast_live_server_settings(self, display_id: str) -> None:
@@ -4097,6 +4103,8 @@ class DataStreamingServer(BaseStreamingService):
 
                             async def _notify_cmd_done(cmd):
                                 await _send_cmd_status(f"command_done,{cmd}")
+                                if self.input_handler:
+                                    await self.input_handler.note_app_command_finished(cmd)
 
                             await run_client_command(
                                 command_to_run, data_logger, notify=_notify_cmd_error,

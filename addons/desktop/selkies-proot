@@ -6,10 +6,12 @@
 
 # Dashboard-facing wrapper around proot-apps (linuxserver.io): the apps panel
 # posts `selkies-proot install|remove|update <app>` through the server's
-# command channel. proot-apps runs its whole toolchain (proot, jq, ncat) from
-# ~/.local/bin by absolute path, so the image's staging directory is linked
-# there before delegating -- linked rather than copied, because a copy drops
-# the extended attribute the capability-carrying proot below is built on.
+# command channel, and the server asks `check` whether apps can run here at all
+# and `list` which ones are installed. proot-apps runs its whole toolchain
+# (proot, jq, ncat) from ~/.local/bin by absolute path, so the image's staging
+# directory is linked there before delegating -- linked rather than copied,
+# because a copy drops the extended attribute the capability-carrying proot
+# below is built on.
 
 set -eu
 
@@ -76,6 +78,24 @@ trust_desktop_entries() {
     return 0
 }
 
+# What proot-apps has installed, named as the panel posts commands for. It keeps
+# no index: an install is a directory under its root named for the image with the
+# separators replaced, so `ghcr.io_linuxserver_proot-apps_x` is app `x`. Read
+# from the directory, not recorded here, so an install by any route is reported.
+list_installed() {
+    # Its install root. PA_REPO_FOLDER is the local repo cache: downloads, not
+    # installs, so it is not consulted.
+    root="${HOME}/proot-apps"
+    [ -d "${root}" ] || return 0
+    for app in "${root}"/*; do
+        [ -d "${app}" ] || continue
+        name="$(basename "${app}")"
+        # A bare app name never contains an underscore, so the last one ends the
+        # image reference; a folder without one is a name already.
+        printf '%s\n' "${name##*_}"
+    done
+}
+
 # `check` is what the server asks before telling clients the apps panel is
 # usable; the rest is answered here rather than as a failed unpack several
 # hundred megabytes later.
@@ -84,6 +104,10 @@ case "${1:-}" in
         proot_runs && exit 0
         explain_denial
         exit 1
+        ;;
+    list)
+        list_installed
+        exit 0
         ;;
     install|update|run|get)
         if ! proot_runs; then
