@@ -4682,7 +4682,8 @@ class DataStreamingServer(BaseStreamingService):
             client = self.display_clients.get(did) or {}
             scale = float(client.get('scale', 1.0) or 1.0)
             if self.input_handler:
-                await self.input_handler.ensure_session_screen(did)
+                await self.input_handler.ensure_session_screen(
+                    did, size=(layout['w'], layout['h']), scale=scale)
             created = False
             try:
                 created = bool(await asyncio.to_thread(
