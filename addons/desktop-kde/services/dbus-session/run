@@ -1,0 +1,15 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# The session bus kwin and plasmashell share. They run in separate s6 services
+# (the base's wayland service and this image's kde service), so a
+# dbus-launch-per-session like the LXQt image uses would give each its own bus
+# and break everything that crosses it — kglobalaccel, kwin's D-Bus API, the
+# kded modules D-Bus activation starts. A fixed socket path lets every service
+# export the same address without sharing environment.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
+mkdir -p "${XDG_RUNTIME_DIR}"
+chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
+exec dbus-daemon --session --nofork --nosyslog --nopidfile --address="unix:path=${XDG_RUNTIME_DIR}/selkies-session-bus"

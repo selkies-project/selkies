@@ -1274,7 +1274,8 @@ class WebRTCService(BaseStreamingService):
         if self.input_handler:
             # The screen this display owns, grown just ahead of the output
             # that adopts its host window.
-            await self.input_handler.ensure_session_screen(did)
+            await self.input_handler.ensure_session_screen(
+                did, size=(s["w"], s["h"]), scale=scale)
         try:
             created = bool(await asyncio.to_thread(
                 module.create_output, oid, s["w"], s["h"], s["x"], s["y"], scale))

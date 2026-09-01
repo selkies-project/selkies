@@ -5737,10 +5737,14 @@ class WebRTCInput:
         return self._app_wl_is_separate
 
     #: Basename of the session compositor's control socket in XDG_RUNTIME_DIR
-    #: (the labwc IPC patch the container images carry). Its presence is what
-    #: enables a second display on the nested-Wayland backend: no Wayland
-    #: protocol can create a screen at runtime, so a session compositor
-    #: without the socket cannot grow one.
+    #: (the labwc IPC patch the container images carry). The first rung of the
+    #: session-screen control that backs a second display on the
+    #: nested-Wayland backend: a wlroots session cannot grow a screen without
+    #: it. KWin serves no socket and needs none — its screens are grown as
+    #: `zkde_screencast_unstable_v1` virtual outputs through pixelflux
+    #: (`add_app_screen`), the rung probed when this socket is absent and the
+    #: deployment set `settings.kwin_multi` (the protocol answers on stock
+    #: kwin too, but only a patched kwin registers a nested virtual output).
     SESSION_IPC_SOCKET = "labwc.sock"
 
     def _session_ipc_path(self) -> Optional[str]:
@@ -5754,6 +5758,12 @@ class WebRTCInput:
         """The last probed answer to whether the session compositor's control
         socket accepts connections; False until a probe ran."""
         return bool(getattr(self, "_session_ipc_ok", False))
+
+    def session_screen_control_available(self) -> bool:
+        """Whether any session-screen control answered the last probe: the
+        labwc control socket, or KWin's virtual-output protocol."""
+        return bool(getattr(self, "_session_ipc_ok", False)
+                    or getattr(self, "_session_kde_ok", False))
 
     async def probe_session_screen_ipc(self) -> bool:
         """Probe the session compositor's control socket and cache the answer.
@@ -5796,12 +5806,13 @@ class WebRTCInput:
     def session_screen_capability(self) -> Tuple[bool, str]:
         """Whether this session can show a second display, from the last probes.
 
-        A nested session compositor with the control socket grows a screen on
-        demand; without the socket, spare screens it opened at startup can
+        A nested session compositor with a screen control grows a screen on
+        demand — over the labwc control socket, or KWin's virtual-output
+        protocol; without one, spare screens it opened at startup can
         still be arranged for a display (the spare-screen hold). A session
         running directly on the capture compositor needs neither: every
         capture output is a monitor of its own there. Only a nested session
-        holding a single screen with no control socket has nowhere to show a
+        holding a single screen with no screen control has nowhere to show a
         second display.
 
         Returns:
@@ -5809,32 +5820,47 @@ class WebRTCInput:
         """
         if not self.is_wayland:
             return True, ""
-        if self.session_screen_ipc_available():
+        if self.session_screen_control_available():
             return True, ""
         if not self._session_is_nested():
             return True, ""
         if int(getattr(self, "_session_screen_count", 0) or 0) >= 2:
             return True, ""
         return False, ("The session compositor cannot show a second display: "
-                       "it has no control socket and no spare screen.")
+                       "it has no screen control and no spare screen.")
 
     async def probe_session_screen_capability(self) -> Tuple[bool, str]:
         """Re-probe what backs a second display and return the fresh answer.
 
-        The control socket decides when it answers; a session without one is
-        asked for its screen count instead, so a compositor started with spare
-        screens keeps its second display.
+        The control socket decides when it answers; without one, a nested
+        session is probed for KWin's virtual-output protocol, and a session
+        with neither control is asked for its screen count instead, so a
+        compositor started with spare screens keeps its second display.
+
+        The KWin probe runs only under `settings.kwin_multi`: the protocol is
+        served by stock kwin too, but only the patched kwin the deployment
+        opts in for actually registers a nested virtual output, so an
+        unguarded probe would offer a second display that cannot open.
         """
         await self.probe_session_screen_ipc()
+        kde = False
         count = 0
         if (not self._session_ipc_ok and self.wayland_input is not None
                 and self._session_is_nested()):
             display = self._app_wayland_display()
-            try:
-                count = len(await asyncio.to_thread(
-                    self.wayland_input.list_app_screens, display))
-            except Exception as e:
-                logger_webrtc_input.debug(f"Session screen count probe failed: {e}")
+            if bool(getattr(settings, "kwin_multi", (False, False))[0]):
+                try:
+                    kde = bool(await asyncio.to_thread(
+                        self.wayland_input.app_screen_control_available, display))
+                except Exception as e:
+                    logger_webrtc_input.debug(f"Session screen control probe failed: {e}")
+            if not kde:
+                try:
+                    count = len(await asyncio.to_thread(
+                        self.wayland_input.list_app_screens, display))
+                except Exception as e:
+                    logger_webrtc_input.debug(f"Session screen count probe failed: {e}")
+        self._session_kde_ok = kde
         self._session_screen_count = count
         return self.session_screen_capability()
 
@@ -5879,9 +5905,11 @@ class WebRTCInput:
         output-destroy path evacuates only the removed screen's windows to
         the primary, which is the X11 behaviour. A screen owned by no
         display is retired the same way, so a session that was also started
-        with pre-provisioned screens converges on one screen per display. A
-        session without the control socket keeps the screens it was started
-        with; the spare-screen hold covers those.
+        with pre-provisioned screens converges on one screen per display.
+        Removal follows the rung that grew: the control socket's
+        REMOVE_SCREEN, or closing the held KWin virtual output. A session
+        with neither control keeps the screens it was started with; the
+        spare-screen hold covers those.
 
         Args:
             secondaries: The display ids still attached ('primary' and empty
@@ -5890,7 +5918,7 @@ class WebRTCInput:
         wanted = sorted({str(d) for d in secondaries if d and d != "primary"},
                         key=wayland_output_id)
         self._session_display_order = wanted
-        if self.wayland_input is None or not self.session_screen_ipc_available():
+        if self.wayland_input is None or not self.session_screen_control_available():
             return
         if (getattr(settings, "wayland_host_display", "") or "").strip():
             # Host capture: the session compositor owns its screens outright.
@@ -5912,11 +5940,21 @@ class WebRTCInput:
             claimed = set(owned.values())
             doomed += [(n, None) for n in names[1:] if n not in claimed]
             for name, did in doomed:
-                reply = await self._session_ipc_command(f"REMOVE_SCREEN {name}")
-                if not reply.get("ok"):
+                if self._session_ipc_ok:
+                    reply = await self._session_ipc_command(f"REMOVE_SCREEN {name}")
+                    removed = bool(reply.get("ok"))
+                    error = reply.get("error", "no reply")
+                else:
+                    try:
+                        removed = bool(await asyncio.to_thread(
+                            self.wayland_input.remove_app_screen, name))
+                        error = "not a screen this session grew"
+                    except Exception as e:
+                        removed, error = False, str(e)
+                if not removed:
                     logger_webrtc_input.warning(
                         f"Session compositor could not remove screen '{name}': "
-                        f"{reply.get('error', 'no reply')}")
+                        f"{error}")
                     continue
                 if did is not None:
                     del owned[did]
@@ -5924,7 +5962,9 @@ class WebRTCInput:
                     f"Session compositor removed screen '{name}'; its windows "
                     "return to the primary.")
 
-    async def ensure_session_screen(self, display_id: str) -> None:
+    async def ensure_session_screen(self, display_id: str,
+                                    size: Optional[Tuple[int, int]] = None,
+                                    scale: float = 1.0) -> None:
         """Grow the session screen a display owns, right before its capture
         output is created.
 
@@ -5932,14 +5972,23 @@ class WebRTCInput:
         capture output that asks, so a screen is added one at a time, each
         claimed by its own display's output creation before the next is
         grown -- that pairing is what keeps every screen showing the display
-        it was grown for. The reply names the screen; the name is what
-        `ensure_session_screens` later removes and what positional
-        addressing resolves through. Waits (bounded) for the new screen's
-        host window to park so the output created next adopts it.
+        it was grown for. The screen's name is what `ensure_session_screens`
+        later removes and what positional addressing resolves through: the
+        control socket's reply coins it, while a KWin virtual output carries
+        the name this handler coins from the display's output id. Waits
+        (bounded) for the new screen's host window to park so the output
+        created next adopts it.
+
+        Args:
+            display_id: The display the screen is grown for.
+            size: The size the display asked for, seeding a KWin virtual
+                output (the capture output drives the real size); the labwc
+                rung sizes screens through output management instead.
+            scale: The display's scale, seeding a KWin virtual output.
         """
         did = str(display_id or "")
         if (not did or did == "primary" or self.wayland_input is None
-                or not self.session_screen_ipc_available()):
+                or not self.session_screen_control_available()):
             return
         if (getattr(settings, "wayland_host_display", "") or "").strip():
             return
@@ -5957,13 +6006,27 @@ class WebRTCInput:
                 return sum(1 for w in wins if w[4])
 
             before = await parked()
-            reply = await self._session_ipc_command("ADD_SCREEN")
-            if not reply.get("ok"):
-                logger_webrtc_input.warning(
-                    f"Session compositor could not add a screen for '{did}': "
-                    f"{reply.get('error', 'no reply')}")
-                return
-            owned[did] = str(reply.get("output", ""))
+            if self._session_ipc_ok:
+                reply = await self._session_ipc_command("ADD_SCREEN")
+                if not reply.get("ok"):
+                    logger_webrtc_input.warning(
+                        f"Session compositor could not add a screen for '{did}': "
+                        f"{reply.get('error', 'no reply')}")
+                    return
+                owned[did] = str(reply.get("output", ""))
+            else:
+                name = f"SELKIES-{wayland_output_id(did)}"
+                width, height = size if size else (1920, 1080)
+                try:
+                    await asyncio.to_thread(
+                        self.wayland_input.add_app_screen,
+                        self._app_wayland_display(), name,
+                        int(width), int(height), float(scale or 1.0))
+                except Exception as e:
+                    logger_webrtc_input.warning(
+                        f"Session compositor could not add a screen for '{did}': {e}")
+                    return
+                owned[did] = name
             logger_webrtc_input.info(
                 f"Session compositor added screen '{owned[did]}' for '{did}'.")
             deadline = asyncio.get_running_loop().time() + 5.0
@@ -5979,8 +6042,8 @@ class WebRTCInput:
         resolved in one read.
 
         'primary' is position 0, the screen the session booted with. A
-        secondary whose screen this handler grew is found by the name the
-        ADD_SCREEN reply coined; on a session whose screens were
+        secondary whose screen this handler grew is found by the name
+        recorded when it was grown; on a session whose screens were
         pre-provisioned instead, the attached secondaries hold them in the
         order they were laid out, after the primary, so a display's rank in
         that order is its position.

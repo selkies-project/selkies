@@ -1,0 +1,86 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
+until [ -f "${XDG_RUNTIME_DIR}/container-env" ]; do sleep 0.5; done
+# shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
+. "${XDG_RUNTIME_DIR}/container-env"
+shopt -s nullglob
+
+# The Plasma shell of the KDE session, drawing on the nested kwin the wayland
+# service runs (selkies-kwin). This image is Wayland-only — resolute ships no
+# Plasma X11 session — so a container steered to the X11 backend, or one whose
+# session compositor was configured away, holds this service idle rather than
+# exiting into an s6 restart loop. The gates mirror the base entrypoint's
+# reading of the toggles.
+START_KDE="${START_KDE%%|*}"
+START_KDE="${START_KDE,,}"
+if { [ -n "${START_KDE}" ] && [ "${START_KDE// /}" != "true" ] && [ "${START_KDE// /}" != "1" ]; } \
+   || [ "${SELKIES_WAYLAND:-false}" != "true" ] \
+   || [ "${SELKIES_WAYLAND_COMPOSITOR:-none}" = "none" ]; then
+  echo "[kde] session disabled (START_KDE=${START_KDE:-true}, SELKIES_WAYLAND=${SELKIES_WAYLAND:-false}, compositor=${SELKIES_WAYLAND_COMPOSITOR:-none})"
+  exec sleep infinity
+fi
+
+# The session belongs to the nested kwin: its socket is the one the wayland
+# service did not record as the capture compositor's, and its XWayland server
+# owns the only X display. Both are discovered here rather than inherited —
+# the inherited values name what a shell attached to the container should use,
+# not what is up yet.
+unset DISPLAY WAYLAND_DISPLAY
+until [ -f "${XDG_RUNTIME_DIR}/selkies-capture-display" ]; do sleep 0.5; done
+capture="$(cat "${XDG_RUNTIME_DIR}/selkies-capture-display")"
+# Each socket sits beside a wayland-N.lock of the same stem, so only sockets
+# count here
+until [ -n "${WAYLAND_DISPLAY}" ]; do
+  sleep 0.5
+  for socket in "${XDG_RUNTIME_DIR}"/wayland-[0-9]*; do
+    [ -S "${socket}" ] && [ "${socket##*/}" != "${capture}" ] \
+      && WAYLAND_DISPLAY="${socket##*/}" && break
+  done
+done
+export WAYLAND_DISPLAY
+# Bounded, unlike the socket wait above: plasmashell is a Wayland client, so a
+# session whose XWayland could not start still gets its desktop and only loses
+# X11 applications.
+x_deadline=$((SECONDS + 30))
+until [ -n "${DISPLAY}" ] || [ "${SECONDS}" -ge "${x_deadline}" ]; do
+  sleep 0.5
+  for socket in /tmp/.X11-unix/X[0-9]*; do
+    [ -S "${socket}" ] && DISPLAY=":${socket##*/X}" && break
+  done
+done
+if [ -n "${DISPLAY}" ]; then
+  export DISPLAY
+else
+  echo "[kde] no XWayland display appeared; starting the shell without X11"
+  unset DISPLAY
+fi
+
+# The bus kwin already joined (see services/dbus-session/run); plasmashell and
+# everything D-Bus activation starts for it must land on the same one.
+export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/selkies-session-bus"
+until [ -S "${XDG_RUNTIME_DIR}/selkies-session-bus" ]; do sleep 0.5; done
+
+export XDG_SESSION_TYPE="wayland"
+export XDG_CURRENT_DESKTOP="KDE"
+export KDE_SESSION_VERSION="6"
+export QT_QPA_PLATFORM="wayland"
+echo "[kde] plasmashell draws on ${WAYLAND_DISPLAY}, XWayland on ${DISPLAY}"
+
+# The PolicyKit agent applications expect a session to provide, started beside
+# the shell rather than as its child so a plasmashell restart does not stack a
+# second one.
+if ! pgrep -f polkit-kde-authentication-agent-1 > /dev/null 2>&1; then
+  for agent in /usr/lib/*/libexec/polkit-kde-authentication-agent-1 \
+               /usr/lib/libexec/polkit-kde-authentication-agent-1 \
+               /usr/libexec/polkit-kde-authentication-agent-1; do
+    if [ -x "${agent}" ]; then
+      "${agent}" &
+      break
+    fi
+  done
+fi
+
+exec plasmashell
