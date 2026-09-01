@@ -68,6 +68,7 @@ from .display_utils import (
     apply_common_capture_settings,
     parse_gpu_id,
     format_pixelflux_cursor,
+    release_pixelflux_cursor_callback,
     get_new_res,
     generate_xrandr_gtf_modeline,
     ensure_mode,
@@ -5328,6 +5329,10 @@ class DataStreamingServer(BaseStreamingService):
                     data_logger.error(f"Error in capture callback for {display_id}: {e}", exc_info=False)
 
             def pixelflux_cursor_handler(msg_type, data_bytes, hot_x, hot_y):
+                # A call already in flight when shutdown cleared `app`.
+                app = self.app
+                if app is None:
+                    return
                 try:
                     # An auto cursor_size is None; the formatter needs a fallback
                     # dimension, the same 24 the WebRTC handler uses.
@@ -5335,7 +5340,7 @@ class DataStreamingServer(BaseStreamingService):
                     payload = format_pixelflux_cursor(
                         msg_type, data_bytes, hot_x, hot_y, size if size > 0 else 24)
                     if payload is not None:
-                        self.app.send_ws_cursor_data(payload)
+                        app.send_ws_cursor_data(payload)
                 except Exception as e:
                     data_logger.error(f"Error handling pixelflux cursor: {e}")
 
@@ -5552,14 +5557,16 @@ class DataStreamingServer(BaseStreamingService):
         Closes every client socket first (code 4000) so handlers exit and no
         stray capture keeps encoding for a page that can no longer receive,
         then stops pipelines while display state still exists to address
-        their tasks, cancels auxiliary tasks, stops the input handler, drops
-        the persistent capture modules, and unregisters the registry-global
-        Prometheus gauges (re-entering this mode after a switch would
-        otherwise fail on duplicated timeseries). The close carries no KILL
-        verb: KILL is the client's terminal verdict (it clears the reconnect
-        timer and drops its onclose handler), whereas a shutdown is usually a
-        mode switch every page must recover from — a bare close leaves the
-        client's reconnect/mode-flip loop armed, which converges the tabs.
+        their tasks, stops every capture that survived that pass and withdraws
+        its cursor callback, cancels auxiliary tasks, stops the input handler,
+        drops the persistent capture modules, and unregisters the
+        registry-global Prometheus gauges
+        (re-entering this mode after a switch would otherwise fail on
+        duplicated timeseries). The close carries no KILL verb: KILL is the
+        client's terminal verdict (it clears the reconnect timer and drops its
+        onclose handler), whereas a shutdown is usually a mode switch every
+        page must recover from — a bare close leaves the client's
+        reconnect/mode-flip loop armed, which converges the tabs.
         """
         if self._shutdown_called:
             logger.info("Shutdown already called, skipping")
@@ -5593,6 +5600,18 @@ class DataStreamingServer(BaseStreamingService):
         self.video_paused_clients.clear()
         self._report_client_presence()
         self.display_clients.clear()
+
+        # Unconditional, and only now: the reconfigure pass stops captures in its
+        # no-clients branch alone, which the reconnect grace holds shut until long
+        # after this returns.
+        for display_id in list(self.capture_instances.keys()):
+            try:
+                await self._stop_capture_for_display(display_id)
+            except Exception as e:
+                logger.error(f"Capture for '{display_id}' failed to stop during shutdown: {e}")
+        self.capture_instances.clear()
+        for module in self._persistent_capture_modules.values():
+            release_pixelflux_cursor_callback(module)
 
         all_tasks_for_cleanup = [
             t for t in self._tasks_to_run

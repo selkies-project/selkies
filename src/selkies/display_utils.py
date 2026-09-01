@@ -2486,6 +2486,26 @@ def cursor_content_handle(
     return zlib.crc32(meta, zlib.crc32(rgba_bytes)) or 1
 
 
+def release_pixelflux_cursor_callback(capture_module: Any) -> None:
+    """Withdraw the cursor callback a stopping capture registered.
+
+    pixelflux's cursor slot is process-wide and outlives the capture that set
+    it, so a service that does not let go stays reachable through it until
+    something else registers. A build without the withdrawal is left alone:
+    the `None` it would store is a `None` its delivery path would call.
+
+    Args:
+        capture_module: The pixelflux `ScreenCapture` that registered it.
+    """
+    clear = getattr(capture_module, "clear_cursor_callback", None)
+    if clear is None:
+        return
+    try:
+        clear()
+    except Exception:
+        logger_app_resize.debug("Cursor callback withdrawal failed", exc_info=True)
+
+
 def format_pixelflux_cursor(
     msg_type: str,
     data_bytes: Optional[bytes],
