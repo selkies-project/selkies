@@ -45,6 +45,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 from PIL import Image, ImageMath
 
 from .Xlib import X as x11_X
+from .Xlib import Xatom as x11_Xatom
 from .Xlib import display as x11_display
 from .Xlib import error as x11_error
 from .Xlib.ext import randr
@@ -143,6 +144,9 @@ _x11_lock = threading.Lock()
 # 1.5 has an output belong to one monitor and servers before 21.1 enforce it
 # (`_sync_set_selkies_layout`).
 _OUTPUT_SHARED: Optional[bool] = None
+# Bumped on the physical output to announce a monitor-set change.
+_MONITOR_SERIAL_ATOM: str = "_SELKIES_MONITOR_SERIAL"
+_MONITOR_SERIAL: int = 0
 _x11_conn: Optional[x11_display.Display] = None
 
 
@@ -817,6 +821,33 @@ def _monitors_match(
                for name, m in live.items())
 
 
+def _sync_announce_monitor_change(d: x11_display.Display, root: Any, out_id: int) -> None:
+    """Emit the RandR event a toolkit re-reads its monitor set on.
+
+    RRSetMonitor emits no RandR event: the server sends core ConfigureNotify on
+    the root, which GTK3 discards wherever RandR 1.3 is present
+    (`_gdk_x11_screen_size_changed`), re-reading its monitors only for
+    RRScreenChangeNotify or RRNotify. So a swap that does not resize the
+    framebuffer never reaches a running desktop, which keeps painting and
+    constraining windows against the monitors it last saw. An output property
+    is the one RRNotify carrying no geometry, physical size or CRTC of its own,
+    and the server emits it even for an unchanged value.
+
+    Advisory, and synced here so a failure surfaces inside it: a set that is
+    right but unannounced is no reason to report the swap as failed.
+    """
+    global _MONITOR_SERIAL
+    _MONITOR_SERIAL = (_MONITOR_SERIAL + 1) & 0x7FFFFFFF
+    try:
+        randr.change_output_property(
+            root, out_id, d.intern_atom(_MONITOR_SERIAL_ATOM), x11_Xatom.INTEGER,
+            x11_X.PropModeReplace, (32, [_MONITOR_SERIAL]),
+        )
+        d.sync()
+    except Exception as e:
+        logger_app_resize.debug(f"Could not announce the monitor-set change ({e}).")
+
+
 def _sync_set_selkies_layout(
     d: x11_display.Display, root: Any, out_id: int,
     ordered: List[Tuple[str, Dict[str, int]]], share_output: bool,
@@ -850,21 +881,19 @@ def _sync_set_selkies_layout(
 def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
     """Blocking swap of ALL selkies-* logical monitors to exactly ``layouts``.
 
-    ``layouts`` maps display id to an `{x, y, w, h}` rectangle. The whole
-    swap runs under one X server grab: window managers re-read the monitor
-    set whenever the root emits a core ConfigureNotify — which both a screen
-    resize AND deleting/creating the monitor that holds the physical output
-    do (the server swaps an automatic whole-CRTC monitor in and out).
-    RRSetMonitor cannot replace an existing name (BadValue), so a delete gap
-    is unavoidable; the grab makes the swap invisible: every event the WM
-    acts on is delivered after the final set is in place, so it never tiles
-    against a monitor-less or half-defined screen. Foreign (non-selkies)
+    ``layouts`` maps display id to an `{x, y, w, h}` rectangle. The whole swap
+    runs under one X server grab: RRSetMonitor cannot replace an existing name
+    (BadValue), so a delete gap is unavoidable, and the grab makes it
+    invisible: every event a window manager acts on is delivered after the
+    final set is in place, so it never tiles against a monitor-less or
+    half-defined screen. The set alone announces nothing a toolkit listens to,
+    so `_sync_announce_monitor_change` closes the grab. Foreign (non-selkies)
     monitors are left untouched. A request matching the live set returns
-    without touching the server: even that swap costs a delete+create and
-    hands the WM a ConfigureNotify to re-tile against. A live set whose
-    outputs sit differently than this server was measured to allow never
-    counts as a match: monitors outlive the client that set them, and a stale
-    outputless set at the right geometry is invisible to GTK apps.
+    without touching the server: even that swap costs a delete+create and a
+    re-tile. A live set whose outputs sit differently than this server was
+    measured to allow never counts as a match: monitors outlive the client
+    that set them, and a stale outputless set at the right geometry is
+    invisible to GTK apps.
     """
     global _OUTPUT_SHARED
     with _x11_lock:
@@ -894,6 +923,7 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
                     _OUTPUT_SHARED = True
                 if layouts:
                     randr.set_output_primary(root, out_id)
+                _sync_announce_monitor_change(d, root, out_id)
             finally:
                 # Flushed, not just queued: an X error aborting the sequence
                 # would leave an unsent ungrab and every other X client wedged.
@@ -911,6 +941,26 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
             raise
+
+
+def _sync_announce_current_monitors() -> None:
+    """Announce the live monitor set on the module connection."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root, _, out_id, _, _ = _connected_output_state(d)
+            _sync_announce_monitor_change(d, root, out_id)
+        except Exception as e:
+            logger_app_resize.debug(f"Could not announce the monitor-set change ({e}).")
+
+
+async def announce_monitor_change() -> None:
+    """Tell the toolkits already running that the monitor set changed.
+
+    The grab-protected replace announces its own; this is for the routes that
+    reach a final set some other way (see `_sync_announce_monitor_change`).
+    """
+    await asyncio.to_thread(_sync_announce_current_monitors)
 
 
 async def replace_selkies_monitors(
@@ -943,6 +993,7 @@ async def replace_selkies_monitors(
         )
         take_output = _OUTPUT_SHARED is not False
     await designate_primary_output(screen_name)
+    await announce_monitor_change()
     return ok
 
 
@@ -1175,8 +1226,11 @@ async def list_selkies_monitors() -> List[str]:
 
 async def clear_selkies_monitors() -> None:
     """Delete every logical monitor this software created (selkies-*)."""
-    for monitor_name in await list_selkies_monitors():
+    names = await list_selkies_monitors()
+    for monitor_name in names:
         await delete_logical_monitor(monitor_name)
+    if names:
+        await announce_monitor_change()
 
 
 class RealizedFit(NamedTuple):
