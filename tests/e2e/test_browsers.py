@@ -249,7 +249,14 @@ def striped_block(engine: str) -> "H.Results":
         page_errors = []
         page.on("pageerror", lambda e: page_errors.append(str(e)))
         page.goto(H.BASE_URL, wait_until="load")
-        time.sleep(12.0)
+        # Polled, not sampled once: which counter is live depends on the divert,
+        # and an engine that takes it optimistically and falls back on the first
+        # decode failure flips between them while the stream is coming up.
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            time.sleep(1.0)
+            if page.evaluate("() => (window.videoChunksReceived || 0) > 0"):
+                break
         try:
             state = page.evaluate("""({
               divert: !!window.videoDivertOn,
