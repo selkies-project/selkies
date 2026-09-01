@@ -233,6 +233,24 @@ def main() -> "H.Results":
         ctl.reposition_output(0, 0, 0)
         poll(ctl.list_windows, lambda v: len(v) == 1)
 
+        # A display opened on one side, closed, and reopened on the other: the
+        # screen a session grows is the one it last released, so an arrangement
+        # left behind is what a second attempt has to overwrite.
+        r = ipc("ADD_SCREEN")
+        n_right = str(r.get("output", ""))
+        ok_r = bool(r.get("ok")) and ctl.create_output(2, W, HGT, W, 0, 1.0)
+        poll(ctl.list_windows, lambda v: len(v) == 2 and not any(w[4] for w in v))
+        placed_r = ctl.set_app_screen_layout(
+            inner, [(0, 0, W, HGT), (W, 0, W, HGT)])
+        got_r = poll(lambda: [(s[1], s[2]) for s in ctl.list_app_screens(inner)],
+                     lambda v: v == [(0, 0), (W, 0)])
+        res.check("a display opens right after one opened left was closed",
+                  ok_r and placed_r == 2 and got_r == [(0, 0), (W, 0)],
+                  f"placed={placed_r} got={got_r}")
+        ctl.destroy_output(2)
+        ipc(f"REMOVE_SCREEN {n_right}")
+        poll(ctl.list_windows, lambda v: len(v) == 1)
+
         reply = ipc("REMOVE_SCREEN")
         res.check("the last screen is refused removal", not reply.get("ok"), reply)
 
