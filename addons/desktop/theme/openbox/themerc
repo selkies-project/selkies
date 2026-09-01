@@ -1,0 +1,110 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Selkies window decorations for Openbox (X11) and labwc (Wayland), one file
+# so both backends match; each parser skips the other's private keys.
+
+border.width: 2
+padding.width: 8
+padding.height: 5
+window.handle.width: 0
+window.client.padding.width: 0
+window.client.padding.height: 0
+window.label.text.justify: left
+
+# Active window
+window.active.border.color: #7967c5
+window.active.title.bg: flat gradient vertical
+window.active.title.bg.color: #1e0d3c
+window.active.title.bg.colorTo: #0c0318
+window.active.label.bg: parentrelative
+window.active.label.text.color: #f2eefb
+window.active.handle.bg: flat solid
+window.active.handle.bg.color: #0c0318
+window.active.grip.bg: flat solid
+window.active.grip.bg.color: #7967c5
+
+# Inactive window
+window.inactive.border.color: #160a2c
+window.inactive.title.bg: flat solid
+window.inactive.title.bg.color: #0a0518
+window.inactive.label.bg: parentrelative
+window.inactive.label.text.color: #8b7fb8
+window.inactive.handle.bg: flat solid
+window.inactive.handle.bg.color: #0a0518
+window.inactive.grip.bg: flat solid
+window.inactive.grip.bg.color: #160a2c
+
+# Titlebar buttons
+window.active.button.unpressed.bg: parentrelative
+window.active.button.unpressed.image.color: #a99bd6
+window.active.button.hover.bg: flat solid
+window.active.button.hover.bg.color: #2e2050
+window.active.button.hover.image.color: #46e5e5
+window.active.button.pressed.bg: flat solid
+window.active.button.pressed.bg.color: #ae3f7e
+window.active.button.pressed.image.color: #0d0221
+window.active.button.toggled.bg: parentrelative
+window.active.button.toggled.image.color: #ae3f7e
+window.active.button.toggled.unpressed.bg: parentrelative
+window.active.button.toggled.unpressed.image.color: #ae3f7e
+window.active.button.disabled.bg: parentrelative
+window.active.button.disabled.image.color: #2e2050
+
+window.inactive.button.unpressed.bg: parentrelative
+window.inactive.button.unpressed.image.color: #5c4d8a
+window.inactive.button.hover.bg: flat solid
+window.inactive.button.hover.bg.color: #160a2c
+window.inactive.button.hover.image.color: #a99bd6
+window.inactive.button.pressed.bg: flat solid
+window.inactive.button.pressed.bg.color: #9e4386
+window.inactive.button.pressed.image.color: #0d0221
+window.inactive.button.toggled.bg: parentrelative
+window.inactive.button.toggled.image.color: #8b7fb8
+window.inactive.button.toggled.unpressed.bg: parentrelative
+window.inactive.button.toggled.unpressed.image.color: #8b7fb8
+window.inactive.button.disabled.bg: parentrelative
+window.inactive.button.disabled.image.color: #160a2c
+
+# Menus
+menu.border.width: 1
+menu.border.color: #7967c5
+menu.overlap.x: -4
+menu.title.bg: flat gradient vertical
+menu.title.bg.color: #ae3f7e
+menu.title.bg.colorTo: #7967c5
+menu.title.text.color: #ffffff
+menu.title.text.justify: center
+menu.items.bg: flat solid
+menu.items.bg.color: #0c0318
+menu.items.text.color: #f2eefb
+menu.items.disabled.text.color: #5c4d8a
+menu.items.active.bg: flat gradient vertical
+menu.items.active.bg.color: #ae3f7e
+menu.items.active.bg.colorTo: #9e4386
+menu.items.active.text.color: #ffffff
+menu.separator.color: #2e2050
+menu.separator.width: 1
+menu.separator.padding.width: 6
+menu.separator.padding.height: 3
+
+# On-screen displays
+osd.border.width: 1
+osd.border.color: #7967c5
+osd.bg: flat gradient vertical
+osd.bg.color: #1e0d3c
+osd.bg.colorTo: #0c0318
+osd.label.bg: parentrelative
+osd.label.text.color: #f2eefb
+osd.hilight.bg: flat solid
+osd.hilight.bg.color: #ae3f7e
+osd.unhilight.bg: flat solid
+osd.unhilight.bg.color: #2e2050
+
+# labwc-only keys: single hover overlay, drop shadows (enabled in rc.xml)
+osd.window-switcher.item.active.border.color: #46e5e5
+window.button.hover.bg.color: #2e2050
+window.button.hover.bg.corner-radius: 4
+window.active.shadow.color: #0c0318a0
+window.inactive.shadow.color: #0c031860

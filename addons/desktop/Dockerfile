@@ -132,6 +132,16 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         gtk-update-icon-cache && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
+# The Selkies theme, one look on both backends: LXQt stylesheets and
+# wallpaper, the Openbox themerc labwc also reads, and the qterminal palette.
+# The wallpaper is the logo on black as SVG — no committed raster, and the
+# flat field keeps a full desktop refresh cheap on the stream.
+COPY --chown=1000:1000 addons/desktop/theme/lxqt/ /usr/share/lxqt/themes/selkies/
+COPY --chown=1000:1000 addons/desktop/theme/openbox/ /usr/share/themes/Selkies/openbox-3/
+COPY --chown=1000:1000 addons/desktop/theme/qterminal/Selkies.colorscheme /usr/share/qtermwidget6/color-schemes/Selkies.colorscheme
+# The panel layout; why it is spelled out is documented in the file
+COPY --chown=1000:1000 addons/desktop/theme/panel.conf /etc/xdg/lxqt/panel.conf
+
 # LXQt's system defaults, which the distribution packages do not ship: without
 # them a session has no theme, so lxqt-panel finds no stylesheet, keeps the
 # invalid colours it writes as its own default, and paints nothing at all — a
@@ -144,11 +154,12 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 #
 # pcmanfm-qt gets its desktop background the same way, for the same reason: its
 # own default is #000000 with no wallpaper, which reads as a broken session
-# rather than a plain one. A flat colour rather than one of the shipped
-# wallpapers, because every full refresh re-encodes whatever the desktop shows
-# and a photograph costs far more of the stream than a single tone.
+# rather than a plain one. The resolved theme's wallpaper when it ships one
+# and a flat colour otherwise — never a photograph, because every full refresh
+# re-encodes whatever the desktop shows.
 # Both names are taken from what is installed rather than asserted, so a
-# distribution that renames or drops one still produces a session that paints.
+# distribution that renames or drops one still produces a session that paints;
+# the Qt palette rides only with the selkies theme it matches.
 #
 # The terminal goes with them: libfm-qt compiles in `xterm` and libqt5xdg/libqt6xdg
 # ship /etc/xdg/qtxdg.conf naming xterm.desktop, so "Open Terminal" and every
@@ -163,13 +174,23 @@ RUN set -eu; \
         for name in "$@"; do command -v "${name}" >/dev/null 2>&1 && { printf '%s' "${name}"; return; }; done; \
     }; \
     ICON_THEME="$(first_installed /usr/share/icons Adwaita breeze oxygen hicolor)"; \
-    THEME="$(first_installed /usr/share/lxqt/themes ambiance system light Leech)"; \
+    THEME="$(first_installed /usr/share/lxqt/themes selkies ambiance system light Leech)"; \
     TERMINAL="$(first_on_path qterminal x-terminal-emulator xterm)"; \
     echo "LXQt defaults: icon_theme=${ICON_THEME} theme=${THEME} terminal=${TERMINAL}"; \
     mkdir -pm755 /etc/xdg/lxqt /etc/xdg/pcmanfm-qt/lxqt; \
     printf '[General]\nicon_theme=%s\ntheme=%s\n' "${ICON_THEME}" "${THEME}" > /etc/xdg/lxqt/lxqt.conf; \
-    printf '[Desktop]\nWallpaperMode=color\nBgColor=#2e3436\nFgColor=#ffffff\n[System]\nTerminal=%s\n' \
-        "${TERMINAL}" > /etc/xdg/pcmanfm-qt/lxqt/settings.conf; \
+    if [ "${THEME}" = "selkies" ]; then \
+        printf '[Palette]\nwindow_color=#120724\nwindow_text_color=#F2EEFB\nbase_color=#0C0318\ntext_color=#F2EEFB\nhighlight_color=#AE3F7E\nhighlighted_text_color=#FFFFFF\nlink_color=#46E5E5\nlink_visited_color=#7967C5\ntooltip_base_color=#1C0E38\ntooltip_text_color=#F2EEFB\n[Qt]\nstyle=Fusion\n' \
+            >> /etc/xdg/lxqt/lxqt.conf; \
+    fi; \
+    WALLPAPER="/usr/share/lxqt/themes/${THEME}/wallpaper.svg"; \
+    if [ -f "${WALLPAPER}" ]; then \
+        printf '[Desktop]\nWallpaperMode=zoom\nWallpaper=%s\nBgColor=#000000\nFgColor=#f2eefb\nShadowColor=#000000\n[System]\nTerminal=%s\n' \
+            "${WALLPAPER}" "${TERMINAL}" > /etc/xdg/pcmanfm-qt/lxqt/settings.conf; \
+    else \
+        printf '[Desktop]\nWallpaperMode=color\nBgColor=#2e3436\nFgColor=#ffffff\n[System]\nTerminal=%s\n' \
+            "${TERMINAL}" > /etc/xdg/pcmanfm-qt/lxqt/settings.conf; \
+    fi; \
     printf 'TerminalEmulator=%s.desktop\n' "${TERMINAL}" > /etc/xdg/qtxdg.conf
 
 # The browsers, in one apt operation: Firefox from Mozilla's own APT repository,
@@ -234,6 +255,35 @@ RUN set -eu; \
         mkdir -pm755 /etc/gtk-3.0 && \
         printf '[Settings]\ngtk-decoration-layout=:minimize,maximize,close\n' > /etc/gtk-3.0/settings.ini; \
     fi
+
+# Name the theme for both decorators and qterminal, and declare the session
+# dark where Qt does not reach. Openbox's theme is its rc.xml's first `name`
+# element; labwc's rc.xml gains the name it otherwise leaves to the default.
+# Firefox and Chrome read darkness from GTK's setting and the GSettings
+# default, compiled beside the decoration override above. The file manager's
+# desktop entry is overridden (first-name-wins, like the hidden leave entries)
+# to carry the theme's icon; the panel's quicklaunch names that override.
+RUN set -eu; \
+    if [ -f /usr/share/applications/pcmanfm-qt.desktop ]; then \
+        mkdir -pm755 /usr/local/share/applications; \
+        sed 's|^Icon=.*|Icon=/usr/share/lxqt/themes/selkies/filemanager.svg|' \
+            /usr/share/applications/pcmanfm-qt.desktop > /usr/local/share/applications/pcmanfm-qt.desktop; \
+    fi; \
+    if [ -f /etc/xdg/openbox/rc.xml ]; then \
+        sed -i '0,/<name>[^<]*<\/name>/s||<name>Selkies</name>|' /etc/xdg/openbox/rc.xml; \
+    fi; \
+    if [ -f /etc/xdg/labwc/rc.xml ] && ! grep -q '<name>' /etc/xdg/labwc/rc.xml; then \
+        sed -i 's|<theme>|<theme>\n    <name>Selkies</name>\n    <dropShadows>yes</dropShadows>|' /etc/xdg/labwc/rc.xml; \
+    fi; \
+    mkdir -pm755 /etc/xdg/qterminal.org; \
+    printf '[General]\ncolorScheme=Selkies\n' > /etc/xdg/qterminal.org/qterminal.ini; \
+    if [ -d /usr/share/qtermwidget5/color-schemes ]; then \
+        cp /usr/share/qtermwidget6/color-schemes/Selkies.colorscheme /usr/share/qtermwidget5/color-schemes/; \
+    fi; \
+    printf "[org.gnome.desktop.interface]\ncolor-scheme='prefer-dark'\n" \
+        > /usr/share/glib-2.0/schemas/selkies-dark.gschema.override; \
+    glib-compile-schemas /usr/share/glib-2.0/schemas/; \
+    sed -i '/^\[Settings\]/a gtk-application-prefer-dark-theme=1' /etc/gtk-3.0/settings.ini
 
 # Leaving the session is not something this desktop can offer: logging out or
 # locking ends or blocks the session the stream is showing and leaves a

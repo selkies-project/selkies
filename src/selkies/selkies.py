@@ -5922,8 +5922,12 @@ async def on_resize_handler(
     layout bring-up and must stay allowed, WebRTC parity) and the server's
     manual-resolution override, applies 16-pixel alignment when the display
     asked for it, then either updates a lone Wayland display's capture in place
-    (with a realized-geometry read-back) or triggers a full layout
-    reconfiguration.
+    or triggers a full layout reconfiguration. The in-place path brackets the
+    capture restart with the screen sizing the restart itself does not do (the
+    primary's capture is a view over screen 0, and pixelflux sizes only the
+    view): the screen is grown first, the realized geometry is read back, and
+    the screen is fitted to it — WebRTC's `_resize_primary_display` parity —
+    so the session compositor lays applications out at the new size.
 
     Args:
         res_str: The requested `{width}x{height}` string.
@@ -5986,6 +5990,8 @@ async def on_resize_handler(
                     data_server_instance.display_layouts[display_id]['w'] = target_w
                     data_server_instance.display_layouts[display_id]['h'] = target_h
 
+                await data_server_instance._size_wayland_screen(
+                    target_w, target_h, grow_only=True)
                 # A start on the live capture resizes it in place (pixelflux keeps
                 # a compatible encoder session); stop+start only when it isn't running.
                 inst = data_server_instance.capture_instances.get(display_id)
@@ -6006,6 +6012,8 @@ async def on_resize_handler(
                     await data_server_instance._stop_capture_for_display(display_id)
                     await data_server_instance._start_capture_for_display(display_id, target_w, target_h, 0, 0)
                 await data_server_instance._sync_wayland_realized_geometry(display_id)
+                await data_server_instance._size_wayland_screen(
+                    client_info.get('width', target_w), client_info.get('height', target_h))
             else:
                 logger_app_resize.info(f"Display client '{display_id}' dimensions updated to {target_w}x{target_h}. Triggering reconfiguration.")
                 await data_server_instance.reconfigure_displays()

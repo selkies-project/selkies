@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+     License, v. 2.0. If a copy of the MPL was not distributed with this
+     file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+     File manager icon: violet folder, cyan seam, pink front. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="back" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8E7BD8"/>
+      <stop offset="1" stop-color="#5A4A9E"/>
+    </linearGradient>
+    <linearGradient id="front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#D5499A"/>
+      <stop offset="1" stop-color="#9B449F"/>
+    </linearGradient>
+  </defs>
+  <path d="M8 17 a4 4 0 0 1 4 -4 h13 a4 4 0 0 1 3.2 1.6 L31.5 19 H52 a4 4 0 0 1 4 4 v25 a4 4 0 0 1 -4 4 H12 a4 4 0 0 1 -4 -4 z" fill="url(#back)"/>
+  <rect x="8" y="25" width="48" height="27" rx="4" fill="url(#front)"/>
+  <rect x="8" y="25" width="48" height="2.5" rx="1.25" fill="#46E5E5" opacity="0.95"/>
+</svg>

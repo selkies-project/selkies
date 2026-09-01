@@ -1,0 +1,45 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ *
+ * Selkies notifications: dark card matching the panel's popups.
+ */
+
+Notification {
+    border: 1px solid #7967C5;
+    background: rgba(7, 2, 16, 95%);
+    border-radius: 8px;
+}
+
+QLabel {
+    color: #F2EEFB;
+}
+
+#appLabel {
+    color: #46E5E5;
+    font-weight: bold;
+}
+
+#closeButton {
+    border: none;
+    border-radius: 4px;
+    padding: 2px;
+}
+
+#closeButton:hover {
+    background: rgba(174, 63, 126, 30%);
+}
+
+QPushButton {
+    background: rgba(46, 32, 80, 60%);
+    border: 1px solid #7967C5;
+    border-radius: 4px;
+    padding: 4px 10px;
+    color: #F2EEFB;
+}
+
+QPushButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 rgba(174, 63, 126, 80%), stop:1 rgba(121, 103, 197, 80%));
+    color: #FFFFFF;
+}

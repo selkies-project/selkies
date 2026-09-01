@@ -1,0 +1,107 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ *
+ * Selkies runner: dark card, cyan focus ring, pink-to-violet selection.
+ */
+
+#panel {
+    background: rgba(7, 2, 16, 95%);
+    border: 1px solid #7967C5;
+    border-radius: 8px;
+}
+
+QToolButton::menu-indicator {
+    image: none;
+}
+
+#closeButton,
+#actionButton {
+    margin: 2px;
+    border: none;
+    border-radius: 4px;
+}
+
+#closeButton:hover,
+#actionButton:hover {
+    background: rgba(174, 63, 126, 30%);
+}
+
+#closeButton:pressed,
+#actionButton:pressed {
+    background: rgba(174, 63, 126, 50%);
+}
+
+/* Search line edit */
+
+QLineEdit {
+    background: rgba(10, 4, 23, 94%);
+    border: 1px solid #2E2050;
+    border-radius: 6px;
+    padding: 8px;
+    margin: 4px;
+    color: #F2EEFB;
+    selection-background-color: #AE3F7E;
+    selection-color: #FFFFFF;
+}
+
+QLineEdit:focus {
+    border: 1px solid #46E5E5;
+}
+
+/* Search results */
+
+#commandList {
+    border-radius: 6px;
+    background: transparent;
+    alternate-background-color: transparent;
+    color: #F2EEFB;
+}
+
+#commandList::item {
+    padding: 4px;
+    border-radius: 4px;
+    background: transparent;
+    color: #F2EEFB;
+}
+
+#commandList::item:selected,
+#commandList::item:hover {
+    border-radius: 4px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 rgba(174, 63, 126, 80%), stop:1 rgba(121, 103, 197, 80%));
+    color: #FFFFFF;
+}
+
+/* Menu */
+
+QMenu {
+    margin: 0;
+    padding: 5px;
+    border: 1px solid #7967C5;
+    border-radius: 6px;
+    background: rgba(10, 4, 23, 95%);
+    color: #F2EEFB;
+}
+
+QMenu::item {
+    border: 3px solid transparent;
+    border-radius: 4px;
+    padding: 5px 24px 5px 8px;
+    background: transparent;
+    color: #F2EEFB;
+}
+
+QMenu::item:selected {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 rgba(174, 63, 126, 80%), stop:1 rgba(121, 103, 197, 80%));
+    color: #FFFFFF;
+}
+
+QMenu::item:disabled {
+    color: #6E5FA0;
+}
+
+QMenu::right-arrow {
+    image: url(arrow-right.svg);
+}
