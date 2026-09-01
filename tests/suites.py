@@ -133,7 +133,7 @@ SUITES: list = [
      "selectors": ["ws-chromium", "ws-firefox", "ws-webkit", "wr-chromium", "wr-webkit",
                    "ws-locked", "ws-pinned"]},
     {"path": "e2e/test_dashboards.py", "tier": "e2e", "timeout": 1200,
-     "selectors": ["classic", "wish", "gates", "hidpi"]},
+     "selectors": ["classic", "wish", "gates", "hidpi", "second-screen"]},
     {"path": "e2e/test_clipboard_large.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_clipboard_image.py", "tier": "e2e", "timeout": 900,

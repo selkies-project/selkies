@@ -396,15 +396,27 @@ export function TopMenu({
    * Window Management API supplied one.
    * @param direction Side of the primary the new display attaches to.
    * @param screen A ScreenDetailed to place the window on, or null.
+   * @returns Whether the window opened.
    */
   const launchWindow = (direction: string, screen: any = null) => {
     const url = `${window.location.href.split('#')[0]}#display2-${direction}`;
-    let features = 'resizable=yes,scrollbars=yes,noopener,noreferrer';
+    // Not `noopener` in the features: that makes window.open return null even
+    // when it opened, leaving a refusal indistinguishable from success. The
+    // opener is severed on the handle instead.
+    let features = 'resizable=yes,scrollbars=yes';
     if (screen) {
       features += `,left=${screen.availLeft},top=${screen.availTop},width=${screen.availWidth},height=${screen.availHeight}`;
     }
-    window.open(url, '_blank', features);
+    const opened = window.open(url, '_blank', features);
+    if (!opened) {
+      // Refused from an async continuation, whose click activation is spent (all
+      // the more after a permission prompt). An arrow click is a fresh one.
+      console.warn('Second display window was blocked; leaving the placement arrows up.');
+      return false;
+    }
+    try { opened.opener = null; } catch { /* already navigated away */ }
     setAvailablePlacements(null);
+    return true;
   };
 
   /** Every side, with no screen to place the window on: what the arrows offer
@@ -416,7 +428,9 @@ export function TopMenu({
    * screen is used directly; anything else offers the placement arrows. Asking
    * beats guessing: the API answers nothing without the window-management
    * permission, and a display silently opened to the right of a monitor that
-   * sits above or left of this one is what the arrows exist to avoid.
+   * sits above or left of this one is what the arrows exist to avoid. A
+   * refused popup falls back to the arrows too, so the button is never seen to
+   * do nothing at all.
    */
   const handleAddScreenClick = async () => {
     if (!('getScreenDetails' in window)) {
@@ -458,7 +472,7 @@ export function TopMenu({
         const direction = availableDirections[0];
         const screen = placements[direction];
         console.log(`Auto-placing single screen to the ${direction}.`);
-        launchWindow(direction, screen);
+        if (!launchWindow(direction, screen)) setAvailablePlacements(placements);
       } else if (availableDirections.length > 1) {
         console.log("Multiple placement options found. Showing arrows.");
         setAvailablePlacements(placements);
@@ -1105,7 +1119,7 @@ export function TopMenu({
 
       {availablePlacements && (
         <div
-          className="fixed inset-0 z-50 pointer-events-auto"
+          className="screen-placement-overlay fixed inset-0 z-50 pointer-events-auto"
           onClick={() => setAvailablePlacements(null)}
         >
           {availablePlacements.up !== undefined && (
