@@ -12,6 +12,14 @@ The master token is the administrative credential. It is never sent to clients a
 - `POST /api/tokens` replaces the session token table. The body is a JSON object keyed by token; each entry carries the client's `role` (`controller` or `viewer`), its gamepad `slot` (`1`-`4` or `null`), and optionally `mk_control: true` to hand keyboard and mouse authority to that one token (everyone else becomes read-only until the next table drops it). A viewer holding it becomes a read-write collaborator only while `--enable-collab` is on, which is the switch that keeps a deployment view-only whatever the table says; `cmd` and every settings-mutating message stay controller-only either way. No client streams until the first table arrives (the WebSocket transport holds the handshake, WebRTC refuses it). A new table is reconciled against the connected clients at once: a token that disappeared is disconnected, a changed role reconnects the client, a slot change is pushed live, and the input verdict is re-announced on both transports.
 - `POST /api/switch` changes the streaming transport (when dual mode is enabled). The dashboards prompt for the master token when they need it.
 
+Both control-plane requests also accept the master token in a `Selkies-Authorization: Bearer <master token>` header, tried after `Authorization`. A request carries a single `Authorization` header, so a caller behind a reverse proxy that demands HTTP Basic authentication must spend it on the Basic credentials; the named header lets both travel together:
+
+```console
+curl -u proxyuser:proxypass \
+  -H "Selkies-Authorization: Bearer <master token>" \
+  -X POST https://selkies.example/api/tokens -d @tokens.json
+```
+
 The master token is also accepted as a Bearer credential on every other API route below, so an operator can upload, download, or scrape metrics with it.
 
 A session token is what a client holds. The client page is opened as `https://host/?token=<session token>` (a deployment subfolder goes in front as usual, and `#display2` and the other hashes still apply). The token's provisioned role is authoritative: a viewer token cannot drive input, own a display, open a second display, or upload, whatever the page asks for.
@@ -26,7 +34,7 @@ The static web client (`/`, its scripts and assets) is served without credential
 |---|---|
 | `/api/websockets` (WebSocket data transport) | `?token=` on the handshake |
 | `/api/webrtc/signaling` (WebRTC signaling) | `client_token` in the HELLO message; the in-process server peer presents the master token |
-| `/api/tokens`, `/api/switch` | master token only (Bearer) |
+| `/api/tokens`, `/api/switch` | master token only (`Authorization` Bearer, or the `Selkies-Authorization` fallback) |
 | `/api/upload` | session or master token; viewer tokens are refused (403) |
 | `/api/files/...` (listing and downloads) | session or master token |
 | `/api/turn` (WebRTC ICE/TURN configuration) | session or master token |

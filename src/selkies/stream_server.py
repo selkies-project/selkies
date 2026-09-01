@@ -580,6 +580,12 @@ WEBSOCKET_ROUTES: Tuple[str, ...] = ("/api/websockets", "/api/webrtc/signaling",
 # Mirror of the secure-mode session token for requests the client cannot put
 # a header on (the file-manager iframe and its download links).
 SESSION_TOKEN_COOKIE: str = "selkies_token"
+# Fallback carrier for the master token on the token and mode-switch
+# endpoints, same ``Bearer <token>`` grammar as Authorization. A request has
+# one Authorization header, so a caller behind a Basic login (a reverse
+# proxy's, typically) must spend it on the Basic credentials and present the
+# master token here instead; Authorization is still tried first.
+MASTER_TOKEN_HEADER: str = "Selkies-Authorization"
 
 FILE_INDEX_HEADER: str = """<!DOCTYPE html>
 <html lang="en">
@@ -1544,7 +1550,10 @@ class CentralizedStreamServer:
 
         Layered gates, in order: cross-site WebSocket upgrades are rejected by
         Origin; health/liveness endpoints pass without credentials; the token
-        and mode-switch control endpoints accept the Bearer master token (a
+        and mode-switch control endpoints accept the Bearer master token,
+        trying `Authorization` first and the `MASTER_TOKEN_HEADER` fallback
+        second for callers whose Authorization header a Basic login in front
+        already owns (a
         mode switch not so authenticated is held to the same Origin rule as
         the upgrades, since a browser attaches cached Basic credentials to a
         cross-site POST); in secure mode every other API route accepts a
@@ -1578,13 +1587,19 @@ class CentralizedStreamServer:
             return await handler(request)
         token_path = path == f"{api_prefix}/api/tokens"
         if settings.master_token and token_path:
-            if not self._check_master_token(auth_header, settings.master_token):
+            if not any(
+                self._check_master_token(header, settings.master_token)
+                for header in (auth_header, request.headers.get(MASTER_TOKEN_HEADER))
+            ):
                 return self._bearer_challenge()
             return await handler(request)
 
         is_control_path = path == f"{api_prefix}/api/switch"
         if settings.master_token and is_control_path:
-            if self._check_master_token(auth_header, settings.master_token):
+            if any(
+                self._check_master_token(header, settings.master_token)
+                for header in (auth_header, request.headers.get(MASTER_TOKEN_HEADER))
+            ):
                 return await handler(request)
             if not settings.enable_basic_auth[0]:
                 return self._bearer_challenge()
