@@ -258,12 +258,14 @@ def main() -> "H.Results":
         # configuration is rebuilt against the new state rather than reported
         # as a refusal, which would drop the display back to a capture scale.
         stop = threading.Event()
+        cycles = []
 
         def churn() -> None:
             while not stop.is_set():
                 added = str(ipc("ADD_SCREEN").get("output", ""))
                 if added:
                     ipc(f"REMOVE_SCREEN {added}")
+                    cycles.append(added)
 
         def sized() -> bool:
             # A configuration the compositor did not take reaches Python as a
@@ -281,8 +283,12 @@ def main() -> "H.Results":
             stop.set()
             churner.join(timeout=15)
         poll(lambda: ctl.list_app_screens(inner), lambda v: len(v) == 1)
+        # A churner whose commands stopped landing would spin without changing
+        # anything, and every configuration would land for want of an adversary.
+        # The floor is well under what the loop manages on two contended cores.
         res.check("a configuration cancelled by a screen change is retried",
-                  landed == 12, f"{landed}/12 landed")
+                  landed == 12 and len(cycles) >= 4,
+                  f"{landed}/12 landed over {len(cycles)} screen changes")
 
         reply = ipc("REMOVE_SCREEN")
         res.check("the last screen is refused removal", not reply.get("ok"), reply)
