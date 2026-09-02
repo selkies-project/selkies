@@ -6101,14 +6101,15 @@ class WebRTCInput:
         scale it leaves behind.
 
         Applications draw larger when the compositor they are on scales its own
-        output, so a nested session is scaled through its output management and
-        the capture keeps 1.0: scaling the capture instead would halve the
-        logical size the session is handed and upscale the whole desktop. A
-        session that manages no outputs for clients (KWin) takes the capture
-        output's scale, which it follows, and so does a plain pixelflux session,
-        where the capture output is the only screen there is. XWayland
-        applications need nothing merged: they run in the compositor's logical
-        space and are scaled with it.
+        output, so a nested session is scaled through its output management
+        (wlroots' or KWin's, whichever it serves) and the capture keeps 1.0:
+        scaling the capture instead would halve the logical size the session
+        is handed and upscale the whole desktop. A session that manages no
+        outputs for clients takes the capture output's scale, which it
+        follows, and so does a plain pixelflux session, where the capture
+        output is the only screen there is. XWayland applications need nothing
+        merged: they run in the compositor's logical space and are scaled with
+        it.
 
         Args:
             dpi: The desktop DPI to realize; 96 is unity.
@@ -6165,12 +6166,12 @@ class WebRTCInput:
         pixelflux resizes one to its full size the moment it gets an output,
         and back when it loses one.
 
-        Only for a session whose screens are pre-provisioned: when the control
-        socket manages them (`ensure_session_screens`) there is never a spare
+        Only for a session whose screens are pre-provisioned: when a screen
+        control grows them (`ensure_session_screens`) there is never a spare
         to hold, and a hold computed before a layout pass created its capture
         output would land late and shrink the screen that output just adopted.
         """
-        if self.session_screen_ipc_available():
+        if self.session_screen_control_available():
             return
         try:
             asyncio.get_running_loop()
