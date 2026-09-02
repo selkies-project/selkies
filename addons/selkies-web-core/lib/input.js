@@ -2979,13 +2979,35 @@ export class Input {
             this._watchScreenGeometry(false);
             return;
         }
+        // Two boxes that overlap on the desktop cannot both be under the
+        // pointer, and an engine reporting screen coordinates relative to its
+        // own window publishes exactly such boxes; the overshoot stands there.
+        for (let i = 0; i < rects.length; i++) {
+            const r = rects[i];
+            r.crossable = r !== own && !this._boxesOverlap(own, r);
+        }
         this._layout = { own, rects, ownX: own.x, ownY: own.y, ownW: own.w, ownH: own.h };
         this._watchScreenGeometry(true);
     }
 
+    /**
+     * Whether the desktop boxes two layout entries published intersect by
+     * more than a pixel: windows placed edge to edge meet on a fraction, since
+     * a letterboxed box starts on one.
+     */
+    _boxesOverlap(a, b) {
+        if (!(a.scaleX > 0) || !(a.scaleY > 0) || !(b.scaleX > 0) || !(b.scaleY > 0)) {
+            return false;
+        }
+        return a.originX + 1 < b.originX + b.w / b.scaleX &&
+               b.originX + 1 < a.originX + a.w / a.scaleX &&
+               a.originY + 1 < b.originY + b.h / b.scaleY &&
+               b.originY + 1 < a.originY + a.h / a.scaleY;
+    }
+
     /** Whether a desktop position sits on the stream box `rect`'s page published. */
     _overNeighbor(rect, screenX, screenY) {
-        if (!(rect.scaleX > 0) || !(rect.scaleY > 0) ||
+        if (!rect.crossable || !(rect.scaleX > 0) || !(rect.scaleY > 0) ||
             !Number.isFinite(screenX) || !Number.isFinite(screenY)) {
             return false;
         }
@@ -3004,14 +3026,14 @@ export class Input {
      * position still inside this page's own height says nothing about where
      * the pointer is on the other one.
      *
-     * Short of that box -- a page that published none, or a pointer in the gap
-     * between two windows -- the overshoot converts at the neighbor's own
-     * CSS-to-remote scale: a captured drag keeps streaming this page CSS
-     * pixels while the pointer physically travels the neighbor page, whose
-     * pixels they are. The result clamps to the union of display rectangles,
-     * the way a multihead X server bounds its pointer, so an edge with no
-     * neighbor still pins and the dead corner beside a shorter display stays
-     * unreachable.
+     * Short of that box -- a page that published none, a pointer in the gap
+     * between two windows, or two boxes that overlap -- the overshoot
+     * converts at the neighbor's own CSS-to-remote scale: a captured drag
+     * keeps streaming this page CSS pixels while the pointer physically
+     * travels the neighbor page, whose pixels they are. The result clamps to
+     * the union of display rectangles, the way a multihead X server bounds
+     * its pointer, so an edge with no neighbor still pins and the dead corner
+     * beside a shorter display stays unreachable.
      *
      * Runs per pointer event; allocation-free.
      * @param {number} rx Own-scale remote X, relative to this display.

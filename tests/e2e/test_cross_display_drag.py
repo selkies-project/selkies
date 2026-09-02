@@ -627,9 +627,10 @@ ANCHOR_JS = """(() => {
 })()"""
 
 # Drives the mapping helper itself over arrangements the session above does not
-# realize: a lower neighbor at double scale, a left neighbor, and two windows
-# whose desktop origins share neither an edge nor a top. Runs on a bare object,
-# which publishes nothing, so the live page keeps its own layout.
+# realize: a lower neighbor at double scale, a left neighbor, two windows whose
+# desktop origins share neither an edge nor a top, and two whose boxes overlap.
+# Runs on a bare object, which publishes nothing, so the live page keeps its
+# own layout.
 SYNTH_JS = """(() => {
   const proto = Object.getPrototypeOf(window.webrtcInput);
   const map = (layouts, own, rx, ry, sx, sy, gx, gy) => {
@@ -664,6 +665,15 @@ SYNTH_JS = """(() => {
   // and clamps as it does with no box published at all.
   const e = map(apart, 'primary', 2100, -150, 1, 1, 2100, -50);
   if (!e || e[0] !== 1800 || e[1] !== 0) return false;
+  // Boxes that overlap on the desktop -- one window over the other, or an
+  // engine reporting screen coordinates relative to its own window -- are
+  // not crossed through: the overshoot converts as with no box at all.
+  const over = {primary: {x: 0, y: 0, w: 1000, h: 500, scale: 1,
+                          originX: 0, originY: 100, scaleX: 1, scaleY: 1},
+                display2: {x: 1000, y: 0, w: 800, h: 400, scale: 1,
+                           originX: 600, originY: 0, scaleX: 1, scaleY: 1}};
+  const f = map(over, 'primary', 1300, 50, 1, 1, 1300, 150);
+  if (!f || f[0] !== 1300 || f[1] !== 50) return false;
   // Inside its own rectangle the mapping stands aside.
   return map(down, 'primary', 500, 250, 1, 1) === null;
 })()"""
