@@ -54,7 +54,7 @@ The container serves HTTPS by default, on the distribution's snakeoil certificat
 
 Full desktop containers that can be used out-of-the-box are available in separate repositories. If you can deploy Docker® or Podman containers, this is the easiest way to get started.
 
-[`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) and [`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) are expandable ready-to-go out-of-the-box containerized remote desktop implementations of Selkies supporting hardware acceleration on NVIDIA and other GPUs.
+[`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) and [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) are ready-to-go KDE Plasma desktops built on the [Base Container](component.md#desktop-container), with hardware acceleration on NVIDIA, AMD and Intel GPUs: the first reaches the GPU through EGL on the base's own display servers (X11 or Wayland, sharing one GPU between containers), the second runs its own X.Org server on the GPU.
 
 ## Minimal Container
 

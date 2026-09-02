@@ -187,7 +187,7 @@ The reference container images (the [Base Container](https://github.com/selkies-
 
 **If you want to change the image behavior, use the original container as a base image and only replace the entrypoint script(s) and/or the s6 service files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu26.04` for the [Desktop Container](component.md#desktop-container)) to preserve a specific container build.**
 
-Start with the below sample `Dockerfile` example and place your modified `container-entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/desktop:main-${DISTRIB_FLAVOR}` for the [Desktop Container](component.md#desktop-container), and `ghcr.io/selkies-project/nvidia-glx-desktop:${DISTRIB_RELEASE}` or `ghcr.io/selkies-project/nvidia-egl-desktop:${DISTRIB_RELEASE}` for the desktop containers):
+Start with the below sample `Dockerfile` example and place your modified `container-entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/desktop:main-${DISTRIB_FLAVOR}` for the [Desktop Container](component.md#desktop-container), and `ghcr.io/selkies-project/selkies-glx-desktop:26.04` or `ghcr.io/selkies-project/selkies-egl-desktop:26.04` for the desktop containers):
 
 ```dockerfile
 ARG DISTRIB_FLAVOR=ubuntu26.04
@@ -241,16 +241,20 @@ The entrypoint script of the base images launches `s6-svscan /etc/service` itsel
 
 ## Container Guide
 
-The [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) and [`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) repositories (the Desktop Containers here) share components with the [Desktop Container](component.md#desktop-container), which is the reference they follow: `container-entrypoint.sh` prepares the session and launches `s6-svscan /etc/service`, the `selkies` service runs `selkies-entrypoint.sh`, and every other daemon is a `run` script under `services/`. There is no `supervisord.conf` and no nginx, since Selkies serves the web client and every endpoint on its single port.
+The [`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) and [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) repositories (the Desktop Containers here) are KDE Plasma desktops built `FROM` the [Base Container](component.md#desktop-container) the way `addons/desktop` builds the LXQt one: the base's `container-entrypoint.sh`, `selkies` service and every other service are used as they are, and each repository adds only its desktop -- packages, session defaults, the browsers, the proot-apps runner -- and the s6 services its session needs, one `run` script each under `services/`. Neither carries an entrypoint, a supervisor configuration or a web server of its own: the base launches `s6-svscan /etc/service`, and Selkies serves the web client and every endpoint on its single port.
 
-**A change to any shared component is three Pull Requests — this repository's Desktop Container and both downstream Desktop Containers — and a change confined to the Desktop Containers is two.** What is shared, and how closely:
+The two differ in what the desktop draws on. The EGL image keeps the base's display servers, Plasma on the framebuffer X server by default and natively on a nested `kwin_wayland` under `SELKIES_WAYLAND=true`, and rebuilds `kwin-wayland` from the distribution source so a second display can be a kwin virtual output (`patches/`, `selkies-kwin`). The GLX image replaces the base's framebuffer server with an X.Org server on the GPU (`services/xorg`, configured at start by `selkies-xorg-config` for NVIDIA's driver or the modesetting driver) and is X11 only. Both build on the Ubuntu 26.04 base alone and publish `26.04`, a timestamped `26.04-<build>` and `latest` tags, for amd64 and arm64.
+
+**A change to a shared component is two Pull Requests, one per Desktop Container; a change to what the base provides is one here, and the Desktop Containers pick it up at their next build.** What is shared, and how closely:
 
 | Component | Shared between | When updating |
 | --- | --- | --- |
-| `LICENSE`, entrypoint script, service definitions | both Desktop Containers, following this repository's | identical; copy between them |
-| Entrypoint script, start to the `export PULSE_SERVER=...` line | both Desktop Containers | identical; the NVIDIA userspace driver install differs only in its outermost `if` |
-| `Dockerfile`, outside the `Anything above/below this line should always be kept the same...` markers | both Desktop Containers | identical, and the Selkies install procedure follows every release |
-| Remaining entrypoint sections, `README.md`, `egl.yml`/`xgl.yml` | both Desktop Containers | similar but not identical; assess by hand |
+| `LICENSE`, the Plasma package set, the session defaults under `/etc/xdg`, the browsers and proot-apps layers, `services/dbus-session` | both Desktop Containers | identical; copy between them |
+| `services/plasma` | both Desktop Containers | identical but for the Wayland branch, which only the EGL image has |
+| The browsers and proot-apps layers, the privileged-file bracket | both Desktop Containers and `addons/desktop` here | identical, with the helper scripts fetched from this repository by `SELKIES_REF` rather than copied |
+| `patches/`, `selkies-kwin`, the kwin rebuild stage | EGL image only | assess against the kwin the archive ships |
+| `services/xorg`, `selkies-xorg-config` | GLX image only | assess by hand |
+| `README.md`, `docker-compose.yml`, `egl.yml`/`xgl.yml`, the publish workflow | both Desktop Containers | similar but not identical; assess by hand |
 
 ## Style Guide
 
