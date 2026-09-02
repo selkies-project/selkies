@@ -6101,15 +6101,16 @@ class WebRTCInput:
         scale it leaves behind.
 
         Applications draw larger when the compositor they are on scales its own
-        output, so a nested session is scaled through its output management
-        (wlroots' or KWin's, whichever it serves) and the capture keeps 1.0:
-        scaling the capture instead would halve the logical size the session
-        is handed and upscale the whole desktop. A session that manages no
-        outputs for clients takes the capture output's scale, which it
-        follows, and so does a plain pixelflux session, where the capture
-        output is the only screen there is. XWayland applications need nothing
-        merged: they run in the compositor's logical space and are scaled with
-        it.
+        output, so a nested session is scaled through its output management and
+        the capture keeps 1.0: scaling the capture instead would halve the
+        logical size the session is handed and upscale the whole desktop. A
+        session that manages no outputs for clients takes the capture output's
+        scale instead, which it follows through the host window's preferred
+        fractional scale (a nested KWin accepts a scale over its own output
+        management and ignores it), and so does a plain pixelflux session,
+        where the capture output is the only screen there is. XWayland
+        applications need nothing merged: they run in the compositor's logical
+        space and are scaled with it.
 
         Args:
             dpi: The desktop DPI to realize; 96 is unity.
