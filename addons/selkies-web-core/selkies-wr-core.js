@@ -334,6 +334,9 @@ export default function webrtc() {
 	let scalingDPI = 96;
 	let isVideoPipelineActive = true;
 	let isAudioPipelineActive = true;
+	/** True once the user has toggled audio in this session; a later
+	 * server_settings payload must not override an explicit choice. */
+	let audioToggledByUser = false;
 	let isMicrophoneActive = false;
 	let isWebcamActive = false;
 	let webcamBusy = false;
@@ -1543,8 +1546,10 @@ export default function webrtc() {
 					} catch (e) {
 						console.error('Video toggle failed:', e);
 					}
-				} else if (message.pipeline === 'audio' && videoElement) {
+				} else if (message.pipeline === 'audio') {
 					// Audio stays negotiated; the toggle only mutes the element carrying it.
+					audioToggledByUser = true;
+					if (!videoElement) break;
 					const audioOn = !!message.enabled;
 					videoElement.muted = !audioOn;
 					isAudioPipelineActive = audioOn;
@@ -2772,9 +2777,9 @@ export default function webrtc() {
 			 * Applies the server settings payload: sanitizes the stored overrides,
 			 * mirrors the policy gates (`command_enabled`, `enable_resize`, the
 			 * clipboard directions, `enable_binary_clipboard`, which the stored
-			 * choice governs unless locked), pushes the pre-copied local clipboard
-			 * once the gates are in place, and switches between the manual and
-			 * auto resize handlers.
+			 * choice governs unless locked, and the `audio_start_muted` element
+			 * mute), pushes the pre-copied local clipboard once the gates are in
+			 * place, and switches between the manual and auto resize handlers.
 			 */
 			webrtc.onserversettings = (obj) => {
 				if (obj.settings === undefined || obj.settings === null) {
@@ -2785,6 +2790,19 @@ export default function webrtc() {
 				const changes = sanitizeAndStoreSettings(obj.settings);
 				const ce = obj.settings && obj.settings.command_enabled;
 				serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
+				// Start-muted policy: server value only, applied until the user
+				// touches the audio toggle, and never for shared viewers or the
+				// secondary display, which do not own the audio state. Audio
+				// stays negotiated on WebRTC, so this only mutes the element
+				// carrying it, exactly what the manual toggle does.
+				const asm = obj.settings && obj.settings.audio_start_muted;
+				if (asm && asm.value === true && !audioToggledByUser && !isSharedMode &&
+					displayId === 'primary' && isAudioPipelineActive) {
+					isAudioPipelineActive = false;
+					if (videoElement) videoElement.muted = true;
+					window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
+					postSidebarButtonUpdate();
+				}
 				const er = obj.settings && obj.settings.enable_resize;
 				if (er && typeof er.value === 'boolean') window.enable_resize = er.value;
 				const cin = obj.settings && obj.settings.clipboard_in_enabled;

@@ -117,6 +117,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Enable server-to-client audio streaming. Disabling this will also disable microphone support.",
     },
     {
+        "name": "audio_start_muted",
+        "type": "bool",
+        "default": False,
+        "help": "Start sessions with server-to-client audio off; the user turns it on with the client UI toggle. On the websockets transport the initial audio request is simply not sent; on WebRTC the track stays negotiated and the element is muted as soon as the settings payload is applied. Unlike disabling audio_enabled nothing is torn down, and a toggle made in a running session wins over this default.",
+    },
+    {
         "name": "microphone_enabled",
         "type": "bool",
         "default": False,

@@ -44,6 +44,7 @@ SUITES: list = [
     {"path": "unit/test_webrtc_audio_recovery.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webrtc_reconnect_grace.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_audio_health.py", "tier": "unit", "timeout": 300},
+    {"path": "unit/test_audio_start_muted.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_audio_worklet.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_control_plane_guards.py", "tier": "unit", "timeout": 300},
     {"path": "unit/test_listen_address.py", "tier": "unit", "timeout": 120},
