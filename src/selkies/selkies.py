@@ -4910,12 +4910,17 @@ class DataStreamingServer(BaseStreamingService):
 
         if not IS_WAYLAND:
             curr_res, _, available_resolutions, _, screen_name = await get_new_res("1x1")
-            if not screen_name:
-                data_logger.error("CRITICAL: Could not determine screen name from xrandr. Aborting.")
-                await self._signal_all_displays_stopped()
-                return
             total_mode_str = f"{total_width}x{total_height}"
-            if total_mode_str not in available_resolutions:
+            if not screen_name:
+                # A server with no connected RandR output (a GPU without a
+                # display engine, a driver told to use none) has no mode to
+                # set and no monitor to publish: its framebuffer is sized
+                # outright where the server allows, and the layouts are
+                # clamped to what it has otherwise.
+                data_logger.info(
+                    f"No connected RandR output on this X server; the desktop is sized as a bare "
+                    f"framebuffer, with no monitor per display.")
+            elif total_mode_str not in available_resolutions:
                 data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
                 # Native first: a mode made by per-invocation xrandr dies with its
                 # connection on some servers (Xvfb).
@@ -4962,25 +4967,26 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.warning(f"Live re-target failed for '{did}' ({e}); restarting it.")
                         keep_ids.discard(did)
                         await self._stop_capture_for_display(did)
-            data_logger.info("Swapping logical monitors to the new layout...")
-            # Monitors go in before the framebuffer change, at their final rectangles
-            # and under a server grab: window managers re-tile on every root
-            # ConfigureNotify and must never see a monitor-less or partial set.
-            await replace_selkies_monitors(layouts, screen_name=screen_name)
+            if screen_name:
+                data_logger.info("Swapping logical monitors to the new layout...")
+                # Monitors go in before the framebuffer change, at their final
+                # rectangles and under a server grab: window managers re-tile on
+                # every root ConfigureNotify and must never see a monitor-less
+                # or partial set.
+                await replace_selkies_monitors(layouts, screen_name=screen_name)
             # A mode change is the dominant cost of a reconfigure (CRTC reprogram,
             # every client repaints), so a same-size reload skips it. A live
             # re-target that grew the framebuffer above still shrinks here.
             curr_norm = (curr_res or "").lower().replace(" ", "")
             if curr_norm == total_mode_str:
                 data_logger.info(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
-            else:
-                if not await resize_display(total_mode_str):
-                    # Some servers refuse runtime modes but honor a plain framebuffer
-                    # grow (RRSetScreenSize); captures and pointer warps address the root.
-                    if await grow_framebuffer(total_width, total_height):
-                        data_logger.info(f"Mode-set for {total_mode_str} failed; grew the framebuffer instead.")
-                    else:
-                        data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
+            elif not await resize_display(total_mode_str):
+                # Some servers refuse runtime modes but honor a plain framebuffer
+                # grow (RRSetScreenSize); captures and pointer warps address the root.
+                if await grow_framebuffer(total_width, total_height):
+                    data_logger.info(f"Mode-set for {total_mode_str} failed; grew the framebuffer instead.")
+                else:
+                    data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
             # The X server is the authority: a driver can refuse the size and leave
             # the root as it was, and a region outside the root grabs garbage.
             realized_w, realized_h = await read_realized_root((total_width, total_height))

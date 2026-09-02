@@ -258,9 +258,14 @@ def _sync_query_randr() -> Tuple[str, List[str], str]:
     with _x11_lock:
         try:
             d = _module_display()
-            root, _, _, oi, names = _connected_output_state(d)
-            geom = root.get_geometry()
+            geom = d.screen().root.get_geometry()
             curr_res = f"{geom.width}x{geom.height}"
+            try:
+                _, _, _, oi, names = _connected_output_state(d)
+            except RuntimeError:
+                # A server with no connected output (a GPU without a display
+                # engine, a driver told to use none): the root is all there is.
+                return curr_res, [], ""
             wh_pat = re.compile(r"\d+x\d+")
             resolutions = sorted(
                 {names[m] for m in oi.modes if m in names and wh_pat.fullmatch(names[m])}
@@ -670,7 +675,10 @@ def _monitor_info(
 
     The primary monitor carries the RandR primary flag: the WM tiles panels
     against it, and the same-set no-op in `_sync_replace_selkies_monitors`
-    reads it back to prove the live set already matches.
+    reads it back to prove the live set already matches. The flag is the
+    only mark of the primary in a multi-display set, because Qt also takes
+    a monitor listing the primary output for the primary screen, which
+    every one of these does.
     """
     return {
         "name": d.intern_atom(name),
@@ -757,6 +765,34 @@ def _sync_set_output_primary() -> None:
             root, _, out_id, _, _ = _connected_output_state(d)
             randr.set_output_primary(root, out_id)
             d.sync()
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            raise
+
+
+def _sync_set_screen_size(w: int, h: int) -> Tuple[int, int]:
+    """Blocking RRSetScreenSize to exactly ``w`` x ``h`` (no CRTC change).
+
+    What sizes the root of a server with no connected output, where there is
+    no mode to set: the framebuffer is all there is and the server sizes it
+    freely in both directions.
+
+    Returns:
+        The root's size afterwards.
+    """
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root = d.screen().root
+            dpi_hint = _APPLIED_DPI if _APPLIED_DPI is not None else 96.0
+            randr.set_screen_size(
+                root, w, h,
+                max(1, round(w * 25.4 / dpi_hint)), max(1, round(h * 25.4 / dpi_hint)),
+            )
+            d.sync()
+            geom = root.get_geometry()
+            return int(geom.width), int(geom.height)
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
@@ -921,8 +957,11 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
                     live = _sync_set_selkies_layout(d, root, out_id, ordered, False)
                 elif share:
                     _OUTPUT_SHARED = True
-                if layouts:
-                    randr.set_output_primary(root, out_id)
+                # Qt takes any monitor listing the primary output for the
+                # primary screen, and these monitors all list the one output
+                # (`_monitor_info`), so with several displays no output is
+                # primary and the monitor flag alone names the primary.
+                randr.set_output_primary(root, out_id if len(layouts) == 1 else 0)
                 _sync_announce_monitor_change(d, root, out_id)
             finally:
                 # Flushed, not just queued: an X error aborting the sequence
@@ -1086,7 +1125,7 @@ class MultiMonitorWindowManager:
             return
         name = os.path.basename(command[0])
         self._swapped = True
-        if name.lower() in (await current_wm_name()).lower():
+        if wm_name_matches(name, await current_wm_name()):
             logger_app_resize.info(
                 f"Multi-monitor setup: {name} already manages the session; no WM swap.")
             return
@@ -1113,8 +1152,25 @@ async def current_wm_name() -> str:
     return await asyncio.to_thread(_sync_wm_name)
 
 
+def wm_name_matches(command_name: str, wm_name: str) -> bool:
+    """Whether the window manager advertising ``wm_name`` is the one the
+    command ``command_name`` starts.
+
+    A window manager rarely advertises its binary's name: kwin_x11 answers
+    "KWin", Openbox "Openbox". Both are reduced to their leading run of
+    letters and digits, case aside, and one has to begin with the other.
+    """
+    def stem(name: str) -> str:
+        m = re.match(r"[a-z0-9]+", name.strip().lower())
+        return m.group(0) if m else ""
+
+    want, have = stem(command_name), stem(wm_name)
+    return bool(want) and bool(have) and (want.startswith(have) or have.startswith(want))
+
+
 async def wait_for_wm(name_substring: str, timeout: float = 3.0) -> bool:
-    """Wait until the EWMH WM name contains ``name_substring`` (case-insensitive).
+    """Wait until the EWMH WM name is the window manager ``name_substring``
+    starts (`wm_name_matches`).
 
     Used after a WM --replace so layout changes are not applied while two
     window managers hand over the selection (the incoming WM snapshots the
@@ -1124,10 +1180,8 @@ async def wait_for_wm(name_substring: str, timeout: float = 3.0) -> bool:
         True when the name matched within ``timeout`` seconds.
     """
     deadline = asyncio.get_running_loop().time() + timeout
-    want = name_substring.lower()
     while True:
-        name = await current_wm_name()
-        if want in name.lower():
+        if wm_name_matches(name_substring, await current_wm_name()):
             return True
         if asyncio.get_running_loop().time() >= deadline:
             return False
@@ -1389,13 +1443,16 @@ async def get_new_res(res_str: str) -> Tuple[str, str, List[str], str, Optional[
 
     Returns:
         ``(curr_res, fitted res_str, sorted mode names, max res, output
-        name)``; the output name is None when no screen could be identified.
+        name)``; the output name is None when the server has no connected
+        output, in which case ``curr_res`` is still the root's size.
     """
     try:
         curr_res, resolutions, screen_name = await asyncio.to_thread(_sync_query_randr)
     except Exception as e:
         logger_app_resize.info(f"Native RandR query failed ({e}); using xrandr fallback.")
         return await _get_new_res_xrandr(res_str)
+    if not screen_name:
+        return curr_res, res_str, [], res_str, None
     max_w_limit, max_h_limit = 7680, 4320
     max_res_str = f"{max_w_limit}x{max_h_limit}"
     new_res = res_str
@@ -1431,21 +1488,22 @@ async def _get_new_res_xrandr(
         return curr_res, new_res, resolutions, max_res_str, screen_name
     current_screen_modes_started = False
     for line in xrandr_output.splitlines():
+        # The root's size heads the listing, whether or not an output follows
+        current_match = current_pat.match(line)
+        if current_match:
+            curr_res = current_match.group(1).replace(" ", "")
         screen_match = screen_pat.match(line)
         if screen_match:
             if screen_name is None:
                 screen_name = screen_match.group(1)
             current_screen_modes_started = screen_name == screen_match.group(1)
         if current_screen_modes_started:
-            current_match = current_pat.match(line)
-            if current_match:
-                curr_res = current_match.group(1).replace(" ", "")
             res_match = res_pat.match(line.strip())
             if res_match:
                 resolutions.append(res_match.group(1))
     if not screen_name:
-        logger_app_resize.warning(
-            "Could not determine connected screen from xrandr."
+        logger_app_resize.info(
+            "No connected RandR output on this X server; the root is all there is."
         )
         return curr_res, new_res, resolutions, max_res_str, screen_name
     max_w_limit, max_h_limit = 7680, 4320
@@ -1473,6 +1531,31 @@ async def resize_display(res_str: str) -> Optional[Tuple[int, int]]:
     """
     try:
         w, h = await asyncio.to_thread(_sync_resize_randr, res_str)
+    except RuntimeError as e:
+        if "no connected RandR output" in str(e):
+            # No mode to set, but the framebuffer itself may still be sized.
+            try:
+                w_req, h_req = (int(p) for p in res_str.split("x"))
+                w, h = await asyncio.to_thread(_sync_set_screen_size, w_req, h_req)
+            except Exception as size_error:
+                logger_app_resize.info(
+                    f"No connected RandR output to size for '{res_str}' and the framebuffer "
+                    f"cannot be resized ({size_error}); the X server keeps its size."
+                )
+                return None
+            if (w, h) != (w_req, h_req):
+                logger_app_resize.info(
+                    f"No connected RandR output; the framebuffer stays at {w}x{h} for '{res_str}'."
+                )
+                return None
+            logger_app_resize.info(
+                f"No connected RandR output; sized the framebuffer to {w}x{h}."
+            )
+            return w, h
+        logger_app_resize.info(
+            f"Native RandR resize for '{res_str}' failed ({e}); falling back to xrandr."
+        )
+        return await _resize_display_xrandr(res_str)
     except Exception as e:
         logger_app_resize.info(
             f"Native RandR resize for '{res_str}' failed ({e}); falling back to xrandr."
