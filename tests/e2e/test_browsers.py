@@ -251,11 +251,18 @@ def striped_block(engine: str) -> "H.Results":
         page.goto(H.BASE_URL, wait_until="load")
         # Polled, not sampled once: which counter is live depends on the divert,
         # and an engine that takes it optimistically and falls back on the first
-        # decode failure flips between them while the stream is coming up.
+        # decode failure flips between them while the stream is coming up. The
+        # worker's own rows and composites are what settle it, and they trail
+        # the first chunks by as long as its decoders take to come up.
+        settled = ("() => (window.videoChunksReceived || 0) > 0" if engine == "webkit" else """() => {
+          const c = document.getElementById('videoWorkerCanvas');
+          return !!window.videoDivertOn && Object.keys(window.videoStripeRows || {}).length > 1
+            && (window.fps || 0) > 0 && !!c && c.width >= 640;
+        }""")
         deadline = time.time() + 30
         while time.time() < deadline:
             time.sleep(1.0)
-            if page.evaluate("() => (window.videoChunksReceived || 0) > 0"):
+            if page.evaluate(settled):
                 break
         try:
             state = page.evaluate("""({

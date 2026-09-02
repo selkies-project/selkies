@@ -778,10 +778,11 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
     """A refused second-display window leaves the placement arrows up.
 
     The window is opened from an async continuation, so the click's transient
-    activation may be spent by then and the browser refuses it. Chromium is
-    launched refusing every one, which is what a popup blocker does: clearing
-    the arrows on a window that never opened is the button appearing to do
-    nothing at all.
+    activation may be spent by then and the browser refuses it. The page is
+    given a `window.open` that refuses every one, which is what a popup blocker
+    does (the headless shell honours a switch for it, a full Chrome in its
+    new headless mode does not): clearing the arrows on a window that never opened is the button
+    appearing to do nothing at all.
     """
     res = H.Results(f"second-screen-{dashboard}")
     H.server_start(mode="websockets", wayland=False, web_root=dist)
@@ -790,7 +791,8 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
         with sync_playwright() as p:
             browser = C.chromium_launch(p, extra_args=["--block-new-web-contents"])
             ctx = browser.new_context(viewport={"width": 1440, "height": 900})
-            ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+            ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';"
+                                "window.open = () => null;")
             page = ctx.new_page()
             page.goto(H.BASE_URL, wait_until="load")
             time.sleep(8.0)
