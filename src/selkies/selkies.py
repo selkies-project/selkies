@@ -1499,10 +1499,43 @@ class DataStreamingServer(BaseStreamingService):
             except Exception as e:
                 data_logger.warning(f"Live CRF update failed for '{display_id}' ({e}).")
 
+    async def set_client_stream_box(self, display_id: str, origin_x: float,
+                                    origin_y: float, scale_x: float,
+                                    scale_y: float) -> None:
+        """Record where a display's page draws its stream on the user's desktop.
+
+        Rebroadcast with the layout, since a page maps a drag that crossed onto
+        a neighbor through the neighbor's box rather than off its own edge.
+        Only the browser knows those origins, and they are the only thing
+        relating two viewports whose monitors, window chrome and device pixel
+        ratios all differ. Ignored for an unknown display or an impossible box.
+        """
+        display_state = self.display_clients.get(display_id)
+        if display_state is None or display_id not in self.display_layouts:
+            return
+        if not (0.05 <= scale_x <= 100.0 and 0.05 <= scale_y <= 100.0):
+            return
+        if not (abs(origin_x) <= 100000.0 and abs(origin_y) <= 100000.0):
+            return
+        box = (origin_x, origin_y, scale_x, scale_y)
+        if display_state.get("client_stream_box") == box:
+            return
+        # One box a page publishes is one broadcast to every client; a page that
+        # alternated two would otherwise amplify at whatever rate it sent. The
+        # page republishes what the layout comes back missing, so a dropped
+        # update is not a lost one.
+        now = time.monotonic()
+        if now - display_state.get("client_stream_box_at", 0.0) < 0.2:
+            return
+        display_state["client_stream_box_at"] = now
+        display_state["client_stream_box"] = box
+        await self.broadcast_display_config()
+
     def _display_config_payload(self) -> dict:
         """DISPLAY_CONFIG_UPDATE body: the display roster, plus each laid-out
-        display's rectangle and its client's reported CSS-to-remote scale, so
-        a page can map a cross-display drag into its neighbor's region."""
+        display's rectangle, its client's reported CSS-to-remote scale and the
+        desktop box that client draws it in, so a page can map a cross-display
+        drag into its neighbor's region."""
         payload = {
             "type": "display_config_update",
             "displays": list(self.display_clients.keys()),
@@ -1510,9 +1543,14 @@ class DataStreamingServer(BaseStreamingService):
         layouts = {}
         for did, rect in (self.display_layouts or {}).items():
             entry = dict(rect)
-            scale = (self.display_clients.get(did) or {}).get("client_scale")
+            client = self.display_clients.get(did) or {}
+            scale = client.get("client_scale")
             if scale:
                 entry["scale"] = scale
+            box = client.get("client_stream_box")
+            if box:
+                (entry["originX"], entry["originY"],
+                 entry["scaleX"], entry["scaleY"]) = box
             layouts[did] = entry
         if layouts:
             payload["layouts"] = layouts

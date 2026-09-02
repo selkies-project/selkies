@@ -30,7 +30,9 @@
  * `START_VIDEO`, `STOP_VIDEO`, `START_AUDIO`, `STOP_AUDIO`,
  * `REQUEST_KEYFRAME`, `CLIENT_FRAME_ACK <id>`, `cr`, `REQUEST_CLIPBOARD`, the
  * chunked clipboard upload of lib/clipboard-worker-bridge.js,
- * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>` and the input verbs of
+ * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>`,
+ * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
+ * user's desktop, relayed to the other displays) and the input verbs of
  * lib/input.js. The server sends `MODE websockets`, `AUTH_SUCCESS,{json}`,
  * `ROLE_UPDATE,{json}`, `MK_ACCESS,<0|1>`, `VIDEO_STARTED`, `VIDEO_STOPPED`,
  * `AUDIO_STARTED`, `AUDIO_STOPPED`, `AUDIO_DISABLED`, `MICROPHONE_DISABLED`,

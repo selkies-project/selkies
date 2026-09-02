@@ -7456,6 +7456,20 @@ class WebRTCInput:
             try: await self.send_x11_mouse(x, y, button_mask, scroll_magnitude, relative, display_id=display_id)
             except Exception as e: logger_webrtc_input.warning(f"Failed to set mouse cursor: {e}")
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
+        elif msg_type == "vp":
+            # Where this display's page shows its stream on the user's desktop,
+            # and the remote pixels per desktop pixel over it. Relayed to the
+            # other pages: a drag held across two browser windows is placed
+            # through the box of the one the pointer physically reached.
+            server = self.data_server_instance
+            if server is None or not hasattr(server, "set_client_stream_box"):
+                return
+            try:
+                origin_x, origin_y, scale_x, scale_y = (float(v) for v in toks[1:5])
+            except ValueError:
+                return
+            await server.set_client_stream_box(display_id, origin_x, origin_y,
+                                               scale_x, scale_y)
         elif msg_type == "vb":
             try:
                 # kbps; per display, named by the delivering channel.

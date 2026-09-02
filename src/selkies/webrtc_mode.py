@@ -236,6 +236,10 @@ class WebRTCService(BaseStreamingService):
         # Each page's reported CSS-to-remote scale, by display id (the primary
         # included), rebroadcast with the layout for cross-display drags.
         self._client_scales: Dict[str, float] = {}
+        # Each page's stream box on the user's desktop, by display id: origin
+        # and remote pixels per desktop pixel, with when it last changed.
+        self._client_stream_boxes: Dict[
+            str, Tuple[Tuple[float, float, float, float], float]] = {}
         self.display_pipelines: Dict[str, MediaPipelinePixel] = {}
         self._last_idr_request_times: Dict[str, float] = {}
         self._display_lock = asyncio.Lock()
@@ -1109,6 +1113,7 @@ class WebRTCService(BaseStreamingService):
             self.display_clients.pop(display_id, None)
             self.display_layouts.pop(display_id, None)
             self._client_scales.pop(display_id, None)
+            self._client_stream_boxes.pop(display_id, None)
             if pipeline is not None:
                 await pipeline.stop_media_pipeline()
         await self.reconfigure_displays()
@@ -1580,6 +1585,7 @@ class WebRTCService(BaseStreamingService):
         self.display_clients.pop(did, None)
         self.display_layouts.pop(did, None)
         self._client_scales.pop(did, None)
+        self._client_stream_boxes.pop(did, None)
         primary_layout = self.display_layouts.get("primary")
         if primary_layout:
             # Input offsets follow the layout; the primary re-anchors at the origin.
@@ -1630,6 +1636,7 @@ class WebRTCService(BaseStreamingService):
         self.display_clients.pop(did, None)
         self.display_layouts.pop(did, None)
         self._client_scales.pop(did, None)
+        self._client_stream_boxes.pop(did, None)
         primary_layout = self.display_layouts.get("primary")
         if primary_layout:
             # Input offsets follow the layout; the primary is back at the origin.
@@ -1890,10 +1897,43 @@ class WebRTCService(BaseStreamingService):
             if w > 0 and h > 0:
                 self.rtc_app.send_remote_resolution(f"{w}x{h}", did)
 
+    async def set_client_stream_box(self, display_id: str, origin_x: float,
+                                    origin_y: float, scale_x: float,
+                                    scale_y: float) -> None:
+        """Record where a display's page draws its stream on the user's desktop.
+
+        Rebroadcast with the layout, since a page maps a drag that crossed onto
+        a neighbor through the neighbor's box rather than off its own edge.
+        Only the browser knows those origins, and they are the only thing
+        relating two viewports whose monitors, window chrome and device pixel
+        ratios all differ. Ignored for an unknown display or an impossible box.
+        """
+        if display_id not in self.display_layouts:
+            return
+        if not (0.05 <= scale_x <= 100.0 and 0.05 <= scale_y <= 100.0):
+            return
+        if not (abs(origin_x) <= 100000.0 and abs(origin_y) <= 100000.0):
+            return
+        box = (origin_x, origin_y, scale_x, scale_y)
+        now = time.monotonic()
+        stored = self._client_stream_boxes.get(display_id)
+        if stored is not None:
+            if stored[0] == box:
+                return
+            # One box a page publishes is one broadcast to every client; a page
+            # that alternated two would otherwise amplify at whatever rate it
+            # sent. The page republishes what the layout comes back missing, so
+            # a dropped update is not a lost one.
+            if now - stored[1] < 0.2:
+                return
+        self._client_stream_boxes[display_id] = (box, now)
+        self._broadcast_display_config()
+
     def _display_config_payload(self) -> Dict[str, Any]:
         """display_config_update body: the display roster, plus each laid-out
-        display's rectangle and its client's reported CSS-to-remote scale, so
-        a page can map a cross-display drag into its neighbor's region."""
+        display's rectangle, its client's reported CSS-to-remote scale and the
+        desktop box that client draws it in, so a page can map a cross-display
+        drag into its neighbor's region."""
         displays = ["primary"] + [d for d in self.display_clients.keys() if d != "primary"]
         payload: Dict[str, Any] = {"displays": displays}
         layouts = {}
@@ -1902,6 +1942,10 @@ class WebRTCService(BaseStreamingService):
             scale = self._client_scales.get(did)
             if scale:
                 entry["scale"] = scale
+            stored = self._client_stream_boxes.get(did)
+            if stored:
+                (entry["originX"], entry["originY"],
+                 entry["scaleX"], entry["scaleY"]) = stored[0]
             layouts[did] = entry
         if layouts:
             payload["layouts"] = layouts

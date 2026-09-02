@@ -63,6 +63,7 @@ SUITES: list = [
     {"path": "unit/test_nvml_failfast.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_realized_layout.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_display_stream_box.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_release_version.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_start_verdict.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_twcc_feedback.py", "tier": "unit", "timeout": 120},

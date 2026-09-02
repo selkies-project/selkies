@@ -35,7 +35,9 @@
  * (stream resolution), `s,DPI`, `vb,kbps`, `ab,bps`, `_arg_fps,N`, `_crf,N`,
  * `_rc,mode`, `_ebc,bool`, `cmd,command`, `kr` (release every key), `cr`
  * (cache-only clipboard fetch), `REQUEST_CLIPBOARD`, `START_VIDEO` /
- * `STOP_VIDEO` (this peer's feed), `SET_NATIVE_CURSOR_RENDERING,0|1`, the
+ * `STOP_VIDEO` (this peer's feed), `SET_NATIVE_CURSOR_RENDERING,0|1`,
+ * `vp,originX,originY,scaleX,scaleY` (this page's stream box on the user's
+ * desktop, relayed to the other displays), the
  * `_f,fps` and `_l,ms` client metrics, `_stats_video,{json}` when the server
  * asked for raw reports, and the chunked clipboard transfer of
  * `lib/clipboard-worker-bridge.js`. Server to client arrives through the
