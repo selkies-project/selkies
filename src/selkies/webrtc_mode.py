@@ -2039,6 +2039,12 @@ class WebRTCService(BaseStreamingService):
                     continue
                 pipeline.scale = new_scale
                 if pipeline.is_media_pipeline_running():
+                    if did == "primary":
+                        # The capture is a view over the primary's screen, and a
+                        # capture start sizes the view alone: the screen carries
+                        # the scale to the session (its window's preferred
+                        # fractional scale).
+                        await self._size_wayland_screen(pipeline.width, pipeline.height)
                     await pipeline.restart_screen_capture()
                     await self._push_wayland_realized_geometry(did, pipeline)
             await self._apply_wayland_cursor_size(dpi_value)

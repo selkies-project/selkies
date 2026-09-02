@@ -4504,6 +4504,27 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e:
             data_logger.error(f"Wayland resize_output failed: {e}")
 
+    async def _scale_wayland_screen(self) -> None:
+        """Give the primary's screen (output 0) the primary's capture scale, at
+        the size it has.
+
+        The primary's capture is a view over that screen, and a capture start
+        sizes the view alone; a session that takes its scale from the host
+        window's preferred fractional scale (a nested KWin) sees only the
+        screen's. A no-op for the compositor at the scale it already carries.
+        """
+        module = self._wayland_control_module()
+        if module is None:
+            return
+        try:
+            outputs = {o[0]: o for o in await asyncio.to_thread(module.list_outputs)}
+        except Exception as e:
+            data_logger.debug(f"Wayland screen scale carry skipped: {e}")
+            return
+        screen = outputs.get(WAYLAND_SCREEN_OUTPUT_ID)
+        if screen:
+            await self._size_wayland_screen(screen[3], screen[4])
+
     async def _reanchor_wayland_primary(self, layouts: dict, keep_ids: set[str]) -> None:
         """Collapse an unrealizable Wayland arrangement: primary back at the
         origin (layout + capture rebuild) -- the Wayland mirror of the X11
@@ -5280,6 +5301,8 @@ class DataStreamingServer(BaseStreamingService):
             f"Preparing to start capture for display='{display_id}': "
             f"Res={width}x{height}, Offset={x_offset}x{y_offset}"
         )
+        if IS_WAYLAND and display_id == 'primary':
+            await self._scale_wayland_screen()
 
         try:
             settings = self._get_capture_settings(display_id, width, height, x_offset, y_offset)
