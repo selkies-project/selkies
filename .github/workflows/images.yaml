@@ -55,7 +55,6 @@ env:
   REGISTRY_NAMESPACE: ghcr.io/selkies-project/selkies
   BASE_IMAGE_NAME: ghcr.io/selkies-project/selkies/base
   IMAGE_NAME: ghcr.io/selkies-project/selkies/desktop
-  KDE_IMAGE_NAME: ghcr.io/selkies-project/selkies/desktop-kde
   # ghcr answers a secondary rate limit with 403 on the push itself. buildx
   # reports that as a build failure rather than a response this can read a
   # Retry-After from, so the pause is the minute GitHub asks for when it names
@@ -190,35 +189,14 @@ jobs:
           outputs: type=image,"name=${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: desktop-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
-      # The KDE desktop, built only on the Ubuntu flavor: it rebuilds the
-      # distribution kwin with the patches under addons/desktop-kde/patches,
-      # which are organized per base and exist for Ubuntu 26.04 alone.
-      - name: Build and push the KDE image by digest
-        id: kde
-        if: ${{ matrix.flavor.name == 'ubuntu26.04' }}
-        uses: ./.github/actions/build-push
-        with:
-          context: .
-          file: addons/desktop-kde/Dockerfile
-          platforms: ${{ matrix.arch.platform }}
-          build-args: |
-            BASE_IMAGE=${{ env.BASE_IMAGE_NAME }}@${{ steps.base.outputs.digest }}
-          outputs: type=image,"name=${{ env.KDE_IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
-          cache-scope: desktop-kde-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
-          retry-delay: ${{ env.PUSH_RETRY_DELAY }}
       - name: Export digests
         env:
           BASE_DIGEST: ${{ steps.base.outputs.digest }}
           DIGEST: ${{ steps.build.outputs.digest }}
-          KDE_DIGEST: ${{ steps.kde.outputs.digest }}
         run: |
           mkdir -p /tmp/digests/base /tmp/digests/desktop
           touch "/tmp/digests/base/${BASE_DIGEST#sha256:}"
           touch "/tmp/digests/desktop/${DIGEST#sha256:}"
-          if [ -n "${KDE_DIGEST}" ]; then
-            mkdir -p /tmp/digests/desktop-kde
-            touch "/tmp/digests/desktop-kde/${KDE_DIGEST#sha256:}"
-          fi
       - uses: actions/upload-artifact@v7
         with:
           name: digest-base-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
@@ -229,13 +207,6 @@ jobs:
         with:
           name: digest-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           path: /tmp/digests/desktop/*
-          if-no-files-found: error
-          retention-days: 1
-      - uses: actions/upload-artifact@v7
-        if: ${{ matrix.flavor.name == 'ubuntu26.04' }}
-        with:
-          name: digest-kde-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
-          path: /tmp/digests/desktop-kde/*
           if-no-files-found: error
           retention-days: 1
 
@@ -271,15 +242,6 @@ jobs:
           pattern: digest-${{ matrix.flavor }}-*
           path: /tmp/digests/desktop
           merge-multiple: true
-      # The KDE image is built for the Ubuntu flavor alone, so only that
-      # flavor's merge has digests to assemble
-      - name: Download the KDE digests for this flavor
-        if: ${{ matrix.flavor == 'ubuntu26.04' }}
-        uses: actions/download-artifact@v8
-        with:
-          pattern: digest-kde-${{ matrix.flavor }}-*
-          path: /tmp/digests/desktop-kde
-          merge-multiple: true
       - name: Create and push the multi-arch manifests
         env:
           TAG_PREFIX: ${{ inputs.tag_prefix }}
@@ -305,9 +267,6 @@ jobs:
           }
           publish "${BASE_IMAGE_NAME}" /tmp/digests/base
           publish "${IMAGE_NAME}" /tmp/digests/desktop
-          if [ -d /tmp/digests/desktop-kde ]; then
-            publish "${KDE_IMAGE_NAME}" /tmp/digests/desktop-kde
-          fi
 
   addons:
     name: ${{ matrix.addon }} (${{ matrix.arch.name }})
@@ -416,7 +375,7 @@ jobs:
     steps:
       - uses: dataaxiom/ghcr-cleanup-action@v1
         with:
-          packages: selkies/base,selkies/desktop,selkies/desktop-kde,selkies/coturn,selkies/turn-rest
+          packages: selkies/base,selkies/desktop,selkies/coturn,selkies/turn-rest
           delete-untagged: true
           # A build in flight has its platform images untagged until its
           # manifest lands, so the window stays well clear of a publish
