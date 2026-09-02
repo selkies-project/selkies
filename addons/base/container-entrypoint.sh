@@ -151,7 +151,7 @@ fi
 if [ "${SELKIES_GPU_DRIVER-}" != "nvidia" ]; then
   :
 elif is_true "${DISABLE_ZINK-false}"; then
-  echo 'DISABLE_ZINK is set: the NVIDIA GPU is left to software OpenGL'
+  echo 'DISABLE_ZINK is set: OpenGL is not routed through Zink on the NVIDIA GPU'
 else
   export LIBGL_KOPPER_DRI2="1"
   export MESA_LOADER_DRIVER_OVERRIDE="zink"
