@@ -2408,8 +2408,9 @@ let codecRefusalUnanswerable = false;
  *
  * A client that owns its settings takes the ladder's own last rung, the JPEG
  * encoder, whose stripes need no `VideoDecoder`. Refusals that outlive that
- * switch mean the server holds the encoder too, and a shared viewer owns none
- * of the stream's settings to begin with: both are told, once.
+ * switch -- a decoder refused again, or an H.264 keyframe still arriving on
+ * the page path -- mean the server holds the encoder too, and a shared viewer
+ * owns none of the stream's settings to begin with: both are told, once.
  * @param {string} codec The refused codec string.
  */
 function answerRefusedCodec(codec) {
@@ -6168,6 +6169,15 @@ class WorkerWebSocket {
                     statusDisplayElement.classList.remove('hidden');
                 }
             }
+            return;
+        }
+
+        // A keyframe still in H.264 after the JPEG rung was asked for: the
+        // server holds the encoder, and the refusal has nowhere left to go.
+        if (!isSharedMode && codecRefusalAnswered && currentEncoderMode === 'jpeg'
+            && video_frame_type_byte === 0x01 && h264Payload.byteLength > 0) {
+            answerRefusedCodec(codecFromKeyframe(h264Payload, null)
+                || getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate));
             return;
         }
 
