@@ -199,11 +199,13 @@ RUN set -eu; \
 # H.264/AV1 media stack the distribution Chromium builds do not carry. Chrome's
 # launcher is switched to the basic password store because the container runs no
 # keyring daemon to unlock, and it otherwise blocks on a prompt nobody can answer.
+# The Chrome download is held to HTTP/1.1: its server resets HTTP/2 streams
+# mid-transfer often enough to fail a build, and curl does not retry that.
 RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d && \
     curl -o /etc/apt/keyrings/packages.mozilla.org.asc -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://packages.mozilla.org/apt/repo-signing-key.gpg" && \
     printf 'Types: deb\nURIs: https://packages.mozilla.org/apt\nSuites: mozilla\nComponents: main\nSigned-By: /etc/apt/keyrings/packages.mozilla.org.asc\n' > /etc/apt/sources.list.d/mozilla.sources && \
     printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla && \
-    curl -o /tmp/google-chrome-stable.deb -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb" && \
+    curl -o /tmp/google-chrome-stable.deb -fsSL --http1.1 --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb" && \
     apt-get clean && apt-get update && \
     apt-get install --no-install-recommends -y firefox /tmp/google-chrome-stable.deb && \
     sed -i '/^Exec=/ s/$/ --password-store=basic/' /usr/share/applications/google-chrome.desktop && \
