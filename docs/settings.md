@@ -32,6 +32,7 @@ Every setting below is one entry of `SETTING_DEFINITIONS` in [`src/selkies/setti
 | `--unix-socket` | `SELKIES_UNIX_SOCKET` | str | (empty) | Unix socket path to start the streaming service; when set, a Unix domain socket is bound instead of the TCP addr/port pair. |
 | `--web-root` | `SELKIES_WEB_ROOT` | str | (empty) | Path to directory containing web application files. Defaults to web files packaged with Selkies application |
 | `--audio-enabled` | `SELKIES_AUDIO_ENABLED` | bool | `true` | Enable server-to-client audio streaming. Disabling this will also disable microphone support. |
+| `--audio-start-muted` | `SELKIES_AUDIO_START_MUTED` | bool | `false` | Start sessions with server-to-client audio off; the user turns it on with the client UI toggle. On the websockets transport the initial audio request is simply not sent; on WebRTC the track stays negotiated and the element is muted as soon as the settings payload is applied. Unlike disabling audio_enabled nothing is torn down, and a toggle made in a running session wins over this default. |
 | `--microphone-enabled` | `SELKIES_MICROPHONE_ENABLED` | bool | `false` | Enable client-to-server microphone forwarding. |
 | `--gamepad-enabled` | `SELKIES_GAMEPAD_ENABLED` | bool | `true` | Enable gamepad support. |
 | `--webcam-enabled` | `SELKIES_WEBCAM_ENABLED` | bool | `false` | Enable client-to-server webcam forwarding to the virtual V4L2 device. |

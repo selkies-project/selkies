@@ -296,6 +296,16 @@ let lastReceivedVideoFrameAt = 0;
 let lastAckSentId = -1, lastAckSentAt = 0;
 let initializationComplete = false;
 let audioEnabled = true;
+/** True once the user has toggled audio in this session; a later
+ * server_settings payload must not override an explicit choice. */
+let audioToggledByUser = false;
+/** Whether a server_settings payload has been applied. The initial audio
+ * request waits for it, so the start-muted policy can act before anything
+ * was requested rather than stopping a stream that just started. */
+let serverSettingsReceived = false;
+/** Initialization wanted audio before the settings payload arrived; the
+ * payload handler resolves it. */
+let pendingInitialAudioStart = false;
 let microphoneEnabled = true;
 let webcamEnabled = true;
 let webcamCapture = null;
@@ -4176,6 +4186,10 @@ function receiveMessage(event) {
           }
         }
       } else if (pipeline === 'audio') {
+        if (isSharedMode) {
+            console.log("Shared mode: Audio pipeline control blocked.");
+            break;
+        }
         if (displayId !== 'primary') {
             console.log("Secondary display: Audio control blocked.");
             break;
@@ -4184,6 +4198,7 @@ function receiveMessage(event) {
           console.log("Audio is disabled. Audio pipeline control blocked.");
           break;
         }
+        audioToggledByUser = true;
         if (isAudioPipelineActive !== desiredState) {
           isAudioPipelineActive = desiredState;
           stateChangedFromControl = true;
@@ -6600,7 +6615,14 @@ class WorkerWebSocket {
             }
         } else {
             if (websocket && websocket.readyState === WebSocket.OPEN) {
-              if (isAudioPipelineActive) websocket.send('START_AUDIO');
+              // The server sends server_settings only after MODE, so the
+              // payload has not been seen yet when this runs. Hold the
+              // initial request until it arrives, otherwise a start-muted
+              // deployment would start audio here only to stop it again.
+              if (isAudioPipelineActive) {
+                if (serverSettingsReceived) websocket.send('START_AUDIO');
+                else pendingInitialAudioStart = true;
+              }
             }
         }
         loadingText = 'Waiting for stream...';
@@ -6680,6 +6702,34 @@ class WorkerWebSocket {
               // for an unlocked bool keeps the client's persisted value.
               const ce = obj.settings && obj.settings.command_enabled;
               serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
+              // Start-muted policy: the server value only (same reasoning as
+              // command_enabled), applied until the user touches the audio
+              // toggle. The initial audio request is held back until this
+              // payload (pendingInitialAudioStart), so acting here means no
+              // request was made yet; nothing is started only to be stopped.
+              // Shared viewers and secondary displays never send audio
+              // pipeline commands, and the policy is not theirs to apply.
+              serverSettingsReceived = true;
+              const asm = obj.settings && obj.settings.audio_start_muted;
+              // audio_enabled=false wins: the held START_AUDIO still goes out
+              // so the server's AUDIO_DISABLED reply tears the workers down,
+              // exactly as it does without the policy.
+              const aen = obj.settings && obj.settings.audio_enabled;
+              const audioDisabledByServer = aen && aen.value === false;
+              if (asm && asm.value === true && !audioDisabledByServer &&
+                  !audioToggledByUser && !isSharedMode &&
+                  displayId === 'primary' && isAudioPipelineActive) {
+                  isAudioPipelineActive = false;
+                  window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
+                  if (audioDecoderWorker) audioDecoderWorker.postMessage({ type: 'updatePipelineStatus', data: { isActive: false } });
+                  if (websocket && websocket.setAudioActive) websocket.setAudioActive(false);
+              }
+              if (pendingInitialAudioStart) {
+                  pendingInitialAudioStart = false;
+                  if (isAudioPipelineActive && websocket && websocket.readyState === WebSocket.OPEN) {
+                      websocket.send('START_AUDIO');
+                  }
+              }
               // Deployment policy the resize paths read; absent keeps resizing enabled.
               const er = obj.settings && obj.settings.enable_resize;
               if (er && typeof er.value === 'boolean') window.enable_resize = er.value;
