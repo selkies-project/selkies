@@ -7716,10 +7716,16 @@ class WebRTCInput:
             else: logger_webrtc_input.warning(f"Rejecting resolution change, invalid: {res}")
         elif msg_type == "s":
             scale = toks[1]
-            if re.fullmatch(r"^\d+(\.\d+)?$", scale):
+            if not re.fullmatch(r"^\d+(\.\d+)?$", scale):
+                logger_webrtc_input.warning(f"Rejecting scaling change, invalid: {scale}")
+            elif display_id != "primary":
+                # One desktop, one DPI: the primary's page owns it.
+                logger_webrtc_input.info(
+                    f"Ignoring DPI {scale} from '{display_id}': "
+                    "the desktop DPI follows the primary display.")
+            else:
                 _s = self.on_scaling_ratio(float(scale))
                 if asyncio.iscoroutine(_s): await _s
-            else: logger_webrtc_input.warning(f"Rejecting scaling change, invalid: {scale}")
         elif msg_type == "cmd":
             if not settings.command_enabled[0]:
                 logger_webrtc_input.warning("Received 'cmd' message, but command execution is disabled by server settings.")

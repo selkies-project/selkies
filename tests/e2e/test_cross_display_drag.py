@@ -414,6 +414,31 @@ def managed_window_drag(res: "H.Results", mode: str, page: Any, seam: int,
             proc.kill()
 
 
+def secondary_density(res: "H.Results", mode: str, dpage: Any) -> None:
+    """A secondary restored on a screen of another density is refused the
+    desktop's DPI.
+
+    The desktop has one DPI and the primary's page owns it; a secondary shown
+    at another device pixel ratio re-derives its own on every restore, and the
+    WebRTC core sends that re-derivation as the bare sync verb, off the SETTINGS
+    path the rule was first put on. Driven by changing the page's device pixel
+    ratio under it, which is what moving its window between such screens does.
+    """
+    mark = len(H.server_log())
+    cdp = dpage.context.new_cdp_session(dpage)
+    cdp.send("Emulation.setDeviceMetricsOverride", {
+        "width": SECONDARY_CSS[0], "height": SECONDARY_CSS[1],
+        "deviceScaleFactor": 2, "mobile": False})
+    refused = wait_for(
+        lambda: H.server_log().find("Ignoring DPI 192 from 'display2'", mark) >= 0, 15)
+    res.check(f"[{mode}] a secondary rederiving its density is refused",
+              refused, H.server_log(tail=3))
+    time.sleep(2.0)
+    res.check(f"[{mode}] and the desktop is not rescaled for it",
+              H.server_log().find("set DPI to 192", mark) < 0, "")
+    cdp.detach()
+
+
 def drive(res: "H.Results", mode: str, wayland: bool) -> None:
     """One transport's crossing checks; the full set runs on websockets."""
     full = mode == "websockets"
@@ -572,6 +597,7 @@ def drive(res: "H.Results", mode: str, wayland: bool) -> None:
                     res, mode, page, seam,
                     lambda sx, sy: (int(round(700 + (sx - p1[0]) / own_scale)),
                                     int(round(400 + (sy - p1[1]) / own_scale))))
+            secondary_density(res, mode, dpage)
         finally:
             browser.close()
 
