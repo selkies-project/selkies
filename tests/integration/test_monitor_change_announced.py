@@ -88,6 +88,18 @@ def publish(layouts):
     D._sync_replace_selkies_monitors(layouts)
 
 
+def primary_output(display_name):
+    """The RandR primary output of the server, 0 for none."""
+    from selkies.Xlib import display as x11_display
+    from selkies.Xlib.ext import randr
+
+    d = x11_display.Display(display_name)
+    try:
+        return int(randr.get_output_primary(d.screen().root).output)
+    finally:
+        d.close()
+
+
 def randr_events(display_name, during, seconds=2.0):
     """RandR events the server sends a bystander while ``during`` runs.
 
@@ -166,6 +178,17 @@ def run() -> H.Results:
         publish(ONE)
         events = randr_events(display_name, lambda: publish(dict(ONE)))
         res.check("a swap matching the live set sends nothing", not events, events)
+
+        # Qt takes any monitor listing the primary output for the primary
+        # screen, so with two displays sharing the output none is primary
+        res.check("a single display keeps the output primary",
+                  primary_output(display_name) != 0, primary_output(display_name))
+        publish(RIGHT)
+        res.check("two displays over one output leave no output primary",
+                  primary_output(display_name) == 0, primary_output(display_name))
+        publish(ONE)
+        res.check("and back to one display the output is primary again",
+                  primary_output(display_name) != 0, primary_output(display_name))
 
         root = D._module_display().screen().root.get_geometry()
         res.check("the root never changed size, so nothing else could prompt a re-read",
