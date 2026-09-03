@@ -60,6 +60,28 @@ window.__SELKIES_STREAMING_MODE__ = '%s';
 """ % (mode, "h264enc-striped" if mode == "websockets" else "h264enc")
 
 
+# A decoder without the 4:4:4 profile, whatever this engine's really has: the
+# locked scenarios are about what the client does with a refusal, and which
+# engines refuse changes with their releases and the codecs their host carries.
+REFUSE_FULLCOLOR_JS = """
+(() => {
+  if (typeof VideoDecoder === 'undefined') return;
+  const refused = (cfg) => /^avc1\\.f4/i.test((cfg && cfg.codec) || '');
+  const supported = VideoDecoder.isConfigSupported.bind(VideoDecoder);
+  VideoDecoder.isConfigSupported = (cfg) =>
+    refused(cfg) ? Promise.resolve({supported: false, config: cfg}) : supported(cfg);
+  const configure = VideoDecoder.prototype.configure;
+  VideoDecoder.prototype.configure = function (cfg) {
+    if (refused(cfg)) throw new DOMException('Unsupported configuration', 'NotSupportedError');
+    return configure.call(this, cfg);
+  };
+})();
+"""
+# The stripe decoders on the page rather than in the video worker, where a
+# script injected into the page cannot reach them.
+PAGE_DECODE_URL = H.BASE_URL + "/?offscreen_worker=false"
+
+
 def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
     """The server holding full colour on, for an engine that cannot decode it.
 
@@ -78,11 +100,11 @@ def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
     browser = C.launch_browser(p, "webkit")
     try:
         ctx = browser.new_context(viewport={"width": 1280, "height": 720})
-        ctx.add_init_script(init_script("websockets"))
+        ctx.add_init_script(init_script("websockets") + REFUSE_FULLCOLOR_JS)
         page = ctx.new_page()
         said = []
         page.on("console", lambda m: said.append(m.text))
-        page.goto(H.BASE_URL, wait_until="load")
+        page.goto(PAGE_DECODE_URL, wait_until="load")
         played = bool(C.wait_ws_video(page, timeout=45))
         encoder = page.evaluate(STORED_JS.replace("_video_fullcolor", "_encoder"))
         switched = [t for t in said if "has no decoder for avc1.F4" in t]
@@ -105,11 +127,11 @@ def drive_pinned(res: "H.Results", p: Any) -> None:
     browser = C.launch_browser(p, "webkit")
     try:
         ctx = browser.new_context(viewport={"width": 1280, "height": 720})
-        ctx.add_init_script(init_script("websockets"))
+        ctx.add_init_script(init_script("websockets") + REFUSE_FULLCOLOR_JS)
         page = ctx.new_page()
         said = []
         page.on("console", lambda m: said.append(m.text))
-        page.goto(H.BASE_URL, wait_until="load")
+        page.goto(PAGE_DECODE_URL, wait_until="load")
         page.wait_for_timeout(20000)
         told = [t for t in said if "which this browser cannot decode" in t]
         res.check("[pinned] the stream it cannot decode is reported once",

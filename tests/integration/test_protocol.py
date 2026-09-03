@@ -6,7 +6,9 @@ WebRTC-dialect opcodes apply live on the websockets transport, sanitized).
 Also covers the `cmd` opcode the dashboards' apps panel posts on: the command
 names it builds are bare, so the server has to resolve them on its own PATH,
 and a launch that fails has to come back as command_error or the optimistic
-install/remove in the UI never rolls back."""
+install/remove in the UI never rolls back; and a shared viewer's gamepad
+authority, where the slot a client may drive is the one its own connection
+carries rather than the index its message names."""
 import asyncio
 import json
 import os
@@ -36,6 +38,27 @@ async def _no_ack_task(*a, **k):
 
 def loglen() -> int:
     return len(H.server_log())
+
+
+async def await_log_from(mark: int, substr: str, timeout: float = 5.0) -> bool:
+    """`wait_log_from` for a caller holding open sockets: the blocking one stalls
+    the loop long enough for a connection's keepalive to expire."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if substr in H.server_log()[mark:]:
+            return True
+        await asyncio.sleep(0.2)
+    return False
+
+
+async def drain(sock) -> None:
+    """Consume and discard a socket's traffic until cancelled. A client being
+    streamed to that stops reading stops answering pings with it."""
+    try:
+        while True:
+            await sock.recv()
+    except Exception:
+        pass
 
 
 def wait_log_from(mark: int, substr: str, timeout: float = 10) -> bool:
@@ -68,9 +91,10 @@ def command_stub(path: str, sentinel: str) -> None:
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as fh:
-        # The server probes the wrapper with `check` before it publishes the
-        # apps panel; only a real command is worth recording.
-        fh.write('#!/bin/sh\n[ "$1" = check ] && exit 0\necho "$@" > "{}"\n'.format(sentinel))
+        # The server probes the wrapper with `check` before it publishes the apps
+        # panel and `list` for what is installed; only a real command is recorded.
+        fh.write('#!/bin/sh\ncase "$1" in check|list) exit 0 ;; esac\n'
+                 'echo "$@" > "{}"\n'.format(sentinel))
     os.chmod(path, 0o755)
 
 
@@ -228,6 +252,29 @@ def run() -> "H.Results":
                         stray.append(seen)
                 res.check("clipboard: a fetch is answered to its requester alone",
                           not stray, f"{stray[:2]}")
+
+            # A viewer's gamepad authority over the live gate. Each probe waits
+            # on the verdict it expects, then reads the association line — which
+            # names the slot actually driven — out of that same window.
+            assoc = "associated with persistent virtual gamepad slot"
+            draining = asyncio.create_task(drain(ws))
+            for label, query, index, allowed in (
+                ("a shared viewer cannot drive player 1", "?role=viewer", 0, False),
+                ("a shared viewer cannot drive player 2", "?role=viewer", 1, False),
+                ("a player-2 viewer cannot drive player 1", "?role=viewer&slot=2", 0, False),
+                ("a player-2 viewer drives its own slot", "?role=viewer&slot=2", 1, True),
+            ):
+                st = loglen()
+                async with websockets.connect(uri + query, max_size=None) as viewer:
+                    await asyncio.wait_for(viewer.recv(), timeout=10)
+                    await viewer.send(f"js,c,{index},UFJPQkU=,6,17")
+                    await viewer.send(f"js,b,{index},0,1")
+                    verdict = f"{assoc} {index}" if allowed else "DENIED gamepad input"
+                    settled = await await_log_from(st, verdict)
+                reached = f"{assoc} {index}" in H.server_log()[st:]
+                res.check(f"gamepad: {label}", settled and reached == allowed,
+                          f"index {index} {'reached' if reached else 'refused'}")
+            draining.cancel()
 
             await ws.send("STOP_VIDEO")
             await asyncio.sleep(1.0)

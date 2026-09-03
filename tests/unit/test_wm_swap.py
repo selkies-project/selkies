@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
-"""Window management is restarted only where the deployment owns the session.
+"""Window management is restarted where the running manager needs it, once.
 
-Some desktops tile a maximized window across the whole framebuffer rather than
-against the per-display regions an extended layout defines, and handing the
-session to a window manager that does not is the way out. That is right for a
-session assembled around Selkies and wrong for a desktop somebody is using:
-restarting the window manager there takes their session apart. So the deployment
-names the one it wants, and an image that assembles its own session is what
-names it.
+A window manager that reads the monitor set only as it starts tiles a
+maximized window across the whole framebuffer rather than against the
+per-display regions an extended layout defines. Which managers do is measured,
+so a session extending onto a second display restarts one of those, with the
+command line it was started with, and leaves every other alone: one that
+follows monitor changes live needs nothing, and kwin_x11 builds its screens
+from CRTCs, which a restart does not change.
+
+The decision is driven against stand-ins; the readers are then checked against
+a real Openbox on the test display, restarted for real.
 """
 import asyncio
 import os
+import subprocess
 import sys
+import time
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 DESKTOP_IMAGE = os.path.join(REPO, "addons", "desktop", "Dockerfile")
-ENTRYPOINT = os.path.join(REPO, "addons", "base", "container-entrypoint.sh")
 sys.path.insert(0, TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 import helpers as H  # noqa: E402
 
 from selkies import display_utils as DU  # noqa: E402
-from selkies.settings import settings  # noqa: E402
 
 res = H.Results("wm-swap")
 
 
-def swap_attempt(named: str = "openbox --replace", is_wayland: bool = False,
-                 displays: int = 2, running_wm: str = "xfwm4") -> list:
+def restart_attempt(running_wm: str = "Openbox", cmdline=("openbox", "--config-file", "/tmp/rc.xml"),
+                    is_wayland: bool = False, displays: int = 2, manager=None) -> list:
     """Run one `ensure_for` against stand-ins; report the commands it ran."""
     started: list = []
 
@@ -42,43 +45,101 @@ def swap_attempt(named: str = "openbox --replace", is_wayland: bool = False,
     async def fake_wm_name() -> str:
         return running_wm
 
+    async def fake_wm_pid() -> int:
+        return 4242 if cmdline else 0
+
+    def fake_wm_command(pid: int) -> list:
+        return list(cmdline) if pid == 4242 else []
+
     async def fake_wait(_name: str) -> bool:
         return True
 
-    saved = (DU.asyncio.create_subprocess_exec, DU.current_wm_name, DU.wait_for_wm,
-             settings.multi_monitor_wm)
+    saved = (DU.asyncio.create_subprocess_exec, DU.current_wm_name, DU.current_wm_pid,
+             DU.wm_command, DU.wait_for_wm)
     DU.asyncio.create_subprocess_exec = fake_exec
     DU.current_wm_name = fake_wm_name
+    DU.current_wm_pid = fake_wm_pid
+    DU.wm_command = fake_wm_command
     DU.wait_for_wm = fake_wait
-    settings.multi_monitor_wm = named
     try:
-        asyncio.run(DU.MultiMonitorWindowManager().ensure_for(displays, is_wayland))
+        asyncio.run((manager or DU.MultiMonitorWindowManager()).ensure_for(displays, is_wayland))
     finally:
-        (DU.asyncio.create_subprocess_exec, DU.current_wm_name, DU.wait_for_wm,
-         settings.multi_monitor_wm) = saved
+        (DU.asyncio.create_subprocess_exec, DU.current_wm_name, DU.current_wm_pid,
+         DU.wm_command, DU.wait_for_wm) = saved
     return started
 
 
-res.check("a session that named no window manager keeps its own",
-          swap_attempt(named="") == [], swap_attempt(named=""))
-res.check("the one the deployment named is what starts",
-          swap_attempt() == ["openbox --replace"], swap_attempt())
-res.check("any window manager can be named, not one this code knows",
-          swap_attempt(named="i3 --replace") == ["i3 --replace"],
-          swap_attempt(named="i3 --replace"))
-res.check("a session already running it is left alone",
-          swap_attempt(running_wm="Openbox") == [])
-res.check("one display never swaps", swap_attempt(displays=1) == [])
-res.check("Wayland manages its own windows", swap_attempt(is_wayland=True) == [])
-res.check("no window manager is named unless something names one",
-          settings.multi_monitor_wm == "", repr(settings.multi_monitor_wm))
+res.check("Openbox is restarted with the command line it was started with, plus --replace",
+          restart_attempt() == ["openbox --config-file /tmp/rc.xml --replace"], restart_attempt())
+res.check("a --replace already on its command line is not doubled",
+          restart_attempt(cmdline=("openbox", "--replace")) == ["openbox --replace"],
+          restart_attempt(cmdline=("openbox", "--replace")))
+res.check("xfwm4 is restarted as well",
+          restart_attempt(running_wm="Xfwm4", cmdline=("xfwm4",)) == ["xfwm4 --replace"],
+          restart_attempt(running_wm="Xfwm4", cmdline=("xfwm4",)))
+res.check("a manager whose command line cannot be read is restarted by name",
+          restart_attempt(cmdline=()) == ["openbox --replace"], restart_attempt(cmdline=()))
+res.check("kwin_x11 is left alone: a restart does not change its CRTC screens",
+          restart_attempt(running_wm="KWin", cmdline=("kwin_x11",)) == [])
+res.check("a manager that follows monitor changes live is left alone",
+          restart_attempt(running_wm="Mutter", cmdline=("mutter",)) == [])
+res.check("no window manager, nothing to restart",
+          restart_attempt(running_wm="", cmdline=()) == [])
+res.check("one display never restarts", restart_attempt(displays=1) == [])
+res.check("Wayland manages its own windows", restart_attempt(is_wayland=True) == [])
+manager = DU.MultiMonitorWindowManager()
+restart_attempt(manager=manager)
+res.check("once per session: a second extend restarts nothing",
+          restart_attempt(manager=manager) == [], restart_attempt(manager=manager))
+res.check("the desktop image names no window manager",
+          "MULTI_MONITOR_WM" not in open(DESKTOP_IMAGE, encoding="utf-8").read())
 
-# The image that ships a window manager is the one that names it: the base
-# image has no desktop in it, so naming one there would name what is not there.
-res.check("the image that ships one names it",
-          'ENV SELKIES_MULTI_MONITOR_WM="openbox --replace"'
-          in open(DESKTOP_IMAGE, encoding="utf-8").read())
-res.check("the image with no desktop in it names none",
-          "SELKIES_MULTI_MONITOR_WM" not in open(ENTRYPOINT, encoding="utf-8").read())
 
+def live_openbox_check() -> None:
+    """The readers against a real Openbox, and a real restart of it."""
+    if H.shutil.which("openbox") is None:
+        res.skip("a real Openbox is read and restarted", "no openbox on PATH")
+        return
+    display = H.require_display()
+    env = {**os.environ, "DISPLAY": display}
+    # The readers open the display the environment names; never the desktop's.
+    os.environ["DISPLAY"] = display
+    DU._drop_module_display()
+    stale = DU._sync_wm_pid()
+    if stale:
+        os.kill(stale, 15)
+        deadline = time.time() + 10
+        while time.time() < deadline and DU._sync_wm_pid() == stale:
+            time.sleep(0.2)
+    proc = H.spawn(["openbox", "--replace"], env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    try:
+        deadline = time.time() + 15
+        while time.time() < deadline and DU._sync_wm_pid() != proc.pid:
+            time.sleep(0.2)
+        name = DU._sync_wm_name()
+        pid = DU._sync_wm_pid()
+        res.check("the running Openbox advertises its name and process id",
+                  DU.wm_name_matches("openbox", name) and pid == proc.pid, (name, pid, proc.pid))
+        res.check("and its command line is read back from /proc",
+                  DU.wm_command(pid) == ["openbox", "--replace"], DU.wm_command(pid))
+        asyncio.run(DU.MultiMonitorWindowManager().ensure_for(2, False))
+        deadline = time.time() + 10
+        while time.time() < deadline and (proc.poll() is None
+                                          or DU._sync_wm_pid() in (0, proc.pid)):
+            time.sleep(0.2)
+        new_pid = DU._sync_wm_pid()
+        res.check("the first extend restarts it: the old process exits and a new one manages",
+                  proc.poll() is not None and new_pid not in (0, proc.pid)
+                  and DU.wm_name_matches("openbox", DU._sync_wm_name()),
+                  (proc.poll(), new_pid, proc.pid))
+        if new_pid not in (0, proc.pid):
+            os.kill(new_pid, 15)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
+live_openbox_check()
 sys.exit(0 if res.summary() else 1)

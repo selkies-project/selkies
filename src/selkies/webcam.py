@@ -226,7 +226,6 @@ class VirtualWebcam:
         s.fps_den = 1
         s.pixel_format = device_pixel_format(str(app_settings.webcam_pixel_format), codec)
         s.device_path = str(app_settings.webcam_device)
-        s.pipewire = bool(app_settings.webcam_pipewire[0])
         return s
 
     async def ensure(self, codec: Optional[int] = None) -> Optional[Any]:

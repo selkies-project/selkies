@@ -50,7 +50,11 @@ from typing import Any, Callable, Optional, Tuple
 
 from .settings import settings as app_settings
 from .audio_control import AudioControl
-from .display_utils import apply_common_capture_settings, format_pixelflux_cursor
+from .display_utils import (
+    apply_common_capture_settings,
+    format_pixelflux_cursor,
+    release_pixelflux_cursor_callback,
+)
 
 # An ABI-skewed non-abi3 wheel raises RuntimeError rather than ImportError.
 try:
@@ -616,9 +620,11 @@ class MediaPipelinePixel(MediaPipeline):
         await self.restart_screen_capture()
 
     async def stop_screen_capture(self) -> None:
-        """Stop the pixelflux capture, dropping the module even on error."""
+        """Stop the pixelflux capture, dropping the module and its cursor
+        callback even on error."""
         if not self._is_screen_capturing or self.capture_module is None:
             return
+        release_pixelflux_cursor_callback(self.capture_module)
         try:
             await asyncio.to_thread(self.capture_module.stop_capture)
             self.capture_module = None

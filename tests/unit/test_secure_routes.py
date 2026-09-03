@@ -4,7 +4,10 @@
 The real auth middleware runs on a stub application carrying the route set the
 server registers. With a master token set and Basic auth off, uploads, the file
 listing, TURN and metrics want a provisioned session token — as a Bearer header,
-as ``?token=``, or as the cookie the web client sets — or the master token; the
+as ``?token=``, or as the cookie the web client sets — or the master token;
+the control endpoints (``/api/tokens``, ``/api/switch``) take the master token
+as ``Authorization: Bearer`` or, beside a Basic login's Authorization header,
+in the named fallback header; the
 liveness routes, the static client and the WebSocket handshakes (which carry
 their own token gate) stay as they are. A viewer-role token is refused where
 the view-only password is. With Basic auth on as well, a token is accepted
@@ -34,7 +37,7 @@ from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
 import selkies.selkies as S  # noqa: E402
 from selkies.stream_server import (  # noqa: E402
-    AUTH_REALM, SESSION_TOKEN_COOKIE, CentralizedStreamServer,
+    AUTH_REALM, MASTER_TOKEN_HEADER, SESSION_TOKEN_COOKIE, CentralizedStreamServer,
 )
 
 MASTER = "unit-master-token"
@@ -75,6 +78,10 @@ def _basic(user: str, password: str) -> str:
 
 def _bearer(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _named(token: str) -> dict:
+    return {MASTER_TOKEN_HEADER: f"Bearer {token}"}
 
 
 def _cookie(token: str) -> dict:
@@ -232,13 +239,44 @@ async def secure_basic_off() -> None:
               f"{status} {challenge!r}")
         status, _, _ = await app.call("POST", "/api/tokens", headers=_bearer(MASTER))
         check("master token provisions tokens", status == 200, status)
-        status, _, challenge = await app.call("POST", "/api/switch", headers=_bearer(CTRL))
-        check("session token cannot switch modes (master only without Basic)",
+        status, _, _ = await app.call("POST", "/api/tokens", headers=_named(MASTER))
+        check("named-header master token provisions tokens", status == 200, status)
+        status, _, _ = await app.call(
+            "POST", "/api/tokens",
+            headers=dict(_named(MASTER), Authorization=_basic("proxyuser", "proxypass")))
+        check("named-header master token provisions beside a Basic Authorization",
+              status == 200, status)
+        status, _, _ = await app.call(
+            "POST", "/api/tokens", headers=dict(_bearer(MASTER), **_named("junk")))
+        check("Authorization Bearer is tried before the named header", status == 200, status)
+        status, _, challenge = await app.call("POST", "/api/tokens", headers=_named(CTRL))
+        check("named header takes only the master token", status == 401 and challenge == BEARER_CHALLENGE,
+              f"{status} {challenge!r}")
+        status, _, _ = await app.call("POST", "/api/upload", headers=_named(MASTER))
+        check("named header is a credential only on the control endpoints", status == 401, status)
+        status, _, _ = await app.call("POST", "/api/switch", headers=_named(MASTER))
+        check("named-header master token switches modes", status == 200, status)
+        status, _, _ = await app.call(
+            "POST", "/api/switch",
+            headers=dict(_named(MASTER), Authorization=_basic("proxyuser", "proxypass")))
+        check("named-header master token switches modes beside a Basic Authorization",
+              status == 200, status)
+        status, _, challenge = await app.call("POST", "/api/switch", headers=_named(CTRL))
+        check("named header on the switch takes only the master token",
               status == 401 and challenge == BEARER_CHALLENGE, f"{status} {challenge!r}")
-        status, _, challenge = await app.call("POST", "/api/switch", headers=_cookie(CTRL))
-        check("cookie cannot switch modes either", status == 401, status)
+        status, body, _ = await app.call("POST", "/api/switch", headers=_bearer(CTRL))
+        check("a controller token switches modes", status == 200 and body == "controller",
+              f"{status} {body}")
+        status, _, _ = await app.call("POST", "/api/switch", headers=_bearer(VIEW))
+        check("a viewer token cannot switch modes", status == 403, status)
+        status, _, challenge = await app.call("POST", "/api/switch")
+        check("no token cannot switch modes",
+              status == 401 and challenge == BEARER_CHALLENGE, f"{status} {challenge!r}")
         status, _, _ = await app.call("POST", "/api/switch", headers=_bearer(MASTER))
         check("master token switches modes", status == 200, status)
+        status, _, _ = await app.call(
+            "POST", "/api/switch", headers=dict(_cookie(CTRL), Origin="http://evil.example"))
+        check("a cross-site switch is refused whatever it carries", status == 403, status)
 
     S.user_tokens.clear()
     async with _App(_Settings()) as app:
@@ -280,9 +318,11 @@ async def secure_basic_on() -> None:
         status, _, challenge = await app.call("POST", "/api/upload", headers=_bearer(CTRL[:-1]))
         check("Basic+token: an invalid token falls through to the Basic challenge",
               status == 401 and (challenge or "").startswith("Basic"), f"{status} {challenge!r}")
-        status, _, challenge = await app.call("POST", "/api/switch", headers=_bearer(CTRL))
-        check("Basic+token: a session token does not switch modes",
-              status == 401 and (challenge or "").startswith("Basic"), f"{status} {challenge!r}")
+        status, body, _ = await app.call("POST", "/api/switch", headers=_bearer(CTRL))
+        check("Basic+token: a controller token switches modes",
+              status == 200 and body == "controller", f"{status} {body}")
+        status, _, _ = await app.call("POST", "/api/switch", headers=_bearer(VIEW))
+        check("Basic+token: a viewer token still cannot", status == 403, status)
         status, _, _ = await app.call("POST", "/api/switch", headers={"Authorization": _basic("user", "secret")})
         check("Basic+token: Basic credentials switch modes as before", status == 200, status)
         status, _, _ = await app.call(

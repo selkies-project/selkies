@@ -32,6 +32,7 @@ import json
 import os
 import shutil
 import socket
+import threading
 import subprocess
 import sys
 import time
@@ -148,7 +149,7 @@ def main() -> "H.Results":
 
         placed = ctl.set_app_screen_layout(
             inner, [(0, 0, W, HGT), (W, 0, W, HGT)])
-        got = poll(lambda: [(x, y) for _n, x, y in ctl.list_app_screens(inner)],
+        got = poll(lambda: [(s[1], s[2]) for s in ctl.list_app_screens(inner)],
                    lambda v: v == [(0, 0), (W, 0)])
         res.check("the session lays the two screens side by side",
                   placed == 2 and got == [(0, 0), (W, 0)],
@@ -223,7 +224,7 @@ def main() -> "H.Results":
         poll(ctl.list_windows, lambda v: len(v) == 2 and not any(w[4] for w in v))
         placed = ctl.set_app_screen_layout(
             inner, [(W, 0, W, HGT), (0, 0, W, HGT)])
-        got = poll(lambda: [(x, y) for _n, x, y in ctl.list_app_screens(inner)],
+        got = poll(lambda: [(s[1], s[2]) for s in ctl.list_app_screens(inner)],
                    lambda v: v == [(W, 0), (0, 0)])
         res.check("a later display can take the origin side",
                   ok_l and placed == 2 and got == [(W, 0), (0, 0)],
@@ -232,6 +233,62 @@ def main() -> "H.Results":
         ipc(f"REMOVE_SCREEN {n_left}")
         ctl.reposition_output(0, 0, 0)
         poll(ctl.list_windows, lambda v: len(v) == 1)
+
+        # A display opened on one side, closed, and reopened on the other: the
+        # screen a session grows is the one it last released, so an arrangement
+        # left behind is what a second attempt has to overwrite.
+        r = ipc("ADD_SCREEN")
+        n_right = str(r.get("output", ""))
+        ok_r = bool(r.get("ok")) and ctl.create_output(2, W, HGT, W, 0, 1.0)
+        poll(ctl.list_windows, lambda v: len(v) == 2 and not any(w[4] for w in v))
+        placed_r = ctl.set_app_screen_layout(
+            inner, [(0, 0, W, HGT), (W, 0, W, HGT)])
+        got_r = poll(lambda: [(s[1], s[2]) for s in ctl.list_app_screens(inner)],
+                     lambda v: v == [(0, 0), (W, 0)])
+        res.check("a display opens right after one opened left was closed",
+                  ok_r and placed_r == 2 and got_r == [(0, 0), (W, 0)],
+                  f"placed={placed_r} got={got_r}")
+        ctl.destroy_output(2)
+        ipc(f"REMOVE_SCREEN {n_right}")
+        poll(ctl.list_windows, lambda v: len(v) == 1)
+
+        # A screen arriving or leaving cancels whatever output configuration is
+        # in flight, and that is the same moment a display's mode and scale are
+        # applied. A cancellation says only that the serial went stale, so the
+        # configuration is rebuilt against the new state rather than reported
+        # as a refusal, which would drop the display back to a capture scale.
+        stop = threading.Event()
+        cycles = []
+
+        def churn() -> None:
+            while not stop.is_set():
+                added = str(ipc("ADD_SCREEN").get("output", ""))
+                if added:
+                    ipc(f"REMOVE_SCREEN {added}")
+                    cycles.append(added)
+
+        def sized() -> bool:
+            # A configuration the compositor did not take reaches Python as a
+            # refusal, whatever the reason it gave.
+            try:
+                return bool(ctl.set_app_screen_geometry(inner, W, HGT, 1.0, 0))
+            except Exception:
+                return False
+
+        churner = threading.Thread(target=churn, daemon=True)
+        churner.start()
+        try:
+            landed = sum(sized() for _ in range(12))
+        finally:
+            stop.set()
+            churner.join(timeout=15)
+        poll(lambda: ctl.list_app_screens(inner), lambda v: len(v) == 1)
+        # A churner whose commands stopped landing would spin without changing
+        # anything, and every configuration would land for want of an adversary.
+        # The floor is well under what the loop manages on two contended cores.
+        res.check("a configuration cancelled by a screen change is retried",
+                  landed == 12 and len(cycles) >= 4,
+                  f"{landed}/12 landed over {len(cycles)} screen changes")
 
         reply = ipc("REMOVE_SCREEN")
         res.check("the last screen is refused removal", not reply.get("ok"), reply)
@@ -265,7 +322,7 @@ def main() -> "H.Results":
             await h._apply_session_screen_layout(
                 {"primary": {"x": 0, "y": 0, "w": W, "h": HGT},
                  "display7": {"x": W, "y": 0, "w": W, "h": HGT}})
-            got = poll(lambda: [(x, y) for _n, x, y in ctl.list_app_screens(inner)],
+            got = poll(lambda: [(s[1], s[2]) for s in ctl.list_app_screens(inner)],
                        lambda v: v == [(0, 0), (W, 0)])
             res.check("the layout lands on the screen the display owns",
                       got == [(0, 0), (W, 0)], got)
@@ -289,7 +346,7 @@ def main() -> "H.Results":
                 {"primary": {"x": 0, "y": 0, "w": W, "h": HGT},
                  "display2": {"x": W, "y": 0, "w": W, "h": HGT},
                  "display3": {"x": 2 * W, "y": 0, "w": W, "h": HGT}})
-            got = poll(lambda: [(x, y) for _n, x, y in ctl.list_app_screens(inner)],
+            got = poll(lambda: [(s[1], s[2]) for s in ctl.list_app_screens(inner)],
                        lambda v: v == [(0, 0), (2 * W, 0), (W, 0)])
             res.check("the arrangement follows ownership, not screen order",
                       got == [(0, 0), (2 * W, 0), (W, 0)], got)
@@ -316,7 +373,7 @@ def main() -> "H.Results":
             name3 = h._session_screens.get("display3", "")
             ctl.destroy_output(2)
             await h.ensure_session_screens(["display3"])
-            scr = poll(lambda: [n for n, _x, _y in ctl.list_app_screens(inner)],
+            scr = poll(lambda: [s[0] for s in ctl.list_app_screens(inner)],
                        lambda v: len(v) == 2)
             wins = poll(ctl.list_windows,
                         lambda v: len(v) == 2 and not any(w[4] for w in v))

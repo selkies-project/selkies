@@ -35,7 +35,9 @@
  * (stream resolution), `s,DPI`, `vb,kbps`, `ab,bps`, `_arg_fps,N`, `_crf,N`,
  * `_rc,mode`, `_ebc,bool`, `cmd,command`, `kr` (release every key), `cr`
  * (cache-only clipboard fetch), `REQUEST_CLIPBOARD`, `START_VIDEO` /
- * `STOP_VIDEO` (this peer's feed), `SET_NATIVE_CURSOR_RENDERING,0|1`, the
+ * `STOP_VIDEO` (this peer's feed), `SET_NATIVE_CURSOR_RENDERING,0|1`,
+ * `vp,originX,originY,scaleX,scaleY` (this page's stream box on the user's
+ * desktop, relayed to the other displays), the
  * `_f,fps` and `_l,ms` client metrics, `_stats_video,{json}` when the server
  * asked for raw reports, and the chunked clipboard transfer of
  * `lib/clipboard-worker-bridge.js`. Server to client arrives through the
@@ -2491,6 +2493,10 @@ export default function webrtc() {
 				} catch (e) {
 					console.warn('Failed to send initial clipboard request (cr):', e);
 				}
+				// Input attaches before negotiation ends, so the pad announcement
+				// it made went into a channel that was not open yet. Every role
+				// re-announces: a #playerN link carries a gamepad and nothing else.
+				if (input) input.resyncGamepads();
 
 				if (isSharedMode) {
 					console.log('Shared mode: skipping loading of last session settings and sending persisted settings to server');
@@ -2664,6 +2670,13 @@ export default function webrtc() {
 					window.postMessage({
 						type: 'commandDone',
 						command: action.slice('command_done,'.length),
+					}, window.location.origin);
+				} else if (action.startsWith('apps_installed,') && !isSharedMode) {
+					// Broadcast when a command changed it: this page may not
+					// be the one that ran it.
+					window.postMessage({
+						type: 'appsInstalled',
+						apps: JSON.parse(action.slice('apps_installed,'.length)),
 					}, window.location.origin);
 				} else if (action.startsWith('auth_success,') || action.startsWith('role_update,')) {
 					const verdict = action.slice(action.indexOf(',') + 1);

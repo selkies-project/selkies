@@ -45,9 +45,11 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 from PIL import Image, ImageMath
 
 from .Xlib import X as x11_X
+from .Xlib import Xatom as x11_Xatom
 from .Xlib import display as x11_display
 from .Xlib import error as x11_error
 from .Xlib.ext import randr
+from .Xlib.ext import res as xres
 from .Xlib.protocol import request as x11_request
 
 import logging
@@ -143,6 +145,9 @@ _x11_lock = threading.Lock()
 # 1.5 has an output belong to one monitor and servers before 21.1 enforce it
 # (`_sync_set_selkies_layout`).
 _OUTPUT_SHARED: Optional[bool] = None
+# Bumped on the physical output to announce a monitor-set change.
+_MONITOR_SERIAL_ATOM: str = "_SELKIES_MONITOR_SERIAL"
+_MONITOR_SERIAL: int = 0
 _x11_conn: Optional[x11_display.Display] = None
 
 
@@ -254,9 +259,14 @@ def _sync_query_randr() -> Tuple[str, List[str], str]:
     with _x11_lock:
         try:
             d = _module_display()
-            root, _, _, oi, names = _connected_output_state(d)
-            geom = root.get_geometry()
+            geom = d.screen().root.get_geometry()
             curr_res = f"{geom.width}x{geom.height}"
+            try:
+                _, _, _, oi, names = _connected_output_state(d)
+            except RuntimeError:
+                # A server with no connected output (a GPU without a display
+                # engine, a driver told to use none): the root is all there is.
+                return curr_res, [], ""
             wh_pat = re.compile(r"\d+x\d+")
             resolutions = sorted(
                 {names[m] for m in oi.modes if m in names and wh_pat.fullmatch(names[m])}
@@ -666,7 +676,10 @@ def _monitor_info(
 
     The primary monitor carries the RandR primary flag: the WM tiles panels
     against it, and the same-set no-op in `_sync_replace_selkies_monitors`
-    reads it back to prove the live set already matches.
+    reads it back to prove the live set already matches. The flag is the
+    only mark of the primary in a multi-display set, because Qt also takes
+    a monitor listing the primary output for the primary screen, which
+    every one of these does.
     """
     return {
         "name": d.intern_atom(name),
@@ -759,6 +772,34 @@ def _sync_set_output_primary() -> None:
             raise
 
 
+def _sync_set_screen_size(w: int, h: int) -> Tuple[int, int]:
+    """Blocking RRSetScreenSize to exactly ``w`` x ``h`` (no CRTC change).
+
+    What sizes the root of a server with no connected output, where there is
+    no mode to set: the framebuffer is all there is and the server sizes it
+    freely in both directions.
+
+    Returns:
+        The root's size afterwards.
+    """
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root = d.screen().root
+            dpi_hint = _APPLIED_DPI if _APPLIED_DPI is not None else 96.0
+            randr.set_screen_size(
+                root, w, h,
+                max(1, round(w * 25.4 / dpi_hint)), max(1, round(h * 25.4 / dpi_hint)),
+            )
+            d.sync()
+            geom = root.get_geometry()
+            return int(geom.width), int(geom.height)
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            raise
+
+
 def _sync_grow_screen(w: int, h: int) -> None:
     """Blocking grow-only screen resize (never shrinks; no CRTC change)."""
     with _x11_lock:
@@ -817,6 +858,33 @@ def _monitors_match(
                for name, m in live.items())
 
 
+def _sync_announce_monitor_change(d: x11_display.Display, root: Any, out_id: int) -> None:
+    """Emit the RandR event a toolkit re-reads its monitor set on.
+
+    RRSetMonitor emits no RandR event: the server sends core ConfigureNotify on
+    the root, which GTK3 discards wherever RandR 1.3 is present
+    (`_gdk_x11_screen_size_changed`), re-reading its monitors only for
+    RRScreenChangeNotify or RRNotify. So a swap that does not resize the
+    framebuffer never reaches a running desktop, which keeps painting and
+    constraining windows against the monitors it last saw. An output property
+    is the one RRNotify carrying no geometry, physical size or CRTC of its own,
+    and the server emits it even for an unchanged value.
+
+    Advisory, and synced here so a failure surfaces inside it: a set that is
+    right but unannounced is no reason to report the swap as failed.
+    """
+    global _MONITOR_SERIAL
+    _MONITOR_SERIAL = (_MONITOR_SERIAL + 1) & 0x7FFFFFFF
+    try:
+        randr.change_output_property(
+            root, out_id, d.intern_atom(_MONITOR_SERIAL_ATOM), x11_Xatom.INTEGER,
+            x11_X.PropModeReplace, (32, [_MONITOR_SERIAL]),
+        )
+        d.sync()
+    except Exception as e:
+        logger_app_resize.debug(f"Could not announce the monitor-set change ({e}).")
+
+
 def _sync_set_selkies_layout(
     d: x11_display.Display, root: Any, out_id: int,
     ordered: List[Tuple[str, Dict[str, int]]], share_output: bool,
@@ -850,21 +918,19 @@ def _sync_set_selkies_layout(
 def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
     """Blocking swap of ALL selkies-* logical monitors to exactly ``layouts``.
 
-    ``layouts`` maps display id to an `{x, y, w, h}` rectangle. The whole
-    swap runs under one X server grab: window managers re-read the monitor
-    set whenever the root emits a core ConfigureNotify — which both a screen
-    resize AND deleting/creating the monitor that holds the physical output
-    do (the server swaps an automatic whole-CRTC monitor in and out).
-    RRSetMonitor cannot replace an existing name (BadValue), so a delete gap
-    is unavoidable; the grab makes the swap invisible: every event the WM
-    acts on is delivered after the final set is in place, so it never tiles
-    against a monitor-less or half-defined screen. Foreign (non-selkies)
+    ``layouts`` maps display id to an `{x, y, w, h}` rectangle. The whole swap
+    runs under one X server grab: RRSetMonitor cannot replace an existing name
+    (BadValue), so a delete gap is unavoidable, and the grab makes it
+    invisible: every event a window manager acts on is delivered after the
+    final set is in place, so it never tiles against a monitor-less or
+    half-defined screen. The set alone announces nothing a toolkit listens to,
+    so `_sync_announce_monitor_change` closes the grab. Foreign (non-selkies)
     monitors are left untouched. A request matching the live set returns
-    without touching the server: even that swap costs a delete+create and
-    hands the WM a ConfigureNotify to re-tile against. A live set whose
-    outputs sit differently than this server was measured to allow never
-    counts as a match: monitors outlive the client that set them, and a stale
-    outputless set at the right geometry is invisible to GTK apps.
+    without touching the server: even that swap costs a delete+create and a
+    re-tile. A live set whose outputs sit differently than this server was
+    measured to allow never counts as a match: monitors outlive the client
+    that set them, and a stale outputless set at the right geometry is
+    invisible to GTK apps.
     """
     global _OUTPUT_SHARED
     with _x11_lock:
@@ -892,8 +958,12 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
                     live = _sync_set_selkies_layout(d, root, out_id, ordered, False)
                 elif share:
                     _OUTPUT_SHARED = True
-                if layouts:
-                    randr.set_output_primary(root, out_id)
+                # Qt takes any monitor listing the primary output for the
+                # primary screen, and these monitors all list the one output
+                # (`_monitor_info`), so with several displays no output is
+                # primary and the monitor flag alone names the primary.
+                randr.set_output_primary(root, out_id if len(layouts) == 1 else 0)
+                _sync_announce_monitor_change(d, root, out_id)
             finally:
                 # Flushed, not just queued: an X error aborting the sequence
                 # would leave an unsent ungrab and every other X client wedged.
@@ -911,6 +981,26 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
             raise
+
+
+def _sync_announce_current_monitors() -> None:
+    """Announce the live monitor set on the module connection."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root, _, out_id, _, _ = _connected_output_state(d)
+            _sync_announce_monitor_change(d, root, out_id)
+        except Exception as e:
+            logger_app_resize.debug(f"Could not announce the monitor-set change ({e}).")
+
+
+async def announce_monitor_change() -> None:
+    """Tell the toolkits already running that the monitor set changed.
+
+    The grab-protected replace announces its own; this is for the routes that
+    reach a final set some other way (see `_sync_announce_monitor_change`).
+    """
+    await asyncio.to_thread(_sync_announce_current_monitors)
 
 
 async def replace_selkies_monitors(
@@ -943,22 +1033,33 @@ async def replace_selkies_monitors(
         )
         take_output = _OUTPUT_SHARED is not False
     await designate_primary_output(screen_name)
+    await announce_monitor_change()
     return ok
 
 
+def _sync_wm_check_window():
+    """The running EWMH window manager's check window (root
+    _NET_SUPPORTING_WM_CHECK), None when no manager advertises one. Under
+    `_x11_lock`."""
+    d = _module_display()
+    root = d.screen().root
+    check_atom = d.intern_atom('_NET_SUPPORTING_WM_CHECK')
+    # 33 is XA_WINDOW, the property's type.
+    prop = root.get_full_property(check_atom, 33)
+    if not prop or not prop.value:
+        return None
+    return d.create_resource_object('window', int(prop.value[0]))
+
+
 def _sync_wm_name() -> str:
-    """Name of the running EWMH window manager ('' when none): root
-    _NET_SUPPORTING_WM_CHECK -> child window -> _NET_WM_NAME."""
+    """Name of the running EWMH window manager ('' when none): the check
+    window's _NET_WM_NAME."""
     with _x11_lock:
         try:
             d = _module_display()
-            root = d.screen().root
-            check_atom = d.intern_atom('_NET_SUPPORTING_WM_CHECK')
-            # 33 is XA_WINDOW, the property's type.
-            prop = root.get_full_property(check_atom, 33)
-            if not prop or not prop.value:
+            wm_win = _sync_wm_check_window()
+            if wm_win is None:
                 return ""
-            wm_win = d.create_resource_object('window', int(prop.value[0]))
             name_prop = wm_win.get_full_property(
                 d.intern_atom('_NET_WM_NAME'), d.intern_atom('UTF8_STRING'))
             if name_prop and name_prop.value:
@@ -969,6 +1070,34 @@ def _sync_wm_name() -> str:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
             return ""
+
+
+def _sync_wm_pid() -> int:
+    """Process id of the running EWMH window manager (0 when none): the check
+    window's _NET_WM_PID, or, for a manager that sets none (Openbox), what
+    the X-Resource extension knows of the client owning that window."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            wm_win = _sync_wm_check_window()
+            if wm_win is None:
+                return 0
+            # 6 is XA_CARDINAL, the property's type.
+            pid_prop = wm_win.get_full_property(d.intern_atom('_NET_WM_PID'), 6)
+            if pid_prop and pid_prop.value:
+                return int(pid_prop.value[0])
+            if d.query_extension('X-Resource') is None:
+                return 0
+            reply = d.res_query_client_ids(
+                [{'client': wm_win.id, 'mask': xres.LocalClientPIDMask}])
+            for entry in reply.ids:
+                if entry.spec.mask & xres.LocalClientPIDMask and entry.value:
+                    return int(entry.value[0])
+            return 0
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            return 0
 
 
 def _declared_desktop() -> str:
@@ -999,47 +1128,57 @@ def _running_desktop(name: str, session_binary: str) -> bool:
     return bool(which(session_binary))
 
 
-class MultiMonitorWindowManager:
-    """Hands X11 window management to another window manager once a session has
-    two displays.
+#: Window managers measured to read the RandR monitor set only as they start,
+#: by the leading run of letters and digits of the name they advertise: a
+#: session extending onto a second display restarts one of these so it reads
+#: the set the layout published. Others follow monitor changes live, or never
+#: read the set at all (kwin_x11 builds its screens from CRTCs, of which a
+#: framebuffer server has one).
+RESTART_TO_READ_MONITORS = ("openbox", "xfwm4")
 
-    Some desktops (XFCE and Plasma among them) tile a maximized window across
-    the whole framebuffer rather than against the per-display regions an
-    extended layout defines, and handing the session to a window manager that
-    does not is the way out. Which one is `--multi-monitor-wm`, unset by
-    default: restarting window management belongs to a session the deployment
-    assembled, never to a desktop somebody is using, and only the deployment
-    knows which of the two it runs. Both transports share this state: the swap
-    is attempted once per session either way, since a second one would restart
-    window management under whoever is using it. Wayland sessions manage their
-    own windows and never swap.
+
+class MultiMonitorWindowManager:
+    """Restarts X11 window management once a session has two displays, where
+    the manager running needs it.
+
+    A window manager that reads the monitor set only as it starts tiles a
+    maximized window across the whole framebuffer rather than the per-display
+    regions an extended layout defines; restarted, it reads the set the layout
+    published. Which managers need that is measured
+    (`RESTART_TO_READ_MONITORS`), not configured, and the one running is
+    restarted with the command line it was started with plus `--replace`, so
+    it keeps the configuration chain its session gave it. Both transports
+    share this state: once per session, since a second restart would take
+    window management away from whoever is using it. Wayland sessions manage
+    their own windows and never restart.
     """
 
     def __init__(self) -> None:
-        self._swapped = False
+        self._done = False
 
     async def ensure_for(self, display_count: int, is_wayland: bool) -> None:
-        """Swap if this session was given a window manager and has not swapped.
+        """Restart the running window manager if it is one that needs it and
+        this session has not yet.
 
         The replacement is started detached, so it outlives this process's
-        session, and with the arguments the deployment gave: a window manager
-        started off its own stock configuration chain keeps the bindings its
-        compiled-in defaults do not cover, which a hand-written minimal config
-        would strip.
+        session.
         """
-        if is_wayland or self._swapped or display_count <= 1:
+        if is_wayland or self._done or display_count <= 1:
             return
-        from .settings import settings as _s
-        command = str(getattr(_s, "multi_monitor_wm", "") or "").strip().split()
-        if not command:
-            return
-        name = os.path.basename(command[0])
-        self._swapped = True
-        if name.lower() in (await current_wm_name()).lower():
+        self._done = True
+        running = await current_wm_name()
+        needing = next((wm for wm in RESTART_TO_READ_MONITORS
+                        if wm_name_matches(wm, running)), None)
+        if needing is None:
             logger_app_resize.info(
-                f"Multi-monitor setup: {name} already manages the session; no WM swap.")
+                f"Multi-monitor setup: {running or 'no window manager'} keeps its "
+                "monitor set current; no restart.")
             return
-        logger_app_resize.info(f"Multi-monitor setup: switching to {name}.")
+        command = wm_command(await current_wm_pid()) or [needing]
+        if "--replace" not in command:
+            command.append("--replace")
+        logger_app_resize.info(
+            f"Multi-monitor setup: restarting {needing} to read the monitor set.")
         try:
             await asyncio.create_subprocess_exec(
                 *command,
@@ -1048,13 +1187,13 @@ class MultiMonitorWindowManager:
                 start_new_session=True,
             )
         except Exception as e:
-            logger_app_resize.error(f"Failed to switch to {name}: {e}")
+            logger_app_resize.error(f"Failed to restart {needing}: {e}")
             return
         # Before the layout applies: a WM snapshotting the monitor set mid-swap
         # re-tiles maximized windows across the whole framebuffer.
-        if not await wait_for_wm(name):
+        if not await wait_for_wm(needing):
             logger_app_resize.warning(
-                f"{name} takeover not confirmed; applying layout anyway.")
+                f"{needing} restart not confirmed; applying layout anyway.")
 
 
 async def current_wm_name() -> str:
@@ -1062,8 +1201,43 @@ async def current_wm_name() -> str:
     return await asyncio.to_thread(_sync_wm_name)
 
 
+async def current_wm_pid() -> int:
+    """Process id the running EWMH window manager advertises, 0 when none."""
+    return await asyncio.to_thread(_sync_wm_pid)
+
+
+def wm_command(pid: int) -> List[str]:
+    """The command line process `pid` was started with, from /proc; empty
+    when there is no such process to read."""
+    if pid <= 0:
+        return []
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    return [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+
+
+def wm_name_matches(command_name: str, wm_name: str) -> bool:
+    """Whether the window manager advertising ``wm_name`` is the one the
+    command ``command_name`` starts.
+
+    A window manager rarely advertises its binary's name: kwin_x11 answers
+    "KWin", Openbox "Openbox". Both are reduced to their leading run of
+    letters and digits, case aside, and one has to begin with the other.
+    """
+    def stem(name: str) -> str:
+        m = re.match(r"[a-z0-9]+", name.strip().lower())
+        return m.group(0) if m else ""
+
+    want, have = stem(command_name), stem(wm_name)
+    return bool(want) and bool(have) and (want.startswith(have) or have.startswith(want))
+
+
 async def wait_for_wm(name_substring: str, timeout: float = 3.0) -> bool:
-    """Wait until the EWMH WM name contains ``name_substring`` (case-insensitive).
+    """Wait until the EWMH WM name is the window manager ``name_substring``
+    starts (`wm_name_matches`).
 
     Used after a WM --replace so layout changes are not applied while two
     window managers hand over the selection (the incoming WM snapshots the
@@ -1073,10 +1247,8 @@ async def wait_for_wm(name_substring: str, timeout: float = 3.0) -> bool:
         True when the name matched within ``timeout`` seconds.
     """
     deadline = asyncio.get_running_loop().time() + timeout
-    want = name_substring.lower()
     while True:
-        name = await current_wm_name()
-        if want in name.lower():
+        if wm_name_matches(name_substring, await current_wm_name()):
             return True
         if asyncio.get_running_loop().time() >= deadline:
             return False
@@ -1175,8 +1347,11 @@ async def list_selkies_monitors() -> List[str]:
 
 async def clear_selkies_monitors() -> None:
     """Delete every logical monitor this software created (selkies-*)."""
-    for monitor_name in await list_selkies_monitors():
+    names = await list_selkies_monitors()
+    for monitor_name in names:
         await delete_logical_monitor(monitor_name)
+    if names:
+        await announce_monitor_change()
 
 
 class RealizedFit(NamedTuple):
@@ -1335,13 +1510,16 @@ async def get_new_res(res_str: str) -> Tuple[str, str, List[str], str, Optional[
 
     Returns:
         ``(curr_res, fitted res_str, sorted mode names, max res, output
-        name)``; the output name is None when no screen could be identified.
+        name)``; the output name is None when the server has no connected
+        output, in which case ``curr_res`` is still the root's size.
     """
     try:
         curr_res, resolutions, screen_name = await asyncio.to_thread(_sync_query_randr)
     except Exception as e:
         logger_app_resize.info(f"Native RandR query failed ({e}); using xrandr fallback.")
         return await _get_new_res_xrandr(res_str)
+    if not screen_name:
+        return curr_res, res_str, [], res_str, None
     max_w_limit, max_h_limit = 7680, 4320
     max_res_str = f"{max_w_limit}x{max_h_limit}"
     new_res = res_str
@@ -1377,21 +1555,22 @@ async def _get_new_res_xrandr(
         return curr_res, new_res, resolutions, max_res_str, screen_name
     current_screen_modes_started = False
     for line in xrandr_output.splitlines():
+        # The root's size heads the listing, whether or not an output follows
+        current_match = current_pat.match(line)
+        if current_match:
+            curr_res = current_match.group(1).replace(" ", "")
         screen_match = screen_pat.match(line)
         if screen_match:
             if screen_name is None:
                 screen_name = screen_match.group(1)
             current_screen_modes_started = screen_name == screen_match.group(1)
         if current_screen_modes_started:
-            current_match = current_pat.match(line)
-            if current_match:
-                curr_res = current_match.group(1).replace(" ", "")
             res_match = res_pat.match(line.strip())
             if res_match:
                 resolutions.append(res_match.group(1))
     if not screen_name:
-        logger_app_resize.warning(
-            "Could not determine connected screen from xrandr."
+        logger_app_resize.info(
+            "No connected RandR output on this X server; the root is all there is."
         )
         return curr_res, new_res, resolutions, max_res_str, screen_name
     max_w_limit, max_h_limit = 7680, 4320
@@ -1419,6 +1598,31 @@ async def resize_display(res_str: str) -> Optional[Tuple[int, int]]:
     """
     try:
         w, h = await asyncio.to_thread(_sync_resize_randr, res_str)
+    except RuntimeError as e:
+        if "no connected RandR output" in str(e):
+            # No mode to set, but the framebuffer itself may still be sized.
+            try:
+                w_req, h_req = (int(p) for p in res_str.split("x"))
+                w, h = await asyncio.to_thread(_sync_set_screen_size, w_req, h_req)
+            except Exception as size_error:
+                logger_app_resize.info(
+                    f"No connected RandR output to size for '{res_str}' and the framebuffer "
+                    f"cannot be resized ({size_error}); the X server keeps its size."
+                )
+                return None
+            if (w, h) != (w_req, h_req):
+                logger_app_resize.info(
+                    f"No connected RandR output; the framebuffer stays at {w}x{h} for '{res_str}'."
+                )
+                return None
+            logger_app_resize.info(
+                f"No connected RandR output; sized the framebuffer to {w}x{h}."
+            )
+            return w, h
+        logger_app_resize.info(
+            f"Native RandR resize for '{res_str}' failed ({e}); falling back to xrandr."
+        )
+        return await _resize_display_xrandr(res_str)
     except Exception as e:
         logger_app_resize.info(
             f"Native RandR resize for '{res_str}' failed ({e}); falling back to xrandr."
@@ -2484,6 +2688,26 @@ def cursor_content_handle(
     """
     meta = struct.pack("<iiii", width, height, hot_x, hot_y)
     return zlib.crc32(meta, zlib.crc32(rgba_bytes)) or 1
+
+
+def release_pixelflux_cursor_callback(capture_module: Any) -> None:
+    """Withdraw the cursor callback a stopping capture registered.
+
+    pixelflux's cursor slot is process-wide and outlives the capture that set
+    it, so a service that does not let go stays reachable through it until
+    something else registers. A build without the withdrawal is left alone:
+    the `None` it would store is a `None` its delivery path would call.
+
+    Args:
+        capture_module: The pixelflux `ScreenCapture` that registered it.
+    """
+    clear = getattr(capture_module, "clear_cursor_callback", None)
+    if clear is None:
+        return
+    try:
+        clear()
+    except Exception:
+        logger_app_resize.debug("Cursor callback withdrawal failed", exc_info=True)
 
 
 def format_pixelflux_cursor(

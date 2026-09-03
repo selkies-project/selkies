@@ -211,7 +211,7 @@ def main() -> "H.Results":
         time.sleep(1.5)
         screens = pixelflux.ScreenCapture().list_app_screens(inner)
         res.check("the session's screens sit side by side",
-                  [(x, y) for _n, x, y in screens] == [(0, 0), (DISPLAY[0], 0)], screens)
+                  [(s[1], s[2]) for s in screens] == [(0, 0), (DISPLAY[0], 0)], screens)
         patch = Patch(display, WIN_RGB)
 
         def settled(want, x, deadline=15.0):

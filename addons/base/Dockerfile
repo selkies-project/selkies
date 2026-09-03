@@ -601,6 +601,10 @@ RUN rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoi
 # AppImages mount themselves through FUSE, which a container is usually not
 # given; extracting instead is what makes them run at all here.
 ENV APPIMAGE_EXTRACT_AND_RUN="1"
+# VS Code's launcher reads a Microsoft kernel as "inside WSL" and exits with a
+# prompt to install the Windows build instead; a container on Docker Desktop
+# or WSL is that kernel, and the prompt is meaningless there.
+ENV DONT_PROMPT_WSL_INSTALL="1"
 
 ENV SHELL="/bin/bash"
 ENV USER="ubuntu"
@@ -608,5 +612,12 @@ ENV HOME="/home/ubuntu"
 WORKDIR /home/ubuntu
 
 EXPOSE 8080
+
+# s6 respawns a service that cannot start, so "running" says nothing: only the
+# port answering tells a session from a container that never served. /api/health
+# needs no credentials, and only the http-to-TLS direction fails outright.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl -fsS -k -o /dev/null "https://localhost:${SELKIES_PORT:-8080}/api/health" || \
+        curl -fsS -o /dev/null "http://localhost:${SELKIES_PORT:-8080}/api/health"
 
 ENTRYPOINT ["/etc/container-entrypoint.sh"]

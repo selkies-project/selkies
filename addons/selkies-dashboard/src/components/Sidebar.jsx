@@ -51,7 +51,7 @@
  */
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
 import { displayLabel, decodableEncoders, canDecodeFullColor, getRoutePrefix, getStorageAppName, isMobileClient } from "../../../selkies-web-core/lib/util.js";
-import { withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
+import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
@@ -61,6 +61,8 @@ import { getTranslator } from "../translations";
 import {
   APP_COMMAND_STATE_EVENT,
   INSTALLED_APPS_ROLLBACK_EVENT,
+  INSTALLED_APPS_SERVER_EVENT,
+  applyServerInstalledApps,
   pendingAppAction,
   postAppCommand,
   readInstalledApps,
@@ -491,8 +493,10 @@ function readStreamAudioLevel(meterRef) {
  * @param {Function} props.t Translator.
  * @param {boolean} props.commandsAvailable Whether the server accepts remote commands; actions are disabled otherwise.
  * @param {boolean} props.commandsKnown Whether `serverSettings` have arrived, so the disabled notice is only shown once known.
+ * @param {string[]|undefined} props.installedFromServer App names the runner reports installed; the stored list is only a cache of it.
  */
-function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown }) {
+function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown,
+                    installedFromServer }) {
   const [appData, setAppData] = useState(cachedAppData);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -513,6 +517,28 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown }) {
     return () =>
       window.removeEventListener(APP_COMMAND_STATE_EVENT, onCommandState);
   }, []);
+
+  /* The runner's answer replaces what this browser remembered, which a private
+     window or cleared site data leaves empty while the session has apps. */
+  useEffect(() => {
+    const adopt = (apps) => {
+      if (applyServerInstalledApps(apps)) setInstalledApps(readInstalledApps());
+    };
+    adopt(installedFromServer);
+    const onServerList = (event) => setInstalledApps(event.detail?.apps || []);
+    const onWindowMessage = (event) => {
+      if (event.origin !== window.location.origin) return;
+      const message = event.data;
+      if (typeof message !== "object" || message === null) return;
+      if (message.type === "appsInstalled") adopt(message.apps);
+    };
+    window.addEventListener(INSTALLED_APPS_SERVER_EVENT, onServerList);
+    window.addEventListener("message", onWindowMessage);
+    return () => {
+      window.removeEventListener(INSTALLED_APPS_SERVER_EVENT, onServerList);
+      window.removeEventListener("message", onWindowMessage);
+    };
+  }, [installedFromServer]);
 
   /**
    * A failed install or remove already rolled the stored list back; mirror
@@ -1063,15 +1089,27 @@ function Sidebar() {
    * Window Management API found one in that direction.
    * @param {'up'|'down'|'left'|'right'} direction
    * @param {ScreenDetailed|null} [screen]
+   * @returns {boolean} Whether the window opened.
    */
   const launchWindow = (direction, screen = null) => {
     const url = `${window.location.href.split('#')[0]}#display2-${direction}`;
-    let features = 'resizable=yes,scrollbars=yes,noopener,noreferrer';
+    // Not `noopener` in the features: that makes window.open return null even
+    // when it opened, leaving a refusal indistinguishable from success. The
+    // opener is severed on the handle instead.
+    let features = 'resizable=yes,scrollbars=yes';
     if (screen) {
       features += `,left=${screen.availLeft},top=${screen.availTop},width=${screen.availWidth},height=${screen.availHeight}`;
     }
-    window.open(url, '_blank', features);
+    const opened = window.open(url, '_blank', features);
+    if (!opened) {
+      // Refused from an async continuation, whose click activation is spent (all
+      // the more after a permission prompt). An arrow click is a fresh one.
+      console.warn('Second display window was blocked; leaving the placement arrows up.');
+      return false;
+    }
+    try { opened.opener = null; } catch { /* already navigated away */ }
     setAvailablePlacements(null);
+    return true;
   };
 
   /** Every side, with no screen to place the window on: what the arrows offer
@@ -1084,7 +1122,8 @@ function Sidebar() {
    * placement arrows. Asking beats guessing: the API answers nothing without
    * the window-management permission, and a display silently opened to the
    * right of a monitor that sits above or left of this one is the one thing
-   * the arrows exist to avoid.
+   * the arrows exist to avoid. A refused popup falls back to the arrows too,
+   * so the button is never seen to do nothing at all.
    */
   const handleAddScreenClick = async () => {
     if (!('getScreenDetails' in window)) {
@@ -1126,7 +1165,7 @@ function Sidebar() {
         const direction = availableDirections[0];
         const screen = placements[direction];
         console.log(`Auto-placing single screen to the ${direction}.`);
-        launchWindow(direction, screen);
+        if (!launchWindow(direction, screen)) setAvailablePlacements(placements);
       } else if (availableDirections.length > 1) {
         console.log("Multiple placement options found. Showing arrows.");
         setAvailablePlacements(placements);
@@ -2363,13 +2402,13 @@ function Sidebar() {
    * core reloads into it. `window.__selkiesModeSwitching` is set before the
    * request because the server tears down the old peer (WebSocket close code
    * 4000) before it responds, and without the flag the active core would
-   * surface a spurious "Server disconnected" alert. The endpoint is gated on
-   * the master token (Bearer) when set, or Basic credentials via same-origin;
-   * with Basic Auth off the dashboard is not given the token, so a 401 prompts
-   * for it once, keeps it in sessionStorage, and retries; a token the server
-   * rejects is dropped so the next attempt re-prompts. A failed switch clears
-   * the flag again, since no reload follows and a kept flag would hide a real
-   * disconnect.
+   * surface a spurious "Server disconnected" alert. The request carries this
+   * client's own session token, which a controller's is enough for; a stored
+   * master token overrides it, and where neither is accepted a 401 prompts for
+   * the master token once, keeps it in sessionStorage and retries, dropping one
+   * the server rejects so the next attempt re-prompts. A viewer is refused 403
+   * and is not asked for anything. A failed switch clears the flag again, since
+   * no reload follows and a kept flag would hide a real disconnect.
    */
   const handleStreamModeChange = async (event) => {
     const newMode = event.target.value;
@@ -2378,7 +2417,7 @@ function Sidebar() {
     try {
       const MASTER_TOKEN_KEY = "selkies_master_token";
       const doSwitch = () => {
-        const headers = { "Content-Type": "application/json" };
+        const headers = sessionAuthHeaders({ "Content-Type": "application/json" });
         let storedToken = null;
         try { storedToken = sessionStorage.getItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ }
         if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;
@@ -2967,53 +3006,23 @@ function Sidebar() {
         </div>
       )}
       {availablePlacements && (() => {
-        const arrowBaseStyle = {
-          position: 'absolute',
-          width: '100px',
-          height: '100px',
-          backgroundColor: 'rgba(97, 218, 251, 0.8)',
-          color: 'var(--sidebar-bg, #20232a)',
-          border: '2px solid var(--sidebar-bg, #20232a)',
-          borderRadius: '15px',
-          fontSize: '48px',
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
-          cursor: 'pointer',
-          pointerEvents: 'all',
-          boxShadow: '0 4px 15px rgba(0, 0, 0, 0.3)',
-          transition: 'transform 0.2s ease',
-        };
-
         const handleArrowClick = (e, direction, screen) => {
           e.stopPropagation();
           launchWindow(direction, screen);
         };
-
         return (
-          <div 
-            style={{
-              position: 'fixed',
-              top: 0,
-              left: 0,
-              width: '100vw',
-              height: '100vh',
-              zIndex: 9999,
-              pointerEvents: 'auto'
-            }}
-            onClick={() => setAvailablePlacements(null)}
-          >
+          <div className={`screen-placement-overlay theme-${theme}`} onClick={() => setAvailablePlacements(null)}>
             {availablePlacements.up !== undefined && (
-              <button style={{...arrowBaseStyle, top: '40px', left: '50%', transform: 'translateX(-50%)'}} onClick={(e) => handleArrowClick(e, 'up', availablePlacements.up)}>▲</button>
+              <button className="screen-placement-arrow up" onClick={(e) => handleArrowClick(e, 'up', availablePlacements.up)}>▲</button>
             )}
             {availablePlacements.down !== undefined && (
-              <button style={{...arrowBaseStyle, bottom: '40px', left: '50%', transform: 'translateX(-50%)'}} onClick={(e) => handleArrowClick(e, 'down', availablePlacements.down)}>▼</button>
+              <button className="screen-placement-arrow down" onClick={(e) => handleArrowClick(e, 'down', availablePlacements.down)}>▼</button>
             )}
             {availablePlacements.left !== undefined && (
-              <button style={{...arrowBaseStyle, left: '40px', top: '50%', transform: 'translateY(-50%)'}} onClick={(e) => handleArrowClick(e, 'left', availablePlacements.left)}>◄</button>
+              <button className="screen-placement-arrow left" onClick={(e) => handleArrowClick(e, 'left', availablePlacements.left)}>◄</button>
             )}
             {availablePlacements.right !== undefined && (
-              <button style={{...arrowBaseStyle, right: '40px', top: '50%', transform: 'translateY(-50%)'}} onClick={(e) => handleArrowClick(e, 'right', availablePlacements.right)}>►</button>
+              <button className="screen-placement-arrow right" onClick={(e) => handleArrowClick(e, 'right', availablePlacements.right)}>►</button>
             )}
           </div>
         );
@@ -4767,7 +4776,8 @@ function Sidebar() {
       {isAppsModalOpen && (
         <AppsModal isOpen={isAppsModalOpen} onClose={toggleAppsModal} t={t}
           commandsAvailable={serverSettings?.command_enabled?.value === true}
-          commandsKnown={serverSettings != null} />
+          commandsKnown={serverSettings != null}
+          installedFromServer={serverSettings?.apps_installed?.value} />
       )}
 
       {isViewerRole && (

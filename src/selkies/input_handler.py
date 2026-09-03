@@ -54,6 +54,8 @@ keyboard, mouse and clipboard set, including `co,` because IME commits and
 atomic typing arrive that way. `cmd` and every settings-mutating message stay
 controller-only. Blur/visibility lifecycle noise (`VIEWER_SILENT_DROP_PREFIXES`)
 from a read-only viewer is normal operation and is dropped without a warning.
+A `js,` message names its own gamepad index, so `gamepad_slot_denied` decides
+separately whether its sender holds that slot.
 
 Blocking X and compositor work runs on worker threads or dedicated event
 threads; the asyncio loop only queues, dispatches, and awaits, so input never
@@ -167,6 +169,36 @@ VIEWER_COLLAB_EXTRA_PREFIXES = (
     "REQUEST_CLIPBOARD",
 )
 VIEWER_SILENT_DROP_PREFIXES = ("kr", "cr")
+
+
+def gamepad_slot_denied(msg: str, role: Optional[str], slot: Optional[int],
+                        is_secure: bool) -> bool:
+    """Whether a `js,` message drives a gamepad slot its sender does not hold.
+
+    The index is a field of the client's own message, so the connection decides
+    which one it may name: a slot holder drives index `slot - 1` alone, and a
+    viewer without one drives none. A legacy controller is left unrestricted,
+    since it already holds keyboard and mouse: pinning it to index 0 would buy
+    no guarantee while breaking a client presenting several local pads.
+
+    Args:
+        msg: Raw client message; anything but `js,` is not this gate's business.
+        role: The connection's role, "controller" or "viewer".
+        slot: One-based player slot the connection holds, None when it holds none.
+        is_secure: Whether a master token is set.
+
+    Returns:
+        True when the message must be dropped.
+    """
+    if not msg.startswith("js,"):
+        return False
+    if slot is None:
+        return is_secure or role == "viewer"
+    try:
+        index = int(msg.split(",", 3)[2])
+    except (IndexError, ValueError):
+        return True
+    return int(slot) - 1 != index
 
 
 class _WaylandKeymapOwner:
@@ -3570,7 +3602,7 @@ class WebRTCInput:
         cursor_size: int = 16,
         cursor_scale: float = 1.0,
         cursor_debug: bool = False,
-        max_cursor_size: int = 32,
+        max_cursor_size: int = 128,
         data_server_instance: Any = None,
         upload_dir: Optional[str] = None,
         is_wayland: bool = False,
@@ -3634,12 +3666,14 @@ class WebRTCInput:
         self.enable_clipboard = enable_clipboard
         self.enable_binary_clipboard = enable_binary_clipboard
         self._apps_runner_ok: Optional[bool] = None
+        self._apps_installed: Optional[List[str]] = None
         self.enable_cursors = enable_cursors
         self.cursor_scale = cursor_scale
         self.cursor_size = cursor_size
         self.cursor_debug = cursor_debug
-        # An explicit cursor_size raises the capture cap so the requested size
-        # survives the transport instead of being resized down.
+        # The cap bounds what is delivered, not the theme: an application's own
+        # sprite (a game's 128px pointer) travels whole up to what a browser
+        # shows as a cursor, and a theme size past that raises it further.
         if isinstance(cursor_size, int) and cursor_size > 0:
             max_cursor_size = max(max_cursor_size, cursor_size)
         self.max_cursor_size = max_cursor_size
@@ -5575,6 +5609,8 @@ class WebRTCInput:
         host that denies ptrace (Yama restricted, no CAP_SYS_PTRACE) leaves the
         panel with nothing that can work. Only the wrapper knows how to decide
         that for the runner it ships, so it is asked rather than reimplemented.
+        A usable runner is then asked what it already has installed, so the
+        first client to connect is told rather than having to remember.
         """
         runner = shutil.which(APP_RUNNER)
         if runner is None:
@@ -5592,6 +5628,7 @@ class WebRTCInput:
             return
         if self._apps_runner_ok:
             logger_webrtc_input.info("Apps panel enabled: %s can run here.", APP_RUNNER)
+            await self.refresh_installed_apps()
         else:
             detail = (stdout or b"").decode("utf-8", "replace").strip().splitlines()
             logger_webrtc_input.warning(
@@ -5599,6 +5636,71 @@ class WebRTCInput:
                 APP_RUNNER, detail[0] if detail else "")
             for line in detail[1:]:
                 logger_webrtc_input.warning("  %s", line.strip())
+
+    def installed_apps(self) -> Optional[List[str]]:
+        """The app names the runner reports installed, as last read.
+
+        None until a read succeeds, which a caller must not publish as an empty
+        set: a client told nothing is installed clears its own record.
+        """
+        return None if self._apps_installed is None else list(self._apps_installed)
+
+    async def refresh_installed_apps(self) -> bool:
+        """Re-read the runner's installed set.
+
+        Only the runner knows what a session has, and the client cannot run
+        anything, so the server asks. A failed read leaves the last answer
+        standing rather than replacing it with nothing.
+
+        Returns:
+            Whether the set changed, so a caller can skip announcing it.
+        """
+        runner = shutil.which(APP_RUNNER)
+        if runner is None:
+            return False
+        try:
+            proc = await subprocess.create_subprocess_exec(
+                runner, "list", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            stdout, _ = await self._communicate_or_kill(
+                proc, APP_RUNNER_CHECK_TIMEOUT_S, f"{APP_RUNNER} list")
+        except Exception as e:
+            logger_webrtc_input.warning(f"{APP_RUNNER} list failed to run: {e}")
+            return False
+        if proc.returncode != 0:
+            logger_webrtc_input.debug(
+                "%s list exited %s; keeping the installed set as it was",
+                APP_RUNNER, proc.returncode)
+            return False
+        names = [line.strip() for line in
+                 (stdout or b"").decode("utf-8", "replace").splitlines()
+                 if line.strip()]
+        changed = names != self._apps_installed
+        self._apps_installed = names
+        if changed:
+            logger_webrtc_input.info("Apps installed in this session: %s",
+                                     ", ".join(names) or "none")
+        return changed
+
+    async def note_app_command_finished(self, command: str) -> None:
+        """Re-read and announce the installed set after an apps command ran.
+
+        Install, remove and update change it; a launch does not. Broadcast
+        rather than answered to the requester, which already applied the change
+        optimistically: it is the session's other pages that have no other way
+        to hear.
+
+        Args:
+            command: The command string that finished, as the client posted it.
+        """
+        parts = command.split()
+        if len(parts) < 2 or os.path.basename(parts[0]) != APP_RUNNER:
+            return
+        if parts[1] not in ("install", "remove", "update"):
+            return
+        if await self.refresh_installed_apps():
+            # A reported change means the read landed, so the set is a list.
+            self.send_command_status(
+                "apps_installed," + json.dumps(self._apps_installed))
 
     def _invalidate_app_wl_display(self) -> None:
         """Drop the cached app-compositor resolution so the next call re-detects
@@ -5636,10 +5738,14 @@ class WebRTCInput:
         return self._app_wl_is_separate
 
     #: Basename of the session compositor's control socket in XDG_RUNTIME_DIR
-    #: (the labwc IPC patch the container images carry). Its presence is what
-    #: enables a second display on the nested-Wayland backend: no Wayland
-    #: protocol can create a screen at runtime, so a session compositor
-    #: without the socket cannot grow one.
+    #: (the labwc IPC patch the container images carry). The first rung of the
+    #: session-screen control that backs a second display on the
+    #: nested-Wayland backend: a wlroots session cannot grow a screen without
+    #: it. KWin serves no socket and needs none — its screens are grown as
+    #: `zkde_screencast_unstable_v1` virtual outputs through pixelflux
+    #: (`add_app_screen`), the rung probed when this socket is absent by
+    #: growing a probe screen (the protocol answers on stock kwin too, but
+    #: only a patched kwin registers a nested virtual output).
     SESSION_IPC_SOCKET = "labwc.sock"
 
     def _session_ipc_path(self) -> Optional[str]:
@@ -5653,6 +5759,12 @@ class WebRTCInput:
         """The last probed answer to whether the session compositor's control
         socket accepts connections; False until a probe ran."""
         return bool(getattr(self, "_session_ipc_ok", False))
+
+    def session_screen_control_available(self) -> bool:
+        """Whether any session-screen control answered the last probe: the
+        labwc control socket, or KWin's virtual-output protocol."""
+        return bool(getattr(self, "_session_ipc_ok", False)
+                    or getattr(self, "_session_kde_ok", False))
 
     async def probe_session_screen_ipc(self) -> bool:
         """Probe the session compositor's control socket and cache the answer.
@@ -5682,6 +5794,19 @@ class WebRTCInput:
         self._session_ipc_ok = ok
         return ok
 
+    def _session_socket_identity(self, display: str) -> Tuple[str, int, int]:
+        """The session compositor's socket as an identity — its path, inode
+        and creation time, zeros where none exists — so a restarted compositor
+        reads as a new one and a cached probe answer stays with the instance
+        it was measured on."""
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or ""
+        path = display if os.path.isabs(display) else os.path.join(runtime, display)
+        try:
+            st = os.stat(path)
+        except OSError:
+            return (path, 0, 0)
+        return (path, st.st_ino, st.st_ctime_ns)
+
     def _session_is_nested(self) -> bool:
         """Whether applications run under a compositor of their own rather than
         directly on the capture compositor."""
@@ -5695,12 +5820,13 @@ class WebRTCInput:
     def session_screen_capability(self) -> Tuple[bool, str]:
         """Whether this session can show a second display, from the last probes.
 
-        A nested session compositor with the control socket grows a screen on
-        demand; without the socket, spare screens it opened at startup can
+        A nested session compositor with a screen control grows a screen on
+        demand — over the labwc control socket, or KWin's virtual-output
+        protocol; without one, spare screens it opened at startup can
         still be arranged for a display (the spare-screen hold). A session
         running directly on the capture compositor needs neither: every
         capture output is a monitor of its own there. Only a nested session
-        holding a single screen with no control socket has nowhere to show a
+        holding a single screen with no screen control has nowhere to show a
         second display.
 
         Returns:
@@ -5708,32 +5834,59 @@ class WebRTCInput:
         """
         if not self.is_wayland:
             return True, ""
-        if self.session_screen_ipc_available():
+        if self.session_screen_control_available():
             return True, ""
         if not self._session_is_nested():
             return True, ""
         if int(getattr(self, "_session_screen_count", 0) or 0) >= 2:
             return True, ""
         return False, ("The session compositor cannot show a second display: "
-                       "it has no control socket and no spare screen.")
+                       "it has no screen control and no spare screen.")
 
     async def probe_session_screen_capability(self) -> Tuple[bool, str]:
         """Re-probe what backs a second display and return the fresh answer.
 
-        The control socket decides when it answers; a session without one is
-        asked for its screen count instead, so a compositor started with spare
-        screens keeps its second display.
+        The control socket decides when it answers; without one, a nested
+        session is probed for KWin's virtual-output protocol, and a session
+        with neither control is asked for its screen count instead, so a
+        compositor started with spare screens keeps its second display.
+
+        The KWin probe grows a token-sized screen and gives it back, since a
+        stock kwin serves the protocol without registering the output and
+        nothing in the globals tells the two apart. The session sees that
+        screen come and go, so the answer is kept for as long as the session
+        compositor's socket is the same one, and only an unreachable
+        compositor is asked again.
         """
         await self.probe_session_screen_ipc()
+        kde = False
         count = 0
         if (not self._session_ipc_ok and self.wayland_input is not None
                 and self._session_is_nested()):
             display = self._app_wayland_display()
-            try:
-                count = len(await asyncio.to_thread(
-                    self.wayland_input.list_app_screens, display))
-            except Exception as e:
-                logger_webrtc_input.debug(f"Session screen count probe failed: {e}")
+            identity = self._session_socket_identity(display)
+            cached = getattr(self, "_session_kde_probe", None)
+            if cached is not None and cached[0] == identity:
+                kde = cached[1]
+            else:
+                try:
+                    kde = bool(await asyncio.to_thread(
+                        self.wayland_input.app_screen_control_available, display))
+                except Exception as e:
+                    logger_webrtc_input.debug(f"Session screen control probe failed: {e}")
+                else:
+                    self._session_kde_probe = (identity, kde)
+                    logger_webrtc_input.info(
+                        "Session compositor grows screens on demand." if kde else
+                        "Session compositor registers no virtual output; "
+                        "a second display needs a spare screen.")
+            if not kde:
+                try:
+                    count = len(await asyncio.to_thread(
+                        self.wayland_input.list_app_screens, display))
+                except Exception as e:
+                    logger_webrtc_input.debug(f"Session screen count probe failed: {e}")
+        self._session_kde_ok = kde
         self._session_screen_count = count
         return self.session_screen_capability()
 
@@ -5778,9 +5931,11 @@ class WebRTCInput:
         output-destroy path evacuates only the removed screen's windows to
         the primary, which is the X11 behaviour. A screen owned by no
         display is retired the same way, so a session that was also started
-        with pre-provisioned screens converges on one screen per display. A
-        session without the control socket keeps the screens it was started
-        with; the spare-screen hold covers those.
+        with pre-provisioned screens converges on one screen per display.
+        Removal follows the rung that grew: the control socket's
+        REMOVE_SCREEN, or closing the held KWin virtual output. A session
+        with neither control keeps the screens it was started with; the
+        spare-screen hold covers those.
 
         Args:
             secondaries: The display ids still attached ('primary' and empty
@@ -5789,7 +5944,7 @@ class WebRTCInput:
         wanted = sorted({str(d) for d in secondaries if d and d != "primary"},
                         key=wayland_output_id)
         self._session_display_order = wanted
-        if self.wayland_input is None or not self.session_screen_ipc_available():
+        if self.wayland_input is None or not self.session_screen_control_available():
             return
         if (getattr(settings, "wayland_host_display", "") or "").strip():
             # Host capture: the session compositor owns its screens outright.
@@ -5804,18 +5959,28 @@ class WebRTCInput:
             except Exception as e:
                 logger_webrtc_input.debug(f"Session screen list failed: {e}")
                 return
-            names = [name for name, _x, _y in screens]
+            names = [screen[0] for screen in screens]
             for did in [d for d, n in owned.items() if n not in names]:
                 del owned[did]
             doomed = [(owned[d], d) for d in list(owned) if d not in wanted]
             claimed = set(owned.values())
             doomed += [(n, None) for n in names[1:] if n not in claimed]
             for name, did in doomed:
-                reply = await self._session_ipc_command(f"REMOVE_SCREEN {name}")
-                if not reply.get("ok"):
+                if self._session_ipc_ok:
+                    reply = await self._session_ipc_command(f"REMOVE_SCREEN {name}")
+                    removed = bool(reply.get("ok"))
+                    error = reply.get("error", "no reply")
+                else:
+                    try:
+                        removed = bool(await asyncio.to_thread(
+                            self.wayland_input.remove_app_screen, name))
+                        error = "not a screen this session grew"
+                    except Exception as e:
+                        removed, error = False, str(e)
+                if not removed:
                     logger_webrtc_input.warning(
                         f"Session compositor could not remove screen '{name}': "
-                        f"{reply.get('error', 'no reply')}")
+                        f"{error}")
                     continue
                 if did is not None:
                     del owned[did]
@@ -5823,7 +5988,9 @@ class WebRTCInput:
                     f"Session compositor removed screen '{name}'; its windows "
                     "return to the primary.")
 
-    async def ensure_session_screen(self, display_id: str) -> None:
+    async def ensure_session_screen(self, display_id: str,
+                                    size: Optional[Tuple[int, int]] = None,
+                                    scale: float = 1.0) -> None:
         """Grow the session screen a display owns, right before its capture
         output is created.
 
@@ -5831,14 +5998,23 @@ class WebRTCInput:
         capture output that asks, so a screen is added one at a time, each
         claimed by its own display's output creation before the next is
         grown -- that pairing is what keeps every screen showing the display
-        it was grown for. The reply names the screen; the name is what
-        `ensure_session_screens` later removes and what positional
-        addressing resolves through. Waits (bounded) for the new screen's
-        host window to park so the output created next adopts it.
+        it was grown for. The screen's name is what `ensure_session_screens`
+        later removes and what positional addressing resolves through: the
+        control socket's reply coins it, while a KWin virtual output carries
+        the name this handler coins from the display's output id. Waits
+        (bounded) for the new screen's host window to park so the output
+        created next adopts it.
+
+        Args:
+            display_id: The display the screen is grown for.
+            size: The size the display asked for, seeding a KWin virtual
+                output (the capture output drives the real size); the labwc
+                rung sizes screens through output management instead.
+            scale: The display's scale, seeding a KWin virtual output.
         """
         did = str(display_id or "")
         if (not did or did == "primary" or self.wayland_input is None
-                or not self.session_screen_ipc_available()):
+                or not self.session_screen_control_available()):
             return
         if (getattr(settings, "wayland_host_display", "") or "").strip():
             return
@@ -5856,13 +6032,27 @@ class WebRTCInput:
                 return sum(1 for w in wins if w[4])
 
             before = await parked()
-            reply = await self._session_ipc_command("ADD_SCREEN")
-            if not reply.get("ok"):
-                logger_webrtc_input.warning(
-                    f"Session compositor could not add a screen for '{did}': "
-                    f"{reply.get('error', 'no reply')}")
-                return
-            owned[did] = str(reply.get("output", ""))
+            if self._session_ipc_ok:
+                reply = await self._session_ipc_command("ADD_SCREEN")
+                if not reply.get("ok"):
+                    logger_webrtc_input.warning(
+                        f"Session compositor could not add a screen for '{did}': "
+                        f"{reply.get('error', 'no reply')}")
+                    return
+                owned[did] = str(reply.get("output", ""))
+            else:
+                name = f"SELKIES-{wayland_output_id(did)}"
+                width, height = size if size else (1920, 1080)
+                try:
+                    await asyncio.to_thread(
+                        self.wayland_input.add_app_screen,
+                        self._app_wayland_display(), name,
+                        int(width), int(height), float(scale or 1.0))
+                except Exception as e:
+                    logger_webrtc_input.warning(
+                        f"Session compositor could not add a screen for '{did}': {e}")
+                    return
+                owned[did] = name
             logger_webrtc_input.info(
                 f"Session compositor added screen '{owned[did]}' for '{did}'.")
             deadline = asyncio.get_running_loop().time() + 5.0
@@ -5878,8 +6068,8 @@ class WebRTCInput:
         resolved in one read.
 
         'primary' is position 0, the screen the session booted with. A
-        secondary whose screen this handler grew is found by the name the
-        ADD_SCREEN reply coined; on a session whose screens were
+        secondary whose screen this handler grew is found by the name
+        recorded when it was grown; on a session whose screens were
         pre-provisioned instead, the attached secondaries hold them in the
         order they were laid out, after the primary, so a display's rank in
         that order is its position.
@@ -5890,7 +6080,7 @@ class WebRTCInput:
         if self.wayland_input is not None and any(
                 owned.get(d) for d in wanted if d != "primary"):
             try:
-                names = [n for n, _x, _y in await asyncio.to_thread(
+                names = [screen[0] for screen in await asyncio.to_thread(
                     self.wayland_input.list_app_screens,
                     self._app_wayland_display())]
             except Exception as e:
@@ -5940,8 +6130,10 @@ class WebRTCInput:
         output, so a nested session is scaled through its output management and
         the capture keeps 1.0: scaling the capture instead would halve the
         logical size the session is handed and upscale the whole desktop. A
-        session that manages no outputs for clients (KWin) takes the capture
-        output's scale, which it follows, and so does a plain pixelflux session,
+        session that manages no outputs for clients takes the capture output's
+        scale instead, which it follows through the host window's preferred
+        fractional scale (a nested KWin accepts a scale over its own output
+        management and ignores it), and so does a plain pixelflux session,
         where the capture output is the only screen there is. XWayland
         applications need nothing merged: they run in the compositor's logical
         space and are scaled with it.
@@ -6001,12 +6193,12 @@ class WebRTCInput:
         pixelflux resizes one to its full size the moment it gets an output,
         and back when it loses one.
 
-        Only for a session whose screens are pre-provisioned: when the control
-        socket manages them (`ensure_session_screens`) there is never a spare
+        Only for a session whose screens are pre-provisioned: when a screen
+        control grows them (`ensure_session_screens`) there is never a spare
         to hold, and a hold computed before a layout pass created its capture
         output would land late and shrink the screen that output just adopted.
         """
-        if self.session_screen_ipc_available():
+        if self.session_screen_control_available():
             return
         try:
             asyncio.get_running_loop()
@@ -7355,6 +7547,20 @@ class WebRTCInput:
             try: await self.send_x11_mouse(x, y, button_mask, scroll_magnitude, relative, display_id=display_id)
             except Exception as e: logger_webrtc_input.warning(f"Failed to set mouse cursor: {e}")
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
+        elif msg_type == "vp":
+            # Where this display's page shows its stream on the user's desktop,
+            # and the remote pixels per desktop pixel over it. Relayed to the
+            # other pages: a drag held across two browser windows is placed
+            # through the box of the one the pointer physically reached.
+            server = self.data_server_instance
+            if server is None or not hasattr(server, "set_client_stream_box"):
+                return
+            try:
+                origin_x, origin_y, scale_x, scale_y = (float(v) for v in toks[1:5])
+            except ValueError:
+                return
+            await server.set_client_stream_box(display_id, origin_x, origin_y,
+                                               scale_x, scale_y)
         elif msg_type == "vb":
             try:
                 # kbps; per display, named by the delivering channel.
@@ -7374,7 +7580,8 @@ class WebRTCInput:
                 logger_webrtc_input.error(f"Error audio bitrate change: {e}")
         elif msg_type == "js":
             # Enforced server-side so a client cannot inject controller input
-            # whatever its own UI state.
+            # whatever its own UI state. Which slot it may name is the transport
+            # gates' call (gamepad_slot_denied), since only they know the sender.
             if not settings.gamepad_enabled[0]:
                 return
             cmd = toks[1]
@@ -7600,10 +7807,16 @@ class WebRTCInput:
             else: logger_webrtc_input.warning(f"Rejecting resolution change, invalid: {res}")
         elif msg_type == "s":
             scale = toks[1]
-            if re.fullmatch(r"^\d+(\.\d+)?$", scale):
+            if not re.fullmatch(r"^\d+(\.\d+)?$", scale):
+                logger_webrtc_input.warning(f"Rejecting scaling change, invalid: {scale}")
+            elif display_id != "primary":
+                # One desktop, one DPI: the primary's page owns it.
+                logger_webrtc_input.info(
+                    f"Ignoring DPI {scale} from '{display_id}': "
+                    "the desktop DPI follows the primary display.")
+            else:
                 _s = self.on_scaling_ratio(float(scale))
                 if asyncio.iscoroutine(_s): await _s
-            else: logger_webrtc_input.warning(f"Rejecting scaling change, invalid: {scale}")
         elif msg_type == "cmd":
             if not settings.command_enabled[0]:
                 logger_webrtc_input.warning("Received 'cmd' message, but command execution is disabled by server settings.")
@@ -7617,6 +7830,7 @@ class WebRTCInput:
 
                 async def _notify_cmd_done(cmd, conn_id=conn_id):
                     self.send_command_status(f"command_done,{cmd}", conn_id)
+                    await self.note_app_command_finished(cmd)
 
                 await run_client_command(
                     command_to_run, logger_webrtc_input, notify=_notify_cmd_error,

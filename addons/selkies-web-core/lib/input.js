@@ -1360,6 +1360,17 @@ export class Input {
         this.useCssScaling = useCssScaling;
         this.m = null;
         this._layout = null;
+        // Viewport origin on the desktop, and the same relative to the browser
+        // window; both null until two events have agreed on one.
+        this._anchorX = null;
+        this._anchorY = null;
+        this._chromeInsetX = null;
+        this._chromeInsetY = null;
+        this._sampleClientX = -1e9;
+        this._sampleClientY = -1e9;
+        this._sampleAnchorX = NaN;
+        this._sampleAnchorY = NaN;
+        this._geometryTimer = null;
         this.buttonMask = 0;
         this.gamepadManager = null;
         this.x = 0;
@@ -2358,6 +2369,7 @@ export class Input {
             this.cursorDiv.style.display = 'block';
             this.element.style.setProperty('cursor', 'none', 'important');
         }
+        this._noteScreenAnchor(event);
         let visualClientX = event.clientX;
         let visualClientY = event.clientY;
         if (event.getPredictedEvents && typeof event.getPredictedEvents === 'function') {
@@ -2417,7 +2429,8 @@ export class Input {
         } else if (event.type === 'mousemove' || event.type === 'pointermove' ||
                    event.type === 'mousedown' || event.type === 'mouseup' ||
                    event.type === 'pointerdown' || event.type === 'pointerup') {
-            if (this._applySinkCoordinates(event.clientX, event.clientY, canvas, videoEle)) {
+            if (this._applySinkCoordinates(event.clientX, event.clientY, canvas, videoEle,
+                                           event.screenX, event.screenY)) {
                 // Mapped through the sink; this.x/this.y are set.
             } else {
                 if (!this.m) {
@@ -2428,7 +2441,8 @@ export class Input {
                     const ry = this._clientToServerY(event.clientY) * dpr_for_input_coords;
                     if (!this._mapToLayout(rx, ry,
                             this.m.mouseMultiX * dpr_for_input_coords,
-                            this.m.mouseMultiY * dpr_for_input_coords)) {
+                            this.m.mouseMultiY * dpr_for_input_coords,
+                            event.screenX, event.screenY)) {
                         this.x = Math.round(rx);
                         this.y = Math.round(ry);
                     }
@@ -2767,12 +2781,139 @@ export class Input {
     }
 
     /**
+     * Notes where this page's viewport sits on the desktop, as the offset from
+     * the browser window's own origin so that `window.screenX`/`screenY` alone
+     * tracks the window afterwards. Both frames come off one event, so a
+     * synthetic one has to carry `screenX`/`screenY` to anchor anything.
+     *
+     * Two events some distance apart have to report the same offset first:
+     * the desktop frame translates the client frame only while nothing scales
+     * one and not the other, which page zoom does and screen coordinates in
+     * device pixels do. Short of agreement no box is published and a crossing
+     * keeps to the overshoot; the distance is what rounding cannot fake.
+     *
+     * Runs per pointer event; allocation-free.
+     */
+    _noteScreenAnchor(event) {
+        const sx = event.screenX, sy = event.screenY;
+        if (!Number.isFinite(sx) || !Number.isFinite(sy)) {
+            return;
+        }
+        if (Math.abs(event.clientX - this._sampleClientX) +
+            Math.abs(event.clientY - this._sampleClientY) < 8) {
+            return;
+        }
+        const anchorX = sx - event.clientX, anchorY = sy - event.clientY;
+        const agrees = anchorX === this._sampleAnchorX && anchorY === this._sampleAnchorY;
+        this._sampleClientX = event.clientX;
+        this._sampleClientY = event.clientY;
+        this._sampleAnchorX = anchorX;
+        this._sampleAnchorY = anchorY;
+        if (!agrees || (anchorX === this._anchorX && anchorY === this._anchorY)) {
+            return;
+        }
+        this._anchorX = anchorX;
+        this._anchorY = anchorY;
+        this._chromeInsetX = anchorX - (window.screenX || 0);
+        this._chromeInsetY = anchorY - (window.screenY || 0);
+        this._publishScreenGeometry();
+    }
+
+    /**
+     * This page's stream box in its own CSS pixels, with the remote pixels per
+     * CSS pixel that map into it: the sink box where one applies, else the
+     * window math. Both absolute paths are `(client - left) * scale`.
+     * @returns {{left: number, top: number, scaleX: number, scaleY: number}|null}
+     */
+    _streamBox() {
+        const box = this._sinkBox(document.getElementById('videoCanvas'),
+                                  document.getElementById('stream'));
+        if (box) {
+            return { left: box.boxLeft, top: box.boxTop,
+                     scaleX: box.sinkW / box.boxW, scaleY: box.sinkH / box.boxH };
+        }
+        if (!this.m) {
+            this._windowMath();
+        }
+        if (!this.m) {
+            return null;
+        }
+        const dpr = this._inputDpr();
+        return { left: this.m.elementClientX + this.m.mouseOffsetX,
+                 top: this.m.elementClientY + this.m.mouseOffsetY,
+                 scaleX: this.m.mouseMultiX * dpr, scaleY: this.m.mouseMultiY * dpr };
+    }
+
+    /**
+     * The same box in the desktop's own coordinates, which is what another
+     * page needs to place the pointer where this one shows it. Null until an
+     * event has anchored the viewport, or with no measurable box.
+     * @returns {{originX: number, originY: number, scaleX: number,
+     *     scaleY: number}|null}
+     */
+    _screenStreamBox() {
+        if (this._chromeInsetX == null) {
+            return null;
+        }
+        const box = this._streamBox();
+        if (!box || !(box.scaleX > 0) || !(box.scaleY > 0)) {
+            return null;
+        }
+        return { originX: (window.screenX || 0) + this._chromeInsetX + box.left,
+                 originY: (window.screenY || 0) + this._chromeInsetY + box.top,
+                 scaleX: box.scaleX, scaleY: box.scaleY };
+    }
+
+    /**
+     * Publishes the box above when the layout comes back carrying a different
+     * one for this display, which is also what recovers a publish the server
+     * dropped. Only while a neighbor exists to map a crossing onto, and never
+     * from a shared viewer, which owns no display.
+     */
+    _publishScreenGeometry() {
+        if (!this._layout || this.isSharedMode) {
+            return;
+        }
+        const box = this._screenStreamBox();
+        if (!box) {
+            return;
+        }
+        const own = this._layout.own;
+        if (Math.abs(own.originX - box.originX) < 1 &&
+            Math.abs(own.originY - box.originY) < 1 &&
+            Math.abs(own.scaleX - box.scaleX) < 1e-3 &&
+            Math.abs(own.scaleY - box.scaleY) < 1e-3) {
+            return;
+        }
+        this.send(`vp,${box.originX.toFixed(2)},${box.originY.toFixed(2)},` +
+                  `${box.scaleX.toFixed(4)},${box.scaleY.toFixed(4)}`);
+    }
+
+    /**
+     * Watches the box while a neighboring display exists: a browser window the
+     * user drags elsewhere fires nothing this page listens for, and the next
+     * crossing would be placed against where the window used to be.
+     */
+    _watchScreenGeometry(on) {
+        if (on && !this._geometryTimer) {
+            this._geometryTimer = setInterval(() => this._publishScreenGeometry(), 1000);
+            this._publishScreenGeometry();
+        } else if (!on && this._geometryTimer) {
+            clearInterval(this._geometryTimer);
+            this._geometryTimer = null;
+        }
+    }
+
+    /**
      * Maps a client position through the sink box into `this.x`/`this.y`.
      * A position past the box during a cross-display drag maps into the
      * neighboring display's region; otherwise it clamps to this display.
+     * @param {number} [screenX] Desktop position of the same point, which
+     *     places a crossing on the neighbor's box exactly.
+     * @param {number} [screenY]
      * @returns {boolean} False when no sink applies.
      */
-    _applySinkCoordinates(clientX, clientY, canvas, videoEle) {
+    _applySinkCoordinates(clientX, clientY, canvas, videoEle, screenX, screenY) {
         const box = this._sinkBox(canvas, videoEle);
         if (!box) {
             return false;
@@ -2781,7 +2922,7 @@ export class Input {
         const scaleY = box.sinkH / box.boxH;
         const rx = (clientX - box.boxLeft) * scaleX;
         const ry = (clientY - box.boxTop) * scaleY;
-        if (this._mapToLayout(rx, ry, scaleX, scaleY)) {
+        if (this._mapToLayout(rx, ry, scaleX, scaleY, screenX, screenY)) {
             return true;
         }
         this.x = Math.max(0, Math.min(box.sinkW, Math.round(rx)));
@@ -2792,15 +2933,20 @@ export class Input {
     /**
      * Sets the extended-desktop layout the mapping above uses: display
      * rectangles in remote pixels, keyed by display id, each carrying the
-     * owning page's CSS-to-remote `scale` where known. Fewer than two valid
-     * rectangles (or no entry for `ownId`) disables cross-display mapping.
+     * owning page's CSS-to-remote `scale` where known, and its stream box in
+     * desktop coordinates where that page has published one. Fewer than two
+     * valid rectangles (or no entry for `ownId`) disables cross-display
+     * mapping.
      * @param {Object<string, {x: number, y: number, w: number, h: number,
-     *     scale: (number|undefined)}>|null} layouts
+     *     scale: (number|undefined), originX: (number|undefined),
+     *     originY: (number|undefined), scaleX: (number|undefined),
+     *     scaleY: (number|undefined)}>|null} layouts
      * @param {string} ownId Display id this page renders.
      */
     setDisplayLayouts(layouts, ownId) {
         this._layout = null;
         if (!layouts || typeof layouts !== 'object') {
+            this._watchScreenGeometry(false);
             return;
         }
         const rects = [];
@@ -2815,14 +2961,58 @@ export class Input {
             }
             const scale = Number(entry.scale);
             const rect = { x, y, w, h,
-                           scale: (Number.isFinite(scale) && scale > 0) ? scale : 0 };
+                           scale: (Number.isFinite(scale) && scale > 0) ? scale : 0,
+                           originX: 0, originY: 0, scaleX: 0, scaleY: 0 };
+            const originX = Number(entry.originX), originY = Number(entry.originY);
+            const scaleX = Number(entry.scaleX), scaleY = Number(entry.scaleY);
+            if (Number.isFinite(originX) && Number.isFinite(originY) &&
+                scaleX > 0 && scaleY > 0) {
+                rect.originX = originX;
+                rect.originY = originY;
+                rect.scaleX = scaleX;
+                rect.scaleY = scaleY;
+            }
             rects.push(rect);
             if (id === ownId) own = rect;
         }
         if (!own || rects.length < 2) {
+            this._watchScreenGeometry(false);
             return;
         }
+        // Two boxes that overlap on the desktop cannot both be under the
+        // pointer, and an engine reporting screen coordinates relative to its
+        // own window publishes exactly such boxes; the overshoot stands there.
+        for (let i = 0; i < rects.length; i++) {
+            const r = rects[i];
+            r.crossable = r !== own && !this._boxesOverlap(own, r);
+        }
         this._layout = { own, rects, ownX: own.x, ownY: own.y, ownW: own.w, ownH: own.h };
+        this._watchScreenGeometry(true);
+    }
+
+    /**
+     * Whether the desktop boxes two layout entries published intersect by
+     * more than a pixel: windows placed edge to edge meet on a fraction, since
+     * a letterboxed box starts on one.
+     */
+    _boxesOverlap(a, b) {
+        if (!(a.scaleX > 0) || !(a.scaleY > 0) || !(b.scaleX > 0) || !(b.scaleY > 0)) {
+            return false;
+        }
+        return a.originX + 1 < b.originX + b.w / b.scaleX &&
+               b.originX + 1 < a.originX + a.w / a.scaleX &&
+               a.originY + 1 < b.originY + b.h / b.scaleY &&
+               b.originY + 1 < a.originY + a.h / a.scaleY;
+    }
+
+    /** Whether a desktop position sits on the stream box `rect`'s page published. */
+    _overNeighbor(rect, screenX, screenY) {
+        if (!rect.crossable || !(rect.scaleX > 0) || !(rect.scaleY > 0) ||
+            !Number.isFinite(screenX) || !Number.isFinite(screenY)) {
+            return false;
+        }
+        return screenX >= rect.originX && screenX <= rect.originX + rect.w / rect.scaleX &&
+               screenY >= rect.originY && screenY <= rect.originY + rect.h / rect.scaleY;
     }
 
     /**
@@ -2831,22 +3021,31 @@ export class Input {
      * `this.x`/`this.y` still relative to this display's origin (the wire
      * coordinate space; the server adds this display's offset).
      *
-     * The overshoot converts at the neighbor's own CSS-to-remote scale: a
-     * captured drag keeps streaming this page CSS pixels while the pointer
-     * physically travels the neighbor page, whose pixels they are. The
-     * result clamps to the union of display rectangles, the way a multihead
-     * X server bounds its pointer, so an edge with no neighbor still pins
-     * and the dead corner beside a shorter display stays unreachable.
+     * A pointer physically over the neighbor's stream box takes both axes
+     * from that box: the two pages sit at their own desktop origins, and a
+     * position still inside this page's own height says nothing about where
+     * the pointer is on the other one.
+     *
+     * Short of that box -- a page that published none, a pointer in the gap
+     * between two windows, or two boxes that overlap -- the overshoot
+     * converts at the neighbor's own CSS-to-remote scale: a captured drag
+     * keeps streaming this page CSS pixels while the pointer physically
+     * travels the neighbor page, whose pixels they are. The result clamps to
+     * the union of display rectangles, the way a multihead X server bounds
+     * its pointer, so an edge with no neighbor still pins and the dead corner
+     * beside a shorter display stays unreachable.
      *
      * Runs per pointer event; allocation-free.
      * @param {number} rx Own-scale remote X, relative to this display.
      * @param {number} ry Own-scale remote Y.
      * @param {number} sxOwn This page's remote pixels per CSS pixel, X.
      * @param {number} syOwn Same for Y.
+     * @param {number} [screenX] Desktop position of the same point.
+     * @param {number} [screenY]
      * @returns {boolean} False inside this display or with no multi-display
      *     layout, so the caller keeps its single-display behavior.
      */
-    _mapToLayout(rx, ry, sxOwn, syOwn) {
+    _mapToLayout(rx, ry, sxOwn, syOwn, screenX, screenY) {
         const L = this._layout;
         if (!L || (rx >= 0 && rx <= L.ownW && ry >= 0 && ry <= L.ownH)) {
             return false;
@@ -2863,7 +3062,10 @@ export class Input {
             const d = dx * dx + dy * dy;
             if (d < bestD) { bestD = d; target = r; }
         }
-        if (target && target.scale > 0 && sxOwn > 0 && syOwn > 0) {
+        if (target && this._overNeighbor(target, screenX, screenY)) {
+            gx = target.x + (screenX - target.originX) * target.scaleX;
+            gy = target.y + (screenY - target.originY) * target.scaleY;
+        } else if (target && target.scale > 0 && sxOwn > 0 && syOwn > 0) {
             const kx = target.scale / sxOwn;
             const ky = target.scale / syOwn;
             if (rx > L.ownW) gx = L.ownX + L.ownW + (rx - L.ownW) * kx;
@@ -2914,20 +3116,10 @@ export class Input {
         if (this._pointerScaleFrame) {
             return this._pointerScaleFrame;
         }
-        const box = this._sinkBox(document.getElementById('videoCanvas'),
-                                  document.getElementById('stream'));
-        let scale;
-        if (box) {
-            scale = { x: box.sinkW / box.boxW, y: box.sinkH / box.boxH };
-        } else {
-            const dpr = this._inputDpr();
-            if (!this.m) {
-                this._windowMath();
-            }
-            scale = this.m
-                ? { x: this.m.mouseMultiX * dpr, y: this.m.mouseMultiY * dpr }
-                : { x: dpr, y: dpr };
-        }
+        const box = this._streamBox();
+        const scale = box
+            ? { x: box.scaleX, y: box.scaleY }
+            : { x: this._inputDpr(), y: this._inputDpr() };
         if (typeof window.requestAnimationFrame === 'function') {
             this._pointerScaleFrame = scale;
             window.requestAnimationFrame(() => { this._pointerScaleFrame = null; });
@@ -2968,6 +3160,7 @@ export class Input {
 
     /** Maps a touch point into `this.x`/`this.y` and moves the page-drawn cursor to it. */
     _calculateTouchCoordinates(touchPoint) {
+        this._noteScreenAnchor(touchPoint);
         this._updateCursorPosition(touchPoint.clientX, touchPoint.clientY);
         this._latestMouseX = touchPoint.clientX;
         this._latestMouseY = touchPoint.clientY;
@@ -2975,7 +3168,8 @@ export class Input {
         let canvas = document.getElementById('videoCanvas');
         let videoEle = document.getElementById('stream');
 
-        if (this._applySinkCoordinates(touchPoint.clientX, touchPoint.clientY, canvas, videoEle)) {
+        if (this._applySinkCoordinates(touchPoint.clientX, touchPoint.clientY, canvas, videoEle,
+                                       touchPoint.screenX, touchPoint.screenY)) {
             // Mapped through the sink; this.x/this.y are set.
         } else {
             if (!this.m) this._windowMath();
@@ -2984,7 +3178,8 @@ export class Input {
                 const ry = this._clientToServerY(touchPoint.clientY) * dpr_for_input_coords;
                 if (!this._mapToLayout(rx, ry,
                         this.m.mouseMultiX * dpr_for_input_coords,
-                        this.m.mouseMultiY * dpr_for_input_coords)) {
+                        this.m.mouseMultiY * dpr_for_input_coords,
+                        touchPoint.screenX, touchPoint.screenY)) {
                     this.x = Math.round(rx);
                     this.y = Math.round(ry);
                 }
@@ -3828,7 +4023,8 @@ export class Input {
      * predecessor's listeners and gamepad poller would otherwise keep firing
      * alongside it. The overlay element takes focus, since browsers only run
      * IME composition on the focused editable element, unless the user is in
-     * another field.
+     * another field. Pads are adopted for every role, since a `#playerN` link
+     * grants a gamepad without the rest of the input context.
      */
     attach() {
         if (Input._attachedInstance && Input._attachedInstance !== this) {
@@ -3858,10 +4054,13 @@ export class Input {
             this.listeners.push(addListener(this.element, 'touchend', preventDefaultHandler, this));
             this.listeners.push(addListener(this.element, 'touchmove', preventDefaultHandler, this));
             this.listeners.push(addListener(this.element, 'touchcancel', preventDefaultHandler, this));
-        }    
+        }
+        // After both branches: a #playerN viewer drives a gamepad and nothing
+        // else, so it adopts pads on the same terms a controller does.
+        this.resyncGamepads();
     }
 
-    /** Attaches the keyboard, pointer, touch, wheel and composition listeners, shows the cursor and adopts connected pads. */
+    /** Attaches the keyboard, pointer, touch, wheel and composition listeners and shows the cursor. */
     attach_context() {
         if (this.inputAttached) return;
         this._windowMath();
@@ -3916,15 +4115,16 @@ export class Input {
         }
         this._windowMath();
         this.inputAttached = true;
-        this._resyncGamepads();
     }
 
     /**
      * Adopts pads the browser already exposes: gamepadconnected fires only on
-     * physical connect (or first press), so a re-attach after a mode switch
-     * or reconnect would otherwise leave the pad dead until re-plugged.
+     * physical connect (or first press), so a re-attach would otherwise leave
+     * the pad dead until re-plugged. Public because a channel that opens after
+     * attach must re-announce: the `js,c` it sent into a closed channel was
+     * dropped, leaving the server no association to release when the peer goes.
      */
-    _resyncGamepads() {
+    resyncGamepads() {
         let pads = [];
         try {
             pads = navigator.getGamepads ? Array.from(navigator.getGamepads()) : [];
@@ -3951,6 +4151,7 @@ export class Input {
             this.gamepadManager.destroy();
             this.gamepadManager = null;
         }
+        this._watchScreenGeometry(false);
         this.detach_context();
     }
 

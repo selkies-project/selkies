@@ -21,8 +21,9 @@
  * joystick interposer reports through its ioctls.
  *
  * Enumeration scans only the "input" subsystem, the one subsystem the nodes
- * live in: a generic scan yields the js and event nodes, a sysname pattern
- * may also select the input parent, and property filters apply to each. The
+ * live in: a generic scan yields the js and event nodes whose interposer
+ * socket is bound, a sysname pattern may also select the input parent, and
+ * property filters apply to each. The
  * remaining match_* calls (sysattr, tag, parent, sysnum, devicenode,
  * is_initialized, add_syspath, nomatch_subsystem) and scan_children /
  * scan_subsystems are accepted and ignored.
@@ -44,6 +45,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <errno.h>
 #include <sys/epoll.h>
@@ -70,6 +72,16 @@ static bool g_fake_udev_logging_initialized = false;
 static const char *fake_udev_socket_dir(void) {
     const char *d = getenv("SELKIES_JS_SOCKET_PATH");
     return (d && d[0]) ? d : FAKE_UDEV_SOCKET_DIR_DEFAULT;
+}
+
+/* Whether the interposer socket behind the node `sysname` is bound. Only a
+ * served node is enumerated, matching the interposer's own directory listing:
+ * a scanner that opens an unserved node pays the full connect timeout before
+ * it fails, and the monitor announces the node once its socket appears. */
+static bool sysname_socket_live(const char *sysname) {
+    char sock[PATH_MAX];
+    snprintf(sock, sizeof(sock), "%s/selkies_%s.sock", fake_udev_socket_dir(), sysname);
+    return access(sock, F_OK) == 0;
 }
 
 typedef enum {
@@ -1100,8 +1112,14 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
                                i, def->js_sysname, def->event_sysname, def->input_parent_sysname);
 
             bool is_generic_sysname_scan = (udev_enumerate->filter_sysname_pattern[0] == '\0');
+            bool js_live = sysname_socket_live(def->js_sysname);
+            bool event_live = sysname_socket_live(def->event_sysname);
+            if (!js_live && !event_live) {
+                FAKE_UDEV_LOG_DEBUG("    def %d has no bound socket; not enumerated.", i);
+                continue;
+            }
 
-            if (is_generic_sysname_scan || fnmatch(udev_enumerate->filter_sysname_pattern, def->js_sysname, 0) == 0) {
+            if (js_live && (is_generic_sysname_scan || fnmatch(udev_enumerate->filter_sysname_pattern, def->js_sysname, 0) == 0)) {
                 if (device_matches_all_property_filters(def, VIRTUAL_TYPE_JS, udev_enumerate->property_filters)) {
                     add_syspath_to_results_list(&head, &tail, &count, def->js_syspath, "JS", i);
                 } else {
@@ -1109,7 +1127,7 @@ int udev_enumerate_scan_devices(struct udev_enumerate *udev_enumerate) {
                 }
             }
 
-            if (is_generic_sysname_scan || fnmatch(udev_enumerate->filter_sysname_pattern, def->event_sysname, 0) == 0) {
+            if (event_live && (is_generic_sysname_scan || fnmatch(udev_enumerate->filter_sysname_pattern, def->event_sysname, 0) == 0)) {
                 if (device_matches_all_property_filters(def, VIRTUAL_TYPE_EVENT, udev_enumerate->property_filters)) {
                     add_syspath_to_results_list(&head, &tail, &count, def->event_syspath, "EVENT", i);
                 } else {

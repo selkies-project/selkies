@@ -26,7 +26,7 @@ uinput_abi_truth: uinput_abi_truth.c
 v4l2probe: v4l2probe.c
 	$(CC) $(CFLAGS) -o $@ $<
 
-gamepad: gamepad/jsread gamepad/sdlenum gamepad/sdlread gamepad/udevscan
+gamepad: gamepad/jsread gamepad/sdlenum gamepad/sdlread gamepad/sdlhotplug gamepad/udevscan
 
 gamepad/jsread: gamepad/jsread.c
 	$(CC) $(CFLAGS) -o $@ $<
@@ -37,10 +37,13 @@ gamepad/sdlenum: gamepad/sdlenum.c
 gamepad/sdlread: gamepad/sdlread.c
 	$(CC) $(CFLAGS) -o $@ $< $(shell pkg-config --cflags --libs sdl2)
 
+gamepad/sdlhotplug: gamepad/sdlhotplug.c
+	$(CC) $(CFLAGS) -o $@ $< $(shell pkg-config --cflags --libs sdl2)
+
 gamepad/udevscan: gamepad/udevscan.c
 	$(CC) $(CFLAGS) -o $@ $< -ludev
 
 clean:
-	rm -f uinput_shim.so uinput_abi_truth v4l2probe gamepad/jsread gamepad/sdlenum gamepad/sdlread gamepad/udevscan
+	rm -f uinput_shim.so uinput_abi_truth v4l2probe gamepad/jsread gamepad/sdlenum gamepad/sdlread gamepad/sdlhotplug gamepad/udevscan
 
 .PHONY: all gamepad clean

@@ -32,7 +32,7 @@ def build_interposer(workdir: str) -> str:
 def serve_slots(sockdir: str, count: int) -> subprocess.Popen:
     """Start `count` gamepad slots, each with its js and evdev sockets bound."""
     script = textwrap.dedent(f"""
-        import asyncio, os, sys
+        import asyncio, os, signal, sys
         sys.path.insert(0, {H.SRC!r})
         from selkies.input_handler import SelkiesGamepad
         D = {sockdir!r}
@@ -46,7 +46,11 @@ def serve_slots(sockdir: str, count: int) -> subprocess.Popen:
                 asyncio.create_task(gp.run_servers())
                 held.append(gp)
             print("UP", flush=True)
-            await asyncio.sleep(3600)
+            stop = asyncio.Event()
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stop.set)
+            await stop.wait()
+            for gp in held:
+                await gp.close()
         asyncio.run(main())
     """)
     proc = subprocess.Popen([H.PYTHON, "-c", script],
@@ -175,9 +179,152 @@ def main() -> bool:
             res.check("readdir-errno-clean", True, "os.listdir did not raise on an empty slot set")
         except RuntimeError as e:
             res.check("readdir-errno-clean", False, str(e)[:150])
+        hotplug_checks(res, preload, os.path.join(work, "hotplug"))
+        sdl_hotplug_check(res, preload, os.path.join(work, "sdl"))
     finally:
         subprocess.run(["rm", "-rf", work], check=False)
     return res.summary()
+
+
+IN_CREATE, IN_DELETE, IN_NONBLOCK, EAGAIN = 0x100, 0x200, 0o4000, 11
+
+WATCHER = textwrap.dedent("""
+    import ctypes, json, os, select, sys
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.inotify_init1(0)
+    wd = libc.inotify_add_watch(fd, b"/dev/input", 0x100 | 0x200)
+    nb = libc.inotify_init1(0o4000)
+    nbwd = libc.inotify_add_watch(nb, b"/dev/input", 0x100 | 0x200)
+    print(json.dumps({"wd": wd, "nbwd": nbwd}), flush=True)
+    buf = ctypes.create_string_buffer(4096)
+    for line in sys.stdin:
+        cmd = line.strip()
+        if cmd == "read":
+            r, _, _ = select.select([fd], [], [], 10)
+            if not r:
+                print(json.dumps({"timeout": True}), flush=True)
+                continue
+            n = libc.read(fd, buf, 4096)
+            recs, off = [], 0
+            while off + 16 <= n:
+                w, mask, cookie, ln = (int.from_bytes(buf.raw[off:off + 4], "little", signed=True),
+                                       int.from_bytes(buf.raw[off + 4:off + 8], "little"),
+                                       int.from_bytes(buf.raw[off + 8:off + 12], "little"),
+                                       int.from_bytes(buf.raw[off + 12:off + 16], "little"))
+                name = buf.raw[off + 16:off + 16 + ln].split(b"\\0", 1)[0].decode()
+                recs.append({"wd": w, "mask": mask, "name": name, "len": ln})
+                off += 16 + ln
+            print(json.dumps({"n": n, "recs": recs}), flush=True)
+        elif cmd == "nbread":
+            r, _, _ = select.select([nb], [], [], 3)
+            n = libc.read(nb, buf, 4096)
+            print(json.dumps({"ready": bool(r), "n": n, "errno": ctypes.get_errno() if n < 0 else 0}), flush=True)
+        elif cmd == "rm":
+            print(json.dumps({"rm": libc.inotify_rm_watch(fd, wd)}), flush=True)
+        elif cmd == "quit":
+            break
+""")
+
+
+def hotplug_checks(res: "H.Results", preload: str, sockdir: str) -> None:
+    """An inotify watch on /dev/input, held by a child under the interposer,
+    reports a slot bound and withdrawn later as its evdev node coming and
+    going: the application's own watch descriptor, the node's name, and only
+    what the sockets stand for. A read that carried nothing for the
+    application never reads as end of file."""
+    import json
+    os.makedirs(sockdir)
+    child = subprocess.Popen(
+        [sys.executable, "-u", "-c", WATCHER],
+        env={**os.environ, "LD_PRELOAD": preload, "SELKIES_JS_SOCKET_PATH": sockdir},
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    def ask(cmd: str) -> dict:
+        child.stdin.write(cmd + "\n")
+        child.stdin.flush()
+        return json.loads(child.stdout.readline())
+
+    try:
+        ids = json.loads(child.stdout.readline())
+        res.check("inotify-watch-added", ids["wd"] >= 0 and ids["nbwd"] >= 0, f"wds={ids}")
+        server = serve_slots(sockdir, 1)
+        try:
+            seen = ask("read")
+            recs = seen.get("recs", [])
+            res.check("inotify-bound-slot-appears",
+                      any(r["wd"] == ids["wd"] and r["mask"] & IN_CREATE and r["name"] == "event1000"
+                          for r in recs),
+                      f"records={recs}")
+            res.check("inotify-sockets-stay-hidden",
+                      all(not r["name"].startswith("selkies_") and not r["name"].startswith("js")
+                          for r in recs),
+                      f"records={recs}")
+            res.check("inotify-record-padding",
+                      all(r["len"] % 16 == 0 and r["len"] > len(r["name"]) for r in recs),
+                      f"records={recs}")
+            # Nothing on the non-blocking fd but the same create records; a
+            # stray file in the socket directory is not a node and must not
+            # read as end of file either.
+            open(os.path.join(sockdir, "not-a-slot"), "w").close()
+            time.sleep(0.3)
+            first = ask("nbread")
+            second = ask("nbread")
+            res.check("inotify-nonblocking-never-eof",
+                      first["n"] > 0 and second["n"] == -1 and second["errno"] == EAGAIN,
+                      f"first={first} second={second}")
+        finally:
+            server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+        gone = ask("read")
+        recs = gone.get("recs", [])
+        res.check("inotify-withdrawn-slot-vanishes",
+                  any(r["wd"] == ids["wd"] and r["mask"] & IN_DELETE and r["name"] == "event1000"
+                      for r in recs),
+                  f"records={recs}")
+        res.check("inotify-rm-watch", ask("rm")["rm"] == 0)
+        child.stdin.write("quit\n")
+        child.stdin.flush()
+    finally:
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.kill()
+
+
+def sdl_hotplug_check(res: "H.Results", preload: str, work: str) -> None:
+    """SDL with udev discovery disabled, started before the pad is served, gets
+    a device-added event when the slot binds and a removed one when it goes."""
+    os.makedirs(work)
+    tool = os.path.join(work, "sdlhotplug")
+    src = os.path.join(H.REPO, "tests", "tools", "gamepad", "sdlhotplug.c")
+    flags = subprocess.run(["pkg-config", "--cflags", "--libs", "sdl2"], capture_output=True, text=True)
+    if flags.returncode != 0 or subprocess.run(["gcc", "-O2", "-o", tool, src] + flags.stdout.split(),
+                                                capture_output=True).returncode != 0:
+        res.skip("sdl-hotplug", "no SDL2 development files")
+        return
+    sockdir = os.path.join(work, "sock")
+    os.makedirs(sockdir)
+    env = {k: v for k, v in os.environ.items() if k not in ("LD_PRELOAD", "SDL_JOYSTICK_DEVICE")}
+    env.update({"LD_PRELOAD": preload, "SELKIES_JS_SOCKET_PATH": sockdir,
+                "SDL_JOYSTICK_DISABLE_UDEV": "1", "SDL_JOYSTICK_HIDAPI": "0"})
+    watcher = subprocess.Popen([tool, "8"], env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True)
+    time.sleep(1.0)
+    server = serve_slots(sockdir, 1)
+    time.sleep(3.0)
+    server.terminate()
+    try:
+        server.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        server.kill()
+    out, _ = watcher.communicate(timeout=20)
+    result = next((ln for ln in out.splitlines() if ln.startswith("RESULT")), "")
+    res.check("sdl-hotplug-add-and-remove",
+              "added=1" in result and "removed=1" in result and "start joysticks=0" in out,
+              out.strip().replace("\n", " | ")[:300])
 
 
 if __name__ == "__main__":

@@ -103,10 +103,44 @@ def wait_root_width(width: int, timeout: float = 30) -> Optional[tuple]:
     return None
 
 
+def start_window_manager(wayland: bool) -> Optional[subprocess.Popen]:
+    """Openbox on the X11 test display, the manager measured to read the
+    monitor set only as it starts; None on Wayland or without one on PATH."""
+    if wayland or shutil.which("openbox") is None:
+        return None
+    display = H.require_display()
+    return H.spawn(["openbox", "--replace"], env={**os.environ, "DISPLAY": display},
+                   stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+
+
+def wm_restart_check(res: "H.Results", wm_proc: Optional[subprocess.Popen], mark: int) -> None:
+    """The first extend restarts Openbox so it reads the new monitor set: the
+    server says so, the process it started with exits, and a fresh one manages."""
+    if wm_proc is None:
+        res.skip("the first extend restarts the window manager", "no Openbox on the display")
+        return
+    from selkies import display_utils as DU
+    os.environ["DISPLAY"] = H.require_display()
+    DU._drop_module_display()
+    deadline = time.time() + 20
+    said = False
+    while time.time() < deadline and not (said and wm_proc.poll() is not None):
+        said = said or H.server_log().find("restarting openbox", mark) >= 0
+        time.sleep(0.25)
+    new_pid = DU._sync_wm_pid()
+    res.check("the first extend restarts the window manager",
+              said and wm_proc.poll() is not None and new_pid not in (0, wm_proc.pid)
+              and DU.wm_name_matches("openbox", DU._sync_wm_name()),
+              f"said={said} old={wm_proc.pid} exit={wm_proc.poll()} new={new_pid}")
+    if new_pid not in (0, wm_proc.pid):
+        os.kill(new_pid, 15)
+
+
 def run(mode: str, wayland: bool) -> bool:
     """Assert the applied two-display geometry for one transport/backend pair."""
     tag = "two-display-{}-{}".format(mode, "wl" if wayland else "x11")
     res = H.Results(tag)
+    wm_proc = start_window_manager(wayland)
     H.server_start(mode=mode, wayland=wayland)
 
     with sync_playwright() as p:
@@ -119,6 +153,7 @@ def run(mode: str, wayland: bool) -> bool:
                 return res.summary()
             info = primary_size(page, mode) or info
 
+            log_mark = len(H.server_log())
             dpage = C.new_page(browser.contexts[0], mode=mode, url_hash="#display2-right")
             res.check("secondary capture started server-side", wait_secondary_ready(mode), "")
 
@@ -143,6 +178,7 @@ def run(mode: str, wayland: bool) -> bool:
                 union_w = max(r["x"] + r["w"] for r in layout.values())
                 res.check("framebuffer grew to the union",
                           wait_root_width(union_w) is not None, union_w)
+                wm_restart_check(res, wm_proc, log_mark)
             else:
                 res.check("secondary output has its own geometry",
                           sec["w"] > 0 and sec["h"] > 0, sec)

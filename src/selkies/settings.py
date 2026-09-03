@@ -167,12 +167,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. The congestion-control pacing protects the video stream without it; the cap is chiefly for links its gauges cannot see, e.g. behind a reverse proxy.',
     },
     {
-        "name": "file_transfer_cc",
-        "type": "bool",
-        "default": True,
-        "help": 'Congestion-control pacing for file transfers: a greedy transfer otherwise queues ahead of the video stream (bufferbloat) and the session stalls. Downloads are held inside a shared allowance that adapts from kernel queue depth (and RTT off-Linux); uploads back off the moment the uploader\'s own session round trip inflates past its floor, so they take whatever the uplink has spare and yield to the stream. Neither needs a link estimate. Behind a reverse proxy the download gauge measures only the hop to the proxy, so the static cap is the download lever there; the upload gauge times the client end to end and keeps working.',
-    },
-    {
         "name": "framerate",
         "type": "range",
         "default": "8-240",
@@ -915,12 +909,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'Also mirror the webcam into a v4l2loopback kernel device, which applications find without the V4L2 Interposer: "auto" uses the first v4l2loopback output device found (typically a desktop host or privileged container), a path such as "/dev/video10" uses that device, and "false" never does. The interposer socket is always served.',
     },
     {
-        "name": "webcam_pipewire",
-        "type": "bool",
-        "default": True,
-        "help": "Also publish the webcam as a PipeWire Video/Source node when a PipeWire daemon is reachable, for PipeWire-native applications and the pipewire-v4l2 wrapper. The interposer socket is always served.",
-    },
-    {
         "name": "uinput_gamepad",
         "type": "str",
         "default": "auto",
@@ -958,12 +946,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Enable passing remote cursors to client",
     },
     {
-        "name": "multi_monitor_wm",
-        "type": "str",
-        "default": "",
-        "help": 'Window manager to hand an X11 session to the first time it extends onto a second display, as the command that starts it (e.g. "openbox --replace"). Desktops that tile a maximized window across the whole framebuffer rather than the per-display regions need one that does not; empty (the default) never restarts window management, which belongs to a session the deployment assembled rather than a desktop somebody is using.',
-    },
-    {
         "name": "debug_cursors",
         "type": "bool",
         "default": False,
@@ -974,7 +956,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "int",
         "default": -1,
         "env_var": "XCURSOR_SIZE",
-        "help": "Cursor size in points at 96 DPI (scaled with the session DPI). Applies to the X11 server cursor, the Wayland compositor cursor theme, and the remote-cursor capture cap on both transports; -1 uses the platform default (32 on X11, 24 on Wayland).",
+        "help": "Cursor size in points at 96 DPI (scaled with the session DPI) for the X11 server cursor and the Wayland compositor cursor theme; -1 uses the platform default (32 on X11, 24 on Wayland). Independent of it, remote-cursor capture delivers an application's own cursor whole up to 128 points, the most a browser shows as a cursor, and a size set here beyond that raises the cap with it.",
     },
     {
         "name": "enable_webrtc_statistics",
@@ -1153,11 +1135,9 @@ class AppSettings:
     webcam_height: int
     webcam_pixel_format: str
     webcam_device: str
-    webcam_pipewire: tuple[bool, bool]
     enable_cursors: tuple[bool, bool]
     debug_cursors: tuple[bool, bool]
     enable_resize: tuple[bool, bool]
-    multi_monitor_wm: tuple[str, bool]
     audio_bitrate: str
     wayland: tuple[bool, bool]
     cursor_size: int
@@ -1169,7 +1149,6 @@ class AppSettings:
     subfolder: str
     video_bitrate: tuple[float, float]
     file_transfer_limit_mbps: float
-    file_transfer_cc: tuple[bool, bool]
 
     def __init__(self, setting: List[Dict[str, Any]]) -> None:
         """Parse the command line and environment against `setting`.

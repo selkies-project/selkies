@@ -3,11 +3,12 @@
 
 Covers every public Python API of both libraries, including capabilities not
 used by selkies or the bundled examples (watermarking, raw-stripe wire mode,
-output management, input injection, clipboard data-control, cursor callbacks,
-computer-use HTTP actions, recording tap + MP4 recorder, NVENC, pcmflux
-multichannel/RED/playback, ...).
+output management, input injection, clipboard data-control, cursor callbacks and
+their withdrawal, computer-use HTTP actions, recording tap + MP4 recorder, NVENC,
+pcmflux multichannel/RED/playback, ...).
 """
 import base64
+import gc
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ import sys
 import threading
 import time
 import urllib.request
+import weakref
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
@@ -26,6 +28,52 @@ import helpers as H
 TEST_DISPLAY = ""
 CU_PORT = 9599
 REC_SOCK = os.path.join(H.WORKDIR, "pixelflux-rec.sock")
+
+
+def cursor_withdrawal(res: "H.Results", backend: str, cap) -> None:
+    """A withdrawn cursor callback is released and stops being called.
+
+    The slot is process-wide and outlives the capture that set it, so a consumer
+    going away has no other way to let go of what its callback captured. The
+    Wayland slot lives on the cursor worker, so the drop lands with the job
+    rather than with the call.
+
+    Release is the load-bearing check: the object is reachable only through the
+    callback's defaults, so a weakref outliving the withdrawal is the failure.
+    Delivery is replayed on registration and otherwise follows real cursor
+    changes, so the silence check only guards.
+
+    Args:
+        res: Results accumulator.
+        backend: "x11" or "wayland", for the check labels.
+        cap: A ScreenCapture with a live capture running.
+    """
+    if not hasattr(cap, "clear_cursor_callback"):
+        res.skip(f"{backend} cursor withdrawal", "pixelflux has no clear_cursor_callback")
+        return
+
+    class Held:
+        """Stands in for whatever a consumer's callback closes over."""
+
+    delivered = []
+    held = Held()
+    ref = weakref.ref(held)
+    # A default rather than a closure reference: `del` clears a closure cell,
+    # which would free the object whether or not the callback was released.
+    cap.set_cursor_callback(lambda mt, data, hx, hy, _held=held: delivered.append(mt))
+    time.sleep(1.5)
+    before = len(delivered)
+    del held
+    cap.clear_cursor_callback()
+    time.sleep(1.5)
+    gc.collect()
+    res.check(f"{backend} cursor withdrawal releases the callback", ref() is None)
+    res.check(f"{backend} cursor withdrawal stops delivery",
+              len(delivered) == before, f"{len(delivered) - before} after")
+    cap.set_cursor_callback(lambda mt, data, hx, hy: delivered.append(mt))
+    time.sleep(1.5)
+    res.check(f"{backend} cursor re-registration delivers again",
+              len(delivered) > before, f"{len(delivered) - before} after")
 
 
 def curl_json(url: str, body=None, timeout: float = 15) -> bytes:
@@ -223,8 +271,9 @@ def main() -> "H.Results":
         cap.set_cursor_callback(lambda mt, data, hx, hy: curs.append((mt, len(data or b""), hx, hy)))
         cap.start_capture(FrameCounter(), cs)
         time.sleep(2.0)
+        res.check("x11 cursor callback registered", bool(curs), f"{len(curs)} cursor events")
+        cursor_withdrawal(res, "x11", cap)
         cap.stop_capture()
-        res.check("x11 cursor callback registered", True, f"{len(curs)} cursor events")
     except Exception as e:
         res.check("x11 cursor callback", False, repr(e)[:140])
 
@@ -306,6 +355,7 @@ def main() -> "H.Results":
             res.check("wayland set_cursor_size/rendering", True, "")
         except Exception as e:
             res.check("wayland cursor control", False, repr(e)[:140])
+        cursor_withdrawal(res, "wayland", wc)
         wc.stop_capture()
         time.sleep(0.3)
     except Exception as e:

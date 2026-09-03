@@ -72,9 +72,15 @@ WIRE_TAP_JS = ("window.__wireSent = [];\n" + wire_hook_js(
     "if (typeof data === 'string') window.__wireSent.push(data);"))
 
 
-def chromium_launch(pw: Any) -> Any:
-    """Launch headless Chromium (or the system Chrome named by E2E_CHROME)."""
-    kwargs = {"headless": True, "args": BROWSER_ARGS}
+def chromium_launch(pw: Any, extra_args: Optional[list] = None) -> Any:
+    """Launch headless Chromium (or the system Chrome named by E2E_CHROME).
+
+    Args:
+        pw: Active Playwright instance.
+        extra_args: Switches appended to the shared set, for a suite that needs
+            the browser to behave differently (refusing popups, say).
+    """
+    kwargs = {"headless": True, "args": BROWSER_ARGS + list(extra_args or [])}
     if CHROME_PATH:
         kwargs["executable_path"] = CHROME_PATH
     return pw.chromium.launch(**kwargs)

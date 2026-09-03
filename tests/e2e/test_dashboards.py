@@ -3,7 +3,9 @@
 covering both dashboards' settings loop, mode switching, and admin UI gates."""
 import json
 import os
+import re
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -772,6 +774,164 @@ def hidpi_default_block(dashboard: str, dist: str) -> "H.Results":
     return res
 
 
+def second_screen_block(dashboard: str, dist: str) -> "H.Results":
+    """A refused second-display window leaves the placement arrows up.
+
+    The window is opened from an async continuation, so the click's transient
+    activation may be spent by then and the browser refuses it. The page is
+    given a `window.open` that refuses every one, which is what a popup blocker
+    does (the headless shell honours a switch for it, a full Chrome in its
+    new headless mode does not): clearing the arrows on a window that never opened is the button
+    appearing to do nothing at all.
+    """
+    res = H.Results(f"second-screen-{dashboard}")
+    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    arrows = "[...document.querySelectorAll('.screen-placement-overlay button')]"
+    try:
+        with sync_playwright() as p:
+            browser = C.chromium_launch(p, extra_args=["--block-new-web-contents"])
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+            ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';"
+                                "window.open = () => null;")
+            page = ctx.new_page()
+            page.goto(H.BASE_URL, wait_until="load")
+            time.sleep(8.0)
+            if dashboard == "wish":
+                opened = wish_open_menu_item(page, "Add a second screen")
+            else:
+                opened = classic_open_video(page)
+                page.evaluate("""() => {
+                  const header = [...document.querySelectorAll('.sidebar-section-header')]
+                    .find(e => /screen/i.test(e.textContent));
+                  if (header) header.click();
+                }""")
+                time.sleep(1.0)
+                page.evaluate("""() => {
+                  const add = [...document.querySelectorAll('button')]
+                    .find(b => /add screen/i.test(b.textContent));
+                  if (add) add.click();
+                }""")
+            time.sleep(2.0)
+            shown = page.evaluate(f"{arrows}.length")
+            res.check("the button offers a placement when it cannot choose one",
+                      shown > 0, f"{shown} arrows, menu reached={opened}")
+            page.evaluate(f"{arrows}[0] && {arrows}[0].click()")
+            time.sleep(1.5)
+            still = page.evaluate(f"{arrows}.length")
+            res.check("a refused window leaves the arrows up rather than clearing them",
+                      still == shown, f"{still} of {shown} arrows")
+            res.check("no second window was opened", len(ctx.pages) == 1,
+                      f"{len(ctx.pages)} page(s)")
+            if dashboard == "classic":
+                classic_arrow_theme_check(page, res)
+            browser.close()
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
+def classic_arrow_theme_check(page, res: "H.Results") -> None:
+    """The placement arrows are the theme's filled button in either theme.
+
+    The overlay is a sibling of the sidebar, so it only sees the palette it
+    carries the theme class for itself; a stale colour here is the one
+    control on the page that never follows the theme.
+    """
+    probe = """() => {
+      const arrow = document.querySelector('.screen-placement-overlay button');
+      const swatch = document.createElement('div');
+      swatch.style.background = 'var(--button-bg)';
+      document.querySelector('.sidebar').appendChild(swatch);
+      const out = {arrow: getComputedStyle(arrow).backgroundColor,
+                   token: getComputedStyle(swatch).backgroundColor};
+      swatch.remove();
+      return out;
+    }"""
+    seen = {}
+    for flip in (False, True):
+        if flip:
+            page.evaluate("document.querySelector('.theme-toggle').click()")
+            time.sleep(0.5)
+        theme = page.evaluate(
+            "document.querySelector('.sidebar').className.includes('theme-light') ? 'light' : 'dark'")
+        colours = page.evaluate(probe)
+        seen[theme] = colours["arrow"]
+        res.check(f"placement arrows use the {theme} theme's button fill",
+                  colours["arrow"] == colours["token"], f"{colours}")
+    res.check("the arrow fill follows a theme flip",
+              len(seen) == 2 and len(set(seen.values())) == 2, f"{seen}")
+
+
+def second_screen_auto_block(dashboard: str, dist: str) -> "H.Results":
+    """With one adjacent screen the button places the display on it, unasked.
+
+    The arrows exist for every other case; this is the branch that skips them,
+    and it needs a browser that reports two screens. Chromium is given a faked
+    screen list and the window-management permission over CDP (a persistent
+    context, which is where a browser-level grant lands), since the Window
+    Management API answers nothing without it.
+    """
+    res = H.Results(f"second-screen-auto-{dashboard}")
+    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    profile = tempfile.mkdtemp(prefix=f"selkies-screens-{dashboard}-")
+    try:
+        with sync_playwright() as p:
+            ctx = p.chromium.launch_persistent_context(
+                profile, headless=True,
+                args=C.BROWSER_ARGS + ["--screen-info={0,0 1280x1024}{1280,0 1280x1024}"],
+                viewport={"width": 1280, "height": 900})
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            ctx.new_cdp_session(page).send(
+                "Browser.grantPermissions",
+                {"origin": H.BASE_URL, "permissions": ["windowManagement"]})
+            page.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+            page.goto(H.BASE_URL, wait_until="load")
+            time.sleep(8.0)
+            res.check("the browser reports the second screen",
+                      page.evaluate("() => window.screen.isExtended") is True)
+
+            opened = []
+            ctx.on("page", lambda pg: opened.append(pg))
+            # Clicked through the browser, not evaluate(): opening a window needs
+            # the transient activation only a real gesture carries.
+            if dashboard == "wish":
+                wish_open_menu_item(page, "Add a second screen")
+            else:
+                classic_open_video(page)
+                page.locator('.sidebar-section-header:has-text("Screen")').first.click()
+                time.sleep(1.0)
+                page.get_by_role("button", name=re.compile("add screen", re.I)).first.click()
+            time.sleep(4.0)
+            arrows = page.evaluate(
+                "[...document.querySelectorAll('.screen-placement-overlay button')].length")
+            res.check("it places the display without asking which side",
+                      arrows == 0 and len(opened) == 1, f"{arrows} arrows, {len(opened)} window(s)")
+            if opened:
+                opened[0].wait_for_load_state("load")
+                res.check("on the side the adjacent screen is",
+                          opened[0].url.endswith("#display2-right"), opened[0].url[-24:])
+                time.sleep(8.0)
+                displays = json.loads(H.curl("/api/status")[1] or "{}")
+                res.check("and the server takes the second display",
+                          wait_second_display(), str(displays.get("current_mode")))
+            ctx.close()
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
+def wait_second_display(timeout: float = 15.0) -> bool:
+    """Whether the server logs a second display client joining."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if "display2" in H.server_log():
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def main() -> None:
     """Run the dashboard blocks named on argv (default: all)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -786,6 +946,11 @@ def main() -> None:
     if which in ("all", "hidpi"):
         blocks.append(hidpi_default_block("classic", H.CLASSIC_DIST))
         blocks.append(hidpi_default_block("wish", H.WISH_DIST))
+    if which in ("all", "second-screen"):
+        blocks.append(second_screen_block("classic", H.CLASSIC_DIST))
+        blocks.append(second_screen_block("wish", H.WISH_DIST))
+        blocks.append(second_screen_auto_block("classic", H.CLASSIC_DIST))
+        blocks.append(second_screen_auto_block("wish", H.WISH_DIST))
     failed = sum(len(b.failed()) for b in blocks)
     total = sum(len(b.items) for b in blocks)
     print(f"\n=== DASH: {total - failed}/{total} passed ===")

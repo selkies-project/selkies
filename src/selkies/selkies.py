@@ -68,6 +68,7 @@ from .display_utils import (
     apply_common_capture_settings,
     parse_gpu_id,
     format_pixelflux_cursor,
+    release_pixelflux_cursor_callback,
     get_new_res,
     generate_xrandr_gtf_modeline,
     ensure_mode,
@@ -93,6 +94,7 @@ from .input_handler import (
     BULK_DRAIN_TIMEOUT_S,
     WebRTCInput as InputHandler,
     CLIPBOARD_CHUNK_SIZE,
+    gamepad_slot_denied,
     VIEWER_ALLOWED_PREFIXES,
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
@@ -1497,10 +1499,43 @@ class DataStreamingServer(BaseStreamingService):
             except Exception as e:
                 data_logger.warning(f"Live CRF update failed for '{display_id}' ({e}).")
 
+    async def set_client_stream_box(self, display_id: str, origin_x: float,
+                                    origin_y: float, scale_x: float,
+                                    scale_y: float) -> None:
+        """Record where a display's page draws its stream on the user's desktop.
+
+        Rebroadcast with the layout, since a page maps a drag that crossed onto
+        a neighbor through the neighbor's box rather than off its own edge.
+        Only the browser knows those origins, and they are the only thing
+        relating two viewports whose monitors, window chrome and device pixel
+        ratios all differ. Ignored for an unknown display or an impossible box.
+        """
+        display_state = self.display_clients.get(display_id)
+        if display_state is None or display_id not in self.display_layouts:
+            return
+        if not (0.05 <= scale_x <= 100.0 and 0.05 <= scale_y <= 100.0):
+            return
+        if not (abs(origin_x) <= 100000.0 and abs(origin_y) <= 100000.0):
+            return
+        box = (origin_x, origin_y, scale_x, scale_y)
+        if display_state.get("client_stream_box") == box:
+            return
+        # One box a page publishes is one broadcast to every client; a page that
+        # alternated two would otherwise amplify at whatever rate it sent. The
+        # page republishes what the layout comes back missing, so a dropped
+        # update is not a lost one.
+        now = time.monotonic()
+        if now - display_state.get("client_stream_box_at", 0.0) < 0.2:
+            return
+        display_state["client_stream_box_at"] = now
+        display_state["client_stream_box"] = box
+        await self.broadcast_display_config()
+
     def _display_config_payload(self) -> dict:
         """DISPLAY_CONFIG_UPDATE body: the display roster, plus each laid-out
-        display's rectangle and its client's reported CSS-to-remote scale, so
-        a page can map a cross-display drag into its neighbor's region."""
+        display's rectangle, its client's reported CSS-to-remote scale and the
+        desktop box that client draws it in, so a page can map a cross-display
+        drag into its neighbor's region."""
         payload = {
             "type": "display_config_update",
             "displays": list(self.display_clients.keys()),
@@ -1508,9 +1543,14 @@ class DataStreamingServer(BaseStreamingService):
         layouts = {}
         for did, rect in (self.display_layouts or {}).items():
             entry = dict(rect)
-            scale = (self.display_clients.get(did) or {}).get("client_scale")
+            client = self.display_clients.get(did) or {}
+            scale = client.get("client_scale")
             if scale:
                 entry["scale"] = scale
+            box = client.get("client_stream_box")
+            if box:
+                (entry["originX"], entry["originY"],
+                 entry["scaleX"], entry["scaleY"]) = box
             layouts[did] = entry
         if layouts:
             payload["layouts"] = layouts
@@ -2175,7 +2215,10 @@ class DataStreamingServer(BaseStreamingService):
         `second_screen` and `ui_sidebar_show_apps` as effective
         availability — the admin flag and what the backend can actually do — so
         dashboards never offer a display the server would immediately kill, nor
-        an apps panel whose every button would fail.
+        an apps panel whose every button would fail; and `apps_installed`, the
+        set the runner reports, which no browser's own storage can answer for a
+        session opened somewhere else — absent until the runner has answered,
+        because a client told nothing is installed clears its own record.
         """
         payload = build_client_settings_payload()
         live_encoder = (self.display_clients.get(display_id) or {}).get('encoder') or self.app.encoder
@@ -2191,6 +2234,9 @@ class DataStreamingServer(BaseStreamingService):
         if (isinstance(apps, dict) and apps.get('value')
                 and self.input_handler and not self.input_handler.apps_available()):
             payload['ui_sidebar_show_apps'] = dict(apps, value=False)
+        installed = self.input_handler.installed_apps() if self.input_handler else None
+        if installed is not None:
+            payload['apps_installed'] = {"value": installed}
         return payload
 
     async def _broadcast_live_server_settings(self, display_id: str) -> None:
@@ -4095,6 +4141,8 @@ class DataStreamingServer(BaseStreamingService):
 
                             async def _notify_cmd_done(cmd):
                                 await _send_cmd_status(f"command_done,{cmd}")
+                                if self.input_handler:
+                                    await self.input_handler.note_app_command_finished(cmd)
 
                             await run_client_command(
                                 command_to_run, data_logger, notify=_notify_cmd_error,
@@ -4104,26 +4152,19 @@ class DataStreamingServer(BaseStreamingService):
                             data_logger.warning("Received 'cmd' message without a command string.")
 
                     else:
-                        if message.startswith("js,") and self.is_secure_mode:
-                            perms = client_permissions.get(websocket)
-                            if not perms or not perms.get("token"):
-                                data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {remote_address} dropped. Client has no token/perms.")
-                                continue
-                            
-                            token = perms.get("token")
-                            current_perms = user_tokens.get(token)
-                            server_slot = current_perms.get("slot") if current_perms else None
-
-                            if server_slot is None:
-                                data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {remote_address} dropped. Client token has no assigned slot.")
-                                continue
-                            try:
-                                client_index = int(message.split(',')[2])
-                                if (int(server_slot) - 1) != client_index:
-                                    data_logger.warning(f"BLOCK (Secure Mode): Gamepad input from {remote_address} dropped. Client sent for index {client_index}, but is assigned slot {server_slot}.")
-                                    continue
-                            except (IndexError, ValueError):
-                                data_logger.warning(f"BLOCK (Secure Mode): Malformed gamepad message from {remote_address}: {message}")
+                        if message.startswith("js,"):
+                            # Live store, not the connect-time snapshot: a revoked
+                            # or re-slotted token lands on the next message.
+                            perms = client_permissions.get(websocket) or {}
+                            slot = perms.get("slot")
+                            if self.is_secure_mode:
+                                live = user_tokens.get(perms.get("token")) if perms.get("token") else None
+                                slot = live.get("slot") if live else None
+                            if gamepad_slot_denied(message, perms.get("role"), slot,
+                                                   self.is_secure_mode):
+                                data_logger.warning(
+                                    f"DENIED gamepad input from {remote_address}: "
+                                    f"{message[:32]} does not match slot {slot}.")
                                 continue
 
                         # maxsplit=1: a full split of an 8 MiB clipboard chunk stalls the loop.
@@ -4463,6 +4504,27 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e:
             data_logger.error(f"Wayland resize_output failed: {e}")
 
+    async def _scale_wayland_screen(self) -> None:
+        """Give the primary's screen (output 0) the primary's capture scale, at
+        the size it has.
+
+        The primary's capture is a view over that screen, and a capture start
+        sizes the view alone; a session that takes its scale from the host
+        window's preferred fractional scale (a nested KWin) sees only the
+        screen's. A no-op for the compositor at the scale it already carries.
+        """
+        module = self._wayland_control_module()
+        if module is None:
+            return
+        try:
+            outputs = {o[0]: o for o in await asyncio.to_thread(module.list_outputs)}
+        except Exception as e:
+            data_logger.debug(f"Wayland screen scale carry skipped: {e}")
+            return
+        screen = outputs.get(WAYLAND_SCREEN_OUTPUT_ID)
+        if screen:
+            await self._size_wayland_screen(screen[3], screen[4])
+
     async def _reanchor_wayland_primary(self, layouts: dict, keep_ids: set[str]) -> None:
         """Collapse an unrealizable Wayland arrangement: primary back at the
         origin (layout + capture rebuild) -- the Wayland mirror of the X11
@@ -4620,7 +4682,8 @@ class DataStreamingServer(BaseStreamingService):
             client = self.display_clients.get(did) or {}
             scale = float(client.get('scale', 1.0) or 1.0)
             if self.input_handler:
-                await self.input_handler.ensure_session_screen(did)
+                await self.input_handler.ensure_session_screen(
+                    did, size=(layout['w'], layout['h']), scale=scale)
             created = False
             try:
                 created = bool(await asyncio.to_thread(
@@ -4869,12 +4932,17 @@ class DataStreamingServer(BaseStreamingService):
 
         if not IS_WAYLAND:
             curr_res, _, available_resolutions, _, screen_name = await get_new_res("1x1")
-            if not screen_name:
-                data_logger.error("CRITICAL: Could not determine screen name from xrandr. Aborting.")
-                await self._signal_all_displays_stopped()
-                return
             total_mode_str = f"{total_width}x{total_height}"
-            if total_mode_str not in available_resolutions:
+            if not screen_name:
+                # A server with no connected RandR output (a GPU without a
+                # display engine, a driver told to use none) has no mode to
+                # set and no monitor to publish: its framebuffer is sized
+                # outright where the server allows, and the layouts are
+                # clamped to what it has otherwise.
+                data_logger.info(
+                    "No connected RandR output on this X server; the desktop is sized as a bare "
+                    "framebuffer, with no monitor per display.")
+            elif total_mode_str not in available_resolutions:
                 data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
                 # Native first: a mode made by per-invocation xrandr dies with its
                 # connection on some servers (Xvfb).
@@ -4921,25 +4989,26 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.warning(f"Live re-target failed for '{did}' ({e}); restarting it.")
                         keep_ids.discard(did)
                         await self._stop_capture_for_display(did)
-            data_logger.info("Swapping logical monitors to the new layout...")
-            # Monitors go in before the framebuffer change, at their final rectangles
-            # and under a server grab: window managers re-tile on every root
-            # ConfigureNotify and must never see a monitor-less or partial set.
-            await replace_selkies_monitors(layouts, screen_name=screen_name)
+            if screen_name:
+                data_logger.info("Swapping logical monitors to the new layout...")
+                # Monitors go in before the framebuffer change, at their final
+                # rectangles and under a server grab: window managers re-tile on
+                # every root ConfigureNotify and must never see a monitor-less
+                # or partial set.
+                await replace_selkies_monitors(layouts, screen_name=screen_name)
             # A mode change is the dominant cost of a reconfigure (CRTC reprogram,
             # every client repaints), so a same-size reload skips it. A live
             # re-target that grew the framebuffer above still shrinks here.
             curr_norm = (curr_res or "").lower().replace(" ", "")
             if curr_norm == total_mode_str:
                 data_logger.info(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
-            else:
-                if not await resize_display(total_mode_str):
-                    # Some servers refuse runtime modes but honor a plain framebuffer
-                    # grow (RRSetScreenSize); captures and pointer warps address the root.
-                    if await grow_framebuffer(total_width, total_height):
-                        data_logger.info(f"Mode-set for {total_mode_str} failed; grew the framebuffer instead.")
-                    else:
-                        data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
+            elif not await resize_display(total_mode_str):
+                # Some servers refuse runtime modes but honor a plain framebuffer
+                # grow (RRSetScreenSize); captures and pointer warps address the root.
+                if await grow_framebuffer(total_width, total_height):
+                    data_logger.info(f"Mode-set for {total_mode_str} failed; grew the framebuffer instead.")
+                else:
+                    data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
             # The X server is the authority: a driver can refuse the size and leave
             # the root as it was, and a region outside the root grabs garbage.
             realized_w, realized_h = await read_realized_root((total_width, total_height))
@@ -5233,6 +5302,8 @@ class DataStreamingServer(BaseStreamingService):
             f"Preparing to start capture for display='{display_id}': "
             f"Res={width}x{height}, Offset={x_offset}x{y_offset}"
         )
+        if IS_WAYLAND and display_id == 'primary':
+            await self._scale_wayland_screen()
 
         try:
             settings = self._get_capture_settings(display_id, width, height, x_offset, y_offset)
@@ -5334,6 +5405,10 @@ class DataStreamingServer(BaseStreamingService):
                     data_logger.error(f"Error in capture callback for {display_id}: {e}", exc_info=False)
 
             def pixelflux_cursor_handler(msg_type, data_bytes, hot_x, hot_y):
+                # A call already in flight when shutdown cleared `app`.
+                app = self.app
+                if app is None:
+                    return
                 try:
                     # An auto cursor_size is None; the formatter needs a fallback
                     # dimension, the same 24 the WebRTC handler uses.
@@ -5341,7 +5416,7 @@ class DataStreamingServer(BaseStreamingService):
                     payload = format_pixelflux_cursor(
                         msg_type, data_bytes, hot_x, hot_y, size if size > 0 else 24)
                     if payload is not None:
-                        self.app.send_ws_cursor_data(payload)
+                        app.send_ws_cursor_data(payload)
                 except Exception as e:
                     data_logger.error(f"Error handling pixelflux cursor: {e}")
 
@@ -5558,14 +5633,16 @@ class DataStreamingServer(BaseStreamingService):
         Closes every client socket first (code 4000) so handlers exit and no
         stray capture keeps encoding for a page that can no longer receive,
         then stops pipelines while display state still exists to address
-        their tasks, cancels auxiliary tasks, stops the input handler, drops
-        the persistent capture modules, and unregisters the registry-global
-        Prometheus gauges (re-entering this mode after a switch would
-        otherwise fail on duplicated timeseries). The close carries no KILL
-        verb: KILL is the client's terminal verdict (it clears the reconnect
-        timer and drops its onclose handler), whereas a shutdown is usually a
-        mode switch every page must recover from — a bare close leaves the
-        client's reconnect/mode-flip loop armed, which converges the tabs.
+        their tasks, stops every capture that survived that pass and withdraws
+        its cursor callback, cancels auxiliary tasks, stops the input handler,
+        drops the persistent capture modules, and unregisters the
+        registry-global Prometheus gauges
+        (re-entering this mode after a switch would otherwise fail on
+        duplicated timeseries). The close carries no KILL verb: KILL is the
+        client's terminal verdict (it clears the reconnect timer and drops its
+        onclose handler), whereas a shutdown is usually a mode switch every
+        page must recover from — a bare close leaves the client's
+        reconnect/mode-flip loop armed, which converges the tabs.
         """
         if self._shutdown_called:
             logger.info("Shutdown already called, skipping")
@@ -5599,6 +5676,18 @@ class DataStreamingServer(BaseStreamingService):
         self.video_paused_clients.clear()
         self._report_client_presence()
         self.display_clients.clear()
+
+        # Unconditional, and only now: the reconfigure pass stops captures in its
+        # no-clients branch alone, which the reconnect grace holds shut until long
+        # after this returns.
+        for display_id in list(self.capture_instances.keys()):
+            try:
+                await self._stop_capture_for_display(display_id)
+            except Exception as e:
+                logger.error(f"Capture for '{display_id}' failed to stop during shutdown: {e}")
+        self.capture_instances.clear()
+        for module in self._persistent_capture_modules.values():
+            release_pixelflux_cursor_callback(module)
 
         all_tasks_for_cleanup = [
             t for t in self._tasks_to_run
@@ -5926,8 +6015,9 @@ async def on_resize_handler(
     capture restart with the screen sizing the restart itself does not do (the
     primary's capture is a view over screen 0, and pixelflux sizes only the
     view): the screen is grown first, the realized geometry is read back, and
-    the screen is fitted to it — WebRTC's `_resize_primary_display` parity —
-    so the session compositor lays applications out at the new size.
+    the screen is fitted to it — WebRTC's `_resize_primary_display` parity. A
+    nested session's screen belongs to its own compositor and is sized after,
+    or its applications stay laid out for the size the last DPI change left.
 
     Args:
         res_str: The requested `{width}x{height}` string.
@@ -6012,8 +6102,17 @@ async def on_resize_handler(
                     await data_server_instance._stop_capture_for_display(display_id)
                     await data_server_instance._start_capture_for_display(display_id, target_w, target_h, 0, 0)
                 await data_server_instance._sync_wayland_realized_geometry(display_id)
-                await data_server_instance._size_wayland_screen(
-                    client_info.get('width', target_w), client_info.get('height', target_h))
+                realized = (client_info.get('width', target_w),
+                            client_info.get('height', target_h))
+                await data_server_instance._size_wayland_screen(*realized)
+                # A nested session's screen is its own compositor's, not the
+                # capture's: sizing only the capture leaves its applications laid
+                # out for the size the last DPI change realized.
+                if data_server_instance.input_handler is not None:
+                    await data_server_instance.input_handler.realize_wayland_dpi(
+                        client_info.get('scaling_dpi')
+                        or getattr(settings, 'scaling_dpi', 96) or 96,
+                        display_id, realized)
             else:
                 logger_app_resize.info(f"Display client '{display_id}' dimensions updated to {target_w}x{target_h}. Triggering reconfiguration.")
                 await data_server_instance.reconfigure_displays()

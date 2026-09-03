@@ -236,6 +236,10 @@ class WebRTCService(BaseStreamingService):
         # Each page's reported CSS-to-remote scale, by display id (the primary
         # included), rebroadcast with the layout for cross-display drags.
         self._client_scales: Dict[str, float] = {}
+        # Each page's stream box on the user's desktop, by display id: origin
+        # and remote pixels per desktop pixel, with when it last changed.
+        self._client_stream_boxes: Dict[
+            str, Tuple[Tuple[float, float, float, float], float]] = {}
         self.display_pipelines: Dict[str, MediaPipelinePixel] = {}
         self._last_idr_request_times: Dict[str, float] = {}
         self._display_lock = asyncio.Lock()
@@ -469,6 +473,10 @@ class WebRTCService(BaseStreamingService):
             display_position: Where a joining secondary sits relative to the
                 primary ("right", "left", "up", "down").
         """
+        # From the registry, not SESSION_START: the signaling server that validated
+        # the claim is this process, and the relay's fields are positional.
+        peer = self.peer_manager.peers.get(session_peer_id) if self.peer_manager else None
+        client_slot = getattr(peer, "client_slot", None) if peer else None
         logger.info(
             f"starting session for client peer id: {session_peer_id} of type: {client_type} (display '{display_id}')"
         )
@@ -488,7 +496,8 @@ class WebRTCService(BaseStreamingService):
                 entry = self.display_clients.setdefault(display_id, {"width": 0, "height": 0})
                 entry["position"] = display_position
                 self._seed_display_settings(entry)
-            await self.rtc_app.start_rtc_connection(session_peer_id, client_type, client_token, display_id)
+            await self.rtc_app.start_rtc_connection(
+                session_peer_id, client_type, client_token, display_id, client_slot)
             if self.args.enable_webrtc_statistics and self.metrics:
                 await self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
             logger.info(f"started session for client peer id {session_peer_id}")
@@ -691,7 +700,10 @@ class WebRTCService(BaseStreamingService):
         the server would immediately refuse, nor an apps panel whose every
         button would fail. Adds the terminal the apps panel launches in, chosen
         by the session's windowing system (absent when none is installed: the
-        client keeps its default)."""
+        client keeps its default), and what the apps panel already has
+        installed, which no browser's own storage can answer for a session
+        opened somewhere else — absent until the runner has answered, because a
+        client told nothing is installed clears its own record."""
         payload = get_server_settings()
         available, _ = self._second_screen_availability()
         entry = payload.get("settings", {}).get("second_screen")
@@ -701,6 +713,9 @@ class WebRTCService(BaseStreamingService):
         if (isinstance(apps, dict) and apps.get("value")
                 and self.input_handler and not self.input_handler.apps_available()):
             payload["settings"]["ui_sidebar_show_apps"] = dict(apps, value=False)
+        installed = self.input_handler.installed_apps() if self.input_handler else None
+        if installed is not None:
+            payload["settings"]["apps_installed"] = {"value": installed}
         return payload
 
     def handle_data_channel_open(self, channel: Optional[Any] = None) -> None:
@@ -893,8 +908,9 @@ class WebRTCService(BaseStreamingService):
         forever. On Wayland there is no X server to resize: the screen is
         grown ahead of the capture restart, the restarted capture resizes the
         view, the compositor's realized geometry (it may even-mask or refuse
-        the mode) is reconciled and pushed to the client, and the screen is
-        then fitted to it.
+        the mode) is reconciled and pushed to the client, the screen is fitted
+        to it, and a nested session's own screen is re-sized to the same
+        geometry at the DPI in force.
         """
         if self._server_locked_dims() is not None:
             logger.warning(
@@ -936,6 +952,15 @@ class WebRTCService(BaseStreamingService):
                     await self._push_wayland_realized_geometry("primary", self.media_pipeline)
                     await self._size_wayland_screen(
                         self.media_pipeline.width, self.media_pipeline.height)
+                    # A nested session's screen is its own compositor's, not the
+                    # capture's: sizing only the capture leaves its applications
+                    # laid out for the size the last DPI change realized.
+                    if self.input_handler is not None:
+                        await self.input_handler.realize_wayland_dpi(
+                            getattr(self, "_last_applied_dpi", None)
+                            or getattr(settings, "scaling_dpi", 96) or 96,
+                            "primary",
+                            (self.media_pipeline.width, self.media_pipeline.height))
                 self.media_pipeline.last_resize_success = True
                 self._last_resize_request = (target_w, target_h)
                 logger.info(
@@ -1088,6 +1113,7 @@ class WebRTCService(BaseStreamingService):
             self.display_clients.pop(display_id, None)
             self.display_layouts.pop(display_id, None)
             self._client_scales.pop(display_id, None)
+            self._client_stream_boxes.pop(display_id, None)
             if pipeline is not None:
                 await pipeline.stop_media_pipeline()
         await self.reconfigure_displays()
@@ -1248,7 +1274,8 @@ class WebRTCService(BaseStreamingService):
         if self.input_handler:
             # The screen this display owns, grown just ahead of the output
             # that adopts its host window.
-            await self.input_handler.ensure_session_screen(did)
+            await self.input_handler.ensure_session_screen(
+                did, size=(s["w"], s["h"]), scale=scale)
         try:
             created = bool(await asyncio.to_thread(
                 module.create_output, oid, s["w"], s["h"], s["x"], s["y"], scale))
@@ -1559,6 +1586,7 @@ class WebRTCService(BaseStreamingService):
         self.display_clients.pop(did, None)
         self.display_layouts.pop(did, None)
         self._client_scales.pop(did, None)
+        self._client_stream_boxes.pop(did, None)
         primary_layout = self.display_layouts.get("primary")
         if primary_layout:
             # Input offsets follow the layout; the primary re-anchors at the origin.
@@ -1609,6 +1637,7 @@ class WebRTCService(BaseStreamingService):
         self.display_clients.pop(did, None)
         self.display_layouts.pop(did, None)
         self._client_scales.pop(did, None)
+        self._client_stream_boxes.pop(did, None)
         primary_layout = self.display_layouts.get("primary")
         if primary_layout:
             # Input offsets follow the layout; the primary is back at the origin.
@@ -1869,10 +1898,43 @@ class WebRTCService(BaseStreamingService):
             if w > 0 and h > 0:
                 self.rtc_app.send_remote_resolution(f"{w}x{h}", did)
 
+    async def set_client_stream_box(self, display_id: str, origin_x: float,
+                                    origin_y: float, scale_x: float,
+                                    scale_y: float) -> None:
+        """Record where a display's page draws its stream on the user's desktop.
+
+        Rebroadcast with the layout, since a page maps a drag that crossed onto
+        a neighbor through the neighbor's box rather than off its own edge.
+        Only the browser knows those origins, and they are the only thing
+        relating two viewports whose monitors, window chrome and device pixel
+        ratios all differ. Ignored for an unknown display or an impossible box.
+        """
+        if display_id not in self.display_layouts:
+            return
+        if not (0.05 <= scale_x <= 100.0 and 0.05 <= scale_y <= 100.0):
+            return
+        if not (abs(origin_x) <= 100000.0 and abs(origin_y) <= 100000.0):
+            return
+        box = (origin_x, origin_y, scale_x, scale_y)
+        now = time.monotonic()
+        stored = self._client_stream_boxes.get(display_id)
+        if stored is not None:
+            if stored[0] == box:
+                return
+            # One box a page publishes is one broadcast to every client; a page
+            # that alternated two would otherwise amplify at whatever rate it
+            # sent. The page republishes what the layout comes back missing, so
+            # a dropped update is not a lost one.
+            if now - stored[1] < 0.2:
+                return
+        self._client_stream_boxes[display_id] = (box, now)
+        self._broadcast_display_config()
+
     def _display_config_payload(self) -> Dict[str, Any]:
         """display_config_update body: the display roster, plus each laid-out
-        display's rectangle and its client's reported CSS-to-remote scale, so
-        a page can map a cross-display drag into its neighbor's region."""
+        display's rectangle, its client's reported CSS-to-remote scale and the
+        desktop box that client draws it in, so a page can map a cross-display
+        drag into its neighbor's region."""
         displays = ["primary"] + [d for d in self.display_clients.keys() if d != "primary"]
         payload: Dict[str, Any] = {"displays": displays}
         layouts = {}
@@ -1881,6 +1943,10 @@ class WebRTCService(BaseStreamingService):
             scale = self._client_scales.get(did)
             if scale:
                 entry["scale"] = scale
+            stored = self._client_stream_boxes.get(did)
+            if stored:
+                (entry["originX"], entry["originY"],
+                 entry["scaleX"], entry["scaleY"]) = stored[0]
             layouts[did] = entry
         if layouts:
             payload["layouts"] = layouts
@@ -1974,6 +2040,12 @@ class WebRTCService(BaseStreamingService):
                     continue
                 pipeline.scale = new_scale
                 if pipeline.is_media_pipeline_running():
+                    if did == "primary":
+                        # The capture is a view over the primary's screen, and a
+                        # capture start sizes the view alone: the screen carries
+                        # the scale to the session (its window's preferred
+                        # fractional scale).
+                        await self._size_wayland_screen(pipeline.width, pipeline.height)
                     await pipeline.restart_screen_capture()
                     await self._push_wayland_realized_geometry(did, pipeline)
             await self._apply_wayland_cursor_size(dpi_value)

@@ -37,7 +37,7 @@ def screen_positions(socket: str) -> List[Tuple[int, int]]:
     """The nested compositor's screen origins, in screen order, read through
     its own output management."""
     import pixelflux
-    return [(x, y) for _name, x, y in
+    return [(screen[1], screen[2]) for screen in
             pixelflux.ScreenCapture().list_app_screens(socket)]
 
 

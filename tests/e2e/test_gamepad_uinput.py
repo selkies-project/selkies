@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Kernel gamepad end-to-end: a real browser client with a synthetic Gamepad API
 drives selkies over each transport; the /dev/uinput emulator records what the
-kernel would receive."""
+kernel would receive. A `#player2` client repeats it on the sharing path, where
+the slot comes from the connection rather than the message."""
 import os
 import struct
 import sys
@@ -45,12 +46,13 @@ def decode(path: str) -> list[tuple[int, int, int]]:
     blob = open(path, "rb").read()
     return [struct.unpack("=qqHHi", blob[o:o + 24])[2:] for o in range(0, len(blob) - 23, 24)]
 
-def launch(pw, mode: str):
+def launch(pw, mode: str, fragment: str = ""):
     """Launch Chromium with the synthetic pad injected and open the stream page.
 
     Args:
         pw: Active Playwright instance.
         mode: Transport mode, ``websockets`` or ``webrtc``.
+        fragment: Sharing fragment to open the page with ("#player2"), or "".
 
     Returns:
         Tuple of (browser, page, console-error list).
@@ -63,7 +65,7 @@ def launch(pw, mode: str):
     errors = []
     page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
     page.on("pageerror", lambda e: errors.append(str(e)))
-    page.goto(H.BASE_URL + "/", wait_until="load")
+    page.goto(H.BASE_URL + "/" + fragment, wait_until="load")
     return browser, page, errors
 
 def run(mode: str, results: "H.Results") -> None:
@@ -109,7 +111,46 @@ def run(mode: str, results: "H.Results") -> None:
                  for i in range(0, len(events) - 1, 2)) and len(events) % 2 == 0
     results.check(f"{mode}: every event is framed by SYN_REPORT", synced, f"{len(events)} events")
 
+def run_player_slot(mode: str, results: "H.Results") -> None:
+    """A `#player2` link drives player 2's pad and no other.
+
+    The slot a client may drive is the one its own connection carries, which
+    each transport learns differently: the websockets handshake reads it off the
+    query, and the signaling HELLO carries it to the WebRTC gate. Driving a real
+    pad through to the kernel device is what proves that path end to end.
+
+    Args:
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+        results: Results accumulator shared across both transports.
+    """
+    shim_env, STREAM, SHIMLOG = H.uinput_shim_env(f"e2e-player2-{mode}")
+    H.server_start(mode=mode, extra_env=shim_env)
+    try:
+        with sync_playwright() as pw:
+            browser, page, errors = launch(pw, mode, fragment="#player2")
+            video = C.wait_wr_video(page) if mode == "webrtc" else C.wait_ws_video(page)
+            results.check(f"{mode}: player-2 video flowing", bool(video), str(video))
+            for action in ("__padPress(0, 1)", "__padPress(0, 0)"):
+                page.evaluate(f"window.{action}")
+                time.sleep(0.25)
+            time.sleep(0.5)
+            browser.close()
+    finally:
+        server_log = H.server_log()
+        H.server_stop()
+
+    events = decode(STREAM)
+    results.check(f"{mode}: a player-2 link is given slot 1",
+                  "virtual gamepad slot 1" in server_log
+                  and "virtual gamepad slot 0" not in server_log)
+    results.check(f"{mode}: its pad reaches the kernel device",
+                  (ih.EV_KEY, ih.BTN_A, 1) in events, f"{len(events)} events")
+    results.check(f"{mode}: no other slot was driven",
+                  open(SHIMLOG).read().count("DEV_CREATE") == 1)
+
+
 results = H.Results("uinput")
 for mode in ("websockets", "webrtc"):
     run(mode, results)
+    run_player_slot(mode, results)
 sys.exit(0 if results.summary() else 1)

@@ -26,6 +26,7 @@ import json
 import html
 import stat
 import hashlib
+import ipaddress
 import time
 import shutil
 import base64
@@ -571,6 +572,9 @@ def _unix_socket_is_live(path: str) -> bool:
     return True
 
 
+# sysexits.h EX_CONFIG: the settings are the problem and starting again will not
+# change the answer, so a supervisor can stop instead of respawning forever.
+EXIT_CONFIG_ERROR: int = 78
 # Realm both 401 challenges name; the web client's 401 guard keys on the
 # Bearer one as this server's own token verdict.
 AUTH_REALM: str = "Selkies Restricted"
@@ -580,6 +584,12 @@ WEBSOCKET_ROUTES: Tuple[str, ...] = ("/api/websockets", "/api/webrtc/signaling",
 # Mirror of the secure-mode session token for requests the client cannot put
 # a header on (the file-manager iframe and its download links).
 SESSION_TOKEN_COOKIE: str = "selkies_token"
+# Fallback carrier for the master token on the token and mode-switch
+# endpoints, same ``Bearer <token>`` grammar as Authorization. A request has
+# one Authorization header, so a caller behind a Basic login (a reverse
+# proxy's, typically) must spend it on the Basic credentials and present the
+# master token here instead; Authorization is still tried first.
+MASTER_TOKEN_HEADER: str = "Selkies-Authorization"
 
 FILE_INDEX_HEADER: str = """<!DOCTYPE html>
 <html lang="en">
@@ -1023,12 +1033,11 @@ class CentralizedStreamServer:
     spawned with a copied environment reaches it.
 
     Attributes:
-        transfer_pacer: Download pacing, congestion-controlled by default; a
-            static cap only when the operator knows the link rate. A zero limit
-            with adaptive off leaves downloads on the unthrottled FileResponse path.
+        transfer_pacer: Download pacing, congestion-controlled, with a static
+            cap on top only when the operator knows the link rate.
         upload_pacer: The uploads' adaptive allowance, fed per-read verdicts
-            from an `UplinkGauge` over the uploader's own session socket; None
-            when congestion control is off. The static cap reaches uploads
+            from an `UplinkGauge` over the uploader's own session socket. The
+            static cap reaches uploads
             through `transfer_pacer`'s shared bucket, as ever.
         _chunked_uploads: In-flight chunked uploads by destination path: transfer
             id, next expected offset, `.part` path, last-activity stamp, and a
@@ -1060,11 +1069,9 @@ class CentralizedStreamServer:
             limit_mbps = 0.0
         self.transfer_pacer = TransferPacer(
             static_bps=int(limit_mbps * 125000),
-            adaptive=bool(self.settings.file_transfer_cc[0]),
+            adaptive=True,
         )
-        self.upload_pacer = (
-            TransferPacer(adaptive=True)
-            if self.settings.file_transfer_cc[0] else None)
+        self.upload_pacer = TransferPacer(adaptive=True)
         self.upload_dir = pathlib.Path(
             os.path.expanduser(self.settings.file_manager_path)
         ).resolve()
@@ -1171,17 +1178,102 @@ class CentralizedStreamServer:
         )
         return cert_pem, key_pem
 
+    def _self_signed_candidates(self) -> List[Tuple[str, str]]:
+        """Where a generated pair may live, most preferred first.
+
+        The configured path leads so an operator who pointed at one gets the
+        pair there; the state directory catches a user install, which for the
+        default `ssl-cert-snakeoil` path means anyone not running as root.
+
+        Returns:
+            `(certificate, key)` absolute path pairs; a pair with no key path
+            is dropped, since a generated key is always written separately.
+        """
+        candidates = []
+        configured = getattr(self.settings, "https_cert", None)
+        if configured:
+            candidates.append((os.path.abspath(configured),
+                               os.path.abspath(getattr(self.settings, "https_key", "") or "")))
+        state = os.path.join(
+            os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+            "selkies")
+        candidates.append((os.path.join(state, "selkies.pem"),
+                           os.path.join(state, "selkies.key")))
+        return [(cert, key) for cert, key in candidates if cert and key]
+
+    def _self_signed_names(self) -> Tuple[list, list]:
+        """The names a generated certificate is issued for.
+
+        Loopback under every spelling, since that is what a published container
+        port is reached by, plus the host's own name. Its routable address is
+        deliberately absent: the pair outlives the address a container is given
+        on each run, and one naming last week's is worse than one claiming none.
+
+        Returns:
+            `(dns names, ip addresses)`, both ready for `SubjectAlternativeName`.
+        """
+        from cryptography import x509
+
+        dns = ["localhost"]
+        hostname = socket.gethostname()
+        if hostname and hostname != "localhost":
+            dns.append(hostname)
+        addresses = [ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1")]
+        return ([x509.DNSName(name) for name in dns],
+                [x509.IPAddress(address) for address in addresses])
+
+    def _self_signed_pair_usable(self, cert_path: str, key_path: str) -> bool:
+        """Whether an existing generated pair can be served again as it is.
+
+        Reused only if it loads, has not expired, and names loopback by address:
+        one issued before those SANs fails hostname verification at 127.0.0.1,
+        and keeping it would carry that forward for the life of the install.
+        Anything unreadable counts as absent, so a truncated file is replaced.
+
+        Args:
+            cert_path: Certificate to examine.
+            key_path: Its private key.
+
+        Returns:
+            True when the pair should be reused instead of regenerated.
+        """
+        from cryptography import x509
+
+        if not (os.path.isfile(cert_path) and os.path.isfile(key_path)):
+            return False
+        try:
+            with open(cert_path, "rb") as handle:
+                cert = x509.load_pem_x509_certificate(handle.read())
+            # not_valid_after_utc where cryptography has it, else the naive
+            # attribute it replaced, read as UTC.
+            expiry = getattr(cert, "not_valid_after_utc", None)
+            now = datetime.now(tz=timezone.utc)
+            if expiry is None:
+                expiry = cert.not_valid_after.replace(tzinfo=timezone.utc)
+            if expiry <= now:
+                return False
+            addresses = cert.extensions.get_extension_for_class(
+                x509.SubjectAlternativeName).value.get_values_for_type(x509.IPAddress)
+            if ipaddress.ip_address("127.0.0.1") not in addresses:
+                return False
+            context = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
+            context.load_cert_chain(cert_path, keyfile=key_path)
+        except Exception:
+            return False
+        return True
+
     def _make_self_signed_cert(self) -> Tuple[str, str]:
-        """Write a self-signed certificate and key, and return their paths.
+        """Return a self-signed certificate and key, writing one where none is usable.
 
         Turning HTTPS on is otherwise a two-step job — make a certificate, then
         point at it — and browsers gate the clipboard, gamepads, pointer lock
         and the camera on a secure context, so the step is in everyone's way.
         The configured paths are used when their directory is writable, which
         for the default `ssl-cert-snakeoil` pair means running as root; a user
-        install falls back to its own state directory. Either way the pair
-        persists, so the exception a browser is told to make survives a
-        restart.
+        install falls back to its own state directory. That directory is not a
+        path `_get_https_certs` consults, so the pair already there is found
+        here instead — and reused, since minting one per start would invalidate
+        the exception the browser was told to make on every restart.
 
         Returns:
             The certificate and key paths, both absolute.
@@ -1193,18 +1285,17 @@ class CentralizedStreamServer:
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import ec
 
-        state = os.path.join(
-            os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
-            "selkies")
-        candidates = []
-        configured = getattr(self.settings, "https_cert", None)
-        if configured:
-            candidates.append((os.path.abspath(configured),
-                               os.path.abspath(getattr(self.settings, "https_key", "") or "")))
-        candidates.append((os.path.join(state, "selkies.pem"), os.path.join(state, "selkies.key")))
+        candidates = self._self_signed_candidates()
+        for cert_path, key_path in candidates:
+            if self._self_signed_pair_usable(cert_path, key_path):
+                logger.info(
+                    "HTTPS is running on the self-signed certificate already at %s.",
+                    cert_path)
+                return cert_path, key_path
 
         key = ec.generate_private_key(ec.SECP256R1())
         name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "localhost")])
+        dns_names, addresses = self._self_signed_names()
         now = datetime.now(tz=timezone.utc)
         cert = (
             x509.CertificateBuilder()
@@ -1214,14 +1305,14 @@ class CentralizedStreamServer:
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - timedelta(days=1))
             .not_valid_after(now + timedelta(days=3650))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+            .add_extension(x509.SubjectAlternativeName(dns_names + addresses), critical=False)
+            # Not a CA: a key sitting in the session container is a far worse
+            # thing to put in a trust store than a leaf is to except.
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .sign(key, hashes.SHA256())
         )
         errors = []
         for cert_path, key_path in candidates:
-            if not cert_path or not key_path:
-                continue
             try:
                 os.makedirs(os.path.dirname(cert_path), exist_ok=True)
                 os.makedirs(os.path.dirname(key_path), exist_ok=True)
@@ -1240,9 +1331,11 @@ class CentralizedStreamServer:
                 continue
             logger.warning(
                 "No certificate at the configured path, so HTTPS runs on a self-signed one "
-                "written to %s. Browsers will warn once until it is trusted; a certificate "
-                "from an authority, or a reverse proxy terminating TLS, avoids that.",
-                cert_path)
+                "written to %s, issued for %s and no other address. Browsers will warn once "
+                "until it is trusted; a certificate from an authority, or a reverse proxy "
+                "terminating TLS, avoids that.",
+                cert_path,
+                ", ".join([n.value for n in dns_names] + [str(a.value) for a in addresses]))
             return cert_path, key_path
         raise OSError("could not write a self-signed certificate: " + "; ".join(errors))
 
@@ -1286,8 +1379,17 @@ class CentralizedStreamServer:
         return sslctx
 
     def _get_cert_mtime(self) -> float:
-        """Return the most recent modification time of the cert and key files."""
+        """Return the most recent modification time of the cert and key files.
+
+        Falls back to the generated pair actually being served, so the reload
+        watcher is not blind to it when the configured path holds nothing.
+        """
         cert_pem, key_pem = self._get_https_certs()
+        if not cert_pem:
+            for candidate_cert, candidate_key in self._self_signed_candidates():
+                if os.path.isfile(candidate_cert):
+                    cert_pem, key_pem = candidate_cert, candidate_key
+                    break
         if not cert_pem:
             return 0.0
         try:
@@ -1544,13 +1646,19 @@ class CentralizedStreamServer:
 
         Layered gates, in order: cross-site WebSocket upgrades are rejected by
         Origin; health/liveness endpoints pass without credentials; the token
-        and mode-switch control endpoints accept the Bearer master token (a
+        and mode-switch control endpoints accept the Bearer master token,
+        trying `Authorization` first and the `MASTER_TOKEN_HEADER` fallback
+        second for callers whose Authorization header a Basic login in front
+        already owns (a
         mode switch not so authenticated is held to the same Origin rule as
         the upgrades, since a browser attaches cached Basic credentials to a
         cross-site POST); in secure mode every other API route accepts a
         session token (Bearer header, ``?token=`` query, or the client's
-        cookie), which is the only credential when Basic auth is off; and
-        everything else falls through to Basic Auth when enabled. A cookie-
+        cookie), which is the only credential when Basic auth is off; the mode
+        switch takes the master token ahead of the Origin rule and otherwise
+        authenticates like any other API route, its handler refusing every
+        role but controller; and everything else falls through to Basic Auth
+        when enabled. A cookie-
         carried token on a state-changing request is held to the Origin rule
         too, since the browser attaches it; and with a master token set, the
         WebSocket handshakes skip Basic (a browser cannot attach fresh Basic
@@ -1578,16 +1686,22 @@ class CentralizedStreamServer:
             return await handler(request)
         token_path = path == f"{api_prefix}/api/tokens"
         if settings.master_token and token_path:
-            if not self._check_master_token(auth_header, settings.master_token):
+            if not any(
+                self._check_master_token(header, settings.master_token)
+                for header in (auth_header, request.headers.get(MASTER_TOKEN_HEADER))
+            ):
                 return self._bearer_challenge()
             return await handler(request)
 
+        # The operator's own path, ahead of the Origin rule a browser is held
+        # to; a session token reaches the switch through the verdict below.
         is_control_path = path == f"{api_prefix}/api/switch"
         if settings.master_token and is_control_path:
-            if self._check_master_token(auth_header, settings.master_token):
+            if any(
+                self._check_master_token(header, settings.master_token)
+                for header in (auth_header, request.headers.get(MASTER_TOKEN_HEADER))
+            ):
                 return await handler(request)
-            if not settings.enable_basic_auth[0]:
-                return self._bearer_challenge()
         if is_control_path and not self._is_origin_allowed(request, settings):
             logger.warning(
                 "Rejected mode switch from disallowed Origin: %r",
@@ -1596,7 +1710,7 @@ class CentralizedStreamServer:
             return web.Response(status=403, text="Forbidden origin")
 
         if (settings.master_token and not is_ws_handshake and not token_path
-                and not is_control_path and path.startswith(f"{api_prefix}/api/")):
+                and path.startswith(f"{api_prefix}/api/")):
             verdict = self._session_token_verdict(request, settings)
             if verdict is not None:
                 ceiling, source = verdict
@@ -1669,6 +1783,12 @@ class CentralizedStreamServer:
         An image that ships its own default is choosing it deliberately, the way most
         container images do, and rejecting known-weak values here would break every one
         of them while stopping nobody who meant it.
+
+        Raises:
+            SystemExit: With `EXIT_CONFIG_ERROR`, which says the settings are the
+                problem and that starting again will not change the answer — a
+                supervisor respawning this forever would otherwise leave a
+                container that looks healthy and never answers.
         """
         if not self.settings.enable_basic_auth[0]:
             return
@@ -1680,7 +1800,7 @@ class CentralizedStreamServer:
             "PASSWD environment variable; or serve without a login by passing "
             "--enable-basic-auth=false."
         )
-        raise SystemExit(1)
+        raise SystemExit(EXIT_CONFIG_ERROR)
 
     async def switch_to_mode(self, mode_name: str) -> None:
         """Stop the active streaming service and start ``mode_name`` in its place.
@@ -1795,7 +1915,13 @@ class CentralizedStreamServer:
     async def handle_switch(self, request: web.Request) -> web.Response:
         """POST /api/switch: change the active streaming mode.
 
-        Refused for view-only credentials and when dual mode is disabled.
+        A controller may switch: it already drives the desktop, so withholding
+        the transport from it protects nothing. What the credential does decide
+        is who counts as one — view-only credentials and viewer-role tokens are
+        refused here, and the master token remains the operator's way in for a
+        deployment that hands out tokens it does not want switching for
+        everyone (the switch restarts the service under every connected page).
+        Refused as well when dual mode is disabled.
         """
         if self._viewer_ceiling(request):
             return web.json_response(
@@ -1895,8 +2021,7 @@ class CentralizedStreamServer:
         pace_conn = pacer.connection_state(gauged=False) if pacer.active else None
         gauge = (
             self._uplink_gauge(request)
-            if self.upload_pacer is not None
-            and (declared or 0) >= UPLOAD_MIN_GAUGED_BYTES
+            if (declared or 0) >= UPLOAD_MIN_GAUGED_BYTES
             else None)
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_TRUNC)
         fd = os.open(path, flags, 0o644)

@@ -99,6 +99,13 @@ Each is documented in full where named; read that before changing the subsystem.
   event reports held, never the transitions one page happened to witness: a held drag crosses between pages,
   reaching one that never saw the press and leaving one that never sees the release
   (`Input._mouseButtonMovement`).
+- That drag is placed through the stream box the page it crossed onto published in desktop coordinates (the
+  `vp` verb), never from the grabbed page's own coordinates: two viewports share no origin, chrome height or
+  device pixel ratio. Two events have to agree on the offset between a page's client frame and the desktop's
+  before it publishes a box, because page zoom scales one frame and not the other, and short of that agreement
+  the crossing keeps to the scaled overshoot. So does a crossing between two boxes that overlap on the desktop:
+  two windows cannot both be under the pointer, and an engine reporting screen coordinates relative to its own
+  window publishes exactly such boxes (`Input._noteScreenAnchor`, `Input._mapToLayout`).
 - A client asks the server only for what its own decoder will take, measured rather than assumed: engines
   differ on H.264 4:4:4 and change with every release, and one whose decoder lacks the profile shows no picture
   at all rather than a worse one (`util.canDecodeFullColor`, `canDecodeEncoder`).

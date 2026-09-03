@@ -30,7 +30,9 @@
  * `START_VIDEO`, `STOP_VIDEO`, `START_AUDIO`, `STOP_AUDIO`,
  * `REQUEST_KEYFRAME`, `CLIENT_FRAME_ACK <id>`, `cr`, `REQUEST_CLIPBOARD`, the
  * chunked clipboard upload of lib/clipboard-worker-bridge.js,
- * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>` and the input verbs of
+ * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>`,
+ * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
+ * user's desktop, relayed to the other displays) and the input verbs of
  * lib/input.js. The server sends `MODE websockets`, `AUTH_SUCCESS,{json}`,
  * `ROLE_UPDATE,{json}`, `MK_ACCESS,<0|1>`, `VIDEO_STARTED`, `VIDEO_STOPPED`,
  * `AUDIO_STARTED`, `AUDIO_STOPPED`, `AUDIO_DISABLED`, `MICROPHONE_DISABLED`,
@@ -2406,8 +2408,9 @@ let codecRefusalUnanswerable = false;
  *
  * A client that owns its settings takes the ladder's own last rung, the JPEG
  * encoder, whose stripes need no `VideoDecoder`. Refusals that outlive that
- * switch mean the server holds the encoder too, and a shared viewer owns none
- * of the stream's settings to begin with: both are told, once.
+ * switch -- a decoder refused again, or an H.264 keyframe still arriving on
+ * the page path -- mean the server holds the encoder too, and a shared viewer
+ * owns none of the stream's settings to begin with: both are told, once.
  * @param {string} codec The refused codec string.
  */
 function answerRefusedCodec(codec) {
@@ -6169,6 +6172,15 @@ class WorkerWebSocket {
             return;
         }
 
+        // A keyframe still in H.264 after the JPEG rung was asked for: the
+        // server holds the encoder, and the refusal has nowhere left to go.
+        if (!isSharedMode && codecRefusalAnswered && currentEncoderMode === 'jpeg'
+            && video_frame_type_byte === 0x01 && h264Payload.byteLength > 0) {
+            answerRefusedCodec(codecFromKeyframe(h264Payload, null)
+                || getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate));
+            return;
+        }
+
         if (decodeInWorker && currentEncoderMode === 'h264enc' && (isSharedMode || isVideoPipelineActive)) {
             if (h264Payload.byteLength === 0) return;
             if (video_frame_type_byte === 0x01) {
@@ -6911,6 +6923,15 @@ class WorkerWebSocket {
               window.postMessage({
                 type: 'commandDone',
                 command: systemMsg.action.slice('command_done,'.length),
+              }, window.location.origin);
+            }
+            else if (typeof systemMsg.action === 'string' &&
+                systemMsg.action.startsWith('apps_installed,') && !isSharedMode) {
+              // Broadcast when a command changed it: this page may not be the
+              // one that ran it.
+              window.postMessage({
+                type: 'appsInstalled',
+                apps: JSON.parse(systemMsg.action.slice('apps_installed,'.length)),
               }, window.location.origin);
             }
           } catch (e) {

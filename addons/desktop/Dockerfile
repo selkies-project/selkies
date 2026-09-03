@@ -194,19 +194,27 @@ RUN set -eu; \
     printf 'TerminalEmulator=%s.desktop\n' "${TERMINAL}" > /etc/xdg/qtxdg.conf
 
 # The browsers, in one apt operation: Firefox from Mozilla's own APT repository,
-# which serves real .deb builds on both bases and is pinned over the
-# distribution package, and Google Chrome as a downloaded .deb for the
-# H.264/AV1 media stack the distribution Chromium builds do not carry. Chrome's
-# launcher is switched to the basic password store because the container runs no
-# keyring daemon to unlock, and it otherwise blocks on a prompt nobody can answer.
+# which serves real .deb builds and is pinned over the distribution package, and
+# Google Chrome as a downloaded .deb for the H.264/AV1 media stack the
+# distribution Chromium builds do not carry. Chrome's own launcher script gains
+# two switches, so every way of starting it -- menu entry, xdg-open, a shell --
+# carries them: --no-sandbox, because Chrome's sandbox needs CAP_SYS_ADMIN for
+# its setuid helper or unprivileged user namespaces for its zygote, and a
+# container's default seccomp profile grants neither, so a stock Chrome aborts
+# at the zygote (the container is the isolation boundary here); and the basic
+# password store, because the container runs no keyring daemon to unlock and
+# Chrome otherwise blocks on a prompt nobody can answer. The downloads retry
+# every failure and the Chrome one is held to HTTP/1.1, since its server resets
+# HTTP/2 streams mid-transfer often enough to fail a build.
 RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d && \
-    curl -o /etc/apt/keyrings/packages.mozilla.org.asc -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://packages.mozilla.org/apt/repo-signing-key.gpg" && \
+    curl -o /etc/apt/keyrings/packages.mozilla.org.asc -fsSL --retry 5 --retry-all-errors --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://packages.mozilla.org/apt/repo-signing-key.gpg" && \
     printf 'Types: deb\nURIs: https://packages.mozilla.org/apt\nSuites: mozilla\nComponents: main\nSigned-By: /etc/apt/keyrings/packages.mozilla.org.asc\n' > /etc/apt/sources.list.d/mozilla.sources && \
     printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla && \
-    curl -o /tmp/google-chrome-stable.deb -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb" && \
+    curl -o /tmp/google-chrome-stable.deb -fsSL --http1.1 --retry 5 --retry-all-errors --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb" && \
     apt-get clean && apt-get update && \
     apt-get install --no-install-recommends -y firefox /tmp/google-chrome-stable.deb && \
-    sed -i '/^Exec=/ s/$/ --password-store=basic/' /usr/share/applications/google-chrome.desktop && \
+    sed -i 's|^exec -a "$0" "$HERE/chrome" "$@"$|exec -a "$0" "$HERE/chrome" --no-sandbox --password-store=basic "$@"|' /opt/google/chrome/google-chrome && \
+    grep -q -- '--no-sandbox --password-store=basic "$@"' /opt/google/chrome/google-chrome && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
 # proot-apps (https://github.com/linuxserver/proot-apps) backs the dashboards'
@@ -323,14 +331,13 @@ RUN printf "==============================================\n=         Selkies De
 USER 0
 # Real root for the same reason the base needs it: under the fakeroot SHELL an
 # ownership change lands only in fakeroot's database, leaving a setuid bit on a
-# file owned by uid 1000, which the kernel refuses to honour. Without a
-# root-owned chrome-sandbox Chrome aborts at launch wherever unprivileged user
-# namespaces are unavailable (the default Docker seccomp profile), and xterm
-# brings a setgid utempter. `restore` covers everything released above, which
-# is the base's own set rather than these.
+# file owned by uid 1000, which the kernel refuses to honour. The PolicyKit
+# agent helper and pkexec need theirs to authenticate at all, and xterm's
+# utempter its setgid to record sessions. `restore` covers everything released
+# above, which is the base's own set rather than these.
 SHELL ["/bin/sh", "-c"]
 RUN selkies-privileged-files restore && \
-    for helper in /opt/google/chrome/chrome-sandbox /usr/lib/polkit-1/polkit-agent-helper-1 /usr/libexec/polkit-agent-helper-1 /usr/bin/pkexec; do \
+    for helper in /usr/lib/polkit-1/polkit-agent-helper-1 /usr/libexec/polkit-agent-helper-1 /usr/bin/pkexec; do \
         if [ -e "$helper" ]; then chown -f root:root "$helper" && chmod -f 4755 "$helper" || echo "Failed to restore setuid for $helper"; fi; \
     done && \
     for helper in /usr/lib/*/utempter/utempter /usr/libexec/utempter/utempter; do \
@@ -347,9 +354,3 @@ USER 1000
 ENV SELKIES_COMMAND_ENABLED="true"
 # Start the LXQt session (set to false to run only the display server)
 ENV START_LXQT="true"
-# This session is the image's to manage, and Openbox is the window manager it
-# ships: a desktop that tiles a maximized window across the whole framebuffer
-# rather than the per-display regions is handed to it when a second display
-# opens. Selkies names none by default, since a session on somebody's own
-# desktop is not one to restart window management in.
-ENV SELKIES_MULTI_MONITOR_WM="openbox --replace"
