@@ -40,6 +40,8 @@ docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
     ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04
 ```
 
+Toolkit releases older than that leave `/dev/nvidia-modeset` and the DRM render node out; only there, add `--device /dev/nvidia-modeset --device /dev/dri`.
+
 ### What the flags are for
 
 `--shm-size=2g` matters because the browsers inside the desktop crash on Docker®'s 64 MB default, and `-p 8080:8080` is the one port the whole session is served on. The image tag names the distribution inside the image — `ubuntu26.04` or `debiantrixie`, a free choice unrelated to your host — and `main` is the newest commit, `latest` the newest release.
