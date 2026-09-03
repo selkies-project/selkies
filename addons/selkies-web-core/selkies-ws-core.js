@@ -28,7 +28,7 @@
  * and `0x05` gzipped large text once the server echoed `_gz,1`. Text messages
  * are control. The client sends `SETTINGS,{json}`, `r,WxH,displayId`,
  * `START_VIDEO`, `STOP_VIDEO`, `START_AUDIO`, `STOP_AUDIO`,
- * `REQUEST_KEYFRAME`, `CLIENT_FRAME_ACK <id>`, `cr`, `REQUEST_CLIPBOARD`, the
+ * `REQUEST_KEYFRAME`, `CLIENT_FRAME_ACK <id> <heldMs>`, `cr`, `REQUEST_CLIPBOARD`, the
  * chunked clipboard upload of lib/clipboard-worker-bridge.js,
  * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>`,
  * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
@@ -291,6 +291,8 @@ let isGamepadEnabled;
 let lastReceivedVideoFrameId = -1;
 /** When that id arrived, so an ack can report how long it was held. */
 let lastReceivedVideoFrameAt = 0;
+/** Newest id the page path acked, and when: an unchanged one repeats on the heartbeat. */
+let lastAckSentId = -1, lastAckSentAt = 0;
 let initializationComplete = false;
 let audioEnabled = true;
 let microphoneEnabled = true;
@@ -357,6 +359,14 @@ const SHARED_STALL_TIMEOUT_MS = 3000;
 const SHARED_STALL_MAX_BACKOFF_MS = 30000;
 const METRICS_INTERVAL_MS = 500;
 const BACKPRESSURE_INTERVAL_MS = 50;
+/**
+ * How often an unchanged frame id is re-acked. The server reads a frame left
+ * unanswered for four seconds as a stalled client, and a damage-gated capture
+ * sends nothing while the screen is still, so the repeat is what tells an idle
+ * client apart from a dead one; the server takes only the first ack of an id
+ * as a round trip.
+ */
+const ACK_HEARTBEAT_MS = 1000;
 /** How often the socket worker re-reports a draining send buffer. */
 const BUFFERED_DRAIN_MS = 20;
 /**
@@ -5052,9 +5062,10 @@ let webcamChainBroken = false;
 // keeps this on, and the newest frame id is acked from here on the same
 // cadence the page would use, so pacing and RTT stay honest through a stall.
 // Full frames ack on receipt; the striped modes ack the id the video worker
-// reports presented, so a client that cannot render sheds load.
+// reports presented, so a client that cannot render sheds load. An unchanged
+// id is repeated on the heartbeat cadence, as the page path does.
 let videoPort = null, videoDivert = false, videoAck = false, videoAckSource = 'receive';
-let videoLastId = -1, videoLastIdAt = 0, videoAckedId = -1, videoAckTimer = null;
+let videoLastId = -1, videoLastIdAt = 0, videoAckedId = -1, videoAckSentAt = 0, videoAckTimer = null;
 
 // The page gates its own sends on what this reports, so a socket left holding
 // bytes has to be reported as it drains: reporting only on send would freeze
@@ -5078,13 +5089,15 @@ function syncVideoAckTimer() {
   const want = videoDivert && videoAck;
   if (want && !videoAckTimer) {
     videoAckTimer = setInterval(() => {
-      if (videoLastId < 0 || videoLastId === videoAckedId) return;
+      if (videoLastId < 0) return;
       if (!ws || ws.readyState !== 1) return;
+      const now = performance.now();
+      if (videoLastId === videoAckedId && now - videoAckSentAt < ${ACK_HEARTBEAT_MS}) return;
       // The hold: how long the id waited on this tick, which a backgrounded
       // tab clamps to a second. The server subtracts it, so the round trip it
       // reports stays the path's rather than this timer's.
-      const held = Math.max(0, Math.round(performance.now() - videoLastIdAt));
-      try { ws.send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held); videoAckedId = videoLastId; } catch (err) {}
+      const held = Math.max(0, Math.round(now - videoLastIdAt));
+      try { ws.send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held); videoAckedId = videoLastId; videoAckSentAt = now; } catch (err) {}
     }, ${BACKPRESSURE_INTERVAL_MS});
   } else if (!want && videoAckTimer) {
     clearInterval(videoAckTimer);
@@ -5109,6 +5122,11 @@ self.onmessage = (e) => {
     videoAck = !!m.ack;
     videoAckSource = m.ackSource || 'receive';
     syncVideoAckTimer();
+    return;
+  }
+  if (m.type === 'videoAckReset') {
+    // The server's ids restart; the heartbeat must not repeat the old one.
+    videoLastId = -1; videoAckedId = -1; videoAckSentAt = 0;
     return;
   }
   if (m.type === 'sendPort') {
@@ -5339,7 +5357,8 @@ class WorkerWebSocket {
    * Turns the video divert on or off; while on, the worker also acks the
    * newest frame id itself unless this page is a shared viewer, whose acks
    * the server ignores. Full frames ack on receipt; the striped modes ack
-   * what the video worker reports presented.
+   * what the video worker reports presented, and either repeats an
+   * unchanged id every ACK_HEARTBEAT_MS.
    * @param {boolean} divert
    * @param {string} [ackSource] `receive` (default) or `present`.
    * @returns {void}
@@ -5347,6 +5366,16 @@ class WorkerWebSocket {
   setVideoDivert(divert, ackSource) {
     const ack = !!divert && displayId === 'primary' && !isSharedMode;
     try { this._worker.postMessage({ type: 'videoState', divert: !!divert, ack, ackSource: ackSource || 'receive' }); } catch (e) { /* closing */ }
+  }
+
+  /**
+   * Forgets the frame id the worker acks, for a pipeline reset: the server's
+   * ids restart at zero, so the heartbeat must not keep repeating an id from
+   * the stream that ended.
+   * @returns {void}
+   */
+  resetVideoAck() {
+    try { this._worker.postMessage({ type: 'videoAckReset' }); } catch (e) { /* closing */ }
   }
 
   /**
@@ -5782,7 +5811,8 @@ class WorkerWebSocket {
    * client whose rendering falls behind is then throttled instead of being
    * sent frames it will never show. Full-frame h264enc presents through sinks
    * the page cannot observe, so there the newest received id is the best the
-   * client knows.
+   * client knows. An unchanged id is repeated every ACK_HEARTBEAT_MS, the
+   * liveness signal an idle damage-gated stream otherwise lacks.
    */
   const sendBackpressureAck = () => {
     // While the divert runs, the socket worker acks the newest id itself, on
@@ -5794,11 +5824,14 @@ class WorkerWebSocket {
         const fromPresent = striped && lastPresentedVideoFrameId !== null;
         const acked = fromPresent ? lastPresentedVideoFrameId : lastReceivedVideoFrameId;
         const at = fromPresent ? lastPresentedVideoFrameAt : lastReceivedVideoFrameAt;
-        if (acked !== -1 && acked !== null) {
+        const now = performance.now();
+        if (acked !== -1 && acked !== null &&
+            (acked !== lastAckSentId || now - lastAckSentAt >= ACK_HEARTBEAT_MS)) {
           // How long this id waited for the tick; the server subtracts it so a
           // throttled ack cadence is not reported as network latency.
-          const held = Math.max(0, Math.round(performance.now() - at));
+          const held = Math.max(0, Math.round(now - at));
           websocket.send(`CLIENT_FRAME_ACK ${acked} ${held}`);
+          lastAckSentId = acked; lastAckSentAt = now;
         }
       } catch (error) {
         console.error('[Backpressure] Error sending frame ACK:', error);
@@ -7850,6 +7883,8 @@ function performServerInitiatedVideoReset(reason = "unknown") {
 
   lastReceivedVideoFrameId = -1;
   lastPresentedVideoFrameId = null;
+  lastAckSentId = -1;
+  if (websocket && typeof websocket.resetVideoAck === 'function') websocket.resetVideoAck();
   console.log(`  Reset lastReceivedVideoFrameId to ${lastReceivedVideoFrameId}.`);
 
   cleanupJpegStripeQueue();

@@ -34,7 +34,9 @@ verb so the client gzips its own large sends, which the handler inflates
 back into text before dispatch. Video chunks carry a uint16 frame id that
 the display's owning client acknowledges (`CLIENT_FRAME_ACK`); the ack
 cadence sizes that display's backpressure window and the matched send
-stamps feed its smoothed RTT.
+stamps feed its smoothed RTT. An unchanged id is repeated as a heartbeat,
+so a client that has nothing new to ack is still told apart from one that
+has gone silent (`_run_frame_backpressure_logic`).
 """
 import asyncio
 import inspect
@@ -130,7 +132,12 @@ MAX_UINT16_FRAME_ID = 65535
 FRAME_ID_SUSPICIOUS_GAP_THRESHOLD = (
     MAX_UINT16_FRAME_ID // 2
 )
+# A frame unanswered by any ack for this long marks the client stalled.
 STALLED_CLIENT_TIMEOUT_SECONDS = 4.0
+# How long a stall keeps the gate shut before it reopens on an IDR to probe the
+# client: a stalled client is sent nothing, so nothing could otherwise reach it
+# to ack, and the gate would hold until the page reloaded.
+STALLED_CLIENT_REPROBE_SECONDS = 2.0
 # Liveness bound for one send on the shared audio fan-out and the video relays:
 # backlogs are bounded upstream, so a send this slow means a dead socket, which
 # is dropped and never reused (the cancelled write tore its framing).
@@ -755,9 +762,12 @@ class _VideoRelay:
                 ds = self.server.display_clients.get(self.display_id)
                 if ds is not None and ds.get('ws') is self.ws:
                     fid = item['frame_id']
-                    ds['sent_timestamps'][fid] = time.monotonic()
+                    now = time.monotonic()
+                    ds['sent_timestamps'][fid] = now
                     ds['last_sent_frame_id'] = fid
                     ds['has_sent_any_frame'] = True
+                    if ds.get('unacked_since') is None:
+                        ds['unacked_since'] = now
                     if len(ds['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
                         ds['sent_timestamps'].popitem(last=False)
                 try:
@@ -1988,7 +1998,8 @@ class DataStreamingServer(BaseStreamingService):
                     data_logger.warning(f"Could not notify client for '{display_id}' of reset; connection closed.")
         
         display_state['backpressure_enabled'] = True
-        display_state['last_ack_update_time'] = time.monotonic()
+        display_state['unacked_since'] = None
+        display_state['stall_gated_at'] = None
 
     async def _start_backpressure_task_if_needed(self, display_id: str) -> None:
         """Start the backpressure task for a specific display if not already running.
@@ -2306,6 +2317,19 @@ class DataStreamingServer(BaseStreamingService):
         flips the display's backpressure flag: a stalled or lagging client
         stops receiving delta frames, and the lift requests an IDR resync.
         Also feeds the Prometheus fps/latency gauges for the primary display.
+
+        A stall is a frame that has gone unanswered by any ack for
+        STALLED_CLIENT_TIMEOUT_SECONDS, timed from the first send after the
+        newest ack (`unacked_since`, stamped by the relay and cleared by every
+        ack). It is not measured from the last ack: a damage-gated capture
+        sends nothing while the screen is still, and silence with nothing
+        outstanding is an idle client, not a dead one. The client repeats an
+        unchanged id as a heartbeat, so a client that is alive but behind is
+        the desync branch's case rather than this one. A stalled gate is sent
+        nothing, so it cannot be lifted by the ack it waits for; after
+        STALLED_CLIENT_REPROBE_SECONDS it reopens on an IDR (the lift's
+        resync) and the stall timer restarts from that send, which a client
+        that is still gone trips again and a returned one answers.
         """
         data_logger.info(f"Frame-based backpressure logic task started for display '{display_id}'.")
         display_state = None
@@ -2335,7 +2359,8 @@ class DataStreamingServer(BaseStreamingService):
                     if not display_state.get('backpressure_enabled', True):
                          data_logger.info(f"Backpressure LIFTED for '{display_id}' (client ACK is -1).")
                     self._set_backpressure_enabled(display_id, display_state, True)
-                    display_state['last_ack_update_time'] = time.monotonic()
+                    display_state['unacked_since'] = None
+                    display_state['stall_gated_at'] = None
                     continue
 
                 configured_fps = display_state.get('framerate', 60)
@@ -2355,7 +2380,8 @@ class DataStreamingServer(BaseStreamingService):
 
                 if wrapped > FRAME_ID_SUSPICIOUS_GAP_THRESHOLD:
                     self._set_backpressure_enabled(display_id, display_state, True)
-                    display_state['last_ack_update_time'] = time.monotonic()
+                    display_state['unacked_since'] = None
+                    display_state['stall_gated_at'] = None
                     continue
 
                 # Distinguish 'no frame sent yet' from the counter legitimately wrapping to 0.
@@ -2373,17 +2399,29 @@ class DataStreamingServer(BaseStreamingService):
                 latency_adjustment_frames = (current_rtt_ms / 1000.0) * client_fps if current_rtt_ms > self.latency_threshold_for_adjustment_ms else 0
                 effective_desync_frames = frame_desync - latency_adjustment_frames
 
-                time_since_last_ack = time.monotonic() - display_state.get('last_ack_update_time', time.monotonic())
-                
-                if time_since_last_ack > STALLED_CLIENT_TIMEOUT_SECONDS:
-                    if display_state.get('backpressure_enabled', True):
-                        data_logger.warning(f"Client stall for '{display_id}': No ACK in {time_since_last_ack:.1f}s. Forcing backpressure.")
-                    self._set_backpressure_enabled(display_id, display_state, False)
+                now = time.monotonic()
+                unacked_since = display_state.get('unacked_since')
+                unanswered_for = (now - unacked_since) if unacked_since is not None else 0.0
+
+                if unanswered_for > STALLED_CLIENT_TIMEOUT_SECONDS:
+                    gated_at = display_state.get('stall_gated_at')
+                    if display_state.get('backpressure_enabled', True) or gated_at is None:
+                        if display_state.get('backpressure_enabled', True):
+                            data_logger.warning(f"Client stall for '{display_id}': no ACK in {unanswered_for:.1f}s since the last frame sent. Forcing backpressure.")
+                        display_state['stall_gated_at'] = now
+                        self._set_backpressure_enabled(display_id, display_state, False)
+                    elif now - gated_at >= STALLED_CLIENT_REPROBE_SECONDS:
+                        data_logger.info(f"Re-probing stalled client for '{display_id}': reopening on an IDR.")
+                        display_state['stall_gated_at'] = None
+                        display_state['unacked_since'] = None
+                        self._set_backpressure_enabled(display_id, display_state, True)
                 elif effective_desync_frames > allowed_desync_frames:
+                    display_state['stall_gated_at'] = None
                     if display_state.get('backpressure_enabled', True):
                         data_logger.warning(f"Backpressure TRIGGERED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f > Allowed:{allowed_desync_frames:.1f}f).")
                     self._set_backpressure_enabled(display_id, display_state, False)
                 else:
+                    display_state['stall_gated_at'] = None
                     if not display_state.get('backpressure_enabled', True):
                         data_logger.info(f"Backpressure LIFTED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f <= Allowed:{allowed_desync_frames:.1f}f).")
                     self._set_backpressure_enabled(display_id, display_state, True)
@@ -3617,7 +3655,8 @@ class DataStreamingServer(BaseStreamingService):
                                     'smoothed_rtt': 0.0,
                                     'backpressure_enabled': True,
                                     'backpressure_task': None,
-                                    'last_ack_update_time': time.monotonic(),
+                                    'unacked_since': None,
+                                    'stall_gated_at': None,
                                     'video_active': True,
                                     'encoder': self.app.encoder,
                                     'framerate': self.app.framerate,
@@ -3657,7 +3696,8 @@ class DataStreamingServer(BaseStreamingService):
                                 if not initial_settings_processed:
                                     display_state['video_active'] = True
                                 display_state['acknowledged_frame_id'] = -1
-                                display_state['last_ack_update_time'] = time.monotonic()
+                                display_state['unacked_since'] = None
+                                display_state['stall_gated_at'] = None
                                 display_state['sent_timestamps'].clear()
                                 display_state['rtt_samples'].clear()
                                 display_state['smoothed_rtt'] = 0.0
@@ -3727,7 +3767,8 @@ class DataStreamingServer(BaseStreamingService):
                             display_state = self.display_clients.get(target_display_id)
                             if display_state and display_state.get('ws') is websocket:
                                 display_state['acknowledged_frame_id'] = acked_frame_id
-                                display_state['last_ack_update_time'] = time.monotonic()
+                                # Any ack, a repeated id included, is the client alive.
+                                display_state['unacked_since'] = None
                                 
                                 sent_ts = display_state.get('sent_timestamps')
                                 if sent_ts and acked_frame_id in sent_ts:
