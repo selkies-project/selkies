@@ -156,7 +156,7 @@ jobs:
           echo "labwc=${LABWC_VERSION}" >> "$GITHUB_OUTPUT"
       - name: Cache the patched labwc
         id: labwc-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.local/labwc
           key: labwc-${{ steps.labwc.outputs.wlroots }}-${{ steps.labwc.outputs.labwc }}-${{ hashFiles('addons/base/patches/labwc-*.patch', 'addons/base/build-labwc.sh') }}
