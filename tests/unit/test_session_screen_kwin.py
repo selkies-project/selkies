@@ -5,8 +5,8 @@ KWin serves no control socket, so the labwc rung of the session-screen
 control never answers there; its screens exist on demand as
 `zkde_screencast_unstable_v1` virtual outputs, reached through pixelflux. The
 protocol is also served by a stock kwin that registers no nested virtual
-output, so that rung is probed only where the deployment opted in with
-`kwin_multi`.
+output, so that rung is proven by growing a probe screen, once per session
+compositor.
 
 Drives the session-screen handler with pixelflux and the settings stubbed, so
 what is asserted is which rung is consulted and with what, not a compositor.
@@ -25,7 +25,6 @@ os.environ["XDG_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="selkies-kwin-")
 import helpers as H
 
 from selkies.input_handler import WebRTCInput
-from selkies.settings import settings
 
 CAPTURE = "wayland-1"
 SESSION = "wayland-0"
@@ -40,9 +39,12 @@ class FakePixelflux:
         self.screens: list = [("WL-1", 0, 0, 1920, 1080)]
         self.parked = 0
         self.fail_add: bool = False
+        self.fail_control: bool = False
 
     def app_screen_control_available(self, display):
         self.calls.append(("control", display))
+        if self.fail_control:
+            raise RuntimeError("connect: no such socket")
         return self.kde
 
     def list_app_screens(self, display):
@@ -89,28 +91,49 @@ async def scenario(res: "H.Results") -> None:
     logger = logging.getLogger("webrtc_input")
     logger.addHandler(log)
     logger.setLevel(logging.DEBUG)
-    saved = settings.kwin_multi
     try:
-        settings.kwin_multi = (False, False)
-        pf = FakePixelflux()
+        pf = FakePixelflux(kde=False)
         handler = make_handler(pf)
         ok, why = await handler.probe_session_screen_capability()
-        res.check("without the opt-in a lone nested screen offers no second display",
+        res.check("a stock kwin holding one screen offers no second display",
                   not ok and "no screen control" in why, (ok, why))
-        res.check("and KWin's protocol is never asked",
-                  not any(c[0] == "control" for c in pf.calls), pf.calls)
-        res.check("the screen count is what decides instead",
+        res.check("after its protocol was probed",
+                  ("control", SESSION) in pf.calls, pf.calls)
+        res.check("and the screen count decided",
                   any(c[0] == "list" for c in pf.calls), pf.calls)
+        pf.calls.clear()
+        await handler.probe_session_screen_capability()
+        res.check("a re-probe keeps that answer rather than growing another probe screen",
+                  not any(c[0] == "control" for c in pf.calls), pf.calls)
 
-        settings.kwin_multi = (True, False)
+        pf = FakePixelflux()
+        pf.fail_control = True
+        handler = make_handler(pf)
+        await handler.probe_session_screen_capability()
+        pf.fail_control = False
+        pf.calls.clear()
+        ok, why = await handler.probe_session_screen_capability()
+        res.check("an unreachable compositor is asked again",
+                  ok and ("control", SESSION) in pf.calls, (ok, why, pf.calls))
+
         pf = FakePixelflux()
         handler = make_handler(pf)
         ok, why = await handler.probe_session_screen_capability()
-        res.check("with the opt-in the virtual-output rung answers",
+        res.check("a kwin that registers the probe screen answers the virtual-output rung",
                   ok and pf.calls == [("control", SESSION)], (ok, why, pf.calls))
         res.check("and the control is what the handler reports",
                   handler.session_screen_control_available()
                   and not handler.session_screen_ipc_available(), None)
+        pf.calls.clear()
+        await handler.probe_session_screen_capability()
+        res.check("the answer is kept while the session socket is the same",
+                  not any(c[0] == "control" for c in pf.calls), pf.calls)
+        socket_path = os.path.join(os.environ["XDG_RUNTIME_DIR"], SESSION)
+        open(socket_path, "w").close()
+        pf.calls.clear()
+        await handler.probe_session_screen_capability()
+        res.check("a restarted session compositor, a new socket, is probed afresh",
+                  ("control", SESSION) in pf.calls, pf.calls)
 
         pf.calls.clear()
         await handler.ensure_session_screen("display2", size=(1280, 720), scale=1.25)
@@ -161,7 +184,6 @@ async def scenario(res: "H.Results") -> None:
                   ok and not handler.session_screen_control_available()
                   and handler._session_screen_count == 2, (ok, why, pf.calls))
     finally:
-        settings.kwin_multi = saved
         logger.removeHandler(log)
 
 
