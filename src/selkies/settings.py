@@ -164,7 +164,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "float",
         "default": 0.0,
         "min": 0.0,
-        "help": 'Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. The congestion-control pacing protects the video stream without it; the cap is chiefly for links its gauges cannot see, e.g. behind a reverse proxy.',
+        "help": 'Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. The congestion-control pacing protects the video stream without it, in both directions and end to end through a reverse proxy; the cap is for holding transfers to a fixed share regardless.',
     },
     {
         "name": "framerate",

@@ -2,24 +2,25 @@
 """Transfer-pacing contracts. The token bucket must deliver the configured
 rate (not a multiple of it), the congestion step must arm its recovery
 ceiling once per epoch and probe multiplicatively only before the first
-congestion, a connection with no usable gauge must not be throttled blindly,
-and the file_transfer_limit_mbps setting must neutralize unusable values.
+congestion, a pacer with neither a cap nor a gauge must not throttle, and
+the file_transfer_limit_mbps setting must neutralize unusable values.
 
-Uploads are gauged end to end over the uploader's session socket
-(`UplinkGauge`): the gauge times its own pings against their pongs, and a
-round trip inflating past a per-session floor is the congestion verdict the
-upload pacer backs off on, so a transfer takes what the uplink has spare and
-yields the moment the session's own delay rises. The floor is a minute-
-bucketed minimum so a route change re-baselines instead of reading as
-permanent congestion, and a session socket that dies mid-transfer takes the
-gauge with it — nothing is left to protect.
+Uploads and downloads alike are gauged end to end over the client's session
+socket (`UplinkGauge`): the gauge times its own pings against their pongs,
+and a round trip inflating past a per-session floor is the congestion
+verdict the direction's pacer backs off on, so a transfer takes what the
+link has spare and yields the moment the session's own delay rises. A
+gauged transfer's chunks are sized to its rate so its own bursts stay under
+the gauge's threshold. The floor is a minute-bucketed minimum so a route
+change re-baselines instead of reading as permanent congestion, and a
+session socket that dies mid-transfer takes the gauge with it — nothing is
+left to protect.
 """
 import asyncio
 import os
 import subprocess
 import sys
 import time
-from typing import Optional
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
@@ -29,14 +30,11 @@ from collections import deque  # noqa: E402
 
 from selkies import stream_server  # noqa: E402
 from selkies.stream_server import (  # noqa: E402
-    TransferPacer, UplinkGauge, _observe_rtt_floor,
+    TRANSFER_CHUNK_MAX_BYTES, TRANSFER_CHUNK_MIN_BYTES, TransferPacer,
+    UplinkGauge, _gauged_chunk_size, _observe_rtt_floor,
 )
 
 passed = failed = 0
-
-# Both gauge probes fail on a plain object, so it stands in for a download
-# socket the pacer cannot gauge.
-UNGAUGED_SOCK = object()
 
 
 def check(label: str, ok, detail="") -> None:
@@ -49,17 +47,14 @@ def check(label: str, ok, detail="") -> None:
 
 
 async def timed_pace(pacer: TransferPacer, total_bytes: int,
-                     chunk: int = TransferPacer._CHUNK, sock=UNGAUGED_SOCK,
-                     conn: Optional[dict] = None) -> tuple:
-    if conn is None:
-        conn = pacer.connection_state()
+                     chunk: int = TransferPacer._CHUNK) -> float:
     start = time.monotonic()
     sent = 0
     while sent < total_bytes:
         n = min(chunk, total_bytes - sent)
-        await pacer.pace(sock, n, conn)
+        await pacer.pace(n)
         sent += n
-    return time.monotonic() - start, conn
+    return time.monotonic() - start
 
 
 # A static cap must deliver the configured rate: the initial burst is half a
@@ -69,7 +64,7 @@ rate = 2 * 1024 * 1024
 pacer = TransferPacer(static_bps=rate, adaptive=False)
 sent = 3 * 1024 * 1024
 expected = (sent - rate * 0.5) / rate
-elapsed, _ = asyncio.run(timed_pace(pacer, sent))
+elapsed = asyncio.run(timed_pace(pacer, sent))
 check("static cap delivers the configured rate",
       expected * 0.85 <= elapsed <= expected * 1.4,
       f"elapsed={elapsed:.2f}s expected~{expected:.2f}s")
@@ -128,47 +123,29 @@ check("probing continues past the released ceiling",
       pacer.rate_bps > after_release and pacer.rate_bps > armed,
       f"{after_release} -> {pacer.rate_bps}")
 
-# A connection with neither the queue ioctl nor TCP RTT gives adaptive pacing
-# nothing to react to: it must pass unthrottled instead of being pinned at the
-# initial allowance. (The static cap path above still paces such connections.)
-_saved_outq, _saved_rtt = stream_server._sock_unsent_bytes, stream_server._sock_rtt_us
-stream_server._sock_unsent_bytes = lambda sock: None
-stream_server._sock_rtt_us = lambda sock: None
-try:
-    pacer = TransferPacer(adaptive=True)
-    elapsed, conn = asyncio.run(timed_pace(pacer, 64 * 1024 * 1024))
-    check("gaugeless connection is not throttled blindly",
-          elapsed < 0.5 and conn["gauged"] is False,
-          f"elapsed={elapsed:.2f}s gauged={conn['gauged']}")
-finally:
-    stream_server._sock_unsent_bytes, stream_server._sock_rtt_us = _saved_outq, _saved_rtt
+# The shared cap pacer with no cap set is inactive: a transfer with no
+# session socket to gauge rides it alone, and must pass unthrottled rather
+# than being pinned at some initial allowance.
+pacer = TransferPacer()
+elapsed = asyncio.run(timed_pace(pacer, 64 * 1024 * 1024))
+check("an unset cap does not throttle", not pacer.active and elapsed < 0.5,
+      f"elapsed={elapsed:.2f}s active={pacer.active}")
 
-# The RTT floor lives per connection: one download's short path must not turn
-# another's base RTT into permanent congestion.
+# A gauged transfer's chunk follows its pacer's rate, clamped: a fixed chunk
+# would burst past the gauge's delay budget on a slow link, and an unbounded
+# one would pin a fast link's thread hops to a single huge read.
 pacer = TransferPacer(adaptive=True)
-check("rtt floor is per-connection state",
-      pacer.connection_state()["rtt_floor_us"] is None
-      and "rtt_floor_us" not in vars(pacer), "")
-
-# Upload reads pace through connection_state(gauged=False) with no socket:
-# adaptive-only mode must leave them unpaced (the client's uplink queue is
-# invisible to the server), while a static cap paces them from the same
-# shared bucket as downloads.
-pacer = TransferPacer(adaptive=True)
-elapsed, _ = asyncio.run(timed_pace(
-    pacer, 64 * 1024 * 1024, sock=None,
-    conn=pacer.connection_state(gauged=False)))
-check("ungauged upload passes adaptive-only mode unpaced", elapsed < 0.5,
-      f"elapsed={elapsed:.2f}s")
-rate = 4 * 1024 * 1024
-pacer = TransferPacer(static_bps=rate, adaptive=True)
-sent = 3 * 1024 * 1024
-expected = (sent - rate * 0.5) / rate
-elapsed, _ = asyncio.run(timed_pace(
-    pacer, sent, sock=None, conn=pacer.connection_state(gauged=False)))
-check("static cap paces ungauged uploads at the configured rate",
-      expected * 0.85 <= elapsed <= expected * 1.4,
-      f"elapsed={elapsed:.2f}s expected~{expected:.2f}s")
+pacer.rate_bps = 8 * 1024 * 1024
+mid = _gauged_chunk_size(pacer)
+pacer.rate_bps = 1024
+small = _gauged_chunk_size(pacer)
+pacer.rate_bps = 1 << 30
+large = _gauged_chunk_size(pacer)
+check("chunk size follows the rate within its clamps",
+      small == TRANSFER_CHUNK_MIN_BYTES and large == TRANSFER_CHUNK_MAX_BYTES
+      and TRANSFER_CHUNK_MIN_BYTES < mid < TRANSFER_CHUNK_MAX_BYTES
+      and mid == int(8 * 1024 * 1024 * stream_server.TRANSFER_CHUNK_DELAY_BUDGET),
+      f"small={small} mid={mid} large={large}")
 
 
 # file_transfer_limit_mbps: negative and non-finite values must resolve to 0
@@ -191,9 +168,9 @@ check("negative limit clamps to 0 (pacing off)", probe_limit("-5") == "0.0",
 check("nan limit clamps to 0 (pacing off)", probe_limit("nan") == "0.0",
       probe_limit("nan"))
 
-# The upload leg: an externally supplied verdict drives the same AIMD, and a
-# read with no fresh sample must hold the rate rather than growing or cutting
-# on stale information.
+# The gauged leg both directions use: an externally supplied verdict drives
+# the AIMD, and a chunk with no fresh sample must hold the rate rather than
+# growing or cutting on stale information.
 pacer = TransferPacer(adaptive=True)
 r0 = pacer.rate_bps
 asyncio.run(pacer.pace_verdict(1024, None))
