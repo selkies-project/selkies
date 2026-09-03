@@ -52,6 +52,7 @@ SUITES: list = [
     {"path": "unit/test_pointer_tracking.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_gpu_fallback.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_turn_address.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_file_index_parent.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_env_case.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_desktop_session_scripts.py", "tier": "unit", "timeout": 600},
     {"path": "unit/test_package_deps.py", "tier": "unit", "timeout": 120},
