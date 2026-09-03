@@ -60,6 +60,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <errno.h>
 #include <time.h>
 #include <dirent.h>
+#include <sys/inotify.h>
 #include <linux/joystick.h>
 #include <linux/input.h>
 #include <linux/input-event-codes.h>
@@ -178,6 +179,8 @@ static struct dirent64 *(*real_readdir64)(DIR *dirp) = NULL;
 static int (*real_scandir64)(const char *dirp, struct dirent64 ***namelist,
                              int (*filter)(const struct dirent64 *),
                              int (*compar)(const struct dirent64 **, const struct dirent64 **)) = NULL;
+static int (*real_inotify_add_watch)(int fd, const char *pathname, uint32_t mask) = NULL;
+static int (*real_inotify_rm_watch)(int fd, int wd) = NULL;
 #endif
 
 static void sji_logging_init() {
@@ -431,6 +434,8 @@ __attribute__((constructor)) void init_interposer() {
 #ifdef SJI_LFS64
     load_real_func((void *)&real_readdir64, "readdir64");
     load_real_func((void *)&real_scandir64, "scandir64");
+    load_real_func((void *)&real_inotify_add_watch, "inotify_add_watch");
+    load_real_func((void *)&real_inotify_rm_watch, "inotify_rm_watch");
 #endif
     sji_log_info("Selkies Joystick Interposer initialized. Logging is %s.", g_sji_log_enabled ? "ENABLED" : "DISABLED");
 }
@@ -1490,12 +1495,221 @@ int openat64(int dirfd, const char *pathname, int flags, ...) {
 /* An interposed handle is retired from its device's table and its own socket
  * closed; other handles of the device are unaffected, and the last one to go
  * clears the cached config. */
+
+/* Hotplug for scanners that watch /dev/input themselves (SDL without udev,
+ * GLFW-style pollers): a watch an application puts on /dev/input is shadowed
+ * by one on the socket directory, and the records that watch produces are
+ * rewritten in read() into what the application asked for — the socket
+ * "selkies_event1000.sock" appearing or vanishing becomes "event1000" under
+ * its own watch descriptor. Only evdev slots surface, as in the listing; the
+ * kernel's own readiness applies, since the records are real. */
+typedef struct {
+    int used;
+    int fd;
+    int app_wd;
+    int sock_wd;
+} sji_inotify_watch_t;
+
+#define SJI_MAX_INOTIFY_WATCHES 16
+static sji_inotify_watch_t inotify_watches[SJI_MAX_INOTIFY_WATCHES];
+static pthread_mutex_t inotify_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* The directory the evdev sockets are bound in, as resolved at load time. */
+static void ev_socket_dir(char *out, size_t n) {
+    const char *path = interposers[NUM_JS_INTERPOSERS].socket_path;
+    const char *slash = strrchr(path, '/');
+    size_t len = slash ? (size_t)(slash - path) : 0;
+    if (slash && len == 0) len = 1;
+    if (len == 0) {
+        snprintf(out, n, ".");
+        return;
+    }
+    if (len >= n) len = n - 1;
+    memcpy(out, path, len);
+    out[len] = '\0';
+}
+
+/* The evdev node basename whose socket basename is `name`, NULL for any
+ * other name (a js socket included). */
+static const char *ev_node_for_socket_name(const char *name) {
+    for (int i = 0; i < NUM_EV_INTERPOSERS; i++) {
+        const char *sock = interposers[NUM_JS_INTERPOSERS + i].socket_path;
+        const char *slash = strrchr(sock, '/');
+        if (strcmp(name, slash ? slash + 1 : sock) == 0) return ev_slot_basename(i);
+    }
+    return NULL;
+}
+
+/* Whether `fd` carries a shadowed /dev/input watch. */
+static int inotify_fd_tracked(int fd) {
+    int tracked = 0;
+    pthread_mutex_lock(&inotify_mutex);
+    for (int i = 0; i < SJI_MAX_INOTIFY_WATCHES; i++) {
+        if (inotify_watches[i].used && inotify_watches[i].fd == fd) {
+            tracked = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&inotify_mutex);
+    return tracked;
+}
+
+/* Drops every shadow watch of `fd`; the kernel releases the watches with the fd. */
+static void inotify_forget_fd(int fd) {
+    pthread_mutex_lock(&inotify_mutex);
+    for (int i = 0; i < SJI_MAX_INOTIFY_WATCHES; i++) {
+        if (inotify_watches[i].used && inotify_watches[i].fd == fd) inotify_watches[i].used = 0;
+    }
+    pthread_mutex_unlock(&inotify_mutex);
+}
+
+int inotify_add_watch(int fd, const char *pathname, uint32_t mask) {
+    if (!real_inotify_add_watch && load_real_func((void *)&real_inotify_add_watch, "inotify_add_watch") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    int wd = real_inotify_add_watch(fd, pathname, mask);
+    if (wd < 0 || !is_dev_input_dir(pathname)) return wd;
+    uint32_t wanted = mask & (IN_CREATE | IN_DELETE | IN_MOVED_TO | IN_MOVED_FROM);
+    if (!wanted) return wd;
+    char dir[sizeof(interposers[0].socket_path)];
+    ev_socket_dir(dir, sizeof(dir));
+    if (is_dev_input_dir(dir)) return wd;
+    int saved = errno;
+    int sock_wd = real_inotify_add_watch(fd, dir, wanted | IN_ONLYDIR);
+    errno = saved;
+    if (sock_wd < 0) {
+        sji_log_error("inotify watch on %s failed: %s; no hotplug for the /dev/input watch on fd %d.",
+                      dir, strerror(errno), fd);
+        return wd;
+    }
+    pthread_mutex_lock(&inotify_mutex);
+    sji_inotify_watch_t *free_slot = NULL;
+    for (int i = 0; i < SJI_MAX_INOTIFY_WATCHES; i++) {
+        sji_inotify_watch_t *w = &inotify_watches[i];
+        if (w->used && w->fd == fd && w->app_wd == wd) {
+            /* The kernel returns the same wd for a re-added path; the shadow
+             * is one watch too, so keep the existing pair. */
+            free_slot = NULL;
+            break;
+        }
+        if (!w->used && !free_slot) free_slot = w;
+    }
+    if (free_slot) {
+        free_slot->used = 1;
+        free_slot->fd = fd;
+        free_slot->app_wd = wd;
+        free_slot->sock_wd = sock_wd;
+        sock_wd = -1;
+    }
+    pthread_mutex_unlock(&inotify_mutex);
+    if (sock_wd >= 0) {
+        real_inotify_rm_watch(fd, sock_wd);
+    }
+    return wd;
+}
+
+int inotify_rm_watch(int fd, int wd) {
+    if (!real_inotify_rm_watch && load_real_func((void *)&real_inotify_rm_watch, "inotify_rm_watch") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    int sock_wd = -1;
+    pthread_mutex_lock(&inotify_mutex);
+    for (int i = 0; i < SJI_MAX_INOTIFY_WATCHES; i++) {
+        sji_inotify_watch_t *w = &inotify_watches[i];
+        if (w->used && w->fd == fd && w->app_wd == wd) {
+            sock_wd = w->sock_wd;
+            w->used = 0;
+        }
+    }
+    pthread_mutex_unlock(&inotify_mutex);
+    int ret = real_inotify_rm_watch(fd, wd);
+    if (sock_wd >= 0) {
+        int saved = errno;
+        real_inotify_rm_watch(fd, sock_wd);
+        errno = saved;
+    }
+    return ret;
+}
+
+/* A read() on a shadowed inotify fd: the socket directory's records are
+ * rewritten to the /dev/input watch and node names, the rest pass through.
+ * Records only shrink or vanish, so the rewrite is in place; a read that
+ * carried nothing for the application is read again on a blocking fd and
+ * answered EAGAIN on a non-blocking one, never 0, which would read as EOF. */
+static ssize_t inotify_read(int fd, void *buf, size_t count) {
+    for (;;) {
+        ssize_t n = real_read(fd, buf, count);
+        if (n <= 0) return n;
+        sji_inotify_watch_t watches[SJI_MAX_INOTIFY_WATCHES];
+        int nwatch = 0;
+        pthread_mutex_lock(&inotify_mutex);
+        for (int i = 0; i < SJI_MAX_INOTIFY_WATCHES; i++) {
+            if (inotify_watches[i].used && inotify_watches[i].fd == fd) watches[nwatch++] = inotify_watches[i];
+        }
+        pthread_mutex_unlock(&inotify_mutex);
+        unsigned char *p = buf;
+        size_t in = 0, out = 0, total = (size_t)n;
+        while (in + sizeof(struct inotify_event) <= total) {
+            struct inotify_event ev;
+            memcpy(&ev, p + in, sizeof(ev));
+            size_t rec = sizeof(ev) + ev.len;
+            if (in + rec > total) break;
+            const sji_inotify_watch_t *w = NULL;
+            for (int i = 0; i < nwatch; i++) {
+                if (watches[i].sock_wd == ev.wd) { w = &watches[i]; break; }
+            }
+            if (!w) {
+                if (out != in) memmove(p + out, p + in, rec);
+                out += rec;
+                in += rec;
+                continue;
+            }
+            char name[NAME_MAX + 1];
+            const char *node = NULL;
+            if (ev.len > 0) {
+                size_t nl = strnlen((const char *)(p + in + sizeof(ev)), ev.len);
+                if (nl <= NAME_MAX) {
+                    memcpy(name, p + in + sizeof(ev), nl);
+                    name[nl] = '\0';
+                    node = ev_node_for_socket_name(name);
+                }
+            }
+            in += rec;
+            if (!node) continue;
+            size_t node_len = strlen(node) + 1;
+            struct inotify_event outev = {
+                .wd = w->app_wd,
+                .mask = ev.mask,
+                .cookie = ev.cookie,
+                .len = (uint32_t)((node_len + sizeof(ev) - 1) / sizeof(ev) * sizeof(ev)),
+            };
+            memcpy(p + out, &outev, sizeof(outev));
+            memset(p + out + sizeof(outev), 0, outev.len);
+            memcpy(p + out + sizeof(outev), node, node_len);
+            out += sizeof(outev) + outev.len;
+        }
+        if (in < total) {
+            memmove(p + out, p + in, total - in);
+            out += total - in;
+        }
+        if (out > 0) return (ssize_t)out;
+        int flags = fcntl(fd, F_GETFL);
+        if (flags >= 0 && (flags & O_NONBLOCK)) {
+            errno = EAGAIN;
+            return -1;
+        }
+    }
+}
+
 int close(int fd) {
     if (!real_close) {
         sji_log_error("CRITICAL: real_close not loaded. Cannot proceed with close call.");
         errno = EFAULT;
         return -1;
     }
+    inotify_forget_fd(fd);
 
     pthread_mutex_lock(&interposers_mutex);
     for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
@@ -1637,6 +1851,9 @@ ssize_t read(int fd, void *buf, size_t count) {
         sji_log_error("CRITICAL: real_read not loaded. Cannot proceed with read call.");
         errno = EFAULT;
         return -1;
+    }
+    if (inotify_fd_tracked(fd)) {
+        return inotify_read(fd, buf, count);
     }
 
     js_interposer_t *interposer = NULL;

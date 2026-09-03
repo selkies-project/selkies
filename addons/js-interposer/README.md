@@ -24,7 +24,7 @@ If using Wine with `x86_64`, both `/usr/lib/x86_64-linux-gnu/selkies_joystick_in
 sudo mkdir -pm1777 /dev/input
 ```
 
-Each of the four gamepad slots is interposed as both a joydev node (`js0`-`js3`) and an evdev node (`event1000`-`event1003`). An application opening one of those paths by name is intercepted whether or not the file exists, so no placeholder files are needed for that. An application that instead scans `/dev/input` is served too: the interposer adds the evdev node of every bound slot to `opendir`/`readdir` and `scandir`, so a directory scan lists them the way it lists a real device (character device, major 13), and an unbound slot is left out so a scan never trips over a node with no server behind it.
+Each of the four gamepad slots is interposed as both a joydev node (`js0`-`js3`) and an evdev node (`event1000`-`event1003`). An application opening one of those paths by name is intercepted whether or not the file exists, so no placeholder files are needed for that. An application that instead scans `/dev/input` is served too: the interposer adds the evdev node of every bound slot to `opendir`/`readdir` and `scandir`, so a directory scan lists them the way it lists a real device (character device, major 13), and an unbound slot is left out so a scan never trips over a node with no server behind it. A scanner that then watches `/dev/input` with inotify is told of a slot bound or withdrawn later as that node appearing or vanishing, the way it would learn of a plugged device.
 
 3. Use the below command before running your target application, so the interposer library intercepts its joystick/gamepad calls (the single quotes are required in the first line).
 

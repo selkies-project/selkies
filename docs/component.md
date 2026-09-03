@@ -94,7 +94,7 @@ The `/dev/input` directory has to exist for the Joystick Interposer to augment i
 mkdir -pm1777 /dev/input
 ```
 
-Each of the four gamepad slots is interposed as both a joydev node (`js0`-`js3`) and an evdev node (`event1000`-`event1003`). Opening either path by name is intercepted whether or not the file exists, and an application that scans `/dev/input` sees the evdev node of every bound slot added to the listing, so no placeholder files are needed either way.
+Each of the four gamepad slots is interposed as both a joydev node (`js0`-`js3`) and an evdev node (`event1000`-`event1003`). Opening either path by name is intercepted whether or not the file exists, and an application that scans `/dev/input` sees the evdev node of every bound slot added to the listing and, if it watches the directory with inotify, sees a slot bound or withdrawn later as that node appearing or vanishing, so no placeholder files are needed either way.
 
 The following environment variables are required to be set in the environment each application is being run in to receive the joystick/gamepad input.
 
