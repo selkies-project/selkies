@@ -68,30 +68,14 @@ export SELKIES_WEBCAM_INTERPOSER="${LIB_PREFIX}/selkies_v4l2_interposer.so"
 export LD_PRELOAD="${SELKIES_INTERPOSER}:${FAKE_UDEV_LIB}:${SELKIES_WEBCAM_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
 # No SDL_JOYSTICK_DEVICE: fake-udev enumerates all four slots as their evdev
 # nodes, so a /dev/input/js0 hint would show slot 0 a second time.
-# Only when the container has no /dev/input of its own: a real one passed in
-# from the host keeps its own ownership and mode.
+# The interposer answers for the pads' nodes whether or not they exist and
+# adds them to a listing of /dev/input, so no device files are made; only the
+# directory has to exist for a listing to be augmented. Only when the container
+# has none of its own: a real one passed in from the host keeps its own
+# ownership and mode.
 if [ ! -d /dev/input ]; then
   # shellcheck disable=SC2174  # /dev always exists, so -m applies to the leaf
-  mkdir -pm1777 /dev/input || sudo-root mkdir -pm1777 /dev/input || echo 'Failed to create joystick interposer device directory'
-fi
-
-# The interposer's device nodes, made directly where this container runs privileged
-# enough and through the image's setuid helper where it does not. Best effort: a
-# session without them loses gamepad support and nothing else.
-make_node() {
-  mknod "$1" c "$2" "$3" || sudo-root mknod "$1" c "$2" "$3" || echo "Failed to create device file $1"
-}
-
-if [ -d /dev/input ]; then
-  for i in 0 1 2 3; do
-    make_node "/dev/input/js${i}" 13 "${i}"
-    make_node "/dev/input/event100${i}" 13 "106${i}"
-  done
-  chmod 0666 /dev/input/js* /dev/input/event* ||
-    sudo-root chmod 0666 /dev/input/js* /dev/input/event* ||
-    echo 'Failed to change permission for joystick interposer devices'
-else
-  echo 'Skipping joystick interposer device files creation since /dev/input is unavailable'
+  mkdir -pm1777 /dev/input || sudo-root mkdir -pm1777 /dev/input || echo 'Failed to create the /dev/input directory the joystick interposer lists into'
 fi
 
 # Backend switch, in settings.py's own order: SELKIES_WAYLAND first, the legacy

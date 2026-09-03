@@ -54,6 +54,9 @@ fi
 
 # A server that died leaves its lock and socket behind, and the replacement then
 # starts against a display number that still looks taken.
+# The server creates its socket directory only as root; made here so an
+# unprivileged run (Apptainer, a rootless engine) still gets the path socket.
+mkdir -pm1777 /tmp/.X11-unix 2>/dev/null || true
 DISPLAY_NUM="${DISPLAY#:}"
 DISPLAY_NUM="${DISPLAY_NUM%%.*}"
 if [ -n "${DISPLAY_NUM}" ] && ! pgrep -f "Xvfb ${DISPLAY}( |$)" >/dev/null 2>&1; then
