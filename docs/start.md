@@ -96,7 +96,7 @@ Reach it with `ssh -L 8080:<node>:$PORT <login-node>` and open `https://localhos
       -B /usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json ...
   ```
 
-  `--nvccli` (setup through nvidia-container-cli) is an alternative where the cluster provides it; with `--contain` it needs `NVIDIA_VISIBLE_DEVICES=all` in the launch environment or it sets up no GPU at all.
+  `--nvccli` (setup through nvidia-container-cli) is not a way around this: it binds the device nodes and the driver libraries but no GBM backend either, and it needs `NVIDIA_VISIBLE_DEVICES=all` and a spelled-out `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display,video` in the launch environment, refusing the `all` the images set.
 - **Intel and AMD** need only `-B /dev/dri` and the render node's group, which a job normally has; `--rocm` for AMD.
 - Device nodes for the gamepad slots are not made (the container cannot, and the interposer needs none), and the `sudo` fallbacks the entrypoint tries print errors and carry on: the session is unaffected.
 
