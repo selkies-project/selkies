@@ -36,11 +36,9 @@ The [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolki
 
 ```bash
 docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
-    --runtime nvidia --gpus all \
+    --gpus 1 --runtime nvidia \
     ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04
 ```
-
-Older toolkit releases leave `/dev/nvidia-modeset` and the DRM render node out; add `--device /dev/nvidia-modeset --device /dev/dri` there.
 
 ### What the flags are for
 
