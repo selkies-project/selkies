@@ -57,7 +57,7 @@ fi
 # The server creates its socket directory only as root; made here so an
 # unprivileged run (Apptainer, a rootless engine) still gets the path socket.
 # shellcheck disable=SC2174  # /tmp always exists, so -m applies to the leaf
-mkdir -pm1777 /tmp/.X11-unix 2>/dev/null || true
+mkdir -pm1777 /tmp/.X11-unix /tmp/.ICE-unix 2>/dev/null || true
 DISPLAY_NUM="${DISPLAY#:}"
 DISPLAY_NUM="${DISPLAY_NUM%%.*}"
 if [ -n "${DISPLAY_NUM}" ] && ! pgrep -f "Xvfb ${DISPLAY}( |$)" >/dev/null 2>&1; then
