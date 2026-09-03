@@ -56,6 +56,7 @@ fi
 # starts against a display number that still looks taken.
 # The server creates its socket directory only as root; made here so an
 # unprivileged run (Apptainer, a rootless engine) still gets the path socket.
+# shellcheck disable=SC2174  # /tmp always exists, so -m applies to the leaf
 mkdir -pm1777 /tmp/.X11-unix 2>/dev/null || true
 DISPLAY_NUM="${DISPLAY#:}"
 DISPLAY_NUM="${DISPLAY_NUM%%.*}"
