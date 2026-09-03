@@ -3006,54 +3006,23 @@ function Sidebar() {
         </div>
       )}
       {availablePlacements && (() => {
-        const arrowBaseStyle = {
-          position: 'absolute',
-          width: '100px',
-          height: '100px',
-          backgroundColor: 'rgba(97, 218, 251, 0.8)',
-          color: 'var(--sidebar-bg, #20232a)',
-          border: '2px solid var(--sidebar-bg, #20232a)',
-          borderRadius: '15px',
-          fontSize: '48px',
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
-          cursor: 'pointer',
-          pointerEvents: 'all',
-          boxShadow: '0 4px 15px rgba(0, 0, 0, 0.3)',
-          transition: 'transform 0.2s ease',
-        };
-
         const handleArrowClick = (e, direction, screen) => {
           e.stopPropagation();
           launchWindow(direction, screen);
         };
-
         return (
-          <div
-            className="screen-placement-overlay"
-            style={{
-              position: 'fixed',
-              top: 0,
-              left: 0,
-              width: '100vw',
-              height: '100vh',
-              zIndex: 9999,
-              pointerEvents: 'auto'
-            }}
-            onClick={() => setAvailablePlacements(null)}
-          >
+          <div className={`screen-placement-overlay theme-${theme}`} onClick={() => setAvailablePlacements(null)}>
             {availablePlacements.up !== undefined && (
-              <button style={{...arrowBaseStyle, top: '40px', left: '50%', transform: 'translateX(-50%)'}} onClick={(e) => handleArrowClick(e, 'up', availablePlacements.up)}>▲</button>
+              <button className="screen-placement-arrow up" onClick={(e) => handleArrowClick(e, 'up', availablePlacements.up)}>▲</button>
             )}
             {availablePlacements.down !== undefined && (
-              <button style={{...arrowBaseStyle, bottom: '40px', left: '50%', transform: 'translateX(-50%)'}} onClick={(e) => handleArrowClick(e, 'down', availablePlacements.down)}>▼</button>
+              <button className="screen-placement-arrow down" onClick={(e) => handleArrowClick(e, 'down', availablePlacements.down)}>▼</button>
             )}
             {availablePlacements.left !== undefined && (
-              <button style={{...arrowBaseStyle, left: '40px', top: '50%', transform: 'translateY(-50%)'}} onClick={(e) => handleArrowClick(e, 'left', availablePlacements.left)}>◄</button>
+              <button className="screen-placement-arrow left" onClick={(e) => handleArrowClick(e, 'left', availablePlacements.left)}>◄</button>
             )}
             {availablePlacements.right !== undefined && (
-              <button style={{...arrowBaseStyle, right: '40px', top: '50%', transform: 'translateY(-50%)'}} onClick={(e) => handleArrowClick(e, 'right', availablePlacements.right)}>►</button>
+              <button className="screen-placement-arrow right" onClick={(e) => handleArrowClick(e, 'right', availablePlacements.right)}>►</button>
             )}
           </div>
         );

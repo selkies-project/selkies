@@ -1228,6 +1228,43 @@ a.cite-link:active {
     background-color: var(--surface-inset);
 }
 
+/* --- Second-display placement arrows --- */
+/* Full-window overlay the second-display button raises when it cannot pick a
+   side itself; one arrow per side a window may open on, styled as the
+   theme's filled button. Clicking the backdrop dismisses it. */
+.screen-placement-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: auto;
+}
+
+.screen-placement-arrow {
+  position: absolute;
+  width: 100px;
+  height: 100px;
+  background-color: var(--button-bg);
+  color: var(--button-text);
+  border: 2px solid var(--sidebar-bg);
+  border-radius: var(--radius-lg);
+  font-size: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 6px 20px var(--sidebar-shadow);
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.screen-placement-arrow:hover {
+  background-color: var(--button-hover-bg);
+}
+
+.screen-placement-arrow.up { top: 40px; left: 50%; transform: translateX(-50%); }
+.screen-placement-arrow.down { bottom: 40px; left: 50%; transform: translateX(-50%); }
+.screen-placement-arrow.left { left: 40px; top: 50%; transform: translateY(-50%); }
+.screen-placement-arrow.right { right: 40px; top: 50%; transform: translateY(-50%); }
+
 /* --- Virtual Keyboard Button --- */
 .virtual-keyboard-button {
   position: fixed;

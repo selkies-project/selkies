@@ -822,11 +822,45 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
                       still == shown, f"{still} of {shown} arrows")
             res.check("no second window was opened", len(ctx.pages) == 1,
                       f"{len(ctx.pages)} page(s)")
+            if dashboard == "classic":
+                classic_arrow_theme_check(page, res)
             browser.close()
     finally:
         H.server_stop()
     res.summary()
     return res
+
+
+def classic_arrow_theme_check(page, res: "H.Results") -> None:
+    """The placement arrows are the theme's filled button in either theme.
+
+    The overlay is a sibling of the sidebar, so it only sees the palette it
+    carries the theme class for itself; a stale colour here is the one
+    control on the page that never follows the theme.
+    """
+    probe = """() => {
+      const arrow = document.querySelector('.screen-placement-overlay button');
+      const swatch = document.createElement('div');
+      swatch.style.background = 'var(--button-bg)';
+      document.querySelector('.sidebar').appendChild(swatch);
+      const out = {arrow: getComputedStyle(arrow).backgroundColor,
+                   token: getComputedStyle(swatch).backgroundColor};
+      swatch.remove();
+      return out;
+    }"""
+    seen = {}
+    for flip in (False, True):
+        if flip:
+            page.evaluate("document.querySelector('.theme-toggle').click()")
+            time.sleep(0.5)
+        theme = page.evaluate(
+            "document.querySelector('.sidebar').className.includes('theme-light') ? 'light' : 'dark'")
+        colours = page.evaluate(probe)
+        seen[theme] = colours["arrow"]
+        res.check(f"placement arrows use the {theme} theme's button fill",
+                  colours["arrow"] == colours["token"], f"{colours}")
+    res.check("the arrow fill follows a theme flip",
+              len(seen) == 2 and len(set(seen.values())) == 2, f"{seen}")
 
 
 def second_screen_auto_block(dashboard: str, dist: str) -> "H.Results":
