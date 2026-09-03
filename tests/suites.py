@@ -80,6 +80,7 @@ SUITES: list = [
     {"path": "unit/test_wayland_reset_queue.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_app_clipboard_poll.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_input_housekeeping.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_cursor_cap.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_session_xwayland.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_typed_keysyms.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_backend_verdict.py", "tier": "unit", "timeout": 180},

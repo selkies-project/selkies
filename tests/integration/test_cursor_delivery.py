@@ -66,6 +66,18 @@ class CursorWindow:
         self.win.change_attributes(cursor=cursor)
         self.d.sync()
 
+    def set_sized(self, size: int) -> None:
+        """A solid bitmap cursor of `size` pixels a side: what an application
+        with its own large pointer hands the server."""
+        shape = self.win.create_pixmap(size, size, 1)
+        gc = shape.create_gc(foreground=1, background=0)
+        shape.fill_rectangle(gc, 0, 0, size, size)
+        cursor = shape.create_cursor(shape, (0, 0, 0), (65535, 65535, 65535), size // 2, size // 2)
+        self.win.change_attributes(cursor=cursor)
+        self.d.sync()
+        gc.free()
+        shape.free()
+
     def close(self) -> None:
         self.win.destroy()
         self.d.sync()
@@ -80,6 +92,14 @@ def curdata(message: str) -> str:
         return json.loads(message[len("cursor,"):]).get("curdata", "")
     except ValueError:
         return ""
+
+
+def png_size(data: str) -> tuple:
+    """Pixel size of a base64 PNG sprite."""
+    import base64
+    import io
+    from PIL import Image
+    return Image.open(io.BytesIO(base64.b64decode(data))).size
 
 
 async def collect(ws, seconds: float) -> list:
@@ -113,6 +133,17 @@ async def drive(res: "H.Results", cursors: CursorWindow) -> None:
         res.check("a change while streaming reaches the client",
                   bool(changed) and changed[-1] != seeded[-1],
                   f"{len(changed)} sprite(s)")
+
+        cursors.set_sized(128)
+        large = await collect(ws, 4.0)
+        size = png_size(large[-1]) if large else None
+        res.check("an application's 128px cursor is delivered whole",
+                  size == (128, 128), f"{len(large)} sprite(s), last {size}")
+        cursors.set_sized(256)
+        larger = await collect(ws, 4.0)
+        size = png_size(larger[-1]) if larger else None
+        res.check("one past the cap is brought down to it",
+                  size == (128, 128), f"{len(larger)} sprite(s), last {size}")
 
         # Stopping the video releases the capture, and with it pixelflux's
         # cursor thread.

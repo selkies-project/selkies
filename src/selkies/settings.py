@@ -950,7 +950,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "int",
         "default": -1,
         "env_var": "XCURSOR_SIZE",
-        "help": "Cursor size in points at 96 DPI (scaled with the session DPI). Applies to the X11 server cursor, the Wayland compositor cursor theme, and the remote-cursor capture cap on both transports; -1 uses the platform default (32 on X11, 24 on Wayland).",
+        "help": "Cursor size in points at 96 DPI (scaled with the session DPI) for the X11 server cursor and the Wayland compositor cursor theme; -1 uses the platform default (32 on X11, 24 on Wayland). Independent of it, remote-cursor capture delivers an application's own cursor whole up to 128 points, the most a browser shows as a cursor, and a size set here beyond that raises the cap with it.",
     },
     {
         "name": "enable_webrtc_statistics",

@@ -3602,7 +3602,7 @@ class WebRTCInput:
         cursor_size: int = 16,
         cursor_scale: float = 1.0,
         cursor_debug: bool = False,
-        max_cursor_size: int = 32,
+        max_cursor_size: int = 128,
         data_server_instance: Any = None,
         upload_dir: Optional[str] = None,
         is_wayland: bool = False,
@@ -3671,8 +3671,9 @@ class WebRTCInput:
         self.cursor_scale = cursor_scale
         self.cursor_size = cursor_size
         self.cursor_debug = cursor_debug
-        # An explicit cursor_size raises the capture cap so the requested size
-        # survives the transport instead of being resized down.
+        # The cap bounds what is delivered, not the theme: an application's own
+        # sprite (a game's 128px pointer) travels whole up to what a browser
+        # shows as a cursor, and a theme size past that raises it further.
         if isinstance(cursor_size, int) and cursor_size > 0:
             max_cursor_size = max(max_cursor_size, cursor_size)
         self.max_cursor_size = max_cursor_size
