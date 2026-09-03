@@ -1033,12 +1033,11 @@ class CentralizedStreamServer:
     spawned with a copied environment reaches it.
 
     Attributes:
-        transfer_pacer: Download pacing, congestion-controlled by default; a
-            static cap only when the operator knows the link rate. A zero limit
-            with adaptive off leaves downloads on the unthrottled FileResponse path.
+        transfer_pacer: Download pacing, congestion-controlled, with a static
+            cap on top only when the operator knows the link rate.
         upload_pacer: The uploads' adaptive allowance, fed per-read verdicts
-            from an `UplinkGauge` over the uploader's own session socket; None
-            when congestion control is off. The static cap reaches uploads
+            from an `UplinkGauge` over the uploader's own session socket. The
+            static cap reaches uploads
             through `transfer_pacer`'s shared bucket, as ever.
         _chunked_uploads: In-flight chunked uploads by destination path: transfer
             id, next expected offset, `.part` path, last-activity stamp, and a
@@ -1070,11 +1069,9 @@ class CentralizedStreamServer:
             limit_mbps = 0.0
         self.transfer_pacer = TransferPacer(
             static_bps=int(limit_mbps * 125000),
-            adaptive=bool(self.settings.file_transfer_cc[0]),
+            adaptive=True,
         )
-        self.upload_pacer = (
-            TransferPacer(adaptive=True)
-            if self.settings.file_transfer_cc[0] else None)
+        self.upload_pacer = TransferPacer(adaptive=True)
         self.upload_dir = pathlib.Path(
             os.path.expanduser(self.settings.file_manager_path)
         ).resolve()
@@ -2024,8 +2021,7 @@ class CentralizedStreamServer:
         pace_conn = pacer.connection_state(gauged=False) if pacer.active else None
         gauge = (
             self._uplink_gauge(request)
-            if self.upload_pacer is not None
-            and (declared or 0) >= UPLOAD_MIN_GAUGED_BYTES
+            if (declared or 0) >= UPLOAD_MIN_GAUGED_BYTES
             else None)
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_TRUNC)
         fd = os.open(path, flags, 0o644)

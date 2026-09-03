@@ -42,7 +42,7 @@ Clipboard behaviour is controlled by the server option `SELKIES_ENABLE_CLIPBOARD
 
 The side menu's files section uploads files into the session and browses the same directory for downloads. Both directions are on by default; `--file-transfers` (`SELKIES_FILE_TRANSFERS`) narrows them to `upload`, to `download`, or to `none`, and a read-only viewer is refused uploads whatever the setting says.
 
-`--file-manager-path` (`FILE_MANAGER_PATH`, default `~/Desktop`) is the directory both directions use, created at startup when missing. Transfers are paced against the video stream so a large one does not stall the session (`--file-transfer-cc`, on by default); `--file-transfer-limit-mbps` adds a fixed cap for links whose rate that pacing cannot measure, such as behind a reverse proxy.
+`--file-manager-path` (`FILE_MANAGER_PATH`, default `~/Desktop`) is the directory both directions use, created at startup when missing. Transfers are paced against the video stream so a large one does not stall the session; `--file-transfer-limit-mbps` adds a fixed cap for links whose rate that pacing cannot measure, such as behind a reverse proxy.
 
 ## Session Sharing
 

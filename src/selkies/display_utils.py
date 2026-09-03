@@ -49,6 +49,7 @@ from .Xlib import Xatom as x11_Xatom
 from .Xlib import display as x11_display
 from .Xlib import error as x11_error
 from .Xlib.ext import randr
+from .Xlib.ext import res as xres
 from .Xlib.protocol import request as x11_request
 
 import logging
@@ -1036,19 +1037,29 @@ async def replace_selkies_monitors(
     return ok
 
 
+def _sync_wm_check_window():
+    """The running EWMH window manager's check window (root
+    _NET_SUPPORTING_WM_CHECK), None when no manager advertises one. Under
+    `_x11_lock`."""
+    d = _module_display()
+    root = d.screen().root
+    check_atom = d.intern_atom('_NET_SUPPORTING_WM_CHECK')
+    # 33 is XA_WINDOW, the property's type.
+    prop = root.get_full_property(check_atom, 33)
+    if not prop or not prop.value:
+        return None
+    return d.create_resource_object('window', int(prop.value[0]))
+
+
 def _sync_wm_name() -> str:
-    """Name of the running EWMH window manager ('' when none): root
-    _NET_SUPPORTING_WM_CHECK -> child window -> _NET_WM_NAME."""
+    """Name of the running EWMH window manager ('' when none): the check
+    window's _NET_WM_NAME."""
     with _x11_lock:
         try:
             d = _module_display()
-            root = d.screen().root
-            check_atom = d.intern_atom('_NET_SUPPORTING_WM_CHECK')
-            # 33 is XA_WINDOW, the property's type.
-            prop = root.get_full_property(check_atom, 33)
-            if not prop or not prop.value:
+            wm_win = _sync_wm_check_window()
+            if wm_win is None:
                 return ""
-            wm_win = d.create_resource_object('window', int(prop.value[0]))
             name_prop = wm_win.get_full_property(
                 d.intern_atom('_NET_WM_NAME'), d.intern_atom('UTF8_STRING'))
             if name_prop and name_prop.value:
@@ -1059,6 +1070,34 @@ def _sync_wm_name() -> str:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
             return ""
+
+
+def _sync_wm_pid() -> int:
+    """Process id of the running EWMH window manager (0 when none): the check
+    window's _NET_WM_PID, or, for a manager that sets none (Openbox), what
+    the X-Resource extension knows of the client owning that window."""
+    with _x11_lock:
+        try:
+            d = _module_display()
+            wm_win = _sync_wm_check_window()
+            if wm_win is None:
+                return 0
+            # 6 is XA_CARDINAL, the property's type.
+            pid_prop = wm_win.get_full_property(d.intern_atom('_NET_WM_PID'), 6)
+            if pid_prop and pid_prop.value:
+                return int(pid_prop.value[0])
+            if d.query_extension('X-Resource') is None:
+                return 0
+            reply = d.res_query_client_ids(
+                [{'client': wm_win.id, 'mask': xres.LocalClientPIDMask}])
+            for entry in reply.ids:
+                if entry.spec.mask & xres.LocalClientPIDMask and entry.value:
+                    return int(entry.value[0])
+            return 0
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            return 0
 
 
 def _declared_desktop() -> str:
@@ -1089,47 +1128,57 @@ def _running_desktop(name: str, session_binary: str) -> bool:
     return bool(which(session_binary))
 
 
-class MultiMonitorWindowManager:
-    """Hands X11 window management to another window manager once a session has
-    two displays.
+#: Window managers measured to read the RandR monitor set only as they start,
+#: by the leading run of letters and digits of the name they advertise: a
+#: session extending onto a second display restarts one of these so it reads
+#: the set the layout published. Others follow monitor changes live, or never
+#: read the set at all (kwin_x11 builds its screens from CRTCs, of which a
+#: framebuffer server has one).
+RESTART_TO_READ_MONITORS = ("openbox", "xfwm4")
 
-    Some desktops (XFCE and Plasma among them) tile a maximized window across
-    the whole framebuffer rather than against the per-display regions an
-    extended layout defines, and handing the session to a window manager that
-    does not is the way out. Which one is `--multi-monitor-wm`, unset by
-    default: restarting window management belongs to a session the deployment
-    assembled, never to a desktop somebody is using, and only the deployment
-    knows which of the two it runs. Both transports share this state: the swap
-    is attempted once per session either way, since a second one would restart
-    window management under whoever is using it. Wayland sessions manage their
-    own windows and never swap.
+
+class MultiMonitorWindowManager:
+    """Restarts X11 window management once a session has two displays, where
+    the manager running needs it.
+
+    A window manager that reads the monitor set only as it starts tiles a
+    maximized window across the whole framebuffer rather than the per-display
+    regions an extended layout defines; restarted, it reads the set the layout
+    published. Which managers need that is measured
+    (`RESTART_TO_READ_MONITORS`), not configured, and the one running is
+    restarted with the command line it was started with plus `--replace`, so
+    it keeps the configuration chain its session gave it. Both transports
+    share this state: once per session, since a second restart would take
+    window management away from whoever is using it. Wayland sessions manage
+    their own windows and never restart.
     """
 
     def __init__(self) -> None:
-        self._swapped = False
+        self._done = False
 
     async def ensure_for(self, display_count: int, is_wayland: bool) -> None:
-        """Swap if this session was given a window manager and has not swapped.
+        """Restart the running window manager if it is one that needs it and
+        this session has not yet.
 
         The replacement is started detached, so it outlives this process's
-        session, and with the arguments the deployment gave: a window manager
-        started off its own stock configuration chain keeps the bindings its
-        compiled-in defaults do not cover, which a hand-written minimal config
-        would strip.
+        session.
         """
-        if is_wayland or self._swapped or display_count <= 1:
+        if is_wayland or self._done or display_count <= 1:
             return
-        from .settings import settings as _s
-        command = str(getattr(_s, "multi_monitor_wm", "") or "").strip().split()
-        if not command:
-            return
-        name = os.path.basename(command[0])
-        self._swapped = True
-        if wm_name_matches(name, await current_wm_name()):
+        self._done = True
+        running = await current_wm_name()
+        needing = next((wm for wm in RESTART_TO_READ_MONITORS
+                        if wm_name_matches(wm, running)), None)
+        if needing is None:
             logger_app_resize.info(
-                f"Multi-monitor setup: {name} already manages the session; no WM swap.")
+                f"Multi-monitor setup: {running or 'no window manager'} keeps its "
+                "monitor set current; no restart.")
             return
-        logger_app_resize.info(f"Multi-monitor setup: switching to {name}.")
+        command = wm_command(await current_wm_pid()) or [needing]
+        if "--replace" not in command:
+            command.append("--replace")
+        logger_app_resize.info(
+            f"Multi-monitor setup: restarting {needing} to read the monitor set.")
         try:
             await asyncio.create_subprocess_exec(
                 *command,
@@ -1138,18 +1187,36 @@ class MultiMonitorWindowManager:
                 start_new_session=True,
             )
         except Exception as e:
-            logger_app_resize.error(f"Failed to switch to {name}: {e}")
+            logger_app_resize.error(f"Failed to restart {needing}: {e}")
             return
         # Before the layout applies: a WM snapshotting the monitor set mid-swap
         # re-tiles maximized windows across the whole framebuffer.
-        if not await wait_for_wm(name):
+        if not await wait_for_wm(needing):
             logger_app_resize.warning(
-                f"{name} takeover not confirmed; applying layout anyway.")
+                f"{needing} restart not confirmed; applying layout anyway.")
 
 
 async def current_wm_name() -> str:
     """Name of the running EWMH window manager, '' when undetectable."""
     return await asyncio.to_thread(_sync_wm_name)
+
+
+async def current_wm_pid() -> int:
+    """Process id the running EWMH window manager advertises, 0 when none."""
+    return await asyncio.to_thread(_sync_wm_pid)
+
+
+def wm_command(pid: int) -> List[str]:
+    """The command line process `pid` was started with, from /proc; empty
+    when there is no such process to read."""
+    if pid <= 0:
+        return []
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return []
+    return [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
 
 
 def wm_name_matches(command_name: str, wm_name: str) -> bool:

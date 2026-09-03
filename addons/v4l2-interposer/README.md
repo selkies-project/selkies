@@ -19,7 +19,7 @@ Where a v4l2loopback device is available (a desktop host, or a privileged
 container), pixelflux mirrors the same frames into it (`webcam_device`), and
 applications need no preload at all — the kernel-device counterpart of
 `/dev/uinput` for the gamepads. Where a PipeWire daemon is reachable, the same
-camera is also published as a PipeWire `Video/Source` node (`webcam_pipewire`)
+camera is also published as a PipeWire `Video/Source` node where a daemon is reachable
 for PipeWire-native applications and the `pipewire-v4l2` wrapper — and this
 library can take its frames from that node instead of the socket (see
 [Frame sources](#frame-sources)), so everything the interposer covers works
