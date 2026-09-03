@@ -179,9 +179,9 @@ static struct dirent64 *(*real_readdir64)(DIR *dirp) = NULL;
 static int (*real_scandir64)(const char *dirp, struct dirent64 ***namelist,
                              int (*filter)(const struct dirent64 *),
                              int (*compar)(const struct dirent64 **, const struct dirent64 **)) = NULL;
+#endif
 static int (*real_inotify_add_watch)(int fd, const char *pathname, uint32_t mask) = NULL;
 static int (*real_inotify_rm_watch)(int fd, int wd) = NULL;
-#endif
 
 static void sji_logging_init() {
     if (getenv("JS_LOG") != NULL) {
@@ -434,9 +434,9 @@ __attribute__((constructor)) void init_interposer() {
 #ifdef SJI_LFS64
     load_real_func((void *)&real_readdir64, "readdir64");
     load_real_func((void *)&real_scandir64, "scandir64");
+#endif
     load_real_func((void *)&real_inotify_add_watch, "inotify_add_watch");
     load_real_func((void *)&real_inotify_rm_watch, "inotify_rm_watch");
-#endif
     sji_log_info("Selkies Joystick Interposer initialized. Logging is %s.", g_sji_log_enabled ? "ENABLED" : "DISABLED");
 }
 
