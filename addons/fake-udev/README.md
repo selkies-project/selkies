@@ -16,6 +16,7 @@ When an application linked against `libudev` is launched with this library prelo
     *   An **Event Device Node** (e.g., `/sys/devices/virtual/selkies_pad0/input/input10/event1000`) representing the evdev interface (`/dev/input/eventX`).
 3.  **Responds to Queries:** It responds to `libudev` API calls (like `udev_enumerate_scan_devices`, `udev_device_get_property_value`, `udev_device_get_sysattr_value`, `udev_device_get_parent_with_subsystem_devtype`) using the hardcoded data for these virtual devices.
     *   The virtual gamepads are designed to mimic "Microsoft X-Box 360 pad" devices.
+    *   Enumeration lists a js or event node only while the interposer's socket for it (`$SELKIES_JS_SOCKET_PATH/selkies_<node>.sock`) is bound; a pad served later is announced through the monitor as a hotplug add.
 
 ## Key Features
 
