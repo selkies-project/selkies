@@ -601,6 +601,10 @@ RUN rm -f /etc/ssl/private/ssl-cert-snakeoil.key /etc/ssl/certs/ssl-cert-snakeoi
 # AppImages mount themselves through FUSE, which a container is usually not
 # given; extracting instead is what makes them run at all here.
 ENV APPIMAGE_EXTRACT_AND_RUN="1"
+# VS Code's launcher reads a Microsoft kernel as "inside WSL" and exits with a
+# prompt to install the Windows build instead; a container on Docker Desktop
+# or WSL is that kernel, and the prompt is meaningless there.
+ENV DONT_PROMPT_WSL_INSTALL="1"
 
 ENV SHELL="/bin/bash"
 ENV USER="ubuntu"
