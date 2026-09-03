@@ -683,12 +683,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Wayland socket of an EXTERNAL compositor (e.g. labwc started with WLR_BACKENDS=headless) that pixelflux captures and injects into as a client, instead of compositing its own. Frames arrive by screencopy into pixelflux-allocated GPU buffers (zero-copy into the encoder); input rides virtual-keyboard/pointer devices. Empty keeps the built-in compositor.",
     },
     {
-        "name": "kwin_multi",
-        "type": "bool",
-        "default": False,
-        "help": "Allow growing screens for a nested KWin session over its virtual-output protocol (zkde_screencast). Off by default because it needs the patched kwin the Selkies KDE images carry — stock kwin never registers a nested virtual output, so the second-display button would fail; a deployment that ships the patch sets SELKIES_KWIN_MULTI=true.",
-    },
-    {
         "name": "recording_socket",
         "type": "str",
         "default": "",

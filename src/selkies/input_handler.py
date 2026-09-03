@@ -5742,9 +5742,9 @@ class WebRTCInput:
     #: nested-Wayland backend: a wlroots session cannot grow a screen without
     #: it. KWin serves no socket and needs none — its screens are grown as
     #: `zkde_screencast_unstable_v1` virtual outputs through pixelflux
-    #: (`add_app_screen`), the rung probed when this socket is absent and the
-    #: deployment set `settings.kwin_multi` (the protocol answers on stock
-    #: kwin too, but only a patched kwin registers a nested virtual output).
+    #: (`add_app_screen`), the rung probed when this socket is absent by
+    #: growing a probe screen (the protocol answers on stock kwin too, but
+    #: only a patched kwin registers a nested virtual output).
     SESSION_IPC_SOCKET = "labwc.sock"
 
     def _session_ipc_path(self) -> Optional[str]:
@@ -5793,6 +5793,19 @@ class WebRTCInput:
         self._session_ipc_ok = ok
         return ok
 
+    def _session_socket_identity(self, display: str) -> Tuple[str, int, int]:
+        """The session compositor's socket as an identity — its path, inode
+        and creation time, zeros where none exists — so a restarted compositor
+        reads as a new one and a cached probe answer stays with the instance
+        it was measured on."""
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or ""
+        path = display if os.path.isabs(display) else os.path.join(runtime, display)
+        try:
+            st = os.stat(path)
+        except OSError:
+            return (path, 0, 0)
+        return (path, st.st_ino, st.st_ctime_ns)
+
     def _session_is_nested(self) -> bool:
         """Whether applications run under a compositor of their own rather than
         directly on the capture compositor."""
@@ -5837,10 +5850,12 @@ class WebRTCInput:
         with neither control is asked for its screen count instead, so a
         compositor started with spare screens keeps its second display.
 
-        The KWin probe runs only under `settings.kwin_multi`: the protocol is
-        served by stock kwin too, but only the patched kwin the deployment
-        opts in for actually registers a nested virtual output, so an
-        unguarded probe would offer a second display that cannot open.
+        The KWin probe grows a token-sized screen and gives it back, since a
+        stock kwin serves the protocol without registering the output and
+        nothing in the globals tells the two apart. The session sees that
+        screen come and go, so the answer is kept for as long as the session
+        compositor's socket is the same one, and only an unreachable
+        compositor is asked again.
         """
         await self.probe_session_screen_ipc()
         kde = False
@@ -5848,12 +5863,22 @@ class WebRTCInput:
         if (not self._session_ipc_ok and self.wayland_input is not None
                 and self._session_is_nested()):
             display = self._app_wayland_display()
-            if bool(getattr(settings, "kwin_multi", (False, False))[0]):
+            identity = self._session_socket_identity(display)
+            cached = getattr(self, "_session_kde_probe", None)
+            if cached is not None and cached[0] == identity:
+                kde = cached[1]
+            else:
                 try:
                     kde = bool(await asyncio.to_thread(
                         self.wayland_input.app_screen_control_available, display))
                 except Exception as e:
                     logger_webrtc_input.debug(f"Session screen control probe failed: {e}")
+                else:
+                    self._session_kde_probe = (identity, kde)
+                    logger_webrtc_input.info(
+                        "Session compositor grows screens on demand." if kde else
+                        "Session compositor registers no virtual output; "
+                        "a second display needs a spare screen.")
             if not kde:
                 try:
                     count = len(await asyncio.to_thread(
