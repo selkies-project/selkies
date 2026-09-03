@@ -55,9 +55,15 @@ for mode in ("websockets", "webrtc"):
                 page = ctx.new_page()
                 page.goto(H.BASE_URL + "/", wait_until="load")
                 (C.wait_wr_video if mode == "webrtc" else C.wait_ws_video)(page)
-                # Hold button A (index 0) without releasing it.
-                page.evaluate("window.__padPress(0, 1)")
-                time.sleep(0.4)
+                # Hold button A (index 0) without releasing it. The press rides
+                # the input channel, which opens after the video on WebRTC, so
+                # it is re-sent until the kernel device shows it held.
+                deadline = time.time() + 15
+                while time.time() < deadline:
+                    page.evaluate("window.__padPress(0, 1)")
+                    time.sleep(0.4)
+                    if (ih.EV_KEY, ih.BTN_A, 1) in decode(STREAM):
+                        break
                 held = decode(STREAM)
                 tag = "" if death == "close" else " before kill"
                 res.check(f"{mode}: button held{tag}", (ih.EV_KEY, ih.BTN_A, 1) in held)
