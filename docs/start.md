@@ -64,26 +64,26 @@ Instructions are available in the [Desktop Container](component.md#desktop-conta
 
 **With the default WebSocket transport, a single exposed port is all you need.** A TURN server only becomes relevant if you opt into the WebRTC transport (`--mode=webrtc`) inside a Docker® or Kubernetes container without `--network=host` or `hostNetwork: true`, or in other cases where the HTML5 web interface loads but the WebRTC connection fails. In that case, follow the instructions from [WebRTC and Firewall Issues](firewall.md) to make the container or self-hosted standalone instance use an external TURN server. This is required for all self-hosted WebRTC applications, unlike proprietary services which provide a TURN server for you.
 
-## Apptainer and SLURM
+## Apptainer
 
-The same images run under [Apptainer](https://apptainer.org) as an ordinary user, which is how a SLURM job on a shared GPU node gets a desktop: no daemon, no root, the image pulled straight from the registry. A job script that starts the desktop and keeps it for the job's lifetime:
+The same images run under [Apptainer](https://apptainer.org) as an ordinary user, which is how a job on a shared GPU node gets a desktop: no daemon, no root, the image pulled straight from the registry. A script that starts the desktop and keeps it for the job's lifetime, with a display number and a port that no other session on the node uses (a job id from the scheduler is a good seed for both):
 
 ```bash
 #!/bin/bash
-#SBATCH --gres=gpu:1
+N=$((RANDOM % 900 + 100))
+PORT=$((RANDOM % 10000 + 20000))
 mkdir -p "$HOME/selkies/home" "$HOME/selkies/tmp"
-export PORT=$((SLURM_JOB_ID % 10000 + 20000))
 apptainer run --nv --writable-tmpfs --contain --cleanenv \
     --home "$HOME/selkies/home:/home/ubuntu" -B "$HOME/selkies/tmp:/tmp" -B /dev/dri \
-    --env "DISPLAY=:$((SLURM_JOB_ID % 900 + 100)),SELKIES_PORT=$PORT,PASSWD=mypasswd" \
+    --env "DISPLAY=:$N,SELKIES_PORT=$PORT,PASSWD=mypasswd" \
     docker://ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04
 ```
 
 Reach it with `ssh -L 8080:<node>:$PORT <login-node>` and open `https://localhost:8080`. What each flag is for, measured rather than assumed:
 
-- **`apptainer run`**, not `apptainer instance start`: a Docker image has no start script, so an instance runs nothing. `run` executes the image's entrypoint, and a job script keeps it in the foreground for the job's lifetime.
-- **A display number and a private `/tmp` per job.** The container shares the node's network namespace, and an X server's abstract socket lives there: two sessions on one node with the default display `:20` collide, and the second one's X server never comes up. The base's display server honours `DISPLAY`, so derive one from the job id. `-B <dir>:/tmp` with `--contain` gives the session its own runtime directory, sockets and locks instead of the node's shared `/tmp`.
-- **Ports are the node's ports.** There is no port mapping; `SELKIES_PORT` has to be free on the node, so derive it from the job id too, and reach it through the login node.
+- **`apptainer run`**, not `apptainer instance start`: a Docker image has no start script, so an instance runs nothing. `run` executes the image's entrypoint, and the script keeps it in the foreground for the job's lifetime.
+- **A display number and a private `/tmp` per session.** The container shares the node's network namespace, and an X server's abstract socket lives there: two sessions on one node with the default display `:20` collide, and the second one's X server never comes up. The base's display server honours `DISPLAY`. `-B <dir>:/tmp` with `--contain` gives the session its own runtime directory, sockets and locks instead of the node's shared `/tmp`.
+- **Ports are the node's ports.** There is no port mapping; `SELKIES_PORT` has to be free on the node, and is reached through whichever host can see it.
 - **`--writable-tmpfs`**: the image is read-only under Apptainer and the service supervisor writes into its service directories at start. `--home <dir>:/home/ubuntu` keeps the session's settings and downloads across jobs.
 - **`--nv`** binds the NVIDIA driver in. On the X11 backend OpenGL then runs through Zink on the Vulkan driver, and NVENC encodes. The Wayland backend (`SELKIES_WAYLAND=true`) also needs the driver's GBM backend, which Apptainer's library list does not carry; bind it from the host, with the driver's version in the file names:
 
