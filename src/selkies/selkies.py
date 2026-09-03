@@ -4939,8 +4939,8 @@ class DataStreamingServer(BaseStreamingService):
                 # outright where the server allows, and the layouts are
                 # clamped to what it has otherwise.
                 data_logger.info(
-                    f"No connected RandR output on this X server; the desktop is sized as a bare "
-                    f"framebuffer, with no monitor per display.")
+                    "No connected RandR output on this X server; the desktop is sized as a bare "
+                    "framebuffer, with no monitor per display.")
             elif total_mode_str not in available_resolutions:
                 data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
                 # Native first: a mode made by per-invocation xrandr dies with its
