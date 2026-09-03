@@ -96,15 +96,7 @@ Reach it with `ssh -L 8080:<node>:$PORT <login-node>` and open `https://localhos
       -B /usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json ...
   ```
 
-  `--nvccli` (setup through nvidia-container-cli) is not a way around this: it binds the device nodes and the driver libraries but no GBM backend either, and it needs `NVIDIA_VISIBLE_DEVICES=all` and a spelled-out `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display,video` in the launch environment, refusing the `all` the images set. A node with a CDI specification (`/etc/cdi/nvidia.yaml`, which `nvidia-ctk cdi generate` writes and the toolkit's refresh service keeps current) can take `--device nvidia.com/gpu=all` in place of `--nv`: that carries the EGL configuration, the X server modules and the modeset node to their real paths, but Apptainer runs none of the specification's hooks, so the three links those hooks would make are bound instead:
-
-  ```bash
-  L=/usr/lib/x86_64-linux-gnu; V=580.178.04
-  apptainer run --device nvidia.com/gpu=all ... --env "SELKIES_WAYLAND=true,..." \
-      -B "$L/libnvidia-allocator.so.$V:$L/gbm/nvidia-drm_gbm.so" \
-      -B "$L/libnvidia-egl-gbm.so.1.1.3:$L/libnvidia-egl-gbm.so.1" \
-      -B "$L/libnvidia-allocator.so.$V:$L/libnvidia-allocator.so.1" ...
-  ```
+  `--nvccli` (setup through nvidia-container-cli) is not a way around this: it binds the device nodes and the driver libraries but no GBM backend either, and it needs `NVIDIA_VISIBLE_DEVICES=all` and a spelled-out `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display,video` in the launch environment, refusing the `all` the images set. Neither is a CDI specification (`--device nvidia.com/gpu=all`), although the toolkit's `nvidia-ctk cdi generate` lists every file the Docker runtime injects: Apptainer applies a specification's mounts but runs none of its hooks, and those hooks are what create the links the driver is loaded through, so on its own the specification leaves applications without the driver's GLX and EGL, and combined with `--nv` its X module mounts are dropped.
 - **Intel and AMD** need only `-B /dev/dri` and the render node's group, which a job normally has; `--rocm` for AMD.
 - Device nodes for the gamepad slots are not made (the container cannot, and the interposer needs none), and the `sudo` fallbacks the entrypoint tries print errors and carry on: the session is unaffected.
 
