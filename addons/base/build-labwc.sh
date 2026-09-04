@@ -48,7 +48,7 @@ pkg-config --exists 'libdrm >= 2.4.129' || \
         -Dtests=false -Dman-pages=disabled
 pkg-config --exists 'xkbcommon >= 1.8.0' || \
     build xkbcommon https://github.com/xkbcommon/libxkbcommon.git xkbcommon-1.13.1 \
-        -Denable-docs=false -Denable-tools=false -Denable-x11=false -Denable-wayland=false
+        -Denable-docs=false -Denable-tools=false -Denable-x11=false -Denable-wayland=false -Denable-xkbregistry=false
 pkg-config --exists 'pixman-1 >= 0.46.0' || \
     build pixman https://gitlab.freedesktop.org/pixman/pixman.git pixman-0.46.4 \
         -Dtests=disabled -Ddemos=disabled -Dgtk=disabled
@@ -67,9 +67,11 @@ git clone --depth 1 --branch "${LABWC_VERSION}" \
     https://github.com/labwc/labwc.git "${SRC}/labwc"
 git -C "${SRC}/labwc" apply "${PATCH_DIR}/labwc-ipc.patch" \
     "${PATCH_DIR}/labwc-seam.patch" "${PATCH_DIR}/labwc-screens.patch"
+# The systemd session target installs into systemd's own unit directory, outside
+# PREFIX, which a session in a container never starts through.
 meson setup "${SRC}/labwc/build" "${SRC}/labwc" \
     --prefix="${PREFIX}" --libdir=lib --buildtype=release \
-    -Dxwayland=enabled -Dnls=enabled
+    -Dxwayland=enabled -Dnls=enabled -Dsystemd-session=disabled
 ninja -C "${SRC}/labwc/build"
 ninja -C "${SRC}/labwc/build" install
 "${PREFIX}/bin/labwc" --version
