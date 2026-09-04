@@ -22,7 +22,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
@@ -173,7 +173,13 @@ async def silent(res: H.Results, tag: str, encoder: str) -> None:
 
 
 async def suspended(res: H.Results, tag: str, encoder: str) -> None:
-    """The client stops reading and acking for 8 s, as a suspended app does."""
+    """The client stops reading and acking for 8 s, as a suspended app does.
+
+    Two ends are right. Where the socket buffers hold the pause, the client
+    is gated, re-probed and gets live frames once it drains. Where they do
+    not, a send blocks past the liveness bound and the server drops the
+    socket on purpose, which the page answers with a reconnect.
+    """
     churn = C.Churn()
     churn.start()
     c = await connect(encoder)
@@ -185,7 +191,11 @@ async def suspended(res: H.Results, tag: str, encoder: str) -> None:
         try:
             await c.pump(8, "heartbeat")
         except websockets.ConnectionClosed as e:
-            res.check(f"{tag} suspended: the socket outlives the pause", False, str(e)[:100])
+            with open(H.LOG, "rb") as f:
+                f.seek(mark)
+                dropped = "send stalled past" in f.read().decode("utf-8", "replace")
+            res.check(f"{tag} suspended: a socket the buffers could not hold was dropped on purpose",
+                      dropped, f"{str(e)[:80]}; server log {'names' if dropped else 'lacks'} the stalled send")
             return
         ev = events(mark)
         late = c.since(t1 + 4)
