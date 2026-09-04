@@ -85,16 +85,16 @@ Reach it with `ssh -L 8080:<node>:$PORT <login-node>` and open `https://localhos
 - **A display number and a private `/tmp` per session.** The container shares the node's network namespace, and an X server's abstract socket lives there: two sessions on one node with the default display `:20` collide, and the second one's X server never comes up. The base's display server honours `DISPLAY`. `-B <dir>:/tmp` with `--contain` gives the session its own runtime directory, sockets and locks instead of the node's shared `/tmp`.
 - **Ports are the node's ports.** There is no port mapping; `SELKIES_PORT` has to be free on the node, and is reached through whichever host can see it.
 - **`--writable-tmpfs`**: the image is read-only under Apptainer and the service supervisor writes into its service directories at start. `--home <dir>:/home/ubuntu` keeps the session's settings and downloads across jobs.
-- **`--nv`** binds the NVIDIA driver in. On the X11 backend GLX then runs on the driver's own library through the framebuffer server's DRI3, EGL on the driver's X11 platform libraries the image carries, and NVENC encodes. The Wayland backend (`SELKIES_WAYLAND=true`) also needs the driver's GBM backend, which Apptainer's library list does not carry; bind the two files it consists of from the host, under the names the container looks them up by:
+- **`--nv`** binds the NVIDIA driver in, but not its GBM backend, which is what draws on the GPU behind both backends: without it the X11 backend's framebuffer server stays in software with OpenGL through Zink on the Vulkan driver, and the Wayland backend (`SELKIES_WAYLAND=true`) falls back to X11. Bind the two files the backend consists of from the host, under the names the container looks them up by:
 
   ```bash
   L=/usr/lib/x86_64-linux-gnu
-  apptainer run --nv ... --env "SELKIES_WAYLAND=true,..." \
+  apptainer run --nv ... \
       -B "$L/gbm/nvidia-drm_gbm.so:$L/gbm/nvidia-drm_gbm.so" \
       -B "$L/libnvidia-allocator.so.<driver version>:$L/libnvidia-allocator.so.1" ...
   ```
 
-  The image carries NVIDIA's EGL platform libraries for GBM, Wayland and X11 itself, so nothing beyond the driver's own files is bound. `--nvccli` (setup through nvidia-container-cli) is not a way around this: it binds the device nodes and the driver libraries but no GBM backend either, and it needs `NVIDIA_VISIBLE_DEVICES=all` and a spelled-out `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display,video` in the host environment, since `all` is refused there and `--env` splits on commas.
+  GLX and EGL then run on the driver's own libraries, through the framebuffer server's DRI3 on X11 and under the Wayland backend alike, and NVENC encodes. The image carries NVIDIA's EGL platform libraries for GBM, Wayland and X11 itself, so nothing beyond the driver's own files is bound. `--nvccli` (setup through nvidia-container-cli) is not a way around this: it binds the device nodes and the driver libraries but no GBM backend either, and it needs `NVIDIA_VISIBLE_DEVICES=all` and a spelled-out `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display,video` in the host environment, since `all` is refused there and `--env` splits on commas.
 - **Intel and AMD** need only `-B /dev/dri` and the render node's group, which a job normally has; `--rocm` for AMD.
 - Device nodes for the gamepad slots are not made (the container cannot, and the interposer needs none), and the `sudo` fallbacks the entrypoint tries print errors and carry on: the session is unaffected.
 
