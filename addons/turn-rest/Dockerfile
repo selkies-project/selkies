@@ -24,4 +24,10 @@ ENV STUN_PORT="19302"
 
 EXPOSE 8008
 
-CMD ["sh", "-c", "python -m gunicorn --worker-class=gthread --workers=1 --threads=${WEB_CONCURRENCY:-3} --bind=0.0.0.0:8008 app:app"]
+# nobody by number, so a cluster that requires a non-root user can verify it
+# from the image; the service reads only its environment and binds above 1024.
+USER 65534:65534
+
+# No control socket: it would live under the home of a user that has none,
+# and nothing here drives it.
+CMD ["sh", "-c", "python -m gunicorn --worker-class=gthread --workers=1 --threads=${WEB_CONCURRENCY:-3} --bind=0.0.0.0:8008 --no-control-socket app:app"]
