@@ -1,6 +1,6 @@
 diff --git a/include/ipc.h b/include/ipc.h
 new file mode 100644
-index 00000000..7be67068
+index 0000000..7be6706
 --- /dev/null
 +++ b/include/ipc.h
 @@ -0,0 +1,10 @@
@@ -15,20 +15,20 @@ index 00000000..7be67068
 +
 +#endif /* LABWC_IPC_H */
 diff --git a/include/labwc.h b/include/labwc.h
-index 88860de2..9235aa2b 100644
+index 87a4219..a7302c0 100644
 --- a/include/labwc.h
 +++ b/include/labwc.h
-@@ -311,6 +311,7 @@ struct server {
+@@ -322,6 +322,7 @@ struct server {
  	struct sfdo *sfdo;
  
  	pid_t primary_client_pid;
 +	bool ipc;
- };
  
- void xdg_popup_create(struct view *view, struct wlr_xdg_popup *wlr_popup);
+ 	char *title_fmt;
+ };
 diff --git a/src/ipc.c b/src/ipc.c
 new file mode 100644
-index 00000000..e763d9e3
+index 0000000..e763d9e
 --- /dev/null
 +++ b/src/ipc.c
 @@ -0,0 +1,298 @@
@@ -331,18 +331,18 @@ index 00000000..e763d9e3
 +	}
 +}
 diff --git a/src/main.c b/src/main.c
-index 755a0a0c..a9906e9f 100644
+index 081bd62..62d3de1 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -9,6 +9,7 @@
- #include "common/spawn.h"
+@@ -12,6 +12,7 @@
+ #include "common/string-helpers.h"
  #include "config/rcxml.h"
  #include "config/session.h"
 +#include "ipc.h"
  #include "labwc.h"
  #include "theme.h"
  #include "translate.h"
-@@ -22,6 +23,7 @@ static const struct option long_options[] = {
+@@ -34,6 +35,7 @@ static const struct option long_options[] = {
  	{"debug", no_argument, NULL, 'd'},
  	{"exit", no_argument, NULL, 'e'},
  	{"help", no_argument, NULL, 'h'},
@@ -350,7 +350,7 @@ index 755a0a0c..a9906e9f 100644
  	{"merge-config", no_argument, NULL, 'm'},
  	{"reconfigure", no_argument, NULL, 'r'},
  	{"startup", required_argument, NULL, 's'},
-@@ -38,6 +40,7 @@ static const char labwc_usage[] =
+@@ -51,6 +53,7 @@ static const char labwc_usage[] =
  "  -d, --debug              Enable full logging, including debug information\n"
  "  -e, --exit               Exit the compositor\n"
  "  -h, --help               Show help message and quit\n"
@@ -358,22 +358,24 @@ index 755a0a0c..a9906e9f 100644
  "  -m, --merge-config       Merge user config files/theme in all XDG Base Dirs\n"
  "  -r, --reconfigure        Reload the compositor configuration\n"
  "  -s, --startup <command>  Run command on startup\n"
-@@ -154,12 +157,13 @@ main(int argc, char *argv[])
+@@ -170,6 +173,7 @@ main(int argc, char *argv[])
  {
  	char *startup_cmd = NULL;
  	char *primary_client = NULL;
 +	bool ipc_enabled = true;
  	enum wlr_log_importance verbosity = WLR_ERROR;
  
+ 	server.wlr_version = _LAB_CALC_WLR_VERSION_NUM(
+@@ -181,7 +185,7 @@ main(int argc, char *argv[])
  	int c;
  	while (1) {
  		int index = 0;
--		c = getopt_long(argc, argv, "c:C:dehmrs:S:vV", long_options, &index);
-+		c = getopt_long(argc, argv, "c:C:dehimrs:S:vV", long_options, &index);
+-		c = getopt_long(argc, argv, "c:C:dehmrs:S:t:vV", long_options, &index);
++		c = getopt_long(argc, argv, "c:C:dehimrs:S:t:vV", long_options, &index);
  		if (c == -1) {
  			break;
  		}
-@@ -195,6 +199,10 @@ main(int argc, char *argv[])
+@@ -220,6 +224,10 @@ main(int argc, char *argv[])
  			verbosity = WLR_INFO;
  			break;
  		case 'h':
@@ -384,16 +386,16 @@ index 755a0a0c..a9906e9f 100644
  		default:
  			usage();
  		}
-@@ -247,6 +255,7 @@ main(int argc, char *argv[])
- 	increase_nofile_limit();
+@@ -275,6 +283,7 @@ main(int argc, char *argv[])
+ 		server.title_fmt = "labwc - %o";
+ 	}
  
- 	struct server server = { 0 };
 +	server.ipc = ipc_enabled;
- 	server_init(&server);
- 	server_start(&server);
+ 	server_init();
+ 	server_start();
  
 diff --git a/src/meson.build b/src/meson.build
-index a9afdc4f..65dbde3c 100644
+index 05163cf..f0f9fc1 100644
 --- a/src/meson.build
 +++ b/src/meson.build
 @@ -7,6 +7,7 @@ labwc_sources = files(
@@ -405,10 +407,10 @@ index a9afdc4f..65dbde3c 100644
    'magnifier.c',
    'main.c',
 diff --git a/src/server.c b/src/server.c
-index b8abc633..e7559ec7 100644
+index e1a91ec..ff0e39f 100644
 --- a/src/server.c
 +++ b/src/server.c
-@@ -52,6 +52,7 @@
+@@ -62,6 +62,7 @@
  #include "desktop-entry.h"
  #include "idle.h"
  #include "input/keyboard.h"
@@ -416,23 +418,23 @@ index b8abc633..e7559ec7 100644
  #include "labwc.h"
  #include "layers.h"
  #include "magnifier.h"
-@@ -729,6 +730,10 @@ server_init(struct server *server)
+@@ -841,6 +842,10 @@ server_init(void)
  #if HAVE_XWAYLAND
- 	xwayland_server_init(server, server->compositor);
+ 	xwayland_server_init(server.compositor);
  #endif
 +
-+	if (server->ipc) {
-+		ipc_init(server);
++	if (server.ipc) {
++		ipc_init(&server);
 +	}
+ 	wl_event_loop_add_idle(server.wl_event_loop, nag_show_callback, NULL);
  }
  
+@@ -876,6 +881,8 @@ server_start(void)
  void
-@@ -763,6 +768,8 @@ server_start(struct server *server)
- void
- server_finish(struct server *server)
+ server_finish(void)
  {
-+	ipc_finish(server);
++	ipc_finish(&server);
 +
  #if HAVE_XWAYLAND
- 	xwayland_server_finish(server);
+ 	xwayland_server_finish();
  #endif

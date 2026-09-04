@@ -39,8 +39,8 @@ ARG PYPI_PACKAGE="selkies"
 # distribution's Xvfb has neither glamor nor DRI3, so GL clients render in
 # software even with a GPU present. XLibre's Xvfb has both, on Mesa's GBM and
 # on NVIDIA's own EGL, and is built from its latest release.
-ARG WLROOTS_VERSION="0.19.3"
-ARG LABWC_VERSION="0.9.7"
+ARG WLROOTS_VERSION="0.20.2"
+ARG LABWC_VERSION="0.20.2"
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS xvfb
 ARG DEBIAN_FRONTEND="noninteractive"
@@ -196,8 +196,10 @@ RUN set -e; \
 # attaches and removes it when that display disconnects (window queries ride the
 # same socket), and a cursor path that carries a held drag across the screen
 # boundary instead of clamping it at the edge. wlroots is built first at the
-# version this labwc pins; both install under /usr/lib unqualified so the copy
-# into the runtime stage is the same on every architecture.
+# version this labwc pins, with whichever of its dependencies the distribution
+# carries too old; everything built installs under /usr/lib unqualified, which
+# holds nothing else, so the copy into the runtime stage is the same on every
+# architecture and distribution.
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS labwc
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG WLROOTS_VERSION
@@ -205,12 +207,15 @@ ARG LABWC_VERSION
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
         > /etc/apt/apt.conf.d/99-selkies-retries
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+        bison \
         build-essential \
         ca-certificates \
         gettext \
         git \
         glslang-tools \
         hwdata \
+        libexpat1-dev \
+        libffi-dev \
         meson \
         ninja-build \
         pkg-config \
@@ -254,7 +259,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-seam.patch addons/base/patches/labwc-screens.patch /build/patches/
 COPY addons/base/build-labwc.sh /build/
-RUN /build/build-labwc.sh
+RUN /build/build-labwc.sh && mkdir -p /build-out/lib && cp -a /usr/lib/*.so* /build-out/lib/
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
 
@@ -557,10 +562,11 @@ COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/lib/ /usr/lib/
 COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/share/egl/ /usr/share/egl/
 
 # The patched labwc replaces the distribution binary, and the wlroots it was
-# built against comes along; the distribution labwc package above keeps every
+# built against comes along with any dependency built beside it, found through
+# the compositor's rpath; the distribution labwc package above keeps every
 # other runtime library in place
 COPY --from=labwc --chown=1000:1000 /usr/bin/labwc /usr/bin/labwc
-COPY --from=labwc --chown=1000:1000 /usr/lib/libwlroots-0.19.so* /usr/lib/
+COPY --from=labwc --chown=1000:1000 /build-out/lib/ /usr/lib/
 
 # Install the joystick and webcam interposers and fake-udev (container-only)
 COPY --from=add-ons --chown=1000:1000 /opt/add-ons/lib/ /usr/lib/
