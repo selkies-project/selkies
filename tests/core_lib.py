@@ -2,6 +2,7 @@
 """Shared check routines for the transport x backend e2e matrix."""
 import json
 import os
+import platform
 import sys
 import time
 from typing import Any, Optional
@@ -103,6 +104,72 @@ def launch_browser(pw: Any, engine: str = "chromium") -> Any:
     if engine == "webkit":
         return pw.webkit.launch(headless=True)
     return chromium_launch(pw)
+
+
+# Persistent Firefox profile: Firefox grants clipboard access only to a profile
+# that carries the permission, and accepts an H.264 video m-line only with the
+# OpenH264 GMP plugin side-loaded by tests/tools/fetch-openh264.sh; a fresh
+# temporary profile has neither.
+FF_E2E_PROFILE: str = os.environ.get(
+    "E2E_FIREFOX_PROFILE", os.path.join(H.WORKDIR, "firefox-profile"))
+
+
+def openh264_version() -> Optional[str]:
+    """Version of the OpenH264 GMP side-loaded into the persistent profile, or None.
+
+    Without the plugin Firefox answers a WebRTC offer with the video m-line
+    rejected, so every video check on that transport reports the same absence.
+    """
+    root = os.path.join(FF_E2E_PROFILE, "gmp-gmpopenh264")
+    if not os.path.isdir(root):
+        return None
+    for version in sorted(os.listdir(root), reverse=True):
+        if os.path.isfile(os.path.join(root, version, "libgmpopenh264.so")):
+            return version
+    return None
+
+
+def openh264_prefs() -> dict:
+    """Prefs that point Firefox at the side-loaded plugin.
+
+    Firefox only scans `gmp-gmpopenh264/<version>` once a pref names that exact
+    version, and the GMP updater is turned off so it does not replace it mid-run.
+    """
+    version = openh264_version()
+    if not version:
+        return {}
+    abi = "aarch64-gcc3" if platform.machine() in ("aarch64", "arm64") else "x86_64-gcc3"
+    return {
+        "media.gmp-gmpopenh264.version": version,
+        "media.gmp-gmpopenh264.abi": abi,
+        "media.gmp-gmpopenh264.lastUpdate": 1,
+        "media.gmp-manager.updateEnabled": False,
+    }
+
+
+def firefox_persistent_context(pw: Any, viewport: Optional[dict] = None,
+                               prefs: Optional[dict] = None) -> Any:
+    """A headless Firefox context on the persistent profile.
+
+    Carries the autoplay allowance `launch_browser` gives Firefox, the clipboard
+    testing pref and the OpenH264 prefs; the caller closes the context.
+    """
+    user_prefs = {
+        "media.gmp-gmpopenh264.enabled": True,
+        "media.autoplay.default": 0,
+        "media.autoplay.blocking_policy": 0,
+        "media.autoplay.block-webaudio": False,
+        "dom.events.testing.asyncClipboard": True,
+        **openh264_prefs(),
+        **(prefs or {}),
+    }
+    kwargs = {"user_data_dir": FF_E2E_PROFILE, "headless": True,
+              "firefox_user_prefs": user_prefs}
+    if viewport:
+        kwargs["viewport"] = viewport
+    if FIREFOX_PATH:
+        kwargs["executable_path"] = FIREFOX_PATH
+    return pw.firefox.launch_persistent_context(**kwargs)
 
 
 def launch_chrome(pw: Any, url_hash: str = "", mode: Optional[str] = None,
