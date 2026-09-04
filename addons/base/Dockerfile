@@ -38,16 +38,12 @@ ARG PYPI_PACKAGE="selkies"
 # The X server the session runs on, built here rather than installed: the
 # distribution's Xvfb has neither glamor nor DRI3, so GL clients render in
 # software even with a GPU present. XLibre's Xvfb has both, on Mesa's GBM and
-# on NVIDIA's own EGL, and is built from its release tag.
-ARG XLIBRE_VERSION="25.2.2"
+# on NVIDIA's own EGL, and is built from its latest release.
 ARG WLROOTS_VERSION="0.19.3"
 ARG LABWC_VERSION="0.9.7"
-ARG XLIBRE_SHA256="3c1f07f4b5f8a483473097be4b964ee97a2b92adde9de6c0d8d9d7217a382810"
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS xvfb
 ARG DEBIAN_FRONTEND="noninteractive"
-ARG XLIBRE_VERSION
-ARG XLIBRE_SHA256
 # The retry configuration the final stage sets further down, repeated here for
 # the same reason the add-ons stage repeats it.
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
@@ -56,6 +52,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         ca-certificates \
         curl \
         gcc \
+        jq \
         meson \
         ninja-build \
         pkg-config \
@@ -87,11 +84,14 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 # from under the rest of the image.
 RUN set -e; \
     cd /tmp; \
+    # The framebuffer server's glamor is in the 25.2 line, which XLibre
+    # publishes as pre-releases while still releasing older lines, so the
+    # highest version among all its releases is taken, not the newest by date.
+    XLIBRE_TAG="$(curl -fsSL --retry 5 "https://api.github.com/repos/X11Libre/xserver/releases?per_page=50" | jq -r '[.[].tag_name | select(startswith("xlibre-xserver-"))] | max_by(ltrimstr("xlibre-xserver-") | split(".") | map(tonumber))')"; \
     curl -fsSL --retry 5 --connect-timeout 30 -o xlibre.tar.gz \
-        "https://github.com/X11Libre/xserver/archive/refs/tags/xlibre-xserver-${XLIBRE_VERSION}.tar.gz"; \
-    echo "${XLIBRE_SHA256}  xlibre.tar.gz" | sha256sum -c -; \
+        "https://github.com/X11Libre/xserver/archive/refs/tags/${XLIBRE_TAG}.tar.gz"; \
     tar -xf xlibre.tar.gz; \
-    cd "xserver-xlibre-xserver-${XLIBRE_VERSION}"; \
+    cd "xserver-${XLIBRE_TAG}"; \
     meson setup build \
         --prefix=/usr --sysconfdir=/etc --localstatedir=/var --buildtype=release \
         -Dxvfb=true -Dglamor=true -Dgbm=true -Ddri3=true -Dglx=true \
@@ -104,6 +104,46 @@ RUN set -e; \
     ninja -C build hw/vfb/Xvfb; \
     install -Dm755 build/hw/vfb/Xvfb /build-out/usr/bin/Xvfb; \
     /build-out/usr/bin/Xvfb -help 2>&1 | grep -q -- '-glamor'
+
+# NVIDIA's EGL platform library for X11 (xcb and xlib), open source and
+# independent of the driver's version, built from its latest release: through
+# it the injected driver's EGL reaches X11 windows on the framebuffer server's
+# DRI3. The distributions that package it ship the same library; Debian's
+# stable has none.
+FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS egl-x11
+ARG DEBIAN_FRONTEND="noninteractive"
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
+        > /etc/apt/apt.conf.d/99-selkies-retries
+RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+        ca-certificates \
+        curl \
+        gcc \
+        jq \
+        libc6-dev \
+        meson \
+        ninja-build \
+        pkg-config \
+        eglexternalplatform-dev \
+        libdrm-dev \
+        libegl-dev \
+        libgbm-dev \
+        libx11-dev \
+        libx11-xcb-dev \
+        libxcb1-dev \
+        libxcb-dri3-dev \
+        libxcb-present-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
+RUN set -e; \
+    cd /tmp; \
+    EGL_X11_TAG="$(curl -fsSL --retry 5 "https://api.github.com/repos/NVIDIA/egl-x11/releases/latest" | jq -r '.tag_name')"; \
+    curl -fsSL --retry 5 --connect-timeout 30 -o egl-x11.tar.gz \
+        "https://github.com/NVIDIA/egl-x11/archive/refs/tags/${EGL_X11_TAG}.tar.gz"; \
+    tar -xf egl-x11.tar.gz; \
+    cd "egl-x11-${EGL_X11_TAG#v}"; \
+    meson setup build --prefix=/usr --libdir="lib/$(gcc -print-multiarch)" --buildtype=release; \
+    ninja -C build; \
+    DESTDIR=/build-out meson install -C build; \
+    ls /build-out/usr/share/egl/egl_external_platform.d/20_nvidia_xcb.json /build-out/usr/share/egl/egl_external_platform.d/20_nvidia_xlib.json
 
 # Build the joystick and webcam interposers and fake-udev inside this
 # repository (they are dedicated to containerized environments and are not
@@ -328,14 +368,16 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         xdg-utils \
         xdg-user-dirs \
         desktop-file-utils \
-        # NVIDIA's EGL platform libraries, open source and independent of the
-        # driver's version: the injected driver's EGL reaches X11 windows (xcb,
-        # xlib), GBM and Wayland through them, whether or not the runtime that
-        # injects the driver carries them along
-        libnvidia-egl-xcb1 \
-        libnvidia-egl-xlib1 \
+        # NVIDIA's EGL platform libraries for GBM and Wayland, open source and
+        # independent of the driver's version: the injected driver's EGL reaches
+        # them whether or not the runtime that injects the driver carries them
+        # along. The X11 one is built above and copied in below, with what it
+        # links against here.
         libnvidia-egl-gbm1 \
         libnvidia-egl-wayland1 \
+        libx11-xcb1 \
+        libxcb-dri3-0 \
+        libxcb-present0 \
         # X11 display server and utilities
         xserver-xorg-core \
         xvfb \
@@ -509,6 +551,10 @@ RUN --mount=type=bind,source=addons/base/wheels,target=/tmp/wheels \
 # to the session user like the rest of the image so fakeroot-sudo apt can
 # still write under /usr after the copy
 COPY --from=xvfb --chown=1000:1000 /build-out/usr/bin/Xvfb /usr/bin/Xvfb
+# NVIDIA's X11 EGL platform: the libraries beside the distribution's, the
+# platform files where the driver's EGL looks for them
+COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/lib/ /usr/lib/
+COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/share/egl/ /usr/share/egl/
 
 # The patched labwc replaces the distribution binary, and the wlroots it was
 # built against comes along; the distribution labwc package above keeps every
