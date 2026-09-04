@@ -78,16 +78,26 @@ for _ in range(6):
 check("pre-congestion ramp is multiplicative", pacer.rate_bps >= r0 * 8,
       f"{r0} -> {pacer.rate_bps}")
 
-# The first congested sample of an epoch arms the ceiling at the pre-cut rate;
-# further congested samples keep cutting without re-arming.
+# The first congested sample of an epoch arms the ceiling at the pre-cut rate
+# and cuts. A congested sample inside the drain window is the queue that cut
+# is already draining: it neither cuts again nor re-arms. Past the window a
+# link still congested is cut again, in the same epoch.
 pacer.rate_bps = r_at_cong = 1024 * 1024
 pacer._gauge_backoff(congested=True, clear=False, cut=0.6)
 armed = pacer._probe_ceiling
+cut_rate = pacer.rate_bps
 pacer._gauge_backoff(congested=True, clear=False, cut=0.6)
 check("ceiling arms once per epoch at the pre-cut rate",
       armed == max(r_at_cong, 2 * TransferPacer._RATE_FLOOR)
       and pacer._probe_ceiling == armed,
       f"armed={armed} rate_at_cong={r_at_cong}")
+check("a congested sample inside the drain window does not cut again",
+      pacer.rate_bps == cut_rate, f"{cut_rate} -> {pacer.rate_bps}")
+pacer._hold_until = 0.0
+pacer._gauge_backoff(congested=True, clear=False, cut=0.6)
+check("a congested sample past the window cuts again without re-arming",
+      pacer.rate_bps < cut_rate and pacer._probe_ceiling == armed,
+      f"{cut_rate} -> {pacer.rate_bps}, ceiling={pacer._probe_ceiling}")
 
 # A clear sample inside the post-cut drain window must not grow the rate:
 # the queue behind the cut needs time to drain before probing resumes.
@@ -122,6 +132,24 @@ pacer._gauge_backoff(congested=False, clear=True, cut=0.6)
 check("probing continues past the released ceiling",
       pacer.rate_bps > after_release and pacer.rate_bps > armed,
       f"{after_release} -> {pacer.rate_bps}")
+
+# Past the window, the gauge's inflation tells a standing queue from one
+# already draining: the first is cut for in full, the second by a quarter.
+pacer = TransferPacer(adaptive=True)
+pacer.rate_bps = 1024 * 1024
+pacer._gauge_backoff(congested=True, clear=False, cut=0.6, inflation_us=200_000)
+pacer._hold_until = 0.0
+r_standing = pacer.rate_bps
+pacer._gauge_backoff(congested=True, clear=False, cut=0.6, inflation_us=200_000)
+standing_cut = pacer.rate_bps / r_standing
+pacer._hold_until = 0.0
+r_draining = pacer.rate_bps
+pacer._gauge_backoff(congested=True, clear=False, cut=0.6, inflation_us=120_000)
+draining_cut = pacer.rate_bps / r_draining
+check("a standing queue past the window takes the full cut",
+      abs(standing_cut - 0.6) < 1e-6, f"cut={standing_cut:.3f}")
+check("a draining queue past the window takes a quarter of the cut",
+      abs(draining_cut - 0.9) < 1e-6, f"cut={draining_cut:.3f}")
 
 # The shared cap pacer with no cap set is inactive: a transfer with no
 # session socket to gauge rides it alone, and must pass unthrottled rather

@@ -270,6 +270,7 @@ class UplinkGauge:
         session connection sharing the uploader's uplink."""
         self._conns = conns
         self._last_ping = 0.0
+        self.inflation_us = 0
 
     @property
     def alive(self) -> bool:
@@ -283,7 +284,9 @@ class UplinkGauge:
             True when any session's round trip stands above its floor by more
             than `INFLATION_US`, False when at least one session answered
             fresh and none congested, None when no fresh pong arrived since
-            the last call (the caller holds its rate).
+            the last call (the caller holds its rate). `inflation_us` keeps
+            the largest fresh excess over the floor, the queue's depth in
+            time, for the caller to size its step by.
         """
         now = time.monotonic()
         if now - self._last_ping >= self.PING_INTERVAL:
@@ -301,6 +304,7 @@ class UplinkGauge:
                 except Exception:
                     self._conns.remove(conn)
         verdict: Optional[bool] = None
+        inflation = 0
         for conn in self._conns:
             _ws, state, last = conn
             if state["seq"] == last or state["rtt_us"] is None:
@@ -309,7 +313,10 @@ class UplinkGauge:
             rtt = state["rtt_us"]
             floor = _observe_rtt_floor(state, rtt, now)
             congested = rtt > floor + self.INFLATION_US
+            inflation = max(inflation, rtt - floor)
             verdict = congested if verdict is None else (verdict or congested)
+        if verdict is not None:
+            self.inflation_us = inflation
         return verdict
 
 
@@ -359,6 +366,7 @@ class TransferPacer:
         self._probe_ceiling = None
         self._slow_start = True
         self._hold_until = 0.0
+        self._last_inflation_us: Optional[int] = None
 
     @property
     def active(self) -> bool:
@@ -386,25 +394,28 @@ class TransferPacer:
             return
         await self._bucket(nbytes)
 
-    async def pace_verdict(self, nbytes: int, congested: Optional[bool]) -> None:
+    async def pace_verdict(self, nbytes: int, congested: Optional[bool],
+                           inflation_us: Optional[int] = None) -> None:
         """Adaptive leg: fold one `UplinkGauge` verdict in, then drain.
 
         ``congested=None`` (no fresh sample) holds the rate and still drains
-        the bucket; True/False are one `_gauge_backoff` step. The cut is
-        gentle — a delay verdict fires at a bounded queue where a loss-like
-        signal would mean one already overflowed — and the growth step is
-        proportional rather than a fixed 8 KiB: verdicts arrive at the
-        gauge's ping cadence, a few per second, and a fixed step at that
-        cadence would take minutes to recover a fast link's post-cut rate.
-        Together they hold the AIMD sawtooth's duty cycle near the line
-        instead of near half of it.
+        the bucket; True/False are one `_gauge_backoff` step, with the
+        gauge's measured inflation telling a draining queue from a standing
+        one. The cut is gentle — a delay verdict fires at a bounded queue
+        where a loss-like signal would mean one already overflowed — and the
+        growth step is proportional rather than a fixed 8 KiB: verdicts
+        arrive at the gauge's ping cadence, a few per second, and a fixed
+        step at that cadence would take minutes to recover a fast link's
+        post-cut rate. Together they hold the AIMD sawtooth's duty cycle
+        near the line instead of near half of it.
         """
         if not self.active:
             return
         if self.adaptive and congested is not None:
             step = max(8 * 1024, int(self.rate_bps * 0.03))
             self._gauge_backoff(
-                congested=congested, clear=not congested, cut=0.65, step=step)
+                congested=congested, clear=not congested, cut=0.65, step=step,
+                inflation_us=inflation_us)
         await self._bucket(nbytes)
 
     async def _bucket(self, nbytes: int) -> None:
@@ -420,7 +431,7 @@ class TransferPacer:
             await asyncio.sleep(-self._tokens / limit)
 
     def _gauge_backoff(self, congested: bool, clear: bool, cut: float,
-                       step: int = 8 * 1024) -> None:
+                       step: int = 8 * 1024, inflation_us: Optional[int] = None) -> None:
         """One congestion-control step on the shared allowance: a congested
         sample multiplies the rate down; a clear one probes upward —
         multiplicatively while no congestion has ever been seen (the initial
@@ -436,21 +447,37 @@ class TransferPacer:
         probing past the last congested rate; that sawtooth is what keeps a
         link that gets faster later reachable.
 
-        A cut also pauses growth for a drain window: resuming on the first
-        clear sample keeps the bottleneck queue standing, and the cut never
-        relieves the stream sharing the link. The epoch closes only on a
-        clear sample past that window: a clear inside the hold still reflects
-        the pre-cut queue draining, and ending the epoch there would let an
-        oscillating gauge re-arm the ceiling from each freshly cut rate — the
-        same ratchet, one flap at a time."""
+        A cut also pauses growth and further cuts for a drain window: a
+        sample inside it, clear or congested, still reflects the queue that
+        cut is draining. Resuming on a clear would keep the bottleneck queue
+        standing, and the cut never relieves the stream sharing the link;
+        cutting again on each congested sample would take a fat buffer's
+        worth of samples to the floor before it empties, and the recovery
+        from there is additive. Past the window a queue still standing draws
+        another full cut, but one the gauge measures as shrinking is already
+        draining at the rate in force and gets a quarter of it: the full cut
+        would only trade the drain's last seconds for a recovery that takes
+        many times longer. The epoch closes only on a clear
+        sample past that window: ending it on one inside would let an
+        oscillating gauge re-arm the ceiling from each freshly cut rate —
+        the same ratchet, one flap at a time."""
         if congested:
             self._slow_start = False
+            now = time.monotonic()
+            draining = (inflation_us is not None and self._last_inflation_us is not None
+                        and inflation_us < self._last_inflation_us)
+            self._last_inflation_us = inflation_us
             if not self._congested:
                 self._congested = True
                 self._probe_ceiling = max(self.rate_bps, 2 * self._RATE_FLOOR)
+            elif now < self._hold_until:
+                return
+            elif draining:
+                cut = 1 - (1 - cut) / 4
             self.rate_bps = max(self.rate_bps * cut, self._RATE_FLOOR)
-            self._hold_until = time.monotonic() + 1.5
+            self._hold_until = now + 1.5
             return
+        self._last_inflation_us = None
         if not clear:
             return
         if time.monotonic() < self._hold_until:
@@ -1989,7 +2016,7 @@ class CentralizedStreamServer:
                 if gauge is not None:
                     verdict = await gauge.sample()
                     if gauge.alive:
-                        await self.upload_pacer.pace_verdict(len(chunk), verdict)
+                        await self.upload_pacer.pace_verdict(len(chunk), verdict, gauge.inflation_us)
                     else:
                         gauge = None
                 await loop.run_in_executor(None, fh.write, chunk)
@@ -2384,7 +2411,7 @@ class CentralizedStreamServer:
                         if gauge is not None:
                             verdict = await gauge.sample()
                             if gauge.alive:
-                                await self.download_pacer.pace_verdict(len(chunk), verdict)
+                                await self.download_pacer.pace_verdict(len(chunk), verdict, gauge.inflation_us)
                             else:
                                 gauge = None
                         await response.write(chunk)
