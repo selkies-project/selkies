@@ -1358,6 +1358,7 @@ export class Input {
         this._latestMouseX = 0;
         this._latestMouseY = 0;
         this.useCssScaling = useCssScaling;
+        this._streamDensity = null;
         this.m = null;
         this._layout = null;
         // Viewport origin on the desktop, and the same relative to the browser
@@ -1509,7 +1510,7 @@ export class Input {
         if (!this._cursorImageBitmap) {
             return;
         }
-        const dpr = this.useCssScaling ? 1 : (window.devicePixelRatio || 1);
+        const dpr = this._cursorDensity();
         const img = this._cursorImageBitmap;
         this.cursorDiv.width = img.width;
         this.cursorDiv.height = img.height;
@@ -1570,7 +1571,7 @@ export class Input {
             return;
         }
         const cursorUrl = `url("data:image/png;base64,${this._cursorBase64Data}")`;
-        const dpr = this.useCssScaling ? 1 : (window.devicePixelRatio || 1);
+        const dpr = this._cursorDensity();
         let cursorValue = `${cursorUrl} ${this._rawHotspotX} ${this._rawHotspotY}, default`;
         const imageSetFn = dpr !== 1 ? this._cursorImageSetFunction() : null;
         if (imageSetFn) {
@@ -3093,11 +3094,38 @@ export class Input {
      * is already realized in CSS pixels and the sink box carries the scale.
      */
     _inputDpr() {
-        if (this.useCssScaling || window.manual_resolution ||
-            window.manualResolution || this.isSharedMode) {
+        if (window.manual_resolution || window.manualResolution || this.isSharedMode) {
             return 1;
         }
-        return window.devicePixelRatio || 1;
+        return this._cursorDensity();
+    }
+
+    /**
+     * Stream pixels per CSS pixel the page draws at: the density the core
+     * set (a secondary streams at the primary's), else the page's own, 1
+     * under CSS scaling. The cursor image arrives in stream pixels and is
+     * shown at that many per CSS pixel.
+     * @returns {number}
+     */
+    _cursorDensity() {
+        if (this._streamDensity) {
+            return this._streamDensity;
+        }
+        return this.useCssScaling ? 1 : (window.devicePixelRatio || 1);
+    }
+
+    /**
+     * Sets the density the core streams this page at, or null to derive it
+     * from the page's own; the window math and cursor follow it.
+     * @param {number|null} density Stream pixels per CSS pixel.
+     */
+    setStreamDensity(density) {
+        const value = (Number.isFinite(density) && density > 0) ? density : null;
+        if (this._streamDensity === value) return;
+        this._streamDensity = value;
+        this._windowMath();
+        this._drawAndScaleCursor();
+        this._updateBrowserCursor();
     }
 
     /**

@@ -110,6 +110,7 @@ import {
   digestedPayload
 } from './lib/clipboard-sync.js';
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js';
+import { streamDensity as streamDensityOf } from './lib/stream-density.js';
 import {
   createFileUploader
 } from './lib/file-upload.js';
@@ -406,6 +407,32 @@ let stripeDecodeSoftErrors = {};
 let wakeLockSentinel = null;
 let currentEncoderMode = 'h264enc-striped';
 let useCssScaling = false;
+/** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
+function streamDensity() {
+  return streamDensityOf({ displayId, layouts: latestDisplayLayouts, useCssScaling, shared: isSharedMode });
+}
+/** The density the last request was built on; a change re-requests on a secondary. */
+let appliedStreamDensity = 0;
+/** The density the last SETTINGS reported as the display scale. */
+let reportedStreamDensity = 0;
+/** The last automatic request, as stream pixels and the CSS size it was built from. */
+let lastRequestedStreamRes = null;
+/**
+ * Hands the density to the input layer and, on a secondary whose density
+ * moved with the primary's, requests the stream at it again.
+ */
+function followStreamDensity() {
+  const density = streamDensity();
+  if (window.webrtcInput && window.webrtcInput.setStreamDensity) {
+    window.webrtcInput.setStreamDensity(density);
+  }
+  const changed = appliedStreamDensity > 0 && Math.abs(density - appliedStreamDensity) > 1e-6;
+  appliedStreamDensity = density;
+  if (changed && displayId !== 'primary' && !window.manual_resolution && handleResizeUI_globalRef) {
+    console.log(`Stream density follows the primary: ${density}.`);
+    handleResizeUI_globalRef();
+  }
+}
 let trackpadMode = false;
 let scalingDPI = 96;
 /** `scaling_dpi` stops in 25% steps; densities between them snap to the nearest. */
@@ -489,7 +516,24 @@ let enable_binary_clipboard = true;
  * Server-clipboard cache, change-only sync and Ctrl/Cmd+C request queue
  * (lib/clipboard-sync.js); the send hook late-binds `websocket`.
  */
+/**
+ * Whether this is a Chromium engine (not the WebKit-backed iOS Chrome): the
+ * userAgentData brands are the authoritative signal, `window.chrome` the
+ * fallback for older engines.
+ */
+const isChromium = (() => {
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
+  const isCriOS = /CriOS/.test(navigator.userAgent);
+  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+  const isChromiumBrand = brands.some((b) => /Chromium|Google Chrome/.test(b.brand));
+  const hasChromeObj = typeof window.chrome !== 'undefined';
+  return (isChromiumBrand || hasChromeObj) && !isIOS && !isFirefox && !isCriOS;
+})();
+
 const clipboardSync = createClipboardSync({
+    isChromium,
     sendRequest: () => {
         if (websocket && websocket.readyState === WebSocket.OPEN) {
             websocket.send('REQUEST_CLIPBOARD');
@@ -516,24 +560,7 @@ let localClipboardSender = null;
 
 /**
  * Sends content the user named (the clipboard box, the image upload) so it
-/**
- * Whether this is a Chromium engine (not the WebKit-backed iOS Chrome): the
- * userAgentData brands are the authoritative signal, `window.chrome` the
- * fallback for older engines.
- */
-const isChromium = (() => {
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
-  const isCriOS = /CriOS/.test(navigator.userAgent);
-  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
-  const isChromiumBrand = brands.some((b) => /Chromium|Google Chrome/.test(b.brand));
-  const hasChromeObj = typeof window.chrome !== 'undefined';
-  return (isChromiumBrand || hasChromeObj) && !isIOS && !isFirefox && !isCriOS;
-})();
-
  * outranks the focus read. Refused before the connection builds the sender.
-    isChromium,
  * @param {string|ArrayBuffer|Blob} data
  * @param {string} [mime]
  * @param {Function} [onSkip] Told why nothing was sent.
@@ -2273,7 +2300,7 @@ const updateCanvasImageRendering = () => {
     return;
   }
   const dpr = window.devicePixelRatio || 1;
-  if (isSharedMode || window.manual_resolution || (useCssScaling && dpr > 1)) {
+  if (isSharedMode || window.manual_resolution || Math.abs(streamDensity() - dpr) > 1e-6) {
     if (canvas.style.imageRendering !== 'auto') {
       console.log("Smoothing enabled for manual resolution, high-DPR scaling, or shared mode.");
       canvas.style.imageRendering = 'auto';
@@ -2463,17 +2490,6 @@ function sendFullSettingsUpdateToServer(reason) {
 }
 
 /**
- * Builds the SETTINGS payload. Only keys with a stored (user-set) value are
- * included, so the fallbacks here never override server-configured defaults
- * for an untouched setting; `scaling_dpi` is the exception, being
- * client-authoritative (the derived default or the dashboard's pick, sent
- * live so it reaches the running server; the desktop DPI is independent of
- * the resolution). The payload also carries the keyboard layout, the client
- * geometry or manual resolution, the display identity and the audio-RED
- * capability that makes the server enable Opus redundancy.
- * @returns {Object<string, *>}
- */
-/**
  * This page's remote pixels per CSS pixel, reported so a neighboring display
  * can scale a cross-display drag's travel over this one: the presented stream
  * box where one is measurable (manual mode scales it freely), else the device
@@ -2494,9 +2510,21 @@ function currentDisplayScale(dpr) {
     return dpr;
 }
 
+/**
+ * Builds the SETTINGS payload. Only keys with a stored (user-set) value are
+ * included, so the fallbacks here never override server-configured defaults
+ * for an untouched setting; `scaling_dpi` is the exception, being
+ * client-authoritative (the derived default or the dashboard's pick, sent
+ * live so it reaches the running server; the desktop DPI is independent of
+ * the resolution). The payload also carries the keyboard layout, the client
+ * geometry or manual resolution, the display identity and the audio-RED
+ * capability that makes the server enable Opus redundancy.
+ * @returns {Object<string, *>}
+ */
 function getCurrentSettingsPayload() {
     const settingsToSend = {};
-    const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+    const dpr = streamDensity();
+    reportedStreamDensity = dpr;
     const hasStoredParam = (key) => {
         let finalKey = `${storageAppName}_${key}`;
         if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
@@ -2600,13 +2628,26 @@ function sendResolutionToServer(width, height) {
     realWidth = alignResolution(width);
     realHeight = alignResolution(height);
   } else {
-    dprUsed = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+    dprUsed = streamDensity();
+    appliedStreamDensity = dprUsed;
+    if (window.webrtcInput && window.webrtcInput.setStreamDensity) {
+      window.webrtcInput.setStreamDensity(dprUsed);
+    }
     realWidth = alignResolution(width * dprUsed);
     realHeight = alignResolution(height * dprUsed);
+    // A request at a density the last SETTINGS did not report: the layout
+    // carries the reported scale to the other pages, so it is sent again.
+    if (reportedStreamDensity > 0 && Math.abs(dprUsed - reportedStreamDensity) > 1e-6) {
+      setTimeout(() => sendFullSettingsUpdateToServer('stream density'), 0);
+    }
   }
 
+  // A capped request no longer equals the CSS size times the density, so the
+  // realized size counts as a divergence for it.
+  const capped = realWidth > 4080 || realHeight > 4080;
   if (realWidth > 4080) realWidth = 4080;
   if (realHeight > 4080) realHeight = 4080;
+  lastRequestedStreamRes = (window.manual_resolution || capped) ? null : [realWidth, realHeight, width, height];
 
   const resString = `${realWidth}x${realHeight}`;
   console.log(`Sending resolution to server: ${resString}, DisplayID: ${displayId}, Manual Mode: ${window.manual_resolution}, Pixel Ratio Used: ${dprUsed}, useCssScaling: ${useCssScaling}`);
@@ -2671,7 +2712,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
   canvasGeomDirty = true;
   lastDrawnJpegStripeFrameId = {};
 
-  const dpr = (isSharedMode || window.manual_resolution || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+  const dpr = (isSharedMode || window.manual_resolution) ? 1 : streamDensity();
   const internalBufferWidth = alignResolution(targetWidth * dpr);
   const internalBufferHeight = alignResolution(targetHeight * dpr);
 
@@ -2763,7 +2804,7 @@ function resetCanvasStyle(streamWidth, streamHeight) {
   lastDrawnJpegStripeFrameId = {};
   canvasGeomDirty = true;
 
-  const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1); 
+  const dpr = streamDensity();
   const internalBufferWidth = alignResolution(streamWidth * dpr);
   const internalBufferHeight = alignResolution(streamHeight * dpr);
 
@@ -3657,7 +3698,9 @@ const initializeInput = () => {
     let evenWidth = alignResolution(windowResolution[0]);
     let evenHeight = alignResolution(windowResolution[1]);
 
-    const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+    const dpr = streamDensity();
+    appliedStreamDensity = dpr;
+    if (inputInstance && inputInstance.setStreamDensity) inputInstance.setStreamDensity(dpr);
     const MAX_DIM = 4080;
     
     if (evenWidth * dpr > MAX_DIM) {
@@ -3931,6 +3974,7 @@ function receiveMessage(event) {
         if (window.webrtcInput && typeof window.webrtcInput.updateCssScaling === 'function') {
           window.webrtcInput.updateCssScaling(useCssScaling);
         }
+        followStreamDensity();
         if (changed) {
           updateCanvasImageRendering();
           if (window.manual_resolution && manual_width != null && manual_height != null) {
@@ -5916,7 +5960,7 @@ class WorkerWebSocket {
     if (!isSharedMode) {
       const settingsPrefix = `${storageAppName}_`;
       const settingsToSend = {};
-      const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+      const dpr = streamDensity();
 
       const knownSettings = [
         'framerate', 'video_crf', 'encoder', 'manual_resolution',
@@ -5984,6 +6028,7 @@ class WorkerWebSocket {
       settingsToSend['useCssScaling'] = useCssScaling;
       settingsToSend['displayId'] = displayId;
       settingsToSend['displayScale'] = currentDisplayScale(dpr);
+      reportedStreamDensity = dpr;
       if (displayId === 'display2') {
           settingsToSend['displayPosition'] = displayPosition;
       }
@@ -6769,23 +6814,31 @@ class WorkerWebSocket {
                // The realized resolution can differ from the request (encoder
                // alignment, RandR cell snapping, a rejected mode-set); canvas,
                // stripe decoders and input mapping follow it.
-               const dprUsed = (window.manual_resolution || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+               const dprUsed = window.manual_resolution ? 1 : streamDensity();
                const bufferWidth = alignResolution(appliedWidth);
                const bufferHeight = alignResolution(appliedHeight);
+               const requested = !window.manual_resolution && lastRequestedStreamRes &&
+                   bufferWidth === lastRequestedStreamRes[0] && bufferHeight === lastRequestedStreamRes[1];
                if (canvas && bufferWidth > 0 && bufferHeight > 0 &&
                    (canvas.width !== bufferWidth || canvas.height !== bufferHeight)) {
-                 console.log(`Server realized stream resolution ${appliedWidth}x${appliedHeight} (canvas buffer ${canvas.width}x${canvas.height}); reconciling.`);
                  clearAllVncStripeDecoders();
-                 // CSS times DPR no longer equals server pixels: input routes through the canvas box.
-                 window.streamResolutionDiverged = true;
-                 if (window.manual_resolution) {
-                   manual_width = bufferWidth;
-                   manual_height = bufferHeight;
-                   applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
+                 if (requested) {
+                   // This page's own request, which the buffer has not caught up with.
+                   window.streamResolutionDiverged = false;
+                   resetCanvasStyle(lastRequestedStreamRes[2], lastRequestedStreamRes[3]);
                  } else {
-                   // +0.5 keeps the divide/multiply round trip on a fractional DPR
-                   // from flooring one even step below the realized size.
-                   applyManualCanvasStyle((bufferWidth + 0.5) / dprUsed, (bufferHeight + 0.5) / dprUsed, true);
+                   console.log(`Server realized stream resolution ${appliedWidth}x${appliedHeight} (canvas buffer ${canvas.width}x${canvas.height}); reconciling.`);
+                   // CSS times the density no longer equals server pixels: input routes through the canvas box.
+                   window.streamResolutionDiverged = true;
+                   if (window.manual_resolution) {
+                     manual_width = bufferWidth;
+                     manual_height = bufferHeight;
+                     applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
+                   } else {
+                     // +0.5 keeps the divide/multiply round trip on a fractional density
+                     // from flooring one even step below the realized size.
+                     applyManualCanvasStyle((bufferWidth + 0.5) / dprUsed, (bufferHeight + 0.5) / dprUsed, true);
+                   }
                  }
                }
              } else {
@@ -7008,6 +7061,7 @@ class WorkerWebSocket {
                 if (window.webrtcInput && window.webrtcInput.setDisplayLayouts) {
                     window.webrtcInput.setDisplayLayouts(latestDisplayLayouts, displayId);
                 }
+                followStreamDensity();
                 if (displayId === 'primary') {
                     const secondaryConnected = payload.displays.includes('display2');
                     if (isSecondaryDisplayConnected !== secondaryConnected) {

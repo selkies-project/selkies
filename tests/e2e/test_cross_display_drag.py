@@ -54,7 +54,9 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 PRIMARY_CSS = (1512, 806)     # DPR 2 -> remote 3024x1612
-SECONDARY_CSS = (1920, 936)   # DPR 1 -> remote 1920x936 at x=3024
+# DPR 1, streamed at the primary's density of 2 so the desktop's one DPI shows
+# at the same physical size on both screens -> remote 3840x1872 at x=3024.
+SECONDARY_CSS = (1920, 936)
 
 # The primary's browser window on the modeled desktop: origin, then the chrome
 # above its viewport. The secondary's window carries a title bar the primary's
@@ -472,8 +474,9 @@ def drive(res: "H.Results", mode: str, wayland: bool) -> None:
             seam = layout["ownW"]
             union_r = max(r["x"] + r["w"] for r in layout["rects"])
             d2 = next((r for r in layout["rects"] if r["x"] == seam), None)
-            res.check(f"[{mode}] secondary laid out at the seam with its scale",
-                      bool(d2) and d2.get("scale") == 1, layout)
+            res.check(f"[{mode}] secondary laid out at the seam at the primary's density",
+                      bool(d2) and d2.get("scale") == 2 and d2.get("w") == SECONDARY_CSS[0] * 2,
+                      layout)
 
             # Each page anchors itself on two events that agree about where
             # its viewport sits, then publishes the box it draws the stream in;
@@ -481,7 +484,7 @@ def drive(res: "H.Results", mode: str, wayland: bool) -> None:
             for pg in (page, dpage):
                 hovered_to(pg, 700, 400, wayland)
                 hovered_to(pg, 760, 430, wayland)
-            got_box = wait_for(lambda: neighbor_rect(page, seam).get("scaleX") == 1, 15)
+            got_box = wait_for(lambda: neighbor_rect(page, seam).get("scaleX") == 2, 15)
             own_box = (page.evaluate(LAYOUT_JS) or {}).get("own") or {}
             res.check(f"[{mode}] the neighbor publishes the box it draws in",
                       got_box and own_box.get("scaleX", 0) > 0,
@@ -519,20 +522,22 @@ def drive(res: "H.Results", mode: str, wayland: bool) -> None:
                 res.check("manual DPR-2 mapping is exact",
                           abs(p1[0] - 1400) <= 2 and abs(p1[1] - 800) <= 2 and edge == PRIMARY_CSS[0],
                           f"{p1} edge={edge}")
+            d2_scale = neighbor_rect(page, seam).get("scaleX")
             over = moved_to(page, edge + 300, 400, wayland)
             far = moved_to(page, edge + 1088, 400, wayland)
             res.check(f"[{mode}] held drag crosses the seam",
                       over[0] > seam, f"{over} seam={seam}")
             res.check(f"[{mode}] overshoot travels at the neighbor's scale",
-                      abs(over[0] - (seam + 300)) <= 4 and abs(far[0] - (seam + 1088)) <= 4,
-                      f"{over} {far} seam={seam}")
+                      abs(over[0] - (seam + 300 * d2_scale)) <= 4
+                      and abs(far[0] - (seam + 1088 * d2_scale)) <= 4,
+                      f"{over} {far} seam={seam} scale={d2_scale}")
 
             if full:
                 clamped = moved_to(page, edge + 3000, 400, wayland)
                 res.check("far overshoot clamps at the union's edge",
                           abs(clamped[0] - (union_r - 1)) <= 1, f"{clamped} union={union_r}")
-                low = moved_to(page, 2000, 700, wayland)
-                res.check("the dead corner past a shorter neighbor is out of reach",
+                low = moved_to(page, 2000, 1000, wayland)
+                res.check("the corner below the neighbor's bottom is out of reach",
                           low[1] <= d2["y"] + d2["h"], f"{low} d2={d2}")
                 left = moved_to(page, -300, 400, wayland)
                 res.check("an edge with no neighbor still clamps",

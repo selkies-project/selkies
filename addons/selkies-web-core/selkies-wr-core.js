@@ -77,6 +77,7 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
+import { streamDensity as streamDensityOf } from "./lib/stream-density.js";
 import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, writeImageToLocalClipboard, digestedPayload } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
@@ -421,7 +422,6 @@ export default function webrtc() {
 		return (isChromiumBrand || typeof window.chrome !== 'undefined') && !isIOS && !isFirefox && !isCriOS;
 	})();
 
-	const hash = window.location.hash;
 	const clipboardSync = createClipboardSync({
 		isChromium,
 		sendRequest: () => webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD'),
@@ -437,6 +437,7 @@ export default function webrtc() {
 	 */
 	const deferredClipboardWriter = createDeferredClipboardWriter();
 
+	const hash = window.location.hash;
 	if (hash === '#shared') {
         clientRole = CLIENT_VIEWER;
         clientSlot = -1;
@@ -477,6 +478,30 @@ export default function webrtc() {
 	 * `getPrefixedKey` and the WebSocket core.
 	 */
 	const storageDisplayId = window.location.hash.startsWith('#display2') ? 'display2' : 'primary';
+	/** Display rectangles (+ per-page scale) from the last display-config update. */
+	let latestDisplayLayouts = null;
+	/** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
+	function streamDensity() {
+		return streamDensityOf({ displayId: storageDisplayId, layouts: latestDisplayLayouts, useCssScaling, shared: isSharedMode });
+	}
+	/** The density the last request was built on; a change re-requests on a secondary. */
+	let appliedStreamDensity = 0;
+	/** The density the last SETTINGS reported as the display scale. */
+	let reportedStreamDensity = 0;
+	/**
+	 * Hands the density to the input layer and, on a secondary whose density
+	 * moved with the primary's, requests the stream at it again.
+	 */
+	function followStreamDensity() {
+		const density = streamDensity();
+		if (input && input.setStreamDensity) input.setStreamDensity(density);
+		const changed = appliedStreamDensity > 0 && Math.abs(density - appliedStreamDensity) > 1e-6;
+		appliedStreamDensity = density;
+		if (changed && storageDisplayId !== 'primary' && !window.manualResolution) {
+			console.log(`Stream density follows the primary: ${density}.`);
+			handleResizeUI();
+		}
+	}
 	const PER_DISPLAY_SETTINGS = [
 		'framerate', 'video_crf', 'video_fullcolor',
 		'video_streaming_mode', 'use_cpu',
@@ -769,8 +794,7 @@ export default function webrtc() {
 			}
 			return;
 		}
-		const dpr = window.devicePixelRatio || 1;
-		const isOneToOne = !useCssScaling || (useCssScaling && dpr <= 1);
+		const isOneToOne = Math.abs(streamDensity() - (window.devicePixelRatio || 1)) < 1e-6;
 		if (isOneToOne) {
 			if (videoElement.style.imageRendering !== 'pixelated') {
 				console.log("Setting video rendering to 'pixelated' for sharp display.");
@@ -908,7 +932,8 @@ export default function webrtc() {
 		}
 		const settingsPrefix = `${storageAppName}_`;
 		const settingsToSend = {};
-		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+		const dpr = streamDensity();
+		reportedStreamDensity = dpr;
 
 		const knownSettings = [
 			'framerate', 'encoder', 'manual_resolution',
@@ -999,7 +1024,7 @@ export default function webrtc() {
 			return;
 		}
 
-		const dpr = (window.manualResolution || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+		const dpr = window.manualResolution ? 1 : streamDensity();
 		const logicalWidth = alignResolution(targetWidth * dpr);
 		const logicalHeight = alignResolution(targetHeight * dpr);
 		console.log(`applyManualStyle logicalWidth: ${logicalWidth} logicalHeight: ${logicalHeight}`)
@@ -1056,7 +1081,7 @@ export default function webrtc() {
 	function resetToWindowResolution(targetWidth, targetHeight) {
 		if (!videoElement) return;
 
-		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+		const dpr = streamDensity();
 		const logicalWidth = alignResolution(targetWidth * dpr);
 		const logicalHeight = alignResolution(targetHeight * dpr);
 		console.log(`resetToWinRes logicalWidth: ${logicalWidth} logicalHeight: ${logicalHeight}`)
@@ -1135,8 +1160,14 @@ export default function webrtc() {
 			realWidth = alignResolution(width);
 			realHeight = alignResolution(height);
 		} else {
-			dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+			dpr = streamDensity();
+			appliedStreamDensity = dpr;
 			realWidth = alignResolution(width * dpr);
+			// A request at a density the last SETTINGS did not report: the layout
+			// carries the reported scale to the other pages, so it is sent again.
+			if (reportedStreamDensity > 0 && Math.abs(dpr - reportedStreamDensity) > 1e-6) {
+				setTimeout(() => sendClientPersistedSettings(), 0);
+			}
 			realHeight = alignResolution(height * dpr);
 		}
 		if (realWidth > 4080) realWidth = 4080;
@@ -1211,7 +1242,9 @@ export default function webrtc() {
 			return;
 		}
 		windowResolution = input.getWindowResolution();
-		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+		const dpr = streamDensity();
+		appliedStreamDensity = dpr;
+		if (input && input.setStreamDensity) input.setStreamDensity(dpr);
 		if (windowResolution[0] * dpr > 4080) windowResolution[0] = Math.floor(4080 / dpr);
 		if (windowResolution[1] * dpr > 4080) windowResolution[1] = Math.floor(4080 / dpr);
 		sendResolutionToServer(windowResolution[0], windowResolution[1]);
@@ -2301,8 +2334,7 @@ export default function webrtc() {
 				const posMatch = hash.match(/^#display2-(right|left|up|down)/);
 				if (posMatch) displayPosition = posMatch[1];
 			}
-			/** Display rectangles (+ per-page scale) from the last display-config update. */
-			let latestDisplayLayouts = null;
+			latestDisplayLayouts = null;
 
 			var pathname = getRoutePrefix() + "/";
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
@@ -2620,6 +2652,7 @@ export default function webrtc() {
 				if (input && input.setDisplayLayouts) {
 					input.setDisplayLayouts(latestDisplayLayouts, displayId);
 				}
+				followStreamDensity();
 				const secondaryConnected = displays.some((d) => d !== 'primary');
 				if (isSecondaryDisplayConnected !== secondaryConnected) {
 					console.log(`Secondary display connection status changed to: ${secondaryConnected}`);
