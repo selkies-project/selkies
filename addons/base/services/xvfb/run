@@ -28,12 +28,15 @@ unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
 # present their buffers into it without a copy. The node is the one Selkies
 # renders on (--render-dri, else the --auto-gpu pick the entrypoint resolved),
 # so the X11 backend and the Wayland compositor answer to the same selection.
-# Without a node the server is the software framebuffer, and its GLX probing
-# then has to be kept off NVIDIA's EGL, whose GBM library crashes it; the
-# session's own EGL selection is untouched either way.
+# A node whose renderer did not come up for the entrypoint's probe (a driver
+# whose GBM allocates nothing, say) draws nothing here either: glamor on it
+# reports success and leaves the screen black. Without a usable node the
+# server is the software framebuffer, and its GLX probing then has to be kept
+# off NVIDIA's EGL, whose GBM library crashes it; the session's own EGL
+# selection is untouched either way.
 VFB_DEVICE=""
 RENDER_DRI="${SELKIES_RENDER_DRI:-${DRINODE:-}}"
-if /usr/bin/Xvfb -help 2>&1 | grep -q -- '-glamor'; then
+if [ "${SELKIES_GPU_ACCELERATED:-}" != "false" ] && /usr/bin/Xvfb -help 2>&1 | grep -q -- '-glamor'; then
   if [ -n "${RENDER_DRI}" ]; then
     VFB_DEVICE="-glamor -dri ${RENDER_DRI}"
   else

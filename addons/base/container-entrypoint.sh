@@ -128,21 +128,51 @@ if [ -z "${SELKIES_GPU_DRIVER-}" ] && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-
 fi
 
 # Hardware OpenGL for the session's applications. Mesa carries no driver for the
-# proprietary NVIDIA stack, so GL there runs through Zink on its Vulkan driver,
-# which needs no render node of its own; every other vendor has a native Mesa
-# driver, and forcing Zink on it would aim Mesa at a device the session does not
+# proprietary NVIDIA stack. Where the X server renders on the GPU's render node
+# (services/xvfb/run), its DRI3 shares buffers with NVIDIA's own GLX client
+# library, which renders and presents on the GPU directly; into a software
+# server that library has only a readback path. NVIDIA's EGL reaches an X
+# server only through its xcb platform library, which a runtime may or may not
+# inject; where it is present glvnd takes it first. Mesa's EGL, and GLX without
+# a node, run through Zink on the NVIDIA Vulkan driver, which needs no node of
+# its own but does need the driver's modeset node to present: without that
+# node no Vulkan swapchain comes up on any surface, so Mesa is left to render
+# in software rather than fail. Every other vendor has a native Mesa driver,
+# and forcing Zink on it would aim Mesa at a device the session does not
 # render on. DISABLE_ZINK=true leaves that GPU to software OpenGL.
 if [ "${SELKIES_GPU_DRIVER-}" != "nvidia" ]; then
   :
 elif is_true "${DISABLE_ZINK-false}"; then
   echo 'DISABLE_ZINK is set: OpenGL is not routed through Zink on the NVIDIA GPU'
 else
-  export MESA_LOADER_DRIVER_OVERRIDE="zink"
-  export GALLIUM_DRIVER="zink"
-  # Zink presents through DRI3 where the X server has it, which the framebuffer
-  # server does on a render node; without one it has the DRI2 path only.
-  [ -n "${SELKIES_GPU_RENDER_NODE:-}" ] || export LIBGL_KOPPER_DRI2="1"
-  echo 'NVIDIA GPU: OpenGL runs through Zink on the NVIDIA Vulkan driver'
+  nvidia_libs="$(ldconfig -p 2>/dev/null)"
+  # The framebuffer server brings glamor and DRI3 up on the render node only
+  # where the probe's renderer came up on it (services/xvfb/run).
+  dri3_server="false"
+  if [ -n "${SELKIES_GPU_RENDER_NODE:-}" ] && [ "${SELKIES_GPU_ACCELERATED-}" != "false" ]; then
+    dri3_server="true"
+  fi
+  glx_path="through Zink on the NVIDIA Vulkan driver"
+  if [ "${dri3_server}" = "true" ] && printf '%s' "${nvidia_libs}" | grep -q '[/]libGLX_nvidia\.so\.0'; then
+    export __GLX_VENDOR_LIBRARY_NAME="nvidia"
+    glx_path="on the NVIDIA driver through the X server's DRI3"
+  fi
+  if printf '%s' "${nvidia_libs}" | grep -q '[/]libnvidia-egl-xcb\.so\.1'; then
+    egl_path="on the NVIDIA driver through its xcb platform"
+  elif [ -e /dev/nvidia-modeset ]; then
+    egl_path="through Zink on the NVIDIA Vulkan driver"
+  else
+    egl_path="in software: without the driver's modeset node Vulkan cannot present"
+  fi
+  if [ -e /dev/nvidia-modeset ]; then
+    export MESA_LOADER_DRIVER_OVERRIDE="zink"
+    export GALLIUM_DRIVER="zink"
+    # Zink presents through DRI3 where the X server has it; the software
+    # framebuffer server has the DRI2 path only.
+    [ "${dri3_server}" = "true" ] || export LIBGL_KOPPER_DRI2="1"
+  fi
+  echo "NVIDIA GPU: GLX runs ${glx_path}, EGL ${egl_path}"
+  unset nvidia_libs dri3_server glx_path egl_path
 fi
 
 # A GPU the compositor cannot reach is a reason to run X11 instead, where the
@@ -152,8 +182,8 @@ fi
 # derived from the backend: the display, the session type and the toolkit
 # defaults all follow it. SELKIES_WAYLAND_X11_FALLBACK=false keeps Wayland and
 # composites in software, which shares no dmabuf, so a GL client aimed at the
-# Vulkan driver would produce buffers it cannot accept — the Zink override goes
-# with it.
+# Vulkan driver would produce buffers it cannot accept — the Zink override and
+# the NVIDIA GLX routing go with it.
 if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ] \
    && [ "${SELKIES_GPU_ACCELERATED-}" = "false" ]; then
   if is_true "${SELKIES_WAYLAND_X11_FALLBACK-true}"; then
@@ -161,7 +191,7 @@ if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ] \
     export SELKIES_WAYLAND="false"
   else
     echo 'GPU: the compositor cannot reach it; compositing in software'
-    unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
+    unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 __GLX_VENDOR_LIBRARY_NAME
   fi
 fi
 

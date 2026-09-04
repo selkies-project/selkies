@@ -465,7 +465,6 @@ ENV PATH="/usr/local/nvidia/bin${PATH:+:${PATH}}"
 ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
 ENV NVIDIA_VISIBLE_DEVICES="all"
 ENV NVIDIA_DRIVER_CAPABILITIES="all"
-ENV __GL_SYNC_TO_VBLANK="0"
 
 # Package state is already owned by the session user: the recursive chown above
 # handed it over, and the apt runs after it went through fakeroot as uid 1000.
