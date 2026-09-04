@@ -127,53 +127,49 @@ if [ -z "${SELKIES_GPU_DRIVER-}" ] && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-
   export SELKIES_GPU_DRIVER="nvidia"
 fi
 
-# Hardware OpenGL for the session's applications. Mesa carries no driver for the
-# proprietary NVIDIA stack. Where the X server renders on the GPU's render node
-# (services/xvfb/run), its DRI3 shares buffers with NVIDIA's own GLX client
-# library, which renders and presents on the GPU directly; into a software
-# server that library has only a readback path. NVIDIA's EGL reaches an X
-# server only through its xcb platform library, which a runtime may or may not
-# inject; where it is present glvnd takes it first. Mesa's EGL, and GLX without
-# a node, run through Zink on the NVIDIA Vulkan driver, which needs no node of
-# its own but does need the driver's modeset node to present: without that
-# node no Vulkan swapchain comes up on any surface, so Mesa is left to render
-# in software rather than fail. Every other vendor has a native Mesa driver,
-# and forcing Zink on it would aim Mesa at a device the session does not
-# render on. DISABLE_ZINK=true leaves that GPU to software OpenGL.
-if [ "${SELKIES_GPU_DRIVER-}" != "nvidia" ]; then
-  :
-elif is_true "${DISABLE_ZINK-false}"; then
-  echo 'DISABLE_ZINK is set: OpenGL is not routed through Zink on the NVIDIA GPU'
-else
-  nvidia_libs="$(ldconfig -p 2>/dev/null)"
-  # The framebuffer server brings glamor and DRI3 up on the render node only
-  # where the probe's renderer came up on it (services/xvfb/run).
-  dri3_server="false"
-  if [ -n "${SELKIES_GPU_RENDER_NODE:-}" ] && [ "${SELKIES_GPU_ACCELERATED-}" != "false" ]; then
-    dri3_server="true"
-  fi
-  glx_path="through Zink on the NVIDIA Vulkan driver"
-  if [ "${dri3_server}" = "true" ] && printf '%s' "${nvidia_libs}" | grep -q '[/]libGLX_nvidia\.so\.0'; then
-    export __GLX_VENDOR_LIBRARY_NAME="nvidia"
-    glx_path="on the NVIDIA driver through the X server's DRI3"
-  fi
-  if printf '%s' "${nvidia_libs}" | grep -q '[/]libnvidia-egl-xcb\.so\.1'; then
-    egl_path="on the NVIDIA driver through its xcb platform"
-  elif [ -e /dev/nvidia-modeset ]; then
-    egl_path="through Zink on the NVIDIA Vulkan driver"
-  else
-    egl_path="in software: without the driver's modeset node Vulkan cannot present"
-  fi
-  if [ -e /dev/nvidia-modeset ]; then
-    export MESA_LOADER_DRIVER_OVERRIDE="zink"
-    export GALLIUM_DRIVER="zink"
-    # Zink presents through DRI3 where the X server has it; the software
-    # framebuffer server has the DRI2 path only.
-    [ "${dri3_server}" = "true" ] || export LIBGL_KOPPER_DRI2="1"
-  fi
-  echo "NVIDIA GPU: GLX runs ${glx_path}, EGL ${egl_path}"
-  unset nvidia_libs dri3_server glx_path egl_path
+# Hardware OpenGL for the session's applications, from what the probe measured
+# of the client paths (selkies-gpu-probe). The framebuffer server brings glamor
+# and DRI3 up on the render node where the compositor's renderer came up
+# (services/xvfb/run), and GLX then goes to the vendor library that drives that
+# node: for Mesa's vendors what glvnd would pick anyway, for a vendor with a
+# client stack of its own the library that renders and presents on the GPU
+# through that DRI3, where a readback into a software server is all it has
+# otherwise. Mesa reaches a GPU it has no driver for through Zink on the Vulkan
+# driver, where that driver could present into a window at all; where it could
+# not, Mesa is left to render in software rather than fail. DISABLE_ZINK=true
+# keeps Zink out either way.
+dri3_server="false"
+if [ -n "${SELKIES_GPU_RENDER_NODE:-}" ] && [ "${SELKIES_GPU_ACCELERATED-}" != "false" ]; then
+  dri3_server="true"
 fi
+if [ "${dri3_server}" = "true" ] && [ -n "${SELKIES_GPU_GL_VENDOR-}" ]; then
+  export __GLX_VENDOR_LIBRARY_NAME="${SELKIES_GPU_GL_VENDOR}"
+  gl_path="GLX on the ${SELKIES_GPU_GL_VENDOR} library through the X server's DRI3"
+else
+  gl_path="GLX through Mesa"
+fi
+gl_path="${gl_path}, EGL on the ${SELKIES_GPU_EGL_X11:-Mesa} library"
+case "${SELKIES_GPU_MESA_DRIVER-}" in
+  native)
+    gl_path="${gl_path}, Mesa on its own driver" ;;
+  zink)
+    if is_true "${DISABLE_ZINK-false}"; then
+      gl_path="${gl_path}, Mesa in software (DISABLE_ZINK is set)"
+    elif [ "${SELKIES_GPU_VULKAN_PRESENTS-}" = "false" ]; then
+      gl_path="${gl_path}, Mesa in software: the Vulkan driver cannot present into a window"
+    else
+      export MESA_LOADER_DRIVER_OVERRIDE="zink"
+      export GALLIUM_DRIVER="zink"
+      # Zink presents through DRI3 where the X server has it; the software
+      # framebuffer server has the DRI2 path only.
+      [ "${dri3_server}" = "true" ] || export LIBGL_KOPPER_DRI2="1"
+      gl_path="${gl_path}, Mesa through Zink on the Vulkan driver"
+    fi ;;
+  *)
+    gl_path="${gl_path}, Mesa in software" ;;
+esac
+[ -z "${SELKIES_GPU_DRIVER-}" ] || echo "GL: ${gl_path}"
+unset dri3_server gl_path
 
 # A GPU the compositor cannot reach is a reason to run X11 instead, where the
 # session still gets it through Zink or the X server's own render node
