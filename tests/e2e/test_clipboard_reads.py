@@ -143,7 +143,9 @@ def main() -> "H.Results":
         for engine in ENGINES:
             for mode in ("websockets", "webrtc"):
                 drive(res, mode, engine, True)
-        drive(res, "websockets", "chromium", False)
+        # With the client-to-session direction off, no engine reads at all.
+        for engine in ENGINES:
+            drive(res, "websockets", engine, False)
     finally:
         H.server_stop()
         if xproc is not None:

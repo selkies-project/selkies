@@ -424,6 +424,7 @@ export default function webrtc() {
 
 	const clipboardSync = createClipboardSync({
 		isChromium,
+		canRead: () => !!clipboard_in_enabled,
 		sendRequest: () => webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD'),
 		digestBytes: async (buf) => {
 			const { byteLength, hash } = await clipboardWorker.hashBytes(buf);

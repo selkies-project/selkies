@@ -138,7 +138,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "enable_clipboard",
         "type": "str",
         "default": "true",
-        "help": 'Clipboard policy for both transports: "true" (both directions), "in" (client-to-server only), "out" (server-to-client only), "false" (disabled).',
+        "help": 'Clipboard policy for both transports: "true" (both directions), "in" (client-to-server only), "out" (server-to-client only), "false" (disabled). "out" is what stops the page reading the local clipboard at all, which is the read Firefox and Safari raise their paste prompt for; the dashboard\'s clipboard box still sends.',
     },
     {
         "name": "command_enabled",

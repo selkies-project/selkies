@@ -534,6 +534,7 @@ const isChromium = (() => {
 
 const clipboardSync = createClipboardSync({
     isChromium,
+    canRead: () => !!clipboard_in_enabled,
     sendRequest: () => {
         if (websocket && websocket.readyState === WebSocket.OPEN) {
             websocket.send('REQUEST_CLIPBOARD');

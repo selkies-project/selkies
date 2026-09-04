@@ -598,9 +598,10 @@ export function clipboardPreviewMessage(text) {
  * @param {object} hooks
  * @param {() => void} hooks.sendRequest Emits REQUEST_CLIPBOARD on the transport.
  * @param {boolean} [hooks.isChromium] Engine flag; the image read-back is Chromium-only.
+ * @param {() => boolean} [hooks.canRead] Local-to-server direction enabled.
  * @returns {ClipboardSync}
  */
-export function createClipboardSync({ sendRequest, digestBytes, isChromium = true }) {
+export function createClipboardSync({ sendRequest, digestBytes, isChromium = true, canRead = () => true }) {
     let lastText = '';
     let lastBlob = null;
     let lastMime = 'text/plain';
@@ -711,7 +712,9 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
     async function captureLocalImageSig() {
         // Firefox and WebKit raise a paste prompt on a read outside a paste
         // gesture, and this one follows a write, so only Chromium reads back.
-        if (!isChromium) return;
+        // It reads the local clipboard, so the local-to-server direction has
+        // to be enabled for it as much as for the focus read.
+        if (!isChromium || !canRead()) return;
         const anchor = lastSyncedSig;
         try {
             const items = await navigator.clipboard.read();
