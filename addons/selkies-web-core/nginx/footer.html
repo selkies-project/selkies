@@ -55,11 +55,15 @@
             document.querySelectorAll('table#list td a').forEach(function(a) {
                 const href = a.getAttribute('href') || '';
                 if (!href || href.startsWith('?')) return;
-                if (!href.endsWith('/')) {
+                // A sorted listing carries its sort in every link's query,
+                // the parent's included, so a directory is told by the path
+                // ahead of it, and the token joins a query already there.
+                if (!href.split('?')[0].endsWith('/')) {
                     a.setAttribute('download', '');
                 }
                 if (sessionToken) {
-                    a.setAttribute('href', href + '?token=' + encodeURIComponent(sessionToken));
+                    a.setAttribute('href', href + (href.includes('?') ? '&' : '?')
+                        + 'token=' + encodeURIComponent(sessionToken));
                 }
             });
 
