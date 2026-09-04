@@ -6,19 +6,27 @@ anchors. Below the root a listing without a parent row strands the user in
 the subdirectory; at the root a parent row is an escape hatch out of the
 file tree entirely. On the nginx `/files/` mount its `../` resolves to the
 desktop page, whose load registers a fresh primary client and kills the
-running session (linuxserver/docker-baseimage-selkies#131 documents that);
-on `/api/files/` it merely 404s at `/api/`, wrong either way. So the
-server renders the row itself: exactly one below the root, none at it,
-and the traversal gates in front stay as they are.
+running session; on `/api/files/` it merely 404s at `/api/`, wrong either
+way. So the server renders the row itself: exactly one below the root, none
+at it, and the traversal gates in front stay as they are.
+
+The nginx mount renders the row unconditionally and leaves it to the shared
+footer script, so the script's behaviour is pinned as well, on both of its
+copies through `tests/tools/file_index_footer_audit.mjs`: the root decision
+on every mount shape, a sorted listing keeping its directories navigable,
+and the session token joining a query already there.
 """
 import asyncio
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
+AUDIT = os.path.join(TESTS, "tools", "file_index_footer_audit.mjs")
 sys.path.insert(0, os.path.join(REPO, "src"))
 
 for _key in [k for k in os.environ if k.startswith("SELKIES_")]:
@@ -31,7 +39,7 @@ import pathlib  # noqa: E402
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
-from selkies.stream_server import CentralizedStreamServer  # noqa: E402
+from selkies.stream_server import FILE_INDEX_FOOTER, CentralizedStreamServer  # noqa: E402
 
 passed = failed = 0
 
@@ -49,7 +57,6 @@ def check(name, ok, detail=""):
 class _Settings:
     file_transfers = ["download"]
     file_transfer_limit_mbps = 0.0
-    file_transfer_cc = False
 
 
 def _app():
@@ -102,30 +109,37 @@ async def main():
     finally:
         await client.close()
 
-    # The client-side half of the contract, pinned structurally in BOTH copies
-    # of the shared footer script: the mount lookup must run on the normalized
-    # path (both needles end in a slash, so the raw path never matches a
-    # slashless root), and the root test must be an exact-length match, not
-    # endsWith, which also fired inside any subdirectory itself named to end
-    # in the mount (/files/backup/files/).
+    # The client-side half of the contract: the two copies of the footer
+    # script carry the same listing function, and it behaves as the audit
+    # says. The Python copy is read as the string the server serves, since
+    # its source escapes what the file does not.
+    python_footer = os.path.join(_SCRATCH, "python-footer.html")
+    with open(python_footer, "w", encoding="utf-8") as fh:
+        fh.write(FILE_INDEX_FOOTER)
     footer_copies = (
         ("nginx footer", os.path.join(REPO, "addons", "selkies-web-core",
                                       "nginx", "footer.html")),
-        ("python footer", os.path.join(REPO, "src", "selkies",
-                                       "stream_server.py")),
+        ("python footer", python_footer),
     )
-    for label, path in footer_copies:
+    bodies = []
+    for _label, path in footer_copies:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
-        check("{} searches both mounts on the normalized path".format(label),
-              "normPath.indexOf('/api/files/')" in text
-              and "normPath.indexOf('/files/')" in text)
-        check("{} lets the outermost mount win".format(label),
-              "idxLegacy !== -1 && (idxApi === -1 || idxLegacy < idxApi)" in text)
-        check("{} detects the root by exact length".format(label),
-              "idx + webPathPrefix.length === normPath.length" in text)
-        check("{} removes the root parent row".format(label),
-              "parentRow.remove()" in text)
+        start = text.find("function processDirectoryListing()")
+        end = text.find("let attempts = 0;", start)
+        bodies.append(text[start:end] if start != -1 and end != -1 else None)
+    check("both footer copies carry the same listing function",
+          bodies[0] is not None and bodies[0] == bodies[1])
+    node = shutil.which("node")
+    if not node:
+        print("SKIP node not found, so the footer script is not exercised", flush=True)
+    for label, path in footer_copies if node else ():
+        r = subprocess.run([node, AUDIT, path], capture_output=True, text=True, timeout=120)
+        for line in r.stdout.splitlines():
+            if line.startswith(("PASS", "FAIL")):
+                check(line[6:].replace("[file-index-footer]", label + ":", 1).strip(),
+                      line.startswith("PASS"))
+        check("{} audit exits clean".format(label), r.returncode == 0, (r.stderr or "")[-300:])
 
     print(f"[file-index-parent] {passed}/{passed + failed} passed", flush=True)
     return failed == 0
