@@ -516,7 +516,24 @@ let localClipboardSender = null;
 
 /**
  * Sends content the user named (the clipboard box, the image upload) so it
+/**
+ * Whether this is a Chromium engine (not the WebKit-backed iOS Chrome): the
+ * userAgentData brands are the authoritative signal, `window.chrome` the
+ * fallback for older engines.
+ */
+const isChromium = (() => {
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
+  const isCriOS = /CriOS/.test(navigator.userAgent);
+  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+  const isChromiumBrand = brands.some((b) => /Chromium|Google Chrome/.test(b.brand));
+  const hasChromeObj = typeof window.chrome !== 'undefined';
+  return (isChromiumBrand || hasChromeObj) && !isIOS && !isFirefox && !isCriOS;
+})();
+
  * outranks the focus read. Refused before the connection builds the sender.
+    isChromium,
  * @param {string|ArrayBuffer|Blob} data
  * @param {string} [mime]
  * @param {Function} [onSkip] Told why nothing was sent.
@@ -1076,21 +1093,6 @@ const alignResolution = (num) => {
   return Math.floor(num / alignment) * alignment;
 };
 
-/**
- * Whether this is a Chromium engine (not the WebKit-backed iOS Chrome): the
- * userAgentData brands are the authoritative signal, `window.chrome` the
- * fallback for older engines.
- */
-const isChromium = (() => {
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
-  const isCriOS = /CriOS/.test(navigator.userAgent);
-  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
-  const isChromiumBrand = brands.some((b) => /Chromium|Google Chrome/.test(b.brand));
-  const hasChromeObj = typeof window.chrome !== 'undefined';
-  return (isChromiumBrand || hasChromeObj) && !isIOS && !isFirefox && !isCriOS;
-})();
 
 /**
  * Whether the page has MediaStreamTrackGenerator (Chromium only). The standard

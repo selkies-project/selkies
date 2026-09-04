@@ -406,19 +406,6 @@ export default function webrtc() {
 	const reencodePngOffThread = (blob) => clipboardWorker.reencodePng(blob)
 		.then((r) => r.result)
 		.catch(() => reencodeBlobAsPng(blob));
-	const clipboardSync = createClipboardSync({
-		sendRequest: () => webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD'),
-		digestBytes: async (buf) => {
-			const { byteLength, hash } = await clipboardWorker.hashBytes(buf);
-			return digestedPayload(byteLength, hash);
-		}
-	});
-	/**
-	 * Retry queue for local clipboard writes of server pushes, which carry no
-	 * user activation: Firefox and WebKit reject the write until the next real
-	 * gesture.
-	 */
-	const deferredClipboardWriter = createDeferredClipboardWriter();
 	/**
 	 * Chromium-engine detection: userAgentData brands are authoritative and
 	 * `window.chrome` a fallback for older engines that expose no brands; iOS,
@@ -435,6 +422,21 @@ export default function webrtc() {
 	})();
 
 	const hash = window.location.hash;
+	const clipboardSync = createClipboardSync({
+		isChromium,
+		sendRequest: () => webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD'),
+		digestBytes: async (buf) => {
+			const { byteLength, hash } = await clipboardWorker.hashBytes(buf);
+			return digestedPayload(byteLength, hash);
+		}
+	});
+	/**
+	 * Retry queue for local clipboard writes of server pushes, which carry no
+	 * user activation: Firefox and WebKit reject the write until the next real
+	 * gesture.
+	 */
+	const deferredClipboardWriter = createDeferredClipboardWriter();
+
 	if (hash === '#shared') {
         clientRole = CLIENT_VIEWER;
         clientSlot = -1;
