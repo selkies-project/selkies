@@ -137,9 +137,11 @@ if [ "${SELKIES_GPU_DRIVER-}" != "nvidia" ]; then
 elif is_true "${DISABLE_ZINK-false}"; then
   echo 'DISABLE_ZINK is set: OpenGL is not routed through Zink on the NVIDIA GPU'
 else
-  export LIBGL_KOPPER_DRI2="1"
   export MESA_LOADER_DRIVER_OVERRIDE="zink"
   export GALLIUM_DRIVER="zink"
+  # Zink presents through DRI3 where the X server has it, which the framebuffer
+  # server does on a render node; without one it has the DRI2 path only.
+  [ -n "${SELKIES_GPU_RENDER_NODE:-}" ] || export LIBGL_KOPPER_DRI2="1"
   echo 'NVIDIA GPU: OpenGL runs through Zink on the NVIDIA Vulkan driver'
 fi
 

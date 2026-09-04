@@ -17,7 +17,7 @@
 # addons/desktop builds the reference LXQt desktop on top of this, and any
 # other desktop can be built the same way.
 #
-#   - X11 display server (a DRI3-capable Xvfb) and the headless Wayland backend
+#   - X11 display server (XLibre's Xvfb, with glamor and DRI3) and the headless Wayland backend
 #     with SELKIES_WAYLAND=true, whose nested labwc supplies window management,
 #     decorations and XWayland
 #   - s6 service supervision, running as PID 1 or below a foreign init
@@ -36,19 +36,18 @@ ARG DISTRIB_IMAGE="ubuntu"
 ARG DISTRIB_RELEASE="26.04"
 ARG PYPI_PACKAGE="selkies"
 # The X server the session runs on, built here rather than installed: the
-# distribution's Xvfb has no DRI3, so GL clients render in software even with a
-# GPU present. The release is pinned instead of taken from the base, because
-# the tree addons/base/patches/xvfb-dri3.patch edits moves within the 21.1
-# series; the pair moves together when it is rebased.
-ARG XORG_SERVER_VERSION="21.1.24"
+# distribution's Xvfb has neither glamor nor DRI3, so GL clients render in
+# software even with a GPU present. XLibre's Xvfb has both, on Mesa's GBM and
+# on NVIDIA's own EGL, and is built from its release tag.
+ARG XLIBRE_VERSION="25.2.2"
 ARG WLROOTS_VERSION="0.19.3"
 ARG LABWC_VERSION="0.9.7"
-ARG XORG_SERVER_SHA256="1a4eb36ca65cc3b1b936566d677a9786e13c11cd5806e951ac55f3f5ce3984af"
+ARG XLIBRE_SHA256="3c1f07f4b5f8a483473097be4b964ee97a2b92adde9de6c0d8d9d7217a382810"
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS xvfb
 ARG DEBIAN_FRONTEND="noninteractive"
-ARG XORG_SERVER_VERSION
-ARG XORG_SERVER_SHA256
+ARG XLIBRE_VERSION
+ARG XLIBRE_SHA256
 # The retry configuration the final stage sets further down, repeated here for
 # the same reason the add-ons stage repeats it.
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
@@ -59,9 +58,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         gcc \
         meson \
         ninja-build \
-        patch \
         pkg-config \
-        xz-utils \
         # The server itself
         libaudit-dev \
         libbsd-dev \
@@ -84,31 +81,29 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         libepoxy-dev \
         libgbm-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-COPY addons/base/patches/xvfb-dri3.patch /patches/
 # Only the framebuffer server is built. Its paths, extensions and defaults are
 # the distribution package's, so the binary drops in where that one installed
 # it; anything left at the meson default would move a keymap or a font path out
 # from under the rest of the image.
 RUN set -e; \
     cd /tmp; \
-    curl -fsSL --retry 5 --connect-timeout 30 -o xorg-server.tar.xz \
-        "https://www.x.org/releases/individual/xserver/xorg-server-${XORG_SERVER_VERSION}.tar.xz"; \
-    echo "${XORG_SERVER_SHA256}  xorg-server.tar.xz" | sha256sum -c -; \
-    tar -xf xorg-server.tar.xz; \
-    cd "xorg-server-${XORG_SERVER_VERSION}"; \
-    patch -p0 < /patches/xvfb-dri3.patch; \
+    curl -fsSL --retry 5 --connect-timeout 30 -o xlibre.tar.gz \
+        "https://github.com/X11Libre/xserver/archive/refs/tags/xlibre-xserver-${XLIBRE_VERSION}.tar.gz"; \
+    echo "${XLIBRE_SHA256}  xlibre.tar.gz" | sha256sum -c -; \
+    tar -xf xlibre.tar.gz; \
+    cd "xserver-xlibre-xserver-${XLIBRE_VERSION}"; \
     meson setup build \
         --prefix=/usr --sysconfdir=/etc --localstatedir=/var --buildtype=release \
-        -Dxvfb=true -Dglamor=true -Ddri3=true -Dglx=true \
+        -Dxvfb=true -Dglamor=true -Dgbm=true -Ddri3=true -Dglx=true \
         -Dxcsecurity=true -Dxselinux=true \
         -Dxorg=false -Dxnest=false -Dxephyr=false -Dxwin=false -Dxquartz=false \
-        -Dudev=false -Dudev_kms=false -Dsystemd_logind=false -Dsecure-rpc=false \
+        -Dudev=false -Dudev_kms=false -Dsystemd_logind=false \
         -Dxkb_dir=/usr/share/X11/xkb -Dxkb_output_dir=/var/lib/xkb -Dxkb_bin_dir=/usr/bin \
         -Ddefault_font_path=/usr/share/fonts/X11/misc,/usr/share/fonts/X11/cyrillic,/usr/share/fonts/X11/100dpi/:unscaled,/usr/share/fonts/X11/75dpi/:unscaled,/usr/share/fonts/X11/Type1,/usr/share/fonts/X11/100dpi,/usr/share/fonts/X11/75dpi,built-ins \
         -Ddocs=false -Ddevel-docs=false; \
     ninja -C build hw/vfb/Xvfb; \
     install -Dm755 build/hw/vfb/Xvfb /build-out/usr/bin/Xvfb; \
-    /build-out/usr/bin/Xvfb -help 2>&1 | grep -q vfbdevice
+    /build-out/usr/bin/Xvfb -help 2>&1 | grep -q -- '-glamor'
 
 # Build the joystick and webcam interposers and fake-udev inside this
 # repository (they are dedicated to containerized environments and are not
@@ -500,7 +495,7 @@ RUN --mount=type=bind,source=addons/base/wheels,target=/tmp/wheels \
     PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --force-reinstall ${PKGS}; \
     rm -rf /tmp/picked
 
-# The DRI3-capable server replaces the distribution's /usr/bin/Xvfb; chowned
+# XLibre's server replaces the distribution's /usr/bin/Xvfb; chowned
 # to the session user like the rest of the image so fakeroot-sudo apt can
 # still write under /usr after the copy
 COPY --from=xvfb --chown=1000:1000 /build-out/usr/bin/Xvfb /usr/bin/Xvfb

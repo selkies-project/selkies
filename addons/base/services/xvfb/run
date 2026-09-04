@@ -23,33 +23,30 @@ fi
 # its listening sockets without ever accepting, so clients hang instead of
 # failing. The session keeps its own Zink settings; only this process drops them.
 unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
-# The server's GLX initialisation probes EGL through GLVND. On NVIDIA-injected
-# runtimes (the container toolkit mounts the vendor libraries) that resolves to
-# libnvidia-egl-gbm, whose probing crashes this server outright. Pin the vendor
-# file to Mesa's: the framebuffer renders with the software stack here by design
-# (see the DRI3 note below), and the session's own EGL selection is untouched.
-MESA_EGL_VENDOR="/usr/share/glvnd/egl_vendor.d/50_mesa.json"
-if [ "${SELKIES_GPU_DRIVER:-}" = "nvidia" ] && [ -f "${MESA_EGL_VENDOR}" ]; then
-  export __EGL_VENDOR_LIBRARY_FILENAMES="${MESA_EGL_VENDOR}"
-fi
-# DRI3: rendering through a DRM node is what gives GL clients the GPU, and only
-# the patched server in this image accepts -vfbdevice. The node is the one
-# Selkies renders on (--render-dri, else the --auto-gpu pick the entrypoint
-# resolved), so the X11 backend and the Wayland compositor answer to the same
-# selection; NVIDIA renders through Zink instead (see container-entrypoint.sh)
-# and is left with the software framebuffer here.
+# Glamor and DRI3 on a DRM render node are what give GL clients the GPU: the
+# server draws through the node's own EGL, NVIDIA's included, and clients
+# present their buffers into it without a copy. The node is the one Selkies
+# renders on (--render-dri, else the --auto-gpu pick the entrypoint resolved),
+# so the X11 backend and the Wayland compositor answer to the same selection.
+# Without a node the server is the software framebuffer, and its GLX probing
+# then has to be kept off NVIDIA's EGL, whose GBM library crashes it; the
+# session's own EGL selection is untouched either way.
 VFB_DEVICE=""
 RENDER_DRI="${SELKIES_RENDER_DRI:-${DRINODE:-}}"
-if /usr/bin/Xvfb -help 2>&1 | grep -q 'vfbdevice'; then
+if /usr/bin/Xvfb -help 2>&1 | grep -q -- '-glamor'; then
   if [ -n "${RENDER_DRI}" ]; then
-    VFB_DEVICE="-vfbdevice ${RENDER_DRI}"
-  elif [ "${SELKIES_GPU_DRIVER:-}" != "nvidia" ]; then
+    VFB_DEVICE="-glamor -dri ${RENDER_DRI}"
+  else
     # shellcheck disable=SC2086  # the resolved node, else every node here
     for node in ${SELKIES_GPU_RENDER_NODE:-/dev/dri/renderD*}; do
-      [ -e "${node}" ] && VFB_DEVICE="-vfbdevice ${node}"
+      [ -e "${node}" ] && VFB_DEVICE="-glamor -dri ${node}"
       break
     done
   fi
+fi
+MESA_EGL_VENDOR="/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+if [ -z "${VFB_DEVICE}" ] && [ "${SELKIES_GPU_DRIVER:-}" = "nvidia" ] && [ -f "${MESA_EGL_VENDOR}" ]; then
+  export __EGL_VENDOR_LIBRARY_FILENAMES="${MESA_EGL_VENDOR}"
 fi
 
 # A server that died leaves its lock and socket behind, and the replacement then
