@@ -461,3 +461,66 @@ def x11_buttons_held() -> tuple:
         return tuple(b for b in range(1, 6) if mask & (1 << (7 + b)))
     finally:
         d.close()
+
+
+class Churn:
+    """Continuous damage on the test display: a window drawing a moving block
+    thirty times a second, for a suite that needs the capture to keep sending.
+
+    Draws through the vendored Xlib on a connection and thread of its own, so
+    the throwaway server needs no GLX and no toolkit. `stop` destroys the
+    window, which repaints the root once and then leaves the screen still.
+    """
+
+    def __init__(self, size: tuple = (900, 700)) -> None:
+        self._size = size
+        self._stop: Any = None
+        self._thread: Any = None
+
+    def start(self) -> None:
+        """Map the window and start drawing; returns once frames are flowing."""
+        import threading
+        from selkies.Xlib import X, display as xdisp
+        if self._thread is not None:
+            return
+        self._stop = threading.Event()
+        ready = threading.Event()
+        width, height = self._size
+
+        def run() -> None:
+            d = xdisp.Display(H.require_display())
+            scr = d.screen()
+            win = scr.root.create_window(0, 0, width, height, 0, scr.root_depth,
+                                         X.InputOutput, X.CopyFromParent,
+                                         background_pixel=scr.black_pixel, override_redirect=1)
+            win.map()
+            gcs = [win.create_gc(foreground=c) for c in (0xE05070, 0x40D080, 0x4080E0)]
+            d.flush()
+            ready.set()
+            step = 0
+            try:
+                while not self._stop.is_set():
+                    win.clear_area(x=0, y=0, width=width, height=height)
+                    x = (step * 23) % max(1, width - 300)
+                    y = (step * 11) % max(1, height - 200)
+                    win.fill_rectangle(gcs[step % 3], x, y, 300, 200)
+                    d.flush()
+                    step += 1
+                    self._stop.wait(1 / 30)
+            finally:
+                win.destroy()
+                d.flush()
+                d.close()
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+        ready.wait(5)
+        time.sleep(0.5)
+
+    def stop(self) -> None:
+        """Take the window down; the screen is still once the root repainted."""
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(5)
+        self._thread = None
