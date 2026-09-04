@@ -1970,6 +1970,7 @@ class DataStreamingServer(BaseStreamingService):
         display_state['last_sent_frame_id'] = 0
         display_state['has_sent_any_frame'] = False
         display_state['acknowledged_frame_id'] = -1
+        display_state['acked_sent_at'] = None
         sent_ts = display_state.get('sent_timestamps')
         if sent_ts is not None:
             sent_ts.clear()
@@ -2311,10 +2312,10 @@ class DataStreamingServer(BaseStreamingService):
     async def _run_frame_backpressure_logic(self, display_id: str) -> None:
         """The core backpressure and latency calculation loop for a single display.
 
-        Every BACKPRESSURE_CHECK_INTERVAL_S it compares the last sent and last
-        acked frame ids (uint16 circular distance), sized by the client's
-        measured consumption rate and forgiving capped propagation delay, and
-        flips the display's backpressure flag: a stalled or lagging client
+        Every BACKPRESSURE_CHECK_INTERVAL_S it counts the frames sent after
+        the one the client last acked, sized by the client's measured
+        consumption rate and forgiving capped propagation delay, and flips
+        the display's backpressure flag: a stalled or lagging client
         stops receiving delta frames, and the lift requests an IDR resync.
         Also feeds the Prometheus fps/latency gauges for the primary display.
 
@@ -2388,7 +2389,13 @@ class DataStreamingServer(BaseStreamingService):
                 if not display_state.get('has_sent_any_frame', False):
                     continue
 
-                frame_desync = wrapped
+                # Ids run at the capture cadence and a still screen sends none
+                # of them, so the client is behind by the frames sent after the
+                # one it acked, not by the id distance.
+                acked_sent_at = display_state.get('acked_sent_at')
+                sent_ts = display_state.get('sent_timestamps') or {}
+                frame_desync = (wrapped if acked_sent_at is None
+                                else sum(1 for t in sent_ts.values() if t > acked_sent_at))
                 allowed_desync_frames = (self.allowed_desync_ms / 1000.0) * client_fps
                 # Capped: the RTT estimate rides the queue this loop bounds and must
                 # not out-grow the trigger it feeds.
@@ -3648,6 +3655,7 @@ class DataStreamingServer(BaseStreamingService):
                                     'ws': websocket, 
                                     'width': 0, 'height': 0, 'position': 'right',
                                     'acknowledged_frame_id': -1,
+                                    'acked_sent_at': None,
                                     'last_sent_frame_id': 0,
                                     'has_sent_any_frame': False,
                                     'sent_timestamps': OrderedDict(),
@@ -3696,6 +3704,7 @@ class DataStreamingServer(BaseStreamingService):
                                 if not initial_settings_processed:
                                     display_state['video_active'] = True
                                 display_state['acknowledged_frame_id'] = -1
+                                display_state['acked_sent_at'] = None
                                 display_state['unacked_since'] = None
                                 display_state['stall_gated_at'] = None
                                 display_state['sent_timestamps'].clear()
@@ -3773,6 +3782,7 @@ class DataStreamingServer(BaseStreamingService):
                                 sent_ts = display_state.get('sent_timestamps')
                                 if sent_ts and acked_frame_id in sent_ts:
                                     send_time = sent_ts.pop(acked_frame_id)
+                                    display_state['acked_sent_at'] = send_time
                                     rtt_sample_ms = max(
                                         0.0,
                                         (time.monotonic() - send_time) * 1000.0 - held_ms)
