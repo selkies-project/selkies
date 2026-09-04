@@ -21,7 +21,7 @@
 
 FROM coturn/coturn:alpine
 
-USER root
+USER 0
 
 # apk has no retry option of its own, so the one package fetch this image makes
 # is bounded-retried in the shell rather than left to fail the build outright.
@@ -36,6 +36,8 @@ RUN chmod -f +x /usr/bin/detect_external_ip
 COPY entrypoint.sh /
 RUN chmod -f +x /entrypoint.sh
 
-USER nobody:nogroup
+# nobody:nogroup by number, so a cluster that requires a non-root user can
+# verify it from the image.
+USER 65534:65533
 
 ENTRYPOINT ["/entrypoint.sh"]
