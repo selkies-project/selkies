@@ -328,6 +328,14 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         xdg-utils \
         xdg-user-dirs \
         desktop-file-utils \
+        # NVIDIA's EGL platform libraries, open source and independent of the
+        # driver's version: the injected driver's EGL reaches X11 windows (xcb,
+        # xlib), GBM and Wayland through them, whether or not the runtime that
+        # injects the driver carries them along
+        libnvidia-egl-xcb1 \
+        libnvidia-egl-xlib1 \
+        libnvidia-egl-gbm1 \
+        libnvidia-egl-wayland1 \
         # X11 display server and utilities
         xserver-xorg-core \
         xvfb \
