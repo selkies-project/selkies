@@ -32,7 +32,7 @@ docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
 
 ### NVIDIA
 
-The [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit) (1.20.1 or newer) passes the driver, its Vulkan ICD and the DRM nodes in, so the runtime flags are all it takes:
+The [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit) passes the driver, its Vulkan ICD and the DRM nodes in, so the runtime flags are all it takes:
 
 ```bash
 docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
@@ -40,7 +40,7 @@ docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
     ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04
 ```
 
-Toolkit releases older than that leave `/dev/nvidia-modeset` and the DRM render node out; only there, add `--device /dev/nvidia-modeset --device /dev/dri`.
+A toolkit that leaves `/dev/nvidia-modeset` and the DRM render node out needs them added, and only there: `--device /dev/nvidia-modeset --device /dev/dri`.
 
 ### What the flags are for
 
