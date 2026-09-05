@@ -22,6 +22,7 @@ a slow disk never stalls streaming.
 import os
 import ssl
 import hmac
+import errno
 import json
 import html
 import stat
@@ -530,6 +531,73 @@ def _carry_destination_mode(staging: str, dest: str) -> None:
         os.chmod(staging, stat.S_IMODE(st.st_mode))
     except OSError as e:
         logger.debug(f"Could not carry the mode of {dest} onto the staged upload: {e}")
+
+
+def _format_sockaddr(family: int, sockaddr: Any) -> str:
+    """``host:port`` for a socket address, the host bracketed for IPv6."""
+    host, port = sockaddr[0], sockaddr[1]
+    return f"[{host}]:{port}" if family == socket.AF_INET6 else f"{host}:{port}"
+
+
+async def _bind_listen_sockets(addr: str, port: int) -> List[socket.socket]:
+    """Bind a listening socket on every address ``addr`` names.
+
+    ``addr`` is a host name or IP literal, or a comma-separated list of them,
+    each bound on every address it resolves to: ``localhost`` covers both
+    loopback families that way. An address the host does not carry (the IPv6
+    loopback with IPv6 disabled) is skipped while another binds; any other
+    failure, or nothing binding at all, raises. IPv6 sockets are IPv6-only so
+    ``::`` and ``0.0.0.0`` can share the port, the way asyncio binds them.
+
+    Raises:
+        OSError: When a name does not resolve, a bind fails for a reason other
+            than the host lacking the address, or no address binds.
+    """
+    loop = asyncio.get_running_loop()
+    candidates: List[Tuple[int, int, int, Any]] = []
+    for host in (h.strip() for h in addr.split(",")):
+        if not host:
+            continue
+        try:
+            infos = await loop.getaddrinfo(
+                host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+        except socket.gaierror as exc:
+            raise OSError(f"cannot resolve listen address '{host}': {exc}") from exc
+        for family, stype, proto, _, sockaddr in infos:
+            if all((family, sockaddr) != (f, sa) for f, _, _, sa in candidates):
+                candidates.append((family, stype, proto, sockaddr))
+
+    unavailable = (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT)
+    socks: List[socket.socket] = []
+    skipped: List[str] = []
+    try:
+        for family, stype, proto, sockaddr in candidates:
+            where = _format_sockaddr(family, sockaddr)
+            sock: Optional[socket.socket] = None
+            try:
+                sock = socket.socket(family, stype, proto)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                if family == socket.AF_INET6 and hasattr(socket, "IPV6_V6ONLY"):
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                sock.bind(sockaddr)
+                sock.setblocking(False)
+            except OSError as exc:
+                if sock is not None:
+                    sock.close()
+                if exc.errno not in unavailable:
+                    raise OSError(exc.errno, f"cannot bind {where}: {exc.strerror}") from exc
+                skipped.append(f"{where} ({exc.strerror})")
+                continue
+            socks.append(sock)
+    except BaseException:
+        for sock in socks:
+            sock.close()
+        raise
+    if not socks:
+        raise OSError(f"no address of '{addr}' is available to listen on: {', '.join(skipped)}")
+    for note in skipped:
+        logger.warning("Not listening on %s", note)
+    return socks
 
 
 def _unix_socket_is_live(path: str) -> bool:
@@ -1056,7 +1124,7 @@ class CentralizedStreamServer:
 
         self.app: Optional[web.Application] = None
         self.runner: Optional[web.AppRunner] = None
-        self.site: Optional[web.BaseSite] = None
+        self.sites: List[web.BaseSite] = []
         self.cert_watcher: Optional[asyncio.Task] = None
         self.ssl_context: Optional[ssl.SSLContext] = None
         self.static_fs_path: str = ""
@@ -1411,7 +1479,7 @@ class CentralizedStreamServer:
             logger.info("Automatic certificate reloading is disabled (interval=0)")
             return
 
-        current_site = self.site
+        current_sites = self.sites
         last_mtime = await asyncio.to_thread(self._get_cert_mtime)
         logger.info(
             "Certificate reload watcher started (interval=%ds, initial mtime=%.0f)",
@@ -1450,17 +1518,16 @@ class CentralizedStreamServer:
                 )
                 continue
 
-            try:
-                await current_site.stop()
-                logger.info("Old %s stopped.", self._site_kind())
-            except Exception as exc:
-                logger.warning("Error stopping old %s: %s", self._site_kind(), exc)
+            for site in current_sites:
+                try:
+                    await site.stop()
+                except Exception as exc:
+                    logger.warning("Error stopping old %s: %s", self._site_kind(), exc)
+            current_sites = self.sites = []
+            logger.info("Old %s stopped.", self._site_kind())
 
             try:
-                new_site = self._build_site(new_ssl_context)
-                await new_site.start()
-                current_site = new_site
-                self.site = new_site
+                current_sites = await self._start_sites(new_ssl_context)
                 last_mtime = new_mtime
                 logger.info(
                     "New %s started with reloaded certificates on %s",
@@ -2613,32 +2680,59 @@ class CentralizedStreamServer:
         except OSError:
             pass
 
-    def _build_site(self, ssl_context: Optional[ssl.SSLContext] = None) -> web.BaseSite:
-        """Build the aiohttp site for the configured listener: a Unix domain
-        socket when ``unix_socket`` is set, otherwise the TCP addr/port pair."""
+    async def _build_sites(self, ssl_context: Optional[ssl.SSLContext] = None) -> List[web.BaseSite]:
+        """The aiohttp sites of the configured listener: one on a Unix domain
+        socket when ``unix_socket`` is set, otherwise one per address ``addr``
+        binds on ``port``, bound here so a listen address the host lacks can
+        be skipped rather than failing the start."""
         sock_path = self._unix_socket_path()
         if sock_path:
             parent = os.path.dirname(sock_path)
             if parent:
                 os.makedirs(parent, exist_ok=True)
             self._clear_stale_unix_socket(sock_path)
-            return web.UnixSite(self.runner, path=sock_path, ssl_context=ssl_context)
-        return web.TCPSite(
-            self.runner,
-            host=self.settings.addr,
-            port=self.settings.port,
-            ssl_context=ssl_context,
-        )
+            return [web.UnixSite(self.runner, path=sock_path, ssl_context=ssl_context)]
+        socks = await _bind_listen_sockets(self.settings.addr, self.settings.port)
+        return [web.SockSite(self.runner, sock, ssl_context=ssl_context) for sock in socks]
+
+    async def _start_sites(self, ssl_context: Optional[ssl.SSLContext] = None) -> List[web.BaseSite]:
+        """Bind and start the configured listener, publishing it as ``self.sites``.
+
+        A start that fails part-way stops what came up so nothing is left
+        listening under a site the server does not track.
+
+        Raises:
+            OSError: When the listener cannot be bound.
+        """
+        sites = await self._build_sites(ssl_context)
+        started: List[web.BaseSite] = []
+        try:
+            for site in sites:
+                await site.start()
+                started.append(site)
+        except BaseException:
+            for site in started:
+                await site.stop()
+            for site in sites[len(started):]:
+                sock = getattr(site, "_sock", None)
+                if sock is not None:
+                    sock.close()
+            raise
+        self.sites = sites
+        return sites
 
     def _site_kind(self) -> str:
-        return "UnixSite" if self._unix_socket_path() else "TCPSite"
+        return "Unix socket listener" if self._unix_socket_path() else "TCP listener"
 
     def _site_endpoint(self) -> str:
+        """Where the server is reached: every bound address once it listens,
+        the configured one before that."""
         sock_path = self._unix_socket_path()
         if sock_path:
             return f"unix://{sock_path}"
-        https = getattr(self.settings, "enable_https", (False,))[0]
-        return f"{'https' if https else 'http'}://{self.settings.addr}:{self.settings.port}"
+        if self.sites:
+            return ", ".join(site.name for site in self.sites)
+        return f"{self.settings.addr} port {self.settings.port}"
 
     async def start_server(self) -> None:
         """Start the HTTP/HTTPS server and, under HTTPS, the cert-reload watcher."""
@@ -2657,13 +2751,11 @@ class CentralizedStreamServer:
         await self.runner.setup()
 
         try:
-            self.site = self._build_site(self.ssl_context)
+            await self._start_sites(self.ssl_context)
         except Exception as exc:
             logger.error("Cannot bind %s: %s", self._site_endpoint(), exc)
             raise
-
         logger.info("Selkies server running on %s", self._site_endpoint())
-        await self.site.start()
 
         if https:
             self.cert_watcher = asyncio.create_task(self._watch_and_reload_certs())
@@ -2682,9 +2774,11 @@ class CentralizedStreamServer:
 
         if self.web_files_ctx:
                 self.web_files_ctx.cleanup()
-        if self.site:
-            await self.site.stop()
+        for site in self.sites:
+            await site.stop()
+        if self.sites:
             self._remove_own_unix_socket()
+        self.sites = []
         if self.runner:
             await self.runner.cleanup()
             logger.info("Server cleanup complete.")
