@@ -915,6 +915,11 @@ class StrClass(object):
 Str = StrClass()
 
 
+# How one static field of a Struct becomes a pack item; see Struct._pack_plan.
+(_PACK_VALUE, _PACK_CHECKED, _PACK_MULTI, _PACK_MULTI_CHECKED,
+ _PACK_CONSTANT, _PACK_TOTAL_LENGTH, _PACK_LENGTH, _PACK_FORMAT) = range(8)
+
+
 class Struct(object):
 
     """Struct objects represents a binary data structure.  It can
@@ -932,9 +937,8 @@ class Struct(object):
       parse_binary() -- convert a binary (string) representation into
                         a Python dictionary or object.
 
-    These functions will be generated dynamically for each Struct
-    object to make conversion as fast as possible.  They are
-    generated the first time the methods are called.
+    to_binary works from a plan built once from the field list, rather
+    than re-deriving the structure's shape on every call.
     """
 
     def __init__(self, *fields):
@@ -973,10 +977,30 @@ class Struct(object):
             self.structcode = self.static_codes[1:]
             self.structvalues = self.static_values
 
+        # What to_binary would otherwise re-derive from the field list on every
+        # call: the argument names, the fields carrying a default, and how each
+        # static field turns into a pack item. Deriving it was most of the cost of
+        # building a request, and none of it can change once the fields are fixed.
+        self._value_names = [f.name for f in self.fields
+                             if isinstance(f, ValueField) and f.name]
+        self._named_fields = [f for f in self.fields if f.name]
+        self._pack_plan = []
+        for f in self.static_fields:
+            # The same order to_binary tested in, so a subclass lands where it did
+            if isinstance(f, LengthField):
+                kind = _PACK_TOTAL_LENGTH if isinstance(f, TotalLengthField) else _PACK_LENGTH
+            elif isinstance(f, FormatField):
+                kind = _PACK_FORMAT
+            elif isinstance(f, ConstantField):
+                kind = _PACK_CONSTANT
+            elif f.structvalues == 1:
+                kind = _PACK_VALUE if f.check_value is None else _PACK_CHECKED
+            else:
+                kind = _PACK_MULTI if f.check_value is None else _PACK_MULTI_CHECKED
+            # The third entry is what the item comes from: a constant's value, or
+            # the argument name every other kind looks up.
+            self._pack_plan.append((kind, f, f.value if kind == _PACK_CONSTANT else f.name))
 
-    # These functions get called only once, as they will override
-    # themselves with dynamically created functions in the Struct
-    # object
 
     def to_binary(self, *varargs, **keys):
         """data = s.to_binary(...)
@@ -989,15 +1013,16 @@ class Struct(object):
         Returns the binary representation as the string DATA.
         """
         # Emulate Python function argument handling with our field names
-        names = [f.name for f in self.fields \
-                 if isinstance(f, ValueField) and f.name]
-        field_args = dict(zip(names, varargs))
-        if set(field_args).intersection(keys):
-            dupes = ", ".join(set(field_args).intersection(keys))
-            raise TypeError("{0} arguments were passed both positionally and by keyword".format(dupes))
-        field_args.update(keys)
-        for f in self.fields:
-            if f.name and (f.name not in field_args):
+        field_args = dict(zip(self._value_names, varargs))
+        if keys:
+            # Nothing positional means nothing to collide with
+            if varargs:
+                dupes = set(field_args).intersection(keys)
+                if dupes:
+                    raise TypeError("{0} arguments were passed both positionally and by keyword".format(", ".join(dupes)))
+            field_args.update(keys)
+        for f in self._named_fields:
+            if f.name not in field_args:
                 if f.default is None:
                     raise TypeError("Missing required argument {0}".format(f.name))
                 field_args[f.name] = f.default
@@ -1025,48 +1050,33 @@ class Struct(object):
 
 
         # Construct item list for struct.pack call, packing all static fields.
+        # A multivalue field spreads into several items, so the plan is walked
+        # rather than zipped.
         pack_items = []
 
-        for f in self.static_fields:
-            if isinstance(f, LengthField):
-
-                # If this is a total length field, insert
-                # the calculated field value here
-                if isinstance(f, TotalLengthField):
-                    pack_items.append(f.calc_length(total_length))
-                else:
-                    pack_items.append(f.calc_length(lengths[f.name]))
-
-            # Format field, just insert the value we got previously
-            elif isinstance(f, FormatField):
-                pack_items.append(formats[f.name])
-
-            # A constant field, insert its value directly
-            elif isinstance(f, ConstantField):
-                pack_items.append(f.value)
-
-            # Value fields
+        for kind, f, arg in self._pack_plan:
+            if kind == _PACK_VALUE:
+                pack_items.append(field_args[arg])
+            elif kind == _PACK_CHECKED:
+                # A value check/convert function stands between value and item
+                pack_items.append(f.check_value(field_args[arg]))
+            elif kind == _PACK_CONSTANT:
+                pack_items.append(arg)
+            elif kind == _PACK_TOTAL_LENGTH:
+                pack_items.append(f.calc_length(total_length))
+            elif kind == _PACK_LENGTH:
+                pack_items.append(f.calc_length(lengths[arg]))
+            elif kind == _PACK_FORMAT:
+                pack_items.append(formats[arg])
+            elif kind == _PACK_MULTI_CHECKED:
+                pack_items.extend(f.check_value(field_args[arg]))
             else:
-                if f.structvalues == 1:
-                    # If there's a value check/convert function, call it
-                    if f.check_value is not None:
-                        pack_items.append(f.check_value(field_args[f.name]))
-                    # Else just use the argument as provided
-                    else:
-                        pack_items.append(field_args[f.name])
-
-                # Multivalue field.  Handled like single valuefield,
-                # but the value are tuple unpacked into separate arguments
-                # which are appended to pack_items
-                else:
-                    if f.check_value is not None:
-                        pack_items.extend(f.check_value(field_args[f.name]))
-                    else:
-                        pack_items.extend(field_args[f.name])
+                pack_items.extend(field_args[arg])
 
         static_part = struct.pack(self.static_codes, *pack_items)
-        var_parts = [var_vals[f.name] for f in self.var_fields]
-        return static_part + b''.join(var_parts)
+        if not self.var_fields:
+            return static_part
+        return static_part + b''.join([var_vals[f.name] for f in self.var_fields])
 
 
     def pack_value(self, value):
