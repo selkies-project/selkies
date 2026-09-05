@@ -35,8 +35,16 @@ import logging
 
 from .candidate import Candidate
 from .ice import Connection, ConnectionClosed, TransportPolicy
+from .mux import TcpMux, UdpMux
 
-__all__ = ["Candidate", "Connection", "ConnectionClosed", "TransportPolicy"]
+__all__ = [
+    "Candidate",
+    "Connection",
+    "ConnectionClosed",
+    "TcpMux",
+    "TransportPolicy",
+    "UdpMux",
+]
 __version__ = "0.10.2"
 
 # Set default logging handler to avoid "No handler found" warnings.

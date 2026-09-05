@@ -48,7 +48,7 @@ from typing import Optional, Union, cast
 
 import ifaddr
 
-from . import mdns, stun, turn
+from . import mdns, mux, stun, turn
 from .candidate import Candidate, candidate_foundation, candidate_priority
 from .utils import random_string
 
@@ -59,6 +59,9 @@ ICE_FAILED = 2
 
 CONSENT_FAILURES = 6
 CONSENT_INTERVAL = 5
+# Seconds a connection waits for a path only the peer can open (its nomination
+# of an ICE-lite agent, its connection to a passive TCP candidate).
+INBOUND_CHECK_TIMEOUT = 30
 
 connection_id = itertools.count()
 protocol_id = itertools.count()
@@ -198,6 +201,19 @@ async def server_reflexive_candidate(
     ), None
 
 
+def host_local_preference(index: int, tcptype: Optional[str] = None) -> int:
+    """Local preference of the host candidate on the `index`-th address.
+
+    Unique per address as RFC 8445 5.1.2.1 requires, counting down from the
+    single-address value; a TCP candidate takes the RFC 6544 4.2 form, its
+    direction preference (passive 4, active 6) below every UDP candidate.
+    """
+    if tcptype is None:
+        return 65535 - index
+    direction = {"active": 6, "passive": 4, "so": 2}[tcptype]
+    return (1 << 13) * direction + (8191 - index)
+
+
 def sort_candidate_pairs(pairs: list["CandidatePair"], ice_controlling: bool) -> None:
     """
     Sort a list of candidate pairs.
@@ -300,6 +316,8 @@ class StunProtocol(asyncio.DatagramProtocol):
         # force IPv6 four-tuple to a two-tuple
         addr = (addr[0], addr[1])
         data = cast(bytes, data)
+        if not data:
+            return
 
         try:
             message = stun.parse_message(data)
@@ -367,6 +385,35 @@ class StunProtocol(asyncio.DatagramProtocol):
         return "protocol(%s)" % self.id
 
 
+class MuxedStunProtocol(StunProtocol):
+    """A connection's protocol on a shared socket or listener (`mux`).
+
+    The mux hands it a transport of its own and routes the answers to the
+    STUN requests it sends back by transaction id; an ICE check's answer also
+    teaches the mux the peer's address, a STUN server's does not.
+    """
+
+    async def request(
+        self,
+        request: stun.Message,
+        addr: tuple[str, int],
+        integrity_key: Optional[bytes] = None,
+        retransmissions: Optional[int] = None,
+    ) -> tuple[stun.Message, tuple[str, int]]:
+        self.transport.expect_response(
+            request.transaction_id, "USERNAME" in request.attributes
+        )
+        try:
+            return await super().request(
+                request, addr, integrity_key=integrity_key, retransmissions=retransmissions
+            )
+        finally:
+            self.transport.forget_response(request.transaction_id)
+
+    def __repr__(self) -> str:
+        return "protocol(%s, muxed)" % self.id
+
+
 class ConnectionEvent:
     pass
 
@@ -398,6 +445,16 @@ class Connection:
                         advertise in host candidates of the matching family
                         (static 1:1 NAT), otherwise host candidates use the
                         bound address.
+    :param port_range: Optional inclusive `(min, max)` UDP port window the
+                       host candidate sockets bind into.
+    :param udp_mux: Optional `mux.UdpMux` whose shared sockets carry the UDP
+                    host candidates instead of sockets of their own; the port
+                    range is then unused.
+    :param tcp_mux: Optional `mux.TcpMux` whose shared listeners add a passive
+                    ICE-TCP host candidate per address.
+    :param ice_lite: Run as an ICE-lite agent (RFC 8445 appendix A): host
+                     candidates only, always the controlled role, answering
+                     the peer's connectivity checks instead of sending any.
     """
 
     def __init__(
@@ -417,11 +474,23 @@ class Connection:
         local_password: Optional[str] = None,
         nat1to1_ips: Optional[list[str]] = None,
         port_range: Optional[tuple[int, int]] = None,
+        udp_mux: Optional[mux.UdpMux] = None,
+        tcp_mux: Optional[mux.TcpMux] = None,
+        ice_lite: bool = False,
     ) -> None:
-        self.ice_controlling = ice_controlling
+        if ice_lite and (stun_server is not None or turn_server is not None):
+            raise ValueError(
+                "An ICE-lite agent gathers host candidates only; it takes no STUN or TURN server."
+            )
+        self.ice_lite = ice_lite
+        self.ice_controlling = ice_controlling and not ice_lite
+        self._udp_mux = udp_mux
+        self._tcp_mux = tcp_mux
 
         if local_username is None:
-            local_username = random_string(4)
+            # Shared sockets tell sessions apart by this fragment alone, so it
+            # is longer than the four characters ICE requires.
+            local_username = random_string(8)
         else:
             validate_username(local_username)
 
@@ -587,8 +656,8 @@ class Connection:
 
         # pair the remote candidate
         for protocol in self._protocols:
-            if protocol.local_candidate.can_pair_with(
-                remote_candidate
+            if self._pairs_with(
+                protocol, remote_candidate
             ) and not self._find_pair(protocol, remote_candidate):
                 pair = CandidatePair(protocol, remote_candidate)
                 self._check_list.append(pair)
@@ -640,14 +709,15 @@ class Connection:
         # 5.7.1. Forming Candidate Pairs
         for remote_candidate in self._remote_candidates:
             for protocol in self._protocols:
-                if protocol.local_candidate.can_pair_with(
-                    remote_candidate
+                if self._pairs_with(
+                    protocol, remote_candidate
                 ) and not self._find_pair(protocol, remote_candidate):
                     pair = CandidatePair(protocol, remote_candidate)
                     self._check_list.append(pair)
         self.sort_check_list()
 
-        self._unfreeze_initial()
+        if not self.ice_lite:
+            self._unfreeze_initial()
 
         # handle early checks
         for early_check in self._early_checks:
@@ -655,15 +725,26 @@ class Connection:
         self._early_checks = []
         self._early_checks_done = True
 
-        # perform checks
-        while True:
-            if not self.check_periodic():
-                break
-            await asyncio.sleep(0.02)
+        # perform checks; an ICE-lite agent only answers the peer's
+        if not self.ice_lite:
+            while True:
+                if not self.check_periodic():
+                    break
+                await asyncio.sleep(0.02)
 
-        # wait for completion
-        if self._check_list:
-            res = await self._check_list_state.get()
+        # wait for completion; a path only the peer can open is waited for
+        # within a bound, since no local check ever fails it
+        if self._check_list or self._awaits_inbound_checks():
+            timeout = INBOUND_CHECK_TIMEOUT if self._awaits_inbound_checks() else None
+            try:
+                res = await asyncio.wait_for(self._check_list_state.get(), timeout)
+            except asyncio.TimeoutError:
+                self.__log_info(
+                    "ICE failed: no check from the peer completed within %ss",
+                    INBOUND_CHECK_TIMEOUT,
+                )
+                self._check_list_done = True
+                res = ICE_FAILED
         else:
             res = ICE_FAILED
 
@@ -690,9 +771,10 @@ class Connection:
             except asyncio.CancelledError:
                 pass
 
-        # stop check list
-        if self._check_list and not self._check_list_done:
+        # stop check list, and a connect() awaiting the peer's checks
+        if not self._check_list_done:
             self._check_list_state.put_nowait(ICE_FAILED)
+            self._check_list_done = True
 
         # unreference mDNS
         await unref_mdns_protocol(self)
@@ -825,7 +907,7 @@ class Connection:
         pair.task = None
 
         if pair.state == CandidatePair.State.SUCCEEDED:
-            if pair.nominated:
+            if pair.nominated and self._selects(pair):
                 self._nominated[pair.component] = pair
 
                 # 8.1.2.  Updating States
@@ -870,6 +952,10 @@ class Connection:
                 if p.state == CandidatePair.State.SUCCEEDED:
                     return
 
+        # the peer may still open a path of its own; connect() bounds the wait
+        if self._awaits_inbound_checks():
+            return
+
         if not self._check_list_done:
             self.__log_info("ICE failed")
             self._check_list_state.put_nowait(ICE_FAILED)
@@ -892,14 +978,16 @@ class Connection:
                 break
         if remote_candidate is None:
             # 7.2.1.3. Learning Peer Reflexive Candidates
+            local_candidate = protocol.local_candidate
             remote_candidate = Candidate(
                 foundation=random_string(10),
                 component=component,
-                transport="udp",
+                transport=local_candidate.transport,
                 priority=message.attributes["PRIORITY"],
                 host=addr[0],
                 port=addr[1],
                 type="prflx",
+                tcptype="active" if local_candidate.transport == "tcp" else None,
             )
             self._remote_candidates.append(remote_candidate)
             self.__log_info("Discovered peer reflexive candidate %s", remote_candidate)
@@ -912,15 +1000,26 @@ class Connection:
             self._check_list.append(pair)
             self.sort_check_list()
 
-        # triggered check
-        if pair.state in [CandidatePair.State.WAITING, CandidatePair.State.FAILED]:
+        # triggered check; an ICE-lite agent sends none
+        if not self.ice_lite and pair.state in [
+            CandidatePair.State.WAITING,
+            CandidatePair.State.FAILED,
+        ]:
             self.check_start_task(pair)
 
         # 7.2.1.5. Updating the Nominated Flag
         if "USE-CANDIDATE" in message.attributes and not self.ice_controlling:
             pair.remote_nominated = True
 
-            if pair.state == CandidatePair.State.SUCCEEDED:
+            if self.ice_lite:
+                # 7.3.1.5: the peer's nomination alone puts the pair in the
+                # valid list of an ICE-lite agent
+                if pair.state != CandidatePair.State.SUCCEEDED:
+                    self.check_state(pair, CandidatePair.State.SUCCEEDED)
+                if not pair.nominated:
+                    pair.nominated = True
+                    self.check_complete(pair)
+            elif pair.state == CandidatePair.State.SUCCEEDED:
                 pair.nominated = True
                 self.check_complete(pair)
 
@@ -1035,6 +1134,63 @@ class Connection:
                 return pair
         return None
 
+    def _selects(self, pair: CandidatePair) -> bool:
+        """
+        Whether a nominated `pair` becomes the selected pair of its component.
+
+        The controlled agent follows the peer's latest nomination. The
+        controlling agent nominates every pair that succeeds, and keeps the
+        highest-priority one: a TCP pair that succeeds after a UDP one must
+        not move the session onto TCP.
+        """
+        current = self._nominated.get(pair.component)
+        if current is None or current is pair or not self.ice_controlling:
+            return True
+        return candidate_pair_priority(
+            pair.local_candidate, pair.remote_candidate, self.ice_controlling
+        ) > candidate_pair_priority(
+            current.local_candidate, current.remote_candidate, self.ice_controlling
+        )
+
+    def _pairs_with(self, protocol: StunProtocol, remote_candidate: Candidate) -> bool:
+        """
+        Whether the local candidate behind `protocol` forms a check list pair
+        with `remote_candidate` in advance.
+
+        A passive TCP candidate (RFC 6544) opens no connection of its own, so
+        its pairs are learned from the peer's checks in `check_incoming`.
+        """
+        local_candidate = protocol.local_candidate
+        if not local_candidate.can_pair_with(remote_candidate):
+            return False
+        return local_candidate.tcptype != "passive"
+
+    def _awaits_inbound_checks(self) -> bool:
+        """
+        Whether a path can still be opened only by the peer: an ICE-lite agent
+        awaits its nomination, a passive TCP candidate its connection, as long
+        as the peer offered (or may still offer) a TCP candidate.
+        """
+        if self.ice_lite:
+            return True
+        if not any(
+            p.local_candidate is not None and p.local_candidate.tcptype == "passive"
+            for p in self._protocols
+        ):
+            return False
+        return not self._remote_candidates_end or any(
+            c.transport.lower() == "tcp" for c in self._remote_candidates
+        )
+
+    def peer_stream_lost(self, addr: tuple[str, int]) -> None:
+        """
+        A stream to `addr` closed; when the nominated pair rode it the
+        connection ends with it instead of waiting for consent to expire.
+        """
+        if any(pair.remote_addr == addr for pair in self._nominated.values()):
+            self.__log_info("Stream to %s lost, connection over", addr)
+            self.data_received(None, None)
+
     async def get_component_candidates(
         self, component: int, addresses: list[str], timeout: int = 5
     ) -> list[Candidate]:
@@ -1046,62 +1202,94 @@ class Connection:
         # With a configured port range, binding is the reservation: the ports
         # are tried in random order and the kernel rejects occupied ones, so
         # concurrent sessions sharing one range spread without coordination.
-        if self._port_range is not None:
+        # On a UDP mux the shared sockets are the reservation instead.
+        if self._port_range is not None and self._udp_mux is None:
             bind_ports = list(range(self._port_range[0], self._port_range[1] + 1))
             random.shuffle(bind_ports)
         else:
             bind_ports = [0]
         host_protocols = []
-        for address in addresses:
+        for index, address in enumerate(addresses):
             # create transport
             protocol = None
-            last_error: Optional[OSError] = None
-            for bind_port in bind_ports:
+            if self._udp_mux is not None:
                 try:
-                    transport, protocol = await loop.create_datagram_endpoint(
-                        lambda: StunProtocol(self), local_addr=(address, bind_port)
+                    protocol = await self._udp_mux.attach(
+                        address, self.local_username, lambda: MuxedStunProtocol(self)
                     )
-                    break
-                except OSError as exc:
-                    last_error = exc
-                    # Only an occupied port can be cured by trying another
-                    # one; anything else (address gone, permissions) would
-                    # fail across the whole window identically.
-                    if exc.errno != errno.EADDRINUSE:
+                except (OSError, ValueError) as exc:
+                    self.__log_info("Could not share the UDP mux on %s - %s", address, exc)
+                    continue
+            else:
+                last_error: Optional[OSError] = None
+                for bind_port in bind_ports:
+                    try:
+                        transport, protocol = await loop.create_datagram_endpoint(
+                            lambda: StunProtocol(self), local_addr=(address, bind_port)
+                        )
                         break
-            if protocol is None:
-                self.__log_info("Could not bind to %s - %s", address, last_error)
-                continue
-            sock = transport.get_extra_info("socket")
-            if sock is not None:
-                sock.setsockopt(
-                    socket.SOL_SOCKET, socket.SO_RCVBUF, turn.UDP_SOCKET_BUFFER_SIZE
-                )
+                    except OSError as exc:
+                        last_error = exc
+                        # Only an occupied port can be cured by trying another
+                        # one; anything else (address gone, permissions) would
+                        # fail across the whole window identically.
+                        if exc.errno != errno.EADDRINUSE:
+                            break
+                if protocol is None:
+                    self.__log_info("Could not bind to %s - %s", address, last_error)
+                    continue
+                sock = transport.get_extra_info("socket")
+                if sock is not None:
+                    sock.setsockopt(
+                        socket.SOL_SOCKET, socket.SO_RCVBUF, turn.UDP_SOCKET_BUFFER_SIZE
+                    )
             host_protocols.append(protocol)
 
             # add host candidate
             candidate_address = protocol.transport.get_extra_info("sockname")
-            # NAT1TO1: advertise the configured public address for this
-            # candidate's IP family while the socket stays bound privately, so a
-            # peer behind static 1:1 NAT connects to this host directly. The
-            # foundation stays keyed on the bound address (hashed, never
-            # signalled verbatim).
-            advertised_host = self._nat1to1_ips.get(
-                ipaddress.ip_address(candidate_address[0]).version,
-                candidate_address[0],
-            )
             protocol.local_candidate = Candidate(
                 foundation=candidate_foundation("host", "udp", candidate_address[0]),
                 component=component,
                 transport="udp",
-                priority=candidate_priority(component, "host"),
-                host=advertised_host,
+                priority=candidate_priority(
+                    component, "host", host_local_preference(index)
+                ),
+                host=self._advertised_host(candidate_address[0]),
                 port=candidate_address[1],
                 type="host",
             )
             if self._transport_policy == TransportPolicy.ALL:
                 candidates.append(protocol.local_candidate)
         self._protocols += host_protocols
+
+        # ICE-TCP: a passive host candidate per address on the shared TCP
+        # port; the peer opens the stream, so it takes part in no outbound
+        # check and never carries a server-reflexive query
+        if self._tcp_mux is not None:
+            for index, address in enumerate(addresses):
+                try:
+                    protocol = await self._tcp_mux.attach(
+                        address, self.local_username, lambda: MuxedStunProtocol(self)
+                    )
+                except (OSError, ValueError) as exc:
+                    self.__log_info("Could not share the TCP mux on %s - %s", address, exc)
+                    continue
+                candidate_address = protocol.transport.get_extra_info("sockname")
+                protocol.local_candidate = Candidate(
+                    foundation=candidate_foundation("host", "tcp", candidate_address[0]),
+                    component=component,
+                    transport="tcp",
+                    priority=candidate_priority(
+                        component, "host", host_local_preference(index, "passive")
+                    ),
+                    host=self._advertised_host(candidate_address[0]),
+                    port=candidate_address[1],
+                    type="host",
+                    tcptype="passive",
+                )
+                self._protocols.append(protocol)
+                if self._transport_policy == TransportPolicy.ALL:
+                    candidates.append(protocol.local_candidate)
 
         tasks: list[asyncio.Task[tuple[Candidate, Optional[StunProtocol]]]] = []
 
@@ -1144,6 +1332,19 @@ class Connection:
                 task.cancel()
 
         return candidates
+
+    def _advertised_host(self, bound_address: str) -> str:
+        """
+        The address a host candidate bound on `bound_address` advertises.
+
+        NAT1TO1: the configured public address of the candidate's IP family
+        replaces the private one while the socket stays bound privately, so a
+        peer behind static 1:1 NAT connects to this host directly. Foundations
+        stay keyed on the bound address (hashed, never signalled verbatim).
+        """
+        return self._nat1to1_ips.get(
+            ipaddress.ip_address(bound_address).version, bound_address
+        )
 
     def _prune_components(self) -> None:
         """
@@ -1220,6 +1421,10 @@ class Connection:
                 return
             self.switch_role(ice_controlling=False)
         elif not self.ice_controlling and "ICE-CONTROLLED" in message.attributes:
+            if self.ice_lite:
+                # only the full agent can take the controlling role
+                self.respond_error(message, addr, protocol, (487, "Role Conflict"))
+                return
             self.__log_info("Role conflict, expected to be controlled")
             if self._tie_breaker < message.attributes["ICE-CONTROLLED"]:
                 self.respond_error(message, addr, protocol, (487, "Role Conflict"))
@@ -1261,6 +1466,9 @@ class Connection:
         sort_candidate_pairs(self._check_list, self.ice_controlling)
 
     def switch_role(self, ice_controlling: bool) -> None:
+        if ice_controlling and self.ice_lite:
+            self.__log_info("Staying controlled: an ICE-lite agent never controls")
+            return
         self.__log_info(
             "Switching to %s role", ice_controlling and "controlling" or "controlled"
         )

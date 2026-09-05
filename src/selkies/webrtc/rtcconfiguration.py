@@ -33,7 +33,7 @@
 
 import enum
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 
 @dataclass
@@ -106,3 +106,12 @@ class RTCConfiguration:
 
     icePortRange: Optional[tuple[int, int]] = None
     "Inclusive UDP port range confining the sockets behind host ICE candidates."
+
+    iceUdpMux: Optional[Any] = None
+    "Shared UDP sockets (`ice.UdpMux`) every peer's host candidates ride, or None for sockets per peer."
+
+    iceTcpMux: Optional[Any] = None
+    "Shared TCP listeners (`ice.TcpMux`) adding a passive ICE-TCP host candidate per address."
+
+    iceLite: bool = False
+    "Gather host candidates only and leave the connectivity checks to the peer (ICE-lite)."

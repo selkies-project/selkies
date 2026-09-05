@@ -221,12 +221,17 @@ class RTCIceGatherer(AsyncIOEventEmitter):
         local_password: Optional[str] = None,
         ice_host_public_ips: Optional[list[str]] = None,
         ice_port_range: Optional[tuple[int, int]] = None,
+        ice_udp_mux: Optional[Any] = None,
+        ice_tcp_mux: Optional[Any] = None,
+        ice_lite: bool = False,
     ) -> None:
         super().__init__()
 
         if iceServers is None:
             iceServers = self.getDefaultIceServers()
-        ice_kwargs = connection_kwargs(iceServers)
+        # An ICE-lite agent gathers host candidates only, so the servers stay
+        # with the peer that still uses them.
+        ice_kwargs = {} if ice_lite else connection_kwargs(iceServers)
 
         self._connection = Connection(
             ice_controlling=False,
@@ -234,6 +239,9 @@ class RTCIceGatherer(AsyncIOEventEmitter):
             local_password=local_password,
             nat1to1_ips=ice_host_public_ips,
             port_range=ice_port_range,
+            udp_mux=ice_udp_mux,
+            tcp_mux=ice_tcp_mux,
+            ice_lite=ice_lite,
             **ice_kwargs,
         )
         self._remote_candidates_end = False
@@ -278,6 +286,7 @@ class RTCIceGatherer(AsyncIOEventEmitter):
         return RTCIceParameters(
             usernameFragment=self._connection.local_username,
             password=self._connection.local_password,
+            iceLite=self._connection.ice_lite,
         )
 
     def __setState(self, state: str) -> None:

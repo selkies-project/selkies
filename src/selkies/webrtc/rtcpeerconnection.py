@@ -902,11 +902,13 @@ class RTCPeerConnection(AsyncIOEventEmitter):
             elif media.kind == "application":
                 self.__sctp.mid = mid
 
-        # set ICE role
+        # set ICE role; an ICE-lite agent is controlled whichever side offers
         if description.type == "offer":
             for iceTransport in self.__iceTransports:
                 if not iceTransport._role_set:
-                    iceTransport._connection.ice_controlling = True
+                    iceTransport._connection.ice_controlling = (
+                        not iceTransport._connection.ice_lite
+                    )
                     iceTransport._role_set = True
 
         # set DTLS role
@@ -1086,7 +1088,9 @@ class RTCPeerConnection(AsyncIOEventEmitter):
 
                 # set ICE role
                 if description.type == "offer" and not iceTransport._role_set:
-                    iceTransport._connection.ice_controlling = media.ice.iceLite
+                    iceTransport._connection.ice_controlling = (
+                        media.ice.iceLite and not iceTransport._connection.ice_lite
+                    )
                     iceTransport._role_set = True
 
                 # set DTLS role
@@ -1236,12 +1240,18 @@ class RTCPeerConnection(AsyncIOEventEmitter):
                 local_password=parameters.password,
                 ice_host_public_ips=self.__configuration.iceHostPublicIps,
                 ice_port_range=self.__configuration.icePortRange,
+                ice_udp_mux=self.__configuration.iceUdpMux,
+                ice_tcp_mux=self.__configuration.iceTcpMux,
+                ice_lite=self.__configuration.iceLite,
             )
         else:
             iceGatherer = RTCIceGatherer(
                 iceServers=self.__configuration.iceServers,
                 ice_host_public_ips=self.__configuration.iceHostPublicIps,
                 ice_port_range=self.__configuration.icePortRange,
+                ice_udp_mux=self.__configuration.iceUdpMux,
+                ice_tcp_mux=self.__configuration.iceTcpMux,
+                ice_lite=self.__configuration.iceLite,
             )
 
         iceGatherer.on("statechange", self.__updateIceGatheringState)
