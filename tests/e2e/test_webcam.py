@@ -32,7 +32,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers as H
 import core_lib as C
-import test_browsers as TB
 from playwright.sync_api import sync_playwright
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -307,11 +306,11 @@ def launch(p, engine: str, cam_sock: str, mode: str, init_js: Optional[str] = No
             "media.autoplay.blocking_policy": 0,
             "media.autoplay.block-webaudio": False,
             "media.gmp-gmpopenh264.enabled": True,
-            **TB.openh264_prefs(),
+            **C.openh264_prefs(),
         }
-        if TB.openh264_version():
+        if C.openh264_version():
             # The side-loaded OpenH264 lives in the persistent e2e profile.
-            ctx = p.firefox.launch_persistent_context(user_data_dir=TB.FF_E2E_PROFILE, headless=True,
+            ctx = p.firefox.launch_persistent_context(user_data_dir=C.FF_E2E_PROFILE, headless=True,
                                                       viewport={"width": 1280, "height": 720},
                                                       firefox_user_prefs=prefs, env=env)
             browser = ctx.browser or ctx
