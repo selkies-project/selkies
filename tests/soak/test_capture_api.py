@@ -362,7 +362,7 @@ def main() -> "H.Results":
         res.check("wayland standalone", False, repr(e)[:200])
 
     try:
-        pixelflux.start_computer_use(f"127.0.0.1:{CU_PORT}")
+        pixelflux.start_computer_use(str(CU_PORT))
         time.sleep(1.0)
         base = f"http://127.0.0.1:{CU_PORT}"
         r = json.loads(curl_json(f"{base}/computer-use", '{"action":"screenshot"}'))
