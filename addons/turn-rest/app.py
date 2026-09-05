@@ -8,7 +8,10 @@ A minimal Flask app implementing the TURN REST API: it mints time-limited
 HMAC-SHA1 credentials (coturn's ``use-auth-secret`` scheme) from a shared
 secret, optionally gated behind an API key, and returns the TURN URI list a
 WebRTC client feeds into its RTCPeerConnection configuration. All deployment
-knobs come from `TURN_*` environment variables read at import time.
+knobs come from `TURN_*` environment variables read at import time. Run
+directly, the development server listens on `TURN_REST_ADDR` (a host name or
+address, the loopback addresses by default) at `TURN_REST_PORT` (8008); the
+container's gunicorn command is what a deployment runs.
 """
 
 from flask import Flask, request, jsonify
@@ -152,5 +155,45 @@ def turn_rest():
 
     return jsonify(rtc_config)
 
+def _development_servers(addr: str, port: int) -> list:
+    """One werkzeug server per address `addr` resolves to.
+
+    werkzeug binds a single address family per server, so a name such as
+    `localhost` needs one server per loopback family. An address the host
+    lacks is skipped while another binds; anything else, or nothing binding,
+    raises.
+
+    Raises:
+        OSError: When no address of `addr` can be bound.
+    """
+    import errno
+    import socket
+    from werkzeug.serving import make_server
+
+    hosts = dict.fromkeys(info[4][0] for info in socket.getaddrinfo(
+        addr, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE))
+    servers = []
+    skipped = []
+    for host in hosts:
+        try:
+            servers.append(make_server(host, port, app, threaded=True))
+        except OSError as exc:
+            if exc.errno not in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
+                raise
+            skipped.append(f"{host} ({exc.strerror})")
+    if not servers:
+        raise OSError(f"no address of '{addr}' is available to listen on: {', '.join(skipped)}")
+    for note in skipped:
+        print(f"Not listening on {note}", flush=True)
+    return servers
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port="8008")
+    import threading
+
+    listen_port = parse_port(os.environ.get('TURN_REST_PORT'), 8008)
+    for server in _development_servers(os.environ.get('TURN_REST_ADDR') or 'localhost', listen_port):
+        host = server.host if ':' not in server.host else f"[{server.host}]"
+        print(f"TURN REST server listening on http://{host}:{server.port}", flush=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Event().wait()
