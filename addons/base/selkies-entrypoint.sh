@@ -75,4 +75,4 @@ if [ "${wayland}" != "true" ] && [ "${wayland}" != "1" ]; then
 fi
 
 # The published port is the container's boundary, so listen on every interface
-exec selkies --addr=0.0.0.0 --port="${SELKIES_PORT:-8080}" "$@"
+exec selkies --addr=0.0.0.0,:: --port="${SELKIES_PORT:-8080}" "$@"

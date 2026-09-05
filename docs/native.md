@@ -57,10 +57,10 @@ Runs from wherever you put it, on any distribution, without touching the system.
 APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${APP}"
 chmod +x "./${APP}"
-"./${APP}" --addr=0.0.0.0 --port=8080 --basic-auth-user=user --basic-auth-password=mypasswd
+"./${APP}" --addr=0.0.0.0,:: --port=8080 --basic-auth-user=user --basic-auth-password=mypasswd
 ```
 
-`--addr=0.0.0.0` accepts connections on every interface; without it, Selkies listens on the loopback addresses only, for a session reached through SSH port forwarding or a reverse proxy on the same machine.
+`--addr=0.0.0.0,::` accepts connections on every interface, IPv4 and IPv6; without it, Selkies listens on the loopback addresses only (`127.0.0.1,::1`), for a session reached through SSH port forwarding or a reverse proxy on the same machine.
 
 What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL` and the GPU's own driver have to be the host's for the GPU to be reachable at all, an X11 session needs the host's X server (or `Xvfb`), and the headless Wayland backend needs the host's `libwayland-server`. Everything above them travels with the AppImage.
 
@@ -86,12 +86,12 @@ export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DI
 **2. Run Selkies:**
 
 ```bash
-selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
+selkies --addr=0.0.0.0,:: --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
 In the default WebSocket mode, `--encoder=` accepts `h264enc` (default; hardware NVENC or VA-API when a supported GPU is available, otherwise the software encoder `pixelflux` was built with — `x264`, or OpenH264 in a GPL-free build), `h264enc-striped` (striped software H.264 on that same encoder), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc`; the same `--encoder=` knob applies, filtered to what WebRTC can produce (`h264enc`, the hardware-first default) — any other value falls back to it with a logged warning.
 
-`--addr=0.0.0.0` above accepts connections on every interface; without it, Selkies listens on the loopback addresses only. `--enable-https=false` leaves the web interface on plain HTTP, which browsers accept as a secure context only on `localhost`; the clipboard, gamepads, pointer lock, and the microphone and webcam need one. Setting `--enable-https=true` is the whole switch: the `--https-cert=` and `--https-key=` paths are the `ssl-cert-snakeoil` pair Debian and Ubuntu install, and when they are absent Selkies writes a self-signed pair itself, so nothing has to be prepared. Browsers warn once on a self-signed certificate; a certificate from an authority at those paths, or a reverse proxy terminating TLS in front, avoids the warning.
+`--addr=0.0.0.0,::` above accepts connections on every interface, IPv4 and IPv6; without it, Selkies listens on the loopback addresses only (`127.0.0.1,::1`). `--enable-https=false` leaves the web interface on plain HTTP, which browsers accept as a secure context only on `localhost`; the clipboard, gamepads, pointer lock, and the microphone and webcam need one. Setting `--enable-https=true` is the whole switch: the `--https-cert=` and `--https-key=` paths are the `ssl-cert-snakeoil` pair Debian and Ubuntu install, and when they are absent Selkies writes a self-signed pair itself, so nothing has to be prepared. Browsers warn once on a self-signed certificate; a certificate from an authority at those paths, or a reverse proxy terminating TLS in front, avoids the warning.
 
 The default username (set with `--basic-auth-user=` or `SELKIES_BASIC_AUTH_USER`), when not specified, is taken from the `CUSTOM_USER`, then `USERNAME`, then `USER` environment variable, and is `ubuntu` when none of them is set. The password has no default: set it with `--basic-auth-password=`, `SELKIES_BASIC_AUTH_PASSWORD`, `PASSWORD`, or `PASSWD`, or pass `--enable-basic-auth=false` to serve without a login. Selkies refuses to start with basic authentication enabled and no password, so a login is never served that nobody chose a password for.
 
@@ -226,7 +226,7 @@ sudo mkdir -pm1777 /dev/input
 # In the default WebSocket mode, change `--encoder=` to `h264enc-striped` or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
 # For the WebRTC transport instead, add `--mode=webrtc` (`--encoder=h264enc` is the only WebRTC encoder)
 # DO NOT set `--enable-resize=true` if there is a physical display
-env -u LD_PRELOAD selkies --addr=0.0.0.0 --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
+env -u LD_PRELOAD selkies --addr=0.0.0.0,:: --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
 ```
 
 The login, the encoder choice, and the HTTPS options behave as in [Run a session](#run-a-session) step 2.

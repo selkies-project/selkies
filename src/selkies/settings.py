@@ -86,7 +86,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "addr",
         "type": "str",
         "default": "localhost",
-        "help": 'Address the streaming service listens on: a host name or IP address, or a comma-separated list of them, bound on every address each resolves to. The default binds the IPv4 and IPv6 loopback addresses only; "0.0.0.0" accepts connections on every IPv4 interface and "::" on every IPv6 one.',
+        "help": 'Address the streaming service listens on: a host name or IP address, or a comma-separated list of them, bound on every address each resolves to. The default binds the loopback addresses only (127.0.0.1,::1); "0.0.0.0,::" accepts connections on every interface of both families.',
     },
     {
         "name": "port",
@@ -674,7 +674,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "computer_use_bind",
         "type": "str",
         "default": "",
-        "help": "Start pixelflux's Computer-Use HTTP server: a bare port listens on the loopback addresses only, host:port names the address to listen on (0.0.0.0:9500 accepts connections on every interface). Empty leaves it off; the PIXELFLUX_CU environment variable remains the standalone fallback.",
+        "help": "Start pixelflux's Computer-Use HTTP server on comma-separated entries: a bare port listens on the loopback addresses only, host:port names the address to listen on (0.0.0.0:9500,[::]:9500 accepts connections on every interface). Empty leaves it off; the PIXELFLUX_CU environment variable remains the standalone fallback.",
     },
     {
         "name": "wayland_host_display",
