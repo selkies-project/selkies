@@ -9,9 +9,10 @@ HMAC-SHA1 credentials (coturn's ``use-auth-secret`` scheme) from a shared
 secret, optionally gated behind an API key, and returns the TURN URI list a
 WebRTC client feeds into its RTCPeerConnection configuration. All deployment
 knobs come from `TURN_*` environment variables read at import time. Run
-directly, the development server listens on `TURN_REST_ADDR` (a host name or
-address, the loopback addresses by default) at `TURN_REST_PORT` (8008); the
-container's gunicorn command is what a deployment runs.
+directly, the development server listens on `TURN_REST_ADDR` (host names or
+addresses, comma-separated, the loopback addresses by default) at
+`TURN_REST_PORT` (8008); the container's gunicorn command is what a deployment
+runs.
 """
 
 from flask import Flask, request, jsonify
@@ -156,12 +157,14 @@ def turn_rest():
     return jsonify(rtc_config)
 
 def _development_servers(addr: str, port: int) -> list:
-    """One werkzeug server per address `addr` resolves to.
+    """One werkzeug server per address `addr` names.
 
-    werkzeug binds a single address family per server, so a name such as
-    `localhost` needs one server per loopback family. An address the host
-    lacks is skipped while another binds; anything else, or nothing binding,
-    raises.
+    `addr` is a host name or address, or a comma-separated list of them, each
+    bound on every address it resolves to. The sockets are bound here rather
+    than by werkzeug, which serves one address per server and leaves an IPv6
+    socket dual-stack, so `0.0.0.0,::` would collide on the port. An address
+    the host lacks is skipped while another binds; anything else, or nothing
+    binding, raises.
 
     Raises:
         OSError: When no address of `addr` can be bound.
@@ -170,17 +173,35 @@ def _development_servers(addr: str, port: int) -> list:
     import socket
     from werkzeug.serving import make_server
 
-    hosts = dict.fromkeys(info[4][0] for info in socket.getaddrinfo(
-        addr, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE))
+    candidates = []
+    for host in (h.strip() for h in addr.split(',')):
+        if not host:
+            continue
+        for family, _, _, _, sockaddr in socket.getaddrinfo(
+                host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE):
+            if (family, sockaddr) not in candidates:
+                candidates.append((family, sockaddr))
     servers = []
     skipped = []
-    for host in hosts:
+    for family, sockaddr in candidates:
+        sock = None
         try:
-            servers.append(make_server(host, port, app, threaded=True))
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            sock.bind(sockaddr)
+            sock.listen(128)
         except OSError as exc:
+            if sock is not None:
+                sock.close()
             if exc.errno not in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
                 raise
-            skipped.append(f"{host} ({exc.strerror})")
+            skipped.append(f"{sockaddr[0]} ({exc.strerror})")
+            continue
+        # werkzeug duplicates the descriptor, so this socket object can go.
+        with sock:
+            servers.append(make_server(sockaddr[0], sockaddr[1], app, threaded=True, fd=sock.fileno()))
     if not servers:
         raise OSError(f"no address of '{addr}' is available to listen on: {', '.join(skipped)}")
     for note in skipped:

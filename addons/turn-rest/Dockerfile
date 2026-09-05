@@ -7,7 +7,7 @@ FROM python:3-alpine
 ARG PIP_BREAK_SYSTEM_PACKAGES="1"
 RUN pip3 install --no-cache-dir --retries 5 --timeout 60 --force-reinstall flask gunicorn
 
-COPY app.py /etc
+COPY app.py gunicorn.conf.py /etc
 
 WORKDIR /etc
 
@@ -28,6 +28,6 @@ EXPOSE 8008
 # from the image; the service reads only its environment and binds above 1024.
 USER 65534:65534
 
-# No control socket: it would live under the home of a user that has none,
-# and nothing here drives it.
-CMD ["sh", "-c", "python -m gunicorn --worker-class=gthread --workers=1 --threads=${WEB_CONCURRENCY:-3} --bind=0.0.0.0:8008 --no-control-socket app:app"]
+# The listen address comes from gunicorn.conf.py. No control socket: it would
+# live under the home of a user that has none, and nothing here drives it.
+CMD ["sh", "-c", "python -m gunicorn --worker-class=gthread --workers=1 --threads=${WEB_CONCURRENCY:-3} --no-control-socket app:app"]
