@@ -102,7 +102,7 @@ from .input_handler import (
     VIEWER_SILENT_DROP_PREFIXES,
     run_client_command,
 )
-from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, effective_use_cpu, inflate_gz_bounded, sanitize_client_setting
+from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, effective_use_cpu, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting
 from .settings import settings as app_settings
 from .webcam import (
     MSG_WEBCAM_DISABLED,
@@ -2047,6 +2047,36 @@ class DataStreamingServer(BaseStreamingService):
             consumers.discard(exclude)
         return consumers
 
+    def _audio_listeners(self, exclude: Optional[web.WebSocketResponse] = None) -> set:
+        """Sockets the audio fan-out serves: every client but the secondary
+        displays' owners, minus `exclude`."""
+        secondary_ws = {
+            info.get('ws')
+            for did, info in self.display_clients.items()
+            if did != 'primary'
+        }
+        listeners = self.clients - secondary_ws
+        if exclude is not None:
+            listeners.discard(exclude)
+        return listeners
+
+    def _video_start_state(self, websocket: web.WebSocketResponse, display_id: str) -> bool:
+        """The `video_active` a session owner's fresh page starts with.
+
+        The start policy names it. An off state pauses this socket (the
+        STOP_VIDEO rule): it leaves the primary fan-out until its START_VIDEO,
+        so a capture a shared viewer starts meanwhile is not delivered to it,
+        and while viewers consume the capture it keeps running for them.
+        """
+        if pipeline_starts_on('video', display_id):
+            return True
+        if display_id == 'primary':
+            self.video_paused_clients.add(websocket)
+            if self._active_primary_consumers(exclude=websocket):
+                return True
+        data_logger.info(f"Display '{display_id}' starts with video off; its capture waits for START_VIDEO.")
+        return False
+
     def _primary_reconnect_pending(self) -> bool:
         """Whether the primary display entry is being held for a socket that is
         already gone: the reconnect grace keeps the capture warm so a reloading
@@ -3663,9 +3693,10 @@ class DataStreamingServer(BaseStreamingService):
                                     'smoothed_rtt': 0.0,
                                     'backpressure_enabled': True,
                                     'backpressure_task': None,
+                                    'last_ack_update_time': time.monotonic(),
                                     'unacked_since': None,
                                     'stall_gated_at': None,
-                                    'video_active': True,
+                                    'video_active': self._video_start_state(websocket, display_id),
                                     'encoder': self.app.encoder,
                                     'framerate': self.app.framerate,
                                     'video_crf': self._initial_video_crf,
@@ -3702,7 +3733,7 @@ class DataStreamingServer(BaseStreamingService):
                                 # Only a page's first SETTINGS reactivates video; a later one
                                 # must not resurrect a stream stopped with STOP_VIDEO.
                                 if not initial_settings_processed:
-                                    display_state['video_active'] = True
+                                    display_state['video_active'] = self._video_start_state(websocket, display_id)
                                 display_state['acknowledged_frame_id'] = -1
                                 display_state['acked_sent_at'] = None
                                 display_state['unacked_since'] = None
@@ -3727,12 +3758,18 @@ class DataStreamingServer(BaseStreamingService):
                             if not initial_settings_processed:
                                 initial_settings_processed = True
                                 data_logger.info("Initial client settings message processed by ws_handler.")
-                                video_is_active = len(self.capture_instances) > 0
-                                if not video_is_active:
+                                video_wanted = self.display_clients.get(display_id, {}).get('video_active', False)
+                                if video_wanted and display_id not in self.capture_instances:
                                     data_logger.error("FATAL: Initial reconfiguration completed, but video pipeline did not start.")
                                 async with self._reconfigure_guard():
                                     audio_is_active = self.is_pcmflux_capturing
-                                    if not audio_is_active and PCMFLUX_AVAILABLE and display_id == 'primary':
+                                    if not pipeline_starts_on('audio', display_id):
+                                        # Off by policy until this page's START_AUDIO; a warm
+                                        # capture nobody else listens to goes with it.
+                                        if audio_is_active and not self._audio_listeners(exclude=websocket):
+                                            data_logger.info("Initial setup: audio starts off for this session; stopping the idle audio capture.")
+                                            await self._stop_pcmflux_pipeline()
+                                    elif not audio_is_active and PCMFLUX_AVAILABLE and display_id == 'primary':
                                         data_logger.info("Initial setup: Primary client connected, audio not active, attempting start.")
                                         await self._start_pcmflux_pipeline()
                                     elif not PCMFLUX_AVAILABLE and not audio_is_active:

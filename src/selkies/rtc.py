@@ -62,7 +62,7 @@ try:
 except (ImportError, RuntimeError):
     pcmflux = None
 
-from .settings import settings as app_settings, inflate_gz_bounded, software_h264_encoder, software_h264_path
+from .settings import settings as app_settings, inflate_gz_bounded, pipeline_starts_on, software_h264_encoder, software_h264_path
 from .webcam import CODEC_BY_NAME, get_shared_webcam, webcam_locked_off, webcam_uplink_allowed
 from .webrtc import (
     RTCPeerConnection,
@@ -344,6 +344,8 @@ class RTCApp:
         on_video_consumer_active: Per-peer video pause (tab-hide STOP_VIDEO /
             START_VIDEO), display-scoped; left None the verbs fall through to
             the input dispatcher, which ignores them.
+        on_audio_consumer_active: Per-peer audio pause (the side menu's
+            STOP_AUDIO / START_AUDIO); left None the verbs are dropped.
         on_consumers_changed: A display's consumer set changed (join, close).
         provision_virtual_mic: Brings up the shared SelkiesVirtualMic (null
             sinks, module-virtual-source, default source) before a mic
@@ -387,6 +389,7 @@ class RTCApp:
         self.request_idr_frame = lambda display_id='primary': logger.warning('unhandled request_idr_frame')
 
         self.on_video_consumer_active = None
+        self.on_audio_consumer_active = None
         self.on_consumers_changed = None
 
         self.provision_virtual_mic = None
@@ -1414,11 +1417,11 @@ class RTCApp:
         otherwise-disallowed input so normal viewer traffic pays nothing; the
         secure-mode input and gamepad gates apply; STOP_VIDEO / START_VIDEO
         pause this peer only (viewer-allowed, so a hidden viewer pauses its
-        own feed); STOP_AUDIO / START_AUDIO are ignored because audio is
-        negotiated per peer over SDP here, so the websockets global toggle
-        would be a no-op for late joiners or cut audio for peers that never
-        asked — each page mutes its `<video>` locally, which stops Opus
-        playback without stopping RTP. Everything else reaches the late-bound
+        own feed), and so do STOP_AUDIO / START_AUDIO, taken ahead of the
+        viewer gate: audio is negotiated per peer over SDP here, so the
+        websockets global toggle would be a no-op for late joiners or cut
+        audio for peers that never asked, and the shared capture stops only
+        once no peer receives it. Everything else reaches the late-bound
         `on_data_message` with the peer id as the connection id, so
         per-connection input state (gamepad associations) traces to the peer.
 
@@ -1441,6 +1444,12 @@ class RTCApp:
                 except Exception as e:
                     logger.warning("Failed to ack compression handshake: %s", e)
             return
+        if msg in ("STOP_AUDIO", "START_AUDIO"):
+            # Per peer, so ahead of the viewer gate: the websockets verb is
+            # global and refused to viewers, this one pauses only the sender.
+            if self.on_audio_consumer_active is not None:
+                return self.on_audio_consumer_active(peer_id, msg == "START_AUDIO")
+            return
         if client_type == ClientType.VIEWER and isinstance(msg, str) and msg.startswith("SETTINGS,"):
             logger.debug("Ignoring SETTINGS payload from a viewer (display '%s')", display_id)
             return
@@ -1460,9 +1469,6 @@ class RTCApp:
         if msg in ("STOP_VIDEO", "START_VIDEO") and self.on_video_consumer_active is not None:
             return self.on_video_consumer_active(
                 peer_id, display_id or "primary", msg == "START_VIDEO")
-        if msg in ("STOP_AUDIO", "START_AUDIO"):
-            logger.debug("Ignoring %s over WebRTC: audio is per-peer (SDP), not global.", msg)
-            return
         return self.on_data_message(msg, display_id or "primary", conn_id=peer_id)
 
     async def on_peer_connection_established(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary") -> None:
@@ -1639,8 +1645,17 @@ class RTCApp:
 
         rtp_video_sender = peer_connection.addTrack(media_relay.subscribe(graph["video_media"]))
         rtp_video_sender.on("pli", lambda cid=client_peer_id, ct=client_type: self.on_pli(cid, ct))
+        rtp_audio_sender = None
         if graph.get("audio_media") is not None:
-            peer_connection.addTrack(media_relay.subscribe(graph["audio_media"]))
+            rtp_audio_sender = peer_connection.addTrack(media_relay.subscribe(graph["audio_media"]))
+        # The start policy: a paused sender drains its relay proxy but sends no
+        # RTP, and the owning service starts a capture only for unpaused peers.
+        is_viewer = client_type is ClientType.VIEWER
+        video_paused = not pipeline_starts_on("video", display_id, is_viewer)
+        audio_paused = not pipeline_starts_on("audio", display_id, is_viewer)
+        rtp_video_sender._enabled = not video_paused
+        if rtp_audio_sender is not None:
+            rtp_audio_sender._enabled = not audio_paused
 
         mic_on, mic_locked = app_settings.microphone_enabled
         mic_state = None
@@ -1715,7 +1730,9 @@ class RTCApp:
             "mic_state": mic_state,
             "webcam_state": webcam_state,
             "video_sender": rtp_video_sender,
-            "video_paused": False,
+            "video_paused": video_paused,
+            "audio_sender": rtp_audio_sender,
+            "audio_paused": audio_paused,
             "client_token": client_token,
         }
         await self._notify_consumers_changed(display_id)

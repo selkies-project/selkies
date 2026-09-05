@@ -620,6 +620,7 @@ class WebRTCService(BaseStreamingService):
         self.rtc_app.get_fullcolor_for_display = self._fullcolor_for_display
         self.rtc_app.get_use_cpu_for_display = self._use_cpu_for_display
         self.rtc_app.on_video_consumer_active = self.handle_video_consumer_active
+        self.rtc_app.on_audio_consumer_active = self.handle_audio_consumer_active
         self.rtc_app.on_consumers_changed = self.handle_consumers_changed
         # /api/tokens updates must reach live WebRTC peers too.
         selkies_module.webrtc_reconcile_hook = self.reconcile_webrtc_peers
@@ -1068,9 +1069,13 @@ class WebRTCService(BaseStreamingService):
 
         A consumer reclaiming the primary cancels a pending grace stop, and
         `start_media_pipeline` is idempotent, so a controller tab reload that
-        reconnects inside the grace reuses the still-warm capture. A Wayland
-        start only enqueues a compositor command, so its real outcome is read
-        back through the same barrier the secondaries use: a pipeline that
+        reconnects inside the grace reuses the still-warm capture. The
+        pipeline starts only the captures its consumers receive: a peer whose
+        session policy starts video or audio off is registered paused, and a
+        warm pipeline is settled against the consumer set afterwards, so a
+        paused reconnect stops what it no longer receives. A Wayland start
+        only enqueues a compositor command, so its real outcome is read back
+        through the same barrier the secondaries use: a pipeline that
         believes it is running with no live capture would leave the page
         waiting on frames that never arrive, so it is stopped and logged and
         the next consumer retries (this also surfaces host death, where
@@ -1081,8 +1086,12 @@ class WebRTCService(BaseStreamingService):
         """
         if display_id == "primary" and self.media_pipeline:
             self._cancel_primary_stop_grace()
-            await self.media_pipeline.start_media_pipeline()
-            if (IS_WAYLAND and self.media_pipeline.is_media_pipeline_running()
+            consumers = self._display_consumers("primary")
+            video_wanted = any(not p.get("video_paused", False) for p in consumers) or not consumers
+            audio_wanted = any(not p.get("audio_paused", False) for p in consumers) or not consumers
+            await self.media_pipeline.start_media_pipeline(video=video_wanted, audio=audio_wanted)
+            await self._settle_primary_consumers()
+            if (IS_WAYLAND and video_wanted and self.media_pipeline.is_media_pipeline_running()
                     and not await self._wayland_capture_live("primary", self.media_pipeline)):
                 last_error = self._wayland_capture_last_error(self.media_pipeline, "primary")
                 logger.error(
@@ -1475,6 +1484,46 @@ class WebRTCService(BaseStreamingService):
                     f"All consumers of display '{display_id}' are paused; capture stopped."
                 )
 
+    async def handle_audio_consumer_active(self, peer_id: str, active: bool) -> None:
+        """The side menu's audio toggle for ONE peer (data-channel STOP_AUDIO /
+        START_AUDIO). The peer's own RTP sender gates its delivery, so a
+        late joiner is unaffected; the shared pcmflux capture stops once no
+        peer receives audio and restarts for the first that asks again. Audio
+        lives on the primary display, whatever display the peer renders."""
+        peer = self.rtc_app.peer_connections.get(peer_id) if self.rtc_app else None
+        if peer is None:
+            return
+        peer["audio_paused"] = not active
+        sender = peer.get("audio_sender")
+        if sender is not None:
+            sender._enabled = active
+        await self._settle_primary_audio()
+
+    async def _settle_primary_audio(self) -> None:
+        """Pause the primary's audio capture once every peer is audio-paused,
+        and resume it while any peer receives audio; a no-op on a pipeline
+        that is not running (start_display_media decides what starts)."""
+        pipeline = self.media_pipeline
+        if pipeline is None or not pipeline.is_media_pipeline_running():
+            return
+        consumers = self._display_consumers("primary")
+        if consumers and all(p.get("audio_paused", False) for p in consumers):
+            if await pipeline.pause_audio_capture():
+                logger.info("No peer receives audio; audio capture stopped.")
+        elif consumers and await pipeline.resume_audio_capture():
+            logger.info("Audio capture restarted for a peer that receives audio.")
+
+    async def _settle_primary_consumers(self) -> None:
+        """Apply the all-paused rule to both of the primary's captures after
+        a pipeline start that may have found them warm."""
+        pipeline = self.display_pipelines.get("primary")
+        if pipeline is not None:
+            consumers = self._display_consumers("primary")
+            if consumers and all(p.get("video_paused", False) for p in consumers):
+                if await pipeline.pause_screen_capture():
+                    logger.info("No peer receives video; capture stopped.")
+        await self._settle_primary_audio()
+
     async def _close_peer_signaling_ws(self, peer_id: str, code: int, message: bytes) -> None:
         """Fatal verdict on ONE peer's signaling socket (websockets KILL parity);
         bounded so a wedged socket cannot stall the caller."""
@@ -1540,9 +1589,9 @@ class WebRTCService(BaseStreamingService):
         unpaused peer must re-open a capture the rule stopped (else a viewer
         arriving while every prior consumer is hidden gets a permanently black
         stream: a paused capture emits no RTP, so the browser never even PLIs).
-        (A departing controller's pipeline is torn down elsewhere; both
-        pause_screen_capture and resume_screen_capture no-op on a stopped
-        pipeline.)"""
+        The primary's audio capture follows the same rule over the peers'
+        audio pauses. (A departing controller's pipeline is torn down
+        elsewhere; the pause and resume calls no-op on a stopped pipeline.)"""
         display_id = display_id or "primary"
         pipeline = self.display_pipelines.get(display_id)
         if pipeline is None:
@@ -1558,6 +1607,8 @@ class WebRTCService(BaseStreamingService):
         else:
             # A live capture already flows RTP; the joining browser's PLI resyncs it.
             await self._resume_display_capture(display_id, pipeline, "joining consumer")
+        if display_id == "primary":
+            await self._settle_primary_audio()
 
     async def _resume_display_capture(self, display_id: str, pipeline: MediaPipelinePixel,
                                       why: str, idr_always: bool = False) -> None:
