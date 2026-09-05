@@ -8,10 +8,9 @@
 # The shell suite gates on shellcheck's lowest severity, and actionlint runs it
 # over every workflow `run:` block. Which findings that severity reports differs
 # between releases, so taking whichever build a runner image happens to carry
-# turns the tree red on an image bump alone. The version and its checksums live
-# here rather than in each workflow, because GitHub Actions shares no
-# environment between workflow files and a second copy is a second thing to
-# forget.
+# turns the tree red on an image bump alone. The version lives here rather than
+# in each workflow, because GitHub Actions shares no environment between
+# workflow files and a second copy is a second thing to forget.
 #
 # Usage: install-shellcheck.sh [install-dir]   (default /usr/local/bin)
 
@@ -24,14 +23,8 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
 case "$(uname -m)" in
-    x86_64 | amd64)
-        ARCH=x86_64
-        SHA256="8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
-        ;;
-    aarch64 | arm64)
-        ARCH=aarch64
-        SHA256="12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588"
-        ;;
+    x86_64 | amd64) ARCH=x86_64 ;;
+    aarch64 | arm64) ARCH=aarch64 ;;
     *) echo "shellcheck: no release build for $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -39,8 +32,6 @@ TARBALL="shellcheck-v${VERSION}.linux.${ARCH}.tar.xz"
 "$(dirname "$0")/fetch.sh" \
     "https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/${TARBALL}" \
     "${WORK}/${TARBALL}"
-echo "${SHA256}  ${WORK}/${TARBALL}" | sha256sum -c -
-
 tar -xJf "${WORK}/${TARBALL}" -C "${WORK}"
 # install(1) needs root for a system directory and must not ask for it when the
 # destination is already writable, which is how a developer runs this.

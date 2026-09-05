@@ -43,6 +43,12 @@ def facts(present: bool = True, accelerated: bool = True,
         f"SELKIES_GPU_DRIVER={driver}",
         f"SELKIES_GPU_PRESENT={'true' if present else 'false'}",
         f"SELKIES_GPU_ACCELERATED={'true' if accelerated else 'false'}",
+        # The client paths the probe measures alongside: a vendor with a client
+        # stack of its own reached by Mesa through Zink, or Mesa's own driver.
+        f"SELKIES_GPU_GL_VENDOR={'nvidia' if driver == 'nvidia' else 'mesa'}",
+        "SELKIES_GPU_EGL_X11=mesa",
+        f"SELKIES_GPU_MESA_DRIVER={'zink' if driver == 'nvidia' else 'native'}",
+        f"SELKIES_GPU_VULKAN_PRESENTS={'true' if driver == 'nvidia' else ''}",
     ))
 
 

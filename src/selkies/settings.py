@@ -85,8 +85,8 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "addr",
         "type": "str",
-        "default": "0.0.0.0",
-        "help": 'Host address to start the streaming service, default: "0.0.0.0"',
+        "default": "localhost",
+        "help": 'Address the streaming service listens on: a host name or IP address, or a comma-separated list of them, bound on every address each resolves to. The default binds the loopback addresses only (127.0.0.1,::1); "0.0.0.0,::" accepts connections on every interface of both families.',
     },
     {
         "name": "port",
@@ -135,10 +135,40 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Enable client-to-server webcam forwarding to the virtual V4L2 device.",
     },
     {
+        "name": "video_on_start",
+        "type": "bool",
+        "default": True,
+        "help": "Start a session with the display's video stream on. Off, nothing is captured for the primary display until the client turns video on with the side menu toggle; a shared viewer and a second display page always start their stream.",
+    },
+    {
+        "name": "audio_on_start",
+        "type": "bool",
+        "default": True,
+        "help": "Start a session with server-to-client audio on. Off, the audio capture stays stopped until the client turns audio on with the side menu toggle; on WebRTC the audio track is negotiated but carries nothing until then. Unlike audio_enabled=false, nothing is torn down and the microphone keeps working.",
+    },
+    {
+        "name": "microphone_on_start",
+        "type": "bool",
+        "default": False,
+        "help": "Start a session with the microphone uplink on, so the browser asks for the device as soon as the session connects; a microphone_enabled locked off leaves it off.",
+    },
+    {
+        "name": "webcam_on_start",
+        "type": "bool",
+        "default": False,
+        "help": "Start a session with the webcam uplink on, so the browser asks for the camera as soon as the session connects; a webcam_enabled locked off leaves it off.",
+    },
+    {
+        "name": "gamepad_on_start",
+        "type": "bool",
+        "default": True,
+        "help": "Start a session with gamepad input on. Off, connected gamepads are not polled until the client turns them on with the side menu toggle; a choice made there is remembered by the browser and takes precedence on its later visits.",
+    },
+    {
         "name": "enable_clipboard",
         "type": "str",
         "default": "true",
-        "help": 'Clipboard policy for both transports: "true" (both directions), "in" (client-to-server only), "out" (server-to-client only), "false" (disabled).',
+        "help": 'Clipboard policy for both transports: "true" (both directions), "in" (client-to-server only), "out" (server-to-client only), "false" (disabled). "out" is what stops the page reading the local clipboard at all, which is the read Firefox and Safari raise their paste prompt for; the dashboard\'s clipboard box still sends.',
     },
     {
         "name": "command_enabled",
@@ -164,7 +194,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "float",
         "default": 0.0,
         "min": 0.0,
-        "help": 'Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. The congestion-control pacing protects the video stream without it; the cap is chiefly for links its gauges cannot see, e.g. behind a reverse proxy.',
+        "help": 'Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. The congestion-control pacing protects the video stream without it, in both directions and end to end through a reverse proxy; the cap is for holding transfers to a fixed share regardless.',
     },
     {
         "name": "framerate",
@@ -674,7 +704,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "computer_use_bind",
         "type": "str",
         "default": "",
-        "help": "Start pixelflux's Computer-Use HTTP server: a bare port listens on all interfaces, host:port scopes it (e.g. 127.0.0.1:9500). Empty leaves it off; the PIXELFLUX_CU environment variable remains the standalone fallback.",
+        "help": "Start pixelflux's Computer-Use HTTP server on comma-separated entries: a bare port listens on the loopback addresses only, host:port names the address to listen on (0.0.0.0:9500,[::]:9500 accepts connections on every interface). Empty leaves it off; the PIXELFLUX_CU environment variable remains the standalone fallback.",
     },
     {
         "name": "wayland_host_display",
@@ -1663,6 +1693,31 @@ OPERATOR_LOCKED_WHEN_OVERRIDDEN = ("scaling_dpi",)
 
 # Encoders with no hardware path: selecting one implies software encoding.
 CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
+
+# Pipelines a session starts on or off by policy, each named by a `*_on_start` setting.
+START_STATE_PIPELINES = ("video", "audio", "microphone", "webcam", "gamepad")
+
+
+def pipeline_starts_on(pipeline: str, display_id: str = "primary", viewer: bool = False) -> bool:
+    """Whether a connecting page starts with `pipeline` on.
+
+    The `*_on_start` settings describe a session owner's primary display page.
+    A shared viewer cannot switch video or audio on from its side menu and
+    never captures a device, and a second display page exists to show its
+    display, so those pages keep the built-in start state whatever the
+    settings say. Both transports read this, so a page and the server it
+    connects to agree on what starts.
+
+    Args:
+        pipeline: One of `START_STATE_PIPELINES`.
+        display_id: The display the page renders.
+        viewer: Whether the page joined through a sharing link.
+    """
+    if pipeline not in START_STATE_PIPELINES:
+        raise ValueError(f"unknown pipeline '{pipeline}'")
+    if viewer or display_id != "primary":
+        return pipeline in ("video", "audio", "gamepad")
+    return bool(getattr(settings, f"{pipeline}_on_start")[0])
 
 
 def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) -> bool:

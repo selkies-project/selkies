@@ -17,7 +17,7 @@
 # addons/desktop builds the reference LXQt desktop on top of this, and any
 # other desktop can be built the same way.
 #
-#   - X11 display server (a DRI3-capable Xvfb) and the headless Wayland backend
+#   - X11 display server (XLibre's Xvfb, with glamor and DRI3) and the headless Wayland backend
 #     with SELKIES_WAYLAND=true, whose nested labwc supplies window management,
 #     decorations and XWayland
 #   - s6 service supervision, running as PID 1 or below a foreign init
@@ -36,19 +36,14 @@ ARG DISTRIB_IMAGE="ubuntu"
 ARG DISTRIB_RELEASE="26.04"
 ARG PYPI_PACKAGE="selkies"
 # The X server the session runs on, built here rather than installed: the
-# distribution's Xvfb has no DRI3, so GL clients render in software even with a
-# GPU present. The release is pinned instead of taken from the base, because
-# the tree addons/base/patches/xvfb-dri3.patch edits moves within the 21.1
-# series; the pair moves together when it is rebased.
-ARG XORG_SERVER_VERSION="21.1.24"
-ARG WLROOTS_VERSION="0.19.3"
-ARG LABWC_VERSION="0.9.7"
-ARG XORG_SERVER_SHA256="1a4eb36ca65cc3b1b936566d677a9786e13c11cd5806e951ac55f3f5ce3984af"
+# distribution's Xvfb has neither glamor nor DRI3, so GL clients render in
+# software even with a GPU present. XLibre's Xvfb has both, on Mesa's GBM and
+# on NVIDIA's own EGL, and is built from its latest release.
+ARG WLROOTS_VERSION="0.20.2"
+ARG LABWC_VERSION="0.20.2"
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS xvfb
 ARG DEBIAN_FRONTEND="noninteractive"
-ARG XORG_SERVER_VERSION
-ARG XORG_SERVER_SHA256
 # The retry configuration the final stage sets further down, repeated here for
 # the same reason the add-ons stage repeats it.
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
@@ -57,11 +52,10 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         ca-certificates \
         curl \
         gcc \
+        jq \
         meson \
         ninja-build \
-        patch \
         pkg-config \
-        xz-utils \
         # The server itself
         libaudit-dev \
         libbsd-dev \
@@ -84,31 +78,72 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         libepoxy-dev \
         libgbm-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-COPY addons/base/patches/xvfb-dri3.patch /patches/
 # Only the framebuffer server is built. Its paths, extensions and defaults are
 # the distribution package's, so the binary drops in where that one installed
 # it; anything left at the meson default would move a keymap or a font path out
 # from under the rest of the image.
 RUN set -e; \
     cd /tmp; \
-    curl -fsSL --retry 5 --connect-timeout 30 -o xorg-server.tar.xz \
-        "https://www.x.org/releases/individual/xserver/xorg-server-${XORG_SERVER_VERSION}.tar.xz"; \
-    echo "${XORG_SERVER_SHA256}  xorg-server.tar.xz" | sha256sum -c -; \
-    tar -xf xorg-server.tar.xz; \
-    cd "xorg-server-${XORG_SERVER_VERSION}"; \
-    patch -p0 < /patches/xvfb-dri3.patch; \
+    # The framebuffer server's glamor is in the 25.2 line, which XLibre
+    # publishes as pre-releases while still releasing older lines, so the
+    # highest version among all its releases is taken, not the newest by date.
+    XLIBRE_TAG="$(curl -fsSL --retry 5 "https://api.github.com/repos/X11Libre/xserver/releases?per_page=50" | jq -r '[.[].tag_name | select(startswith("xlibre-xserver-"))] | max_by(ltrimstr("xlibre-xserver-") | split(".") | map(tonumber))')"; \
+    curl -fsSL --retry 5 --connect-timeout 30 -o xlibre.tar.gz \
+        "https://github.com/X11Libre/xserver/archive/refs/tags/${XLIBRE_TAG}.tar.gz"; \
+    tar -xf xlibre.tar.gz; \
+    cd "xserver-${XLIBRE_TAG}"; \
     meson setup build \
         --prefix=/usr --sysconfdir=/etc --localstatedir=/var --buildtype=release \
-        -Dxvfb=true -Dglamor=true -Ddri3=true -Dglx=true \
+        -Dxvfb=true -Dglamor=true -Dgbm=true -Ddri3=true -Dglx=true \
         -Dxcsecurity=true -Dxselinux=true \
         -Dxorg=false -Dxnest=false -Dxephyr=false -Dxwin=false -Dxquartz=false \
-        -Dudev=false -Dudev_kms=false -Dsystemd_logind=false -Dsecure-rpc=false \
+        -Dudev=false -Dudev_kms=false -Dsystemd_logind=false \
         -Dxkb_dir=/usr/share/X11/xkb -Dxkb_output_dir=/var/lib/xkb -Dxkb_bin_dir=/usr/bin \
         -Ddefault_font_path=/usr/share/fonts/X11/misc,/usr/share/fonts/X11/cyrillic,/usr/share/fonts/X11/100dpi/:unscaled,/usr/share/fonts/X11/75dpi/:unscaled,/usr/share/fonts/X11/Type1,/usr/share/fonts/X11/100dpi,/usr/share/fonts/X11/75dpi,built-ins \
         -Ddocs=false -Ddevel-docs=false; \
     ninja -C build hw/vfb/Xvfb; \
     install -Dm755 build/hw/vfb/Xvfb /build-out/usr/bin/Xvfb; \
-    /build-out/usr/bin/Xvfb -help 2>&1 | grep -q vfbdevice
+    /build-out/usr/bin/Xvfb -help 2>&1 | grep -q -- '-glamor'
+
+# NVIDIA's EGL platform library for X11 (xcb and xlib), open source and
+# independent of the driver's version, built from its latest release: through
+# it the injected driver's EGL reaches X11 windows on the framebuffer server's
+# DRI3. The distributions that package it ship the same library; Debian's
+# stable has none.
+FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS egl-x11
+ARG DEBIAN_FRONTEND="noninteractive"
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
+        > /etc/apt/apt.conf.d/99-selkies-retries
+RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+        ca-certificates \
+        curl \
+        gcc \
+        jq \
+        libc6-dev \
+        meson \
+        ninja-build \
+        pkg-config \
+        eglexternalplatform-dev \
+        libdrm-dev \
+        libegl-dev \
+        libgbm-dev \
+        libx11-dev \
+        libx11-xcb-dev \
+        libxcb1-dev \
+        libxcb-dri3-dev \
+        libxcb-present-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
+RUN set -e; \
+    cd /tmp; \
+    EGL_X11_TAG="$(curl -fsSL --retry 5 "https://api.github.com/repos/NVIDIA/egl-x11/releases/latest" | jq -r '.tag_name')"; \
+    curl -fsSL --retry 5 --connect-timeout 30 -o egl-x11.tar.gz \
+        "https://github.com/NVIDIA/egl-x11/archive/refs/tags/${EGL_X11_TAG}.tar.gz"; \
+    tar -xf egl-x11.tar.gz; \
+    cd "egl-x11-${EGL_X11_TAG#v}"; \
+    meson setup build --prefix=/usr --libdir="lib/$(gcc -print-multiarch)" --buildtype=release; \
+    ninja -C build; \
+    DESTDIR=/build-out meson install -C build; \
+    ls /build-out/usr/share/egl/egl_external_platform.d/20_nvidia_xcb.json /build-out/usr/share/egl/egl_external_platform.d/20_nvidia_xlib.json
 
 # Build the joystick and webcam interposers and fake-udev inside this
 # repository (they are dedicated to containerized environments and are not
@@ -161,8 +196,10 @@ RUN set -e; \
 # attaches and removes it when that display disconnects (window queries ride the
 # same socket), and a cursor path that carries a held drag across the screen
 # boundary instead of clamping it at the edge. wlroots is built first at the
-# version this labwc pins; both install under /usr/lib unqualified so the copy
-# into the runtime stage is the same on every architecture.
+# version this labwc pins, with whichever of its dependencies the distribution
+# carries too old; everything built installs under /usr/lib unqualified, which
+# holds nothing else, so the copy into the runtime stage is the same on every
+# architecture and distribution.
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS labwc
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG WLROOTS_VERSION
@@ -170,12 +207,15 @@ ARG LABWC_VERSION
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
         > /etc/apt/apt.conf.d/99-selkies-retries
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+        bison \
         build-essential \
         ca-certificates \
         gettext \
         git \
         glslang-tools \
         hwdata \
+        libexpat1-dev \
+        libffi-dev \
         meson \
         ninja-build \
         pkg-config \
@@ -219,7 +259,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-seam.patch addons/base/patches/labwc-screens.patch /build/patches/
 COPY addons/base/build-labwc.sh /build/
-RUN /build/build-labwc.sh
+RUN /build/build-labwc.sh && mkdir -p /build-out/lib && cp -a /usr/lib/*.so* /build-out/lib/
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE}
 
@@ -333,6 +373,16 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         xdg-utils \
         xdg-user-dirs \
         desktop-file-utils \
+        # NVIDIA's EGL platform libraries for GBM and Wayland, open source and
+        # independent of the driver's version: the injected driver's EGL reaches
+        # them whether or not the runtime that injects the driver carries them
+        # along. The X11 one is built above and copied in below, with what it
+        # links against here.
+        libnvidia-egl-gbm1 \
+        libnvidia-egl-wayland1 \
+        libx11-xcb1 \
+        libxcb-dri3-0 \
+        libxcb-present0 \
         # X11 display server and utilities
         xserver-xorg-core \
         xvfb \
@@ -470,6 +520,8 @@ ENV PATH="/usr/local/nvidia/bin${PATH:+:${PATH}}"
 ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
 ENV NVIDIA_VISIBLE_DEVICES="all"
 ENV NVIDIA_DRIVER_CAPABILITIES="all"
+# Off because the stream's rate is Selkies' to change; a GL client locked to the
+# framebuffer's refresh would pace itself against a rate that is not the stream's.
 ENV __GL_SYNC_TO_VBLANK="0"
 
 # Package state is already owned by the session user: the recursive chown above
@@ -500,16 +552,21 @@ RUN --mount=type=bind,source=addons/base/wheels,target=/tmp/wheels \
     PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --force-reinstall ${PKGS}; \
     rm -rf /tmp/picked
 
-# The DRI3-capable server replaces the distribution's /usr/bin/Xvfb; chowned
+# XLibre's server replaces the distribution's /usr/bin/Xvfb; chowned
 # to the session user like the rest of the image so fakeroot-sudo apt can
 # still write under /usr after the copy
 COPY --from=xvfb --chown=1000:1000 /build-out/usr/bin/Xvfb /usr/bin/Xvfb
+# NVIDIA's X11 EGL platform: the libraries beside the distribution's, the
+# platform files where the driver's EGL looks for them
+COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/lib/ /usr/lib/
+COPY --from=egl-x11 --chown=1000:1000 /build-out/usr/share/egl/ /usr/share/egl/
 
 # The patched labwc replaces the distribution binary, and the wlroots it was
-# built against comes along; the distribution labwc package above keeps every
+# built against comes along with any dependency built beside it, found through
+# the compositor's rpath; the distribution labwc package above keeps every
 # other runtime library in place
 COPY --from=labwc --chown=1000:1000 /usr/bin/labwc /usr/bin/labwc
-COPY --from=labwc --chown=1000:1000 /usr/lib/libwlroots-0.19.so* /usr/lib/
+COPY --from=labwc --chown=1000:1000 /build-out/lib/ /usr/lib/
 
 # Install the joystick and webcam interposers and fake-udev (container-only)
 COPY --from=add-ons --chown=1000:1000 /opt/add-ons/lib/ /usr/lib/

@@ -150,7 +150,7 @@ no-stun-backward-compatibility
 response-origin-only-with-rfc5780
 ```
 
-`/etc/turnserver.conf` must have the lines `listening-ip=0.0.0.0` and `realm=example.com` (change the realm as appropriate), and either the lines `use-auth-secret` and `static-auth-secret=n0TaRealCoTURNAuthSecretThatIsSixtyFourLengthsLongPlaceholdPlace`, or the lines `lt-cred-mech` and `user=username1:password1` are required.
+`/etc/turnserver.conf` must have the lines `listening-ip=0.0.0.0`, `listening-ip=::` and `realm=example.com` (change the realm as appropriate), and either the lines `use-auth-secret` and `static-auth-secret=n0TaRealCoTURNAuthSecretThatIsSixtyFourLengthsLongPlaceholdPlace`, or the lines `lt-cred-mech` and `user=username1:password1` are required.
 
 For single-user environments, traditional long-term credential authentication is the easiest, but multi-user environments likely need TURN REST API authentication with a static auth secret.
 

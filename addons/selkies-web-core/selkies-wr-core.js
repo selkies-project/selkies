@@ -77,6 +77,7 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
+import { streamDensity as streamDensityOf } from "./lib/stream-density.js";
 import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, writeImageToLocalClipboard, digestedPayload } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
@@ -333,6 +334,15 @@ export default function webrtc() {
 	let scalingDPI = 96;
 	let isVideoPipelineActive = true;
 	let isAudioPipelineActive = true;
+	/**
+	 * Pipelines the user has toggled on this peer connection. The session's
+	 * start policy (the server's `*_on_start` settings) is applied once per
+	 * connection, by `applyStartPolicy` on its first server_settings payload,
+	 * and never over a choice already made here.
+	 */
+	let pipelinesToggledByUser = new Set();
+	/** Whether this peer connection's first server_settings payload has been applied. */
+	let startPolicyApplied = false;
 	let isMicrophoneActive = false;
 	let isWebcamActive = false;
 	let webcamBusy = false;
@@ -406,19 +416,6 @@ export default function webrtc() {
 	const reencodePngOffThread = (blob) => clipboardWorker.reencodePng(blob)
 		.then((r) => r.result)
 		.catch(() => reencodeBlobAsPng(blob));
-	const clipboardSync = createClipboardSync({
-		sendRequest: () => webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD'),
-		digestBytes: async (buf) => {
-			const { byteLength, hash } = await clipboardWorker.hashBytes(buf);
-			return digestedPayload(byteLength, hash);
-		}
-	});
-	/**
-	 * Retry queue for local clipboard writes of server pushes, which carry no
-	 * user activation: Firefox and WebKit reject the write until the next real
-	 * gesture.
-	 */
-	const deferredClipboardWriter = createDeferredClipboardWriter();
 	/**
 	 * Chromium-engine detection: userAgentData brands are authoritative and
 	 * `window.chrome` a fallback for older engines that expose no brands; iOS,
@@ -433,6 +430,22 @@ export default function webrtc() {
 		const isChromiumBrand = brands.some((b) => /Chromium|Google Chrome/.test(b.brand));
 		return (isChromiumBrand || typeof window.chrome !== 'undefined') && !isIOS && !isFirefox && !isCriOS;
 	})();
+
+	const clipboardSync = createClipboardSync({
+		isChromium,
+		canRead: () => !!clipboard_in_enabled,
+		sendRequest: () => webrtc.sendDataChannelMessage('REQUEST_CLIPBOARD'),
+		digestBytes: async (buf) => {
+			const { byteLength, hash } = await clipboardWorker.hashBytes(buf);
+			return digestedPayload(byteLength, hash);
+		}
+	});
+	/**
+	 * Retry queue for local clipboard writes of server pushes, which carry no
+	 * user activation: Firefox and WebKit reject the write until the next real
+	 * gesture.
+	 */
+	const deferredClipboardWriter = createDeferredClipboardWriter();
 
 	const hash = window.location.hash;
 	if (hash === '#shared') {
@@ -475,6 +488,30 @@ export default function webrtc() {
 	 * `getPrefixedKey` and the WebSocket core.
 	 */
 	const storageDisplayId = window.location.hash.startsWith('#display2') ? 'display2' : 'primary';
+	/** Display rectangles (+ per-page scale) from the last display-config update. */
+	let latestDisplayLayouts = null;
+	/** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
+	function streamDensity() {
+		return streamDensityOf({ displayId: storageDisplayId, layouts: latestDisplayLayouts, useCssScaling, shared: isSharedMode });
+	}
+	/** The density the last request was built on; a change re-requests on a secondary. */
+	let appliedStreamDensity = 0;
+	/** The density the last SETTINGS reported as the display scale. */
+	let reportedStreamDensity = 0;
+	/**
+	 * Hands the density to the input layer and, on a secondary whose density
+	 * moved with the primary's, requests the stream at it again.
+	 */
+	function followStreamDensity() {
+		const density = streamDensity();
+		if (input && input.setStreamDensity) input.setStreamDensity(density);
+		const changed = appliedStreamDensity > 0 && Math.abs(density - appliedStreamDensity) > 1e-6;
+		appliedStreamDensity = density;
+		if (changed && storageDisplayId !== 'primary' && !window.manualResolution) {
+			console.log(`Stream density follows the primary: ${density}.`);
+			handleResizeUI();
+		}
+	}
 	const PER_DISPLAY_SETTINGS = [
 		'framerate', 'video_crf', 'video_fullcolor',
 		'video_streaming_mode', 'use_cpu',
@@ -767,8 +804,7 @@ export default function webrtc() {
 			}
 			return;
 		}
-		const dpr = window.devicePixelRatio || 1;
-		const isOneToOne = !useCssScaling || (useCssScaling && dpr <= 1);
+		const isOneToOne = Math.abs(streamDensity() - (window.devicePixelRatio || 1)) < 1e-6;
 		if (isOneToOne) {
 			if (videoElement.style.imageRendering !== 'pixelated') {
 				console.log("Setting video rendering to 'pixelated' for sharp display.");
@@ -906,7 +942,8 @@ export default function webrtc() {
 		}
 		const settingsPrefix = `${storageAppName}_`;
 		const settingsToSend = {};
-		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+		const dpr = streamDensity();
+		reportedStreamDensity = dpr;
 
 		const knownSettings = [
 			'framerate', 'encoder', 'manual_resolution',
@@ -997,7 +1034,7 @@ export default function webrtc() {
 			return;
 		}
 
-		const dpr = (window.manualResolution || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+		const dpr = window.manualResolution ? 1 : streamDensity();
 		const logicalWidth = alignResolution(targetWidth * dpr);
 		const logicalHeight = alignResolution(targetHeight * dpr);
 		console.log(`applyManualStyle logicalWidth: ${logicalWidth} logicalHeight: ${logicalHeight}`)
@@ -1054,7 +1091,7 @@ export default function webrtc() {
 	function resetToWindowResolution(targetWidth, targetHeight) {
 		if (!videoElement) return;
 
-		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+		const dpr = streamDensity();
 		const logicalWidth = alignResolution(targetWidth * dpr);
 		const logicalHeight = alignResolution(targetHeight * dpr);
 		console.log(`resetToWinRes logicalWidth: ${logicalWidth} logicalHeight: ${logicalHeight}`)
@@ -1133,8 +1170,14 @@ export default function webrtc() {
 			realWidth = alignResolution(width);
 			realHeight = alignResolution(height);
 		} else {
-			dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+			dpr = streamDensity();
+			appliedStreamDensity = dpr;
 			realWidth = alignResolution(width * dpr);
+			// A request at a density the last SETTINGS did not report: the layout
+			// carries the reported scale to the other pages, so it is sent again.
+			if (reportedStreamDensity > 0 && Math.abs(dpr - reportedStreamDensity) > 1e-6) {
+				setTimeout(() => sendClientPersistedSettings(), 0);
+			}
 			realHeight = alignResolution(height * dpr);
 		}
 		if (realWidth > 4080) realWidth = 4080;
@@ -1209,7 +1252,9 @@ export default function webrtc() {
 			return;
 		}
 		windowResolution = input.getWindowResolution();
-		const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+		const dpr = streamDensity();
+		appliedStreamDensity = dpr;
+		if (input && input.setStreamDensity) input.setStreamDensity(dpr);
 		if (windowResolution[0] * dpr > 4080) windowResolution[0] = Math.floor(4080 / dpr);
 		if (windowResolution[1] * dpr > 4080) windowResolution[1] = Math.floor(4080 / dpr);
 		sendResolutionToServer(windowResolution[0], windowResolution[1]);
@@ -1485,6 +1530,7 @@ export default function webrtc() {
 					break;
 				}
 				if (message.pipeline === 'microphone' && webrtc && typeof webrtc.setMicrophone === 'function') {
+					pipelinesToggledByUser.add('microphone');
 					const micOn = !!message.enabled;
 					webrtc.setMicrophone(micOn, preferredInputDeviceId).then(() => {
 						isMicrophoneActive = micOn;
@@ -1498,6 +1544,7 @@ export default function webrtc() {
 					console.log("Shared mode: Video pipelineControl blocked.");
 					break;
 				} else if (message.pipeline === 'video' && webrtc) {
+					pipelinesToggledByUser.add('video');
 					const videoOn = !!message.enabled;
 					try {
 						webrtc.sendDataChannelMessage(videoOn ? 'START_VIDEO' : 'STOP_VIDEO');
@@ -1507,11 +1554,20 @@ export default function webrtc() {
 					} catch (e) {
 						console.error('Video toggle failed:', e);
 					}
-				} else if (message.pipeline === 'audio' && videoElement) {
-					// Audio stays negotiated; the toggle only mutes the element carrying it.
+				} else if (message.pipeline === 'audio') {
+					// Audio stays negotiated: the element carrying it is muted at once,
+					// and the server pauses this peer's audio sender, stopping the
+					// capture once no peer receives it.
+					pipelinesToggledByUser.add('audio');
+					if (!videoElement) break;
 					const audioOn = !!message.enabled;
 					videoElement.muted = !audioOn;
 					isAudioPipelineActive = audioOn;
+					if (webrtc) {
+						try { webrtc.sendDataChannelMessage(audioOn ? 'START_AUDIO' : 'STOP_AUDIO'); } catch (e) {
+							console.error('Audio toggle failed:', e);
+						}
+					}
 					window.postMessage({ type: 'pipelineStatusUpdate', audio: audioOn }, window.location.origin);
 					postSidebarButtonUpdate();
 				} else if (message.pipeline === 'webcam') {
@@ -1519,6 +1575,7 @@ export default function webrtc() {
 						console.log("Shared mode: Webcam control blocked.");
 						break;
 					}
+					pipelinesToggledByUser.add('webcam');
 					if (!!message.enabled) {
 						startWebcamCapture();
 					} else {
@@ -1529,6 +1586,7 @@ export default function webrtc() {
 			case 'gamepadControl':
 				console.log(`Received gamepad control message: enabled=${message.enabled}`);
 				const newGamepadState = message.enabled;
+				pipelinesToggledByUser.add('gamepad');
 				if (isGamepadEnabled !== newGamepadState) {
 					isGamepadEnabled = newGamepadState;
 					setBoolParam('isGamepadEnabled', isGamepadEnabled);
@@ -2299,8 +2357,7 @@ export default function webrtc() {
 				const posMatch = hash.match(/^#display2-(right|left|up|down)/);
 				if (posMatch) displayPosition = posMatch[1];
 			}
-			/** Display rectangles (+ per-page scale) from the last display-config update. */
-			let latestDisplayLayouts = null;
+			latestDisplayLayouts = null;
 
 			var pathname = getRoutePrefix() + "/";
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
@@ -2405,6 +2462,13 @@ export default function webrtc() {
 				if (window.__selkiesAuthProbe) window.__selkiesAuthProbe();
 				if (reconnect) {
 					status = 'connecting';
+					// The server registers the new peer by the start policy; its
+					// first server_settings payload applies it here again.
+					pipelinesToggledByUser.clear();
+					startPolicyApplied = false;
+					isVideoPipelineActive = true;
+					isAudioPipelineActive = true;
+					videoElement.muted = false;
 					webrtc.reset();
 				} else {
 					status = 'disconnected';
@@ -2618,6 +2682,7 @@ export default function webrtc() {
 				if (input && input.setDisplayLayouts) {
 					input.setDisplayLayouts(latestDisplayLayouts, displayId);
 				}
+				followStreamDensity();
 				const secondaryConnected = displays.some((d) => d !== 'primary');
 				if (isSecondaryDisplayConnected !== secondaryConnected) {
 					console.log(`Secondary display connection status changed to: ${secondaryConnected}`);
@@ -2733,10 +2798,73 @@ export default function webrtc() {
 			}
 
 			/**
+			 * Applies the session's start policy from a peer connection's first
+			 * server_settings payload: the `*_on_start` settings say which
+			 * pipelines this page starts with. Only a session owner's primary
+			 * display page is governed (a shared viewer cannot switch video or
+			 * audio on, and a second display page exists to show its display),
+			 * and a pipeline the user already toggled keeps that choice. The
+			 * server registered this peer with its video and audio senders paused
+			 * by the same policy, so video and audio off only mirror that here;
+			 * the microphone and webcam start their uplinks; the gamepad policy
+			 * seeds a toggle the browser has not persisted.
+			 * @param {Object<string, {value: *, locked?: boolean}>} serverSettings
+			 */
+			const applyStartPolicy = (serverSettings) => {
+				if (isSharedMode || displayId !== 'primary') return;
+				const setting = (key) => (serverSettings && serverSettings[key]) || null;
+				const startsOn = (key, fallback) => {
+					const s = setting(key);
+					return (s && typeof s.value === 'boolean') ? s.value : fallback;
+				};
+				const lockedOff = (key) => {
+					const s = setting(key);
+					return !!(s && s.value === false && s.locked);
+				};
+				const untouched = (pipeline) => !pipelinesToggledByUser.has(pipeline);
+				let sidebarChanged = false;
+				if (untouched('video') && !startsOn('video_on_start', true) && isVideoPipelineActive) {
+					isVideoPipelineActive = false;
+					window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
+					sidebarChanged = true;
+				}
+				const audioDisabledByServer = startsOn('audio_enabled', true) === false;
+				if (untouched('audio') && !startsOn('audio_on_start', true) && !audioDisabledByServer && isAudioPipelineActive) {
+					isAudioPipelineActive = false;
+					if (videoElement) videoElement.muted = true;
+					window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
+					sidebarChanged = true;
+				}
+				if (untouched('microphone') && startsOn('microphone_on_start', false) && !lockedOff('microphone_enabled') &&
+					!isMicrophoneActive && webrtc && typeof webrtc.setMicrophone === 'function') {
+					webrtc.setMicrophone(true, preferredInputDeviceId).then(() => {
+						isMicrophoneActive = true;
+						postSidebarButtonUpdate();
+					}).catch((e) => {
+						console.error('Microphone start failed:', e);
+					});
+				}
+				if (untouched('webcam') && startsOn('webcam_on_start', false) && !lockedOff('webcam_enabled')) {
+					startWebcamCapture();
+				}
+				const gamepadStored = window.localStorage.getItem(storageKeyFor('isGamepadEnabled')) !== null;
+				if (untouched('gamepad') && !gamepadStored) {
+					const wanted = startsOn('gamepad_on_start', true);
+					if (isGamepadEnabled !== wanted) {
+						isGamepadEnabled = wanted;
+						toggleGamepadConnection();
+						sidebarChanged = true;
+					}
+				}
+				if (sidebarChanged) postSidebarButtonUpdate();
+			};
+
+			/**
 			 * Applies the server settings payload: sanitizes the stored overrides,
 			 * mirrors the policy gates (`command_enabled`, `enable_resize`, the
 			 * clipboard directions, `enable_binary_clipboard`, which the stored
-			 * choice governs unless locked), pushes the pre-copied local clipboard
+			 * choice governs unless locked), applies the session's start policy on
+			 * a connection's first payload, pushes the pre-copied local clipboard
 			 * once the gates are in place, and switches between the manual and
 			 * auto resize handlers.
 			 */
@@ -2749,6 +2877,10 @@ export default function webrtc() {
 				const changes = sanitizeAndStoreSettings(obj.settings);
 				const ce = obj.settings && obj.settings.command_enabled;
 				serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
+				if (!startPolicyApplied) {
+					startPolicyApplied = true;
+					applyStartPolicy(obj.settings);
+				}
 				const er = obj.settings && obj.settings.enable_resize;
 				if (er && typeof er.value === 'boolean') window.enable_resize = er.value;
 				const cin = obj.settings && obj.settings.clipboard_in_enabled;
@@ -2917,6 +3049,8 @@ export default function webrtc() {
 			rtimeout = false;
 			manualWidth = 0, manualHeight = 0;
 			isGamepadEnabled = true;
+			pipelinesToggledByUser.clear();
+			startPolicyApplied = false;
 			videoConnected = "";
 			audioConnected = "";
 			statWatchEnabled = false;

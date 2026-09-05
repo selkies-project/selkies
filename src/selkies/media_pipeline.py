@@ -29,6 +29,13 @@ live across capture restarts, the pipeline keeps its own monotonic pts
 clocks (video: 90 kHz wall-clock anchor; audio: an epoch offset over
 pcmflux's re-zeroing sample clock) so pts never jumps backward.
 
+A running pipeline is the display's media graph; its two captures are
+started and paused one by one underneath it. `start_media_pipeline` opens
+only the captures a consumer asked for, and `pause_screen_capture`,
+`resume_screen_capture`, `pause_audio_capture` and `resume_audio_capture`
+stop and restart each while the pipeline stays running, so a session whose
+policy starts video or audio off never captures what nobody receives.
+
 Tunables split two ways, mirroring the WebSockets path: rate/quality knobs
 (bitrate, CRF, framerate, streaming mode, paint-over) apply live through
 pixelflux's non-blocking update calls, while structural changes (encoder,
@@ -86,7 +93,7 @@ class MediaPipeline(metaclass=ABCMeta):
     """Interface a transport drives to run and tune a media pipeline."""
 
     @abstractmethod
-    async def start_media_pipeline(self) -> None:
+    async def start_media_pipeline(self, video: bool = True, audio: bool = True) -> None:
         pass
 
     @abstractmethod
@@ -662,6 +669,32 @@ class MediaPipelinePixel(MediaPipeline):
             await self.start_screen_capture()
             return True
 
+    async def pause_audio_capture(self) -> bool:
+        """Stop only the audio capture once no consumer receives it; the
+        pipeline keeps running and resume_audio_capture restarts it.
+
+        Returns:
+            Whether a live capture was actually stopped.
+        """
+        async with self.async_lock:
+            if not self._running or not self._is_pcmflux_capturing:
+                return False
+            await self._stop_audio_pipeline()
+            return True
+
+    async def resume_audio_capture(self) -> bool:
+        """Start the audio capture a consumer now wants, unless audio is
+        disabled or it already runs.
+
+        Returns:
+            Whether a stopped capture was actually started.
+        """
+        async with self.async_lock:
+            if not self._running or not self.audio_enabled or self._is_pcmflux_capturing:
+                return False
+            await self._start_audio_pipeline()
+            return self._is_pcmflux_capturing
+
     async def restart_screen_capture(self) -> None:
         """Reapply the current settings snapshot to the live capture module.
 
@@ -891,24 +924,31 @@ class MediaPipelinePixel(MediaPipeline):
             await self._start_audio_pipeline()
         return True
 
-    async def start_media_pipeline(self) -> None:
-        """Start video (and, when enabled, audio) capture and mark the pipeline
-        running; a start failure tears both back down and stays stopped. A
-        raising `on_pipeline_started` does not abort a started pipeline."""
+    async def start_media_pipeline(self, video: bool = True, audio: bool = True) -> None:
+        """Mark the pipeline running and start the captures asked for: the
+        screen when `video`, and pcmflux when `audio` and audio is enabled.
+        A capture left off here starts through its resume call. A start
+        failure tears both back down and stays stopped. A raising
+        `on_pipeline_started` does not abort a started pipeline."""
         async with self.async_lock:
             if self._running:
                 return
 
             logger.info("Starting media pipeline...")
             try:
-                await self.start_screen_capture()
-
-                if self.audio_enabled:
-                    await self._start_audio_pipeline()
+                if video:
+                    await self.start_screen_capture()
                 else:
+                    logger.info("Screen capture starts paused: no consumer receives video yet.")
+
+                if not self.audio_enabled:
                     logger.info(
                         "Audio pipeline is disabled, skipping audio capture startup."
                     )
+                elif audio:
+                    await self._start_audio_pipeline()
+                else:
+                    logger.info("Audio capture starts paused: no consumer receives audio yet.")
                 self._running = True
                 try:
                     self.on_pipeline_started()

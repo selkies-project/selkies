@@ -80,6 +80,26 @@ def main() -> bool:
                                env=dict(env, DRINODE="/dev/null"))
         res.check("what the probe is actually given wins",
                   "/dev/null" in given.stderr, given.stderr.strip()[:120])
+
+    # The client-path facts, measured on whatever this machine has: every one
+    # reported, each from its own small vocabulary, and consistent with each
+    # other, since the entrypoint maps them without looking further.
+    probed = subprocess.run([sys.executable, "-m", "selkies.gpu_probe"],
+                            capture_output=True, text=True, timeout=180,
+                            env=dict(os.environ, PYTHONPATH=os.path.join(repo, "src")))
+    facts = dict(line.split("=", 1) for line in probed.stdout.splitlines() if "=" in line)
+    client = ("SELKIES_GPU_GL_VENDOR", "SELKIES_GPU_EGL_X11",
+              "SELKIES_GPU_MESA_DRIVER", "SELKIES_GPU_VULKAN_PRESENTS")
+    res.check("every client-path fact is reported", all(k in facts for k in client), sorted(facts))
+    res.check("Mesa's route is one of native, zink or software",
+              facts.get("SELKIES_GPU_MESA_DRIVER") in ("native", "zink", ""), facts)
+    res.check("whether Vulkan presents is answered only where Zink is Mesa's route",
+              (facts.get("SELKIES_GPU_VULKAN_PRESENTS") in ("true", "false")) == (facts.get("SELKIES_GPU_MESA_DRIVER") == "zink")
+              or facts.get("SELKIES_GPU_VULKAN_PRESENTS") == "", facts)
+    res.check("a GL vendor is only named where a GPU driver was found",
+              not facts.get("SELKIES_GPU_GL_VENDOR") or facts.get("SELKIES_GPU_DRIVER"), facts)
+    res.check("Mesa's native route names Mesa as the vendor",
+              facts.get("SELKIES_GPU_MESA_DRIVER") != "native" or facts.get("SELKIES_GPU_GL_VENDOR") == "mesa", facts)
     return res.summary()
 
 

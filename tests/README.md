@@ -80,7 +80,9 @@ it, so the readers have something to show without a browser.
 
 `tools/wlobs.py` is the pywayland client the Wayland blocks use to prove that
 input reached the compositor seat; `tools/tcp2unix.py` is the reverse proxy the
-Unix-socket suite puts in front of a server with no TCP listener.
+Unix-socket suite puts in front of a server with no TCP listener; and
+`tools/ws_tap.py` is the one the ack-heartbeat suite puts in front of a server
+to log what the client's socket worker sends, which a page-side hook never sees.
 
 ## Packaging
 

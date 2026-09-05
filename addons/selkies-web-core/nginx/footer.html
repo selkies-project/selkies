@@ -17,11 +17,21 @@
             // than assumed: /api/files/ or the legacy /files/, either of them
             // possibly behind a deployment subfolder or a fronting proxy.
             const path = window.location.pathname;
+            // Normalized before searching: behind a fronting proxy the root
+            // can surface without its trailing slash, and both needles end
+            // in one, so the raw path would simply never match.
+            const normPath = path.endsWith('/') ? path : path + '/';
+            // The OUTERMOST match wins, not a fixed preference: preferring
+            // /api/files/ unconditionally mistook /files/api/files/ (a
+            // subdirectory literally named api/files under the legacy mount)
+            // for the /api/files/ root.
+            const idxApi = normPath.indexOf('/api/files/');
+            const idxLegacy = normPath.indexOf('/files/');
             let webPathPrefix = '/api/files/';
-            let idx = path.indexOf(webPathPrefix);
-            if (idx === -1) {
+            let idx = idxApi;
+            if (idxLegacy !== -1 && (idxApi === -1 || idxLegacy < idxApi)) {
                 webPathPrefix = '/files/';
-                idx = path.indexOf(webPathPrefix);
+                idx = idxLegacy;
             }
             const injectedPathPrefix = window.__SELKIES_INJECTED_PATH_PREFIX__ || '';
             const diskPathPrefix = injectedPathPrefix || '';
@@ -45,21 +55,31 @@
             document.querySelectorAll('table#list td a').forEach(function(a) {
                 const href = a.getAttribute('href') || '';
                 if (!href || href.startsWith('?')) return;
-                if (!href.endsWith('/')) {
+                // A sorted listing carries its sort in every link's query,
+                // the parent's included, so a directory is told by the path
+                // ahead of it, and the token joins a query already there.
+                if (!href.split('?')[0].endsWith('/')) {
                     a.setAttribute('download', '');
                 }
                 if (sessionToken) {
-                    a.setAttribute('href', href + '?token=' + encodeURIComponent(sessionToken));
+                    a.setAttribute('href', href + (href.includes('?') ? '&' : '?')
+                        + 'token=' + encodeURIComponent(sessionToken));
                 }
             });
 
-            const isAtRoot = idx !== -1 && path.endsWith(webPathPrefix);
+            // At the root the parent row is an escape hatch out of the tree.
+            // On the nginx /files/ mount its ../ resolves to /, the desktop
+            // page, whose load registers a fresh primary client and kills
+            // the running session; on /api/files/ it merely 404s at /api/.
+            // Wrong either way, so remove the row outright, leaving no way
+            // for a later style or script to bring it back.
+            const isAtRoot = idx !== -1 && idx + webPathPrefix.length === normPath.length;
             if (isAtRoot) {
                 const parentLink = document.querySelector('table#list a[href^="../"]');
                 if (parentLink) {
                     const parentRow = parentLink.closest('tr');
                     if (parentRow) {
-                        parentRow.style.display = 'none';
+                        parentRow.remove();
                     }
                 }
             }

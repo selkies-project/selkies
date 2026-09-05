@@ -82,7 +82,7 @@ fi
 
 # Start Selkies
 exec selkies \
-    --addr="0.0.0.0" \
+    --addr="0.0.0.0,::" \
     --port="${SELKIES_PORT:-${WEB_PORT:-8080}}" \
     --enable-resize="${SELKIES_ENABLE_RESIZE:-true}" \
     "$@"

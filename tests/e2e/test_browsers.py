@@ -3,7 +3,6 @@
 websockets transport (flow, input, clipboard, resize, console health), plus a
 reduced WebRTC flow on Firefox (parity with the Chrome reference) and WebKit."""
 import os
-import platform
 import sys
 import time
 
@@ -12,7 +11,6 @@ import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
 
-from typing import Optional
 
 DECODER_ERROR_PATTERNS = (
     "Failed to load resource", "Unexpected server response:", "ResizeObserver",
@@ -21,40 +19,8 @@ DECODER_ERROR_PATTERNS = (
 )
 
 
-# Persistent profile: Firefox only grants clipboard access to a profile that
-# carries the permission, which a fresh temporary profile never does.
-FF_E2E_PROFILE: str = os.environ.get(
-    "E2E_FIREFOX_PROFILE", os.path.join(H.WORKDIR, "firefox-profile"))
-
-
-def openh264_version() -> Optional[str]:
-    """Version of the OpenH264 GMP side-loaded by tests/tools/fetch-openh264.sh,
-    or None. Without the plugin Firefox answers the offer with the video m-line
-    rejected, so every video, input and clipboard check in the WebRTC block
-    reports the same one absence."""
-    root = os.path.join(FF_E2E_PROFILE, "gmp-gmpopenh264")
-    if not os.path.isdir(root):
-        return None
-    for version in sorted(os.listdir(root), reverse=True):
-        if os.path.isfile(os.path.join(root, version, "libgmpopenh264.so")):
-            return version
-    return None
-
-
-def openh264_prefs() -> dict:
-    """Prefs that point Firefox at the side-loaded plugin. Firefox only scans
-    `gmp-gmpopenh264/<version>` once a pref names that exact version, and the GMP
-    updater is turned off so it does not replace it mid-run."""
-    version = openh264_version()
-    if not version:
-        return {}
-    abi = "aarch64-gcc3" if platform.machine() in ("aarch64", "arm64") else "x86_64-gcc3"
-    return {
-        "media.gmp-gmpopenh264.version": version,
-        "media.gmp-gmpopenh264.abi": abi,
-        "media.gmp-gmpopenh264.lastUpdate": 1,
-        "media.gmp-manager.updateEnabled": False,
-    }
+FF_E2E_PROFILE = C.FF_E2E_PROFILE
+openh264_version = C.openh264_version
 
 
 def engine_launch(p, engine: str):
@@ -65,17 +31,8 @@ def engine_launch(p, engine: str):
         b = C.chromium_launch(p)
         return b, b.new_context(viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1})
     if engine == "firefox":
-        ctx = p.firefox.launch_persistent_context(
-            user_data_dir=FF_E2E_PROFILE, headless=True,
-            viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1},
-            firefox_user_prefs={
-                "media.gmp-gmpopenh264.enabled": True,
-                "media.autoplay.default": 0,
-                "media.autoplay.blocking_policy": 0,
-                "media.autoplay.block-webaudio": False,
-                "dom.events.testing.asyncClipboard": True,
-                **openh264_prefs(),
-            })
+        ctx = C.firefox_persistent_context(
+            p, viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1})
         return None, ctx
     b = getattr(p, engine).launch(headless=True)
     return b, b.new_context(viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1})

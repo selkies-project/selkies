@@ -192,7 +192,7 @@ def main() -> Results:
                    capture_output=True)
 
     print("\n=== Phase A: X11 Computer Use ===", flush=True)
-    pixelflux.start_computer_use(f"127.0.0.1:{CU_PORT}")
+    pixelflux.start_computer_use(str(CU_PORT))
     time.sleep(1.0)
 
     def cu(name: str, payload: dict, pred, detail: str = "") -> None:

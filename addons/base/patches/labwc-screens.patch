@@ -1,5 +1,7 @@
-diff -ruN a/include/output-wl.h b/include/output-wl.h
---- a/include/output-wl.h
+diff --git a/include/output-wl.h b/include/output-wl.h
+new file mode 100644
+index 0000000..7058119
+--- /dev/null
 +++ b/include/output-wl.h
 @@ -0,0 +1,24 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
@@ -26,7 +28,8 @@ diff -ruN a/include/output-wl.h b/include/output-wl.h
 +bool output_wl_remove(struct server *server, const char *output_name);
 +
 +#endif /* LABWC_OUTPUT_WL_H */
-diff -ruN a/src/ipc.c b/src/ipc.c
+diff --git a/src/ipc.c b/src/ipc.c
+index e763d9e..8fc6adf 100644
 --- a/src/ipc.c
 +++ b/src/ipc.c
 @@ -9,9 +9,11 @@
@@ -41,7 +44,7 @@ diff -ruN a/src/ipc.c b/src/ipc.c
  #include "view.h"
  
  #define IPC_BUF_SIZE 4096
-@@ -152,6 +154,36 @@
+@@ -152,6 +154,36 @@ ipc_handle_command(struct ipc_client *client, const char *cmd)
  			char *p = wl_array_add(&buf, 4);
  			memcpy(p, "null", 4);
  		}
@@ -78,10 +81,11 @@ diff -ruN a/src/ipc.c b/src/ipc.c
  	} else {
  		const char *err = "{\"error\":\"unknown command\"}";
  		size_t err_len = strlen(err);
-diff -ruN a/src/meson.build b/src/meson.build
+diff --git a/src/meson.build b/src/meson.build
+index f0f9fc1..fc131f1 100644
 --- a/src/meson.build
 +++ b/src/meson.build
-@@ -15,6 +15,7 @@
+@@ -15,6 +15,7 @@ labwc_sources = files(
    'output.c',
    'output-state.c',
    'output-virtual.c',
@@ -89,8 +93,10 @@ diff -ruN a/src/meson.build b/src/meson.build
    'overlay.c',
    'placement.c',
    'regions.c',
-diff -ruN a/src/output-wl.c b/src/output-wl.c
---- a/src/output-wl.c
+diff --git a/src/output-wl.c b/src/output-wl.c
+new file mode 100644
+index 0000000..cd3783f
+--- /dev/null
 +++ b/src/output-wl.c
 @@ -0,0 +1,64 @@
 +// SPDX-License-Identifier: GPL-2.0-only

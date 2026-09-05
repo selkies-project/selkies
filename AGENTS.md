@@ -112,3 +112,8 @@ Each is documented in full where named; read that before changing the subsystem.
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `src/selkies/webcam.py`,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).
+- What a session starts with is one rule both transports read (`settings.pipeline_starts_on`, the
+  `*_on_start` settings): the server captures only what a page receives and the page requests only what
+  the policy or the user turned on, so nothing is started only to be stopped and a capture nobody receives
+  never runs (`media_pipeline` module docstring, `DataStreamingServer._video_start_state`, each core's
+  `applyStartPolicy`).

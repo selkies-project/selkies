@@ -127,21 +127,49 @@ if [ -z "${SELKIES_GPU_DRIVER-}" ] && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-
   export SELKIES_GPU_DRIVER="nvidia"
 fi
 
-# Hardware OpenGL for the session's applications. Mesa carries no driver for the
-# proprietary NVIDIA stack, so GL there runs through Zink on its Vulkan driver,
-# which needs no render node of its own; every other vendor has a native Mesa
-# driver, and forcing Zink on it would aim Mesa at a device the session does not
-# render on. DISABLE_ZINK=true leaves that GPU to software OpenGL.
-if [ "${SELKIES_GPU_DRIVER-}" != "nvidia" ]; then
-  :
-elif is_true "${DISABLE_ZINK-false}"; then
-  echo 'DISABLE_ZINK is set: OpenGL is not routed through Zink on the NVIDIA GPU'
-else
-  export LIBGL_KOPPER_DRI2="1"
-  export MESA_LOADER_DRIVER_OVERRIDE="zink"
-  export GALLIUM_DRIVER="zink"
-  echo 'NVIDIA GPU: OpenGL runs through Zink on the NVIDIA Vulkan driver'
+# Hardware OpenGL for the session's applications, from what the probe measured
+# of the client paths (selkies-gpu-probe). The framebuffer server brings glamor
+# and DRI3 up on the render node where the compositor's renderer came up
+# (services/xvfb/run), and GLX then goes to the vendor library that drives that
+# node: for Mesa's vendors what glvnd would pick anyway, for a vendor with a
+# client stack of its own the library that renders and presents on the GPU
+# through that DRI3, where a readback into a software server is all it has
+# otherwise. Mesa reaches a GPU it has no driver for through Zink on the Vulkan
+# driver, where that driver could present into a window at all; where it could
+# not, Mesa is left to render in software rather than fail. DISABLE_ZINK=true
+# keeps Zink out either way.
+dri3_server="false"
+if [ -n "${SELKIES_GPU_RENDER_NODE:-}" ] && [ "${SELKIES_GPU_ACCELERATED-}" != "false" ]; then
+  dri3_server="true"
 fi
+if [ "${dri3_server}" = "true" ] && [ -n "${SELKIES_GPU_GL_VENDOR-}" ]; then
+  export __GLX_VENDOR_LIBRARY_NAME="${SELKIES_GPU_GL_VENDOR}"
+  gl_path="GLX on the ${SELKIES_GPU_GL_VENDOR} library through the X server's DRI3"
+else
+  gl_path="GLX through Mesa"
+fi
+gl_path="${gl_path}, EGL on the ${SELKIES_GPU_EGL_X11:-Mesa} library"
+case "${SELKIES_GPU_MESA_DRIVER-}" in
+  native)
+    gl_path="${gl_path}, Mesa on its own driver" ;;
+  zink)
+    if is_true "${DISABLE_ZINK-false}"; then
+      gl_path="${gl_path}, Mesa in software (DISABLE_ZINK is set)"
+    elif [ "${SELKIES_GPU_VULKAN_PRESENTS-}" = "false" ]; then
+      gl_path="${gl_path}, Mesa in software: the Vulkan driver cannot present into a window"
+    else
+      export MESA_LOADER_DRIVER_OVERRIDE="zink"
+      export GALLIUM_DRIVER="zink"
+      # Zink presents through DRI3 where the X server has it; the software
+      # framebuffer server has the DRI2 path only.
+      [ "${dri3_server}" = "true" ] || export LIBGL_KOPPER_DRI2="1"
+      gl_path="${gl_path}, Mesa through Zink on the Vulkan driver"
+    fi ;;
+  *)
+    gl_path="${gl_path}, Mesa in software" ;;
+esac
+[ -z "${SELKIES_GPU_DRIVER-}" ] || echo "GL: ${gl_path}"
+unset dri3_server gl_path
 
 # A GPU the compositor cannot reach is a reason to run X11 instead, where the
 # session still gets it through Zink or the X server's own render node
@@ -150,8 +178,8 @@ fi
 # derived from the backend: the display, the session type and the toolkit
 # defaults all follow it. SELKIES_WAYLAND_X11_FALLBACK=false keeps Wayland and
 # composites in software, which shares no dmabuf, so a GL client aimed at the
-# Vulkan driver would produce buffers it cannot accept — the Zink override goes
-# with it.
+# Vulkan driver would produce buffers it cannot accept — the Zink override and
+# the NVIDIA GLX routing go with it.
 if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ] \
    && [ "${SELKIES_GPU_ACCELERATED-}" = "false" ]; then
   if is_true "${SELKIES_WAYLAND_X11_FALLBACK-true}"; then
@@ -159,7 +187,7 @@ if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ] \
     export SELKIES_WAYLAND="false"
   else
     echo 'GPU: the compositor cannot reach it; compositing in software'
-    unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
+    unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 __GLX_VENDOR_LIBRARY_NAME
   fi
 fi
 

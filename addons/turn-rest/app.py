@@ -8,7 +8,11 @@ A minimal Flask app implementing the TURN REST API: it mints time-limited
 HMAC-SHA1 credentials (coturn's ``use-auth-secret`` scheme) from a shared
 secret, optionally gated behind an API key, and returns the TURN URI list a
 WebRTC client feeds into its RTCPeerConnection configuration. All deployment
-knobs come from `TURN_*` environment variables read at import time.
+knobs come from `TURN_*` environment variables read at import time. Run
+directly, the development server listens on `TURN_REST_ADDR` (host names or
+addresses, comma-separated, the loopback addresses by default) at
+`TURN_REST_PORT` (8008); the container's gunicorn command is what a deployment
+runs.
 """
 
 from flask import Flask, request, jsonify
@@ -152,5 +156,65 @@ def turn_rest():
 
     return jsonify(rtc_config)
 
+def _development_servers(addr: str, port: int) -> list:
+    """One werkzeug server per address `addr` names.
+
+    `addr` is a host name or address, or a comma-separated list of them, each
+    bound on every address it resolves to. The sockets are bound here rather
+    than by werkzeug, which serves one address per server and leaves an IPv6
+    socket dual-stack, so `0.0.0.0,::` would collide on the port. An address
+    the host lacks is skipped while another binds; anything else, or nothing
+    binding, raises.
+
+    Raises:
+        OSError: When no address of `addr` can be bound.
+    """
+    import errno
+    import socket
+    from werkzeug.serving import make_server
+
+    candidates = []
+    for host in (h.strip() for h in addr.split(',')):
+        if not host:
+            continue
+        for family, _, _, _, sockaddr in socket.getaddrinfo(
+                host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE):
+            if (family, sockaddr) not in candidates:
+                candidates.append((family, sockaddr))
+    servers = []
+    skipped = []
+    for family, sockaddr in candidates:
+        sock = None
+        try:
+            sock = socket.socket(family, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            sock.bind(sockaddr)
+            sock.listen(128)
+        except OSError as exc:
+            if sock is not None:
+                sock.close()
+            if exc.errno not in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT):
+                raise
+            skipped.append(f"{sockaddr[0]} ({exc.strerror})")
+            continue
+        # werkzeug duplicates the descriptor, so this socket object can go.
+        with sock:
+            servers.append(make_server(sockaddr[0], sockaddr[1], app, threaded=True, fd=sock.fileno()))
+    if not servers:
+        raise OSError(f"no address of '{addr}' is available to listen on: {', '.join(skipped)}")
+    for note in skipped:
+        print(f"Not listening on {note}", flush=True)
+    return servers
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port="8008")
+    import threading
+
+    listen_port = parse_port(os.environ.get('TURN_REST_PORT'), 8008)
+    for server in _development_servers(os.environ.get('TURN_REST_ADDR') or 'localhost', listen_port):
+        host = server.host if ':' not in server.host else f"[{server.host}]"
+        print(f"TURN REST server listening on http://{host}:{server.port}", flush=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Event().wait()

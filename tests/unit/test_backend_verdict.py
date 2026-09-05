@@ -32,18 +32,28 @@ import helpers as H  # noqa: E402
 from selkies import gpu_probe as GP  # noqa: E402
 
 FACTS_BLOCK = 'gpu_status=0\ngpu_facts="$(timeout 60 selkies-gpu-probe)"'
-GL_BLOCK = 'if [ "${SELKIES_GPU_DRIVER-}" != "nvidia" ]; then'
+GL_BLOCK = 'dri3_server="false"'
 BACKEND_BLOCK = 'if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ]'
 STATE = ('echo "WAYLAND=${SELKIES_WAYLAND:-unset} GL=${GALLIUM_DRIVER:-unset}'
+         ' GLX=${__GLX_VENDOR_LIBRARY_NAME:-unset} DRI2=${LIBGL_KOPPER_DRI2:-unset}'
          ' DRIVER=${SELKIES_GPU_DRIVER:-unset} NODE=${SELKIES_GPU_RENDER_NODE:-unset}'
          ' ACCEL=${SELKIES_GPU_ACCELERATED:-unset} PRESENT=${SELKIES_GPU_PRESENT:-unset}"')
+# The client-path facts the probe measures: a vendor with a client stack of its
+# own on a node Mesa reaches through Zink, and a vendor Mesa drives itself.
+VENDOR_PATHS = ('echo SELKIES_GPU_GL_VENDOR=nvidia; echo SELKIES_GPU_EGL_X11=mesa; '
+                'echo SELKIES_GPU_MESA_DRIVER=zink; echo SELKIES_GPU_VULKAN_PRESENTS=true')
+MESA_PATHS = ('echo SELKIES_GPU_GL_VENDOR=mesa; echo SELKIES_GPU_EGL_X11=mesa; '
+              'echo SELKIES_GPU_MESA_DRIVER=native; echo SELKIES_GPU_VULKAN_PRESENTS=')
 
 NVIDIA_FACTS = ('echo SELKIES_GPU_RENDER_NODE=/dev/dri/renderD128; echo SELKIES_GPU_DRIVER=nvidia; '
-                'echo SELKIES_GPU_PRESENT=true; echo SELKIES_GPU_ACCELERATED=true')
+                'echo SELKIES_GPU_PRESENT=true; echo SELKIES_GPU_ACCELERATED=true; ' + VENDOR_PATHS)
 INTEL_FACTS = ('echo SELKIES_GPU_RENDER_NODE=/dev/dri/renderD128; echo SELKIES_GPU_DRIVER=i915; '
-               'echo SELKIES_GPU_PRESENT=true; echo SELKIES_GPU_ACCELERATED=true')
+               'echo SELKIES_GPU_PRESENT=true; echo SELKIES_GPU_ACCELERATED=true; ' + MESA_PATHS)
 UNREACHABLE_FACTS = ('echo SELKIES_GPU_RENDER_NODE=; echo SELKIES_GPU_DRIVER=nvidia; '
-                     'echo SELKIES_GPU_PRESENT=true; echo SELKIES_GPU_ACCELERATED=false')
+                     'echo SELKIES_GPU_PRESENT=true; echo SELKIES_GPU_ACCELERATED=false; ' + VENDOR_PATHS)
+HELD_NODE_FACTS = ('echo SELKIES_GPU_RENDER_NODE=/dev/dri/renderD128; echo SELKIES_GPU_DRIVER=nvidia; '
+                   'echo SELKIES_GPU_PRESENT=true; echo SELKIES_GPU_ACCELERATED=false; ' + VENDOR_PATHS)
+UNPRESENTABLE_FACTS = NVIDIA_FACTS.replace("VULKAN_PRESENTS=true", "VULKAN_PRESENTS=false")
 NO_GPU_FACTS = ('echo SELKIES_GPU_RENDER_NODE=; echo SELKIES_GPU_DRIVER=; '
                 'echo SELKIES_GPU_PRESENT=false; echo SELKIES_GPU_ACCELERATED=false')
 
@@ -92,8 +102,11 @@ def run(stub: str = "exit 1", env: Optional[dict] = None,
             ["bash", script], capture_output=True, text=True, timeout=120,
             env=dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"],
                      GALLIUM_DRIVER="", MESA_LOADER_DRIVER_OVERRIDE="", LIBGL_KOPPER_DRI2="",
+                     __GLX_VENDOR_LIBRARY_NAME="",
                      SELKIES_GPU_DRIVER="", SELKIES_GPU_RENDER_NODE="",
                      SELKIES_GPU_PRESENT="", SELKIES_GPU_ACCELERATED="",
+                     SELKIES_GPU_GL_VENDOR="", SELKIES_GPU_EGL_X11="",
+                     SELKIES_GPU_MESA_DRIVER="", SELKIES_GPU_VULKAN_PRESENTS="",
                      **(env or {})))
         lines = [ln for ln in out.stdout.strip().splitlines() if ln]
         return {"state": lines[-1] if lines else "", "said": out.stdout, "rc": out.returncode}
@@ -136,31 +149,50 @@ res.check("no report at all falls back to the driver's own devices",
 res.check("and leaves the backend as it was asked for",
           "WAYLAND=true" in silent["state"], silent["state"])
 
-# --- the GL stack, which follows that GPU ---------------------------------
-res.check("a session rendering on NVIDIA runs GL through Zink",
-          "GL=zink" in run(NVIDIA_FACTS, WAYLAND)["state"])
-res.check("a session rendering on another vendor keeps Mesa's own driver",
-          "GL=unset" in run(INTEL_FACTS, WAYLAND)["state"])
+# --- the GL stack, which follows the probe's client-path facts ------------
+vendor = run(NVIDIA_FACTS, WAYLAND)
+res.check("a vendor with a client stack of its own gets GLX on it through the server's DRI3",
+          "GLX=nvidia" in vendor["state"] and "GL=zink" in vendor["state"]
+          and "DRI2=unset" in vendor["state"], vendor["state"])
+res.check("and the log names both paths",
+          "GLX on the nvidia library" in vendor["said"] and "through Zink" in vendor["said"],
+          vendor["said"].strip()[:120])
+mesa = run(INTEL_FACTS, WAYLAND)
+res.check("a vendor Mesa drives itself keeps Mesa's own driver, GLX on Mesa",
+          "GL=unset" in mesa["state"] and "GLX=mesa" in mesa["state"], mesa["state"])
+held = run(HELD_NODE_FACTS, {"SELKIES_WAYLAND": "false"})
+res.check("a node the renderer did not come up on gives no DRI3 server: GLX stays on Mesa, Zink copies",
+          "GLX=unset" in held["state"] and "GL=zink" in held["state"] and "DRI2=1" in held["state"],
+          held["state"])
+unpresentable = run(UNPRESENTABLE_FACTS, WAYLAND)
+res.check("a Vulkan driver that cannot present into a window leaves Mesa in software",
+          "GL=unset" in unpresentable["state"] and "GLX=nvidia" in unpresentable["state"],
+          unpresentable["state"])
+res.check("and says so", "cannot present" in unpresentable["said"], unpresentable["said"].strip()[:120])
 opted_out = run(NVIDIA_FACTS, dict(WAYLAND, DISABLE_ZINK="true"))
-res.check("DISABLE_ZINK drops the Zink half and keeps the GPU",
-          "GL=unset" in opted_out["state"] and "DRIVER=nvidia" in opted_out["state"],
+res.check("DISABLE_ZINK drops the Zink half and keeps the GPU's own GLX",
+          "GL=unset" in opted_out["state"] and "GLX=nvidia" in opted_out["state"],
           opted_out["state"])
-res.check("and says the opt-out is what left the GPU behind",
-          "DISABLE_ZINK is set" in opted_out["said"], opted_out["said"].strip()[:90])
+res.check("and says the opt-out is what left Mesa in software",
+          "DISABLE_ZINK is set" in opted_out["said"], opted_out["said"].strip()[:120])
+# With no GPU in the report the device-node fallback still answers for this host.
+res.check("no GPU at all says nothing about GL",
+          ("GL:" in run(NO_GPU_FACTS, WAYLAND)["said"]) == nvidia_here)
 
 # --- the backend, which follows it too ------------------------------------
 res.check("a GPU the compositor reached keeps the session on Wayland",
           "WAYLAND=true" in run(NVIDIA_FACTS, WAYLAND)["state"])
 unreachable = run(UNREACHABLE_FACTS, WAYLAND)
-res.check("a GPU it cannot reach moves the session to X11, which still has it",
-          "WAYLAND=false" in unreachable["state"] and "GL=zink" in unreachable["state"],
+res.check("a GPU it cannot reach moves the session to X11, which still has it through Zink's copy path",
+          "WAYLAND=false" in unreachable["state"] and "GL=zink" in unreachable["state"]
+          and "DRI2=1" in unreachable["state"] and "GLX=unset" in unreachable["state"],
           unreachable["state"])
 res.check("and says why", "cannot reach it" in unreachable["said"],
           unreachable["said"].strip()[:110])
 software = run(UNREACHABLE_FACTS, dict(WAYLAND, SELKIES_WAYLAND_X11_FALLBACK="false"))
 res.check("a session that declined X11 composites in software, GL included",
-          "WAYLAND=true" in software["state"] and "GL=unset" in software["state"],
-          software["state"])
+          "WAYLAND=true" in software["state"] and "GL=unset" in software["state"]
+          and "GLX=unset" in software["state"], software["state"])
 res.check("no GPU at all leaves the session where it is",
           "WAYLAND=true" in run(NO_GPU_FACTS, WAYLAND)["state"])
 res.check("an X11 session is never moved",

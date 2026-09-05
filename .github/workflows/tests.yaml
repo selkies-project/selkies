@@ -168,7 +168,7 @@ jobs:
             libcairo2-dev libdisplay-info-dev libdrm-dev libgbm-dev libglib2.0-dev \
             libglvnd-dev libinput-dev liblcms2-dev libliftoff-dev libpango1.0-dev \
             libpixman-1-dev libpng-dev librsvg2-dev libseat-dev libudev-dev libvulkan-dev \
-            libffi-dev libexpat1-dev \
+            libffi-dev libexpat1-dev libxml2-dev bison libevdev-dev libmtdev-dev \
             libwayland-dev libxcb1-dev libxcb-composite0-dev libxcb-dri3-dev libxcb-ewmh-dev \
             libxcb-icccm4-dev libxcb-present-dev libxcb-randr0-dev libxcb-render0-dev \
             libxcb-render-util0-dev libxcb-res0-dev libxcb-shape0-dev libxcb-shm0-dev \

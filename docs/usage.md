@@ -42,7 +42,7 @@ Clipboard behaviour is controlled by the server option `SELKIES_ENABLE_CLIPBOARD
 
 The side menu's files section uploads files into the session and browses the same directory for downloads. Both directions are on by default; `--file-transfers` (`SELKIES_FILE_TRANSFERS`) narrows them to `upload`, to `download`, or to `none`, and a read-only viewer is refused uploads whatever the setting says.
 
-`--file-manager-path` (`FILE_MANAGER_PATH`, default `~/Desktop`) is the directory both directions use, created at startup when missing. Transfers are paced against the video stream so a large one does not stall the session; `--file-transfer-limit-mbps` adds a fixed cap for links whose rate that pacing cannot measure, such as behind a reverse proxy.
+`--file-manager-path` (`FILE_MANAGER_PATH`, default `~/Desktop`) is the directory both directions use, created at startup when missing. Transfers in either direction are paced against the video stream so a large one does not stall the session, measured end to end so a reverse proxy in front changes nothing; `--file-transfer-limit-mbps` adds a fixed cap on top for operators who want one.
 
 ## Session Sharing
 
@@ -65,6 +65,10 @@ Both send a local device into the session, are off by default, and need a secure
 
 - **Microphone** (`--microphone-enabled` / `SELKIES_MICROPHONE_ENABLED`) publishes the browser's microphone as an ordinary PulseAudio source in the session, so applications record it like any capture device. It rides the audio path, so `--audio-enabled=false` disables it as well.
 - **Webcam** (`--webcam-enabled` / `SELKIES_WEBCAM_ENABLED`) publishes the browser's camera as a V4L2 capture device. How applications reach it, and what each of its sinks needs, is in [V4L2 Interposer](component.md#v4l2-interposer).
+
+## What a Session Starts With
+
+A session starts with video, audio and gamepad input on, and the microphone and webcam off; each is then toggled from the side menu. The `--video-on-start`, `--audio-on-start`, `--microphone-on-start`, `--webcam-on-start` and `--gamepad-on-start` settings (`SELKIES_VIDEO_ON_START` and so on) change that start state for a session's primary page: an image that should open silent sets `--audio-on-start=false`, one that should ask for the camera at once sets `--webcam-on-start=true` alongside `--webcam-enabled=true`. Whatever starts off is not captured at all until it is turned on, on either transport: no screen or audio capture runs for a page that does not receive it, a microphone or webcam is not asked for, and gamepads are not polled. A toggle made during the session wins over the start state, a shared viewer and a second display page always start their stream, and the gamepad toggle's choice is remembered by the browser.
 
 ## Command-Line Options and Environment Variables
 

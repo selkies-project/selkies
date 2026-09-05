@@ -28,7 +28,7 @@
  * and `0x05` gzipped large text once the server echoed `_gz,1`. Text messages
  * are control. The client sends `SETTINGS,{json}`, `r,WxH,displayId`,
  * `START_VIDEO`, `STOP_VIDEO`, `START_AUDIO`, `STOP_AUDIO`,
- * `REQUEST_KEYFRAME`, `CLIENT_FRAME_ACK <id>`, `cr`, `REQUEST_CLIPBOARD`, the
+ * `REQUEST_KEYFRAME`, `CLIENT_FRAME_ACK <id> <heldMs>`, `cr`, `REQUEST_CLIPBOARD`, the
  * chunked clipboard upload of lib/clipboard-worker-bridge.js,
  * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>`,
  * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
@@ -110,6 +110,7 @@ import {
   digestedPayload
 } from './lib/clipboard-sync.js';
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js';
+import { streamDensity as streamDensityOf } from './lib/stream-density.js';
 import {
   createFileUploader
 } from './lib/file-upload.js';
@@ -291,8 +292,24 @@ let isGamepadEnabled;
 let lastReceivedVideoFrameId = -1;
 /** When that id arrived, so an ack can report how long it was held. */
 let lastReceivedVideoFrameAt = 0;
+/** Newest id the page path acked, and when: an unchanged one repeats on the heartbeat. */
+let lastAckSentId = -1, lastAckSentAt = 0;
 let initializationComplete = false;
 let audioEnabled = true;
+/**
+ * Pipelines the user has toggled on this connection. The session's start
+ * policy (the server's `*_on_start` settings) is applied once per connection,
+ * by `applyStartPolicy` on its first server_settings payload, and never over
+ * a choice already made here.
+ */
+let pipelinesToggledByUser = new Set();
+/** Whether this connection's first server_settings payload has been applied.
+ * The initial audio request waits for it, so a policy of audio off acts
+ * before anything was requested rather than stopping a stream just started. */
+let serverSettingsReceived = false;
+/** Initialization wanted audio before the settings payload arrived; the
+ * payload handler resolves it. */
+let pendingInitialAudioStart = false;
 let microphoneEnabled = true;
 let webcamEnabled = true;
 let webcamCapture = null;
@@ -357,6 +374,14 @@ const SHARED_STALL_TIMEOUT_MS = 3000;
 const SHARED_STALL_MAX_BACKOFF_MS = 30000;
 const METRICS_INTERVAL_MS = 500;
 const BACKPRESSURE_INTERVAL_MS = 50;
+/**
+ * How often an unchanged frame id is re-acked. The server reads a frame left
+ * unanswered for four seconds as a stalled client, and a damage-gated capture
+ * sends nothing while the screen is still, so the repeat is what tells an idle
+ * client apart from a dead one; the server takes only the first ack of an id
+ * as a round trip.
+ */
+const ACK_HEARTBEAT_MS = 1000;
 /** How often the socket worker re-reports a draining send buffer. */
 const BUFFERED_DRAIN_MS = 20;
 /**
@@ -396,6 +421,32 @@ let stripeDecodeSoftErrors = {};
 let wakeLockSentinel = null;
 let currentEncoderMode = 'h264enc-striped';
 let useCssScaling = false;
+/** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
+function streamDensity() {
+  return streamDensityOf({ displayId, layouts: latestDisplayLayouts, useCssScaling, shared: isSharedMode });
+}
+/** The density the last request was built on; a change re-requests on a secondary. */
+let appliedStreamDensity = 0;
+/** The density the last SETTINGS reported as the display scale. */
+let reportedStreamDensity = 0;
+/** The last automatic request, as stream pixels and the CSS size it was built from. */
+let lastRequestedStreamRes = null;
+/**
+ * Hands the density to the input layer and, on a secondary whose density
+ * moved with the primary's, requests the stream at it again.
+ */
+function followStreamDensity() {
+  const density = streamDensity();
+  if (window.webrtcInput && window.webrtcInput.setStreamDensity) {
+    window.webrtcInput.setStreamDensity(density);
+  }
+  const changed = appliedStreamDensity > 0 && Math.abs(density - appliedStreamDensity) > 1e-6;
+  appliedStreamDensity = density;
+  if (changed && displayId !== 'primary' && !window.manual_resolution && handleResizeUI_globalRef) {
+    console.log(`Stream density follows the primary: ${density}.`);
+    handleResizeUI_globalRef();
+  }
+}
 let trackpadMode = false;
 let scalingDPI = 96;
 /** `scaling_dpi` stops in 25% steps; densities between them snap to the nearest. */
@@ -479,7 +530,25 @@ let enable_binary_clipboard = true;
  * Server-clipboard cache, change-only sync and Ctrl/Cmd+C request queue
  * (lib/clipboard-sync.js); the send hook late-binds `websocket`.
  */
+/**
+ * Whether this is a Chromium engine (not the WebKit-backed iOS Chrome): the
+ * userAgentData brands are the authoritative signal, `window.chrome` the
+ * fallback for older engines.
+ */
+const isChromium = (() => {
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
+  const isCriOS = /CriOS/.test(navigator.userAgent);
+  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+  const isChromiumBrand = brands.some((b) => /Chromium|Google Chrome/.test(b.brand));
+  const hasChromeObj = typeof window.chrome !== 'undefined';
+  return (isChromiumBrand || hasChromeObj) && !isIOS && !isFirefox && !isCriOS;
+})();
+
 const clipboardSync = createClipboardSync({
+    isChromium,
+    canRead: () => !!clipboard_in_enabled,
     sendRequest: () => {
         if (websocket && websocket.readyState === WebSocket.OPEN) {
             websocket.send('REQUEST_CLIPBOARD');
@@ -1066,21 +1135,6 @@ const alignResolution = (num) => {
   return Math.floor(num / alignment) * alignment;
 };
 
-/**
- * Whether this is a Chromium engine (not the WebKit-backed iOS Chrome): the
- * userAgentData brands are the authoritative signal, `window.chrome` the
- * fallback for older engines.
- */
-const isChromium = (() => {
-  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const isFirefox = /Firefox|FxiOS/.test(navigator.userAgent);
-  const isCriOS = /CriOS/.test(navigator.userAgent);
-  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
-  const isChromiumBrand = brands.some((b) => /Chromium|Google Chrome/.test(b.brand));
-  const hasChromeObj = typeof window.chrome !== 'undefined';
-  return (isChromiumBrand || hasChromeObj) && !isIOS && !isFirefox && !isCriOS;
-})();
 
 /**
  * Whether the page has MediaStreamTrackGenerator (Chromium only). The standard
@@ -2261,7 +2315,7 @@ const updateCanvasImageRendering = () => {
     return;
   }
   const dpr = window.devicePixelRatio || 1;
-  if (isSharedMode || window.manual_resolution || (useCssScaling && dpr > 1)) {
+  if (isSharedMode || window.manual_resolution || Math.abs(streamDensity() - dpr) > 1e-6) {
     if (canvas.style.imageRendering !== 'auto') {
       console.log("Smoothing enabled for manual resolution, high-DPR scaling, or shared mode.");
       canvas.style.imageRendering = 'auto';
@@ -2451,17 +2505,6 @@ function sendFullSettingsUpdateToServer(reason) {
 }
 
 /**
- * Builds the SETTINGS payload. Only keys with a stored (user-set) value are
- * included, so the fallbacks here never override server-configured defaults
- * for an untouched setting; `scaling_dpi` is the exception, being
- * client-authoritative (the derived default or the dashboard's pick, sent
- * live so it reaches the running server; the desktop DPI is independent of
- * the resolution). The payload also carries the keyboard layout, the client
- * geometry or manual resolution, the display identity and the audio-RED
- * capability that makes the server enable Opus redundancy.
- * @returns {Object<string, *>}
- */
-/**
  * This page's remote pixels per CSS pixel, reported so a neighboring display
  * can scale a cross-display drag's travel over this one: the presented stream
  * box where one is measurable (manual mode scales it freely), else the device
@@ -2482,9 +2525,21 @@ function currentDisplayScale(dpr) {
     return dpr;
 }
 
+/**
+ * Builds the SETTINGS payload. Only keys with a stored (user-set) value are
+ * included, so the fallbacks here never override server-configured defaults
+ * for an untouched setting; `scaling_dpi` is the exception, being
+ * client-authoritative (the derived default or the dashboard's pick, sent
+ * live so it reaches the running server; the desktop DPI is independent of
+ * the resolution). The payload also carries the keyboard layout, the client
+ * geometry or manual resolution, the display identity and the audio-RED
+ * capability that makes the server enable Opus redundancy.
+ * @returns {Object<string, *>}
+ */
 function getCurrentSettingsPayload() {
     const settingsToSend = {};
-    const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+    const dpr = streamDensity();
+    reportedStreamDensity = dpr;
     const hasStoredParam = (key) => {
         let finalKey = `${storageAppName}_${key}`;
         if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
@@ -2588,13 +2643,26 @@ function sendResolutionToServer(width, height) {
     realWidth = alignResolution(width);
     realHeight = alignResolution(height);
   } else {
-    dprUsed = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+    dprUsed = streamDensity();
+    appliedStreamDensity = dprUsed;
+    if (window.webrtcInput && window.webrtcInput.setStreamDensity) {
+      window.webrtcInput.setStreamDensity(dprUsed);
+    }
     realWidth = alignResolution(width * dprUsed);
     realHeight = alignResolution(height * dprUsed);
+    // A request at a density the last SETTINGS did not report: the layout
+    // carries the reported scale to the other pages, so it is sent again.
+    if (reportedStreamDensity > 0 && Math.abs(dprUsed - reportedStreamDensity) > 1e-6) {
+      setTimeout(() => sendFullSettingsUpdateToServer('stream density'), 0);
+    }
   }
 
+  // A capped request no longer equals the CSS size times the density, so the
+  // realized size counts as a divergence for it.
+  const capped = realWidth > 4080 || realHeight > 4080;
   if (realWidth > 4080) realWidth = 4080;
   if (realHeight > 4080) realHeight = 4080;
+  lastRequestedStreamRes = (window.manual_resolution || capped) ? null : [realWidth, realHeight, width, height];
 
   const resString = `${realWidth}x${realHeight}`;
   console.log(`Sending resolution to server: ${resString}, DisplayID: ${displayId}, Manual Mode: ${window.manual_resolution}, Pixel Ratio Used: ${dprUsed}, useCssScaling: ${useCssScaling}`);
@@ -2659,7 +2727,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
   canvasGeomDirty = true;
   lastDrawnJpegStripeFrameId = {};
 
-  const dpr = (isSharedMode || window.manual_resolution || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+  const dpr = (isSharedMode || window.manual_resolution) ? 1 : streamDensity();
   const internalBufferWidth = alignResolution(targetWidth * dpr);
   const internalBufferHeight = alignResolution(targetHeight * dpr);
 
@@ -2751,7 +2819,7 @@ function resetCanvasStyle(streamWidth, streamHeight) {
   lastDrawnJpegStripeFrameId = {};
   canvasGeomDirty = true;
 
-  const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1); 
+  const dpr = streamDensity();
   const internalBufferWidth = alignResolution(streamWidth * dpr);
   const internalBufferHeight = alignResolution(streamHeight * dpr);
 
@@ -3487,12 +3555,17 @@ function debounce(func, delay) {
   };
 }
 
+/** Hides the status bar and start button: a frame arrived, or the page is up with no stream to wait for. */
+function hideStreamOverlay() {
+  if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
+  if (playButtonElement) playButtonElement.classList.add('hidden');
+}
+
 /** Marks the stream as started and hides the status bar and start button. */
 const startStream = () => {
   if (streamStarted) return;
   streamStarted = true;
-  if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
-  if (playButtonElement) playButtonElement.classList.add('hidden');
+  hideStreamOverlay();
   console.log("Stream started (UI elements hidden).");
 };
 
@@ -3645,7 +3718,9 @@ const initializeInput = () => {
     let evenWidth = alignResolution(windowResolution[0]);
     let evenHeight = alignResolution(windowResolution[1]);
 
-    const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+    const dpr = streamDensity();
+    appliedStreamDensity = dpr;
+    if (inputInstance && inputInstance.setStreamDensity) inputInstance.setStreamDensity(dpr);
     const MAX_DIM = 4080;
     
     if (evenWidth * dpr > MAX_DIM) {
@@ -3797,6 +3872,81 @@ async function applyOutputDevice() {
 
 window.addEventListener('message', receiveMessage, false);
 
+/** Applies the gamepad toggle to the manager's polling; a shared page always polls. */
+function applyGamepadPolling() {
+  const manager = window.webrtcInput && window.webrtcInput.gamepadManager;
+  if (!manager) {
+    console.warn("Client: window.webrtcInput.gamepadManager not found; cannot apply the gamepad toggle.");
+    return;
+  }
+  if (isSharedMode || isGamepadEnabled) {
+    manager.enable();
+    console.log(isSharedMode ? "Shared mode: GamepadManager polling stays active." : "Gamepad toggle ON. Enabling GamepadManager polling.");
+  } else {
+    manager.disable();
+    console.log("Gamepad toggle OFF. Disabling GamepadManager polling.");
+  }
+}
+
+/**
+ * Applies the session's start policy from a connection's first
+ * server_settings payload: the `*_on_start` settings say which pipelines
+ * this page starts with. Only a session owner's primary display page is
+ * governed (a shared viewer cannot switch video or audio on, and a second
+ * display page exists to show its display), and a pipeline the user already
+ * toggled keeps that choice. Video and audio off are applied before anything
+ * was requested, and the server starts neither for this page; the
+ * microphone and webcam start their uplinks; the gamepad policy seeds a
+ * toggle the browser has not persisted.
+ * @param {Object<string, {value: *, locked?: boolean}>} serverSettings
+ */
+function applyStartPolicy(serverSettings) {
+  if (isSharedMode || displayId !== 'primary') return;
+  const setting = (key) => (serverSettings && serverSettings[key]) || null;
+  const startsOn = (key, fallback) => {
+    const s = setting(key);
+    return (s && typeof s.value === 'boolean') ? s.value : fallback;
+  };
+  const lockedOff = (key) => {
+    const s = setting(key);
+    return !!(s && s.value === false && s.locked);
+  };
+  const untouched = (pipeline) => !pipelinesToggledByUser.has(pipeline);
+  let sidebarChanged = false;
+  if (untouched('video') && !startsOn('video_on_start', true) && isVideoPipelineActive) {
+    isVideoPipelineActive = false;
+    hideStreamOverlay();
+    window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
+    sidebarChanged = true;
+  }
+  // audio_enabled=false wins: the held START_AUDIO still goes out so the
+  // server's AUDIO_DISABLED reply tears the workers down.
+  const audioDisabledByServer = startsOn('audio_enabled', true) === false;
+  if (untouched('audio') && !startsOn('audio_on_start', true) && !audioDisabledByServer && isAudioPipelineActive) {
+    isAudioPipelineActive = false;
+    window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
+    if (audioDecoderWorker) audioDecoderWorker.postMessage({ type: 'updatePipelineStatus', data: { isActive: false } });
+    if (websocket && websocket.setAudioActive) websocket.setAudioActive(false);
+    sidebarChanged = true;
+  }
+  if (untouched('microphone') && startsOn('microphone_on_start', false) && microphoneEnabled && !lockedOff('microphone_enabled')) {
+    startMicrophoneCapture();
+  }
+  if (untouched('webcam') && startsOn('webcam_on_start', false) && webcamEnabled && !lockedOff('webcam_enabled')) {
+    startWebcamCapture();
+  }
+  const gamepadStored = window.localStorage.getItem(`${storageAppName}_isGamepadEnabled`) !== null;
+  if (untouched('gamepad') && !gamepadStored) {
+    const wanted = startsOn('gamepad_on_start', true);
+    if (isGamepadEnabled !== wanted) {
+      isGamepadEnabled = wanted;
+      applyGamepadPolling();
+      sidebarChanged = true;
+    }
+  }
+  if (sidebarChanged) postSidebarButtonUpdate();
+}
+
 /** Posts `sidebarButtonStatusUpdate` with the state of every pipeline toggle to the dashboards. */
 function postSidebarButtonUpdate() {
   const updatePayload = {
@@ -3919,6 +4069,7 @@ function receiveMessage(event) {
         if (window.webrtcInput && typeof window.webrtcInput.updateCssScaling === 'function') {
           window.webrtcInput.updateCssScaling(useCssScaling);
         }
+        followStreamDensity();
         if (changed) {
           updateCanvasImageRendering();
           if (window.manual_resolution && manual_width != null && manual_height != null) {
@@ -4095,6 +4246,7 @@ function receiveMessage(event) {
           console.log("Shared mode: Video pipelineControl blocked.");
           break;
         }
+        pipelinesToggledByUser.add('video');
         if (isVideoPipelineActive !== desiredState) {
           isVideoPipelineActive = desiredState;
           stateChangedFromControl = true;
@@ -4119,6 +4271,10 @@ function receiveMessage(event) {
           }
         }
       } else if (pipeline === 'audio') {
+        if (isSharedMode) {
+            console.log("Shared mode: Audio pipeline control blocked.");
+            break;
+        }
         if (displayId !== 'primary') {
             console.log("Secondary display: Audio control blocked.");
             break;
@@ -4127,6 +4283,7 @@ function receiveMessage(event) {
           console.log("Audio is disabled. Audio pipeline control blocked.");
           break;
         }
+        pipelinesToggledByUser.add('audio');
         if (isAudioPipelineActive !== desiredState) {
           isAudioPipelineActive = desiredState;
           stateChangedFromControl = true;
@@ -4150,6 +4307,7 @@ function receiveMessage(event) {
           console.log("Microphone is disabled. Microphone pipeline control blocked.");
           break;
         }
+        pipelinesToggledByUser.add('microphone');
         if (desiredState) {
           startMicrophoneCapture();
         } else {
@@ -4164,6 +4322,7 @@ function receiveMessage(event) {
           console.log("Webcam is disabled. Webcam pipeline control blocked.");
           break;
         }
+        pipelinesToggledByUser.add('webcam');
         if (desiredState) {
           startWebcamCapture();
         } else {
@@ -4215,26 +4374,12 @@ function receiveMessage(event) {
     case 'gamepadControl':
       console.log(`Received gamepad control message: enabled=${message.enabled}`);
       const newGamepadState = message.enabled;
+      pipelinesToggledByUser.add('gamepad');
       if (isGamepadEnabled !== newGamepadState) {
         isGamepadEnabled = newGamepadState;
         setBoolParam('isGamepadEnabled', isGamepadEnabled);
         postSidebarButtonUpdate();
-        if (window.webrtcInput && window.webrtcInput.gamepadManager) {
-            if (isSharedMode) {
-                window.webrtcInput.gamepadManager.enable();
-                console.log("Shared mode: Gamepad control message received, ensuring its GamepadManager remains active for polling.");
-            } else {
-                if (isGamepadEnabled) {
-                    window.webrtcInput.gamepadManager.enable();
-                    console.log("Primary mode: Gamepad toggle ON. Enabling GamepadManager polling.");
-                } else {
-                    window.webrtcInput.gamepadManager.disable();
-                    console.log("Primary mode: Gamepad toggle OFF. Disabling GamepadManager polling.");
-                }
-            }
-        } else {
-            console.warn("Client: window.webrtcInput.gamepadManager not found in 'gamepadControl' message handler.");
-        }
+        applyGamepadPolling();
       }
       break;
     case 'requestFullscreen':
@@ -5052,9 +5197,10 @@ let webcamChainBroken = false;
 // keeps this on, and the newest frame id is acked from here on the same
 // cadence the page would use, so pacing and RTT stay honest through a stall.
 // Full frames ack on receipt; the striped modes ack the id the video worker
-// reports presented, so a client that cannot render sheds load.
+// reports presented, so a client that cannot render sheds load. An unchanged
+// id is repeated on the heartbeat cadence, as the page path does.
 let videoPort = null, videoDivert = false, videoAck = false, videoAckSource = 'receive';
-let videoLastId = -1, videoLastIdAt = 0, videoAckedId = -1, videoAckTimer = null;
+let videoLastId = -1, videoLastIdAt = 0, videoAckedId = -1, videoAckSentAt = 0, videoAckTimer = null;
 
 // The page gates its own sends on what this reports, so a socket left holding
 // bytes has to be reported as it drains: reporting only on send would freeze
@@ -5078,13 +5224,15 @@ function syncVideoAckTimer() {
   const want = videoDivert && videoAck;
   if (want && !videoAckTimer) {
     videoAckTimer = setInterval(() => {
-      if (videoLastId < 0 || videoLastId === videoAckedId) return;
+      if (videoLastId < 0) return;
       if (!ws || ws.readyState !== 1) return;
+      const now = performance.now();
+      if (videoLastId === videoAckedId && now - videoAckSentAt < ${ACK_HEARTBEAT_MS}) return;
       // The hold: how long the id waited on this tick, which a backgrounded
       // tab clamps to a second. The server subtracts it, so the round trip it
       // reports stays the path's rather than this timer's.
-      const held = Math.max(0, Math.round(performance.now() - videoLastIdAt));
-      try { ws.send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held); videoAckedId = videoLastId; } catch (err) {}
+      const held = Math.max(0, Math.round(now - videoLastIdAt));
+      try { ws.send('CLIENT_FRAME_ACK ' + videoLastId + ' ' + held); videoAckedId = videoLastId; videoAckSentAt = now; } catch (err) {}
     }, ${BACKPRESSURE_INTERVAL_MS});
   } else if (!want && videoAckTimer) {
     clearInterval(videoAckTimer);
@@ -5109,6 +5257,11 @@ self.onmessage = (e) => {
     videoAck = !!m.ack;
     videoAckSource = m.ackSource || 'receive';
     syncVideoAckTimer();
+    return;
+  }
+  if (m.type === 'videoAckReset') {
+    // The server's ids restart; the heartbeat must not repeat the old one.
+    videoLastId = -1; videoAckedId = -1; videoAckSentAt = 0;
     return;
   }
   if (m.type === 'sendPort') {
@@ -5339,7 +5492,8 @@ class WorkerWebSocket {
    * Turns the video divert on or off; while on, the worker also acks the
    * newest frame id itself unless this page is a shared viewer, whose acks
    * the server ignores. Full frames ack on receipt; the striped modes ack
-   * what the video worker reports presented.
+   * what the video worker reports presented, and either repeats an
+   * unchanged id every ACK_HEARTBEAT_MS.
    * @param {boolean} divert
    * @param {string} [ackSource] `receive` (default) or `present`.
    * @returns {void}
@@ -5347,6 +5501,16 @@ class WorkerWebSocket {
   setVideoDivert(divert, ackSource) {
     const ack = !!divert && displayId === 'primary' && !isSharedMode;
     try { this._worker.postMessage({ type: 'videoState', divert: !!divert, ack, ackSource: ackSource || 'receive' }); } catch (e) { /* closing */ }
+  }
+
+  /**
+   * Forgets the frame id the worker acks, for a pipeline reset: the server's
+   * ids restart at zero, so the heartbeat must not keep repeating an id from
+   * the stream that ended.
+   * @returns {void}
+   */
+  resetVideoAck() {
+    try { this._worker.postMessage({ type: 'videoAckReset' }); } catch (e) { /* closing */ }
   }
 
   /**
@@ -5782,7 +5946,8 @@ class WorkerWebSocket {
    * client whose rendering falls behind is then throttled instead of being
    * sent frames it will never show. Full-frame h264enc presents through sinks
    * the page cannot observe, so there the newest received id is the best the
-   * client knows.
+   * client knows. An unchanged id is repeated every ACK_HEARTBEAT_MS, the
+   * liveness signal an idle damage-gated stream otherwise lacks.
    */
   const sendBackpressureAck = () => {
     // While the divert runs, the socket worker acks the newest id itself, on
@@ -5794,11 +5959,14 @@ class WorkerWebSocket {
         const fromPresent = striped && lastPresentedVideoFrameId !== null;
         const acked = fromPresent ? lastPresentedVideoFrameId : lastReceivedVideoFrameId;
         const at = fromPresent ? lastPresentedVideoFrameAt : lastReceivedVideoFrameAt;
-        if (acked !== -1 && acked !== null) {
+        const now = performance.now();
+        if (acked !== -1 && acked !== null &&
+            (acked !== lastAckSentId || now - lastAckSentAt >= ACK_HEARTBEAT_MS)) {
           // How long this id waited for the tick; the server subtracts it so a
           // throttled ack cadence is not reported as network latency.
-          const held = Math.max(0, Math.round(performance.now() - at));
+          const held = Math.max(0, Math.round(now - at));
           websocket.send(`CLIENT_FRAME_ACK ${acked} ${held}`);
+          lastAckSentId = acked; lastAckSentAt = now;
         }
       } catch (error) {
         console.error('[Backpressure] Error sending frame ACK:', error);
@@ -5881,7 +6049,7 @@ class WorkerWebSocket {
     if (!isSharedMode) {
       const settingsPrefix = `${storageAppName}_`;
       const settingsToSend = {};
-      const dpr = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+      const dpr = streamDensity();
 
       const knownSettings = [
         'framerate', 'video_crf', 'encoder', 'manual_resolution',
@@ -5949,6 +6117,7 @@ class WorkerWebSocket {
       settingsToSend['useCssScaling'] = useCssScaling;
       settingsToSend['displayId'] = displayId;
       settingsToSend['displayScale'] = currentDisplayScale(dpr);
+      reportedStreamDensity = dpr;
       if (displayId === 'display2') {
           settingsToSend['displayPosition'] = displayPosition;
       }
@@ -5968,6 +6137,11 @@ class WorkerWebSocket {
     taggedClipboardFetch.armLegacyWindow(5000);
     websocket.send('cr');
     console.log('[websockets] Sent initial clipboard request (cr) to server (cache-only).');
+    // Each connection starts over: the server registers it by the start
+    // policy, applied here again by its first server_settings payload.
+    pipelinesToggledByUser.clear();
+    serverSettingsReceived = false;
+    pendingInitialAudioStart = false;
     isVideoPipelineActive = true;
     isAudioPipelineActive = (displayId === 'primary');
     window.postMessage({
@@ -6519,7 +6693,14 @@ class WorkerWebSocket {
             }
         } else {
             if (websocket && websocket.readyState === WebSocket.OPEN) {
-              if (isAudioPipelineActive) websocket.send('START_AUDIO');
+              // The server sends server_settings only after MODE, so the
+              // payload has not been seen yet when this runs. Hold the
+              // initial request until it arrives, otherwise a policy of
+              // audio off would start audio here only to stop it again.
+              if (isAudioPipelineActive) {
+                if (serverSettingsReceived) websocket.send('START_AUDIO');
+                else pendingInitialAudioStart = true;
+              }
             }
         }
         loadingText = 'Waiting for stream...';
@@ -6528,7 +6709,7 @@ class WorkerWebSocket {
         if (firstFrameRecoveryTimer !== null) clearInterval(firstFrameRecoveryTimer);
         let firstFrameNudges = 0;
         firstFrameRecoveryTimer = setInterval(() => {
-          if (streamStarted || !websocket || websocket.readyState !== WebSocket.OPEN || firstFrameNudges >= 5) {
+          if (streamStarted || !isVideoPipelineActive || !websocket || websocket.readyState !== WebSocket.OPEN || firstFrameNudges >= 5) {
             clearInterval(firstFrameRecoveryTimer);
             firstFrameRecoveryTimer = null;
             return;
@@ -6599,6 +6780,19 @@ class WorkerWebSocket {
               // for an unlocked bool keeps the client's persisted value.
               const ce = obj.settings && obj.settings.command_enabled;
               serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
+              // The start policy reads the server values (same reasoning as
+              // command_enabled) and runs before the held initial audio
+              // request is resolved, so nothing is started only to be stopped.
+              if (!serverSettingsReceived) {
+                serverSettingsReceived = true;
+                applyStartPolicy(obj.settings);
+              }
+              if (pendingInitialAudioStart) {
+                  pendingInitialAudioStart = false;
+                  if (isAudioPipelineActive && websocket && websocket.readyState === WebSocket.OPEN) {
+                      websocket.send('START_AUDIO');
+                  }
+              }
               // Deployment policy the resize paths read; absent keeps resizing enabled.
               const er = obj.settings && obj.settings.enable_resize;
               if (er && typeof er.value === 'boolean') window.enable_resize = er.value;
@@ -6734,23 +6928,31 @@ class WorkerWebSocket {
                // The realized resolution can differ from the request (encoder
                // alignment, RandR cell snapping, a rejected mode-set); canvas,
                // stripe decoders and input mapping follow it.
-               const dprUsed = (window.manual_resolution || useCssScaling) ? 1 : (window.devicePixelRatio || 1);
+               const dprUsed = window.manual_resolution ? 1 : streamDensity();
                const bufferWidth = alignResolution(appliedWidth);
                const bufferHeight = alignResolution(appliedHeight);
+               const requested = !window.manual_resolution && lastRequestedStreamRes &&
+                   bufferWidth === lastRequestedStreamRes[0] && bufferHeight === lastRequestedStreamRes[1];
                if (canvas && bufferWidth > 0 && bufferHeight > 0 &&
                    (canvas.width !== bufferWidth || canvas.height !== bufferHeight)) {
-                 console.log(`Server realized stream resolution ${appliedWidth}x${appliedHeight} (canvas buffer ${canvas.width}x${canvas.height}); reconciling.`);
                  clearAllVncStripeDecoders();
-                 // CSS times DPR no longer equals server pixels: input routes through the canvas box.
-                 window.streamResolutionDiverged = true;
-                 if (window.manual_resolution) {
-                   manual_width = bufferWidth;
-                   manual_height = bufferHeight;
-                   applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
+                 if (requested) {
+                   // This page's own request, which the buffer has not caught up with.
+                   window.streamResolutionDiverged = false;
+                   resetCanvasStyle(lastRequestedStreamRes[2], lastRequestedStreamRes[3]);
                  } else {
-                   // +0.5 keeps the divide/multiply round trip on a fractional DPR
-                   // from flooring one even step below the realized size.
-                   applyManualCanvasStyle((bufferWidth + 0.5) / dprUsed, (bufferHeight + 0.5) / dprUsed, true);
+                   console.log(`Server realized stream resolution ${appliedWidth}x${appliedHeight} (canvas buffer ${canvas.width}x${canvas.height}); reconciling.`);
+                   // CSS times the density no longer equals server pixels: input routes through the canvas box.
+                   window.streamResolutionDiverged = true;
+                   if (window.manual_resolution) {
+                     manual_width = bufferWidth;
+                     manual_height = bufferHeight;
+                     applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
+                   } else {
+                     // +0.5 keeps the divide/multiply round trip on a fractional density
+                     // from flooring one even step below the realized size.
+                     applyManualCanvasStyle((bufferWidth + 0.5) / dprUsed, (bufferHeight + 0.5) / dprUsed, true);
+                   }
                  }
                }
              } else {
@@ -6973,6 +7175,7 @@ class WorkerWebSocket {
                 if (window.webrtcInput && window.webrtcInput.setDisplayLayouts) {
                     window.webrtcInput.setDisplayLayouts(latestDisplayLayouts, displayId);
                 }
+                followStreamDensity();
                 if (displayId === 'primary') {
                     const secondaryConnected = payload.displays.includes('display2');
                     if (isSecondaryDisplayConnected !== secondaryConnected) {
@@ -7832,6 +8035,9 @@ function cleanup() {
   isVideoPipelineActive = true;
   isAudioPipelineActive = true;
   isMicrophoneActive = false;
+  pipelinesToggledByUser.clear();
+  serverSettingsReceived = false;
+  pendingInitialAudioStart = false;
   window.fps = 0;
   frameCount = 0;
   lastFpsUpdateTime = performance.now();
@@ -7850,6 +8056,8 @@ function performServerInitiatedVideoReset(reason = "unknown") {
 
   lastReceivedVideoFrameId = -1;
   lastPresentedVideoFrameId = null;
+  lastAckSentId = -1;
+  if (websocket && typeof websocket.resetVideoAck === 'function') websocket.resetVideoAck();
   console.log(`  Reset lastReceivedVideoFrameId to ${lastReceivedVideoFrameId}.`);
 
   cleanupJpegStripeQueue();
