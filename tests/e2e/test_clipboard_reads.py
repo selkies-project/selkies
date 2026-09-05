@@ -8,8 +8,11 @@ there is the `paste` event's own data. Chromium reads on focus once the
 permission is granted. The async read API is counted on each engine across
 the moments the client syncs the clipboard: load, focus, a Ctrl+V chord with
 nothing on the clipboard, and one with text on it, which is a real paste. With the client-to-session direction turned off by the
-server (`enable_clipboard=out`), nothing reads on any engine.
-Usage: python3 tests/e2e/test_clipboard_reads.py
+server (`enable_clipboard=out`), nothing reads on any engine. A selector
+names one engine, so the registry's per-engine cases each drive a third of
+the matrix.
+
+Usage: python3 tests/e2e/test_clipboard_reads.py [firefox|chromium|webkit|all]
 """
 import os
 import sys
@@ -135,16 +138,20 @@ def drive(res: "H.Results", mode: str, engine: str, clipboard_in: bool) -> None:
 
 def main() -> "H.Results":
     res = H.Results("clipboard-reads")
+    which = sys.argv[1] if len(sys.argv) > 1 else "all"
+    engines = ENGINES if which == "all" else (which,)
+    if which not in ENGINES + ("all",):
+        raise SystemExit(f"unknown engine {which!r}; one of {', '.join(ENGINES)} or all")
     xproc = None
     if not H.TEST_DISPLAY:
         xproc, xdisp = H.private_x_server()
         H.TEST_DISPLAY = xdisp
     try:
-        for engine in ENGINES:
+        for engine in engines:
             for mode in ("websockets", "webrtc"):
                 drive(res, mode, engine, True)
         # With the client-to-session direction off, no engine reads at all.
-        for engine in ENGINES:
+        for engine in engines:
             drive(res, "websockets", engine, False)
     finally:
         H.server_stop()
