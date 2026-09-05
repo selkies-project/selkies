@@ -378,6 +378,9 @@ class WebRTCService(BaseStreamingService):
         )
         self.rtc_app.media_pipeline = self.media_pipeline
         self.rtc_app.provision_virtual_mic = self._provision_webrtc_virtual_mic
+        await self.rtc_app.open_ice_muxes()
+        if self.rtc_app.ice_lite_enabled():
+            logger.info("WebRTC ICE-lite: the server offers host candidates only and answers the client's checks; STUN/TURN serve the client side")
         self.display_pipelines["primary"] = self.media_pipeline
 
         self.input_handler = WebRTCInput(
@@ -2752,6 +2755,11 @@ class WebRTCService(BaseStreamingService):
 
         self.signaling_client = None
         self.media_pipeline = None
+        if self.rtc_app is not None:
+            try:
+                await self.rtc_app.close_ice_muxes()
+            except Exception:
+                logger.exception("Error releasing the shared ICE ports")
         self.rtc_app = None
         self.input_handler = None
         self.system_monitor = None

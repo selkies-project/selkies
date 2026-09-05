@@ -63,6 +63,8 @@ except (ImportError, RuntimeError):
     pcmflux = None
 
 from .settings import settings as app_settings, inflate_gz_bounded, pipeline_starts_on, software_h264_encoder, software_h264_path
+from .ice import TcpMux, UdpMux
+from .ice.ice import get_host_addresses
 from .webcam import CODEC_BY_NAME, get_shared_webcam, webcam_locked_off, webcam_uplink_allowed
 from .webrtc import (
     RTCPeerConnection,
@@ -395,6 +397,8 @@ class RTCApp:
         self.async_event_loop = async_event_loop
         self.stun_servers = stun_servers
         self.turn_servers = turn_servers
+        self.ice_udp_mux: Optional[UdpMux] = None
+        self.ice_tcp_mux: Optional[TcpMux] = None
         self.encoder = encoder
         self.last_cursor_sent = None
 
@@ -1142,13 +1146,69 @@ class RTCApp:
             formatted_servers.append("".join(server))
         return formatted_servers
 
+    @staticmethod
+    def ice_lite_enabled() -> bool:
+        """Whether `webrtc_ice_lite` runs every peer's ICE agent as ICE-lite."""
+        return bool(getattr(app_settings, "webrtc_ice_lite", (False, False))[0])
+
+    async def open_ice_muxes(self) -> None:
+        """Bind the shared ICE ports the settings name, ahead of the first peer.
+
+        `webrtc_udp_mux_port` binds one UDP socket per host address and
+        `webrtc_tcp_mux_port` one TCP listener, once for the service; every
+        peer's gatherer then shares them (`ice.mux`). A port in use fails here,
+        at startup, rather than on a session. An address that appears later is
+        bound on first use by the gatherer.
+
+        Raises:
+            OSError: A mux port could not be bound; nothing stays bound.
+        """
+        udp_port = int(getattr(app_settings, "webrtc_udp_mux_port", 0) or 0)
+        tcp_port = int(getattr(app_settings, "webrtc_tcp_mux_port", 0) or 0)
+        if not udp_port and not tcp_port:
+            return
+        addresses = get_host_addresses(use_ipv4=True, use_ipv6=True)
+        listed = ", ".join(addresses) or "no host address yet"
+        if udp_port:
+            mux = UdpMux(udp_port)
+            try:
+                await mux.open(addresses)
+            except OSError as exc:
+                logger.error(f"WebRTC UDP mux: cannot bind port {udp_port}: {exc}")
+                raise
+            self.ice_udp_mux = mux
+            logger.info(f"WebRTC UDP mux: every session's host candidates share UDP port {udp_port} on {listed}")
+            if (getattr(app_settings, "webrtc_port_range", "") or "").strip():
+                logger.warning("webrtc_port_range is unused while webrtc_udp_mux_port is set: the mux port is the only UDP port")
+        if tcp_port:
+            mux = TcpMux(tcp_port)
+            try:
+                await mux.open(addresses)
+            except OSError as exc:
+                logger.error(f"WebRTC TCP mux: cannot bind port {tcp_port}: {exc}")
+                await self.close_ice_muxes()
+                raise
+            self.ice_tcp_mux = mux
+            logger.info(f"WebRTC TCP mux: ICE-TCP accepted on TCP port {tcp_port} on {listed}")
+
+    async def close_ice_muxes(self) -> None:
+        """Release the shared ICE ports, ending every peer's ICE that rode them."""
+        muxes = [mux for mux in (self.ice_udp_mux, self.ice_tcp_mux) if mux is not None]
+        self.ice_udp_mux = None
+        self.ice_tcp_mux = None
+        for mux in muxes:
+            await mux.close()
+
     def get_rtc_config(self) -> RTCConfiguration:
         """Build the RTCConfiguration for a new peer from the current servers.
 
         Operator-configured public addresses (`webrtc_public_ip`, comma- or
         space-separated IPv4/IPv6) are advertised in host ICE candidates for
         hosts behind static 1:1 NAT; each family maps to its own host
-        candidates.
+        candidates. The shared mux sockets, when opened, and the ICE-lite
+        choice travel the same way; an ICE-lite agent gathers host candidates
+        only, so the STUN and TURN servers are left out of its configuration
+        and serve the client side alone.
         """
         formatted_turn_servers = self.format_turn_servers(self.turn_servers)
         formatted_stun_servers = self.format_stun_servers(self.stun_servers)
@@ -1170,13 +1230,17 @@ class RTCApp:
         public_ips = (
             getattr(app_settings, "webrtc_public_ip", "") or ""
         ).replace(",", " ").split()
+        ice_lite = self.ice_lite_enabled()
         config = RTCConfiguration(
-            iceServers=ice_servers,
+            iceServers=[] if ice_lite else ice_servers,
             bundlePolicy=RTCBundlePolicy.MAX_BUNDLE,
             iceHostPublicIps=public_ips or None,
             icePortRange=parse_webrtc_port_range(
                 getattr(app_settings, "webrtc_port_range", "") or ""
             ),
+            iceUdpMux=self.ice_udp_mux,
+            iceTcpMux=self.ice_tcp_mux,
+            iceLite=ice_lite,
         )
         return config
 

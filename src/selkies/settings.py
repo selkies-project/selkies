@@ -860,6 +860,28 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'Inclusive UDP port range "min-max" (e.g. "50000-50100") that the local sockets behind direct WebRTC host ICE candidates bind into, for scheduler-managed deployments that allot each session a small firewalled window. Both bounds must lie within 1024-65535; a malformed or out-of-range value is rejected rather than clamped. Distinct from TURN_MIN_PORT/TURN_MAX_PORT, which confine the TURN relay allocation on the TURN server. Empty (default) keeps ephemeral OS-assigned ports.',
     },
     {
+        "name": "webrtc_udp_mux_port",
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "max": 65535,
+        "help": 'Single UDP port every WebRTC session shares for its host ICE candidates (UDPMUX): bound once on each host address at startup, with sessions told apart by their ICE username fragment, so one forwarded port (e.g. "-p 59000:59000/udp") serves any number of sessions. STUN server-reflexive discovery rides the same port; TURN relay and mDNS sockets stay separate, and webrtc_port_range is unused. 0 (default) gives each session sockets of its own.',
+    },
+    {
+        "name": "webrtc_tcp_mux_port",
+        "type": "int",
+        "default": 0,
+        "min": 0,
+        "max": 65535,
+        "help": 'Single TCP port on which the server accepts ICE-TCP connections (TCPMUX), advertised as a passive TCP host candidate on each host address next to the UDP ones, so a client on a network that blocks UDP still connects; UDP is preferred whenever it works. It may equal the UDP mux port, and a port firewalls pass, such as 443, is the usual choice for a public deployment. 0 (default) offers no TCP candidates.',
+    },
+    {
+        "name": "webrtc_ice_lite",
+        "type": "bool",
+        "default": False,
+        "help": "Run the server's ICE agent as ICE-lite: it offers host candidates only, takes the controlled role and answers the client's connectivity checks instead of sending its own, which suits a server whose host candidates are reachable as advertised (a public address, a static 1:1 NAT with webrtc_public_ip, or forwarded mux ports). STUN and TURN are then unused by the server itself; clients still receive them for candidates of their own.",
+    },
+    {
         "name": "enable_cloudflare_turn",
         "type": "bool",
         "default": False,

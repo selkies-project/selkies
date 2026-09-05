@@ -373,6 +373,6 @@ Both are off by default and need a secure context in the browser; see [Usage](us
 | Transport | Selected with | Ports | Notes |
 |---|---|---|---|
 | WebSockets (default) | `--mode=websockets` | single TCP port (default `8080`) | WebCodecs-based client decode (striped JPEG without WebCodecs); no STUN/TURN required |
-| WebRTC (opt-in) | `--mode=webrtc` | signaling over the same port; media over UDP (or TCP) with ICE | Uses a vendored [`aiortc`](https://github.com/aiortc/aiortc) fork; may need STUN/TURN, see [WebRTC and Firewall Issues](firewall.md) |
+| WebRTC (opt-in) | `--mode=webrtc` | signaling over the same port; media over UDP (or TCP) with ICE: ephemeral ports, a port range, or one shared UDP and/or TCP port | Uses a vendored [`aiortc`](https://github.com/aiortc/aiortc) fork; may need STUN/TURN, and offers a port range, UDP/TCP mux and ICE-lite, see [WebRTC and Firewall Issues](firewall.md#restricting-the-ports-port-range-udp-mux-tcp-mux-and-ice-lite) |
 
 Use `--enable-dual-mode=true` to let the client switch between the WebSocket and WebRTC transports from the UI.

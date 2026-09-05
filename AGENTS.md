@@ -117,3 +117,8 @@ Each is documented in full where named; read that before changing the subsystem.
   the policy or the user turned on, so nothing is started only to be stopped and a capture nobody receives
   never runs (`media_pipeline` module docstring, `DataStreamingServer._video_start_state`, each core's
   `applyStartPolicy`).
+- The WebRTC ICE topology is decided once, at startup: `RTCApp.open_ice_muxes` binds the shared UDP and
+  TCP ports the settings name (failing the service on a port in use), and every peer's gatherer reads the
+  muxes and the ICE-lite choice from its `RTCConfiguration`, never from the settings directly; sessions on
+  a shared socket are told apart by their ICE username fragment alone, which is why it is eight characters
+  (`ice.mux` module docstring, `ice.Connection`).
