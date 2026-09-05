@@ -85,7 +85,13 @@ Reach it with `ssh -L 8080:<node>:$PORT <login-node>` and open `https://localhos
 - **A display number and a private `/tmp` per session.** The container shares the node's network namespace, and an X server's abstract socket lives there: two sessions on one node with the default display `:20` collide, and the second one's X server never comes up. The base's display server honours `DISPLAY`. `-B <dir>:/tmp` with `--contain` gives the session its own runtime directory, sockets and locks instead of the node's shared `/tmp`.
 - **Ports are the node's ports.** There is no port mapping; `SELKIES_PORT` has to be free on the node, and is reached through whichever host can see it.
 - **`--writable-tmpfs`**: the image is read-only under Apptainer and the service supervisor writes into its service directories at start. `--home <dir>:/home/ubuntu` keeps the session's settings and downloads across jobs.
-- **`--nv`** binds the NVIDIA driver in, but not its GBM backend, which is what draws on the GPU behind both backends: without it the X11 backend's framebuffer server stays in software with OpenGL through Zink on the Vulkan driver, and the Wayland backend (`SELKIES_WAYLAND=true`) falls back to X11. Bind the two files the backend consists of from the host, under the names the container looks them up by:
+- **`--nv`** binds the NVIDIA driver in. Whether it also binds the driver's GBM backend, which is what draws on the GPU behind both backends, depends on the Apptainer: one that does places it next to the driver's libraries, and the session needs nothing more:
+
+  ```bash
+  apptainer exec --nv docker://ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04 ls /.singularity.d/libs/nvidia-drm_gbm.so
+  ```
+
+  When that file is missing, the X11 backend's framebuffer server stays in software with OpenGL through Zink on the Vulkan driver, and the Wayland backend (`SELKIES_WAYLAND=true`) falls back to X11. Bind the two files the backend consists of from the host, under the names the container looks them up by:
 
   ```bash
   L=/usr/lib/x86_64-linux-gnu
@@ -94,7 +100,9 @@ Reach it with `ssh -L 8080:<node>:$PORT <login-node>` and open `https://localhos
       -B "$L/libnvidia-allocator.so.<driver version>:$L/libnvidia-allocator.so.1" ...
   ```
 
-  GLX and EGL then run on the driver's own libraries, through the framebuffer server's DRI3 on X11 and under the Wayland backend alike, and NVENC encodes. The image carries NVIDIA's EGL platform libraries for GBM, Wayland and X11 itself, so nothing beyond the driver's own files is bound. `--nvccli` (setup through nvidia-container-cli) is not a way around this: it binds the device nodes and the driver libraries but no GBM backend either, and it needs `NVIDIA_VISIBLE_DEVICES=all` and a spelled-out `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics,display,video` in the host environment, since `all` is refused there and `--env` splits on commas.
+  GLX and EGL then run on the driver's own libraries, through the framebuffer server's DRI3 on X11 and under the Wayland backend alike, and NVENC encodes. The image carries NVIDIA's EGL platform libraries for GBM, Wayland and X11 itself, so nothing beyond the driver's own files is bound. The same Apptainer binds `/dev/dri` under `--contain` by itself, and the `-B /dev/dri` above is then redundant; an Apptainer that leaves the backend out leaves the DRM nodes out too, and the bind stays. Vulkan presents into windows only with `/dev/nvidia-modeset` in the container: an Apptainer that binds the backend also creates that node on the host when it is missing, as the driver's own libraries do; otherwise `nvidia-modprobe -m` on the host before the job creates it.
+- **`--nvccli`** (setup through nvidia-container-cli) needs `NVIDIA_VISIBLE_DEVICES=all` and `NVIDIA_DRIVER_CAPABILITIES=all` in the host environment, not through `--env`, which is not where Apptainer reads them; an Apptainer that refuses `all` takes the spelled-out `compute,utility,graphics,display,video`. It stages the driver's libraries and device nodes, and whether it stages the GBM backend and the DRM nodes follows the same check as for `--nv`.
+- **`--device nvidia.com/gpu=all`** (a CDI device from `nvidia-ctk cdi generate`) mounts everything the specification lists, including the X11 platform libraries and the modeset node where the toolkit that generated it does so, but only an Apptainer that runs the specification's hooks makes the driver's libraries resolvable inside the container: without them GLX fails to create a DRI3 screen and the Wayland backend to create an EGL display. Check with `apptainer exec --device nvidia.com/gpu=all <image> ldconfig -p | grep -c nvidia`, which is zero when the hooks did not run.
 - **Intel and AMD** need only `-B /dev/dri` and the render node's group, which a job normally has; `--rocm` for AMD.
 - Device nodes for the gamepad slots are not made (the container cannot, and the interposer needs none), and the `sudo` fallbacks the entrypoint tries print errors and carry on: the session is unaffected.
 
