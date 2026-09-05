@@ -428,7 +428,7 @@ class WebRTCService(BaseStreamingService):
         username = self.settings.basic_auth_user
         password = self.settings.basic_auth_password
         client = WebRTCSignalingClient(
-            f"{ws_protocol}//127.0.0.1:{self.args.port}{prefix}/api/ws",
+            f"{ws_protocol}//localhost:{self.args.port}{prefix}/api/ws",
             enable_https=using_https,
             enable_basic_auth=using_basic_auth,
             basic_auth_user=username,
