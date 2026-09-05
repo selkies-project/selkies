@@ -296,12 +296,16 @@ let lastReceivedVideoFrameAt = 0;
 let lastAckSentId = -1, lastAckSentAt = 0;
 let initializationComplete = false;
 let audioEnabled = true;
-/** True once the user has toggled audio in this session; a later
- * server_settings payload must not override an explicit choice. */
-let audioToggledByUser = false;
-/** Whether a server_settings payload has been applied. The initial audio
- * request waits for it, so the start-muted policy can act before anything
- * was requested rather than stopping a stream that just started. */
+/**
+ * Pipelines the user has toggled on this connection. The session's start
+ * policy (the server's `*_on_start` settings) is applied once per connection,
+ * by `applyStartPolicy` on its first server_settings payload, and never over
+ * a choice already made here.
+ */
+let pipelinesToggledByUser = new Set();
+/** Whether this connection's first server_settings payload has been applied.
+ * The initial audio request waits for it, so a policy of audio off acts
+ * before anything was requested rather than stopping a stream just started. */
 let serverSettingsReceived = false;
 /** Initialization wanted audio before the settings payload arrived; the
  * payload handler resolves it. */
@@ -3551,12 +3555,17 @@ function debounce(func, delay) {
   };
 }
 
+/** Hides the status bar and start button: a frame arrived, or the page is up with no stream to wait for. */
+function hideStreamOverlay() {
+  if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
+  if (playButtonElement) playButtonElement.classList.add('hidden');
+}
+
 /** Marks the stream as started and hides the status bar and start button. */
 const startStream = () => {
   if (streamStarted) return;
   streamStarted = true;
-  if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
-  if (playButtonElement) playButtonElement.classList.add('hidden');
+  hideStreamOverlay();
   console.log("Stream started (UI elements hidden).");
 };
 
@@ -3863,6 +3872,81 @@ async function applyOutputDevice() {
 
 window.addEventListener('message', receiveMessage, false);
 
+/** Applies the gamepad toggle to the manager's polling; a shared page always polls. */
+function applyGamepadPolling() {
+  const manager = window.webrtcInput && window.webrtcInput.gamepadManager;
+  if (!manager) {
+    console.warn("Client: window.webrtcInput.gamepadManager not found; cannot apply the gamepad toggle.");
+    return;
+  }
+  if (isSharedMode || isGamepadEnabled) {
+    manager.enable();
+    console.log(isSharedMode ? "Shared mode: GamepadManager polling stays active." : "Gamepad toggle ON. Enabling GamepadManager polling.");
+  } else {
+    manager.disable();
+    console.log("Gamepad toggle OFF. Disabling GamepadManager polling.");
+  }
+}
+
+/**
+ * Applies the session's start policy from a connection's first
+ * server_settings payload: the `*_on_start` settings say which pipelines
+ * this page starts with. Only a session owner's primary display page is
+ * governed (a shared viewer cannot switch video or audio on, and a second
+ * display page exists to show its display), and a pipeline the user already
+ * toggled keeps that choice. Video and audio off are applied before anything
+ * was requested, and the server starts neither for this page; the
+ * microphone and webcam start their uplinks; the gamepad policy seeds a
+ * toggle the browser has not persisted.
+ * @param {Object<string, {value: *, locked?: boolean}>} serverSettings
+ */
+function applyStartPolicy(serverSettings) {
+  if (isSharedMode || displayId !== 'primary') return;
+  const setting = (key) => (serverSettings && serverSettings[key]) || null;
+  const startsOn = (key, fallback) => {
+    const s = setting(key);
+    return (s && typeof s.value === 'boolean') ? s.value : fallback;
+  };
+  const lockedOff = (key) => {
+    const s = setting(key);
+    return !!(s && s.value === false && s.locked);
+  };
+  const untouched = (pipeline) => !pipelinesToggledByUser.has(pipeline);
+  let sidebarChanged = false;
+  if (untouched('video') && !startsOn('video_on_start', true) && isVideoPipelineActive) {
+    isVideoPipelineActive = false;
+    hideStreamOverlay();
+    window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
+    sidebarChanged = true;
+  }
+  // audio_enabled=false wins: the held START_AUDIO still goes out so the
+  // server's AUDIO_DISABLED reply tears the workers down.
+  const audioDisabledByServer = startsOn('audio_enabled', true) === false;
+  if (untouched('audio') && !startsOn('audio_on_start', true) && !audioDisabledByServer && isAudioPipelineActive) {
+    isAudioPipelineActive = false;
+    window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
+    if (audioDecoderWorker) audioDecoderWorker.postMessage({ type: 'updatePipelineStatus', data: { isActive: false } });
+    if (websocket && websocket.setAudioActive) websocket.setAudioActive(false);
+    sidebarChanged = true;
+  }
+  if (untouched('microphone') && startsOn('microphone_on_start', false) && microphoneEnabled && !lockedOff('microphone_enabled')) {
+    startMicrophoneCapture();
+  }
+  if (untouched('webcam') && startsOn('webcam_on_start', false) && webcamEnabled && !lockedOff('webcam_enabled')) {
+    startWebcamCapture();
+  }
+  const gamepadStored = window.localStorage.getItem(`${storageAppName}_isGamepadEnabled`) !== null;
+  if (untouched('gamepad') && !gamepadStored) {
+    const wanted = startsOn('gamepad_on_start', true);
+    if (isGamepadEnabled !== wanted) {
+      isGamepadEnabled = wanted;
+      applyGamepadPolling();
+      sidebarChanged = true;
+    }
+  }
+  if (sidebarChanged) postSidebarButtonUpdate();
+}
+
 /** Posts `sidebarButtonStatusUpdate` with the state of every pipeline toggle to the dashboards. */
 function postSidebarButtonUpdate() {
   const updatePayload = {
@@ -4162,6 +4246,7 @@ function receiveMessage(event) {
           console.log("Shared mode: Video pipelineControl blocked.");
           break;
         }
+        pipelinesToggledByUser.add('video');
         if (isVideoPipelineActive !== desiredState) {
           isVideoPipelineActive = desiredState;
           stateChangedFromControl = true;
@@ -4198,7 +4283,7 @@ function receiveMessage(event) {
           console.log("Audio is disabled. Audio pipeline control blocked.");
           break;
         }
-        audioToggledByUser = true;
+        pipelinesToggledByUser.add('audio');
         if (isAudioPipelineActive !== desiredState) {
           isAudioPipelineActive = desiredState;
           stateChangedFromControl = true;
@@ -4222,6 +4307,7 @@ function receiveMessage(event) {
           console.log("Microphone is disabled. Microphone pipeline control blocked.");
           break;
         }
+        pipelinesToggledByUser.add('microphone');
         if (desiredState) {
           startMicrophoneCapture();
         } else {
@@ -4236,6 +4322,7 @@ function receiveMessage(event) {
           console.log("Webcam is disabled. Webcam pipeline control blocked.");
           break;
         }
+        pipelinesToggledByUser.add('webcam');
         if (desiredState) {
           startWebcamCapture();
         } else {
@@ -4287,26 +4374,12 @@ function receiveMessage(event) {
     case 'gamepadControl':
       console.log(`Received gamepad control message: enabled=${message.enabled}`);
       const newGamepadState = message.enabled;
+      pipelinesToggledByUser.add('gamepad');
       if (isGamepadEnabled !== newGamepadState) {
         isGamepadEnabled = newGamepadState;
         setBoolParam('isGamepadEnabled', isGamepadEnabled);
         postSidebarButtonUpdate();
-        if (window.webrtcInput && window.webrtcInput.gamepadManager) {
-            if (isSharedMode) {
-                window.webrtcInput.gamepadManager.enable();
-                console.log("Shared mode: Gamepad control message received, ensuring its GamepadManager remains active for polling.");
-            } else {
-                if (isGamepadEnabled) {
-                    window.webrtcInput.gamepadManager.enable();
-                    console.log("Primary mode: Gamepad toggle ON. Enabling GamepadManager polling.");
-                } else {
-                    window.webrtcInput.gamepadManager.disable();
-                    console.log("Primary mode: Gamepad toggle OFF. Disabling GamepadManager polling.");
-                }
-            }
-        } else {
-            console.warn("Client: window.webrtcInput.gamepadManager not found in 'gamepadControl' message handler.");
-        }
+        applyGamepadPolling();
       }
       break;
     case 'requestFullscreen':
@@ -6064,6 +6137,11 @@ class WorkerWebSocket {
     taggedClipboardFetch.armLegacyWindow(5000);
     websocket.send('cr');
     console.log('[websockets] Sent initial clipboard request (cr) to server (cache-only).');
+    // Each connection starts over: the server registers it by the start
+    // policy, applied here again by its first server_settings payload.
+    pipelinesToggledByUser.clear();
+    serverSettingsReceived = false;
+    pendingInitialAudioStart = false;
     isVideoPipelineActive = true;
     isAudioPipelineActive = (displayId === 'primary');
     window.postMessage({
@@ -6617,8 +6695,8 @@ class WorkerWebSocket {
             if (websocket && websocket.readyState === WebSocket.OPEN) {
               // The server sends server_settings only after MODE, so the
               // payload has not been seen yet when this runs. Hold the
-              // initial request until it arrives, otherwise a start-muted
-              // deployment would start audio here only to stop it again.
+              // initial request until it arrives, otherwise a policy of
+              // audio off would start audio here only to stop it again.
               if (isAudioPipelineActive) {
                 if (serverSettingsReceived) websocket.send('START_AUDIO');
                 else pendingInitialAudioStart = true;
@@ -6631,7 +6709,7 @@ class WorkerWebSocket {
         if (firstFrameRecoveryTimer !== null) clearInterval(firstFrameRecoveryTimer);
         let firstFrameNudges = 0;
         firstFrameRecoveryTimer = setInterval(() => {
-          if (streamStarted || !websocket || websocket.readyState !== WebSocket.OPEN || firstFrameNudges >= 5) {
+          if (streamStarted || !isVideoPipelineActive || !websocket || websocket.readyState !== WebSocket.OPEN || firstFrameNudges >= 5) {
             clearInterval(firstFrameRecoveryTimer);
             firstFrameRecoveryTimer = null;
             return;
@@ -6702,27 +6780,12 @@ class WorkerWebSocket {
               // for an unlocked bool keeps the client's persisted value.
               const ce = obj.settings && obj.settings.command_enabled;
               serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
-              // Start-muted policy: the server value only (same reasoning as
-              // command_enabled), applied until the user touches the audio
-              // toggle. The initial audio request is held back until this
-              // payload (pendingInitialAudioStart), so acting here means no
-              // request was made yet; nothing is started only to be stopped.
-              // Shared viewers and secondary displays never send audio
-              // pipeline commands, and the policy is not theirs to apply.
-              serverSettingsReceived = true;
-              const asm = obj.settings && obj.settings.audio_start_muted;
-              // audio_enabled=false wins: the held START_AUDIO still goes out
-              // so the server's AUDIO_DISABLED reply tears the workers down,
-              // exactly as it does without the policy.
-              const aen = obj.settings && obj.settings.audio_enabled;
-              const audioDisabledByServer = aen && aen.value === false;
-              if (asm && asm.value === true && !audioDisabledByServer &&
-                  !audioToggledByUser && !isSharedMode &&
-                  displayId === 'primary' && isAudioPipelineActive) {
-                  isAudioPipelineActive = false;
-                  window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
-                  if (audioDecoderWorker) audioDecoderWorker.postMessage({ type: 'updatePipelineStatus', data: { isActive: false } });
-                  if (websocket && websocket.setAudioActive) websocket.setAudioActive(false);
+              // The start policy reads the server values (same reasoning as
+              // command_enabled) and runs before the held initial audio
+              // request is resolved, so nothing is started only to be stopped.
+              if (!serverSettingsReceived) {
+                serverSettingsReceived = true;
+                applyStartPolicy(obj.settings);
               }
               if (pendingInitialAudioStart) {
                   pendingInitialAudioStart = false;
@@ -7972,6 +8035,9 @@ function cleanup() {
   isVideoPipelineActive = true;
   isAudioPipelineActive = true;
   isMicrophoneActive = false;
+  pipelinesToggledByUser.clear();
+  serverSettingsReceived = false;
+  pendingInitialAudioStart = false;
   window.fps = 0;
   frameCount = 0;
   lastFpsUpdateTime = performance.now();

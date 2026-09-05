@@ -334,9 +334,15 @@ export default function webrtc() {
 	let scalingDPI = 96;
 	let isVideoPipelineActive = true;
 	let isAudioPipelineActive = true;
-	/** True once the user has toggled audio in this session; a later
-	 * server_settings payload must not override an explicit choice. */
-	let audioToggledByUser = false;
+	/**
+	 * Pipelines the user has toggled on this peer connection. The session's
+	 * start policy (the server's `*_on_start` settings) is applied once per
+	 * connection, by `applyStartPolicy` on its first server_settings payload,
+	 * and never over a choice already made here.
+	 */
+	let pipelinesToggledByUser = new Set();
+	/** Whether this peer connection's first server_settings payload has been applied. */
+	let startPolicyApplied = false;
 	let isMicrophoneActive = false;
 	let isWebcamActive = false;
 	let webcamBusy = false;
@@ -1524,6 +1530,7 @@ export default function webrtc() {
 					break;
 				}
 				if (message.pipeline === 'microphone' && webrtc && typeof webrtc.setMicrophone === 'function') {
+					pipelinesToggledByUser.add('microphone');
 					const micOn = !!message.enabled;
 					webrtc.setMicrophone(micOn, preferredInputDeviceId).then(() => {
 						isMicrophoneActive = micOn;
@@ -1537,6 +1544,7 @@ export default function webrtc() {
 					console.log("Shared mode: Video pipelineControl blocked.");
 					break;
 				} else if (message.pipeline === 'video' && webrtc) {
+					pipelinesToggledByUser.add('video');
 					const videoOn = !!message.enabled;
 					try {
 						webrtc.sendDataChannelMessage(videoOn ? 'START_VIDEO' : 'STOP_VIDEO');
@@ -1547,12 +1555,19 @@ export default function webrtc() {
 						console.error('Video toggle failed:', e);
 					}
 				} else if (message.pipeline === 'audio') {
-					// Audio stays negotiated; the toggle only mutes the element carrying it.
-					audioToggledByUser = true;
+					// Audio stays negotiated: the element carrying it is muted at once,
+					// and the server pauses this peer's audio sender, stopping the
+					// capture once no peer receives it.
+					pipelinesToggledByUser.add('audio');
 					if (!videoElement) break;
 					const audioOn = !!message.enabled;
 					videoElement.muted = !audioOn;
 					isAudioPipelineActive = audioOn;
+					if (webrtc) {
+						try { webrtc.sendDataChannelMessage(audioOn ? 'START_AUDIO' : 'STOP_AUDIO'); } catch (e) {
+							console.error('Audio toggle failed:', e);
+						}
+					}
 					window.postMessage({ type: 'pipelineStatusUpdate', audio: audioOn }, window.location.origin);
 					postSidebarButtonUpdate();
 				} else if (message.pipeline === 'webcam') {
@@ -1560,6 +1575,7 @@ export default function webrtc() {
 						console.log("Shared mode: Webcam control blocked.");
 						break;
 					}
+					pipelinesToggledByUser.add('webcam');
 					if (!!message.enabled) {
 						startWebcamCapture();
 					} else {
@@ -1570,6 +1586,7 @@ export default function webrtc() {
 			case 'gamepadControl':
 				console.log(`Received gamepad control message: enabled=${message.enabled}`);
 				const newGamepadState = message.enabled;
+				pipelinesToggledByUser.add('gamepad');
 				if (isGamepadEnabled !== newGamepadState) {
 					isGamepadEnabled = newGamepadState;
 					setBoolParam('isGamepadEnabled', isGamepadEnabled);
@@ -2445,6 +2462,13 @@ export default function webrtc() {
 				if (window.__selkiesAuthProbe) window.__selkiesAuthProbe();
 				if (reconnect) {
 					status = 'connecting';
+					// The server registers the new peer by the start policy; its
+					// first server_settings payload applies it here again.
+					pipelinesToggledByUser.clear();
+					startPolicyApplied = false;
+					isVideoPipelineActive = true;
+					isAudioPipelineActive = true;
+					videoElement.muted = false;
 					webrtc.reset();
 				} else {
 					status = 'disconnected';
@@ -2774,12 +2798,75 @@ export default function webrtc() {
 			}
 
 			/**
+			 * Applies the session's start policy from a peer connection's first
+			 * server_settings payload: the `*_on_start` settings say which
+			 * pipelines this page starts with. Only a session owner's primary
+			 * display page is governed (a shared viewer cannot switch video or
+			 * audio on, and a second display page exists to show its display),
+			 * and a pipeline the user already toggled keeps that choice. The
+			 * server registered this peer with its video and audio senders paused
+			 * by the same policy, so video and audio off only mirror that here;
+			 * the microphone and webcam start their uplinks; the gamepad policy
+			 * seeds a toggle the browser has not persisted.
+			 * @param {Object<string, {value: *, locked?: boolean}>} serverSettings
+			 */
+			const applyStartPolicy = (serverSettings) => {
+				if (isSharedMode || displayId !== 'primary') return;
+				const setting = (key) => (serverSettings && serverSettings[key]) || null;
+				const startsOn = (key, fallback) => {
+					const s = setting(key);
+					return (s && typeof s.value === 'boolean') ? s.value : fallback;
+				};
+				const lockedOff = (key) => {
+					const s = setting(key);
+					return !!(s && s.value === false && s.locked);
+				};
+				const untouched = (pipeline) => !pipelinesToggledByUser.has(pipeline);
+				let sidebarChanged = false;
+				if (untouched('video') && !startsOn('video_on_start', true) && isVideoPipelineActive) {
+					isVideoPipelineActive = false;
+					window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
+					sidebarChanged = true;
+				}
+				const audioDisabledByServer = startsOn('audio_enabled', true) === false;
+				if (untouched('audio') && !startsOn('audio_on_start', true) && !audioDisabledByServer && isAudioPipelineActive) {
+					isAudioPipelineActive = false;
+					if (videoElement) videoElement.muted = true;
+					window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
+					sidebarChanged = true;
+				}
+				if (untouched('microphone') && startsOn('microphone_on_start', false) && !lockedOff('microphone_enabled') &&
+					!isMicrophoneActive && webrtc && typeof webrtc.setMicrophone === 'function') {
+					webrtc.setMicrophone(true, preferredInputDeviceId).then(() => {
+						isMicrophoneActive = true;
+						postSidebarButtonUpdate();
+					}).catch((e) => {
+						console.error('Microphone start failed:', e);
+					});
+				}
+				if (untouched('webcam') && startsOn('webcam_on_start', false) && !lockedOff('webcam_enabled')) {
+					startWebcamCapture();
+				}
+				const gamepadStored = window.localStorage.getItem(storageKeyFor('isGamepadEnabled')) !== null;
+				if (untouched('gamepad') && !gamepadStored) {
+					const wanted = startsOn('gamepad_on_start', true);
+					if (isGamepadEnabled !== wanted) {
+						isGamepadEnabled = wanted;
+						toggleGamepadConnection();
+						sidebarChanged = true;
+					}
+				}
+				if (sidebarChanged) postSidebarButtonUpdate();
+			};
+
+			/**
 			 * Applies the server settings payload: sanitizes the stored overrides,
 			 * mirrors the policy gates (`command_enabled`, `enable_resize`, the
 			 * clipboard directions, `enable_binary_clipboard`, which the stored
-			 * choice governs unless locked, and the `audio_start_muted` element
-			 * mute), pushes the pre-copied local clipboard once the gates are in
-			 * place, and switches between the manual and auto resize handlers.
+			 * choice governs unless locked), applies the session's start policy on
+			 * a connection's first payload, pushes the pre-copied local clipboard
+			 * once the gates are in place, and switches between the manual and
+			 * auto resize handlers.
 			 */
 			webrtc.onserversettings = (obj) => {
 				if (obj.settings === undefined || obj.settings === null) {
@@ -2790,18 +2877,9 @@ export default function webrtc() {
 				const changes = sanitizeAndStoreSettings(obj.settings);
 				const ce = obj.settings && obj.settings.command_enabled;
 				serverCommandEnabled = (ce && typeof ce.value === 'boolean') ? ce.value : true;
-				// Start-muted policy: server value only, applied until the user
-				// touches the audio toggle, and never for shared viewers or the
-				// secondary display, which do not own the audio state. Audio
-				// stays negotiated on WebRTC, so this only mutes the element
-				// carrying it, exactly what the manual toggle does.
-				const asm = obj.settings && obj.settings.audio_start_muted;
-				if (asm && asm.value === true && !audioToggledByUser && !isSharedMode &&
-					displayId === 'primary' && isAudioPipelineActive) {
-					isAudioPipelineActive = false;
-					if (videoElement) videoElement.muted = true;
-					window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
-					postSidebarButtonUpdate();
+				if (!startPolicyApplied) {
+					startPolicyApplied = true;
+					applyStartPolicy(obj.settings);
 				}
 				const er = obj.settings && obj.settings.enable_resize;
 				if (er && typeof er.value === 'boolean') window.enable_resize = er.value;
@@ -2971,6 +3049,8 @@ export default function webrtc() {
 			rtimeout = false;
 			manualWidth = 0, manualHeight = 0;
 			isGamepadEnabled = true;
+			pipelinesToggledByUser.clear();
+			startPolicyApplied = false;
 			videoConnected = "";
 			audioConnected = "";
 			statWatchEnabled = false;

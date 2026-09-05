@@ -27,7 +27,7 @@ class FakePipeline:
         self.stopped = 0
         self.running = True
 
-    async def start_media_pipeline(self) -> None:
+    async def start_media_pipeline(self, video: bool = True, audio: bool = True) -> None:
         self.started += 1
         self.running = True
 
@@ -37,6 +37,18 @@ class FakePipeline:
 
     def is_media_pipeline_running(self) -> bool:
         return self.running
+
+    async def pause_screen_capture(self) -> bool:
+        return False
+
+    async def resume_screen_capture(self) -> bool:
+        return False
+
+    async def pause_audio_capture(self) -> bool:
+        return False
+
+    async def resume_audio_capture(self) -> bool:
+        return False
 
 
 def make_service(grace: float = 0.2) -> webrtc_mode.WebRTCService:

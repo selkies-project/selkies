@@ -117,12 +117,6 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Enable server-to-client audio streaming. Disabling this will also disable microphone support.",
     },
     {
-        "name": "audio_start_muted",
-        "type": "bool",
-        "default": False,
-        "help": "Start sessions with server-to-client audio off; the user turns it on with the client UI toggle. On the websockets transport the initial audio request is simply not sent; on WebRTC the track stays negotiated and the element is muted as soon as the settings payload is applied. Unlike disabling audio_enabled nothing is torn down, and a toggle made in a running session wins over this default.",
-    },
-    {
         "name": "microphone_enabled",
         "type": "bool",
         "default": False,
@@ -139,6 +133,36 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "bool",
         "default": False,
         "help": "Enable client-to-server webcam forwarding to the virtual V4L2 device.",
+    },
+    {
+        "name": "video_on_start",
+        "type": "bool",
+        "default": True,
+        "help": "Start a session with the display's video stream on. Off, nothing is captured for the primary display until the client turns video on with the side menu toggle; a shared viewer and a second display page always start their stream.",
+    },
+    {
+        "name": "audio_on_start",
+        "type": "bool",
+        "default": True,
+        "help": "Start a session with server-to-client audio on. Off, the audio capture stays stopped until the client turns audio on with the side menu toggle; on WebRTC the audio track is negotiated but carries nothing until then. Unlike audio_enabled=false, nothing is torn down and the microphone keeps working.",
+    },
+    {
+        "name": "microphone_on_start",
+        "type": "bool",
+        "default": False,
+        "help": "Start a session with the microphone uplink on, so the browser asks for the device as soon as the session connects; a microphone_enabled locked off leaves it off.",
+    },
+    {
+        "name": "webcam_on_start",
+        "type": "bool",
+        "default": False,
+        "help": "Start a session with the webcam uplink on, so the browser asks for the camera as soon as the session connects; a webcam_enabled locked off leaves it off.",
+    },
+    {
+        "name": "gamepad_on_start",
+        "type": "bool",
+        "default": True,
+        "help": "Start a session with gamepad input on. Off, connected gamepads are not polled until the client turns them on with the side menu toggle; a choice made there is remembered by the browser and takes precedence on its later visits.",
     },
     {
         "name": "enable_clipboard",
@@ -1663,6 +1687,31 @@ OPERATOR_LOCKED_WHEN_OVERRIDDEN = ("scaling_dpi",)
 
 # Encoders with no hardware path: selecting one implies software encoding.
 CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
+
+# Pipelines a session starts on or off by policy, each named by a `*_on_start` setting.
+START_STATE_PIPELINES = ("video", "audio", "microphone", "webcam", "gamepad")
+
+
+def pipeline_starts_on(pipeline: str, display_id: str = "primary", viewer: bool = False) -> bool:
+    """Whether a connecting page starts with `pipeline` on.
+
+    The `*_on_start` settings describe a session owner's primary display page.
+    A shared viewer cannot switch video or audio on from its side menu and
+    never captures a device, and a second display page exists to show its
+    display, so those pages keep the built-in start state whatever the
+    settings say. Both transports read this, so a page and the server it
+    connects to agree on what starts.
+
+    Args:
+        pipeline: One of `START_STATE_PIPELINES`.
+        display_id: The display the page renders.
+        viewer: Whether the page joined through a sharing link.
+    """
+    if pipeline not in START_STATE_PIPELINES:
+        raise ValueError(f"unknown pipeline '{pipeline}'")
+    if viewer or display_id != "primary":
+        return pipeline in ("video", "audio", "gamepad")
+    return bool(getattr(settings, f"{pipeline}_on_start")[0])
 
 
 def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) -> bool:
