@@ -504,7 +504,6 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         fonts-dejavu-extra \
         fonts-freefont-ttf \
         fonts-hack \
-        fonts-ubuntu \
         fonts-opensymbol \
         # The bitmap and scalable fonts an X server's default font path names,
         # which an X11 application that asks for a core font needs
@@ -528,12 +527,18 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         # come and go. Not wayfire: it demands a DRM file descriptor the nested
         # Wayland backend has none of without a GPU
         labwc && \
+    # Ubuntu's own font is absent from Debian, whose only copy is non-free
+    if [ ! -f /etc/apt/sources.list.d/debian.sources ]; then \
+        apt-get install --no-install-recommends -y fonts-ubuntu; \
+    fi && \
     # The Intel media stack and the 32-bit graphics runtime exist for amd64
     # alone. A 32-bit application -- a Wine or Steam game, an old binary --
     # loads its own copy of every graphics library, and finds none of the
     # 64-bit ones: without these it falls back to software rendering, or does
     # not start. Mesa's own VA-API and VDPAU drivers arrive with
     # mesa-libgallium, which va-driver-all pulls in for that architecture.
+    # The free Intel media driver is taken for both architectures, since its
+    # non-free build conflicts with the one already installed here.
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install --no-install-recommends -y \
             intel-media-va-driver intel-gpu-tools \
@@ -541,7 +546,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
             libegl1:i386 libgles2:i386 libglu1-mesa:i386 \
             libvulkan1:i386 mesa-vulkan-drivers:i386 \
             libva2:i386 libva-drm2:i386 libva-x11-2:i386 \
-            va-driver-all:i386 intel-media-va-driver-non-free:i386 \
+            va-driver-all:i386 intel-media-va-driver:i386 \
             libvdpau1:i386; \
     fi && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
