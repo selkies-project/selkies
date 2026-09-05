@@ -23,8 +23,11 @@
 #   - s6 service supervision, running as PID 1 or below a foreign init
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) and the
 #     V4L2 webcam interposer, all built in-tree and wired with LD_PRELOAD
-#   - GPU wiring: NVIDIA/VA-API/Vulkan runtime, Zink for hardware OpenGL
-#   - Audio: PipeWire with the PulseAudio interface pcmflux records through
+#   - GPU wiring: NVIDIA/VA-API/Vulkan runtime, Zink for hardware OpenGL, and
+#     the 32-bit graphics runtime on x86, which a 32-bit application needs a
+#     complete second copy of
+#   - Audio: PipeWire with the PulseAudio, ALSA, JACK and V4L2 interfaces,
+#     recorded through the PulseAudio one by pcmflux
 #   - Embedded coTURN for WebRTC firewall traversal
 #   - Selkies installed with pip: from wheels dropped into `wheels/`, or from
 #     PyPI (latest release) when `wheels/` is empty
@@ -347,7 +350,8 @@ SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
 ###
 # Debian packaging frontends: apt-get only, never dpkg
 ###
-RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
+RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architecture i386; fi && \
+    apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
         # Process supervision
         s6 \
         # Base utilities
@@ -436,6 +440,18 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # Applications that open an ALSA device directly rather than through
         # PulseAudio, which find no sound card at all without this
         pipewire-alsa \
+        # The rest of what PipeWire serves an application: JACK for the audio
+        # tools that speak only that, V4L2 so a camera reaches applications
+        # through the same graph the webcam interposer feeds, libcamera for the
+        # sensors that have no V4L2 node, and the ALSA command-line tools for
+        # looking at the graph from a shell
+        pipewire-jack \
+        pipewire-audio-client-libraries \
+        libspa-0.2-jack \
+        pipewire-v4l2 \
+        pipewire-libcamera \
+        alsa-utils \
+        jackd2 \
         # Xft resources alone reach a toolkit only at process start, and few
         # desktop environments run an XSETTINGS manager of their own: without
         # one on the selection a DPI change moves nothing until the session
@@ -467,6 +483,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         vdpauinfo \
         mesa-vdpau-drivers \
         libvdpau-va-gl1 \
+        # VA-API on an NVIDIA GPU, which has no Mesa driver: this maps it onto
+        # NVDEC through the injected driver, and is inert without one
+        nvidia-vaapi-driver \
         vulkan-tools \
         # Per-vendor GPU monitors; nvtop sits in Debian's contrib, enabled above
         radeontop \
@@ -480,6 +499,17 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         fonts-noto-extra \
         fonts-noto-cjk-extra \
         fonts-symbola \
+        fonts-noto-ui-core \
+        fonts-noto-ui-extra \
+        fonts-dejavu-extra \
+        fonts-freefont-ttf \
+        fonts-hack \
+        fonts-ubuntu \
+        fonts-opensymbol \
+        # The bitmap and scalable fonts an X server's default font path names,
+        # which an X11 application that asks for a core font needs
+        xfonts-scalable \
+        xbitmaps \
         # The SVG loader GdkPixbuf needs, so GTK applications render scalable
         # icons rather than blanks
         librsvg2-common \
@@ -498,10 +528,21 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # come and go. Not wayfire: it demands a DRM file descriptor the nested
         # Wayland backend has none of without a GPU
         labwc && \
-    # The Intel media stack exists for amd64 alone
+    # The Intel media stack and the 32-bit graphics runtime exist for amd64
+    # alone. A 32-bit application -- a Wine or Steam game, an old binary --
+    # loads its own copy of every graphics library, and finds none of the
+    # 64-bit ones: without these it falls back to software rendering, or does
+    # not start. Mesa's own VA-API and VDPAU drivers arrive with
+    # mesa-libgallium, which va-driver-all pulls in for that architecture.
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install --no-install-recommends -y \
-            intel-media-va-driver intel-gpu-tools; \
+            intel-media-va-driver intel-gpu-tools \
+            libgl1:i386 libglx-mesa0:i386 libgl1-mesa-dri:i386 \
+            libegl1:i386 libgles2:i386 libglu1-mesa:i386 \
+            libvulkan1:i386 mesa-vulkan-drivers:i386 \
+            libva2:i386 libva-drm2:i386 libva-x11-2:i386 \
+            va-driver-all:i386 intel-media-va-driver-non-free:i386 \
+            libvdpau1:i386; \
     fi && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 
