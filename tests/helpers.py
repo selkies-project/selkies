@@ -133,22 +133,34 @@ def pulse_setup() -> None:
     """Create the 'output' null sink the audio capture reads through its monitor
     source, matching the deployed layout. Module ids must not collide across
     restarts, so an existing sink is left alone. Without pactl the sink has to
-    exist already; only the audio checks depend on it."""
+    exist already; only the audio checks depend on it.
+
+    Every call is bounded, because a sound server that accepts a connection and
+    then stops answering would otherwise hold the suite that asked until its own
+    timeout killed it, with nothing said about where it stopped.
+    """
     pactl = shutil.which("pactl")
     if not pactl:
         print("note: pactl not found, leaving the audio sink as it is", flush=True)
         return
-    r = subprocess.run([pactl, "list", "short", "sources"],
-                       capture_output=True, text=True)
-    if "output.monitor" not in r.stdout:
-        subprocess.run(
-            [pactl, "load-module", "module-null-sink",
-             "sink_name=output", "rate=48000", "channels=2"],
-            capture_output=True, timeout=10)
+
+    def ask(*args: str) -> Optional[subprocess.CompletedProcess]:
+        try:
+            return subprocess.run([pactl, *args], capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            print(f"note: pactl {args[0]} did not answer in 10s; "
+                  "leaving the audio sink as it is", flush=True)
+            return None
+
+    sources = ask("list", "short", "sources")
+    if sources is None:
+        return
+    if "output.monitor" not in sources.stdout:
+        ask("load-module", "module-null-sink",
+            "sink_name=output", "rate=48000", "channels=2")
     # Reset on every setup: a suite that pointed the default elsewhere and died
     # would otherwise leave every later audio check reading silence.
-    subprocess.run([pactl, "set-default-sink", "output"],
-                   capture_output=True, timeout=10)
+    ask("set-default-sink", "output")
 
 
 def pulse_null_sink(name: str, **opts: Any) -> Optional[str]:
