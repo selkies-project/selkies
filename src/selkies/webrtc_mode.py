@@ -2480,6 +2480,8 @@ class WebRTCService(BaseStreamingService):
                 if window["goodput_bps"]:
                     bucket["goodputs"].append(window["goodput_bps"])
                 bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
+            if self.metrics is not None:
+                self.metrics.set_bridge_drops(rtc_app.bridge_drops())
             for did, bucket in per_display.items():
                 if not self.args.congestion_control:
                     continue
