@@ -374,10 +374,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         # to seed its pool where the host gives it little
         net-tools \
         netcat-openbsd \
-        apache2-utils \
         haveged \
-        # The X11 selection tool scripts reach for when no toolkit is loaded
-        xsel \
         # Archive handling, which a file manager shells out to and a session
         # with no unpacker cannot do at all
         zip \
