@@ -2429,6 +2429,12 @@ class WebRTCService(BaseStreamingService):
         encoder within the allowed video_bitrate range — one display's congested
         link never steers another's stream. Only CBR mode has a target to steer.
 
+        Each peer's feedback is drained per tick, so a decision is taken over a
+        tick's worth of it rather than whichever window landed last: a single
+        window is a few tens of packets, too few for its loss fraction to mean
+        anything, and a display that sends little (a still second screen) is
+        made of such windows. A tick that drains nothing steers nothing.
+
         The user-selected bitrate is the ceiling: control only backs off below
         it and recovers up to it. Clamping to the allowed range instead let a
         fast local segment ramp an 8000 kbps session to 80000+ kbps, saturating
@@ -2465,15 +2471,15 @@ class WebRTCService(BaseStreamingService):
                             self.metrics.set_pacer_snapshot(did, dtls.pacer_snapshot())
                     except Exception:
                         logger.exception("_ensure_pacer failed (display %s)", did)
-                sctp = getattr(pc, "sctp", None)
-                estimate = getattr(getattr(sctp, "transport", None), "twcc_estimate", None)
-                if not estimate:
+                transport = getattr(getattr(pc, "sctp", None), "transport", None)
+                window = transport.take_twcc_window() if transport is not None else None
+                if window is None:
                     continue
                 bucket = per_display.setdefault(
                     did, {"goodputs": [], "worst_loss": 0.0})
-                if estimate.get("goodput_bps"):
-                    bucket["goodputs"].append(estimate["goodput_bps"])
-                bucket["worst_loss"] = max(bucket["worst_loss"], estimate.get("loss_fraction", 0.0))
+                if window["goodput_bps"]:
+                    bucket["goodputs"].append(window["goodput_bps"])
+                bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
             for did, bucket in per_display.items():
                 if not self.args.congestion_control:
                     continue

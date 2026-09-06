@@ -424,6 +424,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_seq = 0
         self._twcc_history: dict[int, tuple[int, float]] = {}
         self.twcc_estimate: Optional[dict] = None
+        self._twcc_window = self._twcc_window_zero()
         # Receive side of transport-wide congestion control: a sender that
         # negotiates transport-cc runs its bandwidth estimation on this
         # feedback alone and starves at its floor bitrate without it.
@@ -959,6 +960,11 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             "recv_span_s": span_s,
             "goodput_bps": int(bytes_acked * 8 / span_s) if received else 0,
         }
+        window = self._twcc_window
+        window["received"] += received
+        window["lost"] += lost
+        window["bytes_acked"] += bytes_acked
+        window["span_s"] += span_s
         if self._pacer is not None and bytes_acked >= MIN_GOODPUT_SAMPLE_BYTES:
             # Windows carrying almost no data (pure keepalive / control)
             # carry no rate signal; feeding them to the pacer slams the pace.
@@ -969,6 +975,39 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             lost,
             self.twcc_estimate["goodput_bps"],
         )
+
+    @staticmethod
+    def _twcc_window_zero() -> dict:
+        return {"received": 0, "lost": 0, "bytes_acked": 0, "span_s": 0.0}
+
+    def take_twcc_window(self) -> Optional[dict]:
+        """Drain the transport-cc feedback accumulated since the last call.
+
+        One feedback packet covers a few tens of RTP packets over a few tens of
+        milliseconds, which is too little to measure either quantity: five lost
+        out of twenty-two reads as 22.7% loss, and a 17 ms receive span turns a
+        static screen's trickle into tens of Mbps. A control interval's worth of
+        feedback is the measurement. Draining also means an interval that
+        carried no feedback yields nothing to steer from, rather than the last
+        window to apply again.
+
+        Returns:
+            Loss and goodput over the drained interval, or None when no feedback
+            arrived in it.
+        """
+        window = self._twcc_window
+        packets = window["received"] + window["lost"]
+        if not packets:
+            return None
+        self._twcc_window = self._twcc_window_zero()
+        span_s = max(window["span_s"], 1e-4)
+        return {
+            "received": window["received"],
+            "lost": window["lost"],
+            "loss_fraction": window["lost"] / packets,
+            "bytes_acked": window["bytes_acked"],
+            "goodput_bps": int(window["bytes_acked"] * 8 / span_s) if window["received"] else 0,
+        }
 
     def _set_role(self, role: str) -> None:
         self._role = role
