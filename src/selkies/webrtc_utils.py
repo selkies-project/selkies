@@ -1112,6 +1112,9 @@ class Metrics:
         webrtc_pacer_pace_bps: Pacer gauges are per display and exist only
             while a pacer is attached; the event counters are cumulative
             since transport start.
+        webrtc_bridge_dropped_frames: Per display, cumulative since the graph
+            was built; unlike the pacer counters it is published whether or not
+            a pacer is attached.
         prev_stats_video_header_names: Header names of the video CSV (and
             `prev_stats_audio_header_names` for audio), tracked alongside the
             lengths so a same-count field swap still triggers a remap.
@@ -1145,6 +1148,9 @@ class Metrics:
             'webrtc_pacer_idr_floor_bytes', 'IDR floor of the pacer video queue budget in bytes', ['display'])
         self.webrtc_pacer_events = Gauge(
             'webrtc_pacer_events', 'Cumulative pacer event counter', ['display', 'event'])
+        self.webrtc_bridge_dropped_frames = Gauge(
+            'webrtc_bridge_dropped_frames',
+            'Encoded frames dropped before packetization, per display', ['display'])
         self.stats_video_file_path: Optional[str] = None
         self.stats_audio_file_path: Optional[str] = None
         self.prev_stats_video_header_len: Optional[int]  = None
@@ -1175,6 +1181,11 @@ class Metrics:
                       "idr_resurrects", "timeout_resurrects", "stale_resets"):
             self.webrtc_pacer_events.labels(display, event).set(snap.get(event, 0))
 
+    def set_bridge_drops(self, drops: Dict[str, int]) -> None:
+        """Publish each display's bridge drop count (see `RTCApp.bridge_drops`)."""
+        for display, dropped in drops.items():
+            self.webrtc_bridge_dropped_frames.labels(display or "primary").set(dropped)
+
     def set_gpu_utilization(self, utilization: float) -> None:
         self.gpu_utilization.set(utilization)
 
@@ -1200,7 +1211,8 @@ class Metrics:
         for collector in (self.fps, self.fps_hist, self.gpu_utilization,
                           self.latency, self.webrtc_statistics,
                           self.webrtc_pacer_pace_bps, self.webrtc_pacer_queue_bytes,
-                          self.webrtc_pacer_idr_floor_bytes, self.webrtc_pacer_events):
+                          self.webrtc_pacer_idr_floor_bytes, self.webrtc_pacer_events,
+                          self.webrtc_bridge_dropped_frames):
             try:
                 REGISTRY.unregister(collector)
             except KeyError:

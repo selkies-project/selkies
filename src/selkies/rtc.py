@@ -273,9 +273,16 @@ class PipelineBridge:
                 a dropped ENCODED frame breaks the wire reference chain with no
                 RTP gap, so the browser never requests a PLI and the smear
                 would persist under infinite GOP.
+
+        Attributes:
+            dropped: Items dropped since construction. A drop here spends no
+                sequence number, so it appears in no loss statistic on either
+                side; this counter is the only place it is visible, and it is
+                what separates it from a pacer drop.
         """
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
         self._on_drop = on_drop
+        self.dropped = 0
 
     def set_data(self, data: Any) -> None:
         """Enqueue an item, dropping the oldest one when the queue is full.
@@ -287,6 +294,7 @@ class PipelineBridge:
         """
         if self._queue.full():
             self._queue.get_nowait()
+            self.dropped += 1
             if self._on_drop is not None:
                 self._on_drop()
         self._queue.put_nowait(data)
@@ -1074,6 +1082,18 @@ class RTCApp:
                         bridge.set_data(packet)
                 except Exception as e:
                     logger.error(f"error processing audio sample: {e}")
+
+    def bridge_drops(self) -> Dict[str, int]:
+        """Frames each display's video bridge has dropped, by display id.
+
+        A drop happens before the sender packetizes, so no sequence number is
+        spent and neither `packetsLost` nor the pacer's counters move, while
+        the pictures that do go out reference one the client never got. Rising
+        here with those flat is a lagging consumer, not a lossy link.
+        """
+        return {did: graph["video_bridge"].dropped
+                for did, graph in self.displays.items()
+                if graph.get("video_bridge") is not None}
 
     def update_rtc_config(self, stun_servers: List[str], turn_servers: List[str]) -> None:
         """Update the STUN/TURN servers used for every NEW peer connection.
