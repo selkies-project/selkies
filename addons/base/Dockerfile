@@ -41,12 +41,21 @@ ARG PYPI_PACKAGE="selkies"
 # The X server the session runs on, built here rather than installed: the
 # distribution's Xvfb has neither glamor nor DRI3, so GL clients render in
 # software even with a GPU present. XLibre's Xvfb has both, on Mesa's GBM and
-# on NVIDIA's own EGL, and is built from its latest release.
+# on NVIDIA's own EGL.
+# Every version built from source is pinned, so one commit builds one set of
+# components whenever it is built. XLIBRE_VERSION and EGL_X11_VERSION also take
+# "latest", which resolves that component from its upstream releases at build
+# time instead, which is what a rolling rebuild wants
+# (--build-arg XLIBRE_VERSION=latest). The other two are git refs and take a
+# version only.
 ARG WLROOTS_VERSION="0.20.2"
 ARG LABWC_VERSION="0.20.2"
+ARG XLIBRE_VERSION="25.2.2"
+ARG EGL_X11_VERSION="1.0.6"
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS xvfb
 ARG DEBIAN_FRONTEND="noninteractive"
+ARG XLIBRE_VERSION
 # The retry configuration the final stage sets further down, repeated here for
 # the same reason the add-ons stage repeats it.
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
@@ -88,9 +97,14 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 RUN set -e; \
     cd /tmp; \
     # The framebuffer server's glamor is in the 25.2 line, which XLibre
-    # publishes as pre-releases while still releasing older lines, so the
-    # highest version among all its releases is taken, not the newest by date.
-    XLIBRE_TAG="$(curl -fsSL --retry 5 "https://api.github.com/repos/X11Libre/xserver/releases?per_page=50" | jq -r '[.[].tag_name | select(startswith("xlibre-xserver-"))] | max_by(ltrimstr("xlibre-xserver-") | split(".") | map(tonumber))')"; \
+    # publishes as pre-releases while still releasing older lines, so the pin
+    # sits on a pre-release on purpose, and "latest" takes the highest version
+    # among all its releases rather than the newest by date.
+    if [ "${XLIBRE_VERSION}" = "latest" ]; then \
+        XLIBRE_TAG="$(curl -fsSL --retry 5 "https://api.github.com/repos/X11Libre/xserver/releases?per_page=50" | jq -r '[.[].tag_name | select(startswith("xlibre-xserver-"))] | max_by(ltrimstr("xlibre-xserver-") | split(".") | map(tonumber))')"; \
+    else \
+        XLIBRE_TAG="xlibre-xserver-${XLIBRE_VERSION}"; \
+    fi; \
     curl -fsSL --retry 5 --connect-timeout 30 -o xlibre.tar.gz \
         "https://github.com/X11Libre/xserver/archive/refs/tags/${XLIBRE_TAG}.tar.gz"; \
     tar -xf xlibre.tar.gz; \
@@ -109,12 +123,13 @@ RUN set -e; \
     /build-out/usr/bin/Xvfb -help 2>&1 | grep -q -- '-glamor'
 
 # NVIDIA's EGL platform library for X11 (xcb and xlib), open source and
-# independent of the driver's version, built from its latest release: through
-# it the injected driver's EGL reaches X11 windows on the framebuffer server's
-# DRI3. The distributions that package it ship the same library; Debian's
+# independent of the driver's version, built from the pinned release above:
+# through it the injected driver's EGL reaches X11 windows on the framebuffer
+# server's DRI3. The distributions that package it ship the same library; Debian's
 # stable has none.
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS egl-x11
 ARG DEBIAN_FRONTEND="noninteractive"
+ARG EGL_X11_VERSION
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
         > /etc/apt/apt.conf.d/99-selkies-retries
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
@@ -138,7 +153,11 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 RUN set -e; \
     cd /tmp; \
-    EGL_X11_TAG="$(curl -fsSL --retry 5 "https://api.github.com/repos/NVIDIA/egl-x11/releases/latest" | jq -r '.tag_name')"; \
+    if [ "${EGL_X11_VERSION}" = "latest" ]; then \
+        EGL_X11_TAG="$(curl -fsSL --retry 5 "https://api.github.com/repos/NVIDIA/egl-x11/releases/latest" | jq -r '.tag_name')"; \
+    else \
+        EGL_X11_TAG="v${EGL_X11_VERSION}"; \
+    fi; \
     curl -fsSL --retry 5 --connect-timeout 30 -o egl-x11.tar.gz \
         "https://github.com/NVIDIA/egl-x11/archive/refs/tags/${EGL_X11_TAG}.tar.gz"; \
     tar -xf egl-x11.tar.gz; \
