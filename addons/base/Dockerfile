@@ -505,6 +505,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         fonts-dejavu-extra \
         fonts-freefont-ttf \
         fonts-hack \
+        fonts-ubuntu \
         fonts-opensymbol \
         # The bitmap and scalable fonts an X server's default font path names,
         # which an X11 application that asks for a core font needs
@@ -528,10 +529,6 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         # come and go. Not wayfire: it demands a DRM file descriptor the nested
         # Wayland backend has none of without a GPU
         labwc && \
-    # Ubuntu's own font is absent from Debian, whose only copy is non-free
-    if [ ! -f /etc/apt/sources.list.d/debian.sources ]; then \
-        apt-get install --no-install-recommends -y fonts-ubuntu; \
-    fi && \
     # The Intel media stack and the 32-bit graphics runtime exist for amd64
     # alone. A 32-bit application -- a Wine or Steam game, an old binary --
     # loads its own copy of every graphics library, and finds none of the
