@@ -185,8 +185,14 @@ def wait_video(page: Any, mode: str) -> Optional[dict]:
     return C.wait_ws_video(page, timeout=30) if mode == "websockets" else C.wait_wr_video(page)
 
 
-def wait_divert(page: Any, want: bool, timeout: float = 15) -> dict:
-    """Poll the divert state the core publishes until it matches, or time out."""
+def wait_divert(page: Any, want: bool, timeout: float = 15, presented: bool = False) -> dict:
+    """Poll the divert state the core publishes until it matches, or time out.
+
+    ``presented`` also waits for a frame to have been presented. The row layout
+    is published as the first stripes are decoded, while the frame rate is
+    counted over a window that closes later, so a caller asserting one has to
+    wait for it rather than for the rows that arrive before it.
+    """
     deadline = time.time() + timeout
     state = {}
     while time.time() < deadline:
@@ -195,7 +201,8 @@ def wait_divert(page: Any, want: bool, timeout: float = 15) -> dict:
           rows: Object.keys(window.videoStripeRows || {}).length,
           fps: window.fps || 0,
         })""")
-        if state["on"] == want and (not want or state["rows"] > 0):
+        settled = state["rows"] > 0 and (not presented or state["fps"] > 0)
+        if state["on"] == want and (not want or settled):
             return state
         time.sleep(0.5)
     return state
@@ -279,7 +286,7 @@ def block_striped(mode: str, wayland: bool, res: "H.Results") -> None:
                     res.check("striped: several H.264 stripes per frame on the wire",
                               video and is_striped(seen, video["h"]), seen)
                     res.check("striped: encoded in software", cpu_encoder(line), encoder_field(line))
-                    divert = wait_divert(page, True)
+                    divert = wait_divert(page, True, presented=True)
                     res.check("striped: the video worker decodes and presents it",
                               divert["on"] and divert["rows"] > 1 and divert["fps"] > 0, divert)
                     page.evaluate("window.__stripes = {}")
