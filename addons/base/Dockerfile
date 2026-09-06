@@ -282,10 +282,11 @@ ARG PYPI_PACKAGE
 # invocations inherits it; curl and pip carry their own flags at each call.
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
         > /etc/apt/apt.conf.d/99-selkies-retries && \
-    # nvtop sits in Debian's contrib component, which its base image leaves off;
-    # Ubuntu ships it in universe, which is already enabled there.
+    # nvtop sits in Debian's contrib component and the Intel media drivers below
+    # in its non-free one, both of which its base image leaves off; Ubuntu ships
+    # them in universe and multiverse, which are already enabled there.
     if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
-        sed -i 's/^Components: .*/& contrib/' /etc/apt/sources.list.d/debian.sources; \
+        sed -i 's/^Components: .*/& contrib non-free/' /etc/apt/sources.list.d/debian.sources; \
     fi
 
 # Ownership of the image's setuid and setgid files, used at both ends of the
@@ -537,16 +538,18 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
     # 64-bit ones: without these it falls back to software rendering, or does
     # not start. Mesa's own VA-API and VDPAU drivers arrive with
     # mesa-libgallium, which va-driver-all pulls in for that architecture.
-    # The free Intel media driver is taken for both architectures, since its
-    # non-free build conflicts with the one already installed here.
+    # The non-free builds of the Intel drivers are the ones taken: they decode
+    # more formats than the free builds, which they conflict with, so both
+    # architectures have to agree on which of the two is installed.
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install --no-install-recommends -y \
-            intel-media-va-driver intel-gpu-tools \
+            intel-media-va-driver-non-free i965-va-driver-shaders intel-gpu-tools \
             libgl1:i386 libglx-mesa0:i386 libgl1-mesa-dri:i386 \
             libegl1:i386 libgles2:i386 libglu1-mesa:i386 \
             libvulkan1:i386 mesa-vulkan-drivers:i386 \
             libva2:i386 libva-drm2:i386 libva-x11-2:i386 \
-            va-driver-all:i386 intel-media-va-driver:i386 \
+            va-driver-all:i386 intel-media-va-driver-non-free:i386 \
+            i965-va-driver-shaders:i386 \
             libvdpau1:i386; \
     fi && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
