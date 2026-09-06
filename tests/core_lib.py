@@ -3,7 +3,9 @@
 import json
 import os
 import platform
+import signal
 import sys
+import threading
 import time
 from typing import Any, Optional
 
@@ -104,6 +106,44 @@ def launch_browser(pw: Any, engine: str = "chromium") -> Any:
     if engine == "webkit":
         return pw.webkit.launch(headless=True)
     return chromium_launch(pw)
+
+
+def close_browser(closer: Any, timeout: float = 30) -> bool:
+    """Close a browser or persistent context, abandoning one that will not go.
+
+    An engine that wedges while tearing a session down blocks the close with no
+    deadline of its own, and the suite then reaches its own timeout and is
+    killed, which throws away every result it had already printed. The wait is
+    bounded here instead: the checks are done by the time anything closes, so a
+    browser that will not answer is reported and left to the driver to reap.
+
+    Args:
+        closer: The browser or persistent context to close.
+        timeout: Seconds to wait before giving up on it.
+
+    Returns:
+        Whether the close returned on its own.
+    """
+    def expired(signum: int, frame: Any) -> None:
+        raise TimeoutError(f"the browser did not close within {timeout:.0f}s")
+
+    if threading.current_thread() is not threading.main_thread():
+        # Only the main thread can take a signal; a caller off it closes plainly.
+        closer.close()
+        return True
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, timeout)
+    try:
+        closer.close()
+        return True
+    except TimeoutError as e:
+        print(f"note: {e}; abandoning it", flush=True)
+        return False
+    except Exception:
+        return True
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 # Persistent Firefox profile: Firefox grants clipboard access only to a profile

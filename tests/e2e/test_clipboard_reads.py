@@ -133,7 +133,7 @@ def drive(res: "H.Results", mode: str, engine: str, clipboard_in: bool) -> None:
                 res.check(f"{tag} a paste event still reaches the session", sent > 0,
                           f"sent={sent} policy/active={policy}")
         finally:
-            closer.close()
+            C.close_browser(closer)
 
 
 def main() -> "H.Results":
