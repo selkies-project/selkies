@@ -361,11 +361,23 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         jq \
         dnsutils \
         # A session hands the user a terminal: `file` is what desktop tooling
-        # types a path with, `less` is the pager man and git reach for, and nano
-        # is the only editor otherwise present
+        # types a path with, `less` is the pager man and git reach for, and the
+        # editors, monitor and version control a shell session is expected to
+        # have. Not desktop components: any session built on this one wants them
         file \
         less \
         nano \
+        vim \
+        htop \
+        git \
+        # Networking and diagnostics, and the entropy daemon a container needs
+        # to seed its pool where the host gives it little
+        net-tools \
+        netcat-openbsd \
+        apache2-utils \
+        haveged \
+        # The X11 selection tool scripts reach for when no toolkit is loaded
+        xsel \
         # Archive handling, which a file manager shells out to and a session
         # with no unpacker cannot do at all
         zip \
@@ -373,6 +385,8 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         xz-utils \
         bzip2 \
         zstd \
+        unrar \
+        unar \
         # How an application opens a file or a URL in the session, and the
         # standard home directories a file manager and desktop expect
         xdg-utils \
@@ -491,6 +505,15 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         # Per-vendor GPU monitors; nvtop sits in Debian's contrib, enabled above
         radeontop \
         nvtop \
+        # Spell checking, which text components look for at runtime through
+        # Enchant rather than linking against
+        aspell \
+        aspell-en \
+        hunspell \
+        enchant-2 \
+        # The codecs the distribution's default ffmpeg build leaves out, which
+        # a player or a browser falls back to for anything it cannot decode
+        libavcodec-extra \
         # Fonts: DejaVu/Liberation for Latin, Noto for worldwide script and emoji coverage
         fonts-dejavu-core \
         fonts-liberation \
@@ -541,6 +564,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
     if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
         apt-get install --no-install-recommends -y \
             intel-media-va-driver-non-free i965-va-driver-shaders intel-gpu-tools \
+            rar \
             libgl1:i386 libglx-mesa0:i386 libgl1-mesa-dri:i386 \
             libegl1:i386 libgles2:i386 libglu1-mesa:i386 \
             libvulkan1:i386 mesa-vulkan-drivers:i386 \
