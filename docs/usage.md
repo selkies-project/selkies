@@ -21,7 +21,7 @@ Gaming mode, on `Control + Shift + X` or the gaming mode button, fullscreens the
 
 The cursor can be locked into the web interface using `Control + Shift + Left Click` in web browsers supporting the Pointer Lock API. Press `Escape` to exit this remote cursor mode. This remote cursor capability is useful for most games or graphics applications where the cursor must be confined to the remote screen.
 
-Locked movement is relayed to the remote desktop as-is, so the only acceleration applied to it is your own machine's. The client asks the browser for raw mouse movement to leave that curve out, which is what games and 3D applications expect; browsers offer it on Windows and macOS, and refuse it on Linux and Android, where locked movement keeps the local acceleration curve.
+Locked movement is relayed to the remote desktop as-is, so the only acceleration applied to it is your own machine's. The client asks the browser for raw mouse movement to leave that curve out, which is what games and 3D applications expect; browsers offer it on Windows, and refuse it on Linux and Android, where locked movement keeps the local acceleration curve. macOS offers it too but is not asked, because its curve is what carries a slow hand across the remote screen and the client has nothing to put in its place, which makes the pointer feel heavy.
 
 The side menu is available by clicking the small button on the right side of the interface, or by using the shortcut `Control + Shift + M`; gaming mode is the one mode that hides both.
 

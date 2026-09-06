@@ -10,8 +10,10 @@ installed browser holding a real pointer lock, and the deltas it reports are
 fed through the client's own relative-motion path: what is measured is the
 engine, not a model of it.
 
-The engines are also asked for raw (unadjusted) movement, which is what removes
-the local acceleration curve from locked motion where an engine offers it.
+The lock is taken through the client's own request, so the engine is asked for
+raw (unadjusted) movement exactly where the client asks for it: that is what
+removes the local acceleration curve, and on the platforms where the client
+withholds the option this measures the accelerated deltas it really sends.
 """
 import http.server
 import json

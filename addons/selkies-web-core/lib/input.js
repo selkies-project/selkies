@@ -1050,6 +1050,22 @@ const browser = {
     isWindows: function() { return /Win/.test(navigator.platform); },
     isLinux: function() { return /Linux/.test(navigator.platform); },
     /**
+     * macOS proper, which is a narrower question than `isMac`: the iPhones and
+     * the iPads are Macs to that one, and an iPad in its desktop-class default
+     * reports `MacIntel` like a Mac does. Its touch points are what tell the
+     * two apart, the same test selkies-wr-core.js and selkies-ws-core.js use.
+     * `navigator.platform` decides and the client hint is only a fallback, for
+     * an engine that has dropped the deprecated field: the question is which
+     * pointer acceleration curve the OS applies, not which brand the browser
+     * reports.
+     */
+    isMacDesktop: function() {
+        if (typeof navigator === 'undefined') return false;
+        const platform = navigator.platform
+            || (navigator.userAgentData && navigator.userAgentData.platform) || '';
+        return /^mac/i.test(platform) && (navigator.maxTouchPoints || 0) <= 1;
+    },
+    /**
      * Whether the engine delivers an IME commit on the textInput event; where
      * it does not exist, compositionend is the only carrier of the committed
      * text.
@@ -1502,8 +1518,20 @@ export class Input {
 
     static _nextGuacID = 0;
 
-    /** Cleared the first time an engine refuses raw pointer movement, so the option costs one refused request per page. */
-    static _unadjustedMovement = true;
+    /**
+     * Cleared the first time an engine refuses raw pointer movement, so the
+     * option costs one refused request per page.
+     *
+     * It starts cleared on macOS, where the engine grants the option instead of
+     * refusing it and nothing replaces the acceleration curve it takes away.
+     * The client scales a locked delta by the stream box and quantizes it
+     * (`_relativeToServer`), but that gain is the same at every speed, so the
+     * slow motion the curve used to expand now covers far less of the remote
+     * screen and the pointer feels heavy. Windows grants it as well and is left
+     * on it: raw deltas are what pointer lock is for, and nobody has reported
+     * the same there.
+     */
+    static _unadjustedMovement = !browser.isMacDesktop();
 
     /** Paints the server cursor bitmap onto the cursor canvas at the current device pixel ratio and rebases the hotspot. */
     _drawAndScaleCursor() {
@@ -3948,7 +3976,9 @@ export class Input {
      * unadjustedMovement asks for the deltas before that curve, which is what
      * games and 3D applications expect from pointer lock. Platforms that cannot
      * deliver them — Linux and Android, on every engine — reject the option
-     * with NotSupportedError, and the first refusal turns it off for the page;
+     * with NotSupportedError, and the first refusal turns it off for the page.
+     * macOS delivers them and is asked not to, since removing its curve leaves
+     * the pointer heavy and nothing here replaces it (see `_unadjustedMovement`).
      * `again` re-runs the request the way its caller would, so guarded callers
      * re-check their guards. Engines older than the promise-returning API
      * report failures through pointerlockerror instead.

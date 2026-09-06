@@ -53,16 +53,14 @@ document.addEventListener('pointerlockchange', () => {
 document.addEventListener('pointerlockerror', () => { T.err = T.err || 'pointerlockerror'; });
 
 element.addEventListener('mousedown', () => {
-    const lock = element.requestPointerLock({ unadjustedMovement: true });
-    if (!lock || !lock.catch) { T.lockPath = 'no-promise'; return; }
-    lock.then(() => { T.lockPath = 'unadjusted'; }).catch((err) => {
-        T.err = (err && err.name) || String(err);
-        if (err && err.name === 'NotSupportedError') {
-            T.lockPath = 'plain';
-            const plain = element.requestPointerLock();
-            if (plain && plain.catch) plain.catch((e) => { T.err += '/' + (e && e.name); });
-        }
-    });
+    // Locked the way the shipping client locks, rather than always asking for
+    // raw movement: the client withholds that option on some platforms, and a
+    // rig that asked for it anyway would measure deltas nobody sends.
+    const lock = () => input._requestPointerLock(element,
+        () => { T.lockPath = 'plain'; lock(); },
+        (err) => { T.err = (err && err.name) || String(err); });
+    T.lockPath = Input._unadjustedMovement ? 'unadjusted' : 'plain';
+    lock();
 });
 
 setInterval(() => {

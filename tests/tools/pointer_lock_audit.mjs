@@ -8,7 +8,10 @@
 // (unadjustedMovement), which every engine on Linux and Android refuses with
 // NotSupportedError, so the refusal has to end in a plain lock rather than in
 // no lock at all -- and it has to be remembered, or every lock pays for a
-// refused request. The lock belongs to gaming mode alone -- plain fullscreen
+// refused request. macOS is the platform that grants the option and is not
+// asked for it, since removing its acceleration curve leaves the pointer heavy
+// and the client has nothing to put in its place; which platform that is has to
+// be decided narrowly, because an iPad reports a Mac's platform string too. The lock belongs to gaming mode alone -- plain fullscreen
 // leaves the pointer to the browser so the dashboard stays usable -- and its
 // caller guards the request (gaming mode, stream fullscreen, not already locked,
 // not a shared viewer); the request it re-runs after a refusal must pass those
@@ -121,6 +124,65 @@ function reset(element) {
     await sleep(10);
     check('a pre-promise engine is asked once', element.calls.join(',') === 'unadjusted',
           element.calls.join(','));
+}
+
+// --- which platforms are asked ---------------------------------------------
+// macOS is the one platform that GRANTS raw movement and is worse for it: the
+// curve it drops is what carried a slow hand across the remote screen, and the
+// client has nothing to put in its place, so the pointer feels heavy. It is
+// asked plainly instead. The decision is taken once, when the module loads, so
+// it takes a fresh load under a faked navigator to pin it; a query string is
+// what makes the second import a second evaluation rather than the cached one.
+// The cases that matter are the ones where a platform only looks like macOS, or
+// only looks like something else: an iPad reports `MacIntel` too, and a client
+// hint may say `Unknown` on a real Mac.
+{
+    const realNavigator = globalThis.navigator;
+    const setNavigator = (value) => Object.defineProperty(globalThis, 'navigator', {
+        value, configurable: true, writable: true });
+    let seq = 0;
+    const loadUnder = async (nav) => {
+        setNavigator(nav);
+        const mod = await import(`../../addons/selkies-web-core/lib/input.js?platform=${seq++}`);
+        return mod.Input._unadjustedMovement;
+    };
+    try {
+        const asksPlainly = [
+            ['a Mac', { platform: 'MacIntel' }],
+            ['a Mac whose client hint says nothing useful',
+             { platform: 'MacIntel', userAgentData: { platform: 'Unknown' } }],
+            ['a Mac that only reports a client hint', { userAgentData: { platform: 'macOS' } }],
+        ];
+        for (const [what, nav] of asksPlainly) {
+            check(`${what} starts without raw movement`, (await loadUnder(nav)) === false);
+        }
+        const asksForRaw = [
+            ['an iPad in its desktop-class default', { platform: 'MacIntel', maxTouchPoints: 5 }],
+            ['an iPhone', { platform: 'iPhone', maxTouchPoints: 5 }],
+            ['Windows', { platform: 'Win32' }],
+            ['Linux', { platform: 'Linux x86_64' }],
+            ['a navigator that says nothing', {}],
+        ];
+        for (const [what, nav] of asksForRaw) {
+            check(`${what} starts with raw movement`, (await loadUnder(nav)) === true);
+        }
+    } finally {
+        setNavigator(realNavigator);
+    }
+}
+{
+    // What the macOS start means at the request: the option is never asked for,
+    // so there is no refusal to recover from and the first lock is the lock.
+    const element = makeElement('ok');
+    reset(element);
+    Input._unadjustedMovement = false;
+    const input = makeInput(element);
+    let retried = 0;
+    input._requestPointerLock(element, () => { retried++; }, () => {});
+    await sleep(10);
+    check('a macOS start asks plainly the first time', element.calls.join(',') === 'plain',
+          element.calls.join(','));
+    check('and needs no second request', retried === 0, String(retried));
 }
 
 // --- where a lock may land -------------------------------------------------

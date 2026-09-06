@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """How the client asks for pointer lock, and what it does when the engine says no.
 
-Locked motion is relayed as relative motion and injected verbatim, so the OS
-acceleration curve the engine applies to movementX/Y is the whole difference
-between how far a hand moved and how far the remote pointer went. The client
-asks for the raw deltas instead, and every engine on Linux and Android refuses
-that with NotSupportedError -- which
+Locked motion is relayed as relative motion, scaled onto the stream's own
+pixels and injected unaccelerated, so the OS acceleration curve the engine
+applies to movementX/Y is what separates how far a hand moved from how far the
+remote pointer went. The client asks for the raw deltas instead, except on
+macOS, where the option is granted and taking that curve away leaves the
+pointer heavy. Every engine on Linux and Android refuses the option with
+NotSupportedError -- which
 must still end in a lock, must not be mistaken for a real failure, and must not
 slip past the guards its caller checked before it asked -- gaming mode among
 them, since plain fullscreen leaves the pointer to the browser. The checks live
