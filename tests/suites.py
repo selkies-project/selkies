@@ -71,6 +71,7 @@ SUITES: list = [
     {"path": "unit/test_rate_control_defaults.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_transfer_pacer.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_webrtc_pacer_brake.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_twcc_window.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_nvml_failfast.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_realized_layout.py", "tier": "unit", "timeout": 120},
