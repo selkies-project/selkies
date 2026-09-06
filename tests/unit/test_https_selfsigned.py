@@ -75,6 +75,22 @@ def server(cert: str, key: str):
     return obj
 
 
+def _writes_through_mode(directory: str) -> bool:
+    """Whether this process writes into `directory` whatever its mode says.
+
+    Probed rather than read off the uid: CAP_DAC_OVERRIDE carries it without
+    being root, and a sandbox can withhold it from root.
+    """
+    probe = os.path.join(directory, ".probe")
+    try:
+        with open(probe, "w"):
+            pass
+    except OSError:
+        return False
+    os.unlink(probe)
+    return True
+
+
 def main() -> int:
     res = H.Results("https-selfsigned")
     work = tempfile.mkdtemp(prefix="selkies-https-")
@@ -93,10 +109,18 @@ def main() -> int:
     blocked = os.path.join(work, "blocked")
     os.makedirs(blocked)
     os.chmod(blocked, 0o500)
+    # No mode makes a directory unwritable to a caller it does not bind, so a
+    # run as root has no fallback to observe. The reuse checks below hold either
+    # way: they follow whichever path the pair actually landed at.
+    bound_by_mode = not _writes_through_mode(blocked)
     fallback_cert, _ = server(os.path.join(blocked, "s.pem"),
                               os.path.join(blocked, "s.key"))._make_self_signed_cert()
-    res.check("an unwritable one falls back to the state directory",
-              fallback_cert.startswith(os.environ["XDG_STATE_HOME"]), fallback_cert)
+    if bound_by_mode:
+        res.check("an unwritable one falls back to the state directory",
+                  fallback_cert.startswith(os.environ["XDG_STATE_HOME"]), fallback_cert)
+    else:
+        res.skip("an unwritable one falls back to the state directory",
+                 "this process writes through the mode")
 
     body = open(cert, "rb").read()
     context = server(cert, key)._create_ssl_context()
