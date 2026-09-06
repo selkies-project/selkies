@@ -30,6 +30,7 @@ import core_lib as C
 import test_browsers as TB
 import test_browser_backends as BB
 from playwright.sync_api import sync_playwright
+from selkies.ice.ice import get_host_addresses
 
 ENGINES = ("chromium", "firefox", "webkit")
 
@@ -106,23 +107,52 @@ STATS_JS = """async () => {
 }"""
 
 
-def free_port(kind: int) -> int:
-    with socket.socket(socket.AF_INET, kind) as probe:
-        probe.bind(("0.0.0.0", 0))
-        return probe.getsockname()[1]
+def mux_addresses() -> list:
+    """The `(family, address)` pairs a mux binds, as `ice.get_host_addresses`
+    reports them; loopback stands in on a host that has no other address."""
+    return [(socket.AF_INET6 if ":" in address else socket.AF_INET, address)
+            for address in get_host_addresses(use_ipv4=True, use_ipv6=True)] or [
+        (socket.AF_INET, "127.0.0.1")]
 
 
-def free_port_both() -> int:
-    """A port free for UDP and TCP alike, as one shared mux number wants."""
+def free_port(*kinds: int) -> int:
+    """A port number free for every socket kind on every address a mux binds.
+
+    A mux binds one socket per host address rather than a wildcard, and
+    `get_host_addresses` leaves loopback out, so a number probed on loopback --
+    or over IPv4 alone -- says nothing about the addresses it will take. Every
+    address is held at once here, so the number is free across all of them
+    together rather than on each in turn.
+
+    Args:
+        kinds: Socket kinds the number must be free for; a shared UDP/TCP mux
+            number wants both.
+
+    Raises:
+        RuntimeError: No candidate number was free everywhere.
+    """
+    addresses = mux_addresses()
     for _ in range(50):
-        port = free_port(socket.SOCK_DGRAM)
-        with socket.socket() as probe:
-            try:
-                probe.bind(("0.0.0.0", port))
-            except OSError:
-                continue
-        return port
-    raise RuntimeError("no port free for both UDP and TCP")
+        held, port = [], 0
+        try:
+            for kind in kinds:
+                for family, address in addresses:
+                    probe = socket.socket(family, kind)
+                    held.append(probe)
+                    try:
+                        probe.bind((address, port))
+                    except OSError:
+                        break
+                    port = port or probe.getsockname()[1]
+                else:
+                    continue
+                break
+            else:
+                return port
+        finally:
+            for probe in held:
+                probe.close()
+    raise RuntimeError("no port free on every mux address")
 
 
 def open_engine(pw: Any, engine: str, strip_udp: bool = False, url_hash: str = "") -> tuple:
@@ -329,7 +359,7 @@ def icelite_block() -> H.Results:
 
 def combined_block(wayland: bool = False) -> H.Results:
     res = H.Results("ice-combined-wl" if wayland else "ice-combined")
-    port = free_port_both()
+    port = free_port(socket.SOCK_DGRAM, socket.SOCK_STREAM)
     H.server_start(mode="webrtc", wayland=wayland, extra_env={
         "SELKIES_WEBRTC_UDP_MUX_PORT": str(port),
         "SELKIES_WEBRTC_TCP_MUX_PORT": str(port),
