@@ -631,7 +631,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "video_fullcolor",
         "type": "bool",
         "default": False,
-        "help": "Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264 and x265; VP9 profile 1 on VA-API and libvpx); other codecs and encoders stay 4:2:0. A client whose decoder has no 4:4:4 profile turns it off for itself, whether it or this default asked for it, and streams 4:2:0 on the same codec; where it is locked on, such a client steps over WebSockets to the next allowed encoder whose 4:4:4 it decodes or that has none, and to JPEG last, and reports the stream over WebRTC.",
+        "help": "Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264 and x265; VP9 profile 1 on VA-API and libvpx); other codecs and encoders stay 4:2:0. A client whose decoder has no 4:4:4 profile turns it off for itself, whether it or this default asked for it, and streams 4:2:0 on the same codec; where it is locked on, such a client steps over WebSockets to the next allowed encoder whose 4:4:4 it decodes or that has none, and to JPEG last, and reports the stream over WebRTC. A WebRTC client names the 4:4:4 it decodes in its hello, so its first offer already fits it.",
     },
     {
         "name": "video_streaming_mode",

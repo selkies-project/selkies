@@ -68,6 +68,15 @@ export class WebRTCSignaling {
         /** @type {URL} */
         this._server = server;
 
+        /**
+         * Answers, before the hello, which codec names this engine decodes at
+         * 4:4:4, so the server offers 4:2:0 to a client without them rather
+         * than a profile it paints nothing of; unset, the hello says nothing
+         * and the server takes the client at its word.
+         * @type {?function(): Promise<string[]>}
+         */
+        this.capabilities = null;
+
         /** Local peer id, set by the WebRTC client before `connect`. @type {number} */
         this.peer_id = 1;
 
@@ -187,7 +196,7 @@ export class WebRTCSignaling {
      * Registers with the server once the socket opens: sends `HELLO` with
      * the client metadata and resets the retry count.
      */
-    _onServerOpen() {
+    async _onServerOpen() {
         this.state = 'connected';
         const meta = {
             'client_type': this.client_type,
@@ -197,6 +206,10 @@ export class WebRTCSignaling {
             'display_id': this.display_id,
             'display_position': this.display_position,
         }
+        if (this.capabilities) {
+            try { meta.fullcolor_codecs = await this.capabilities(); } catch (e) { /* the server takes silence as decodable */ }
+        }
+        if (!this._ws_conn || this._ws_conn.readyState !== WebSocket.OPEN) return;
         this._ws_conn.send(`HELLO ${this.peer_type} ${JSON.stringify(meta)}`);
         this._setStatus("Registering with server, peer type: " + this.peer_type + ", client type: " + this.client_type);
         this.retry_count = 0;

@@ -138,7 +138,9 @@ Each is documented in full where named; read that before changing the subsystem.
   differ on H.264 4:4:4 and change with every release, and one whose decoder lacks the profile shows no picture
   at all rather than a worse one (`util.canDecodeFullColor`, `canDecodeEncoder`). A full colour the server's
   own unlocked default announces is turned off by such a client the same way, so the stream stays on its
-  codec at 4:2:0; only a locked full colour goes to the refusal ladder (a report over WebRTC). Over
+  codec at 4:2:0; a WebRTC client says in its hello which 4:4:4 it decodes (`fullcolor_codecs`), so the
+  server settles that before the first offer (`RTCApp._settle_fullcolor`) and never switches the profile
+  under a decoder mid-stream; only a locked full colour goes to the refusal ladder (a report over WebRTC). Over
   WebSockets that ladder walks the server's allowed encoders in order, H.264 first when unrestricted,
   through every video codec the engine decodes, and reaches JPEG last (`nextRung` in the core).
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python

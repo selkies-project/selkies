@@ -2548,6 +2548,14 @@ export default function webrtc() {
 			fatalConnectionHalt = false;
 			let pcRecoveryTimer = null;
 			var signaling = new WebRTCSignaling(url, clientRole, clientSlot, isStrictViewer, authToken, displayId, displayPosition);
+			// The hello names the 4:4:4 this engine decodes, so the first offer already fits it.
+			signaling.capabilities = async () => {
+				const codecs = [];
+				for (const codec of ['h264', 'h265', 'vp9']) {
+					if (await fullColorDecodable(codec)) codecs.push(codec);
+				}
+				return codecs;
+			};
 			/**
 			 * A plain GET on the signaling endpoint returns 409 exactly when the
 			 * server is serving WebSockets: after repeated connect failures, probe
