@@ -332,7 +332,7 @@ Video is encoded by the `pixelflux` extension.
 | `h264enc` (default) | H.264 AVC | NVIDIA NVENC / Intel & AMD VA-API, software fallback (`x264`, or OpenH264 in a GPL-free `pixelflux`) | Uses hardware encoding when a supported GPU is available; add `--use-cpu=true` to force software |
 | `h265enc` | H.265 HEVC | NVIDIA NVENC / Intel & AMD VA-API, software fallback (`x265`, or kvazaar in a GPL-free `pixelflux`) | Carries 4:4:4 like H.264; a browser without an HEVC decoder falls back to `h264enc` |
 | `vp8enc` | VP8 | Intel & AMD VA-API, software fallback (libvpx) | Decodes everywhere |
-| `vp9enc` | VP9 | Intel & AMD VA-API, software fallback (libvpx) | |
+| `vp9enc` | VP9 | Intel & AMD VA-API, software fallback (libvpx) | Carries 4:4:4 as profile 1 where the browser decodes it |
 | `av1enc` | AV1 | NVIDIA NVENC (Ada and newer) / Intel & AMD VA-API, software fallback (SVT-AV1) | Best quality per bit at low bitrates |
 | `h264enc-striped` | H.264 AVC | Software (`x264`, or OpenH264 in a GPL-free `pixelflux`) | Striped/parallel software H.264 |
 | `jpeg` | Motion JPEG | Software | Maximum-compatibility fallback |

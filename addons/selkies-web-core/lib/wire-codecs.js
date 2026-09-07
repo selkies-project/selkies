@@ -55,7 +55,7 @@ export const codecOfEncoder = (encoder) => ENCODER_CODECS[encoder] || 'h264';
  * @param {string} codec A codec name.
  * @returns {boolean} Whether the codec can carry 4:4:4 chroma.
  */
-export const codecCarriesFullColor = (codec) => codec === 'h264' || codec === 'h265';
+export const codecCarriesFullColor = (codec) => codec === 'h264' || codec === 'h265' || codec === 'vp9';
 
 /**
  * The NAL units of an Annex-B buffer, each without its start code.
@@ -443,8 +443,9 @@ export const PROBE_CODEC_STRINGS = {
   av1: 'av01.0.05M.08',
 };
 
-/** The 4:4:4 configurations, at the profiles the encoders emit. */
+/** The 4:4:4 configurations, at the profiles the encoders emit (VP9 profile 1). */
 export const PROBE_FULLCOLOR_STRINGS = {
   h264: 'avc1.F4001E',
   h265: 'hev1.4.10.L93.9E.8',
+  vp9: 'vp09.01.10.08.03',
 };

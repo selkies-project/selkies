@@ -979,7 +979,9 @@ class RTCApp:
         OpenH264 (the software encoder of a GPL-free pixelflux build, forced
         onto the CPU) is excluded: it always emits limited-range 4:2:0, and a
         4:4:4 profile makes decoders misread its color range (visibly darker
-        output).
+        output). A full-colour VP9 display offers profile 1, the 4:4:4 profile,
+        in place of profile 0; the client asks for full colour only where its
+        receiver takes that profile.
 
         The Opus ptime advertises the real frame duration pcmflux emits
         (`audio_frame_duration_ms`) so the client keys its minptime munge off
@@ -1021,6 +1023,8 @@ class RTCApp:
                     and not (software_path and software_encoders().get("h264") == "openh264"):
                 sdp_text = re.sub(r'profile-level-id=[0-9A-Fa-f]{6}',
                                   'profile-level-id=f4001f', sdp_text)
+        if "vp9" in encoder and fullcolor:
+            sdp_text = re.sub(r'\bprofile-id=0\b', 'profile-id=1', sdp_text)
         if "opus/" in sdp_text.lower():
             frame_ms = float(getattr(app_settings, 'audio_frame_duration_ms', '10') or 10)
             # A 2.5 ms frame advertises 3; pcmflux keeps the real frame.
