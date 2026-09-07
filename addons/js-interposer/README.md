@@ -48,6 +48,8 @@ export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/selkies_joystick_interposer.so${LD_
 
 You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root path of your choice if using the `.tar.gz` tarball. Make sure the correct `selkies_joystick_interposer.so` is installed in that path.
 
+Chromium, Electron and other binaries built with `_FORTIFY_SOURCE` open devices through glibc's checked entry points (`__open64_2`, `__openat64_2`, `__read_chk`) rather than `open()`; the interposer hooks those too, so a browser's Gamepad API sees the pads with nothing further to set.
+
 SDL2 applications find the four pads through [fake-udev](https://github.com/selkies-project/selkies/tree/main/addons/fake-udev/README.md), which is preloaded alongside the interposer in the container images. Where device discovery through `libudev` is unavailable — `SDL_JOYSTICK_DISABLE_UDEV=1`, an SDL sandbox build, or an SDL built without udev — SDL scans `/dev/input`, and the interposer's evdev nodes appear in that scan, so the pads are found with nothing further to set.
 
 SDL with udev disabled also probes `/dev/input/js0` directly, and since the interposer answers that path it enumerates the pad as both its joydev and evdev node — the same double a udev-less SDL shows for a real controller, and the reason the container images run fake-udev. To pin SDL to the evdev node alone (and skip the joydev probe), name it:

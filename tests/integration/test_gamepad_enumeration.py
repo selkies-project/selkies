@@ -5,6 +5,11 @@ without placeholder files. The interposer adds one evdev node per bound slot to
 opendir/readdir and scandir; an unbound slot is never advertised, and the
 directory read itself never fails because of the probe. Real host nodes pass
 through untouched, so every check diffs against the directory's own baseline.
+
+The device opens must also be reached through the _FORTIFY_SOURCE entry points
+(`__open_2`, `__openat64_2`, `__read_chk`): a clang-built binary such as Chromium
+calls only those, and a hook set that stops at open() leaves it on the kernel
+node instead of the socket.
 """
 import os
 import subprocess
@@ -180,6 +185,7 @@ def main() -> bool:
         except RuntimeError as e:
             res.check("readdir-errno-clean", False, str(e)[:150])
         hotplug_checks(res, preload, os.path.join(work, "hotplug"))
+        fortified_open_checks(res, preload, os.path.join(work, "fortified"))
         sdl_hotplug_check(res, preload, os.path.join(work, "sdl"))
     finally:
         subprocess.run(["rm", "-rf", work], check=False)
@@ -294,13 +300,111 @@ def hotplug_checks(res: "H.Results", preload: str, sockdir: str) -> None:
             child.kill()
 
 
+FORTIFIED_CLIENT = textwrap.dedent(r"""
+    #define _GNU_SOURCE
+    #include <errno.h>
+    #include <fcntl.h>
+    #include <poll.h>
+    #include <stdio.h>
+    #include <string.h>
+    #include <sys/ioctl.h>
+    #include <unistd.h>
+    #include <linux/input.h>
+    #include <linux/joystick.h>
+    /* Called by name, as the fortified open()/read() wrappers compile to. */
+    extern int __open_2(const char *path, int oflag);
+    extern int __open64_2(const char *path, int oflag);
+    extern int __openat64_2(int dirfd, const char *path, int oflag);
+    extern ssize_t __read_chk(int fd, void *buf, size_t nbytes, size_t buflen);
+
+    int main(void) {
+        int js = __open64_2("/dev/input/js0", O_RDONLY | O_NONBLOCK);
+        printf("js_fd=%d js_errno=%d\n", js, js < 0 ? errno : 0);
+        char name[128] = "";
+        struct js_event ev;
+        ssize_t n = -1;
+        if (js >= 0) {
+            ioctl(js, JSIOCGNAME(sizeof name), name);
+            struct pollfd pfd = {js, POLLIN, 0};
+            poll(&pfd, 1, 3000);
+            n = __read_chk(js, &ev, sizeof ev, sizeof ev);
+        }
+        printf("name=%s\n", name);
+        printf("read=%zd type=%u\n", n, n == (ssize_t)sizeof ev ? ev.type : 0u);
+        int evfd = __openat64_2(AT_FDCWD, "/dev/input/event1000", O_RDWR | O_NONBLOCK);
+        struct input_id id;
+        memset(&id, 0, sizeof id);
+        if (evfd >= 0) {
+            ioctl(evfd, EVIOCGID, &id);
+        }
+        printf("ev_fd=%d vendor=%04x\n", evfd, id.vendor);
+        int unbound = __open_2("/dev/input/js1", O_RDONLY | O_NONBLOCK);
+        printf("unbound=%d unbound_errno=%d\n", unbound, unbound < 0 ? errno : 0);
+        int other = __open_2("/dev/null", O_RDONLY);
+        printf("passthrough=%d\n", other);
+        return 0;
+    }
+""")
+
+
+def fortified_open_checks(res: "H.Results", preload: str, work: str) -> None:
+    """A client that opens and reads through the fortified libc entry points,
+    as a binary built with _FORTIFY_SOURCE does, gets the served slot's
+    socket: the joydev node answers its name and init burst, the evdev node
+    its identity, an unserved slot fails with the interposer's EIO rather than
+    the kernel's answer for the path, and a path that is not a device still
+    reaches the real libc."""
+    os.makedirs(work)
+    src = os.path.join(work, "fortified.c")
+    tool = os.path.join(work, "fortified")
+    with open(src, "w") as f:
+        f.write(FORTIFIED_CLIENT)
+    build = subprocess.run(["gcc", "-O2", "-o", tool, src], capture_output=True, text=True)
+    if build.returncode != 0:
+        res.check("fortified-client-build", False, build.stderr[:150])
+        return
+    sockdir = os.path.join(work, "sock")
+    os.makedirs(sockdir)
+    server = serve_slots(sockdir, 1)
+    try:
+        out = subprocess.run([tool], env={**os.environ, "LD_PRELOAD": preload, "SELKIES_JS_SOCKET_PATH": sockdir},
+                             capture_output=True, text=True, timeout=30)
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            server.kill()
+    got = {}
+    for ln in out.stdout.splitlines():
+        for field in ln.split():
+            if "=" in field:
+                k, v = field.split("=", 1)
+                got[k] = v
+    summary = out.stdout.strip().replace("\n", " | ")[:300]
+    EIO, JS_EVENT_INIT = 5, 0x80
+    res.check("fortified-open64-2-joydev",
+              got.get("js_fd", "-1") != "-1" and got.get("name", "") != "", summary)
+    res.check("fortified-read-chk-init-burst",
+              got.get("read") == "8" and int(got.get("type", "0")) & JS_EVENT_INIT, summary)
+    res.check("fortified-openat64-2-evdev",
+              got.get("ev_fd", "-1") != "-1" and got.get("vendor") == "045e", summary)
+    res.check("fortified-open-2-unserved-slot",
+              got.get("unbound") == "-1" and got.get("unbound_errno") == str(EIO), summary)
+    res.check("fortified-open-2-passthrough", got.get("passthrough", "-1") != "-1", summary)
+
+
 def sdl_hotplug_check(res: "H.Results", preload: str, work: str) -> None:
     """SDL with udev discovery disabled, started before the pad is served, gets
     a device-added event when the slot binds and a removed one when it goes."""
     os.makedirs(work)
     tool = os.path.join(work, "sdlhotplug")
     src = os.path.join(H.REPO, "tests", "tools", "gamepad", "sdlhotplug.c")
-    flags = subprocess.run(["pkg-config", "--cflags", "--libs", "sdl2"], capture_output=True, text=True)
+    try:
+        flags = subprocess.run(["pkg-config", "--cflags", "--libs", "sdl2"], capture_output=True, text=True)
+    except FileNotFoundError:
+        res.skip("sdl-hotplug", "no pkg-config to find the SDL2 development files with")
+        return
     if flags.returncode != 0 or subprocess.run(["gcc", "-O2", "-o", tool, src] + flags.stdout.split(),
                                                 capture_output=True).returncode != 0:
         res.skip("sdl-hotplug", "no SDL2 development files")

@@ -173,6 +173,7 @@ static int (*real___open_2)(const char *file, int oflag) = NULL;
 static int (*real___open64_2)(const char *file, int oflag) = NULL;
 static int (*real___openat_2)(int dirfd, const char *file, int oflag) = NULL;
 static int (*real___openat64_2)(int dirfd, const char *file, int oflag) = NULL;
+static ssize_t (*real___read_chk)(int fd, void *buf, size_t nbytes, size_t buflen) = NULL;
 static int (*real___xstat)(int ver, const char *pathname, struct stat *buf) = NULL;
 static int (*real___lxstat)(int ver, const char *pathname, struct stat *buf) = NULL;
 static int (*real___fxstat)(int ver, int fd, struct stat *buf) = NULL;
@@ -561,6 +562,7 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
     load_real_func((void *)&real___open64_2, "__open64_2");
     load_real_func((void *)&real___openat_2, "__openat_2");
     load_real_func((void *)&real___openat64_2, "__openat64_2");
+    load_real_func((void *)&real___read_chk, "__read_chk");
 #endif
 #ifdef SWC_LFS64
     load_real_func((void *)&real_open64, "open64");
@@ -2483,6 +2485,24 @@ ssize_t read(int fd, void *buf, size_t count) {
     ssize_t ret = wc_read_common(fd, buf, count, &handled);
     return handled ? ret : real_read(fd, buf, count);
 }
+
+#ifdef __GLIBC__
+/* The fortified read() (a destination whose size the compiler knows but a
+ * count it cannot prove fits), as the fortified opens above: the real entry
+ * point keeps its overflow abort for every fd. */
+ssize_t __read_chk(int fd, void *buf, size_t nbytes, size_t buflen) {
+    if (!real___read_chk && load_real_func((void *)&real___read_chk, "__read_chk") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (nbytes > buflen) {
+        return real___read_chk(fd, buf, nbytes, buflen);
+    }
+    int handled = 0;
+    ssize_t ret = wc_read_common(fd, buf, nbytes, &handled);
+    return handled ? ret : real___read_chk(fd, buf, nbytes, buflen);
+}
+#endif
 
 /* Retires the fd's tracking before the caller issues its own real close, so
  * a reused fd number can't alias a stale handle. A dup alias only drops its
