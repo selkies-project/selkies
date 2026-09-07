@@ -33,8 +33,19 @@ CASES: list = [
 def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
     """Run one suite as a subprocess and map its exit protocol onto pytest."""
     cmd = [PYTHON, os.path.join(TESTS, path)] + ([selector] if selector else [])
-    proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,
-                          timeout=timeout)
+    try:
+        proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        # The checks the suite did finish are its record of where it stuck;
+        # they would otherwise die with it.
+        out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        sys.stdout.write(out)
+        sys.stderr.write(err)
+        raise AssertionError(
+            f"{path} {selector or ''} ran past {timeout}s\n"
+            + ("\n".join(out.splitlines()[-20:]) or err[-2000:])) from None
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
     if proc.returncode == helpers.SKIP_EXIT:

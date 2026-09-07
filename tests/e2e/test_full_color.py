@@ -117,7 +117,7 @@ def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
         res.check("[locked] no stripe is left reporting the refusal per frame",
                   not spam, spam[:2])
     finally:
-        browser.close()
+        C.close_browser(browser)
 
 
 def drive_pinned(res: "H.Results", p: Any) -> None:
@@ -145,7 +145,7 @@ def drive_pinned(res: "H.Results", p: Any) -> None:
         res.check("[pinned] no stripe is left reporting the refusal per frame",
                   not spam, spam[:2])
     finally:
-        browser.close()
+        C.close_browser(browser)
 
 
 def drive(res: "H.Results", engine: str, mode: str, p: Any) -> None:
@@ -175,7 +175,7 @@ def drive(res: "H.Results", engine: str, mode: str, p: Any) -> None:
         res.check(f"[{tag}] no stripe decoder is left asking for a profile it lacks",
                   not refused, refused[:1])
     finally:
-        browser.close()
+        C.close_browser(browser)
 
 
 def main() -> "H.Results":
