@@ -47,7 +47,7 @@ import argparse
 from aiohttp import web
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
-from .rtc import RTCApp, ClientType
+from .rtc import IDR_REQUEST_FLOOR_S, RTCApp, ClientType
 from . import selkies as selkies_module
 from .selkies import current_session_tokens, SCALING_DPI_MIN, SCALING_DPI_MAX
 from .media_pipeline import (MediaPipelinePixel, RateControlMode,
@@ -1022,7 +1022,7 @@ class WebRTCService(BaseStreamingService):
         """
         display_id = display_id or "primary"
         now = time.monotonic()
-        if now - self._last_idr_request_times.get(display_id, 0.0) < 0.25:
+        if now - self._last_idr_request_times.get(display_id, 0.0) < IDR_REQUEST_FLOOR_S:
             return
         self._last_idr_request_times[display_id] = now
         pipeline = self.display_pipelines.get(display_id)
@@ -1888,7 +1888,8 @@ class WebRTCService(BaseStreamingService):
                 # The native-cursor toggle is global across displays.
                 pipeline.capture_cursor = self.media_pipeline.capture_cursor
                 pipeline.produce_data = (
-                    lambda buf, pts, kind, _did=did: self.rtc_app.consume_data(buf, pts, kind, _did)
+                    lambda buf, pts, kind, keyframe=True, _did=did:
+                        self.rtc_app.consume_data(buf, pts, kind, keyframe, _did)
                 )
                 # pixelflux's cursor-callback slot is process-global (last registration
                 # wins), so every display must route cursors into the same sink.

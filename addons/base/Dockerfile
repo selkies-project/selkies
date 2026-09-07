@@ -307,6 +307,11 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
         sudo \
         udev \
         tzdata && \
+    # The 32-bit compiler and runtime, on the architecture that has one. Here
+    # rather than in the rootless phase below, because libc6-i386 links /lib32
+    # from its preinst, and a session with no root can install neither it nor
+    # anything else that needs the same afterwards.
+    { [ "$(dpkg --print-architecture)" != "amd64" ] || apt-get install --no-install-recommends -y gcc-multilib; } && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
     # Debian's locale-gen takes no locale arguments and generates only what
     # /etc/locale.gen has uncommented, which Ubuntu's honours as well

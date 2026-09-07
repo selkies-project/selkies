@@ -34,14 +34,21 @@
 import math
 import os
 import struct
+from collections import deque
 from dataclasses import dataclass, field
 from struct import pack, unpack, unpack_from
 from typing import Any, Optional, Union
 
 from .rtcrtpparameters import RTCRtpParameters
 
-# used for NACK and retransmission
+# Receive side: how far back a NACK reaches.
 RTP_HISTORY_SIZE = 512
+# Send side: packets are kept for retransmission for at least this long. A
+# NACK reaches the sender about a round trip after the loss, and a count of
+# packets covers a shrinking slice of the stream as the bitrate rises. The
+# packet cap bounds what a burst can hold.
+RTP_HISTORY_S = 1.0
+RTP_HISTORY_MAX_PACKETS = 9600
 
 # reserved to avoid confusion with RTCP
 FORBIDDEN_PAYLOAD_TYPES = range(72, 77)
@@ -894,6 +901,37 @@ class RtpPacket:
         return data
 
 
+class RtpHistory:
+    """Packets sent on one stream, by sequence number, for retransmission.
+
+    Bounded by RTP_HISTORY_S of sending and RTP_HISTORY_MAX_PACKETS; within
+    those a sequence number cannot repeat, so a lookup is exact.
+    """
+
+    __slots__ = ("_packets", "_order", "_horizon", "_capacity")
+
+    def __init__(self, horizon: float = RTP_HISTORY_S,
+                 capacity: int = RTP_HISTORY_MAX_PACKETS) -> None:
+        self._packets: dict[int, RtpPacket] = {}
+        self._order: deque = deque()
+        self._horizon = horizon
+        self._capacity = capacity
+
+    def add(self, packet: RtpPacket, now: float) -> None:
+        """Record a sent packet and let go of those past the horizon."""
+        self._packets[packet.sequence_number] = packet
+        order = self._order
+        order.append((now, packet.sequence_number))
+        while order and (now - order[0][0] > self._horizon or len(order) > self._capacity):
+            self._packets.pop(order.popleft()[1], None)
+
+    def get(self, sequence_number: int) -> Optional[RtpPacket]:
+        return self._packets.get(sequence_number)
+
+    def __len__(self) -> int:
+        return len(self._order)
+
+
 def unwrap_rtx(rtx: RtpPacket, payload_type: int, ssrc: int) -> RtpPacket:
     """
     Recover initial packet from a retransmission packet.
@@ -954,7 +992,10 @@ def build_flexfec_03(
     length_recovery = 0
     ts_recovery = 0
     longest = max(len(p) for p in media_packets) - 12
-    payload_recovery = bytearray(longest)
+    # The payloads are XORed as big integers: a shorter one is shifted up so
+    # its first byte lines up with the others', which pads it with zeros at
+    # the end as the draft requires.
+    payload_xor = 0
     mask = 0
     for offset, media in enumerate(media_packets):
         # Byte 0 folds in P, X and CC (the version bits stay out); byte 1,
@@ -963,9 +1004,9 @@ def build_flexfec_03(
         recovery[1] ^= media[1]
         length_recovery ^= len(media) - 12
         ts_recovery ^= unpack("!L", media[4:8])[0]
-        for i, b in enumerate(media[12:]):
-            payload_recovery[i] ^= b
+        payload_xor ^= int.from_bytes(media[12:], "big") << (8 * (longest - len(media) + 12))
         mask |= 1 << (14 - offset)
+    payload_recovery = payload_xor.to_bytes(longest, "big")
 
     header = bytearray(12)
     # V=2, P=0, X=0, CC=0.
@@ -986,4 +1027,4 @@ def build_flexfec_03(
     fec += pack("!H", first_sequence_number)
     # K=1: single mask block.
     fec += pack("!H", 0x8000 | mask)
-    return bytes(header) + bytes(fec) + bytes(payload_recovery)
+    return bytes(header) + bytes(fec) + payload_recovery

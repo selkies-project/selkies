@@ -75,6 +75,11 @@ except (ImportError, RuntimeError):
     AudioCapture = AudioCaptureSettings = None
 
 logger = logging.getLogger("media_pipeline")
+
+# pixelflux's per-stripe wire header: a codec tag, the picture type the
+# encoder produced (IDR = 0x01 for H.264; every JPEG picture stands alone),
+# the frame id, and the stripe geometry.
+STRIPE_HEADER_LEN = 10
 logger.setLevel(logging.INFO)
 
 
@@ -154,7 +159,8 @@ class MediaPipelinePixel(MediaPipeline):
             structural.
         scale: Wayland compositor capture scale (DPI/96); a DPI change updates
             it and restarts capture so pixelflux re-reads it.
-        produce_data: `(buf, pts, kind)` sink for encoded frames, on the loop.
+        produce_data: `(buf, pts, kind, keyframe)` sink for encoded frames,
+            on the loop.
         on_pipeline_started: Fired after the video stream (re)starts so the
             transport can resend the cursor (a slept tab clears its canvas).
         on_cursor_data: Cursor updates from pixelflux (Wayland compositor or
@@ -223,7 +229,7 @@ class MediaPipelinePixel(MediaPipeline):
         self.audio_enabled = audio_enabled
         self.audio_device_name = audio_device_name
         self.capture_cursor = False
-        self.produce_data: Callable[[bytes, int, str], None] = lambda buf, pts, kind: logger.warning(
+        self.produce_data: Callable[[bytes, int, str, bool], None] = lambda buf, pts, kind, keyframe=True: logger.warning(
             "unhandled produce_data"
         )
         self.on_pipeline_started: Callable[[], None] = lambda: None
@@ -474,9 +480,11 @@ class MediaPipelinePixel(MediaPipeline):
 
         A secondary display's `capture_region` pins its exact geometry
         (auto-adjust would balloon the region to the whole root); the primary
-        auto-sizes from (0, 0). Both backends omit pixelflux's per-stripe
-        header since WebRTC has its own RTP framing, so nothing is stripped in
-        Python and the frame id comes from the frame attribute.
+        auto-sizes from (0, 0). Both backends keep pixelflux's per-stripe
+        header: its picture-type byte says whether the encoder produced a
+        keyframe, which the video bridge needs to keep the wire decodable
+        across a drop. The header is sliced off the zero-copy view before RTP
+        framing.
 
         Returns:
             A populated `pixelflux.CaptureSettings` (annotated as Any because
@@ -494,8 +502,7 @@ class MediaPipelinePixel(MediaPipeline):
             cs.capture_y = 0
             cs.auto_adjust_screen_capture_size = True
         cs.output_mode = 1
-        self._omit_stripe_headers = True
-        cs.omit_stripe_headers = self._omit_stripe_headers
+        cs.omit_stripe_headers = False
         apply_common_capture_settings(
             cs, app_settings,
             is_wayland=bool(app_settings.wayland[0]),
@@ -521,7 +528,8 @@ class MediaPipelinePixel(MediaPipeline):
         """Deliver one encoded video frame; runs on the pixelflux capture thread.
 
         The frame owns its native buffer and goes downstream as a zero-copy
-        memoryview sliced past the header; `produce_data` wraps it in an
+        memoryview sliced past the header, with the keyframe flag read off
+        the header's picture-type byte; `produce_data` wraps it in an
         EncodedPacket and keeps a reference so the frame stays alive. pts
         (90 kHz) comes from the pipeline-scoped monotonic clock rather than
         `frame.frame_id`: the u16 counter wraps, restarts at 0 on every
@@ -533,9 +541,10 @@ class MediaPipelinePixel(MediaPipeline):
         with no per-frame Future, matching the websockets path.
         """
         try:
-            hdr = 0 if self._omit_stripe_headers else 10
-            if len(frame) > hdr:
-                data_bytes = memoryview(frame)[hdr:]
+            view = memoryview(frame)
+            if len(view) > STRIPE_HEADER_LEN:
+                keyframe = view[0] != 0x04 or view[1] == 0x01
+                data_bytes = view[STRIPE_HEADER_LEN:]
                 now = time.monotonic()
                 if self._video_pts_anchor is None:
                     self._video_pts_anchor = now
@@ -544,7 +553,7 @@ class MediaPipelinePixel(MediaPipeline):
                     pts = self._last_video_pts + 1
                 self._last_video_pts = pts
                 self.async_event_loop.call_soon_threadsafe(
-                    self.produce_data, data_bytes, pts, "video"
+                    self.produce_data, data_bytes, pts, "video", keyframe
                 )
 
         except Exception as e:

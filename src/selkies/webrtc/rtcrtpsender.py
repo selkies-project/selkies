@@ -42,7 +42,7 @@ from typing import Optional, Union
 
 
 from . import clock, rtp
-from .pacer import CLASS_AUDIO, CLASS_VIDEO, h264_payloads_suggest_idr
+from .pacer import CLASS_AUDIO, CLASS_VIDEO
 from .codecs import get_capabilities, get_encoder, is_rtx
 from .codecs.base import Encoder
 from .exceptions import InvalidStateError
@@ -59,7 +59,7 @@ from .rtp import (
     RTCP_PSFB_PLI,
     RTCP_RTPFB_NACK,
     RTCP_RTPFB_TWCC,
-    RTP_HISTORY_SIZE,
+    RtpHistory,
     AnyRtcpPacket,
     RtcpByePacket,
     RtcpPsfbPacket,
@@ -101,10 +101,12 @@ def random_sequence_number() -> int:
 
 
 class RTCEncodedFrame:
-    def __init__(self, payloads: list[bytes], timestamp: int, audio_level: int):
+    def __init__(self, payloads: list[bytes], timestamp: int, audio_level: int,
+                 keyframe: bool = False):
         self.payloads = payloads
         self.timestamp = timestamp
         self.audio_level = audio_level
+        self.keyframe = keyframe
 
 
 class RTCRtpSender(AsyncIOEventEmitter):
@@ -153,7 +155,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self.__rtp_header_extensions_map = rtp.HeaderExtensionsMap()
         self.__rtp_started = asyncio.Event()
         self.__rtp_task: Optional[asyncio.Future[None]] = None
-        self.__rtp_history: dict[int, RtpPacket] = {}
+        self.__rtp_history = RtpHistory()
         self.__rtcp_exited = asyncio.Event()
         self.__rtcp_started = asyncio.Event()
         self.__rtcp_task: Optional[asyncio.Future[None]] = None
@@ -390,14 +392,14 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if not payloads:
             return None
 
-        return RTCEncodedFrame(payloads, timestamp, None)
+        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe)
 
     async def _retransmit(self, sequence_number: int) -> None:
         """
         Retransmit an RTP packet which was reported as lost.
         """
-        packet = self.__rtp_history.get(sequence_number % RTP_HISTORY_SIZE)
-        if packet and packet.sequence_number == sequence_number:
+        packet = self.__rtp_history.get(sequence_number)
+        if packet is not None:
             if self.__rtx_payload_type is not None:
                 packet = wrap_rtx(
                     packet,
@@ -452,16 +454,13 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 frame_time = time.time()
 
                 if self.__kind == "video" and (
-                    self.__force_keyframe_used
-                    or "jpeg" in codec.mimeType.lower()
-                    or h264_payloads_suggest_idr(enc_frame.payloads)
+                    self.__force_keyframe_used or enc_frame.keyframe
                 ):
                     # Report keyframe size to the pacer: feeds its IDR-aware
                     # queue budget and resurrects video after a GOP reset.
                     # Forced (recovery) keyframes resurrect but must not
-                    # shrink the IDR floor. JPEG: every frame is self-contained,
-                    # so every one feeds the floor (else a floor-0 cap would
-                    # reset-churn full-image frames). Remember for late attach.
+                    # shrink the IDR floor. Every JPEG frame is one, so every
+                    # one feeds the floor. Remember for late attach.
                     natural = not self.__force_keyframe_used
                     size = sum(len(p_) for p_ in enc_frame.payloads)
                     self._keyframe_bytes = size
@@ -512,9 +511,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         )
                     # send packet
                     self.__log_debug("> %s", packet)
-                    self.__rtp_history[packet.sequence_number % RTP_HISTORY_SIZE] = (
-                        packet
-                    )
+                    self.__rtp_history.add(packet, frame_time)
                     packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
                     await self.transport._send_rtp(
                         packet_bytes,
