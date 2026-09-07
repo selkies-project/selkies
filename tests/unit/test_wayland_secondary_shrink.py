@@ -14,7 +14,7 @@ import asyncio
 import os
 import sys
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(TESTS), "src"))
