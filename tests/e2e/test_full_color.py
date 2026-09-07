@@ -27,6 +27,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
+import test_software_h264 as TS
 from playwright.sync_api import sync_playwright
 
 ENGINES = ("chromium", "firefox", "webkit")
@@ -145,6 +146,30 @@ def drive_stalled(res: "H.Results", p: Any, mode: str) -> None:
         C.close_browser(browser)
 
 
+def drive_openh264(res: "H.Results", p: Any, tag: str) -> None:
+    """The striped encoder of an OpenH264 build cannot emit 4:4:4, so a locked
+    full colour reaches the client as 4:2:0, which every engine decodes:
+    nothing is refused, nothing is said, and the stream plays where it is."""
+    browser = C.launch_browser(p, "webkit")
+    try:
+        ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+        ctx.add_init_script(init_script("websockets") + REFUSE_FULLCOLOR_JS)
+        page = ctx.new_page()
+        said = []
+        page.on("console", lambda m: said.append(m.text))
+        page.goto(PAGE_DECODE_URL, wait_until="load")
+        played = bool(C.wait_ws_video(page, timeout=45))
+        encoder = page.evaluate(STORED_JS.replace("_video_fullcolor", "_encoder"))
+        res.check(f"[{tag}] OpenH264 streams 4:2:0 under a locked full colour",
+                  "Colorspace: I420" in H.server_log(), H.server_log()[-200:])
+        res.check(f"[{tag}] and the stream plays where it is", played and encoder == "h264enc-striped",
+                  (played, encoder))
+        refused = [t for t in said if "has no decoder for" in t or "cannot decode" in t]
+        res.check(f"[{tag}] nothing is refused", not refused, refused[:2])
+    finally:
+        browser.close()
+
+
 def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
     """The server holding full colour on, for an engine that cannot decode it.
 
@@ -157,6 +182,9 @@ def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
         pinned: The encoder is held to H.264 as well, so the rung is refused
             too and there is nothing left for the client to do but say so.
     """
+    if TS.server_software_encoder() == "openh264":
+        drive_openh264(res, p, "pinned" if pinned else "locked")
+        return
     if pinned:
         drive_pinned(res, p)
         return

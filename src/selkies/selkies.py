@@ -25,7 +25,7 @@ in-process pixelflux handle, never through forked tools.
 
 Wire framing: text frames carry the control verbs; binary frames are typed
 by their first byte — 0x01 Opus audio (pcmflux's native header, sent as-is),
-0x03 JPEG and 0x04 H.264 video stripes from pixelflux, 0x02 client mic PCM,
+0x03 JPEG and 0x04 video stripes from pixelflux, 0x02 client mic PCM,
 `WS_OPCODE_WEBCAM` a webcam frame for the virtual camera, and 0x05 a gzip
 wrapped control text. A client that sends `_gz,1` can inflate gzip: control
 text at or above `WS_GZIP_MIN_BYTES` then goes out as 0x05 frames (small,
@@ -43,6 +43,7 @@ import inspect
 import base64
 import contextlib
 import gzip
+import importlib.metadata
 import hmac
 import json
 import logging
@@ -102,7 +103,7 @@ from .input_handler import (
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
-from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, effective_use_cpu, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting
+from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting
 from .settings import settings as app_settings
 from .webcam import (
     MSG_WEBCAM_DISABLED,
@@ -184,7 +185,7 @@ AUDIO_CHANNELS_DEFAULT = 2
 # An operator override of the audio_bitrate enum reaches here as an arbitrary
 # numeric string; a fractional value must not abort module import.
 AUDIO_BITRATE_DEFAULT = int(float(settings.audio_bitrate))
-PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped"]
+PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "h265enc", "vp8enc", "vp9enc", "av1enc"]
 
 LOGLEVEL = logging.INFO
 logging.basicConfig(level=LOGLEVEL)
@@ -248,8 +249,19 @@ except (ImportError, RuntimeError) as e:
     data_logger.warning("pcmflux library not found. Audio capture is unavailable. (%s)", e)
 
 try:
+    import pixelflux
     from pixelflux import CaptureSettings, ScreenCapture
 
+    # One check for the build Selkies pins, at import: a pixelflux without
+    # this surface would fail on every capture start and client connect.
+    if not hasattr(pixelflux, "SOFTWARE_ENCODERS") or not hasattr(CaptureSettings(), "codec"):
+        try:
+            installed = importlib.metadata.version("pixelflux")
+        except Exception:
+            installed = "unknown version"
+        raise SystemExit(
+            f"pixelflux {installed} is not the release Selkies pins: it has no "
+            "SOFTWARE_ENCODERS or CaptureSettings.codec. Install the pinned pixelflux.")
     X11_CAPTURE_AVAILABLE = True
     data_logger.info("pixelflux library found. Striped encoding modes available.")
 except (ImportError, RuntimeError) as e:
@@ -638,7 +650,7 @@ class _VideoRelay:
     broadcast-video contract. Keyframes are exempt from the budget (part of
     one is useless), so the true bound is budget plus one keyframe burst.
 
-    H.264 chain safety is tracked per stripe ROW (wire-header y_start, bytes
+    Video reference-chain safety is tracked per stripe ROW (wire-header y_start, bytes
     4:6): one capture frame can mix IDR and delta stripes (a lone stripe
     encoder re-init IDRs only its own row), so after any drop a row's delta
     chunks stay gated until that row's own IDR arrives — a delivered delta
@@ -721,8 +733,8 @@ class _VideoRelay:
         """
         data = item['data']
         size = len(data)
-        is_h264 = size >= 10 and data[0] == 0x04
-        is_idr = is_h264 and data[1] == 0x01
+        is_video = size >= 10 and data[0] == 0x04
+        is_idr = is_video and (data[1] & 0x0F) == 0x01
         dropped = False
         if (not is_idr and self.backlog
                 and self.backlog_bytes + size > self.budget):
@@ -731,7 +743,7 @@ class _VideoRelay:
             self.live_rows.clear()
             dropped = True
         deliver = True
-        if is_h264:
+        if is_video:
             row = (data[4] << 8) | data[5]
             if is_idr:
                 self.live_rows.add(row)
@@ -5023,12 +5035,13 @@ class DataStreamingServer(BaseStreamingService):
             if not screen_name:
                 # A server with no connected RandR output (a GPU without a
                 # display engine, a driver told to use none) has no mode to
-                # set and no monitor to publish: its framebuffer is sized
-                # outright where the server allows, and the layouts are
-                # clamped to what it has otherwise.
+                # set: its framebuffer is sized outright where the server
+                # allows, and the layouts are clamped to what it has
+                # otherwise. The monitors below are still what gives the
+                # toolkits their screens, and carry no output there.
                 data_logger.info(
                     "No connected RandR output on this X server; the desktop is sized as a bare "
-                    "framebuffer, with no monitor per display.")
+                    "framebuffer, and its displays are monitors carrying no output.")
             elif total_mode_str not in available_resolutions:
                 data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
                 # Native first: a mode made by per-invocation xrandr dies with its
@@ -5076,13 +5089,12 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.warning(f"Live re-target failed for '{did}' ({e}); restarting it.")
                         keep_ids.discard(did)
                         await self._stop_capture_for_display(did)
-            if screen_name:
-                data_logger.info("Swapping logical monitors to the new layout...")
-                # Monitors go in before the framebuffer change, at their final
-                # rectangles and under a server grab: window managers re-tile on
-                # every root ConfigureNotify and must never see a monitor-less
-                # or partial set.
-                await replace_selkies_monitors(layouts, screen_name=screen_name)
+            data_logger.info("Swapping logical monitors to the new layout...")
+            # Monitors go in before the framebuffer change, at their final
+            # rectangles and under a server grab: window managers re-tile on
+            # every root ConfigureNotify and must never see a monitor-less
+            # or partial set.
+            await replace_selkies_monitors(layouts, screen_name=screen_name)
             # A mode change is the dominant cost of a reconfigure (CRTC reprogram,
             # every client repaints), so a same-size reload skips it. A live
             # re-target that grew the framebuffer above still shrinks here.
@@ -5551,12 +5563,50 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.warning(
                     f"Capture started for '{display_id}' with a caveat: {last_error}")
             data_logger.info(f"SUCCESS: Capture started for '{display_id}'.")
+            self._schedule_active_codec_settle(display_id)
             return True
 
         except Exception as e:
             data_logger.error(f"Failed to start capture for '{display_id}': {e}", exc_info=True)
             self._close_video_relays(display_id)
             return False
+
+    def _schedule_active_codec_settle(self, display_id: str, attempt: int = 0) -> None:
+        """Read back, once frames flow, the codec a fresh capture streams.
+
+        The selection ladder demotes a codec no encoder could serve to H.264 with
+        a log line; the clients must then hear the encoder they really receive,
+        so the display's setting follows and the settings are re-announced.
+        """
+        loop = asyncio.get_running_loop()
+        loop.call_later(1.0, lambda: asyncio.ensure_future(self._settle_active_codec(display_id, attempt)))
+
+    async def _settle_active_codec(self, display_id: str, attempt: int) -> None:
+        module = (self.capture_instances.get(display_id) or {}).get('module')
+        if module is None or not hasattr(module, "active_codec"):
+            return
+        try:
+            active = await asyncio.to_thread(module.active_codec)
+        except Exception as e:
+            data_logger.debug(f"Active codec of '{display_id}' unknown: {e}")
+            return
+        if active is None:
+            if attempt < 5:
+                self._schedule_active_codec_settle(display_id, attempt + 1)
+            return
+        entry = self.display_clients.get(display_id)
+        encoder = (entry or {}).get('encoder') or self.app.encoder
+        if codec_for_encoder(encoder) == active:
+            return
+        demoted = encoder_for_codec(active)
+        data_logger.warning(
+            f"Display '{display_id}' streams {CODEC_LABELS.get(active, active)} as '{demoted}': "
+            f"no encoder served '{encoder}'.")
+        if entry is not None:
+            entry['encoder'] = demoted
+        if display_id == 'primary':
+            self.app.encoder = demoted
+        await self._broadcast_live_server_settings(display_id)
 
     async def _wayland_start_verdict(self, module: Any, display_id: str) -> Tuple[bool, Optional[str]]:
         """Read the truthful outcome of a Wayland capture start.
@@ -5635,12 +5685,10 @@ class DataStreamingServer(BaseStreamingService):
         cs.capture_x = x
         cs.capture_y = y
         encoder = display_state.get('encoder', self.app.encoder)
-        if encoder == "jpeg":
-            cs.output_mode = 0
+        cs.codec = codec_for_encoder(encoder)
+        if cs.codec == "jpeg":
             cs.jpeg_quality = display_state.get('jpeg_quality', self._initial_jpeg_quality)
             cs.paint_over_jpeg_quality = display_state.get('paint_over_jpeg_quality', self._initial_paint_over_jpeg_quality)
-        else:
-            cs.output_mode = 1
         ih = getattr(self, 'input_handler', None)
         apply_common_capture_settings(
             cs, self.cli_args,

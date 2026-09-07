@@ -120,7 +120,13 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, isMacDesktop } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, h264Framing, h264FramingReady, isMacDesktop } from './lib/util.js';
+import {
+  wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
+  avcDescription, annexbToAvcc, sameBytes,
+} from './lib/wire-codecs.js';
+// The same module by source, for the video worker's own copy of it.
+import wireCodecsSource from './lib/wire-codecs.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 
@@ -422,6 +428,10 @@ const JPEG_STRIPE_REORDER_WINDOW = 256;
 let stripeDecodeSoftErrors = {};
 let wakeLockSentinel = null;
 let currentEncoderMode = 'h264enc-striped';
+/** Whether an encoder wire value streams whole video frames through one decoder. */
+const isFullFrameVideo = (mode) => mode !== 'jpeg' && mode !== 'h264enc-striped';
+/** Whether an encoder wire value streams video at all rather than JPEG stills. */
+const isVideoEncoder = (mode) => mode !== 'jpeg';
 let useCssScaling = false;
 /** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 function streamDensity() {
@@ -1312,49 +1322,6 @@ function checkWorkerSinkAlive() {
     deactivateVideoWorker();
   }
 }
-/**
- * Reads the codec string from a keyframe's SPS: scans the Annex-B payload for
- * the first SPS NAL and builds `avc1.PPCCLL` from it.
- * @param {Uint8Array} bytes
- * @returns {string|null} `null` when no SPS is found, so the caller falls back
- *     to the heuristic guess.
- */
-const parseAvcCodecFromAnnexB = (bytes) => {
-  if (!bytes || bytes.length < 5) return null;
-  const hex2 = (n) => n.toString(16).toUpperCase().padStart(2, '0');
-  const n = bytes.length;
-  let i = 0;
-  while (i + 3 < n) {
-    let startLen = 0;
-    if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1) {
-      startLen = 3;
-    } else if (i + 4 < n && bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 0 && bytes[i + 3] === 1) {
-      startLen = 4;
-    } else {
-      i++;
-      continue;
-    }
-    const nalStart = i + startLen;
-    if (nalStart >= n) return null;
-    const nalHeader = bytes[nalStart];
-    // forbidden_zero_bit must be 0; nal_unit_type is the low 5 bits.
-    const nalType = nalHeader & 0x1f;
-    if ((nalHeader & 0x80) === 0 && nalType === 7) {
-      // profile_idc, constraint flags and level_idc are the first three RBSP
-      // bytes and, with profile_idc always >= 66, never need emulation prevention.
-      if (nalStart + 3 < n) {
-        const profileIdc = bytes[nalStart + 1];
-        const constraintFlags = bytes[nalStart + 2];
-        const levelIdc = bytes[nalStart + 3];
-        return `avc1.${hex2(profileIdc)}${hex2(constraintFlags)}${hex2(levelIdc)}`;
-      }
-      return null;
-    }
-    i = nalStart;
-  }
-  return null;
-};
-
 const VIDEO_WORKER_SRC = `
 // Video sink and optional in-worker decoder. The sink is a worker-only
 // VideoTrackGenerator (its track transferred to the page for <video>.srcObject) or a
@@ -1404,10 +1371,10 @@ function present(f) {
 function closeDecoder() {
   if (dec) { try { if (dec.state !== 'closed') dec.close(); } catch (_) {} dec = null; }
   decKey = false; decNeedKey = false;
-  wireCodec = null; wireW = 0; wireH = 0;
+  wireCodec = null; wireW = 0; wireH = 0; wireDesc = null;
 }
 
-function configureDecoder(codec, w, h, software) {
+function configureDecoder(codec, w, h, software, description) {
   closeDecoder();
   try {
     dec = new VideoDecoder({ output: present, error: () => { closeDecoder(); self.postMessage({ type: 'decoderError' }); } });
@@ -1417,6 +1384,7 @@ function configureDecoder(codec, w, h, software) {
     // and the pinned SPS level keeps it from re-initializing mid-stream.
     const cfg = { codec: codec, codedWidth: w, codedHeight: h, optimizeForLatency: true };
     if (software) cfg.hardwareAcceleration = 'prefer-software';
+    if (description) cfg.description = description;
     dec.configure(cfg);
     // A keyframe is required after (re)configure.
     decNeedKey = true;
@@ -1443,9 +1411,18 @@ function decodeChunk(key, data, timestamp) {
 // is derived from each keyframe's SPS; hints carry the page's fallback guess
 // and acceleration preference. Wire stats go up once a second for the page's
 // counters, watchdogs and fps, with the row layout this side is decoding.
-let wireCodec = null, wireW = 0, wireH = 0, wireHint = null, wireSoftware = false;
+let wireCodec = null, wireW = 0, wireH = 0, wireHint = null, wireSoftware = false, wireChromium = false;
+// H.264 as this engine takes it: Annex B as sent, or length-prefixed NAL units
+// behind the key frame's avcC description where Annex B is refused.
+let wireAvcc = false, wireDesc = null;
+const avcFramed = (codec) => wireAvcc && typeof codec === 'string' && codec.startsWith('avc1');
+// The codec the page's encoder streams; frames of another are the stream it
+// just left, still in flight, and must not build (and lose) a decoder here.
+let wireExpect = null;
 let wireChunks = 0, wireFrames = 0, wireLastId = -1, wireStatsTimer = null;
-const parseAvcCodecFromAnnexB = ${parseAvcCodecFromAnnexB.toString()};
+// The codec helpers by source: a bundler renames the module bindings they
+// share, which a stringified function would carry in here unresolved.
+${wireCodecsSource.replace(/^export /gm, '')}
 
 // The striped modes (h264enc-striped, jpeg) decode, composite and present in
 // here: a VideoDecoder per row offset or an in-worker JPEG decode, drawn onto
@@ -1579,7 +1556,7 @@ function onStripeError(y) {
 function onH264Stripe(buffer) {
   if (buffer.byteLength < 11) return;
   const head = new Uint8Array(buffer, 0, 10);
-  const key = head[1] === 0x01;
+  const key = wireFrameIsKey(head[1]);
   const frameId = (head[2] << 8) | head[3];
   const y = (head[4] << 8) | head[5];
   const w = (head[6] << 8) | head[7];
@@ -1591,13 +1568,14 @@ function onH264Stripe(buffer) {
   if (payload.byteLength === 0) return;
   let info = stripeDecs[y];
   let codec = info ? info.codec : null;
-  if (key) {
-    const parsed = parseAvcCodecFromAnnexB(new Uint8Array(payload));
-    if (parsed) codec = parsed;
-    else if (!codec) codec = wireHint;
-  }
+  const bytes = new Uint8Array(payload);
+  if (key) codec = codecStringFor(wireCodecName(head[1]), bytes, w, h, 0, false, wireChromium);
+  else if (!codec) codec = wireHint;
   if (!codec) { sendNeedKey('no_codec'); return; }
-  if (!info || info.dec.state !== 'configured' || info.w !== w || info.h !== h || info.codec !== codec) {
+  const framed = avcFramed(codec);
+  const desc = key && framed ? avcDescription(bytes) : (info ? info.desc : null);
+  if (!info || info.dec.state !== 'configured' || info.w !== w || info.h !== h || info.codec !== codec
+      || (key && framed && !sameBytes(desc, info.desc))) {
     // Only a keyframe may (re)configure a row: deltas against a lost state are noise.
     if (!key) { sendNeedKey('no_key'); return; }
     if (info) { try { if (info.dec.state !== 'closed') info.dec.close(); } catch (err) {} }
@@ -1613,13 +1591,14 @@ function onH264Stripe(buffer) {
     try {
       const cfg = { codec: codec, codedWidth: w, codedHeight: h, optimizeForLatency: true };
       if (wireSoftware) cfg.hardwareAcceleration = 'prefer-software';
+      if (desc) cfg.description = desc;
       dec.configure(cfg);
     } catch (err) {
       try { if (dec.state !== 'closed') dec.close(); } catch (e2) {}
       onStripeError(y);
       return;
     }
-    info = stripeDecs[y] = { dec: dec, w: w, h: h, codec: codec, gotKey: false, meta: [] };
+    info = stripeDecs[y] = { dec: dec, w: w, h: h, codec: codec, desc: desc, gotKey: false, meta: [] };
   }
   if (!key && !info.gotKey) { sendNeedKey('no_key'); return; }
   if (!key && info.dec.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
@@ -1630,7 +1609,8 @@ function onH264Stripe(buffer) {
   }
   try {
     info.meta.push({ frameId: frameId });
-    info.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: performance.now() * 1000, data: payload }));
+    const data = framed ? annexbToAvcc(bytes) : payload;
+    info.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: performance.now() * 1000, data: data }));
     if (key) info.gotKey = true;
   } catch (err) {
     info.meta.pop();
@@ -1688,28 +1668,30 @@ function onWire(buffer) {
   }
   if (buffer.byteLength < 11) return;
   const head = new Uint8Array(buffer, 0, 10);
-  const key = head[1] === 0x01;
+  if (wireExpect && wireCodecName(head[1]) !== wireExpect) return;
+  const key = wireFrameIsKey(head[1]);
   const frameId = (head[2] << 8) | head[3];
   const w = (head[6] << 8) | head[7];
   const h = (head[8] << 8) | head[9];
   wireChunks++;
   if (frameId !== wireLastId) { wireFrames++; wireLastId = frameId; }
   const payload = buffer.slice(10);
+  const bytes = new Uint8Array(payload);
   let codec = wireCodec;
-  if (key) {
-    const parsed = parseAvcCodecFromAnnexB(new Uint8Array(payload));
-    if (parsed) codec = parsed;
-    else if (!codec) codec = wireHint;
-  }
+  if (key) codec = codecStringFor(wireCodecName(head[1]), bytes, w, h, 0, false, wireChromium);
+  else if (!codec) codec = wireHint;
   if (!codec) { sendNeedKey('no_codec'); return; }
-  if (!dec || dec.state !== 'configured' || codec !== wireCodec || w !== wireW || h !== wireH) {
+  const framed = avcFramed(codec);
+  const desc = key && framed ? avcDescription(bytes) : wireDesc;
+  if (!dec || dec.state !== 'configured' || codec !== wireCodec || w !== wireW || h !== wireH
+      || (key && framed && !sameBytes(desc, wireDesc))) {
     // Only a keyframe may (re)configure: deltas against a lost state are noise.
     if (!key) { sendNeedKey('no_key'); return; }
-    if (!configureDecoder(codec, w, h, wireSoftware)) return;
-    wireCodec = codec; wireW = w; wireH = h;
+    if (!configureDecoder(codec, w, h, wireSoftware, desc)) return;
+    wireCodec = codec; wireW = w; wireH = h; wireDesc = desc;
     self.postMessage({ type: 'wireDims', w: w, h: h });
   }
-  decodeChunk(key, payload, performance.now() * 1000);
+  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, performance.now() * 1000);
 }
 
 const stripedCaps = {
@@ -1730,7 +1712,7 @@ if (typeof VideoTrackGenerator !== 'undefined') {
 self.onmessage = (e) => {
   const m = e.data;
   if (m.canvas) { oc = m.canvas; ctx = oc.getContext('2d', { desynchronized: true }); if (!mode) mode = 'canvas'; return; }
-  if (m.type === 'decoderConfig') { configureDecoder(m.codec, m.codedWidth, m.codedHeight, m.software); return; }
+  if (m.type === 'decoderConfig') { configureDecoder(m.codec, m.codedWidth, m.codedHeight, m.software, m.description || null); return; }
   if (m.type === 'closeDecoder') { closeDecoder(); return; }
   if (m.type === 'chunk') {
     // Not ready yet; the page will resend a keyframe.
@@ -1740,6 +1722,8 @@ self.onmessage = (e) => {
   if (m.type === 'wireIn') {
     if (m.codecHint) wireHint = m.codecHint;
     wireSoftware = !!m.software;
+    wireChromium = !!m.chromium;
+    wireAvcc = !!m.avcc;
     wirePort = m.port;
     m.port.onmessage = (ev) => onWire(ev.data);
     if (!wireStatsTimer) {
@@ -1760,6 +1744,7 @@ self.onmessage = (e) => {
   }
   if (m.type === 'wireMode') {
     const striped = !!m.striped;
+    wireExpect = m.codec || null;
     if (striped !== stripedOn) {
       stripedOn = striped;
       // The sink re-announces in the new mode, so the page re-hides its
@@ -1786,6 +1771,8 @@ self.onmessage = (e) => {
   if (m.type === 'wireHints') {
     if (m.codecHint) wireHint = m.codecHint;
     if (m.software !== undefined) wireSoftware = !!m.software;
+    if (m.chromium !== undefined) wireChromium = !!m.chromium;
+    if (m.avcc !== undefined) wireAvcc = !!m.avcc;
     return;
   }
   // Fallback: a main-thread-decoded frame transferred in.
@@ -1943,7 +1930,8 @@ function wireSocketToVideoWorker() {
   try {
     videoWorker.postMessage({
       type: 'wireIn', port: channel.port1,
-      codecHint: workerKeyframeCodec, software: preferSoftwareDecode,
+      codecHint: workerKeyframeCodec, software: preferSoftwareDecode, chromium: isChromium,
+      avcc: h264Framing() === 'avcc',
     }, [channel.port1]);
     websocket.connectVideo(channel.port2);
   } catch (e) {
@@ -1971,9 +1959,11 @@ function updateVideoDivert(force) {
     (currentEncoderMode === 'jpeg' ? videoWorkerJpegDecode : videoWorkerStripedDecode);
   const on = !!(websocket && typeof websocket.setVideoDivert === 'function' &&
     videoWorkerReady && !workerDecodeFailed &&
-    (striped ? stripedReady : (decodeInWorker && currentEncoderMode === 'h264enc')));
+    (striped ? stripedReady : (decodeInWorker && isFullFrameVideo(currentEncoderMode))));
   if (videoWorker) {
-    try { videoWorker.postMessage({ type: 'wireMode', striped }); } catch (e) { /* respawns fresh */ }
+    try {
+      videoWorker.postMessage({ type: 'wireMode', striped, codec: striped ? null : codecOfEncoder(currentEncoderMode) });
+    } catch (e) { /* respawns fresh */ }
   }
   // The striped flag is part of the state: a full-frame divert rolling into a
   // striped one keeps `on` but changes the ack source and the sink upkeep.
@@ -2061,6 +2051,10 @@ function ensureVideoWorker() {
         workerDecoderCodec = null; workerDecoderW = 0; workerDecoderH = 0;
         workerKeyframeCodec = null;
         updateVideoDivert();
+        // The page path takes over from the next key frame: it needs one to
+        // build (or refuse) its own decoder, and a still screen would not
+        // send another on its own.
+        requestKeyframe();
         return;
       }
       if (m.type === 'wireStats') {
@@ -2110,7 +2104,7 @@ function ensureVideoWorker() {
           syncWireGeom();
           updateVideoDivert();
         } else if (supportsWindowMSTG &&
-            currentEncoderMode !== 'h264enc-striped' && currentEncoderMode !== 'jpeg') {
+            isFullFrameVideo(currentEncoderMode)) {
           // No worker generator, but the page has one: it feeds a <video>
           // element, which beats compositing a canvas by hand.
           announceSink('MediaStreamTrackGenerator on the page — '
@@ -2303,14 +2297,20 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec) {
   if (workerDecodeFailed) return false;
   if (!ensureVideoWorker()) return false;
   if (!activateWorkerSinkDisplay()) return false;
+  const framed = h264Framing() === 'avcc' && codec.startsWith('avc1');
   if (codec !== workerDecoderCodec || w !== workerDecoderW || h !== workerDecoderH) {
+    if (framed && !isKey) { requestKeyframe(); return true; }
     logWorkerDecoderConfig(codec, w, h);
-    try { videoWorker.postMessage({ type: 'decoderConfig', codec: codec, codedWidth: w, codedHeight: h, software: preferSoftwareDecode }); }
-    catch (e) { return false; }
+    const description = framed ? avcDescription(new Uint8Array(dataBuf)) : null;
+    try {
+      videoWorker.postMessage({ type: 'decoderConfig', codec: codec, codedWidth: w, codedHeight: h,
+                                software: preferSoftwareDecode, description: description });
+    } catch (e) { return false; }
     workerDecoderCodec = codec; workerDecoderW = w; workerDecoderH = h;
     requestKeyframe();
   }
-  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: dataBuf, timestamp: performance.now() * 1000 }, [dataBuf]); }
+  const data = framed ? annexbToAvcc(new Uint8Array(dataBuf)).buffer : dataBuf;
+  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: performance.now() * 1000 }, [data]); }
   catch (e) { return false; }
   return true;
 }
@@ -2327,58 +2327,22 @@ function deactivateMstg() {
 }
 
 /**
- * Pre-stream guess of the H.264 codec string. Decoder creation re-derives the
- * exact codec from the first keyframe's SPS (codecFromKeyframe), and outside
- * Chromium only a conservative baseline is guessed because Safari rejects a
- * stream whose real profile or level exceeds the configured one.
- * @param {number} width
- * @param {number} height
- * @param {boolean} is444 Whether the stream is 4:4:4 full-color.
- * @param {number} fps
- * @returns {string}
- */
-const getDynamicH264Codec = (width, height, is444, fps) => {
-  if (!isChromium) {
-    return 'avc1.42E01E';
-  }
-  const effFps = (typeof fps === 'number' && fps > 0) ? fps : 60;
-  const pixelsPerSecond = width * height * effFps;
-  // NVENC's emitted profile_idc: High (0x64) for 4:2:0, High 4:4:4 (0xF4) for 4:4:4.
-  const profile = is444 ? 'F400' : '6400';
-  // Floored at level 5.2 (0x34), the encoder's emitted level, so the first
-  // keyframe does not trigger a level-only reconfigure.
-  let level;
-  if (pixelsPerSecond <= 3840 * 2160 * 60) {
-    level = '34';
-  } else if (pixelsPerSecond <= 7680 * 4320 * 30) {
-    level = '3C';
-  } else if (pixelsPerSecond <= 7680 * 4320 * 60) {
-    level = '3D';
-  } else {
-    level = '3E';
-  }
-  return `avc1.${profile}${level}`;
-};
-
-
-/**
- * The H.264 codec string a keyframe's in-band SPS declares. Every engine uses
+ * The WebCodecs codec string of the stream a video frame belongs to: read from
+ * the frame itself when it is a key frame (the parameter sets every codec here
+ * repeats on its key frames), from the geometry otherwise. Every engine uses
  * this: Safari's VideoDecoder errors when the configured profile or level is
  * lower than the stream's real one, and the parsed value always matches the
  * bitstream.
- * @param {ArrayBuffer|Uint8Array} keyframeBytes
- * @param {string} fallback Used when no SPS can be read.
+ * @param {number} typeByte The frame's wire type byte.
+ * @param {ArrayBuffer|null} payload The frame's payload.
+ * @param {number} width
+ * @param {number} height
  * @returns {string}
  */
-const codecFromKeyframe = (keyframeBytes, fallback) => {
-  if (!keyframeBytes || !keyframeBytes.byteLength) return fallback;
-  try {
-    const parsed = parseAvcCodecFromAnnexB(
-      keyframeBytes instanceof Uint8Array ? keyframeBytes : new Uint8Array(keyframeBytes));
-    return parsed || fallback;
-  } catch (_) {
-    return fallback;
-  }
+const wireCodecString = (typeByte, payload, width, height) => {
+  const keyframe = (payload && wireFrameIsKey(typeByte) && payload.byteLength)
+    ? new Uint8Array(payload) : null;
+  return codecStringFor(wireCodecName(typeByte), keyframe, width, height, framerate, video_fullcolor, isChromium);
 };
 
 /**
@@ -2527,49 +2491,94 @@ body {
  * here to start and the answer settles nothing for a stream not asking for it.
  */
 async function settleFullColorSupport() {
+    const codec = codecOfEncoder(currentEncoderMode);
+    if (!codecCarriesFullColor(codec)) return;
+    if (await canDecodeFullColor(codec)) return;
     if (!getBoolParam('video_fullcolor', false)) return;
-    if (await canDecodeFullColor()) return;
-    console.warn('[Selkies] full colour (4:4:4) is off: this browser decodes H.264 4:2:0 only.');
+    console.warn(`[Selkies] full colour (4:4:4) is off: this browser decodes ${codec} 4:2:0 only.`);
     video_fullcolor = false;
     setBoolParam('video_fullcolor', false);
 }
 
-let codecRefusalAnswered = false;
-let codecRefusalUnanswerable = false;
 /**
- * Answers a decoder config this engine will not take, and reports it.
- *
- * The codec is the stream's own, read from the keyframe's SPS, so it is what
- * the server is really sending rather than what the settings say: a
- * `video_fullcolor` the server holds locked arrives as 4:4:4 in the bitstream
- * and as nothing at all in the settings echo. Left alone, every stripe of
- * every frame builds a decoder and has it refused, and the page stays black
- * without saying why.
- *
- * A client that owns its settings takes the ladder's own last rung, the JPEG
- * encoder, whose stripes need no `VideoDecoder`. Refusals that outlive that
- * switch -- a decoder refused again, or an H.264 keyframe still arriving on
- * the page path -- mean the server holds the encoder too, and a shared viewer
- * owns none of the stream's settings to begin with: both are told, once.
- * @param {string} codec The refused codec string.
+ * The codec-refusal ladder: rungs taken, the encoder asked for and not yet
+ * confirmed, and whether a refusal has anywhere left to go.
  */
-function answerRefusedCodec(codec) {
-    if (codecRefusalUnanswerable) return;
-    if (!codecRefusalAnswered) {
-        codecRefusalAnswered = true;
-        if (!isSharedMode && currentEncoderMode !== 'jpeg') {
-            console.warn(`This browser has no decoder for ${codec}; switching to the JPEG encoder.`);
-            pinJpegEncoder();
-            sendFullSettingsUpdateToServer(`no decoder for ${codec}`);
-            return;
-        }
+let codecRefusalRung = 0;
+let codecRefusalPending = null;
+let codecRefusalUnanswerable = false;
+/** Whether the server holds the encoder: a locked setting, or a step it answered with another value. */
+let encoderLocked = false;
+
+/** The encoder a refused one falls back to: H.264 where this engine decodes it, else JPEG. */
+const fallbackEncoder = () => (canDecodeEncoder('h264enc') ? 'h264enc' : 'jpeg');
+
+/**
+ * Answers a stream this engine will not decode, and reports it.
+ *
+ * `label` is what was refused: the codec string read from a key frame, which
+ * is what the server really sends rather than what the settings say (a
+ * `video_fullcolor` the server holds locked arrives as 4:4:4 in the bitstream
+ * and as nothing at all in the settings echo), or the encoder the server
+ * announced when its codec fails the decoder probe.
+ *
+ * A client that owns the encoder steps down the ladder: to the H.264 encoder
+ * where the engine decodes H.264, else to the JPEG encoder, whose stripes
+ * need no `VideoDecoder`. A refused H.264 stream, whichever encoder framed it
+ * and whatever profile the refusal was about, goes to JPEG at once: H.264 is
+ * the rung in between. The step stays pending until the server confirms it,
+ * by its settings echo or by the new stream's first frame; refusals in the
+ * meantime are the old stream still in flight. A server that holds the
+ * encoder, and a shared viewer, which owns none of the stream's settings, are
+ * told once.
+ * @param {string} label The refused codec string or encoder.
+ * @param {string} codec The refused stream's codec name.
+ */
+function answerRefusedCodec(label, codec) {
+    if (codecRefusalUnanswerable || codecRefusalPending) return;
+    if (!isSharedMode && !encoderLocked && currentEncoderMode !== 'jpeg' && codecRefusalRung < 2) {
+        const next = (codec === 'h264' || currentEncoderMode === 'h264enc') ? 'jpeg' : fallbackEncoder();
+        codecRefusalRung = next === 'jpeg' ? 2 : 1;
+        codecRefusalPending = next;
+        console.warn(`This browser has no decoder for ${label}; switching to the ${next} encoder.`);
+        currentEncoderMode = next;
+        setStringParam('encoder', next);
+        // The worker takes the next stream from its first frame, whatever the
+        // refused one did to it; the refused stream's stragglers it drops.
+        workerDecodeFailed = false;
+        workerDecoderCodec = null; workerDecoderW = 0; workerDecoderH = 0;
+        workerKeyframeCodec = null;
+        updateVideoDivert();
+        sendFullSettingsUpdateToServer(`no decoder for ${label}`);
+        return;
     }
     codecRefusalUnanswerable = true;
-    console.error(`This session streams ${codec}, which this browser cannot decode.`);
+    console.error(`This session streams ${label}, which this browser cannot decode.`);
     if (statusDisplayElement) {
-        statusDisplayElement.textContent = 'Error: This session streams video in a format this '
-            + 'browser cannot decode. Full color (4:4:4) needs a browser whose decoder has that profile.';
+        statusDisplayElement.textContent = 'Error: This session streams video in a format this browser cannot decode.';
         statusDisplayElement.classList.remove('hidden');
+    }
+}
+
+/**
+ * Takes the server's word on the encoder: what it streams, whether it holds
+ * the setting, and whether the ladder's pending step landed. An encoder whose
+ * codec fails the decoder probe goes to the ladder; a decodable one clears
+ * the notice.
+ * @param {string} encoder The announced encoder.
+ * @param {{locked?: boolean, allowed?: string[]}} [entry] Its settings entry.
+ */
+function settleServerEncoder(encoder, entry) {
+    encoderLocked = !!(entry && (entry.locked || (Array.isArray(entry.allowed) && entry.allowed.length === 1)));
+    if (codecRefusalPending) {
+        // Answered with another value: the server keeps the encoder.
+        if (encoder !== codecRefusalPending) encoderLocked = true;
+        codecRefusalPending = null;
+    }
+    if (!canDecodeEncoder(encoder)) { answerRefusedCodec(encoder, codecOfEncoder(encoder)); return; }
+    if (codecRefusalUnanswerable) {
+        codecRefusalUnanswerable = false;
+        if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
     }
 }
 
@@ -3235,7 +3244,7 @@ const STRIPE_SOFT_ERROR_WINDOW_MS = 10000;
  * @param {number} vncStripeYStart The stripe's row offset, which keys its decoder.
  */
 function handleStripeDecodeError(e, vncStripeYStart) {
-    if (decodeInWorker && !workerDecodeFailed && currentEncoderMode === 'h264enc') {
+    if (decodeInWorker && !workerDecodeFailed && isFullFrameVideo(currentEncoderMode)) {
         const now = performance.now();
         const prev = stripeDecodeSoftErrors[vncStripeYStart];
         const soft = (prev && now - prev.last <= STRIPE_SOFT_ERROR_WINDOW_MS) ? prev.count + 1 : 1;
@@ -3570,7 +3579,7 @@ function armSharedStallWatchdog() {
  * @param {VideoFrame} frame
  */
 function handleDecodedVncStripeFrame(yPos, frame) {
-  if (currentEncoderMode === 'h264enc' && yPos === 0) {
+  if (isFullFrameVideo(currentEncoderMode) && yPos === 0) {
     if (document.hidden || (clientMode === 'websockets' && !isSharedMode && !isVideoPipelineActive)) {
       try { frame.close(); } catch (e) {}
       return;
@@ -4246,7 +4255,7 @@ function receiveMessage(event) {
       // flip carries the new answer.
       sendFullSettingsUpdateToServer('manual resolution set');
       applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
-      if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') {
+      if (isVideoEncoder(currentEncoderMode)) {
         console.log("Clearing VNC stripe decoders due to manual resolution change.");
         clearAllVncStripeDecoders();
         if (canvasContext) canvasContext.setTransform(1, 0, 0, 1, 0, 0);
@@ -4270,7 +4279,7 @@ function receiveMessage(event) {
         const autoWidth = alignResolution(currentWindowRes[0]);
         const autoHeight = alignResolution(currentWindowRes[1]);
         resetCanvasStyle(autoWidth, autoHeight);
-        if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') {
+        if (isVideoEncoder(currentEncoderMode)) {
           console.log("Clearing VNC stripe decoders due to resolution reset to window.");
           clearAllVncStripeDecoders();
           if (canvasContext) canvasContext.setTransform(1, 0, 0, 1, 0, 0);
@@ -4694,23 +4703,19 @@ function handleSettingsMessage(settings, fromServer) {
   }
   if (settings.encoder !== undefined) {
     let newEncoderSetting = settings.encoder;
-    if (!canDecodeEncoder(newEncoderSetting)) {
-      if (fromServer) {
-        showUndecodableEncoderNotice(newEncoderSetting);
-      } else {
-        console.warn(`Encoder ${newEncoderSetting} needs WebCodecs, which this browser lacks; keeping jpeg.`);
-      }
-      newEncoderSetting = 'jpeg';
-    } else {
-      clearUndecodableEncoderNotice();
+    // A server-authored value is applied as announced and the settings echo
+    // runs the refusal ladder for it; a dashboard pick this engine cannot
+    // decode takes the ladder's fallback at once.
+    if (!fromServer && !canDecodeEncoder(newEncoderSetting)) {
+      const fallback = fallbackEncoder();
+      console.warn(`This browser has no decoder for ${newEncoderSetting}; using the ${fallback} encoder.`);
+      newEncoderSetting = fallback;
     }
     if (currentEncoderMode !== newEncoderSetting) {
         currentEncoderMode = newEncoderSetting;
         updateVideoDivert();
         storeString('encoder', currentEncoderMode);
         settingsChanged = true;
-        if (newEncoderSetting === 'jpeg' || newEncoderSetting === 'h264enc' || newEncoderSetting === 'h264enc-striped') {
-        }
         if (newEncoderSetting !== 'h264enc-striped') {
             clearAllVncStripeDecoders();
         }
@@ -5098,7 +5103,7 @@ function initWebsockets() {
     }
 
     if (mstgActive || videoWorkerActive) {
-      const fullFrameMode = (currentEncoderMode !== 'jpeg' && currentEncoderMode !== 'h264enc-striped');
+      const fullFrameMode = isFullFrameVideo(currentEncoderMode);
       if (mstgActive && !fullFrameMode) deactivateMstg();
       // Diverted striped modes present through the worker sink; only an
       // undiverted striped mode reclaims the page canvas from it.
@@ -5120,7 +5125,7 @@ function initWebsockets() {
 
     let jpegPaintedThisFrame = false;
 
-    if (currentEncoderMode === 'h264enc') {
+    if (isFullFrameVideo(currentEncoderMode)) {
       let paintedSomethingThisCycle = false;
       if (decodedStripesQueue.length > 0) {
         // Index math rather than repeated shift(), which re-indexes the array each time.
@@ -6163,6 +6168,7 @@ class WorkerWebSocket {
   websocket.onopen = async () => {
     console.log('[websockets] Connection opened!');
     await settleFullColorSupport();
+    if (await h264FramingReady === 'avcc') console.info('[Selkies] H.264 decodes here with an avcC description; frames are reframed for it.');
     wsEverOpened = true;
     try { sessionStorage.removeItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
     status = 'connected_waiting_mode';
@@ -6411,6 +6417,8 @@ class WorkerWebSocket {
       } else if (dataTypeByte === 0x03) {
         const jpegHeaderLength = 6;
         if (arrayBuffer.byteLength < jpegHeaderLength) return;
+        // The JPEG rung of the refusal ladder lands with its first stripe.
+        if (codecRefusalPending === 'jpeg') codecRefusalPending = null;
 
         const jpegFrameId = dataView.getUint16(2, false);
         stripeClock.note(jpegFrameId);
@@ -6472,46 +6480,48 @@ class WorkerWebSocket {
             return;
         }
 
-        // A keyframe still in H.264 after the JPEG rung was asked for: the
-        // server holds the encoder, and the refusal has nowhere left to go.
-        if (!isSharedMode && codecRefusalAnswered && currentEncoderMode === 'jpeg'
-            && video_frame_type_byte === 0x01 && h264Payload.byteLength > 0) {
-            answerRefusedCodec(codecFromKeyframe(h264Payload, null)
-                || getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate));
-            return;
+        const isKeyFrame = wireFrameIsKey(video_frame_type_byte);
+        // A step of the refusal ladder lands with the new stream's first frame;
+        // the refused stream still in flight until then is dropped.
+        if (codecRefusalPending) {
+            if (wireCodecName(video_frame_type_byte) !== codecOfEncoder(codecRefusalPending)) return;
+            codecRefusalPending = null;
         }
 
-        if (decodeInWorker && currentEncoderMode === 'h264enc' && (isSharedMode || isVideoPipelineActive)) {
+        if (decodeInWorker && isFullFrameVideo(currentEncoderMode) && (isSharedMode || isVideoPipelineActive)) {
             if (h264Payload.byteLength === 0) return;
-            if (video_frame_type_byte === 0x01) {
-                const spsCodec = codecFromKeyframe(h264Payload, null);
-                if (spsCodec && spsCodec !== workerKeyframeCodec) {
-                    workerKeyframeCodec = spsCodec;
+            if (isKeyFrame) {
+                const keyCodec = wireCodecString(video_frame_type_byte, h264Payload, stripeWidth, stripeHeight);
+                if (keyCodec !== workerKeyframeCodec) {
+                    workerKeyframeCodec = keyCodec;
                 }
             }
-            const workerCodec = workerKeyframeCodec || getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate);
-            if (feedWorkerDecoder(video_frame_type_byte === 0x01, h264Payload, stripeWidth, stripeHeight, workerCodec)) {
+            const workerCodec = workerKeyframeCodec || wireCodecString(video_frame_type_byte, null, stripeWidth, stripeHeight);
+            if (feedWorkerDecoder(isKeyFrame, h264Payload, stripeWidth, stripeHeight, workerCodec)) {
                 return;
             }
         }
 
-        // Full-frame h264enc is the stripe path with a single decoder at row 0,
-        // for a shared viewer exactly as for the primary.
+        // A full-frame video encoder is the stripe path with a single decoder at
+        // row 0, for a shared viewer exactly as for the primary.
         const canProcessVncStripe =
-            (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') &&
+            isVideoEncoder(currentEncoderMode) &&
             (isSharedMode || isVideoPipelineActive);
 
         if (canProcessVncStripe) {
             if (h264Payload.byteLength === 0) return;
 
             let decoderInfo = vncStripeDecoders[vncStripeYStart];
-            const chunkType = (video_frame_type_byte === 0x01) ? 'key' : 'delta';
+            const chunkType = isKeyFrame ? 'key' : 'delta';
             const needKeyframe = !decoderInfo || !decoderInfo.hasReceivedKeyframe;
             if (chunkType === 'delta' && needKeyframe) {
                 requestKeyframe();
                 return;
             }
-            if (!decoderInfo || decoderInfo.decoder.state === 'closed' ||
+            // A reframed row is rebuilt on a key frame whose parameter sets changed too.
+            const reframed = decoderInfo && decoderInfo.framed && isKeyFrame
+                && !sameBytes(avcDescription(new Uint8Array(h264Payload)), decoderInfo.description);
+            if (!decoderInfo || decoderInfo.decoder.state === 'closed' || reframed ||
                 (decoderInfo.decoder.state === 'configured' && (decoderInfo.width !== stripeWidth || decoderInfo.height !== stripeHeight))) {
 
                 if(decoderInfo && decoderInfo.decoder.state !== 'closed') {
@@ -6522,21 +6532,23 @@ class WorkerWebSocket {
                     output: handleDecodedVncStripeFrame.bind(null, vncStripeYStart),
                     error: (e) => handleStripeDecodeError(e, vncStripeYStart)
                 });
-                let dynamicCodec = getDynamicH264Codec(stripeWidth, stripeHeight, video_fullcolor, framerate);
-                if (video_frame_type_byte === 0x01) {
-                    dynamicCodec = codecFromKeyframe(h264Payload, dynamicCodec);
-                }
+                const dynamicCodec = wireCodecString(video_frame_type_byte, h264Payload, stripeWidth, stripeHeight);
+                const framed = h264Framing() === 'avcc' && dynamicCodec.startsWith('avc1');
+                const description = framed ? avcDescription(new Uint8Array(h264Payload)) : null;
                 const decoderConfig = decoderConfigFor({
                     codec: dynamicCodec,
                     codedWidth: stripeWidth,
                     codedHeight: stripeHeight,
-                    optimizeForLatency: true
+                    optimizeForLatency: true,
+                    ...(description ? { description } : {})
                 });
                 vncStripeDecoders[vncStripeYStart] = {
                     decoder: newStripeDecoder,
                     pendingChunks: [],
                     width: stripeWidth,
                     height: stripeHeight,
+                    framed: framed,
+                    description: description,
                     hasReceivedKeyframe: false
                 };
                 decoderInfo = vncStripeDecoders[vncStripeYStart];
@@ -6547,7 +6559,7 @@ class WorkerWebSocket {
                             return newStripeDecoder.configure(decoderConfig);
                         } else {
                             // The catch below closes the decoder while the map entry still points at it.
-                            answerRefusedCodec(dynamicCodec);
+                            answerRefusedCodec(dynamicCodec, wireCodecName(video_frame_type_byte));
                             const refusal = new Error(`config not supported: ${dynamicCodec}`);
                             refusal.quiet = true;
                             return Promise.reject(refusal);
@@ -6584,7 +6596,7 @@ class WorkerWebSocket {
                 const chunkData = {
                     type: chunkType,
                     timestamp: chunkTimestamp,
-                    data: h264Payload
+                    data: decoderInfo.framed ? annexbToAvcc(new Uint8Array(h264Payload)) : h264Payload
                 };
                 if (decoderInfo.decoder.state === "configured") {
                     const chunk = new EncodedVideoChunk(chunkData);
@@ -6879,11 +6891,8 @@ class WorkerWebSocket {
                   return;
               }
               const changes = sanitizeAndStoreSettings(obj.settings);
-              if (typeof window['encoder'] === 'string' && !canDecodeEncoder(window['encoder'])) {
-                  showUndecodableEncoderNotice(window['encoder']);
-              } else if (typeof window['encoder'] === 'string' && window['encoder'] !== currentEncoderMode) {
+              if (typeof window['encoder'] === 'string' && window['encoder'] !== currentEncoderMode) {
                   const newEnc = window['encoder'];
-                  clearUndecodableEncoderNotice();
                   console.log(`Server settings switch encoder ${currentEncoderMode} -> ${newEnc}.`);
                   currentEncoderMode = newEnc;
                   updateVideoDivert();
@@ -6959,6 +6968,7 @@ class WorkerWebSocket {
                   console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
                   handleSettingsMessage(changes, true);
               }
+              if (typeof window['encoder'] === 'string') settleServerEncoder(window['encoder'], obj.settings.encoder);
               const serverForcesManual = obj.settings && obj.settings.manual_resolution && obj.settings.manual_resolution.value === true;
 
               if (serverForcesManual || window.manual_resolution) {
@@ -7004,7 +7014,7 @@ class WorkerWebSocket {
             if (obj.video !== undefined && obj.video !== isVideoPipelineActive) {
               isVideoPipelineActive = obj.video;
               statusChanged = true;
-              if (!isVideoPipelineActive && (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') && !isSharedMode) {
+              if (!isVideoPipelineActive && isVideoEncoder(currentEncoderMode) && !isSharedMode) {
                   clearAllVncStripeDecoders();
               }
             }
@@ -8205,11 +8215,18 @@ function performServerInitiatedVideoReset(reason = "unknown") {
   cleanupJpegStripeQueue();
   clearDecodedStripesQueue();
 
-  if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') {
+  if (isVideoEncoder(currentEncoderMode)) {
     clearAllVncStripeDecoders();
   }
+  // A worker decoder the stream just torn down disqualified gets its turn back.
+  if (workerDecodeFailed) {
+    workerDecodeFailed = false;
+    workerDecoderCodec = null; workerDecoderW = 0; workerDecoderH = 0;
+    workerKeyframeCodec = null;
+    updateVideoDivert();
+  }
 
-  if (canvasContext && canvas && !(currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped')) {
+  if (canvasContext && canvas && !isVideoEncoder(currentEncoderMode)) {
     try {
       canvasContext.setTransform(1, 0, 0, 1, 0, 0);
       canvasContext.clearRect(0, 0, canvas.width, canvas.height);
@@ -8287,6 +8304,21 @@ function initiateFallback(error, context) {
     if (performance.now() - softwareDecodeSwitchedAt < SOFTWARE_DECODE_SETTLE_MS) {
         console.warn(`[initiateFallback] Ignoring decoder error (Context: ${context}) from the decoders the software switch replaced.`);
         return;
+    }
+    // An engine that takes the configuration and refuses the stream at decode
+    // (WebKit does for AV1): a codec with a rung below it steps the ladder the
+    // way a refused configuration does, rather than reloading into the crash
+    // count.
+    const codec = codecOfEncoder(currentEncoderMode);
+    if (!isSharedMode && isFullFrameVideo(currentEncoderMode) && codec !== 'h264') {
+        if (codecRefusalPending) return;
+        answerRefusedCodec(`${codec} (refused at decode)`, codec);
+        if (codecRefusalPending) {
+            softwareDecodeAttempted = false;
+            rememberSoftwareDecode(false);
+            clearAllVncStripeDecoders();
+            return;
+        }
     }
     console.error(`FATAL DECODER ERROR (Context: ${context}).`, error);
     if (window.isFallingBack) return;
@@ -8370,27 +8402,6 @@ function runPreflightChecks() {
 function pinJpegEncoder() {
     currentEncoderMode = 'jpeg';
     setStringParam('encoder', 'jpeg');
-}
-
-let undecodableEncoderNoticeShown = false;
-/**
- * Reports a server-locked encoder this engine cannot decode instead of showing nothing.
- * @param {string} encoderName
- */
-function showUndecodableEncoderNotice(encoderName) {
-    console.error(`Encoder ${encoderName} needs the WebCodecs API, which this browser lacks.`);
-    if (statusDisplayElement) {
-        statusDisplayElement.textContent = 'Error: The session streams an encoder this browser cannot decode without the WebCodecs API.';
-        statusDisplayElement.classList.remove('hidden');
-    }
-    undecodableEncoderNoticeShown = true;
-}
-
-/** Hides the undecodable-encoder notice once a decodable encoder is in use. */
-function clearUndecodableEncoderNotice() {
-    if (!undecodableEncoderNoticeShown) return;
-    undecodableEncoderNoticeShown = false;
-    if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
 }
 
 window.addEventListener('beforeunload', cleanup);

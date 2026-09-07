@@ -144,6 +144,11 @@ def live_openbox_check() -> None:
     if H.shutil.which("openbox") is None:
         res.skip("a real Openbox is read and restarted", "no openbox on PATH")
         return
+    if not H.TEST_DISPLAY:
+        # This tier is defined to need only the source tree; the live half runs
+        # wherever a throwaway server is configured for the suites to drive.
+        res.skip("a real Openbox is read and restarted", "E2E_DISPLAY is not set")
+        return
     display = H.require_display()
     env = {**os.environ, "DISPLAY": display}
     # The readers open the display the environment names; never the desktop's.

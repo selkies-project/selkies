@@ -110,8 +110,11 @@ class JitterBuffer:
             elif packet.timestamp != timestamp:
                 # we now have a complete frame, only store the first one
                 if frame is None:
+                    # A codec whose packets cannot be joined carries its own assembler.
+                    assemble = getattr(packets[0], "_assemble", None)
+                    parts = [x._data for x in packets]  # type: ignore
                     frame = JitterFrame(
-                        data=b"".join([x._data for x in packets]),  # type: ignore
+                        data=assemble(parts) if assemble else b"".join(parts),
                         timestamp=timestamp,
                     )
                     remove = count

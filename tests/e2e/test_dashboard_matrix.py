@@ -38,7 +38,8 @@ CELLS = ("wish-webrtc-x11", "wish-ws-wl", "wish-webrtc-wl",
 # the order a switch away from the default prefers them: the striped H.264
 # mode keeps the WebCodecs path, JPEG needs no decoder at all.
 ENCODER_BY_LABEL = {"H.264 (Striped Frame)": "h264enc-striped", "JPEG (Striped Frame)": "jpeg",
-                    "H.264 (Full Frame)": "h264enc"}
+                    "H.264 (Full Frame)": "h264enc", "H.265 (Full Frame)": "h265enc",
+                    "VP8 (Full Frame)": "vp8enc", "VP9 (Full Frame)": "vp9enc", "AV1 (Full Frame)": "av1enc"}
 
 # Records the core's clipboard messages (a push that arrives while the panel
 # is closed) and the server settings payload the dashboard renders from.

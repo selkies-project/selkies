@@ -71,6 +71,9 @@ SUITES: list = [
     {"path": "unit/test_https_selfsigned.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_encoder_cpu_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rate_control_defaults.py", "tier": "unit", "timeout": 180},
+    {"path": "unit/test_codec_encoders.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_rtp_packetizers.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_encoder_demotion.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_transfer_pacer.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_webrtc_pacer_brake.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_twcc_window.py", "tier": "unit", "timeout": 120},
@@ -199,7 +202,7 @@ SUITES: list = [
     {"path": "e2e/test_software_h264.py", "tier": "e2e", "timeout": 600,
      "selectors": ["x11", "wl"]},
     {"path": "e2e/test_webcam.py", "tier": "e2e", "timeout": 900,
-     "selectors": ["websockets", "webrtc", "locked", "nowebcodecs", "rotation", "reformat", "detail", "encoderpref"]},
+     "selectors": ["websockets", "webrtc", "av1", "webrtcpref", "locked", "nowebcodecs", "rotation", "reformat", "detail", "encoderpref"]},
     {"path": "e2e/test_microphone.py", "tier": "e2e", "timeout": 600,
      "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_media_on_start.py", "tier": "e2e", "timeout": 900,
@@ -241,6 +244,8 @@ SUITES: list = [
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/test_video_drop_recovery.py", "tier": "e2e", "timeout": 600,
      "selectors": ["default", "cpu"]},
+    {"path": "e2e/test_codecs.py", "tier": "e2e", "timeout": 2400,
+     "selectors": ["ws-x11", "ws-wl", "wr-x11"]},
     {"path": "e2e/test_ws_unix_socket.py", "tier": "e2e", "timeout": 600},
 
     # on request

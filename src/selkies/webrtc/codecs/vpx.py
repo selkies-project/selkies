@@ -186,11 +186,13 @@ class Vp8Encoder(Encoder):
         self.picture_id = random.randint(0, (1 << 15) - 1)
         self.__target_bitrate = DEFAULT_BITRATE
 
-    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
-        payloads = self._packetize(memoryview(packet.data), self.picture_id)
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int, bool]:
+        frame = memoryview(packet.data)
+        payloads = self._packetize(frame, self.picture_id)
         timestamp = convert_timebase(packet.pts, packet.time_base, VIDEO_TIME_BASE)
         self.picture_id = (self.picture_id + 1) % (1 << 15)
-        return payloads, timestamp
+        # The frame tag's lowest bit is clear on a key frame.
+        return payloads, timestamp, len(frame) > 0 and frame[0] & 1 == 0
 
     @property
     def target_bitrate(self) -> int:

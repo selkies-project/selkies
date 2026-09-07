@@ -113,10 +113,10 @@ def make_settings(encoder: str, w: int = 1024, h: int = 640, **kw):
     cs.damage_block_duration = 20
     cs.jpeg_quality = 90
     if encoder == "jpeg":
-        cs.output_mode = 0
+        cs.codec = "jpeg"
         cs.video_fullframe = False
     else:
-        cs.output_mode = 1
+        cs.codec = "h264"
         cs.video_fullframe = encoder in ("h264enc", "nvenc")
     for k, v in kw.items():
         setattr(cs, k, v)

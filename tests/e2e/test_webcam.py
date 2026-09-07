@@ -456,6 +456,74 @@ def transport_block(mode: str) -> "H.Results":
     return res
 
 
+# Keeps every peer connection the page opens reachable, so the camera sender
+# can be steered to AV1 through its encoding's `codec` once the track is on.
+PC_JS = """
+(() => {
+  const Real = window.RTCPeerConnection;
+  window.__pcs = [];
+  window.RTCPeerConnection = new Proxy(Real, {
+    construct(target, args) { const pc = Reflect.construct(target, args); window.__pcs.push(pc); return pc; },
+  });
+})();
+"""
+
+# A browser answering the server's offer sends with the offer's first codec
+# whatever its own answer lists first, so the send codec is set on the sender
+# itself, from the codecs the answer negotiated.
+SEND_AV1_JS = """async () => {
+  const out = [];
+  for (const pc of window.__pcs) {
+    for (const t of pc.getTransceivers()) {
+      if (!(t.sender.track && t.sender.track.kind === 'video')) continue;
+      const params = t.sender.getParameters();
+      const av1 = (params.codecs || []).find((c) => /video\\/av1/i.test(c.mimeType));
+      if (!av1) { out.push('no AV1 negotiated'); continue; }
+      params.encodings[0].codec = { mimeType: av1.mimeType, clockRate: av1.clockRate, sdpFmtpLine: av1.sdpFmtpLine };
+      try { await t.sender.setParameters(params); out.push('av1'); } catch (e) { out.push(String(e)); }
+    }
+  }
+  return out;
+}"""
+
+
+def av1_block() -> "H.Results":
+    """The camera comes out of /dev/video0 over WebRTC when the browser sends it
+    as AV1, steered onto that codec once its track is on: one OBU's fragments
+    span RTP packets, so the frame the virtual camera decodes is reassembled
+    from the frame's packets rather than joined."""
+    res = H.Results("webcam-av1")
+    cam = PublishedCamera(flat_frames()).start()
+    H.server_start(mode="webrtc", wayland=False,
+                   extra_env={"SELKIES_WEBCAM_ENABLED": "false",
+                              "SELKIES_WEBCAM_PIXEL_FORMAT": "I420"})
+    try:
+        with sync_playwright() as p:
+            browser, page, errors = launch(p, "chromium", cam.sock_dir, "webrtc", init_js=PC_JS)
+            video = C.wait_wr_video(page)
+            res.check("stream up", bool(video), str(video)[:100])
+            toggle(page, True)
+            res.check("webcam reports active", wait_status(page, True), str(page.evaluate("window.__camStatus")))
+            switched = page.evaluate(SEND_AV1_JS)
+            res.check("the camera sender takes AV1", switched == ["av1"], switched)
+            res.check("the uplink carries AV1", C.wait_log("Webcam uplink carries av1.", timeout=10), "")
+            r = wait_for_picture([((640, 360), GREEN), ((20, 20), BLACK)])
+            res.check("30 frames reach /dev/video0", r.get("rc") == 0 and r.get("frames") == "30",
+                      f"rc={r.get('rc')} frames={r.get('frames')} err={r.get('error', '')}")
+            res.check("frames flow at the camera's rate",
+                      float(r.get("fps", "0")) >= CAMERA_FPS * RATE_FLOOR, f"{r.get('fps')} of {CAMERA_FPS}")
+            res.check("centre is the camera's green", near(r["samples"].get((640, 360)), GREEN), str(r["samples"]))
+            res.check("pillarbox is black", near(r["samples"].get((20, 20)), (16, 128, 128)), str(r["samples"]))
+            toggle(page, False)
+            res.check("webcam reports inactive", wait_status(page, False), str(page.evaluate("window.__camStatus")))
+            res.check("no page errors", not errors, "; ".join(errors)[:200])
+            browser.close()
+    finally:
+        H.server_stop()
+        cam.stop()
+    return res
+
+
 def locked_block() -> "H.Results":
     res = H.Results("webcam-locked")
     cam = PublishedCamera(flat_frames()).start()
@@ -607,7 +675,7 @@ def detail_block() -> "H.Results":
 
 
 # Uplink codec ids, as the frame header carries them.
-CODEC_IDS = {"mjpeg": 0, "jpeg": 0, "h264": 1, "avc": 1, "vp8": 2}
+CODEC_IDS = {"mjpeg": 0, "jpeg": 0, "h264": 1, "avc": 1, "vp8": 2, "vp9": 3, "av1": 4, "h265": 5}
 
 WIRE_CODEC_JS = "window.__codecs = {};\n" + C.wire_hook_js("""
   if (data instanceof ArrayBuffer && data.byteLength > 3) {
@@ -656,6 +724,60 @@ def encoderpref_block() -> "H.Results":
                 browser.close()
         finally:
             H.server_stop()
+    # The codecs past VP8 come from Chromium's own WebCodecs encoders, so a pin
+    # to one of them must come out of the device as that codec's id alone.
+    for pref, want in (("vp9", {3}), ("av1", {4})):
+        H.server_start(mode="websockets", wayland=False,
+                       extra_env={"SELKIES_WEBCAM_ENABLED": "false", "SELKIES_WEBCAM_PIXEL_FORMAT": "I420",
+                                  "SELKIES_WEBCAM_ENCODER": pref})
+        try:
+            with sync_playwright() as p:
+                browser, page, errors = launch(p, "chromium", cam.sock_dir, "websockets", init_js=WIRE_CODEC_JS)
+                res.check(f"chromium {pref}: stream up", bool(C.wait_ws_video(page)), "")
+                toggle(page, True)
+                res.check(f"chromium {pref}: webcam reports active", wait_status(page, True),
+                          str(page.evaluate("window.__camStatus")))
+                r = wait_for_picture([((640, 360), GREEN)])
+                res.check(f"chromium {pref}: device shows the camera's green",
+                          near(r["samples"].get((640, 360)), GREEN), str(r.get("samples")))
+                codecs = page.evaluate("window.__codecs") or {}
+                got = {int(k) for k, v in codecs.items() if v > 5}
+                if not got:
+                    got = {CODEC_IDS.get(page.evaluate("window.webcamCodec"))} - {None}
+                res.check(f"chromium {pref}: wire codec is {sorted(want)}", got == want,
+                          str(codecs) or str(page.evaluate("window.webcamCodec")))
+                res.check(f"chromium {pref}: no page errors", not errors, "; ".join(errors)[:200])
+                browser.close()
+        finally:
+            H.server_stop()
+    cam.stop()
+    return res
+
+
+def webrtcpref_block() -> "H.Results":
+    """`webcam_encoder` over WebRTC: the camera sender is set to the named codec
+    among the ones the answer negotiated, so the server's uplink carries it."""
+    res = H.Results("webcam-webrtcpref")
+    cam = PublishedCamera(flat_frames()).start()
+    for pref in ("vp9", "av1"):
+        H.server_start(mode="webrtc", wayland=False,
+                       extra_env={"SELKIES_WEBCAM_ENABLED": "false", "SELKIES_WEBCAM_PIXEL_FORMAT": "I420",
+                                  "SELKIES_WEBCAM_ENCODER": pref})
+        try:
+            with sync_playwright() as p:
+                browser, page, errors = launch(p, "chromium", cam.sock_dir, "webrtc")
+                res.check(f"{pref}: stream up", bool(C.wait_wr_video(page)), "")
+                toggle(page, True)
+                res.check(f"{pref}: webcam reports active", wait_status(page, True),
+                          str(page.evaluate("window.__camStatus")))
+                res.check(f"{pref}: the uplink carries {pref}", C.wait_log(f"Webcam uplink carries {pref}.", timeout=10), "")
+                r = wait_for_picture([((640, 360), GREEN)])
+                res.check(f"{pref}: device shows the camera's green",
+                          near(r["samples"].get((640, 360)), GREEN), str(r.get("samples")))
+                res.check(f"{pref}: no page errors", not errors, "; ".join(errors)[:200])
+                browser.close()
+        finally:
+            H.server_stop()
     cam.stop()
     return res
 
@@ -673,6 +795,10 @@ def main() -> int:
         ok = reformat_block().summary()
     elif sel == "detail":
         ok = detail_block().summary()
+    elif sel == "av1":
+        ok = av1_block().summary()
+    elif sel == "webrtcpref":
+        ok = webrtcpref_block().summary()
     elif sel == "encoderpref":
         ok = encoderpref_block().summary()
     else:

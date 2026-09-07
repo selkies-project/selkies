@@ -354,12 +354,12 @@ def block_switch(mode: str, wayland: bool, res: "H.Results") -> None:
                 options = page.evaluate(
                     "Array.from(document.querySelectorAll('#encoderSelect option')).map(o => o.value)") if opened else []
                 if mode == "webrtc":
-                    # The server offers WebRTC a single encoder, so the dashboard has
-                    # no choice to render; a select it does render must not carry
-                    # the striped framing.
-                    res.check("switch: the dashboard offers WebRTC no striped encoder",
-                              opened and "h264enc-striped" not in options
-                              and (not options or options == ["h264enc"]), (opened, options))
+                    # WebRTC carries the full-frame encoders alone, those the
+                    # engine's RTP receiver takes; the striped framings never show.
+                    full_frame = ("h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc")
+                    res.check("switch: the dashboard offers WebRTC only full-frame encoders",
+                              opened and "h264enc" in options
+                              and all(o in full_frame for o in options), (opened, options))
                     return
                 res.check("switch: the dashboard offers the striped encoder", "h264enc-striped" in options, options)
                 seen = wait_stripes(page, striped=False)

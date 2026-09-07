@@ -132,7 +132,6 @@ MIN_GOODPUT_SAMPLE_BYTES = 2048
 SendNow = Callable[[bytes], Awaitable[None]]
 
 
-
 class RtpPacer:
     """Token-bucket pacer with strict priority classes for one RTP/DTLS flow.
 

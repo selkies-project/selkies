@@ -383,7 +383,7 @@ export class WebRTCClient {
 
 	/**
 	 * Enables or disables the webcam: attaches a getUserMedia video track to
-	 * the reserved sendonly transceiver (the browser encodes H.264 or VP8 over
+	 * the reserved sendonly transceiver (the browser encodes H.264, VP8, VP9, H.265 or AV1 over
 	 * RTP and the server's virtual camera decodes it), or detaches and stops
 	 * it. Disabling also deactivates the sender's encodings, because a null or
 	 * ended track alone does not silence every engine (Firefox keeps the
@@ -396,7 +396,7 @@ export class WebRTCClient {
 	 * @throws {Error} When the server withheld the webcam m-line (the webcam
 	 *     is locked off); raised before prompting for permission.
 	 */
-	async setWebcam(enabled, deviceId = null, { width = 1280, height = 720, fps = 30 } = {}) {
+	async setWebcam(enabled, deviceId = null, { width = 1280, height = 720, fps = 30, codec = 'auto' } = {}) {
 		if (enabled) {
 			if (!this._webcamTransceiver) {
 				throw new Error('Webcam is disabled on this server.');
@@ -410,6 +410,7 @@ export class WebRTCClient {
 			if (this._webcamTransceiver && this._webcamTransceiver.sender && track) {
 				await this._setSenderActive(this._webcamTransceiver.sender, true);
 				await this._webcamTransceiver.sender.replaceTrack(track);
+				await this.setWebcamCodec(codec);
 			}
 			return true;
 		}
@@ -422,6 +423,42 @@ export class WebRTCClient {
 			this._webcamStream = null;
 		}
 		return true;
+	}
+
+	/**
+	 * Sends the camera as one codec: the `webcam_encoder` name (`h264`, `h265`,
+	 * `vp8`, `vp9`, `av1`) is set on the sender's encoding from the codecs the
+	 * answer negotiated, so the browser leaves the negotiated order for it;
+	 * `auto`, `mjpeg` or a codec the answer lacks returns to that order. The
+	 * codec of an encoding is what the engine offers for this, and an engine
+	 * without it keeps the negotiated order, logged once.
+	 * @param {string} codec
+	 * @returns {Promise<boolean>} Whether the named codec is what goes out.
+	 */
+	async setWebcamCodec(codec) {
+		const sender = this._webcamTransceiver && this._webcamTransceiver.sender;
+		if (!sender || !sender.track) return false;
+		const wanted = `video/${String(codec || 'auto').toLowerCase()}`;
+		try {
+			const params = sender.getParameters();
+			if (!params.encodings || params.encodings.length === 0) return false;
+			const negotiated = (params.codecs || []).find((c) => c.mimeType.toLowerCase() === wanted) || null;
+			const current = params.encodings[0].codec || null;
+			if (negotiated) {
+				if (current && current.mimeType.toLowerCase() === wanted) return true;
+				params.encodings[0].codec = {
+					mimeType: negotiated.mimeType, clockRate: negotiated.clockRate, sdpFmtpLine: negotiated.sdpFmtpLine,
+				};
+			} else {
+				if (!current) return false;
+				delete params.encodings[0].codec;
+			}
+			await sender.setParameters(params);
+			return !!negotiated;
+		} catch (e) {
+			console.warn('Webcam codec not applied to the sender:', e);
+			return false;
+		}
 	}
 
 	/**

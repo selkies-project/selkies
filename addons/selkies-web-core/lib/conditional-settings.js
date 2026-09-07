@@ -50,39 +50,46 @@
  * WebRTC streams default to CBR regardless of encoder (`RATE_CONTROL_SPEC`):
  * a congestion-controlled transport needs the encoder holding a bandwidth
  * target. So does OpenH264, the software H.264 encoder of a GPL-free
- * pixelflux build: a session known to encode on the CPU defaults to CBR when
- * the server reports that build (`softwareH264RcDefault`, the same rule as
- * the server's `resolve_rate_control_default`).
+ * pixelflux build: an H.264 session known to encode on the CPU defaults to
+ * CBR when the server reports that build (`softwareRcDefault`, the same rule
+ * as the server's `resolve_rate_control_default`).
  */
 export const ENCODER_RC_DEFAULTS = {
     "h264enc": "crf",
+    "h265enc": "crf",
+    "vp8enc": "crf",
+    "vp9enc": "crf",
+    "av1enc": "crf",
     "h264enc-striped": "crf",
     "jpeg": "crf",
 };
 
 /**
- * Whether a session with this encoder is known to encode H.264 on the CPU:
- * the striped encoder has no hardware path, and `h264enc` does when software
- * encoding is forced (without it `h264enc` may still land on the CPU, which
- * nothing here can know in advance).
+ * Whether a session with this encoder is known to encode video on the CPU:
+ * the striped encoder has no hardware path, and a full-frame encoder does when
+ * software encoding is forced (without it the session may still land on the
+ * CPU, which nothing here can know in advance).
  * @param {string} encoder Encoder wire value.
  * @param {boolean} useCpu Whether software encoding is forced.
  * @returns {boolean}
  */
-export function softwareH264Path(encoder, useCpu) {
-    return encoder === "h264enc-striped" || (encoder === "h264enc" && !!useCpu);
+export function softwareVideoPath(encoder, useCpu) {
+    if (encoder === "jpeg") return false;
+    return encoder === "h264enc-striped" || !!useCpu;
 }
 
 /**
  * The WebSocket rate-control default for an encoder.
  * @param {string} encoder Encoder wire value.
- * @param {string} softwareH264Encoder The server's software H.264 encoder
- *     from the settings payload, `x264` or `openh264`.
+ * @param {Object<string, string>|undefined} softwareEncoders The server's
+ *     software encoder per codec from the settings payload (`h264` is `x264`
+ *     or `openh264`).
  * @param {boolean} useCpu Whether software encoding is forced.
  * @returns {string|undefined} `cbr` or `crf`; `undefined` for an unknown encoder.
  */
-export function softwareH264RcDefault(encoder, softwareH264Encoder, useCpu) {
-    if (softwareH264Encoder === "openh264" && softwareH264Path(encoder, useCpu)) return "cbr";
+export function softwareRcDefault(encoder, softwareEncoders, useCpu) {
+    const h264 = encoder === "h264enc" || encoder === "h264enc-striped";
+    if (h264 && softwareEncoders && softwareEncoders.h264 === "openh264" && softwareVideoPath(encoder, useCpu)) return "cbr";
     return ENCODER_RC_DEFAULTS[encoder];
 }
 
@@ -170,7 +177,7 @@ export const RATE_CONTROL_SPEC = {
     storageKey: "rate_control_mode",
     conditional: (ctx) => (ctx.streamMode === "webrtc"
         ? "cbr"
-        : softwareH264RcDefault(ctx.activeEncoder, ctx.softwareH264Encoder, ctx.useCpu)),
+        : softwareRcDefault(ctx.activeEncoder, ctx.softwareEncoders, ctx.useCpu)),
     isValid: (v, ctx) => ctx.allowedRateControl.includes(v),
     fallback: "crf",
     propagate: (mode, _ctx, io) => io.postSetting({ rate_control_mode: mode }),

@@ -264,13 +264,14 @@ class H264Encoder(Encoder):
 
         return packetized_packages
 
-    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int, bool]:
         # The encoder buffer is walked as a memoryview, so the Annex-B scan needs
         # no full-frame copy; the views are consumed inside _packetize, which cuts
         # them into the RTP payloads (the only bytes materialized).
-        packages = self._split_bitstream(memoryview(packet.data))
+        packages = list(self._split_bitstream(memoryview(packet.data)))
         timestamp = convert_timebase(packet.pts, packet.time_base, VIDEO_TIME_BASE)
-        return self._packetize(packages), timestamp
+        keyframe = any(nal[0] & 0x1F in (5, 7) for nal in packages)
+        return self._packetize(packages), timestamp, keyframe
 
     @property
     def target_bitrate(self) -> int:

@@ -45,9 +45,14 @@ from ..rtcrtpparameters import (
 from .base import Decoder, Encoder
 from .g711 import PcmaDecoder, PcmaEncoder, PcmuDecoder, PcmuEncoder
 from .g722 import G722Decoder, G722Encoder
+from collections.abc import Callable
+
+from .av1 import Av1Decoder, Av1Encoder, av1_assemble
 from .h264 import H264Decoder, H264Encoder, h264_depayload
+from .h265 import H265Decoder, H265Encoder, h265_depayload
 from .opus import OpusDecoder, OpusEncoder
 from .red import RedOpusEncoder, red_block_payload_type
+from .vp9 import Vp9Decoder, Vp9Encoder, vp9_depayload
 from .vpx import Vp8Decoder, Vp8Encoder, vp8_depayload
 
 # The clockrate for G.722 is 8kHz even though the sampling rate is 16kHz.
@@ -199,6 +204,15 @@ def init_codecs() -> None:
                 "profile-level-id": profile_level_id,
             },
         )
+    # The parameters name the profile and level a 4K stream stays within; a
+    # browser matches these codecs by MIME type alone.
+    add_video_codec("video/VP8")
+    add_video_codec("video/VP9", {"profile-id": "0"})
+    add_video_codec("video/AV1", {"level-idx": "5", "profile": "0", "tier": "0"})
+    add_video_codec(
+        "video/H265",
+        {"level-id": "153", "profile-id": "1", "tier-flag": "0", "tx-mode": "SRST"},
+    )
 
     # FlexFEC (draft-03): one m-line-level repair stream (its SSRC is announced via
     # the FEC-FR ssrc-group); Chrome negotiates it by default, other browsers drop it.
@@ -214,12 +228,28 @@ def init_codecs() -> None:
 
 
 def depayload(codec: RTCRtpCodecParameters, payload: bytes) -> bytes:
-    if codec.name == "VP8":
+    name = codec.name.upper()
+    if name == "VP8":
         return vp8_depayload(payload)
-    elif codec.name == "H264":
+    elif name == "VP9":
+        return vp9_depayload(payload)
+    elif name == "H264":
         return h264_depayload(payload)
+    elif name == "H265":
+        return h265_depayload(payload)
+    elif name == "AV1":
+        # One OBU's fragments span packets: the frame assembler joins them.
+        return payload
     else:
         return payload
+
+
+def frame_assembler(codec: RTCRtpCodecParameters) -> Optional[Callable[[list[bytes]], bytes]]:
+    """The function that turns a frame's depayloaded packets into its bitstream,
+    for a codec whose packets cannot simply be joined; None for the rest."""
+    if codec.name.upper() == "AV1":
+        return av1_assemble
+    return None
 
 
 def get_capabilities(kind: str) -> RTCRtpCapabilities:
@@ -267,8 +297,14 @@ def get_decoder(codec: RTCRtpCodecParameters) -> Decoder:
         return PcmuDecoder()
     elif mimeType == "video/h264":
         return H264Decoder()
+    elif mimeType == "video/h265":
+        return H265Decoder()
     elif mimeType == "video/vp8":
         return Vp8Decoder()
+    elif mimeType == "video/vp9":
+        return Vp9Decoder()
+    elif mimeType == "video/av1":
+        return Av1Decoder()
     else:
         raise ValueError(f"No decoder found for MIME type `{mimeType}`")
 
@@ -290,8 +326,14 @@ def get_encoder(codec: RTCRtpCodecParameters) -> Encoder:
         return PcmuEncoder()
     elif mimeType == "video/h264":
         return H264Encoder()
+    elif mimeType == "video/h265":
+        return H265Encoder()
     elif mimeType == "video/vp8":
         return Vp8Encoder()
+    elif mimeType == "video/vp9":
+        return Vp9Encoder()
+    elif mimeType == "video/av1":
+        return Av1Encoder()
     else:
         raise ValueError(f"No encoder found for MIME type `{mimeType}`")
 

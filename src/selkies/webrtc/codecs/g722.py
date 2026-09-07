@@ -50,6 +50,6 @@ class G722Decoder(Decoder):
 
 
 class G722Encoder(Encoder):
-    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int, bool]:
         timestamp = convert_timebase(packet.pts, packet.time_base, CLOCK_BASE)
-        return [bytes(packet.data)], timestamp
+        return [bytes(packet.data)], timestamp, False

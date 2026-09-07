@@ -84,7 +84,7 @@ def settings(display_id: int):
     cs.display_id = display_id
     cs.capture_width, cs.capture_height = DISPLAY
     cs.target_fps = 10.0
-    cs.output_mode = 0
+    cs.codec = "jpeg"
     cs.jpeg_quality = 80
     cs.use_cpu = True
     cs.capture_cursor = False

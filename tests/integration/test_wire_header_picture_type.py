@@ -2,11 +2,12 @@
 """pixelflux's wire header names the picture the encoder produced.
 
 The WebRTC video bridge reads a frame's keyframe flag off the per-stripe
-header (byte 1: IDR is 0x01, every JPEG picture stands alone) to keep the
-wire decodable across a drop, so the header has to say so for every encoder
-and backend: the first H.264 picture of a capture is an IDR, the pictures
-behind it are not, and a requested keyframe arrives as one. Driven against
-pixelflux directly on a throwaway X server and on its own Wayland compositor.
+header (the low nibble of byte 1: a keyframe is 0x01; every JPEG picture
+stands alone) to keep the wire decodable across a drop, so the header has to
+say so for every encoder and backend: the first H.264 picture of a capture is
+an IDR, the pictures behind it are not, and a requested keyframe arrives as
+one. Driven against pixelflux directly on a throwaway X server and on its own
+Wayland compositor.
 
     python3 tests/integration/test_wire_header_picture_type.py
 """
@@ -34,7 +35,7 @@ class Headers:
         view = memoryview(frame)
         if len(view) >= 10:
             with self.lock:
-                self.frames.append((view[0], view[1]))
+                self.frames.append((view[0], view[1] & 0x0F))
 
     def snap(self) -> list:
         with self.lock:
@@ -53,7 +54,10 @@ def settings(pixelflux, encoder: str, cpu: bool, wayland: bool):
     cs.video_streaming_mode = True
     cs.use_paint_over_quality = True
     cs.omit_stripe_headers = False
-    cs.output_mode = 0 if encoder == "jpeg" else 1
+    if hasattr(cs, "codec"):
+        cs.codec = "jpeg" if encoder == "jpeg" else "h264"
+    else:
+        cs.output_mode = 0 if encoder == "jpeg" else 1
     cs.video_fullframe = encoder == "h264enc"
     return cs
 

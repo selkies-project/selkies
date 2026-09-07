@@ -89,7 +89,7 @@ export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DI
 selkies --addr=0.0.0.0,:: --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
-In the default WebSocket mode, `--encoder=` accepts `h264enc` (default; hardware NVENC or VA-API when a supported GPU is available, otherwise the software encoder `pixelflux` was built with — `x264`, or OpenH264 in a GPL-free build), `h264enc-striped` (striped software H.264 on that same encoder), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc`; the same `--encoder=` knob applies, filtered to what WebRTC can produce (`h264enc`, the hardware-first default) — any other value falls back to it with a logged warning.
+In the default WebSocket mode, `--encoder=` accepts `h264enc` (default), `h265enc`, `vp8enc`, `vp9enc` and `av1enc` (each hardware NVENC or VA-API where the GPU carries the codec, otherwise the software encoder `pixelflux` was built with — `x264` or OpenH264, `x265` or kvazaar, libvpx, SVT-AV1), `h264enc-striped` (striped software H.264), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc`; the same `--encoder=` knob applies to the full-frame encoders (`h264enc`, `h265enc`, `vp8enc`, `vp9enc`, `av1enc`), a browser that declines the codec is answered with H.264, and the striped `h264enc-striped` and `jpeg` fall back to the default with a logged warning.
 
 `--addr=0.0.0.0,::` above accepts connections on every interface, IPv4 and IPv6; without it, Selkies listens on the loopback addresses only (`127.0.0.1,::1`). `--enable-https=false` leaves the web interface on plain HTTP, which browsers accept as a secure context only on `localhost`; the clipboard, gamepads, pointer lock, and the microphone and webcam need one. Setting `--enable-https=true` is the whole switch: the `--https-cert=` and `--https-key=` paths are the `ssl-cert-snakeoil` pair Debian and Ubuntu install, and when they are absent Selkies writes a self-signed pair itself, so nothing has to be prepared. Browsers warn once on a self-signed certificate; a certificate from an authority at those paths, or a reverse proxy terminating TLS in front, avoids the warning.
 
@@ -223,8 +223,8 @@ sudo mkdir -pm1777 /dev/input
 # their process-wide hooks can stop the asyncio loop answering. The two
 # variables stay set, which is what tells Selkies applications reach the
 # devices through the preload.
-# In the default WebSocket mode, change `--encoder=` to `h264enc-striped` or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
-# For the WebRTC transport instead, add `--mode=webrtc` (`--encoder=h264enc` is the only WebRTC encoder)
+# In the default WebSocket mode, change `--encoder=` to `h265enc`, `vp8enc`, `vp9enc`, `av1enc`, `h264enc-striped` or `jpeg` for a different encoder; add `--use-cpu=true` to force software encoding
+# For the WebRTC transport instead, add `--mode=webrtc` (the full-frame encoders stream over WebRTC; `h264enc-striped` and `jpeg` are WebSocket-only)
 # DO NOT set `--enable-resize=true` if there is a physical display
 env -u LD_PRELOAD selkies --addr=0.0.0.0,:: --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false &
 ```

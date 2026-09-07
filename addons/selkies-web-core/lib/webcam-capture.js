@@ -40,17 +40,26 @@ export const WEBCAM_CODEC_MJPEG = 0;
 export const WEBCAM_CODEC_H264 = 1;
 /** Codec id of VP8 frames. */
 export const WEBCAM_CODEC_VP8 = 2;
-/** Codec id of VP9 frames; never produced here, reserved on the wire. */
+/** Codec id of VP9 frames. */
 export const WEBCAM_CODEC_VP9 = 3;
+/** Codec id of AV1 temporal units. */
+export const WEBCAM_CODEC_AV1 = 4;
+/** Codec id of H.265 Annex B frames. */
+export const WEBCAM_CODEC_H265 = 5;
 
 /**
  * Candidates in preference order; support reports are no promise of speed,
  * so the probe measures each on real frames (Firefox's software H.264 tops
- * out under 30 fps at 720p where its VP8 runs three times faster).
+ * out under 30 fps at 720p where its VP8 runs three times faster). VP9, AV1
+ * and H.265 come after the two every engine encodes: their software encoders
+ * are slower still, and H.265 exists only where the platform encodes it.
  */
 const ENCODER_CANDIDATES = [
   { id: WEBCAM_CODEC_H264, name: "h264", codec: "avc1.42E01F", extra: { avc: { format: "annexb" } } },
   { id: WEBCAM_CODEC_VP8, name: "vp8", codec: "vp8", extra: {} },
+  { id: WEBCAM_CODEC_VP9, name: "vp9", codec: "vp09.00.31.08", extra: {} },
+  { id: WEBCAM_CODEC_AV1, name: "av1", codec: "av01.0.05M.08", extra: {} },
+  { id: WEBCAM_CODEC_H265, name: "h265", codec: "hev1.1.6.L93.B0", extra: { hevc: { format: "annexb" } } },
 ];
 
 /**
@@ -69,10 +78,10 @@ const FRAME_CREDIT_INTERVALS = 2;
 
 /**
  * `webcam_encoder` values: `auto` = the ladder on MediaStreamTrackProcessor
- * sources and JPEG on the `<video>` rung, `h264`/`vp8` = that codec alone
+ * sources and JPEG on the `<video>` rung, a codec name = that codec alone
  * everywhere (JPEG still the floor), `mjpeg` = JPEG everywhere.
  */
-export const WEBCAM_ENCODER_PREFERENCES = ["auto", "h264", "vp8", "mjpeg"];
+export const WEBCAM_ENCODER_PREFERENCES = ["auto", "h264", "h265", "vp8", "vp9", "av1", "mjpeg"];
 
 /** Frames the encode pace is measured over before it can be believed. */
 export const PACE_MIN_SAMPLES = 60;
@@ -630,7 +639,7 @@ export class WebcamCapture {
     this.quality = opts.quality || 0.8;
     this.encoderPreference = WEBCAM_ENCODER_PREFERENCES.indexOf(opts.encoderPreference) >= 0
       ? opts.encoderPreference : "auto";
-    this._encoderCandidates = this.encoderPreference === "h264" || this.encoderPreference === "vp8"
+    this._encoderCandidates = ENCODER_CANDIDATES.some((c) => c.name === this.encoderPreference)
       ? ENCODER_CANDIDATES.filter((c) => c.name === this.encoderPreference)
       : ENCODER_CANDIDATES;
 
@@ -672,7 +681,7 @@ export class WebcamCapture {
     return this._active;
   }
 
-  /** Name of the codec frames are sent as (`h264`, `vp8`, `mjpeg`), or null. @type {?string} */
+  /** Name of the codec frames are sent as (a candidate name, or `mjpeg`), or null. @type {?string} */
   get codec() {
     if (this._encoderCodecName) return this._encoderCodecName;
     return this._encoderCodec ? this._encoderCodec.name : (this._active ? "mjpeg" : null);
