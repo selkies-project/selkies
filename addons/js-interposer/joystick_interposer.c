@@ -19,13 +19,18 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     a distinct fd as POSIX requires, O_NONBLOCK applies per handle, and every
     handle receives every event (the server broadcasts per device). The fd
     handed to the application is the connected socket itself, so poll/select/
-    epoll/dup work with no interception. On connect the server sends one
-    js_config_t (identity, button and axis maps), then the client answers with
-    a one-byte architecture specifier (sizeof(long)) and the server streams
-    struct js_event or struct input_event records. read() only ever delivers
-    whole events: a short consume would desync the SOCK_STREAM for every later
-    read, so partially drained events are stashed per handle and completed on
-    the next call.
+    epoll/dup work with no interception. Every libc spelling of open and read
+    is hooked, the _FORTIFY_SOURCE entry points (__open_2, __openat64_2,
+    __read_chk, ...) included: a clang-built binary such as Chromium reaches
+    only those, and a hook set that stops at open()/open64() leaves the
+    browser opening the kernel node the container does not have.
+
+    On connect the server sends one js_config_t (identity, button and axis
+    maps), then the client answers with a one-byte architecture specifier
+    (sizeof(long)) and the server streams struct js_event or struct
+    input_event records. read() only ever delivers whole events: a short
+    consume would desync the SOCK_STREAM for every later read, so partially
+    drained events are stashed per handle and completed on the next call.
 
     Device identity (name, VID/PID, uniq) answered through the ioctls is hard
     coded to the same values the sibling fake-udev library publishes, so udev,
@@ -139,6 +144,18 @@ static int (*real_open)(const char *pathname, int flags, ...) = NULL;
 static int (*real_open64)(const char *pathname, int flags, ...) = NULL;
 static int (*real_openat)(int dirfd, const char *pathname, int flags, ...) = NULL;
 static int (*real_openat64)(int dirfd, const char *pathname, int flags, ...) = NULL;
+/* glibc's _FORTIFY_SOURCE headers route a two-argument open() (no mode) to
+ * these checked entry points instead of open(): always under clang since
+ * glibc 2.35, and under gcc when the flags are not a compile-time constant.
+ * Chromium and Electron are built that way, so a browser that only ever
+ * calls open(path, O_RDONLY|O_NONBLOCK) never reaches open() above. */
+#ifdef __GLIBC__
+static int (*real___open_2)(const char *file, int oflag) = NULL;
+static int (*real___open64_2)(const char *file, int oflag) = NULL;
+static int (*real___openat_2)(int dirfd, const char *file, int oflag) = NULL;
+static int (*real___openat64_2)(int dirfd, const char *file, int oflag) = NULL;
+static ssize_t (*real___read_chk)(int fd, void *buf, size_t nbytes, size_t buflen) = NULL;
+#endif
 static int (*real_ioctl)(int fd, ioctl_request_t request, ...) = NULL;
 static int (*real_epoll_ctl)(int epfd, int op, int fd, struct epoll_event *event) = NULL;
 static int (*real_close)(int fd) = NULL;
@@ -427,6 +444,13 @@ __attribute__((constructor)) void init_interposer() {
     load_real_func((void *)&real_open64, "open64");
     load_real_func((void *)&real_openat, "openat");
     load_real_func((void *)&real_openat64, "openat64");
+#ifdef __GLIBC__
+    load_real_func((void *)&real___open_2, "__open_2");
+    load_real_func((void *)&real___open64_2, "__open64_2");
+    load_real_func((void *)&real___openat_2, "__openat_2");
+    load_real_func((void *)&real___openat64_2, "__openat64_2");
+    load_real_func((void *)&real___read_chk, "__read_chk");
+#endif
     load_real_func((void *)&real_opendir, "opendir");
     load_real_func((void *)&real_readdir, "readdir");
     load_real_func((void *)&real_closedir, "closedir");
@@ -1400,8 +1424,30 @@ int open64(const char *pathname, int flags, ...) {
     return result_fd;
 }
 
-/* As open(), with a relative path resolved against dirfd through /proc/self/fd
- * for the device match only; the real call receives the original arguments. */
+/**
+ * The path the openat family matches against the device names: `pathname`
+ * itself, or, when it is relative to a directory fd, that directory's path
+ * from /proc/self/fd joined with it, written into `full`. Only the match uses
+ * the result; the real call receives the original arguments.
+ */
+static const char *resolve_at_path(int dirfd, const char *pathname, char *full, size_t full_len) {
+    if (!pathname || pathname[0] == '/' || dirfd == AT_FDCWD) {
+        return pathname;
+    }
+    char procfd[64];
+    snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", dirfd);
+    ssize_t len = readlink(procfd, full, full_len - 1);
+    if (len <= 0 || (size_t)len >= full_len - 1) {
+        return pathname;
+    }
+    int written = snprintf(full + len, full_len - (size_t)len, "/%s", pathname);
+    if (written <= 0 || (size_t)written >= full_len - (size_t)len) {
+        return pathname;
+    }
+    return full;
+}
+
+/* As open(), with a relative path resolved against dirfd for the device match. */
 int openat(int dirfd, const char *pathname, int flags, ...) {
     if (!real_openat) {
         errno = EFAULT;
@@ -1409,19 +1455,7 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
     }
 
     char full_path[4096];
-    const char *check_path = pathname;
-
-    if (pathname && pathname[0] != '/' && dirfd != AT_FDCWD) {
-        char procfd[64];
-        snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", dirfd);
-        ssize_t len = readlink(procfd, full_path, sizeof(full_path) - 1);
-        if (len > 0 && (size_t)len < sizeof(full_path) - 1) {
-            int written = snprintf(full_path + len, sizeof(full_path) - (size_t)len, "/%s", pathname);
-            if (written > 0 && (size_t)written < sizeof(full_path) - (size_t)len) {
-                check_path = full_path;
-            }
-        }
-    }
+    const char *check_path = resolve_at_path(dirfd, pathname, full_path, sizeof(full_path));
 
     js_interposer_t *interposer = NULL;
     int result_fd = common_open_logic(check_path, flags, &interposer);
@@ -1452,19 +1486,7 @@ int openat64(int dirfd, const char *pathname, int flags, ...) {
     }
 
     char full_path[4096];
-    const char *check_path = pathname;
-
-    if (pathname && pathname[0] != '/' && dirfd != AT_FDCWD) {
-        char procfd[64];
-        snprintf(procfd, sizeof(procfd), "/proc/self/fd/%d", dirfd);
-        ssize_t len = readlink(procfd, full_path, sizeof(full_path) - 1);
-        if (len > 0 && (size_t)len < sizeof(full_path) - 1) {
-            int written = snprintf(full_path + len, sizeof(full_path) - (size_t)len, "/%s", pathname);
-            if (written > 0 && (size_t)written < sizeof(full_path) - (size_t)len) {
-                check_path = full_path;
-            }
-        }
-    }
+    const char *check_path = resolve_at_path(dirfd, pathname, full_path, sizeof(full_path));
 
     js_interposer_t *interposer = NULL;
     int result_fd = common_open_logic(check_path, flags, &interposer);
@@ -1491,6 +1513,52 @@ int openat64(int dirfd, const char *pathname, int flags, ...) {
     }
     return result_fd;
 }
+
+#ifdef __GLIBC__
+/* The fortified two-argument open family (see real___open_2 above): the same
+ * device match, the real checked entry point otherwise. */
+int __open_2(const char *file, int oflag) {
+    if (!real___open_2 && load_real_func((void *)&real___open_2, "__open_2") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    js_interposer_t *interposer = NULL;
+    int fd = common_open_logic(file, oflag, &interposer);
+    return fd != -2 ? fd : real___open_2(file, oflag);
+}
+
+int __open64_2(const char *file, int oflag) {
+    if (!real___open64_2 && load_real_func((void *)&real___open64_2, "__open64_2") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    js_interposer_t *interposer = NULL;
+    int fd = common_open_logic(file, oflag, &interposer);
+    return fd != -2 ? fd : real___open64_2(file, oflag);
+}
+
+int __openat_2(int dirfd, const char *file, int oflag) {
+    if (!real___openat_2 && load_real_func((void *)&real___openat_2, "__openat_2") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    char full_path[4096];
+    js_interposer_t *interposer = NULL;
+    int fd = common_open_logic(resolve_at_path(dirfd, file, full_path, sizeof(full_path)), oflag, &interposer);
+    return fd != -2 ? fd : real___openat_2(dirfd, file, oflag);
+}
+
+int __openat64_2(int dirfd, const char *file, int oflag) {
+    if (!real___openat64_2 && load_real_func((void *)&real___openat64_2, "__openat64_2") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    char full_path[4096];
+    js_interposer_t *interposer = NULL;
+    int fd = common_open_logic(resolve_at_path(dirfd, file, full_path, sizeof(full_path)), oflag, &interposer);
+    return fd != -2 ? fd : real___openat64_2(dirfd, file, oflag);
+}
+#endif
 
 /* An interposed handle is retired from its device's table and its own socket
  * closed; other handles of the device are unaffected, and the last one to go
@@ -2019,6 +2087,29 @@ ssize_t read(int fd, void *buf, size_t count) {
     }
     return bytes_read;
 }
+
+#ifdef __GLIBC__
+/* The fortified read() (a destination whose size the compiler knows but a
+ * count it cannot prove fits): the real entry point keeps its overflow abort
+ * for every fd, then an interposed handle or shadowed inotify fd is served by
+ * read() above. */
+ssize_t __read_chk(int fd, void *buf, size_t nbytes, size_t buflen) {
+    if (!real___read_chk && load_real_func((void *)&real___read_chk, "__read_chk") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (nbytes > buflen) {
+        return real___read_chk(fd, buf, nbytes, buflen);
+    }
+    int interposed = inotify_fd_tracked(fd);
+    if (!interposed) {
+        pthread_mutex_lock(&interposers_mutex);
+        interposed = find_interposer_for_fd_locked(fd, NULL, NULL) != NULL;
+        pthread_mutex_unlock(&interposers_mutex);
+    }
+    return interposed ? read(fd, buf, nbytes) : real___read_chk(fd, buf, nbytes, buflen);
+}
+#endif
 
 /* An interposed handle added to or modified in an epoll set is switched to
  * O_NONBLOCK first, as epoll consumers expect; only that handle's connection
