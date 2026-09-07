@@ -39,9 +39,16 @@ WL_SOCKET = "wayland-1"
 PAINT = (40, 120, 220)
 PAINT_ARGB = "ff2878dc"
 TOLERANCE = 24
-# Where the X11 window sits, and a spot well outside it.
+# A saturated second block on X11 guards the colour matrix: a stream converted
+# with one matrix and painted with another lands tens of levels off here, where
+# the first block barely moves. Every engine paints a matched stream within 5.
+SATURATED = (0, 255, 0)
+SATURATED_ARGB = "ff00ff00"
+SATURATED_TOLERANCE = 10
+# Where the X11 windows sit, and a spot well outside them.
 BLOCK = (100, 100, 300, 200)
-INSIDE, OUTSIDE = (250, 200), (900, 600)
+BLOCK2 = (500, 100, 300, 200)
+INSIDE, OUTSIDE, INSIDE2 = (250, 200), (900, 600), (650, 200)
 
 # Every 0x04 frame on the WebSocket carries its stripe's Y start and height in
 # the header; a striped stream has several starts, a full-frame one only 0.
@@ -83,7 +90,7 @@ STRIPE_TAP = """
 # The decoded picture: whichever sink is showing (the <video> a full-frame
 # mode renders through, else the canvas), drawn once into a scratch canvas.
 SAMPLE_JS = """
-([ix, iy, ox, oy]) => {
+([ix, iy, ox, oy, sx, sy]) => {
   const v = document.querySelector('video');
   let src = null, w = 0, h = 0, kind = '';
   if (v && v.videoWidth > 0 && v.readyState >= 2 && v.style.display !== 'none') {
@@ -98,30 +105,31 @@ SAMPLE_JS = """
   const ctx = oc.getContext('2d'); ctx.drawImage(src, 0, 0, w, h);
   const d = ctx.getImageData(0, 0, w, h).data;
   const px = (x, y) => { const i = (y * w + x) * 4; return [d[i], d[i + 1], d[i + 2]]; };
-  return {kind, w, h, inside: px(ix, iy), outside: px(ox, oy)};
+  return {kind, w, h, inside: px(ix, iy), outside: px(ox, oy), saturated: px(sx, sy)};
 }
 """
 
 
-def near(rgb: Optional[list], want: tuple) -> bool:
-    return rgb is not None and all(abs(a - b) <= TOLERANCE for a, b in zip(rgb, want))
+def near(rgb: Optional[list], want: tuple, tolerance: int = TOLERANCE) -> bool:
+    return rgb is not None and all(abs(a - b) <= tolerance for a, b in zip(rgb, want))
 
 
 def paint_x11() -> Any:
-    """Map a solid override-redirect window on the test display; closing the
-    returned display connection takes it down again."""
+    """Map the two solid override-redirect windows on the test display; closing
+    the returned display connection takes them down again."""
     from selkies.Xlib import display as xdisp, X
     d = xdisp.Display(H.require_display())
     scr = d.screen()
-    win = scr.root.create_window(*BLOCK, 0, scr.root_depth, window_class=X.InputOutput,
-                                 background_pixel=int(PAINT_ARGB[2:], 16), override_redirect=True)
-    win.map()
+    for block, argb in ((BLOCK, PAINT_ARGB), (BLOCK2, SATURATED_ARGB)):
+        win = scr.root.create_window(*block, 0, scr.root_depth, window_class=X.InputOutput,
+                                     background_pixel=int(argb[2:], 16), override_redirect=True)
+        win.map()
     d.sync()
     return d
 
 
 class Picture:
-    """The painted picture as the page decodes it: the X11 block sits in a
+    """The painted picture as the page decodes it: the X11 blocks sit in a
     black frame, the filled observer surface covers the whole Wayland frame."""
 
     def __init__(self, wayland: bool) -> None:
@@ -148,24 +156,29 @@ class Picture:
 
     @staticmethod
     def sample_page(page: Any) -> Optional[dict]:
-        return page.evaluate(SAMPLE_JS, [*INSIDE, *OUTSIDE])
+        return page.evaluate(SAMPLE_JS, [*INSIDE, *OUTSIDE, *INSIDE2])
 
     def sample(self, page: Any) -> Optional[dict]:
         return Picture.sample_page(page)
 
-    def matches(self, sample: Optional[dict]) -> bool:
+    def matches(self, sample: Optional[dict], matrix: bool = True) -> bool:
+        """Whether the sample shows the painted picture; `matrix` also holds the
+        saturated block to its tolerance, which an engine painting the stream
+        with a matrix the codec cannot declare to it fails through no fault of
+        the stream."""
         if not sample:
             return False
         if self.wayland:
             return near(sample["inside"], PAINT) and near(sample["outside"], PAINT)
-        return near(sample["inside"], PAINT) and near(sample["outside"], (0, 0, 0))
+        return (near(sample["inside"], PAINT) and near(sample["outside"], (0, 0, 0))
+                and (not matrix or near(sample["saturated"], SATURATED, SATURATED_TOLERANCE)))
 
-    def wait(self, page: Any, timeout: float = 20) -> Optional[dict]:
+    def wait(self, page: Any, timeout: float = 20, matrix: bool = True) -> Optional[dict]:
         deadline = time.time() + timeout
         sample = None
         while time.time() < deadline:
             sample = self.sample(page)
-            if self.matches(sample):
+            if self.matches(sample, matrix):
                 return sample
             time.sleep(0.5)
         return sample
