@@ -136,7 +136,11 @@ Each is documented in full where named; read that before changing the subsystem.
   window publishes exactly such boxes (`Input._noteScreenAnchor`, `Input._mapToLayout`).
 - A client asks the server only for what its own decoder will take, measured rather than assumed: engines
   differ on H.264 4:4:4 and change with every release, and one whose decoder lacks the profile shows no picture
-  at all rather than a worse one (`util.canDecodeFullColor`, `canDecodeEncoder`).
+  at all rather than a worse one (`util.canDecodeFullColor`, `canDecodeEncoder`). A full colour the server's
+  own unlocked default announces is turned off by such a client the same way, so the stream stays on its
+  codec at 4:2:0; only a locked full colour goes to the refusal ladder (a report over WebRTC). Over
+  WebSockets that ladder walks the server's allowed encoders in order, H.264 first when unrestricted,
+  through every video codec the engine decodes, and reaches JPEG last (`nextRung` in the core).
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `src/selkies/webcam.py`,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).

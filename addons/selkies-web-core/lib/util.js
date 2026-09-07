@@ -278,9 +278,25 @@ const fullColorProbes = {};
 export function canDecodeFullColor(codec = "h264") {
     const string = PROBE_FULLCOLOR_STRINGS[codec];
     if (!string) return Promise.resolve(false);
-    if (!fullColorProbes[codec]) fullColorProbes[codec] = decoderAccepts(string, 320, 240);
+    if (!fullColorProbes[codec]) {
+        fullColorProbes[codec] = decoderAccepts(string, 320, 240).then((ok) => {
+            fullColorAnswers[codec] = ok;
+            return ok;
+        });
+    }
     return fullColorProbes[codec];
 }
+
+/** The answers `canDecodeFullColor` has settled, by codec. */
+const fullColorAnswers = {};
+
+/**
+ * What `canDecodeFullColor` answered for `codec`, for a decision that cannot
+ * wait on the probe: `undefined` while it is still out or was never asked.
+ * @param {string} codec The codec name.
+ * @returns {boolean|undefined}
+ */
+export const fullColorDecoded = (codec) => fullColorAnswers[codec];
 
 /**
  * Directory this document is served from, without a trailing slash (`''` at

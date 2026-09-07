@@ -1008,11 +1008,44 @@ export default function webrtc() {
 	 */
 	async function settleFullColorSupport() {
 		const codec = codecOfEncoder(encoder);
-		if (!codecCarriesFullColor(codec)) return;
-		if (codec === 'vp9' ? receiverTakesVp9FullColor() : await canDecodeFullColor(codec)) return;
+		if (!codecCarriesFullColor(codec) || await fullColorDecodable(codec)) return;
 		if (!getBoolParam('video_fullcolor', false)) return;
 		console.warn(`[Selkies] full colour (4:4:4) is off: this browser decodes ${codec} 4:2:0 only over WebRTC.`);
 		setBoolParam('video_fullcolor', false);
+	}
+
+	/**
+	 * Whether this engine decodes the codec's 4:4:4 over WebRTC: the receiver's
+	 * capabilities for VP9 (profile 1), the decoder probe for H.264 and H.265.
+	 * @param {string} codec A codec name.
+	 * @returns {Promise<boolean>}
+	 */
+	async function fullColorDecodable(codec) {
+		return codec === 'vp9' ? receiverTakesVp9FullColor() : await canDecodeFullColor(codec);
+	}
+
+	/** Whether the server holds full colour: a locked `video_fullcolor`. */
+	let fullColorLocked = false;
+
+	/**
+	 * Turns a full colour the server announced off again where this engine
+	 * cannot decode the codec's 4:4:4 over WebRTC, so the stream comes back
+	 * 4:2:0 on the same codec instead of arriving as one this browser paints
+	 * nothing of. A locked setting cannot be turned off and is reported once.
+	 */
+	async function declineUndecodableFullColor() {
+		if (!window.video_fullcolor || isSharedMode) return;
+		const codec = codecOfEncoder(encoder);
+		if (!codecCarriesFullColor(codec) || await fullColorDecodable(codec)) return;
+		if (!window.video_fullcolor) return;
+		if (fullColorLocked) {
+			console.error(`This session streams ${codec} 4:4:4, which this browser cannot decode over WebRTC.`);
+			return;
+		}
+		console.warn(`[Selkies] full colour (4:4:4) is off: this browser decodes ${codec} 4:2:0 only over WebRTC.`);
+		window.video_fullcolor = false;
+		setBoolParam('video_fullcolor', false);
+		handleSettingsMessage({ video_fullcolor: false }, false);
 	}
 
 	/**
@@ -3029,6 +3062,9 @@ export default function webrtc() {
 				}
 				console.log("Received server settings payload:", obj.settings);
 				const changes = sanitizeAndStoreSettings(obj.settings);
+				const fcEntry = obj.settings && obj.settings.video_fullcolor;
+				fullColorLocked = !!(fcEntry && fcEntry.locked);
+				if (fcEntry) declineUndecodableFullColor();
 				const wce = obj.settings && obj.settings.webcam_encoder;
 				if (wce && WEBCAM_ENCODER_PREFERENCES.includes(wce.value)) {
 					const stored = getStringParam('webcam_encoder', wce.value);
