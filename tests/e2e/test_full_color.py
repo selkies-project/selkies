@@ -21,6 +21,10 @@ A ``-vp9`` suffix drives the same question for VP9, whose 4:4:4 is profile 1:
 ``ws-chromium-vp9`` asks the WebCodecs decoder, ``wr-chromium-vp9`` the RTP
 receiver's capabilities, which is what the WebRTC client consults.
 
+``ws-default`` and ``wr-default`` hold full colour on through the server's own
+unlocked default against an engine that refuses it: the client turns it off
+and streams 4:2:0 on the same codec.
+
 Usage: python3 tests/e2e/test_full_color.py ws-webkit
 """
 import os
@@ -185,10 +189,12 @@ def drive_openh264(res: "H.Results", p: Any, tag: str) -> None:
 def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
     """The server holding full colour on, for an engine that cannot decode it.
 
-    A client cannot turn a locked setting off, so it takes the ladder's own
-    last rung instead: the JPEG encoder, whose stripes need no `VideoDecoder`
-    at all. What must not happen is the stripe decoders being built and refused
-    for as long as the session runs, with nothing on the page to say why.
+    A client cannot turn a locked setting off, so it walks the refusal ladder
+    instead: the next allowed video encoder whose stream it decodes at the
+    locked full colour, or whose codec carries none, and JPEG only when no
+    video codec is left. What must not happen is the stripe decoders being
+    built and refused for as long as the session runs, with nothing on the
+    page to say why.
 
     Args:
         pinned: The encoder is held to H.264 as well, so the rung is refused
@@ -209,12 +215,18 @@ def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
         page.on("console", lambda m: said.append(m.text))
         page.goto(PAGE_DECODE_URL, wait_until="load")
         played = bool(C.wait_ws_video(page, timeout=45))
-        encoder = page.evaluate(STORED_JS.replace("_video_fullcolor", "_encoder"))
+        # The ladder may take more than one step; read the encoder once it holds still.
+        encoder, since = None, time.time()
+        while time.time() - since < 4:
+            now = page.evaluate(STORED_JS.replace("_video_fullcolor", "_encoder"))
+            if now != encoder:
+                encoder, since = now, time.time()
+            time.sleep(0.5)
         switched = [t for t in said if "has no decoder for avc1.F4" in t]
         res.check("[locked] the 4:4:4 the server insists on is named once",
                   len(switched) == 1, switched or said[-2:])
-        res.check("[locked] the client takes the rung that needs no decoder",
-                  encoder == "jpeg", encoder)
+        res.check("[locked] the client steps to a video codec it decodes before JPEG",
+                  encoder in ("vp8enc", "vp9enc", "av1enc"), encoder)
         res.check("[locked] and the stream plays there", played, played)
         spam = [t for t in said if "Error configuring VNC stripe decoder" in t]
         res.check("[locked] no stripe is left reporting the refusal per frame",
@@ -249,6 +261,42 @@ def drive_pinned(res: "H.Results", p: Any) -> None:
                   not spam, spam[:2])
     finally:
         C.close_browser(browser)
+
+
+def drive_default(res: "H.Results", engine: str, mode: str, p: Any) -> None:
+    """The server's own default holding full colour on, unlocked, for an engine
+    whose decoder has no 4:4:4 H.264: the client turns the setting off for
+    itself and the stream comes back 4:2:0 on the same codec, not on JPEG and
+    not as a stream this browser paints nothing of."""
+    tag = f"{engine}-{mode}-default"
+    browser = C.launch_browser(p, engine)
+    try:
+        ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+        ctx.add_init_script(init_script(mode).replace("localStorage.setItem(k + '_video_fullcolor', 'true');", "")
+                            + REFUSE_FULLCOLOR_JS)
+        page = ctx.new_page()
+        said = []
+        page.on("console", lambda m: said.append(m.text))
+        page.goto(PAGE_DECODE_URL if mode == "websockets" else H.BASE_URL, wait_until="load")
+        video = (C.wait_wr_video(page, timeout=45) if mode == "webrtc"
+                 else C.wait_ws_video(page, timeout=45))
+        res.check(f"[{tag}] the stream plays", bool(video), video)
+        if mode == "webrtc":
+            res.check(f"[{tag}] the page's toggle shows full colour off",
+                      page.evaluate("() => window.video_fullcolor") is False,
+                      page.evaluate("() => window.video_fullcolor"))
+        else:
+            res.check(f"[{tag}] the client turned the server's full colour off",
+                      page.evaluate(STORED_JS) == "false", page.evaluate(STORED_JS))
+            res.check(f"[{tag}] and said so once",
+                      len([t for t in said if "full colour (4:4:4) is off" in t]) == 1, said[-3:])
+        res.check(f"[{tag}] the server streams 4:2:0 on the same codec",
+                  C.wait_log("Colorspace: I420", timeout=20) and "Mode: H264" in H.server_log()[-4000:],
+                  H.server_log()[-300:])
+        encoder = page.evaluate(STORED_JS.replace("_video_fullcolor", "_encoder"))
+        res.check(f"[{tag}] no ladder step to JPEG", encoder != "jpeg", encoder)
+    finally:
+        browser.close()
 
 
 def drive(res: "H.Results", engine: str, mode: str, p: Any, vp9: bool = False) -> None:
@@ -296,9 +344,12 @@ def main() -> "H.Results":
     mode = "webrtc" if short == "wr" else "websockets"
     res = H.Results(f"full-color-{selector}")
     locked = engine in ("locked", "pinned")
+    default = engine == "default"
     env = {"SELKIES_VIDEO_FULLCOLOR": "true|locked"} if locked else None
     if engine == "pinned":
         env["SELKIES_ENCODER"] = "h264enc-striped"
+    if default:
+        env = {"SELKIES_VIDEO_FULLCOLOR": "true"}
     if vp9:
         env = {"SELKIES_ENCODER": "vp9enc,h264enc,jpeg"}
     H.server_start(mode=mode, wayland=False, extra_env=env)
@@ -308,6 +359,8 @@ def main() -> "H.Results":
                 drive_locked(res, p, pinned=engine == "pinned")
             elif engine == "stalled":
                 drive_stalled(res, p, mode)
+            elif default:
+                drive_default(res, "webkit" if mode == "websockets" else "chromium", mode, p)
             else:
                 drive(res, engine, mode, p, vp9)
     finally:

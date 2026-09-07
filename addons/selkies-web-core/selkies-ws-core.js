@@ -120,7 +120,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, h264Framing, h264FramingReady, isMacDesktop } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isMacDesktop } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace,
@@ -2501,6 +2501,8 @@ body {
  * here to start and the answer settles nothing for a stream not asking for it.
  */
 async function settleFullColorSupport() {
+    // Every 4:4:4 profile is asked now, so a later ladder step can read the answers.
+    for (const c of ['h264', 'h265', 'vp9']) canDecodeFullColor(c);
     const codec = codecOfEncoder(currentEncoderMode);
     if (!codecCarriesFullColor(codec)) return;
     if (await canDecodeFullColor(codec)) return;
@@ -2510,18 +2512,78 @@ async function settleFullColorSupport() {
     setBoolParam('video_fullcolor', false);
 }
 
+/** Whether the server holds full colour: a locked `video_fullcolor`. */
+let fullColorLocked = false;
+
+/**
+ * Turns a full colour the server announced off again where this engine cannot
+ * decode the codec's 4:4:4, so the stream comes back 4:2:0 on the same codec
+ * rather than stepping to a codec it does decode. A locked setting cannot be
+ * turned off and is left to the refusal ladder.
+ * @param {string} reason Logged with the settings update.
+ * @returns {Promise<boolean>} Whether full colour was turned off.
+ */
+async function declineUndecodableFullColor(reason) {
+    if (!video_fullcolor || fullColorLocked || isSharedMode) return false;
+    const codec = codecOfEncoder(currentEncoderMode);
+    if (!codecCarriesFullColor(codec) || await canDecodeFullColor(codec)) return false;
+    if (!video_fullcolor) return false;
+    console.warn(`[Selkies] full colour (4:4:4) is off: this browser decodes ${codec} 4:2:0 only.`);
+    video_fullcolor = false;
+    setBoolParam('video_fullcolor', false);
+    sendFullSettingsUpdateToServer(reason);
+    return true;
+}
+
+/** Whether a refused codec string names a 4:4:4 profile. */
+const isFullColorProfile = (label) => /^(avc1\.F4|hev1\.4\.|vp09\.01)/i.test(label);
+
 /**
  * The codec-refusal ladder: rungs taken, the encoder asked for and not yet
  * confirmed, and whether a refusal has anywhere left to go.
  */
-let codecRefusalRung = 0;
 let codecRefusalPending = null;
 let codecRefusalUnanswerable = false;
 /** Whether the server holds the encoder: a locked setting, or a step it answered with another value. */
 let encoderLocked = false;
+/** The encoders the server allows, in its order, when it restricts them. */
+let encoderAllowed = null;
+/** The codecs this engine refused in this session. */
+const refusedCodecs = new Set();
 
-/** The encoder a refused one falls back to: H.264 where this engine decodes it, else JPEG. */
-const fallbackEncoder = () => (canDecodeEncoder('h264enc') ? 'h264enc' : 'jpeg');
+/**
+ * The rungs a refusal walks when the server does not restrict the encoder:
+ * H.264, which every engine decodes and every GPU encodes, then the other
+ * video codecs, and JPEG, whose stripes need no `VideoDecoder`, last.
+ */
+const LADDER_ORDER = ['h264enc', 'h264enc-striped', 'vp9enc', 'vp8enc', 'av1enc', 'h265enc', 'jpeg'];
+
+/**
+ * The next encoder a refusal steps to: the first of `LADDER_ORDER`, among
+ * those the server allows, whose codec this engine has not refused and
+ * decodes, and whose 4:4:4 it decodes where the server holds full colour on
+ * and the codec carries it; JPEG is the last rung, and the only one when
+ * nothing else is left.
+ * @param {string} [refused] The codec just refused.
+ * @returns {string|null} The encoder, or `null` when nothing is left.
+ */
+function nextRung(refused) {
+    if (refused) refusedCodecs.add(refused);
+    const allowed = Array.isArray(encoderAllowed) && encoderAllowed.length ? encoderAllowed : LADDER_ORDER;
+    const rungs = LADDER_ORDER.filter((e) => allowed.includes(e));
+    for (const enc of rungs) {
+        if (enc === currentEncoderMode) continue;
+        if (enc === 'jpeg') return enc;
+        const codec = codecOfEncoder(enc);
+        if (refusedCodecs.has(codec) || !canDecodeEncoder(enc)) continue;
+        if (fullColorLocked && video_fullcolor && codecCarriesFullColor(codec) && fullColorDecoded(codec) === false) continue;
+        return enc;
+    }
+    return null;
+}
+
+/** The encoder a pick this engine cannot decode falls back to: the ladder's first rung past it. */
+const fallbackEncoder = (pick) => nextRung(codecOfEncoder(pick)) || 'jpeg';
 
 /**
  * Answers a stream this engine will not decode, and reports it.
@@ -2532,23 +2594,39 @@ const fallbackEncoder = () => (canDecodeEncoder('h264enc') ? 'h264enc' : 'jpeg')
  * and as nothing at all in the settings echo), or the encoder the server
  * announced when its codec fails the decoder probe.
  *
- * A client that owns the encoder steps down the ladder: to the H.264 encoder
- * where the engine decodes H.264, else to the JPEG encoder, whose stripes
- * need no `VideoDecoder`. A refused H.264 stream, whichever encoder framed it
- * and whatever profile the refusal was about, goes to JPEG at once: H.264 is
- * the rung in between. The step stays pending until the server confirms it,
- * by its settings echo or by the new stream's first frame; refusals in the
- * meantime are the old stream still in flight. A server that holds the
- * encoder, and a shared viewer, which owns none of the stream's settings, are
- * told once.
+ * A client that owns the encoder steps down the ladder `nextRung` walks:
+ * every video codec it decodes before JPEG. The step stays pending until the
+ * server confirms it, by its settings echo or by the new stream's first
+ * frame; refusals in the meantime are the old stream still in flight. A
+ * server that holds the encoder, and a shared viewer, which owns none of the
+ * stream's settings, are told once.
  * @param {string} label The refused codec string or encoder.
  * @param {string} codec The refused stream's codec name.
  */
 function answerRefusedCodec(label, codec) {
     if (codecRefusalUnanswerable || codecRefusalPending) return;
-    if (!isSharedMode && !encoderLocked && currentEncoderMode !== 'jpeg' && codecRefusalRung < 2) {
-        const next = (codec === 'h264' || currentEncoderMode === 'h264enc') ? 'jpeg' : fallbackEncoder();
-        codecRefusalRung = next === 'jpeg' ? 2 : 1;
+    // A refused 4:4:4 profile is answered by turning full colour off, which
+    // keeps the codec, unless the server holds it: then the ladder answers.
+    // Once it is off, a refusal is the 4:4:4 stream still in flight.
+    if (isFullColorProfile(label) && !fullColorLocked && !isSharedMode) {
+        if (!video_fullcolor) return;
+        declineUndecodableFullColor(`no decoder for ${label}`).then((declined) => {
+            if (!declined) stepRefusalLadder(label, codec);
+        });
+        return;
+    }
+    stepRefusalLadder(label, codec);
+}
+
+/**
+ * The ladder step behind `answerRefusedCodec`, once full colour is not the answer.
+ * @param {string} label The refused codec string or encoder.
+ * @param {string} codec The refused stream's codec name.
+ */
+function stepRefusalLadder(label, codec) {
+    if (codecRefusalUnanswerable || codecRefusalPending) return;
+    const next = (!isSharedMode && !encoderLocked && currentEncoderMode !== 'jpeg') ? nextRung(codec) : null;
+    if (next) {
         codecRefusalPending = next;
         console.warn(`This browser has no decoder for ${label}; switching to the ${next} encoder.`);
         currentEncoderMode = next;
@@ -2580,6 +2658,7 @@ function answerRefusedCodec(label, codec) {
  */
 function settleServerEncoder(encoder, entry) {
     encoderLocked = !!(entry && (entry.locked || (Array.isArray(entry.allowed) && entry.allowed.length === 1)));
+    encoderAllowed = entry && Array.isArray(entry.allowed) ? entry.allowed.slice() : null;
     if (codecRefusalPending) {
         // Answered with another value: the server keeps the encoder.
         if (encoder !== codecRefusalPending) encoderLocked = true;
@@ -4717,7 +4796,7 @@ function handleSettingsMessage(settings, fromServer) {
     // runs the refusal ladder for it; a dashboard pick this engine cannot
     // decode takes the ladder's fallback at once.
     if (!fromServer && !canDecodeEncoder(newEncoderSetting)) {
-      const fallback = fallbackEncoder();
+      const fallback = fallbackEncoder(newEncoderSetting);
       console.warn(`This browser has no decoder for ${newEncoderSetting}; using the ${fallback} encoder.`);
       newEncoderSetting = fallback;
     }
@@ -6920,6 +6999,9 @@ class WorkerWebSocket {
               if (typeof window['video_fullcolor'] === 'boolean') {
                   video_fullcolor = window['video_fullcolor'];
               }
+              const fcEntry = obj.settings && obj.settings.video_fullcolor;
+              fullColorLocked = !!(fcEntry && fcEntry.locked);
+              if (video_fullcolor) declineUndecodableFullColor('full colour the server announced is not decoded here');
               if (typeof window['video_streaming_mode'] === 'boolean') {
                   video_streaming_mode = window['video_streaming_mode'];
               }
