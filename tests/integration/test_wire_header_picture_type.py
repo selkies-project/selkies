@@ -58,16 +58,33 @@ def settings(pixelflux, encoder: str, cpu: bool, wayland: bool):
     return cs
 
 
-def capture(pixelflux, encoder: str, cpu: bool, wayland: bool) -> tuple:
+def repaint(stop: threading.Event) -> None:
+    """A striped capture sends only what damage covers, so keep the root changing."""
+    colours = ("#3366cc", "#cc6633", "#33cc66")
+    index = 0
+    while not stop.wait(0.1):
+        subprocess.run(["xsetroot", "-solid", colours[index % len(colours)]],
+                       capture_output=True)
+        index += 1
+
+
+def capture(pixelflux, encoder: str, cpu: bool, wayland: bool,
+            damage: bool = False) -> tuple:
     cap = pixelflux.ScreenCapture()
     sink = Headers()
-    cap.start_capture(sink, settings(pixelflux, encoder, cpu, wayland))
-    time.sleep(2.0)
-    before = sink.snap()
-    cap.request_idr_frame()
-    time.sleep(1.0)
-    after = sink.snap()[len(before):]
-    cap.stop_capture()
+    stop = threading.Event()
+    if damage:
+        threading.Thread(target=repaint, args=(stop,), daemon=True).start()
+    try:
+        cap.start_capture(sink, settings(pixelflux, encoder, cpu, wayland))
+        time.sleep(2.0)
+        before = sink.snap()
+        cap.request_idr_frame()
+        time.sleep(1.0)
+        after = sink.snap()[len(before):]
+        cap.stop_capture()
+    finally:
+        stop.set()
     time.sleep(0.3)
     return before, after
 
@@ -107,7 +124,8 @@ def main() -> int:
         for encoder, cpu in (("h264enc", False), ("h264enc", True), ("jpeg", True)):
             tag = "x11 " + encoder + (" cpu" if cpu else "")
             try:
-                before, after = capture(pixelflux, encoder, cpu, False)
+                before, after = capture(pixelflux, encoder, cpu, False,
+                                        damage=encoder == "jpeg")
             except Exception as e:
                 res.check(f"{tag}: capture", False, repr(e)[:140])
                 continue
