@@ -156,6 +156,9 @@ HEADER_EXTENSIONS: dict[str, list[RTCRtpHeaderExtensionParameters]] = {
         RTCRtpHeaderExtensionParameters(
             id=6, uri="http://www.webrtc.org/experiments/rtp-hdrext/video-timing"
         ),
+        RTCRtpHeaderExtensionParameters(
+            id=7, uri="http://www.webrtc.org/experiments/rtp-hdrext/color-space"
+        ),
     ],
 }
 

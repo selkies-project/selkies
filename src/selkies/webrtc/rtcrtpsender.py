@@ -102,11 +102,12 @@ def random_sequence_number() -> int:
 
 class RTCEncodedFrame:
     def __init__(self, payloads: list[bytes], timestamp: int, audio_level: int,
-                 keyframe: bool = False):
+                 keyframe: bool = False, color_space: Optional[tuple] = None):
         self.payloads = payloads
         self.timestamp = timestamp
         self.audio_level = audio_level
         self.keyframe = keyframe
+        self.color_space = color_space
 
 
 class RTCRtpSender(AsyncIOEventEmitter):
@@ -414,7 +415,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if not payloads:
             return None
 
-        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe)
+        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe,
+                               getattr(data, "color_space", None))
 
     async def _retransmit(self, sequence_number: int) -> None:
         """
@@ -515,6 +517,15 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     # https://webrtc.googlesource.com/src/+/main/docs/native-code/rtp-hdrext/playout-delay/README.md
                     # set min and max to 0 to hint the receiver to render frames as soon as possible
                     packet.extensions.playout_delay = (0, 0)
+                    # The colour signal rides every packet of a key frame, as libwebrtc sends
+                    # it; the receiver keeps it for the frames that follow. Only VP8 and VP9
+                    # need it: their bitstreams cannot name primaries apart from the matrix.
+                    if (
+                        enc_frame.keyframe
+                        and enc_frame.color_space is not None
+                        and codec.mimeType.lower() in ("video/vp8", "video/vp9")
+                    ):
+                        packet.extensions.color_space = enc_frame.color_space
                     # video-timing rides the LAST packet of a frame. The encode legs
                     # happen in the capture library and aren't visible here (0 =
                     # unknown). packetization-complete is real; pacer-exit repeats it
