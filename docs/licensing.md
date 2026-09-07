@@ -104,7 +104,7 @@ so it matches the sources.
 | --- | --- | --- | --- |
 | Joystick Interposer (`addons/js-interposer`, `selkies_joystick_interposer.so`) | MPL-2.0 | libc, libdl | `LD_PRELOAD` library |
 | V4L2 interposer (`addons/v4l2-interposer`) | MPL-2.0 | libc, libdl; `dlopen`s libpipewire-0.3 (MIT) when a PipeWire source is configured | shares its ring layout with pixelflux's `VirtualCamera` |
-| fake-udev (`addons/fake-udev`) | MPL-2.0 (own `libudev.h` declarations, no systemd code) | libc | replaces the LGPL libudev only by ABI, for virtual gamepads |
+| fake-udev (`addons/fake-udev`) | MPL-2.0 (own `libudev.h` declarations, no systemd code) | libc, libdl; `dlopen`s the system libudev (LGPL) for everything but the virtual gamepads | replaces the LGPL libudev only by ABI, for virtual gamepads |
 | coturn addon (`addons/coturn`) | MPL-2.0 scripts around the coturn image | runs coturn (BSD-3-Clause) | TURN server |
 | TURN REST (`addons/turn-rest`) | MPL-2.0 | aiohttp | |
 

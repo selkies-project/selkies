@@ -3,8 +3,8 @@ TARGET_BASENAME = libudev.so
 LIB_VERSION ?= 1.0.0-fake
 FULL_TARGET = $(TARGET_BASENAME).$(LIB_VERSION)
 CC = gcc
-CFLAGS = -Wall -Wextra -fPIC -DPIC -O2 -g
-LDFLAGS = -shared
+CFLAGS = -Wall -Wextra -fPIC -DPIC -O2 -g -pthread
+LDFLAGS = -shared -ldl -pthread
 LDFLAGS += -Wl,--version-script=libudev.sym
 LDFLAGS += -Wl,-soname,$(TARGET_SO)
 SOURCES = fake-libudev-core.c
@@ -15,7 +15,7 @@ TARGET_SO_32 = libudev_x86.so.1
 TARGET_BASENAME_32 = libudev_x86.so
 FULL_TARGET_32 = $(TARGET_BASENAME_32).$(LIB_VERSION)
 CFLAGS_32 = $(CFLAGS) -m32
-LDFLAGS_32 = -shared -Wl,--version-script=libudev.sym -m32
+LDFLAGS_32 = -shared -Wl,--version-script=libudev.sym -m32 -ldl -pthread
 LDFLAGS_32 += -Wl,-soname,$(TARGET_SO_32)
 OBJECTS_32 = $(SOURCES:.c=.x86.o)
 
