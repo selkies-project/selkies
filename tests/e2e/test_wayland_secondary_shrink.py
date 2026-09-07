@@ -54,6 +54,34 @@ async def wait_log_from(mark: int, substr: str, timeout: float = 20) -> bool:
     return False
 
 
+async def wait_log_draining(mark: int, substrs: tuple, sockets: tuple, timeout: float = 20) -> tuple:
+    """`wait_log_from` for any of `substrs`, reading `sockets` meanwhile: the streams they
+    carry would otherwise back up on the client and stall its keepalive.
+
+    Returns:
+        ``(found, messages)``: whether a substring showed up, and the text messages read,
+        with a KILL marker for a socket the server closed.
+    """
+    got = []
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        log = H.server_log()
+        if any(log.find(sub, mark) >= 0 for sub in substrs):
+            return True, got
+        for ws in sockets:
+            try:
+                msg = await asyncio.wait_for(ws.recv(), timeout=0.2)
+            except asyncio.TimeoutError:
+                continue
+            except websockets.ConnectionClosed as e:
+                got.append(f"KILL socket closed: {e}")
+                continue
+            if isinstance(msg, str):
+                got.append(msg)
+        await asyncio.sleep(0.05)
+    return False, got
+
+
 def layouts_from(mark: int) -> list:
     """Every layout the server calculated at or after byte `mark`."""
     import ast
@@ -104,11 +132,13 @@ async def resize_secondary(res: "H.Results", primary, secondary, width: int, hei
     except websockets.ConnectionClosed as e:
         res.check(f"{label}: the secondary's socket is still open for its resize", False, str(e))
         return
-    res.check(f"{label}: the secondary's capture follows the new size",
-              await wait_log_from(mark, "Capture 'display2' followed the new layout live", 45)
-              or await wait_log_from(mark, "SUCCESS: Capture started for 'display2'", 5), "")
+    # A kept capture follows the layout live; one the pass rebuilt starts again.
+    followed, msgs = await wait_log_draining(
+        mark, ("Capture 'display2' followed the new layout live", "SUCCESS: Capture started for 'display2'"),
+        (primary, secondary), 45)
+    res.check(f"{label}: the secondary's capture follows the new size", followed, "")
     await drain(primary, 1.0)
-    secondary_msgs = await drain(secondary, 2.0)
+    secondary_msgs = [m for m in msgs if not m.startswith("PIPELINE_RESETTING")] + await drain(secondary, 2.0)
     tail = H.server_log()[mark:]
     res.check(f"{label}: the compositor refused no output move or creation",
               "RepositionOutput 0: rejected" not in tail and "CreateOutput 2: rejected" not in tail
@@ -145,8 +175,9 @@ async def drive(res: "H.Results") -> None:
             await asyncio.wait_for(secondary.recv(), timeout=10)
             mark = loglen()
             await secondary.send("SETTINGS," + json.dumps(settings_for("display2", 1280, 720)))
-            res.check("secondary capture starts left of the primary",
-                      await wait_log_from(mark, "SUCCESS: Capture started for 'display2'", 45), "")
+            started, _ = await wait_log_draining(
+                mark, ("SUCCESS: Capture started for 'display2'",), (primary, secondary), 45)
+            res.check("secondary capture starts left of the primary", started, "")
             layouts = layouts_from(mark)
             before = layouts[-1] if layouts else {}
             res.check("the primary is laid out at the secondary's right edge",
