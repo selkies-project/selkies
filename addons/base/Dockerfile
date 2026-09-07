@@ -293,7 +293,9 @@ COPY addons/base/selkies-privileged-files /usr/local/bin/selkies-privileged-file
 ARG DEBIAN_FRONTEND="noninteractive"
 # Configure rootless user environment for constrained conditions without escalated root privileges inside containers
 ARG TZ="UTC"
-ENV PASSWD="mypasswd"
+# No default: an image that ships one ships a known password, and both of these
+# are applied again at startup from the environment when they are given there.
+ARG PASSWD
 # The one knob for the generated locale; the ENV block below reuses it.
 ARG LOCALE="en_US.UTF-8"
 RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get install --no-install-recommends -y \
@@ -324,7 +326,7 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     useradd -ms /bin/bash ubuntu -u 1000 -g 1000 || echo 'Failed to add ubuntu user' && \
     usermod -a -G adm,audio,cdrom,dialout,dip,fax,floppy,games,input,lp,plugdev,render,ssl-cert,sudo,tape,tty,video,voice ubuntu && \
     echo "ubuntu ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers && \
-    echo "ubuntu:${PASSWD}" | chpasswd && \
+    { [ -z "${PASSWD}" ] || echo "ubuntu:${PASSWD}" | chpasswd; } && \
     # The recursive chown clears every setuid and setgid bit, and a bit on a
     # file uid 1000 owns is refused anyway, so what is privileged is recorded
     # first and given back by the layer at the end of this file. It stays

@@ -42,6 +42,20 @@ mkdir -p "${XDG_RUNTIME_DIR}"
 # to re-mode, and that is no reason to refuse to start the container.
 chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 
+# The time zone and the account password when the environment carries them. The
+# image bakes neither, and neither is fatal here: a read-only /etc is a
+# legitimate way to run this.
+if [ -n "${TZ-}" ] && [ -e "/usr/share/zoneinfo/${TZ}" ]; then
+  ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime 2>/dev/null &&
+    printf '%s\n' "${TZ}" > /etc/timezone 2>/dev/null ||
+    echo "selkies: cannot set the time zone to ${TZ}" >&2
+fi
+if [ -n "${PASSWD-}" ]; then
+  echo "$(id -nu):${PASSWD}" | chpasswd 2>/dev/null ||
+    echo "$(id -nu):${PASSWD}" | sudo-root chpasswd 2>/dev/null ||
+    echo "selkies: cannot change the password of $(id -nu)" >&2
+fi
+
 # A desktop menu watches the directories it read at startup, and cannot watch one
 # that does not exist yet: the first application installed into a home without
 # them lands in a directory nothing is watching, and never reaches the running
