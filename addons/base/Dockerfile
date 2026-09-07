@@ -42,8 +42,8 @@ ARG PYPI_PACKAGE="selkies"
 # distribution's Xvfb has neither glamor nor DRI3, so GL clients render in
 # software even with a GPU present. XLibre's Xvfb has both, on Mesa's GBM and
 # on NVIDIA's own EGL, and is built from its release tag.
-ARG WLROOTS_VERSION="0.20.2"
-ARG LABWC_VERSION="0.20.2"
+ARG WLROOTS_VERSION="0.19.3"
+ARG LABWC_VERSION="0.9.7"
 ARG XLIBRE_TAG="xlibre-xserver-25.2.2"
 ARG EGL_X11_TAG="v1.0.6"
 

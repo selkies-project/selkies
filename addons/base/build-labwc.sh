@@ -8,9 +8,8 @@
 # compositor the suites drive is the one the images ship. The distribution
 # supplies the toolchain and libraries; the dependencies the pinned wlroots
 # may need newer than a distribution carries (wayland, wayland-protocols,
-# libdrm, xkbcommon, pixman, libinput, libliftoff, libdisplay-info) are built from
-# source only where the installed ones are too old, at the versions the
-# current Ubuntu ships, and the result finds them through its rpath.
+# pixman, libliftoff, libdisplay-info) are built from source only where the
+# installed ones are too old, and the result finds them through its rpath.
 #
 # Inputs: WLROOTS_VERSION and LABWC_VERSION (required); PREFIX (default
 # /usr); PATCH_DIR (default: patches/ beside this script).
@@ -37,24 +36,15 @@ build() {
     ninja -C "${SRC}/${name}/build" install
 }
 
-pkg-config --exists 'wayland-server >= 1.24.0' || \
-    build wayland https://gitlab.freedesktop.org/wayland/wayland.git 1.24.0 \
+pkg-config --exists 'wayland-server >= 1.23.1' || \
+    build wayland https://gitlab.freedesktop.org/wayland/wayland.git 1.23.1 \
         -Ddocumentation=false -Dtests=false -Ddtd_validation=false
-pkg-config --exists 'wayland-protocols >= 1.47' || \
-    build wayland-protocols https://gitlab.freedesktop.org/wayland/wayland-protocols.git 1.47 \
+pkg-config --exists 'wayland-protocols >= 1.41' || \
+    build wayland-protocols https://gitlab.freedesktop.org/wayland/wayland-protocols.git 1.41 \
         -Dtests=false
-pkg-config --exists 'libdrm >= 2.4.129' || \
-    build libdrm https://gitlab.freedesktop.org/mesa/drm.git libdrm-2.4.131 \
-        -Dtests=false -Dman-pages=disabled
-pkg-config --exists 'xkbcommon >= 1.8.0' || \
-    build xkbcommon https://github.com/xkbcommon/libxkbcommon.git xkbcommon-1.13.1 \
-        -Denable-docs=false -Denable-tools=false -Denable-x11=false -Denable-wayland=false -Denable-xkbregistry=false
-pkg-config --exists 'pixman-1 >= 0.46.0' || \
-    build pixman https://gitlab.freedesktop.org/pixman/pixman.git pixman-0.46.4 \
+pkg-config --exists 'pixman-1 >= 0.43.0' || \
+    build pixman https://gitlab.freedesktop.org/pixman/pixman.git pixman-0.43.4 \
         -Dtests=disabled -Ddemos=disabled -Dgtk=disabled
-pkg-config --exists 'libinput >= 1.26' || \
-    build libinput https://gitlab.freedesktop.org/libinput/libinput.git 1.31.1 \
-        -Dtests=false -Ddocumentation=false -Ddebug-gui=false -Dlibwacom=false
 pkg-config --exists 'libliftoff >= 0.5.0' || \
     build libliftoff https://gitlab.freedesktop.org/emersion/libliftoff.git v0.5.0
 pkg-config --exists 'libdisplay-info >= 0.2.0' || \
@@ -67,11 +57,9 @@ git clone --depth 1 --branch "${LABWC_VERSION}" \
     https://github.com/labwc/labwc.git "${SRC}/labwc"
 git -C "${SRC}/labwc" apply "${PATCH_DIR}/labwc-ipc.patch" \
     "${PATCH_DIR}/labwc-seam.patch" "${PATCH_DIR}/labwc-screens.patch"
-# The systemd session target installs into systemd's own unit directory, outside
-# PREFIX, which a session in a container never starts through.
 meson setup "${SRC}/labwc/build" "${SRC}/labwc" \
     --prefix="${PREFIX}" --libdir=lib --buildtype=release \
-    -Dxwayland=enabled -Dnls=enabled -Dsystemd-session=disabled
+    -Dxwayland=enabled -Dnls=enabled
 ninja -C "${SRC}/labwc/build"
 ninja -C "${SRC}/labwc/build" install
 "${PREFIX}/bin/labwc" --version
