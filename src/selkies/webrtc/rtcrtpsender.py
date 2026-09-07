@@ -59,7 +59,7 @@ from .rtp import (
     RTCP_PSFB_PLI,
     RTCP_RTPFB_NACK,
     RTCP_RTPFB_TWCC,
-    RTP_HISTORY_SIZE,
+    RtpHistory,
     AnyRtcpPacket,
     RtcpByePacket,
     RtcpPsfbPacket,
@@ -155,7 +155,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self.__rtp_header_extensions_map = rtp.HeaderExtensionsMap()
         self.__rtp_started = asyncio.Event()
         self.__rtp_task: Optional[asyncio.Future[None]] = None
-        self.__rtp_history: dict[int, RtpPacket] = {}
+        self.__rtp_history = RtpHistory()
         self.__rtcp_exited = asyncio.Event()
         self.__rtcp_started = asyncio.Event()
         self.__rtcp_task: Optional[asyncio.Future[None]] = None
@@ -398,8 +398,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
         """
         Retransmit an RTP packet which was reported as lost.
         """
-        packet = self.__rtp_history.get(sequence_number % RTP_HISTORY_SIZE)
-        if packet and packet.sequence_number == sequence_number:
+        packet = self.__rtp_history.get(sequence_number)
+        if packet is not None:
             if self.__rtx_payload_type is not None:
                 packet = wrap_rtx(
                     packet,
@@ -511,9 +511,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         )
                     # send packet
                     self.__log_debug("> %s", packet)
-                    self.__rtp_history[packet.sequence_number % RTP_HISTORY_SIZE] = (
-                        packet
-                    )
+                    self.__rtp_history.add(packet, frame_time)
                     packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
                     await self.transport._send_rtp(
                         packet_bytes,

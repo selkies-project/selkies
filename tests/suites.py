@@ -73,6 +73,7 @@ SUITES: list = [
     {"path": "unit/test_webrtc_pacer_brake.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_twcc_window.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_video_bridge_gate.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_rtp_history.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_nvml_failfast.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_realized_layout.py", "tier": "unit", "timeout": 120},

@@ -34,14 +34,21 @@
 import math
 import os
 import struct
+from collections import deque
 from dataclasses import dataclass, field
 from struct import pack, unpack, unpack_from
 from typing import Any, Optional, Union
 
 from .rtcrtpparameters import RTCRtpParameters
 
-# used for NACK and retransmission
+# Receive side: how far back a NACK reaches.
 RTP_HISTORY_SIZE = 512
+# Send side: packets are kept for retransmission for at least this long. A
+# NACK reaches the sender about a round trip after the loss, and a count of
+# packets covers a shrinking slice of the stream as the bitrate rises. The
+# packet cap bounds what a burst can hold.
+RTP_HISTORY_S = 1.0
+RTP_HISTORY_MAX_PACKETS = 9600
 
 # reserved to avoid confusion with RTCP
 FORBIDDEN_PAYLOAD_TYPES = range(72, 77)
@@ -892,6 +899,37 @@ class RtpPacket:
             data += os.urandom(self.padding_size - 1)
             data += bytes([self.padding_size])
         return data
+
+
+class RtpHistory:
+    """Packets sent on one stream, by sequence number, for retransmission.
+
+    Bounded by RTP_HISTORY_S of sending and RTP_HISTORY_MAX_PACKETS; within
+    those a sequence number cannot repeat, so a lookup is exact.
+    """
+
+    __slots__ = ("_packets", "_order", "_horizon", "_capacity")
+
+    def __init__(self, horizon: float = RTP_HISTORY_S,
+                 capacity: int = RTP_HISTORY_MAX_PACKETS) -> None:
+        self._packets: dict[int, RtpPacket] = {}
+        self._order: deque = deque()
+        self._horizon = horizon
+        self._capacity = capacity
+
+    def add(self, packet: RtpPacket, now: float) -> None:
+        """Record a sent packet and let go of those past the horizon."""
+        self._packets[packet.sequence_number] = packet
+        order = self._order
+        order.append((now, packet.sequence_number))
+        while order and (now - order[0][0] > self._horizon or len(order) > self._capacity):
+            self._packets.pop(order.popleft()[1], None)
+
+    def get(self, sequence_number: int) -> Optional[RtpPacket]:
+        return self._packets.get(sequence_number)
+
+    def __len__(self) -> int:
+        return len(self._order)
 
 
 def unwrap_rtx(rtx: RtpPacket, payload_type: int, ssrc: int) -> RtpPacket:
