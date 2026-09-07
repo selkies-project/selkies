@@ -48,18 +48,23 @@ class EncodedPacket:
     they emit. Keeping the whole-frame copy out of the path both cuts latency
     and frees the GIL that a `bytes(frame)` copy would hold for the memcpy.
     `keyframe` says whether the sample decodes on its own, as the encoder
-    reported it; audio samples always do.
+    reported it; audio samples always do. `color_space` is the colour signal a
+    video sample was converted with, as `(primaries, transfer, matrix, range)`
+    ITU-T H.273 codes, for the RTP header extension a bitstream without room
+    for that signal needs; `None` leaves the wire to the bitstream.
     """
 
-    __slots__ = ("data", "pts", "dts", "time_base", "keyframe")
+    __slots__ = ("data", "pts", "dts", "time_base", "keyframe", "color_space")
 
     def __init__(self, data: Any, pts: Optional[int] = None,
-                 time_base: Optional[Fraction] = None, keyframe: bool = True) -> None:
+                 time_base: Optional[Fraction] = None, keyframe: bool = True,
+                 color_space: Optional[tuple] = None) -> None:
         self.data = data
         self.pts = pts
         self.dts = pts
         self.time_base = time_base
         self.keyframe = keyframe
+        self.color_space = color_space
 
     def __len__(self) -> int:
         return len(self.data)

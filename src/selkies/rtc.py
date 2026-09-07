@@ -379,6 +379,18 @@ class AudioMedia(AudioStreamTrack):
         packet = await self.data_pipeline.get_data()
         return packet
 
+#: The colour signal every pixelflux VP8 and VP9 session converts with, as the
+#: ITU-T H.273 codes the RTP colour-space header extension carries: BT.709
+#: primaries and transfer, the BT.601 matrix, limited range. The H.264, H.265
+#: and AV1 headers name that split themselves; VP8 has no in-band signal and
+#: VP9's single colour field cannot name BT.709 primaries beside the BT.601
+#: matrix, and a GPU-composited Chromium reading that field desaturates the
+#: picture by up to 70 levels, while it and WebKit take the extension over the
+#: bitstream and paint exactly. Firefox does not negotiate it and assumes this
+#: signal anyway.
+VPX_COLOR_SPACE = (1, 1, 6, 1)
+
+
 class VideoMedia(VideoStreamTrack):
     """Video track that serves pre-encoded packets from a `PipelineBridge`."""
 
@@ -1142,7 +1154,8 @@ class RTCApp:
             if buf:
                 try:
                     RTP_VIDEO_CLOCK_RATE = 90000
-                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE), keyframe)
+                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE), keyframe,
+                                           color_space=VPX_COLOR_SPACE)
                     bridge = graph.get("video_bridge")
                     if bridge is not None:
                         bridge.set_data(packet, keyframe)

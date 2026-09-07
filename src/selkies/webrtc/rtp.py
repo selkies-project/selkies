@@ -90,6 +90,9 @@ class HeaderExtensions:
     # (flags, encode_start, encode_finish, packetization_complete, pacer_exit,
     #  network_ts, network2_ts) — u8 + 6x u16 ms deltas from the capture timestamp.
     video_timing: Any = None
+    # (primaries, transfer, matrix, range) as the ITU-T H.273 codes; range is
+    # 1 limited, 2 full. Chroma siting is left unspecified.
+    color_space: Any = None
 
 
 class HeaderExtensionsMap:
@@ -121,6 +124,8 @@ class HeaderExtensionsMap:
                 self.__ids.playout_delay = ext.id
             elif ext.uri == "http://www.webrtc.org/experiments/rtp-hdrext/video-timing":
                 self.__ids.video_timing = ext.id
+            elif ext.uri == "http://www.webrtc.org/experiments/rtp-hdrext/color-space":
+                self.__ids.color_space = ext.id
 
     def get(self, extension_profile: int, extension_value: bytes) -> HeaderExtensions:
         values = HeaderExtensions()
@@ -164,6 +169,12 @@ class HeaderExtensionsMap:
                     # Malformed length: skip rather than raise struct.error.
                     continue
                 values.video_timing = unpack("!BHHHHHH", x_value[:13])
+            elif x_id == self.__ids.color_space:
+                if len(x_value) < 4:
+                    # Malformed length: skip rather than raise struct.error.
+                    continue
+                primaries, transfer, matrix, siting = unpack("!BBBB", x_value[:4])
+                values.color_space = (primaries, transfer, matrix, (siting >> 4) & 0x03)
         return values
 
     def set(self, values: HeaderExtensions) -> tuple[int, bytes]:
@@ -231,6 +242,14 @@ class HeaderExtensionsMap:
         if values.video_timing is not None and self.__ids.video_timing:
             extensions.append(
                 (self.__ids.video_timing, pack("!BHHHHHH", *values.video_timing))
+            )
+        if values.color_space is not None and self.__ids.color_space:
+            primaries, transfer, matrix, color_range = values.color_space
+            extensions.append(
+                (
+                    self.__ids.color_space,
+                    pack("!BBBB", primaries, transfer, matrix, (color_range & 0x03) << 4),
+                )
             )
         return pack_header_extensions(extensions)
 
