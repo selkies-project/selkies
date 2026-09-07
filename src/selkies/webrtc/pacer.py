@@ -132,27 +132,6 @@ MIN_GOODPUT_SAMPLE_BYTES = 2048
 SendNow = Callable[[bytes], Awaitable[None]]
 
 
-def h264_payloads_suggest_idr(payloads) -> bool:
-    """Cheap keyframe hint from the first few payload bytes. Handles raw NAL
-    (IDR=5/SPS=7 at byte 0), STAP-A aggregation (type 24: first inner NAL at
-    offset 3) and FU-A fragmentation (type 28+start bit: original NAL type in
-    byte 1) — pixelflux/libx264 keyframes announce themselves as leading
-    SPS(7)/IDR(5) inside one of those wrappings. False negatives only
-    under-inflate the IDR floor temporarily; false positives just age out
-    of the window."""
-    for payload in payloads[:3]:
-        if not payload:
-            continue
-        t = payload[0] & 0x1F
-        if t in (5, 7):
-            return True
-        if t == 24 and len(payload) > 3 and (payload[3] & 0x1F) in (5, 7):
-            return True
-        if t == 28 and len(payload) > 1 and (payload[1] & 0x80) \
-                and (payload[1] & 0x1F) in (5, 7):
-            return True
-    return False
-
 
 class RtpPacer:
     """Token-bucket pacer with strict priority classes for one RTP/DTLS flow.

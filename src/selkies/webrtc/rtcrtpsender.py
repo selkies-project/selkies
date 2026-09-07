@@ -42,7 +42,7 @@ from typing import Optional, Union
 
 
 from . import clock, rtp
-from .pacer import CLASS_AUDIO, CLASS_VIDEO, h264_payloads_suggest_idr
+from .pacer import CLASS_AUDIO, CLASS_VIDEO
 from .codecs import get_capabilities, get_encoder, is_rtx
 from .codecs.base import Encoder
 from .exceptions import InvalidStateError
@@ -101,10 +101,12 @@ def random_sequence_number() -> int:
 
 
 class RTCEncodedFrame:
-    def __init__(self, payloads: list[bytes], timestamp: int, audio_level: int):
+    def __init__(self, payloads: list[bytes], timestamp: int, audio_level: int,
+                 keyframe: bool = False):
         self.payloads = payloads
         self.timestamp = timestamp
         self.audio_level = audio_level
+        self.keyframe = keyframe
 
 
 class RTCRtpSender(AsyncIOEventEmitter):
@@ -390,7 +392,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if not payloads:
             return None
 
-        return RTCEncodedFrame(payloads, timestamp, None)
+        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe)
 
     async def _retransmit(self, sequence_number: int) -> None:
         """
@@ -452,16 +454,13 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 frame_time = time.time()
 
                 if self.__kind == "video" and (
-                    self.__force_keyframe_used
-                    or "jpeg" in codec.mimeType.lower()
-                    or h264_payloads_suggest_idr(enc_frame.payloads)
+                    self.__force_keyframe_used or enc_frame.keyframe
                 ):
                     # Report keyframe size to the pacer: feeds its IDR-aware
                     # queue budget and resurrects video after a GOP reset.
                     # Forced (recovery) keyframes resurrect but must not
-                    # shrink the IDR floor. JPEG: every frame is self-contained,
-                    # so every one feeds the floor (else a floor-0 cap would
-                    # reset-churn full-image frames). Remember for late attach.
+                    # shrink the IDR floor. Every JPEG frame is one, so every
+                    # one feeds the floor. Remember for late attach.
                     natural = not self.__force_keyframe_used
                     size = sum(len(p_) for p_ in enc_frame.payloads)
                     self._keyframe_bytes = size

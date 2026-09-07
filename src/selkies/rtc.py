@@ -176,6 +176,13 @@ logger.addHandler(handler)
 # chunks concatenate as base64.
 DATA_CHANNEL_BULK_CHUNK_SIZE = 16 * 1024 // 3 * 3
 DATA_CHANNEL_BULK_HIGH_WATER = 64 * 1024
+# Floor between keyframe requests for one display: a request inside it is
+# served by the keyframe the previous one already scheduled.
+IDR_REQUEST_FLOOR_S = 0.25
+# A closed video gate no keyframe answers within this long reopens on its
+# own, so an encoder that ignores requests degrades to a smear rather than
+# a dead stream.
+GATE_TIMEOUT_S = 1.0
 
 
 async def drain_data_channel(channel: RTCDataChannel,
@@ -261,43 +268,100 @@ class PipelineBridge:
     maxsize selects the buffering policy: depth 1 is latest-wins (video wants
     the freshest frame), a deeper bound acts as a short drop-oldest FIFO (audio
     wants continuity so a brief consumer stall doesn't silently drop samples).
+
+    A drop happens upstream of RTP: no sequence number is spent, so the
+    receiver sees no gap and never asks for a keyframe, while every delta
+    frame behind the drop references a picture it never received. With
+    `request_keyframe` bound the bridge keeps the wire decodable the way the
+    websockets relay does: a drop closes a gate that holds delta frames back,
+    a keyframe is asked for until one arrives and reopens it, and a queued
+    keyframe is never evicted by a delta frame. A gate no keyframe answers
+    within GATE_TIMEOUT_S reopens on its own.
     """
     def __init__(self, maxsize: int = 1,
-                 on_drop: Optional[Callable[[], None]] = None) -> None:
+                 request_keyframe: Optional[Callable[[], None]] = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         """Initializes the bridge.
 
         Args:
             maxsize: Queue depth; 1 means latest-wins, larger is drop-oldest.
-            on_drop: Fired (on the loop thread) whenever a queued item is
-                dropped. The video bridge uses it to force a recovery keyframe:
-                a dropped ENCODED frame breaks the wire reference chain with no
-                RTP gap, so the browser never requests a PLI and the smear
-                would persist under infinite GOP.
+            request_keyframe: Asks the display's encoder for a keyframe, on
+                the loop thread, at most once per IDR_REQUEST_FLOOR_S while
+                the gate is closed. None leaves every item ungated: audio
+                samples are self-contained.
+            clock: Monotonic time source.
 
         Attributes:
-            dropped: Items dropped since construction. A drop here spends no
-                sequence number, so it appears in no loss statistic on either
-                side; this counter is the only place it is visible, and it is
-                what separates it from a pacer drop.
+            dropped: Items discarded since construction, evicted for a newer
+                one or held back behind a closed gate. None of them spent a
+                sequence number, so they appear in no loss statistic on either
+                side; this counter is what separates a lagging sender from a
+                lossy link.
         """
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
-        self._on_drop = on_drop
+        self._request_keyframe = request_keyframe
+        self._clock = clock
+        self._queued_keyframe = False
+        self._gated_at: Optional[float] = None
+        self._last_request: Optional[float] = None
         self.dropped = 0
 
-    def set_data(self, data: Any) -> None:
+    def set_data(self, data: Any, keyframe: bool = True) -> None:
         """Enqueue an item, dropping the oldest one when the queue is full.
 
-        Synchronous, no lock: the drop-oldest check and the put have no await,
-        so the single-threaded loop runs them without interleaving (all access
-        is on the loop thread). A full queue means the consumer is lagging, so
-        the oldest queued item is dropped to make space for the new one.
+        Synchronous, no lock: the checks and the put have no await, so the
+        single-threaded loop runs them without interleaving (all access is on
+        the loop thread). A full queue means the consumer is lagging.
+
+        Args:
+            data: The item.
+            keyframe: Whether the item decodes on its own. A delta frame needs
+                the one before it on the wire, so once one is dropped the ones
+                behind it are held back until the next keyframe.
         """
-        if self._queue.full():
-            self._queue.get_nowait()
+        queue = self._queue
+        if self._request_keyframe is None:
+            if queue.full():
+                queue.get_nowait()
+                self.dropped += 1
+            queue.put_nowait(data)
+            return
+        if keyframe:
+            if queue.full():
+                queue.get_nowait()
+                self.dropped += 1
+            queue.put_nowait(data)
+            self._queued_keyframe = True
+            self._gated_at = None
+            return
+        now = self._clock()
+        if self._gated_at is not None:
+            if now - self._gated_at < GATE_TIMEOUT_S:
+                self.dropped += 1
+                self._ask(now)
+                return
+            logger.warning("Video bridge: no keyframe within %.1fs of a drop; "
+                           "sending delta frames again", GATE_TIMEOUT_S)
+            self._gated_at = None
+        if queue.full():
             self.dropped += 1
-            if self._on_drop is not None:
-                self._on_drop()
-        self._queue.put_nowait(data)
+            if not self._queued_keyframe:
+                queue.get_nowait()
+                self.dropped += 1
+            self._gated_at = now
+            self._ask(now)
+            return
+        queue.put_nowait(data)
+        self._queued_keyframe = False
+
+    def _ask(self, now: float) -> None:
+        if self._last_request is not None and now - self._last_request < IDR_REQUEST_FLOOR_S:
+            return
+        self._last_request = now
+        self._request_keyframe()
+
+    def empty(self) -> bool:
+        return self._queue.empty()
 
     async def get_data(self) -> Any:
         """Wait until an item is available in the queue and return it."""
@@ -1045,7 +1109,7 @@ class RTCApp:
         return "\r\n".join(out)
 
     def consume_data(self, buf: Any, pts: Optional[int], kind: str,
-                     display_id: str = "primary") -> None:
+                     keyframe: bool = True, display_id: str = "primary") -> None:
         """Feed one encoded frame from the capture side into a display's bridge.
 
         Synchronous: scheduled via `loop.call_soon_threadsafe` from the capture
@@ -1058,6 +1122,8 @@ class RTCApp:
             buf: Buffer-protocol object holding the encoded sample.
             pts: Presentation timestamp in the stream's clock, or None.
             kind: "video" or "audio".
+            keyframe: Whether the sample decodes on its own; a video delta
+                frame needs the one before it.
             display_id: Display whose media graph receives the sample.
         """
         graph = self.displays.get(display_id or "primary")
@@ -1067,10 +1133,10 @@ class RTCApp:
             if buf:
                 try:
                     RTP_VIDEO_CLOCK_RATE = 90000
-                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE))
+                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE), keyframe)
                     bridge = graph.get("video_bridge")
                     if bridge is not None:
-                        bridge.set_data(packet)
+                        bridge.set_data(packet, keyframe)
                 except Exception as e:
                     logger.error(f"error processing video sample: {e}")
         elif kind == "audio":
@@ -1087,9 +1153,10 @@ class RTCApp:
         """Frames each display's video bridge has dropped, by display id.
 
         A drop happens before the sender packetizes, so no sequence number is
-        spent and neither `packetsLost` nor the pacer's counters move, while
-        the pictures that do go out reference one the client never got. Rising
-        here with those flat is a lagging consumer, not a lossy link.
+        spent and neither `packetsLost` nor the pacer's counters move. Rising
+        here with those flat is a lagging sender, not a lossy link; the bridge
+        holds the picture still until the keyframe it asks for arrives, so the
+        cost is frame rate rather than a smear.
         """
         return {did: graph["video_bridge"].dropped
                 for did, graph in self.displays.items()
@@ -1655,36 +1722,22 @@ class RTCApp:
         display_id = peer_obj.get("display_id") or "primary"
         asyncio.run_coroutine_threadsafe(self.request_idr_frame(display_id), self.async_event_loop)
 
-    def _idr_on_video_drop(self, display_id: str,
-                           min_interval: float = 0.5) -> Callable[[], None]:
-        """Build the drop hook for a display's video bridge.
+    def _keyframe_request(self, display_id: str) -> Callable[[], None]:
+        """Build the keyframe request of a display's video bridge.
 
-        A dropped encoded frame leaves the wire referencing a picture no
-        client received; the drop is upstream of RTP so no loss is signalled
-        and the browser never asks for a keyframe, leaving a persistent smear
-        under infinite GOP. The hook forces a recovery IDR, debounced so a
-        sustained consumer lag doesn't turn every dropped frame into a large
-        keyframe and deepen the congestion.
+        Runs on the loop thread. The request takes the display's throttled IDR
+        path, the one a PLI takes too, so bridges and peers asking at once
+        schedule a single keyframe.
         """
-        state: Dict[str, Optional[float]] = {"last": None}
-
-        def on_drop() -> None:
+        def request() -> None:
             loop = self.async_event_loop
             if loop is None:
                 return
-            now = loop.time()
-            if state["last"] is not None and now - state["last"] < min_interval:
-                return
-            state["last"] = now
-            req = getattr(self, "request_idr_frame", None)
-            if req is None:
-                return
-            try:
-                asyncio.run_coroutine_threadsafe(req(display_id), loop)
-            except Exception:
-                pass
+            result = self.request_idr_frame(display_id)
+            if asyncio.iscoroutine(result):
+                loop.create_task(result)
 
-        return on_drop
+        return request
 
     async def _start_rtc_pipeline(
         self,
@@ -1744,7 +1797,7 @@ class RTCApp:
         graph = self.displays.get(display_id)
         if graph is None and (client_type is ClientType.CONTROLLER or display_id == "primary"):
             graph = {"relay": MediaRelay()}
-            graph["video_bridge"] = PipelineBridge(on_drop=self._idr_on_video_drop(display_id))
+            graph["video_bridge"] = PipelineBridge(request_keyframe=self._keyframe_request(display_id))
             graph["video_media"] = VideoMedia(graph["video_bridge"])
             if display_id == "primary":
                 graph["audio_bridge"] = PipelineBridge(maxsize=8)

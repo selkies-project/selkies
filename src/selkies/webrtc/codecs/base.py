@@ -47,16 +47,19 @@ class EncodedPacket:
     `memoryview(packet.data)` and materialize bytes only for the RTP payloads
     they emit. Keeping the whole-frame copy out of the path both cuts latency
     and frees the GIL that a `bytes(frame)` copy would hold for the memcpy.
+    `keyframe` says whether the sample decodes on its own, as the encoder
+    reported it; audio samples always do.
     """
 
-    __slots__ = ("data", "pts", "dts", "time_base")
+    __slots__ = ("data", "pts", "dts", "time_base", "keyframe")
 
     def __init__(self, data: Any, pts: Optional[int] = None,
-                 time_base: Optional[Fraction] = None) -> None:
+                 time_base: Optional[Fraction] = None, keyframe: bool = True) -> None:
         self.data = data
         self.pts = pts
         self.dts = pts
         self.time_base = time_base
+        self.keyframe = keyframe
 
     def __len__(self) -> int:
         return len(self.data)
