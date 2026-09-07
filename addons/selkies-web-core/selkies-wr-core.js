@@ -86,6 +86,7 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeFullColor, isMacDesktop } from './lib/util.js';
+import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 
 installAuthGuard();
@@ -984,20 +985,33 @@ export default function webrtc() {
 		return changes;
 	}
 
+	/** Whether this engine's RTP receiver takes VP9 profile 1, the 4:4:4 profile. */
+	function receiverTakesVp9FullColor() {
+		try {
+			return RTCRtpReceiver.getCapabilities('video').codecs.some((c) =>
+				/^video\/vp9$/i.test(c.mimeType) && /(^|;)profile-id=1(;|$)/.test(c.sdpFmtpLine || ''));
+		} catch (e) {
+			return false;
+		}
+	}
+
 	/**
-	 * Turns full colour off where this engine's decoder has no 4:4:4 profile.
+	 * Turns full colour off where this engine cannot decode the codec's 4:4:4
+	 * profile over RTP.
 	 *
 	 * Where the decoder has no 4:4:4 profile a full-colour stream is not a
 	 * heavier picture but no picture, so the setting is dropped rather than
-	 * asked for. Written to storage, which is what every payload and both
-	 * dashboards read, so the toggle shows what the stream is. The decoder is
-	 * only asked where full colour is on, since the first settings payload
-	 * waits here and the answer settles nothing for a stream not asking for it.
+	 * asked for. The receiver's own capabilities answer for VP9 (profile 1);
+	 * the decoder probe answers for H.264 and H.265. Written to storage, which
+	 * is what every payload and both dashboards read, so the toggle shows what
+	 * the stream is.
 	 */
 	async function settleFullColorSupport() {
+		const codec = codecOfEncoder(encoder);
+		if (!codecCarriesFullColor(codec)) return;
+		if (codec === 'vp9' ? receiverTakesVp9FullColor() : await canDecodeFullColor(codec)) return;
 		if (!getBoolParam('video_fullcolor', false)) return;
-		if (await canDecodeFullColor()) return;
-		console.warn('[Selkies] full colour (4:4:4) is off: this browser decodes H.264 4:2:0 only.');
+		console.warn(`[Selkies] full colour (4:4:4) is off: this browser decodes ${codec} 4:2:0 only over WebRTC.`);
 		setBoolParam('video_fullcolor', false);
 	}
 

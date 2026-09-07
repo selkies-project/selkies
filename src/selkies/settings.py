@@ -631,7 +631,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "video_fullcolor",
         "type": "bool",
         "default": False,
-        "help": "Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264 and x265); other codecs and encoders stay 4:2:0. A client whose decoder has no 4:4:4 profile turns it off for itself; where it is locked on, such a client falls back to the JPEG encoder.",
+        "help": "Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264 and x265; VP9 profile 1 on VA-API and libvpx); other codecs and encoders stay 4:2:0. A client whose decoder has no 4:4:4 profile turns it off for itself; where it is locked on, such a client falls back to the JPEG encoder.",
     },
     {
         "name": "video_streaming_mode",

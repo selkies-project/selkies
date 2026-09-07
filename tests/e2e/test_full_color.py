@@ -17,12 +17,16 @@ Firefox is covered on websockets alone: its WebRTC answer needs the OpenH264
 plugin the browser matrix side-loads into a profile of its own, and the answer
 about its decoder is the same on either transport.
 
+A ``-vp9`` suffix drives the same question for VP9, whose 4:4:4 is profile 1:
+``ws-chromium-vp9`` asks the WebCodecs decoder, ``wr-chromium-vp9`` the RTP
+receiver's capabilities, which is what the WebRTC client consults.
+
 Usage: python3 tests/e2e/test_full_color.py ws-webkit
 """
 import os
 import sys
 import time
-from typing import Any
+from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
@@ -34,6 +38,14 @@ ENGINES = ("chromium", "firefox", "webkit")
 # The profile the full-colour encoders emit, at the lowest level, so what the
 # probe answers is about the profile and not the size of any one stream.
 FULLCOLOR_CODEC = "avc1.F4001E"
+VP9_FULLCOLOR_CODEC = "vp09.01.10.08.03"
+
+RTP_VP9_PROBE_JS = """() => {
+  try {
+    return RTCRtpReceiver.getCapabilities('video').codecs.some((c) =>
+      /^video\\/vp9$/i.test(c.mimeType) && /(^|;)profile-id=1(;|$)/.test(c.sdpFmtpLine || ''));
+  } catch (e) { return false; }
+}"""
 
 # The answer is parked on the window and collected with a deadline: an engine's
 # `isConfigSupported` has none of its own, and an evaluate awaiting a promise that
@@ -67,7 +79,7 @@ def probe_decoder(page: Any, codec: str, timeout: float = 20.0) -> Any:
     return page.evaluate("() => window.__fullcolorProbe")
 
 
-def init_script(mode: str) -> str:
+def init_script(mode: str, encoder: Optional[str] = None) -> str:
     """Stores the encoder and full colour before the client's first line runs."""
     return """
 window.__SELKIES_STREAMING_MODE__ = '%s';
@@ -76,7 +88,7 @@ window.__SELKIES_STREAMING_MODE__ = '%s';
   localStorage.setItem(k + '_encoder', '%s');
   localStorage.setItem(k + '_video_fullcolor', 'true');
 })();
-""" % (mode, "h264enc-striped" if mode == "websockets" else "h264enc")
+""" % (mode, encoder or ("h264enc-striped" if mode == "websockets" else "h264enc"))
 
 
 # A decoder without the 4:4:4 profile, whatever this engine's really has: the
@@ -239,18 +251,21 @@ def drive_pinned(res: "H.Results", p: Any) -> None:
         C.close_browser(browser)
 
 
-def drive(res: "H.Results", engine: str, mode: str, p: Any) -> None:
+def drive(res: "H.Results", engine: str, mode: str, p: Any, vp9: bool = False) -> None:
     """One engine: what its decoder answers, and what the client then does."""
-    tag = f"{engine}-{mode}"
+    tag = f"{engine}-{mode}{'-vp9' if vp9 else ''}"
     browser = C.launch_browser(p, engine)
     try:
         ctx = browser.new_context(viewport={"width": 1280, "height": 720})
-        ctx.add_init_script(init_script(mode))
+        ctx.add_init_script(init_script(mode, "vp9enc" if vp9 else None))
         page = ctx.new_page()
         warnings = []
         page.on("console", lambda m: warnings.append(m.text))
         page.goto(H.BASE_URL, wait_until="load")
-        decodable = probe_decoder(page, FULLCOLOR_CODEC)
+        if vp9 and mode == "webrtc":
+            decodable = page.evaluate(RTP_VP9_PROBE_JS)
+        else:
+            decodable = probe_decoder(page, VP9_FULLCOLOR_CODEC if vp9 else FULLCOLOR_CODEC)
         res.check(f"[{tag}] the decoder answers the profile probe", decodable is not None, decodable)
 
         video = (C.wait_wr_video(page, timeout=45) if mode == "webrtc"
@@ -276,12 +291,16 @@ def main() -> "H.Results":
     when the next connects, and the second sees no video for that alone."""
     selector = sys.argv[1] if len(sys.argv) > 1 else "ws-chromium"
     short, engine = selector.split("-", 1)
+    vp9 = engine.endswith("-vp9")
+    engine = engine[:-4] if vp9 else engine
     mode = "webrtc" if short == "wr" else "websockets"
     res = H.Results(f"full-color-{selector}")
     locked = engine in ("locked", "pinned")
     env = {"SELKIES_VIDEO_FULLCOLOR": "true|locked"} if locked else None
     if engine == "pinned":
         env["SELKIES_ENCODER"] = "h264enc-striped"
+    if vp9:
+        env = {"SELKIES_ENCODER": "vp9enc,h264enc,jpeg"}
     H.server_start(mode=mode, wayland=False, extra_env=env)
     try:
         with sync_playwright() as p:
@@ -290,7 +309,7 @@ def main() -> "H.Results":
             elif engine == "stalled":
                 drive_stalled(res, p, mode)
             else:
-                drive(res, engine, mode, p)
+                drive(res, engine, mode, p, vp9)
     finally:
         H.server_stop()
     res.summary()

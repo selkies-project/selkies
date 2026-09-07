@@ -262,7 +262,7 @@ const fullColorProbes = {};
 /**
  * Whether this engine's `VideoDecoder` will take `codec` at full colour (4:4:4).
  *
- * Engines differ on the 4:4:4 profiles (High 4:4:4 Predictive, HEVC RExt), and
+ * Engines differ on the 4:4:4 profiles (High 4:4:4 Predictive, HEVC RExt, VP9 profile 1), and
  * one whose decoder lacks them cannot show the stream at all rather than
  * showing it worse, so full colour is asked of the decoder before it is asked
  * of the server. Which engines have them changes with their releases, which is
