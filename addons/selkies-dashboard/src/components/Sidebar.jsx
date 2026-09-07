@@ -51,7 +51,7 @@
  * @module
  */
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
-import { displayLabel, decodableEncoders, canDecodeFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
+import { displayLabel, decodableEncoders, receivableEncoders, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
@@ -95,21 +95,28 @@ const PER_DISPLAY_SETTINGS = [
 
 const encoderOptions = [
   "h264enc",
+  "h265enc",
+  "vp8enc",
+  "vp9enc",
+  "av1enc",
   "h264enc-striped",
   "jpeg",
 ];
 
 /**
  * WebRTC encoders offered before the server payload arrives; its `encoder`
- * allowed list is already filtered to what the WebRTC pipeline produces
- * (pixelflux emits H.264 only).
+ * allowed list is already filtered to what the WebRTC pipeline packetizes.
  */
 const encoderOptionsWR = [
   "h264enc",
+  "h265enc",
+  "vp8enc",
+  "vp9enc",
+  "av1enc",
 ]
 
 /** `webcam_encoder` values; labels come from `displayLabel`. */
-const webcamEncoderOptions = ["auto", "h264", "vp8", "mjpeg"];
+const webcamEncoderOptions = ["auto", "h264", "h265", "vp8", "vp9", "av1", "mjpeg"];
 
 const rateControlOptions = ["cbr", "crf"];
 
@@ -1346,7 +1353,7 @@ function Sidebar() {
    * below re-resolve against current values when their deps change.
    * `activeEncoder` is the one encoder knob for both transports, read from
    * storage first: an out-of-set stored value is ignored by the server's own
-   * fallback and re-seated by the `serverSettings` sync. `softwareH264Encoder`
+   * fallback and re-seated by the `serverSettings` sync. `softwareEncoders`
    * and `useCpu` (the client's choice, else the server's) feed the
    * rate-control default.
    */
@@ -1354,7 +1361,7 @@ function Sidebar() {
     manualActive: !!readStored("manual_width") || serverSettings?.manual_resolution?.value === true,
     streamMode,
     activeEncoder: readStored("encoder") || encoder,
-    softwareH264Encoder: serverSettings?.software_h264_encoder?.value,
+    softwareEncoders: serverSettings?.software_encoders?.value,
     useCpu: readStored("use_cpu") !== null
       ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
     allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
@@ -1379,7 +1386,13 @@ function Sidebar() {
   // Full colour is 4:4:4 H.264; where the decoder has no such profile the core
   // turns it off, so offering the switch would offer nothing.
   const [fullColorDecodable, setFullColorDecodable] = useState(true);
-  useEffect(() => { canDecodeFullColor().then(setFullColorDecodable); }, []);
+  /** Full colour is offered only where the codec carries it and this engine decodes it. */
+  const fullColorCodec = codecOfEncoder(encoder);
+  useEffect(() => {
+    let live = true;
+    canDecodeFullColor(fullColorCodec).then((ok) => { if (live) setFullColorDecodable(ok); });
+    return () => { live = false; };
+  }, [fullColorCodec]);
   const [use_cpu, setUseCpu] = useConditionalSetting(
     USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
@@ -1496,13 +1509,25 @@ function Sidebar() {
   /**
    * Filters an encoder list to what this transport can play: on the
    * WebSocket transport only encoders this engine can decode (JPEG alone
-   * without WebCodecs). The static lists seed the picker; the server's own
-   * allowed list replaces them as soon as settings arrive.
+   * without WebCodecs), on WebRTC those its RTP receiver takes. The static
+   * lists seed the picker; the server's own allowed list replaces them as
+   * soon as settings arrive.
    */
   const offeredEncoders = useCallback(
-    (list) => (isWebrtc ? list : decodableEncoders(list)), [isWebrtc]);
+    (list) => (isWebrtc ? receivableEncoders(list) : decodableEncoders(list)), [isWebrtc]);
   const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState(
     () => offeredEncoders(isWebrtc ? encoderOptionsWR : encoderOptions));
+  // The decoder probe answers after the first render; the menu is rebuilt from
+  // whatever list is current once it has.
+  const serverEncoderList = serverSettings?.encoder?.allowed;
+  useEffect(() => {
+    let live = true;
+    decoderSupportReady.then(() => {
+      if (!live) return;
+      setDynamicEncoderOptions(offeredEncoders(serverEncoderList || (isWebrtc ? encoderOptionsWR : encoderOptions)));
+    });
+    return () => { live = false; };
+  }, [serverEncoderList, isWebrtc, offeredEncoders]);
   /** Audio bitrate stops the slider indexes into: the server's allowed enum, else the local list. */
   const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v) => parseInt(v, 10))) || audioBitrateOptions;
 
@@ -3007,14 +3032,15 @@ function Sidebar() {
 
   /** One encoder knob serves both transports; CBR/CRF applies to every H.264 encoder on both. */
   const activeEncoder = encoder;
-  const H264_ENCODERS = ["h264enc", "h264enc-striped", "nvh264enc"];
+  const VIDEO_ENCODERS = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "h264enc-striped"];
   const showFPS = [
     "jpeg",
     "h264enc-striped",
     "h264enc",
   ].includes(encoder);
-  const showCRF = H264_ENCODERS.includes(activeEncoder);
-  const showH264Options = H264_ENCODERS.includes(activeEncoder);
+  const showCRF = VIDEO_ENCODERS.includes(activeEncoder);
+  const showH264Options = VIDEO_ENCODERS.includes(activeEncoder);
+  const showFullColor = showH264Options && codecCarriesFullColor(codecOfEncoder(activeEncoder));
   const showJpegOptions = encoder === 'jpeg';
   const showPaintOverQualityToggle = showH264Options || showJpegOptions;
   /**
@@ -3559,7 +3585,7 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {showH264Options && (renderableSettings.videoFullColor ?? true) && fullColorDecodable && (
+                {showFullColor && (renderableSettings.videoFullColor ?? true) && fullColorDecodable && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="videoFullColorToggle">
                       {t("sections.video.fullColorLabel")}

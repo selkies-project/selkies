@@ -75,9 +75,16 @@ function literal(text, name) {
 /** Helpers a worker source splices in that its own module imports. */
 const IMPORTED = { createStripeClock };
 
+/** Module sources a worker splices in whole, by their `?raw` import name. */
+const RAW_SOURCES = {
+    wireCodecsSource: () => readFileSync(join(WEB, 'lib', 'wire-codecs.js'), 'utf8').replace(/^export /gm, ''),
+};
+
 /** Resolves one `${...}` the client would have interpolated. */
 function splice(text, token) {
-    let m = token.match(/^(\w+)\.toString\(\)$/);
+    let m = token.match(/^(\w+)\.replace\(\/\^export \/gm, ''\)$/);
+    if (m && RAW_SOURCES[m[1]]) return RAW_SOURCES[m[1]]();
+    m = token.match(/^(\w+)\.toString\(\)$/);
     if (m) {
         return IMPORTED[m[1]]
             ? IMPORTED[m[1]].toString()

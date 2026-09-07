@@ -16,7 +16,7 @@ First of all, ensure that there is a running PulseAudio or PipeWire-Pulse sessio
 
 **Then, if you are using WebRTC mode, please read [WebRTC and Firewall Issues](firewall.md).**
 
-In WebRTC mode, also check that H.264 decoding is available in your web browser; the only `--encoder=` choice available there (`h264enc`) produces H.264, which all major web browsers support.
+In WebRTC mode, the browser's own RTP receiver decodes: H.264 and VP8 are taken by every major browser, VP9 and AV1 by Chromium and Firefox, H.265 by Safari and by Chromium where the platform decodes it; a browser that declines the codec is answered with H.264.
 
 Moreover, if using HTTP but not HTTPS on a remote host that is not `localhost`, use port forwarding to `localhost` as much as possible. Many browsers do not support WebRTC or relevant features including pointer and keyboard lock in HTTP outside localhost.
 

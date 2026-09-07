@@ -55,7 +55,7 @@ from enum import Enum
 from abc import ABCMeta, abstractmethod
 from typing import Any, Callable, Optional, Tuple
 
-from .settings import settings as app_settings
+from .settings import codec_for_encoder, encoder_for_codec, settings as app_settings
 from .audio_control import AudioControl
 from .display_utils import (
     apply_common_capture_settings,
@@ -76,9 +76,10 @@ except (ImportError, RuntimeError):
 
 logger = logging.getLogger("media_pipeline")
 
-# pixelflux's per-stripe wire header: a codec tag, the picture type the
-# encoder produced (IDR = 0x01 for H.264; every JPEG picture stands alone),
-# the frame id, and the stripe geometry.
+# pixelflux's per-stripe wire header: a video tag, a byte carrying the codec
+# in its high nibble and the picture kind the encoder produced in its low
+# nibble (a keyframe is 0x01; every JPEG picture stands alone), the frame id,
+# and the stripe geometry.
 STRIPE_HEADER_LEN = 10
 logger.setLevel(logging.INFO)
 
@@ -233,6 +234,9 @@ class MediaPipelinePixel(MediaPipeline):
             "unhandled produce_data"
         )
         self.on_pipeline_started: Callable[[], None] = lambda: None
+        # A capture that could not build its codec's encoder streams H.264 instead;
+        # told the encoder it now runs, once frames flow.
+        self.on_encoder_demoted: Callable[[str], None] = lambda encoder: None
         self.on_cursor_data: Callable[[dict], None] = lambda data: None
         self.get_cursor_size_cap: Callable[[], int] = lambda: 0
 
@@ -357,9 +361,8 @@ class MediaPipelinePixel(MediaPipeline):
         await self.restart_screen_capture()
 
     async def set_encoder(self, encoder: str) -> None:
-        """Switch the WebRTC video encoder (h264enc is the only one it can
-        stream). Structural (a different encoder instance), so restart capture —
-        same as use_cpu (WS parity)."""
+        """Switch the WebRTC video encoder. Structural (a different encoder
+        instance), so restart capture — same as use_cpu (WS parity)."""
         if self.encoder == encoder:
             return
         self.encoder = encoder
@@ -501,7 +504,7 @@ class MediaPipelinePixel(MediaPipeline):
             cs.capture_x = 0
             cs.capture_y = 0
             cs.auto_adjust_screen_capture_size = True
-        cs.output_mode = 1
+        cs.codec = codec_for_encoder(self.encoder)
         cs.omit_stripe_headers = False
         apply_common_capture_settings(
             cs, app_settings,
@@ -543,7 +546,7 @@ class MediaPipelinePixel(MediaPipeline):
         try:
             view = memoryview(frame)
             if len(view) > STRIPE_HEADER_LEN:
-                keyframe = view[0] != 0x04 or view[1] == 0x01
+                keyframe = view[0] != 0x04 or (view[1] & 0x0F) == 0x01
                 data_bytes = view[STRIPE_HEADER_LEN:]
                 now = time.monotonic()
                 if self._video_pts_anchor is None:
@@ -609,11 +612,38 @@ class MediaPipelinePixel(MediaPipeline):
             )
             self._is_screen_capturing = True
             logger.info("Started screen capture module")
+            self._schedule_active_codec_settle()
         except Exception as e:
             logger.error(f"Failed to start screen capture: {e}", exc_info=True)
             self.capture_module = None
             self._is_screen_capturing = False
             raise MediaPipelineError(f"screen capture failed to start: {e}") from e
+
+    def _schedule_active_codec_settle(self, attempt: int = 0) -> None:
+        """Read back, once frames flow, the codec the capture streams, and report a
+        demotion through `on_encoder_demoted` so the senders and clients follow."""
+        self.async_event_loop.call_later(
+            1.0, lambda: asyncio.ensure_future(self._settle_active_codec(attempt)))
+
+    async def _settle_active_codec(self, attempt: int) -> None:
+        module = self.capture_module
+        if module is None or not self._is_screen_capturing or not hasattr(module, "active_codec"):
+            return
+        try:
+            active = await asyncio.to_thread(module.active_codec)
+        except Exception as e:
+            logger.debug(f"Active codec unknown: {e}")
+            return
+        if active is None:
+            if attempt < 5:
+                self._schedule_active_codec_settle(attempt + 1)
+            return
+        if codec_for_encoder(self.encoder) == active:
+            return
+        demoted = encoder_for_codec(active)
+        logger.warning(f"The capture streams {active} as '{demoted}': no encoder served '{self.encoder}'.")
+        self.encoder = demoted
+        self.on_encoder_demoted(demoted)
 
     async def update_capture_region(self, x: int, y: int, w: int, h: int) -> None:
         """Re-target the capture to a new region of the extended framebuffer.

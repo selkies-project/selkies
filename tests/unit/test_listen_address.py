@@ -157,22 +157,30 @@ async def binder_cases() -> None:
         log.removeHandler(sink)
 
     with socket.socket() as taken:
-        taken.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        taken.bind(("127.0.0.1", port))
+        # The port is held for the length of the check rather than looked up and
+        # then asked for, which another process on the machine could win.
+        taken.bind(("127.0.0.1", 0))
         taken.listen(1)
         try:
-            await _bind_listen_sockets("localhost", port)
+            await _bind_listen_sockets("localhost", taken.getsockname()[1])
             check("a port already taken is an error", False, "no exception")
         except OSError as exc:
             check("a port already taken is an error", exc.errno == errno.EADDRINUSE, exc)
     if HAS_V6:
         check("a failed bind leaves nothing else bound", host_has(socket.AF_INET6, "::1"))
 
+    def unresolvable(*args, **kwargs):
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    socket.getaddrinfo = unresolvable
     try:
         await _bind_listen_sockets("selkies-listen-address.invalid", port)
         check("a name that does not resolve is an error", False, "no exception")
     except OSError as exc:
-        check("a name that does not resolve is an error", "selkies-listen-address.invalid" in str(exc), exc)
+        check("a name that does not resolve is an error",
+              "selkies-listen-address.invalid" in str(exc), exc)
+    finally:
+        socket.getaddrinfo = real_getaddrinfo
 
 
 def get_status(url: str) -> str:

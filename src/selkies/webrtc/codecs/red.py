@@ -113,9 +113,9 @@ class RedOpusEncoder(Encoder):
             maxlen=self.distance
         )
 
-    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int, bool]:
         timestamp = convert_timebase(packet.pts, packet.time_base, TIME_BASE)
         primary = bytes(packet.data)
         red = _build_red(list(self.history), primary, timestamp, self.block_pt)
         self.history.append((primary, timestamp))
-        return [red], timestamp
+        return [red], timestamp, False

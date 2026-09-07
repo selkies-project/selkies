@@ -76,5 +76,7 @@ class Encoder(metaclass=ABCMeta):
     payloads. Encoding itself lives in those libraries, not here."""
 
     @abstractmethod
-    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int, bool]:
+        """The RTP payloads of one frame, its RTP timestamp, and whether the
+        frame is a key frame (read from the bitstream; always False for audio)."""
         pass  # pragma: no cover

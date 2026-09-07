@@ -106,7 +106,7 @@ Each is documented in full where named; read that before changing the subsystem.
 - A DPI is an output scale on the session compositor, never Xft resources; only a changed capture scale restarts a
   capture (`src/selkies/display_utils.py` module docstring).
 - Software H.264 is a property of the installed pixelflux build, never a Selkies setting
-  (`settings.software_h264_encoder`, `canonical_encoder`; the OpenH264 profile gate in `src/selkies/rtc.py`).
+  (`settings.software_encoders`, `canonical_encoder`; the OpenH264 profile gate in `src/selkies/rtc.py`).
 - The sound-server control plane is in-process over pulsectl_asyncio under a never-cancel discipline; `pactl` is
   only the fallback when the bindings are missing (`src/selkies/audio_control.py` module docstring).
 - Bulk traffic sharing the session connection is paced by an end-to-end gauge, never by the local send
@@ -120,7 +120,9 @@ Each is documented in full where named; read that before changing the subsystem.
 - Every display of an extended desktop is published as a RandR logical monitor listing the physical output,
   because a toolkit realizes a monitor only where one is listed; whether the server lets several monitors share
   the output is read back from the reply rather than assumed, since RandR 1.5 gives an output to one monitor and
-  servers before 21.1 enforce that (`display_utils._sync_set_selkies_layout`).
+  servers before 21.1 enforce that (`display_utils._sync_set_selkies_layout`). A server whose driver reports no
+  display device has no output to list and no screen of its own: there the monitors are the only screens the
+  toolkits find, so they are published without one and clearing the layout leaves one covering the framebuffer.
 - One remote pointer is driven by an `Input` per display page, so a pointer message carries the buttons the
   event reports held, never the transitions one page happened to witness: a held drag crosses between pages,
   reaching one that never saw the press and leaving one that never sees the release

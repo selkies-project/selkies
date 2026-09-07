@@ -578,6 +578,9 @@ class WebRTCService(BaseStreamingService):
         self.signaling_client.on_ice = self.rtc_app.set_ice
 
         self.media_pipeline.produce_data = self.rtc_app.consume_data
+        self.media_pipeline.on_encoder_demoted = (
+            lambda encoder: asyncio.ensure_future(self._encoder_demoted("primary", encoder))
+        )
         self.media_pipeline.on_pipeline_started = self.send_current_cursor
 
         self.rtc_app.request_idr_frame = self.request_idr_for_display
@@ -622,6 +625,7 @@ class WebRTCService(BaseStreamingService):
         self.input_handler.on_update_rate_control_mode = self.handle_rate_control_change
         self.input_handler.on_update_crf = self.handle_crf_change
         self.rtc_app.get_encoder_for_display = self._encoder_for_display
+        self.rtc_app.on_video_codec_declined = self._video_codec_declined
         self.rtc_app.get_fullcolor_for_display = self._fullcolor_for_display
         self.rtc_app.get_use_cpu_for_display = self._use_cpu_for_display
         self.rtc_app.on_video_consumer_active = self.handle_video_consumer_active
@@ -1917,6 +1921,9 @@ class WebRTCService(BaseStreamingService):
                 # pixelflux's cursor-callback slot is process-global (last registration
                 # wins), so every display must route cursors into the same sink.
                 pipeline.on_cursor_data = self.media_pipeline.on_cursor_data
+                pipeline.on_encoder_demoted = (
+                    lambda encoder, _did=did: asyncio.ensure_future(self._encoder_demoted(_did, encoder))
+                )
                 pipeline.get_cursor_size_cap = self.media_pipeline.get_cursor_size_cap
                 self.display_pipelines[did] = pipeline
                 try:
@@ -2306,6 +2313,10 @@ class WebRTCService(BaseStreamingService):
         if applier is None:
             return
         self._store_display_setting(display_id, key, value)
+        # The senders take the new codec ahead of the capture restart that
+        # produces it, so no frame of one codec goes out packed as another.
+        if key == "encoder" and self.rtc_app:
+            self.rtc_app.switch_display_codec(display_id, str(value))
         pipeline = self.display_pipelines.get(display_id)
         if pipeline is not None:
             await applier(pipeline, value)
@@ -2317,6 +2328,38 @@ class WebRTCService(BaseStreamingService):
 
     def _encoder_for_display(self, display_id: str) -> str:
         return str(self._display_setting(display_id, "encoder") or self.args.encoder)
+
+    async def _encoder_demoted(self, display_id: str, encoder: str) -> None:
+        """A display's capture streams `encoder` in place of the one asked for: the
+        setting follows, its RTP senders switch codec, and every client hears of it."""
+        self._store_display_setting(display_id, "encoder", encoder)
+        if display_id == "primary":
+            self.settings.encoder = encoder
+            if self.rtc_app:
+                self.rtc_app.encoder = encoder
+        if self.rtc_app:
+            self.rtc_app.switch_display_codec(display_id, encoder)
+            self.rtc_app.send_media_data_over_channel("server_settings", self._server_settings_payload())
+
+    async def _video_codec_declined(self, display_id: str, mime: str, fallback: str) -> bool:
+        """A peer's answer left out the display's codec: the display moves to
+        `fallback` and every client hears of it, unless the operator's menu
+        holds the encoder, which leaves that peer without video."""
+        current = self._encoder_for_display(display_id)
+        if current == fallback:
+            return True
+        definition = next(d for d in SETTING_DEFINITIONS if d["name"] == "encoder")
+        allowed = definition.get("meta", {}).get("allowed", [])
+        if fallback not in allowed:
+            return False
+        logger.warning(
+            "Encoder %r (%s) is not decoded by a WebRTC peer of display %r; using %r.",
+            current, mime, display_id, fallback)
+        await self._apply_display_setting(display_id, "encoder", fallback)
+        if self.rtc_app:
+            self.rtc_app.send_media_data_over_channel(
+                "server_settings", self._server_settings_payload())
+        return True
 
     def _fullcolor_for_display(self, display_id: str) -> bool:
         return bool(self._display_setting(display_id, "video_fullcolor"))

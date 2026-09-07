@@ -50,6 +50,6 @@ class OpusDecoder(Decoder):
 class OpusEncoder(Encoder):
     """Packs pre-encoded Opus (from pcmflux) into RTP payloads."""
 
-    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int, bool]:
         timestamp = convert_timebase(packet.pts, packet.time_base, TIME_BASE)
-        return [bytes(packet.data)], timestamp
+        return [bytes(packet.data)], timestamp, False

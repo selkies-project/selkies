@@ -42,7 +42,7 @@ from typing import Any, Optional
 
 
 from . import clock
-from .codecs import depayload, get_capabilities, is_rtx
+from .codecs import frame_assembler, depayload, get_capabilities, is_rtx
 from .exceptions import InvalidStateError
 from .jitterbuffer import JitterBuffer
 from .mediastreams import MediaStreamError, MediaStreamTrack
@@ -545,6 +545,7 @@ class RTCRtpReceiver:
                 packet._data = depayload(codec, packet.payload)  # type: ignore
             else:
                 packet._data = b""  # type: ignore
+            packet._assemble = frame_assembler(codec)  # type: ignore
         except ValueError as exc:
             self.__log_debug("x RTP payload parsing failed: %s", exc)
             return
@@ -565,8 +566,8 @@ class RTCRtpReceiver:
                 # rather than decoding it in Python.
                 self._encoded_audio_sink(codec, encoded_frame)
             elif self._encoded_video_sink is not None:
-                # Same for video: the depacketized frame (Annex-B H.264, VP8/VP9)
-                # goes to the virtual webcam's decoder.
+                # Same for video: the depacketized frame (Annex-B H.264 or H.265,
+                # VP8/VP9, an AV1 temporal unit) goes to the virtual webcam's decoder.
                 self._encoded_video_sink(codec, encoded_frame)
 
     async def _run_rtcp(self) -> None:

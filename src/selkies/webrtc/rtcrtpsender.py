@@ -142,6 +142,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self._stream_id = str(uuid.uuid4())
         self._enabled = True
         self.__encoder: Optional[Encoder] = None
+        # The negotiated codecs and the one frames go out as; None drops them.
+        self.__codecs: list[RTCRtpCodecParameters] = []
+        self.__send_codec: Optional[RTCRtpCodecParameters] = None
         self.__force_keyframe = False
         self.__force_keyframe_used = False
         # Last observed keyframe size (bytes) and whether it was a natural
@@ -274,15 +277,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 break
             if send_codec is None:
                 raise InvalidStateError("No sendable media codec was negotiated")
-
-            # make note of RTX payload type
-            for codec in parameters.codecs:
-                if (
-                    is_rtx(codec)
-                    and codec.parameters["apt"] == send_codec.payloadType
-                ):
-                    self.__rtx_payload_type = codec.payloadType
-                    break
+            self.__codecs = list(parameters.codecs)
+            self.__send_codec = send_codec
+            self.__rtx_payload_type = self._rtx_payload_type_for(send_codec)
 
             # make note of the FlexFEC payload type (negotiated => protect video)
             for codec in parameters.codecs:
@@ -290,9 +287,36 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     self.__fec_payload_type = codec.payloadType
                     break
 
-            self.__rtp_task = asyncio.ensure_future(self._run_rtp(send_codec))
+            self.__rtp_task = asyncio.ensure_future(self._run_rtp())
             self.__rtcp_task = asyncio.ensure_future(self._run_rtcp())
             self.__started = True
+
+    def _rtx_payload_type_for(self, codec: RTCRtpCodecParameters) -> Optional[int]:
+        for candidate in self.__codecs:
+            if is_rtx(candidate) and candidate.parameters["apt"] == codec.payloadType:
+                return candidate.payloadType
+        return None
+
+    def negotiated_codec(self, mime_type: str) -> Optional[RTCRtpCodecParameters]:
+        """The negotiated media codec of `mime_type`, or None when the peer did not take it."""
+        wanted = mime_type.lower()
+        for codec in self.__codecs:
+            if codec.mimeType.lower() == wanted:
+                return codec
+        return None
+
+    def switch_codec(self, mime_type: str) -> bool:
+        """Send the track's frames as the negotiated codec of `mime_type` from
+        now on: its payload type, its RTX type and its own packer. A codec the
+        peer never took drops the frames instead, until a switch names one it
+        did; before the sender starts, the answer settles the codec."""
+        if not self.__started:
+            return True
+        codec = self.negotiated_codec(mime_type)
+        self.__send_codec = codec
+        self.__encoder = None
+        self.__rtx_payload_type = self._rtx_payload_type_for(codec) if codec else None
+        return codec is not None
 
     async def stop(self) -> None:
         """
@@ -368,25 +392,23 @@ class RTCRtpSender(AsyncIOEventEmitter):
         """
         self.emit("pli")
 
-    async def _next_encoded_frame(
-        self, codec: RTCRtpCodecParameters
-    ) -> Optional[RTCEncodedFrame]:
+    async def _next_encoded_frame(self) -> Optional[RTCEncodedFrame]:
         data = await self.__track.recv()
 
         # If the sender is disabled, drop the frame instead of packing it.
         # We still want to read from the track in order to avoid frames
         # accumulating in memory.
-        if not self._enabled:
+        if not self._enabled or self.__send_codec is None:
             return None
 
         if self.__encoder is None:
-            self.__encoder = get_encoder(codec)
+            self.__encoder = get_encoder(self.__send_codec)
 
         # Tracks serve frames pixelflux/pcmflux have already encoded; the sender
         # only packs them into RTP payloads. Keyframes are requested out of band
         # (the capture side produces the IDR), so no encode runs here.
         self.__force_keyframe_used = False
-        payloads, timestamp = self.__encoder.pack(data)
+        payloads, timestamp, keyframe = self.__encoder.pack(data)
 
         # If the packer did not return any payloads, return `None`.
         if not payloads:
@@ -428,7 +450,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         """Public alias used by the transport pacer's GOP-reset recovery hook."""
         self._send_keyframe()
 
-    async def _run_rtp(self, codec: RTCRtpCodecParameters) -> None:
+    async def _run_rtp(self) -> None:
         self.__log_debug("- RTP started")
         self.__rtp_started.set()
 
@@ -448,9 +470,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
 
                 # Fetch the next encoded frame. This can be `None` if the sender
                 # is disabled, in which case we just continue the loop.
-                enc_frame = await self._next_encoded_frame(codec)
+                enc_frame = await self._next_encoded_frame()
                 if enc_frame is None:
                     continue
+                codec = self.__send_codec
                 frame_time = time.time()
 
                 if self.__kind == "video" and (

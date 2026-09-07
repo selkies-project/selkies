@@ -52,9 +52,9 @@ class PcmEncoder(Encoder):
     def __init__(self, codec_name: Literal["pcm_alaw", "pcm_mulaw"]) -> None:
         self.codec_name = codec_name
 
-    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int]:
+    def pack(self, packet: EncodedPacket) -> tuple[list[bytes], int, bool]:
         timestamp = convert_timebase(packet.pts, packet.time_base, TIME_BASE)
-        return [bytes(packet.data)], timestamp
+        return [bytes(packet.data)], timestamp, False
 
 
 class PcmaDecoder(PcmDecoder):

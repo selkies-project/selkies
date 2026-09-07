@@ -91,7 +91,7 @@ def make_settings(encoder: str = "h264enc", w: int = 1024, h: int = 640, **kw):
     cs.video_fullcolor = False
     cs.use_paint_over_quality = False
     cs.jpeg_quality = 90
-    cs.output_mode = 1
+    cs.codec = "h264"
     cs.video_fullframe = True
     for k, v in kw.items():
         setattr(cs, k, v)
@@ -396,8 +396,8 @@ def main() -> Results:
 
     try:
         j = make_settings(w=320, h=200)
-        # output_mode 0 selects JPEG, which the recorder must reject.
-        j.output_mode = 0
+        # JPEG capture settings, which the recorder must reject.
+        j.codec = "jpeg"
         j.video_fullframe = False
         try:
             pixelflux.start_recording(os.path.join(H.WORKDIR, "cap2-rec-jpg.mp4"), j)
@@ -415,9 +415,12 @@ def main() -> Results:
         cs.keyframe_interval_s = 0.5
         cap.start_capture(fc, cs)
         time.sleep(2.6)
+        active = cap.active_codec()
         cap.stop_capture()
         res.check("fields: keyframe_interval_s schedules periodic IDRs",
                   fc.snap()["idr_nals"] >= 2, fc.snap())
+        res.check("fields: active_codec names the codec the capture streams", active == "h264", active)
+        res.check("fields: active_codec is None once stopped", cap.active_codec() is None, cap.active_codec())
     except Exception as e:
         res.check("fields: keyframe_interval_s", False, repr(e)[:140])
 
