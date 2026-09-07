@@ -265,6 +265,15 @@ jobs:
       - name: Install the remaining browser engines
         if: contains(inputs.tiers || 'integration or e2e', 'e2e')
         run: python -m playwright install --with-deps firefox webkit
+      # WebKit paints every <video> through its GL sink, which needs GStreamer's
+      # opengl plugin; without it a silent software fallback is what the suites
+      # would measure, so the plugin is named and checked here rather than left
+      # to Playwright's dependency list (the harness refuses WebKit without it).
+      - name: Install the GStreamer plugin WebKit's video sink needs
+        if: contains(inputs.tiers || 'integration or e2e', 'e2e')
+        run: |
+          sudo apt-get install --no-install-recommends -y gstreamer1.0-gl gstreamer1.0-tools
+          gst-inspect-1.0 opengl > /dev/null
       # Firefox negotiates H.264 only with the OpenH264 GMP, which its bundled
       # profile never carries; without this the whole firefox-wr block skips.
       - name: Install the OpenH264 plugin for Firefox

@@ -3,7 +3,9 @@
 import json
 import os
 import platform
+import shutil
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -89,8 +91,37 @@ def chromium_launch(pw: Any, extra_args: Optional[list] = None) -> Any:
     return pw.chromium.launch(**kwargs)
 
 
+_WEBKIT_GL_SINK_READY: Optional[bool] = None
+
+
+def webkit_gl_sink_ready() -> bool:
+    """Whether GStreamer carries the ``opengl`` plugin WebKit's video sink needs.
+
+    Playwright's Linux WebKit shows every ``<video>`` through WebKit's GL sink,
+    which needs GStreamer's ``opengl`` plugin (``gstreamer1.0-gl``, on
+    Playwright's own dependency list). Without it WebKit falls back, silently,
+    to a software sink that paints WebRTC streams differently and can stall
+    them, so a suite would measure a path no user runs. Probed once through
+    ``gst-inspect-1.0``; a host without that tool is taken at its word.
+    """
+    global _WEBKIT_GL_SINK_READY
+    if _WEBKIT_GL_SINK_READY is None:
+        inspect = shutil.which("gst-inspect-1.0")
+        if inspect is None:
+            _WEBKIT_GL_SINK_READY = True
+        else:
+            probe = subprocess.run([inspect, "opengl"], capture_output=True, text=True)
+            _WEBKIT_GL_SINK_READY = probe.returncode == 0
+    return _WEBKIT_GL_SINK_READY
+
+
 def launch_browser(pw: Any, engine: str = "chromium") -> Any:
-    """Launch a headless browser for ``engine``: chromium, firefox, or webkit."""
+    """Launch a headless browser for ``engine``: chromium, firefox, or webkit.
+
+    Raises:
+        RuntimeError: WebKit was asked for where GStreamer lacks the ``opengl``
+            plugin its video sink needs (see ``webkit_gl_sink_ready``).
+    """
     if engine == "firefox":
         # The <video> carries the audio stream, so Firefox's default autoplay
         # policy rejects the initial play() without a user gesture; the same
@@ -104,6 +135,10 @@ def launch_browser(pw: Any, engine: str = "chromium") -> Any:
             kwargs["executable_path"] = FIREFOX_PATH
         return pw.firefox.launch(**kwargs)
     if engine == "webkit":
+        if not webkit_gl_sink_ready():
+            raise RuntimeError("GStreamer has no opengl plugin, so WebKit would paint through its "
+                               "software fallback sink; install gstreamer1.0-gl "
+                               "(playwright install --with-deps webkit)")
         return pw.webkit.launch(headless=True)
     return chromium_launch(pw)
 

@@ -62,7 +62,9 @@ dependencies = [
 [project.optional-dependencies]
 # The test suites, on top of an installed selkies (which already brings
 # pixelflux/pcmflux, aiohttp and psutil): `pip install .[test]`. The browsers the
-# e2e tier drives come from `playwright install chromium firefox webkit`.
+# e2e tier drives come from `playwright install --with-deps chromium firefox
+# webkit`; WebKit on Linux also needs GStreamer's opengl plugin
+# (gstreamer1.0-gl, on that dependency list), or its video sink falls back.
 test = [
     "pytest",
     "playwright",
