@@ -68,7 +68,9 @@ class WebRTCSignalingClient:
             peer's SDP; assigned by the consumer.
         on_disconnect: Async callback fired when the socket closes.
         on_session_start: Async callback `(client_peer_id, client_type,
-            client_token, display_id, display_position)` for SESSION_START.
+            client_token, display_id, display_position, fullcolor_codecs=None)`
+            for SESSION_START; `fullcolor_codecs` is what the client's hello
+            said it decodes at 4:4:4, `None` when it did not say.
         on_session_end: Async callback `(client_peer_id, client_type)` for
             SESSION_END.
         on_error: Async callback receiving a `WebRTCSignalingError` for a
@@ -296,14 +298,18 @@ class WebRTCSignalingClient:
 
         elif message.startswith("SESSION_START"):
             toks = message.strip().split(" ")
-            if len(toks) in (3, 5, 6):
+            if len(toks) == 3 or 5 <= len(toks) <= 7:
                 client_peer_id = toks[1]
                 client_type = toks[2]
                 display_id = toks[3] if len(toks) >= 5 else "primary"
                 display_position = toks[4] if len(toks) >= 5 else "right"
-                client_token = toks[5] if len(toks) == 6 else None
+                extras = toks[5:]
+                client_token = next((t for t in extras if not t.startswith("fullcolor=")), None)
+                fullcolor = next((t[len("fullcolor="):] for t in extras if t.startswith("fullcolor=")), None)
+                fullcolor_codecs = [c for c in fullcolor.split(",") if c] if fullcolor is not None else None
                 await self.on_session_start(
-                    client_peer_id, client_type, client_token, display_id, display_position
+                    client_peer_id, client_type, client_token, display_id, display_position,
+                    fullcolor_codecs=fullcolor_codecs,
                 )
             else:
                 logger.error(f"invalid SESSION_START message: {message}")

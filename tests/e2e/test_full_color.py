@@ -282,7 +282,10 @@ def drive_default(res: "H.Results", engine: str, mode: str, p: Any) -> None:
                  else C.wait_ws_video(page, timeout=45))
         res.check(f"[{tag}] the stream plays", bool(video), video)
         if mode == "webrtc":
-            res.check(f"[{tag}] the page's toggle shows full colour off",
+            # The hello named no 4:4:4, so the server settled it before the offer.
+            res.check(f"[{tag}] the server turned full colour off before the offer",
+                      C.wait_log("streams 4:2:0", timeout=20), H.server_log()[-300:])
+            res.check(f"[{tag}] and the page's toggle shows it off",
                       page.evaluate("() => window.video_fullcolor") is False,
                       page.evaluate("() => window.video_fullcolor"))
         else:

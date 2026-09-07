@@ -15,10 +15,11 @@ cannot trade the session forever.
 Wire protocol (text frames, space-separated): a peer opens with
 `HELLO <server|client> [<json-metadata>]` (`client_type`, `client_slot`,
 `client_strict_viewer`, `client_token`, `server_token`, `display_id`,
-`display_position`) and is answered `HELLO`. `SESSION <peer-id|server>` pairs
+`display_position`, `fullcolor_codecs`: the codec names the client decodes at
+4:4:4) and is answered `HELLO`. `SESSION <peer-id|server>` pairs
 the caller with the callee: the caller gets `SESSION_OK <callee-id>`, the callee
 `SESSION_START <caller-id> <client_type> <display_id> <display_position>
-[<client_token>]`, and a disconnect sends the partner `SESSION_END <peer-id>
+[<client_token>] [fullcolor=<codec,...>]`, and a disconnect sends the partner `SESSION_END <peer-id>
 <client_type>`. In a session every message is addressed `<peer-id> <message>`
 and relayed as `<sender-id> <message>`, only between session partners. `ROOM
 <room-id>` joins or creates a room (`ROOM_OK <member-ids>`, members get
@@ -92,6 +93,7 @@ class Peer:
     peer_status: Optional[str] = None
     display_id: str = "primary"
     display_position: str = "right"
+    fullcolor_codecs: Optional[List[str]] = None
 
 
 class WebRTCPeerManagement:
@@ -539,6 +541,8 @@ class WebRTCPeerManagement:
                     )
                     if peer.client_token:
                         session_start += " " + peer.client_token
+                    if peer.fullcolor_codecs is not None:
+                        session_start += " fullcolor=" + ",".join(peer.fullcolor_codecs)
                     await wsc.send_str(session_start)
                     peer.peer_status = peer_status = "session"
                     callee_peer.peer_status = "session"
@@ -710,6 +714,7 @@ class WebRTCPeerManagement:
         server_token = None
         display_id = "primary"
         display_position = "right"
+        fullcolor_codecs = None
         dead_peer_notifications: List[Callable[[], Awaitable[Any]]] = []
 
         def evict_peer_locked(
@@ -744,6 +749,9 @@ class WebRTCPeerManagement:
                         display_id = json_metadata.get("display_id") or "primary"
                         pos = json_metadata.get("display_position")
                         display_position = pos if pos in ("right", "left", "up", "down") else "right"
+                        codecs = json_metadata.get("fullcolor_codecs")
+                        if isinstance(codecs, list):
+                            fullcolor_codecs = [str(c) for c in codecs if isinstance(c, str) and c.isalnum()]
                     except json.JSONDecodeError as e:
                         await ws.close(code=1002, message=b"invalid protocol")
                         raise Exception("Invalid JSON metadata from {!r}".format(raddr)) from e
@@ -939,6 +947,7 @@ class WebRTCPeerManagement:
                     client_token=client_token,
                     display_id=display_id,
                     display_position=display_position,
+                    fullcolor_codecs=fullcolor_codecs,
                 )
                 result = (puid, peer_type, client_type, client_slot, client_strict_viewer)
         finally:
