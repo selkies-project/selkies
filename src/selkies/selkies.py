@@ -83,6 +83,7 @@ from .display_utils import (
     WAYLAND_SCREEN_OUTPUT_ID,
     wayland_output_id,
     wayland_reposition_primary,
+    wayland_shrink_output,
     grow_framebuffer,
     set_dpi,
     set_cursor_size,
@@ -4636,19 +4637,20 @@ class DataStreamingServer(BaseStreamingService):
         placement that overlaps a live output, and the primary's screen takes
         its new size only once its capture has restarted, so a secondary moving
         into room a shrinking primary gives up can only be created after that.
-        This pass therefore only removes, moves and grows: stale and moved
-        secondaries are destroyed (a secondary reposition is a destroy +
+        This pass therefore only removes, shrinks, moves and grows: stale and
+        moved secondaries are destroyed (a secondary reposition is a destroy +
         recreate; its capture dies with the output and the start loop rebuilds
-        it), the primary (output 0) is moved to its layout offset ('left'/'up'
-        place it off-origin; teardown re-anchors it at 0,0), and its screen is
-        grown to hold the rectangle its capture is about to take. A primary move
-        the compositor refuses is retried with every secondary output destroyed
-        -- a secondary that shrinks can leave the primary's new offset inside
-        its old rectangle, and the outputs come back in _create_wayland_outputs
-        anyway -- and only then is the arrangement void: primary back at the
-        origin, every secondary dropped. _create_wayland_outputs, run by the
-        start loop right after the primary's capture start, creates the
-        secondary outputs.
+        it), a secondary that keeps its origin but shrinks gives the room up in
+        place (its capture start grows it to its whole rectangle afterwards),
+        the primary (output 0) is moved to its layout offset ('left'/'up' place
+        it off-origin; teardown re-anchors it at 0,0), and its screen is grown
+        to hold the rectangle its capture is about to take. A primary move the
+        compositor refuses is retried with every secondary output destroyed --
+        a rectangle the compositor would not shrink can still stand in the way,
+        and the outputs come back in _create_wayland_outputs anyway -- and only
+        then is the arrangement void: primary back at the origin, every
+        secondary dropped. _create_wayland_outputs, run by the start loop right
+        after the primary's capture start, creates the secondary outputs.
 
         Args:
             layouts: display_id to layout rect; mutated when a display has to
@@ -4689,8 +4691,12 @@ class DataStreamingServer(BaseStreamingService):
         for oid, did in sorted(wanted.items()):
             layout = layouts[did]
             existing = outputs.get(oid)
-            if existing is not None and (existing[1], existing[2]) != (layout['x'], layout['y']):
+            if existing is None:
+                continue
+            if (existing[1], existing[2]) != (layout['x'], layout['y']):
                 await recreate_later(oid, did, f"moves to +{layout['x']}+{layout['y']}")
+            elif not await wayland_shrink_output(module, existing, layout['w'], layout['h']):
+                await recreate_later(oid, did, f"cannot shrink to {layout['w']}x{layout['h']}")
         primary_layout = layouts.get('primary')
         target = (primary_layout['x'], primary_layout['y']) if primary_layout else (0, 0)
         existing0 = outputs.get(WAYLAND_SCREEN_OUTPUT_ID)

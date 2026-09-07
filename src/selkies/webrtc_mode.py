@@ -61,7 +61,7 @@ from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_
                             clear_selkies_monitors, clamp_primary_feedback,
                             MultiMonitorWindowManager,
                             WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id,
-                            wayland_reposition_primary,
+                            wayland_reposition_primary, wayland_shrink_output,
                             parse_resize_dims, cursor_size_for_dpi, align_dims_16)
 from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
 from .settings import (settings, AppSettings, SETTING_DEFINITIONS,
@@ -1252,7 +1252,10 @@ class WebRTCService(BaseStreamingService):
         its layout offset ('left'/'up' place it off-origin); a secondary
         reposition is a destroy + recreate (its capture rebinds on the pipeline
         restart that follows), destroyed before the primary moves so the
-        rectangles never overlap.
+        rectangles never overlap. A secondary that keeps its origin but shrinks
+        gives the room up in place ahead of the move, and grows into the room
+        the move leaves on the same restart; a retained output the compositor
+        still finds in the primary's way is recreated after all.
 
         Returns:
             False when the output cannot be created or the primary cannot move
@@ -1275,11 +1278,22 @@ class WebRTCService(BaseStreamingService):
             logger.info(f"Wayland output {oid} moves to +{s['x']}+{s['y']}; recreating it.")
             await asyncio.to_thread(module.destroy_output, oid)
             existing = None
+        elif (existing is not None
+              and not await wayland_shrink_output(module, existing, s["w"], s["h"])):
+            logger.info(f"Wayland output {oid} cannot shrink to {s['w']}x{s['h']}; recreating it.")
+            await asyncio.to_thread(module.destroy_output, oid)
+            existing = None
         p = layouts.get("primary") or {"x": 0, "y": 0}
         existing0 = outputs.get(WAYLAND_SCREEN_OUTPUT_ID)
         current0 = (existing0[1], existing0[2]) if existing0 is not None else (0, 0)
         if (p["x"], p["y"]) != current0:
-            if not await wayland_reposition_primary(module, p["x"], p["y"]):
+            moved = await wayland_reposition_primary(module, p["x"], p["y"])
+            if not moved and existing is not None:
+                logger.info(f"Wayland output {oid} blocks the primary's move; recreating it.")
+                await asyncio.to_thread(module.destroy_output, oid)
+                existing = None
+                moved = await wayland_reposition_primary(module, p["x"], p["y"])
+            if not moved:
                 return False
         if existing is not None:
             return True

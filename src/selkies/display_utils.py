@@ -489,6 +489,44 @@ async def wayland_reposition_primary(module: Any, x: int, y: int) -> bool:
         return False
 
 
+async def wayland_shrink_output(module: Any, output: Tuple, width: int, height: int) -> bool:
+    """Shrink a secondary output to no more than ``width`` x ``height`` on each axis.
+
+    The layout pass moves the primary before the captures restart, and the
+    compositor refuses a move into room a live output still holds: a secondary
+    whose rectangle shrinks (a page changing density, a smaller browser window)
+    has to give that room up first. Only the shrink happens here, at the scale
+    the output holds; the capture start that follows the primary's move grows
+    the output to its whole rectangle and scale, into room the move has left.
+    Shared by both transports.
+
+    Args:
+        module: A pixelflux capture handle for the compositor.
+        output: The output's ``list_outputs`` entry,
+            ``(id, x, y, width, height, scale, capturing)``.
+        width: The width the layout asks of the output.
+        height: The height the layout asks of the output.
+
+    Returns:
+        Whether the output now holds no more than the asked rectangle; False
+        when the compositor refused the resize, for the caller to recreate the
+        output instead.
+    """
+    oid, _x, _y, cur_w, cur_h, scale = output[:6]
+    fit_w, fit_h = min(int(cur_w), int(width)), min(int(cur_h), int(height))
+    if (fit_w, fit_h) == (int(cur_w), int(cur_h)):
+        return True
+    try:
+        shrunk = bool(await asyncio.to_thread(
+            module.resize_output, oid, fit_w, fit_h, float(scale)))
+    except Exception as e:
+        logger_app_resize.error(f"Wayland output {oid} shrink to {fit_w}x{fit_h} failed: {e}")
+        return False
+    if not shrunk:
+        logger_app_resize.warning(f"Wayland output {oid} shrink to {fit_w}x{fit_h} refused.")
+    return shrunk
+
+
 def compute_dual_layout(
     primary_wh: Tuple[int, int],
     secondary_wh: Tuple[int, int],
