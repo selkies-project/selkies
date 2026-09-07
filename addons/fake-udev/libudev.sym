@@ -82,6 +82,7 @@ LIBUDEV_183 {
     udev_set_userdata;
     udev_unref;
     udev_util_encode_string;
+    selkies_fake_udev_identity;
   local:
     *;
 };

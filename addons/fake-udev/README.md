@@ -1,39 +1,40 @@
 # Fake Libudev Core (for Virtual Gamepads)
 
-This subproject provides a fake `libudev` shared library (`libudev.so.1`) designed to be used with `LD_PRELOAD`. Its primary purpose is to simulate the presence of a predefined set of virtual gamepads for applications that use `libudev` to discover and query input devices.
+This subproject provides a `libudev` shared library (`libudev.so.1`) designed to be used with `LD_PRELOAD`. It adds a predefined set of virtual gamepads to what the system's `libudev` reports, for applications that use `libudev` to discover and query input devices.
 
-This is particularly useful for testing applications or running them in environments where actual gamepad hardware is unavailable or where a full udev daemon setup is not feasible (e.g., certain containerized environments, CI/CD pipelines).
+This is particularly useful for running applications in environments where actual gamepad hardware is unavailable or where a full udev daemon setup is not feasible (e.g., certain containerized environments, CI/CD pipelines).
 
 ## How it Works
 
-When an application linked against `libudev` is launched with this library preloaded, calls to `libudev` functions are intercepted by this fake implementation. Instead of querying the system's actual udev database, this library:
+When an application linked against `libudev` is launched with this library preloaded, calls to `libudev` functions are intercepted by this implementation. It:
 
-1.  **Initializes Virtual Device Data:** On the first relevant `libudev` call (e.g., `udev_new()`), it sets up internal data structures representing a fixed number (`NUM_VIRTUAL_GAMEPADS`, currently 4) of virtual gamepads.
-2.  **Simulates Device Hierarchy:** Each virtual gamepad is represented with a typical udev device hierarchy:
+1.  **Initializes Virtual Device Data:** On the first `udev_new()`, it sets up internal data structures representing a fixed number (`NUM_VIRTUAL_GAMEPADS`, currently 4) of virtual gamepads.
+2.  **Loads the Real Library:** At the same time it `dlopen`s the system `libudev` by path (this library carries the `libudev.so.1` SONAME, so the dynamic linker never maps the real one on its own) and forwards everything that is not a virtual gamepad to it: other subsystems (`drm`, `video4linux`, `hidraw`, ...), the host's own input devices, hotplug events, hwdb and queue queries. `SELKIES_REAL_LIBUDEV` names the real library when it lives outside the platform library directories and `LD_LIBRARY_PATH`; `SELKIES_REAL_LIBUDEV=none` disables passthrough. Without a real `libudev`, only the virtual gamepads are visible.
+3.  **Simulates Device Hierarchy:** Each virtual gamepad is represented with a typical udev device hierarchy:
     *   A **USB Parent Device** (e.g., `/sys/devices/virtual/usb/selkies_usb_ctrl0_dev`) with USB-specific attributes like `idVendor`, `idProduct`.
     *   An **Input Parent Device** (e.g., `/sys/devices/virtual/selkies_pad0/input/input10`) which is a child of the USB device, providing common input attributes like `name`, `phys`, `uniq`.
     *   A **JS (Joystick) Device Node** (e.g., `/sys/devices/virtual/selkies_pad0/input/input10/js0`) representing the traditional joystick interface (`/dev/input/jsX`).
     *   An **Event Device Node** (e.g., `/sys/devices/virtual/selkies_pad0/input/input10/event1000`) representing the evdev interface (`/dev/input/eventX`).
-3.  **Responds to Queries:** It responds to `libudev` API calls (like `udev_enumerate_scan_devices`, `udev_device_get_property_value`, `udev_device_get_sysattr_value`, `udev_device_get_parent_with_subsystem_devtype`) using the hardcoded data for these virtual devices.
+4.  **Responds to Queries:** It answers `libudev` API calls (like `udev_enumerate_scan_devices`, `udev_device_get_property_value`, `udev_device_get_sysattr_value`, `udev_device_get_parent_with_subsystem_devtype`) for these virtual devices from the hardcoded data, and for every other device from the real library.
     *   The virtual gamepads are designed to mimic "Microsoft X-Box 360 pad" devices.
     *   Enumeration lists a js or event node only while the interposer's socket for it (`$SELKIES_JS_SOCKET_PATH/selkies_<node>.sock`) is bound; a pad served later is announced through the monitor as a hotplug add.
+    *   A real input node that shares a virtual node's name (`js0`–`js3`, `event1000`–`event1003`) is hidden, since its `/dev/input` path is the one the joystick interposer serves.
 
 ## Key Features
 
 *   **LD_PRELOADable:** Designed to intercept `libudev` calls without modifying the target application.
+*   **Transparent Elsewhere:** Anything outside the virtual gamepads passes through to the real `libudev`, so a preloaded application (a nested KWin discovering its GPU, a browser probing webcams) behaves as without the preload.
 *   **Virtual Gamepads:** Simulates `NUM_VIRTUAL_GAMEPADS` (default: 4) gamepads.
 *   **Standard Hierarchy:** Presents devices with a plausible sysfs path and parent/child relationships.
 *   **Common Properties/Attributes:** Provides essential udev properties (`DEVNAME`, `ID_INPUT_JOYSTICK`, etc.) and sysfs attributes (`idVendor`, `idProduct`, `name`, etc.).
-*   **Targeted Implementation:** Implements core `libudev` functions relevant for device enumeration and property querying.
-*   **Debug Logging:** Includes extensive `fprintf(stderr, ...)` logging (prefixed with `[fake_udev_dbg:]`, `[fake_udev_info:]`, etc.) to trace `libudev` calls and the library's responses.
+*   **Debug Logging:** `JS_LOG=1` in the environment enables `stderr` logging (prefixed with `[fake_udev_dbg:]`, `[fake_udev_info:]`, etc.) to trace `libudev` calls and the library's responses.
 
 ## Limitations
 
-*   **Static Data:** All device information is hardcoded in `fake-libudev-core.c`. It does not interact with the system's actual udev daemon or sysfs beyond what's necessary for the simulation.
+*   **Static Data:** All virtual device information is hardcoded in `fake-libudev-core.c`.
 *   **No Real Hardware Interaction:** These are purely virtual constructs. No actual `/dev/input/jsX` or `/dev/input/eventX` device nodes are created in the kernel. The library only makes applications *believe* they exist via `libudev`.
-*   **Hotplug via inotify:** `udev_monitor_*` is backed by an inotify watch on `/tmp`; creating/removing the interposer's device sockets (`/tmp/selkies_js*.sock`, `/tmp/selkies_event*.sock`) surfaces as `input`-subsystem `add`/`remove` events. Remaining `udev_monitor_*` calls are minimal.
-*   **HWDB Stubs:** `udev_hwdb_*` functions are stubs.
-*   **Limited Scope:** Primarily focused on the "input" subsystem and devices that look like gamepads. Other udev functionalities or device types are not implemented or are minimally stubbed.
+*   **Hotplug via inotify:** For the virtual gamepads, `udev_monitor_*` is backed by an inotify watch on the socket directory; creating/removing the interposer's device sockets (`selkies_js*.sock`, `selkies_event*.sock`) surfaces as `input`-subsystem `add`/`remove` events. Real hotplug events come from the real library's monitor over the same fd.
+*   **Filters the Pads Cannot Honour:** sysattr, tag and is-initialized matches are forwarded to the real library but do not restrict the virtual gamepads.
 *   **Fixed Number of Devices:** The number of virtual gamepads is determined at compile time by `NUM_VIRTUAL_GAMEPADS`.
 
 ## Build Instructions
@@ -49,9 +50,11 @@ make
     *   `libudev.so.1` (symlink to `libudev.so.1.0.0-fake`, typically used for `soname`)
     *   `libudev.so` (symlink to `libudev.so.1`, typically used for linking)
 
+    `make all32` builds the 32-bit variant (`libudev_x86.so.1.0.0-fake`) with `gcc-multilib`.
+
 ## Usage
 
-To use this fake library, preload it when running your target application:
+To use this library, preload it when running your target application:
 
 ```
 LD_PRELOAD=./libudev.so.1 /path/to/your/application [application_args]
@@ -60,7 +63,7 @@ LD_PRELOAD=./libudev.so.1 /path/to/your/application [application_args]
 *   Replace `./libudev.so.1` with the correct path to the compiled shared library if it's not in the current directory.
 *   Replace `/path/to/your/application` with the actual application you want to run.
 
-The application should then discover and interact with the virtual gamepads as if they were reported by the system's `libudev`.
+The application should then discover and interact with the virtual gamepads as if they were reported by the system's `libudev`, alongside everything the system's `libudev` reports itself.
 
 ## Creating Device Nodes (Manual Step)
 
@@ -104,7 +107,7 @@ ls -l /dev/input/js* /dev/input/event100*
 
 ## Debugging
 
-The library outputs detailed logging to `stderr`. This can be very helpful for:
+With `JS_LOG=1` in the environment the library outputs logging to `stderr`. This can be very helpful for:
 *   Understanding which `libudev` functions your application is calling.
 *   Seeing how the fake library is responding to these calls.
 *   Troubleshooting why an application might not be "seeing" the virtual devices as expected.
