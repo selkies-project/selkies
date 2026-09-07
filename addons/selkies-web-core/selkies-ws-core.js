@@ -1933,6 +1933,14 @@ function wireSocketToVideoWorker() {
       codecHint: workerKeyframeCodec, software: preferSoftwareDecode, chromium: isChromium,
       avcc: h264Framing() === 'avcc',
     }, [channel.port1]);
+    // The framing probe may still be running when the worker is wired; its
+    // answer is forwarded once it lands, so a stripe decoder built before it
+    // does not feed Annex B to an engine that refuses it.
+    const worker = videoWorker;
+    h264FramingReady.then((answer) => {
+      if (videoWorker !== worker) return;
+      try { worker.postMessage({ type: 'wireHints', avcc: answer === 'avcc' }); } catch (e) { /* respawns fresh */ }
+    });
     websocket.connectVideo(channel.port2);
   } catch (e) {
     console.warn('Could not connect the socket worker to the video worker:', e);
