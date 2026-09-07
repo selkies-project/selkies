@@ -351,6 +351,19 @@ export const codecStringFor = (codec, keyframe, width, height, fps, is444, chrom
 };
 
 /**
+ * The colour space a decoder is told to assume where the bitstream does not
+ * settle it: VP8 carries no colour signalling, and Chromium's VP9 decoder does
+ * not read the matrix from the frame header. The server converts both with the
+ * BT.601 matrix every WebRTC receiver assumes, and the WebCodecs decoder is told
+ * the same; the other codecs declare their matrix and are left to it.
+ * @param {string} codec The wire codec name or WebCodecs codec string.
+ * @returns {VideoColorSpaceInit|undefined}
+ */
+export const decoderColorSpace = (codec) =>
+  (codec === 'vp8' || codec === 'vp9' || codec.startsWith('vp09'))
+    ? { primaries: 'bt709', transfer: 'bt709', matrix: 'smpte170m', fullRange: false } : undefined;
+
+/**
  * Representative decoder configurations, one per codec at the profile and
  * level the encoders emit for a 720p stream, for asking an engine what it can
  * decode before any stream exists.
