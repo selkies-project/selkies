@@ -992,7 +992,10 @@ def build_flexfec_03(
     length_recovery = 0
     ts_recovery = 0
     longest = max(len(p) for p in media_packets) - 12
-    payload_recovery = bytearray(longest)
+    # The payloads are XORed as big integers: a shorter one is shifted up so
+    # its first byte lines up with the others', which pads it with zeros at
+    # the end as the draft requires.
+    payload_xor = 0
     mask = 0
     for offset, media in enumerate(media_packets):
         # Byte 0 folds in P, X and CC (the version bits stay out); byte 1,
@@ -1001,9 +1004,9 @@ def build_flexfec_03(
         recovery[1] ^= media[1]
         length_recovery ^= len(media) - 12
         ts_recovery ^= unpack("!L", media[4:8])[0]
-        for i, b in enumerate(media[12:]):
-            payload_recovery[i] ^= b
+        payload_xor ^= int.from_bytes(media[12:], "big") << (8 * (longest - len(media) + 12))
         mask |= 1 << (14 - offset)
+    payload_recovery = payload_xor.to_bytes(longest, "big")
 
     header = bytearray(12)
     # V=2, P=0, X=0, CC=0.
@@ -1024,4 +1027,4 @@ def build_flexfec_03(
     fec += pack("!H", first_sequence_number)
     # K=1: single mask block.
     fec += pack("!H", 0x8000 | mask)
-    return bytes(header) + bytes(fec) + bytes(payload_recovery)
+    return bytes(header) + bytes(fec) + payload_recovery

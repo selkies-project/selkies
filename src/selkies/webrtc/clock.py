@@ -32,8 +32,11 @@
 #   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import datetime
+import time
 
 NTP_EPOCH = datetime.datetime(1900, 1, 1, tzinfo=datetime.timezone.utc)
+# Seconds from the NTP epoch to the Unix epoch.
+NTP_UNIX_OFFSET = 2208988800
 
 
 def current_datetime() -> datetime.datetime:
@@ -46,7 +49,11 @@ def current_ms() -> int:
 
 
 def current_ntp_time() -> int:
-    return datetime_to_ntp(current_datetime())
+    """The NTP timestamp now, straight from the system clock: every RTP
+    packet stamps one, so no datetime is built on the way."""
+    now = time.time()
+    seconds = int(now)
+    return ((seconds + NTP_UNIX_OFFSET) << 32) | int((now - seconds) * (1 << 32))
 
 
 def datetime_from_ntp(ntp: int) -> datetime.datetime:
