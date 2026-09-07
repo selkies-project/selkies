@@ -49,15 +49,6 @@ SETTLE_S = 5.0
 # reference; a clean one reads zero.
 CORRUPT_FRACTION = 0.02
 CLEAN_FRACTION = 0.005
-# x264's four-slice pictures now and then reach the browser's decoder short of
-# one slice, with no packet lost, reordered or missing on the wire, in every
-# browser and with no load at all: a one-picture seam about once in three
-# hundred samples, and when the seam lands on a keyframe the pictures behind
-# it carry it until the browser asks for the next one, about a second. One
-# such run in a load phase is allowed for x264; a broken reference chain
-# corrupts every burst, and a single-slice encoder is allowed nothing.
-SLICE_LOSS_ALLOWANCE = 0.05
-
 # Keeps every RTCPeerConnection reachable for getStats and pins the transport.
 INIT_JS = """
   window.__SELKIES_STREAMING_MODE__ = 'webrtc';
@@ -347,11 +338,11 @@ def drive(res: H.Results, cell: str) -> None:
                 return
             res.check(f"{tag}: every run of bridge drops is followed by a keyframe",
                       keyframes >= 1, detail)
-            sliced = "Encoder: CPU (x264)" in H.server_log()
-            allowance = SLICE_LOSS_ALLOWANCE * len(samples) if sliced else 0
-            res.check(f"{tag}: no decoded picture shows a broken reference"
-                      + (" beyond x264's slice loss" if sliced else ""),
-                      len(bad) <= allowance and not bad_after, detail)
+            # Every decoded picture matches its own index: the encoder codes what
+            # changed even when the rate budget cannot be met, and a broken
+            # reference chain would corrupt every burst.
+            res.check(f"{tag}: no decoded picture shows a broken reference",
+                      not bad and not bad_after, detail)
             res.check(f"{tag}: the picture is clean once the load ends",
                       after and not corrupt(after[-1]), after[-1] if after else None)
         finally:
