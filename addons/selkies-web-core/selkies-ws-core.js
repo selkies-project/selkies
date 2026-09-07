@@ -123,7 +123,7 @@ import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPE
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, h264Framing, h264FramingReady, isMacDesktop } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
-  avcDescription, annexbToAvcc, sameBytes,
+  avcDescription, annexbToAvcc, sameBytes, decoderColorSpace,
 } from './lib/wire-codecs.js';
 // The same module by source, for the video worker's own copy of it.
 import wireCodecsSource from './lib/wire-codecs.js?raw';
@@ -1385,6 +1385,8 @@ function configureDecoder(codec, w, h, software, description) {
     const cfg = { codec: codec, codedWidth: w, codedHeight: h, optimizeForLatency: true };
     if (software) cfg.hardwareAcceleration = 'prefer-software';
     if (description) cfg.description = description;
+    const colorSpace = decoderColorSpace(codec);
+    if (colorSpace) cfg.colorSpace = colorSpace;
     dec.configure(cfg);
     // A keyframe is required after (re)configure.
     decNeedKey = true;
@@ -6543,11 +6545,13 @@ class WorkerWebSocket {
                 const dynamicCodec = wireCodecString(video_frame_type_byte, h264Payload, stripeWidth, stripeHeight);
                 const framed = h264Framing() === 'avcc' && dynamicCodec.startsWith('avc1');
                 const description = framed ? avcDescription(new Uint8Array(h264Payload)) : null;
+                const colorSpace = decoderColorSpace(dynamicCodec);
                 const decoderConfig = decoderConfigFor({
                     codec: dynamicCodec,
                     codedWidth: stripeWidth,
                     codedHeight: stripeHeight,
                     optimizeForLatency: true,
+                    ...(colorSpace ? { colorSpace } : {}),
                     ...(description ? { description } : {})
                 });
                 vncStripeDecoders[vncStripeYStart] = {
