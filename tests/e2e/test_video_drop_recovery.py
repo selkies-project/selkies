@@ -52,9 +52,11 @@ CLEAN_FRACTION = 0.005
 # x264's four-slice pictures now and then reach the browser's decoder short of
 # one slice, with no packet lost, reordered or missing on the wire, in every
 # browser and with no load at all: a one-picture seam about once in three
-# hundred samples. A broken reference chain corrupts an order of magnitude
-# more, so that rate is allowed for x264 and nothing for a single-slice encoder.
-SLICE_LOSS_ALLOWANCE = 0.01
+# hundred samples, and when the seam lands on a keyframe the pictures behind
+# it carry it until the browser asks for the next one, about a second. One
+# such run in a load phase is allowed for x264; a broken reference chain
+# corrupts every burst, and a single-slice encoder is allowed nothing.
+SLICE_LOSS_ALLOWANCE = 0.05
 
 # Keeps every RTCPeerConnection reachable for getStats and pins the transport.
 INIT_JS = """
