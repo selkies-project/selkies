@@ -730,14 +730,15 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
     return res
 
 
-def hidpi_default_block(dashboard: str, dist: str) -> "H.Results":
+def hidpi_default_block(dashboard: str, dist: str, mode: str = "websockets") -> "H.Results":
     """A deployment that configures a resolution turns HiDPI off, and the core
     has to stream that way. The dashboard resolves the default; the core starts
     from its own stored value, so without a push it streams pixel-perfect on
     every load while the toggle reads off. `useCssScaling` in the settings the
-    core sends is what it is actually applying."""
-    res = H.Results(f"hidpi-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist,
+    core sends is what it is actually applying. Both cores resolve it, so both
+    transports are driven."""
+    res = H.Results(f"hidpi-{dashboard}-{mode}")
+    H.server_start(mode=mode, wayland=False, web_root=dist,
                    extra_env={"SELKIES_MANUAL_WIDTH": "1280",
                               "SELKIES_MANUAL_HEIGHT": "800"})
     # The core persists every `useCssScaling` it applies, so the stored value is
@@ -755,7 +756,7 @@ def hidpi_default_block(dashboard: str, dist: str) -> "H.Results":
             browser = C.chromium_launch(p)
             ctx = browser.new_context(viewport={"width": 1440, "height": 900},
                                       device_scale_factor=2)
-            ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+            ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
             page = ctx.new_page()
             page.goto(H.BASE_URL, wait_until="load")
             time.sleep(10.0)
@@ -1035,6 +1036,9 @@ def main() -> None:
     if which in ("all", "hidpi"):
         blocks.append(hidpi_default_block("classic", H.CLASSIC_DIST))
         blocks.append(hidpi_default_block("wish", H.WISH_DIST))
+    if which in ("all", "hidpi-webrtc"):
+        blocks.append(hidpi_default_block("classic", H.CLASSIC_DIST, "webrtc"))
+        blocks.append(hidpi_default_block("wish", H.WISH_DIST, "webrtc"))
     if which in ("all", "raw-motion"):
         blocks.append(raw_pointer_motion_block("classic", H.CLASSIC_DIST))
         blocks.append(raw_pointer_motion_block("wish", H.WISH_DIST))

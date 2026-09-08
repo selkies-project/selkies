@@ -84,7 +84,7 @@ import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-wor
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
-import { storageKeyForServerKey, resolveSpec, RAW_POINTER_MOTION_SPEC } from './lib/conditional-settings.js';
+import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeFullColor, isMacDesktop } from './lib/util.js';
 
 installAuthGuard();
@@ -638,6 +638,26 @@ export default function webrtc() {
 	function resolvedRawPointerMotion(serverSettings) {
 		return resolveSpec(RAW_POINTER_MOTION_SPEC, serverSettings, { macDesktop: isMacDesktop() },
 			(key) => getStringParam(key, null));
+	}
+
+	/**
+	 * The `use_css_scaling` the deployment implies, off the shared ladder: a
+	 * locked or operator value, else the client's explicit pick, else CSS
+	 * scaling whenever a resolution is configured (the sanitized payload has
+	 * just published the server's manual mode and width on `window`). Resolved
+	 * here rather than left to a settings panel, which a dashboard may mount
+	 * only when it is opened; until then the session would stream pixel-perfect
+	 * against a configuration that says otherwise, on every load.
+	 * @param {Object<string, object>} serverSettings The `server_settings` payload.
+	 * @returns {boolean}
+	 */
+	function resolvedCssScaling(serverSettings) {
+		const key = storageKeyFor('useCssScaling');
+		const explicit = window.localStorage.getItem(`${key}_explicit_choice`) === 'true';
+		const hidpi = resolveSpec(HIDPI_SPEC, serverSettings,
+			{ manualActive: !!window.manual_resolution || window.manual_width > 0 },
+			() => (explicit ? window.localStorage.getItem(key) : null));
+		return HIDPI_SPEC.toServer(hidpi);
 	}
 
 	/** Starts playback after the user's gesture and takes the wake lock. */
@@ -2939,6 +2959,10 @@ export default function webrtc() {
 				if (rawMotion !== rawPointerMotion) {
 					rawPointerMotion = rawMotion;
 					applyRawPointerMotion();
+				}
+				const cssScaling = resolvedCssScaling(obj.settings);
+				if (cssScaling !== useCssScaling) {
+					window.postMessage({ type: 'setUseCssScaling', value: cssScaling }, window.location.origin);
 				}
 				maybeSendInitialClipboard();
 				window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
