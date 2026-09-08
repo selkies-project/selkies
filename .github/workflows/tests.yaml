@@ -132,7 +132,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             xvfb x11-xserver-utils x11-utils xauth xcvt wmctrl \
-            wl-clipboard \
+            wl-clipboard libsdl2-2.0-0 openbox kwin-x11 kwin-wayland \
             pulseaudio pulseaudio-utils \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \

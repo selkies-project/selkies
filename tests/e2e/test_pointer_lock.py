@@ -16,13 +16,33 @@ by the client from CSS pixels to stream pixels, so the expectations follow
 the stream size the server realized; that the stream matches the window at
 connect is its own check.
 
+Where the pointer ends up cannot tell a delta from a warp to the same spot,
+and a game can: it reads relative motion (XInput2 raw motion, the Wayland
+relative pointer) and never the position. So the last block puts an SDL2
+window in relative mouse mode over the desktop (tests/tools/sdl_relative_probe.py),
+locks again, and requires every move to reach it as exactly the delta the
+wire carried, one event per message, and a key pressed under the lock to
+arrive as that key. Without a libSDL2 to load the block is skipped.
+
+A desktop selector runs that block under the session manager the images run
+the game under: openbox or kwin_x11 managing the X test display, or labwc or
+kwin_wayland nested on the capture compositor with the game as a client of
+the nested one, which then relays the motion it is given as a Wayland client
+itself. Without that manager installed the block is skipped.
+
+    python3 tests/e2e/test_pointer_lock.py ws-x11|wr-x11|ws-wl|wr-wl
+    python3 tests/e2e/test_pointer_lock.py ws-x11-openbox|ws-x11-kwin|ws-wl-labwc|ws-wl-kwin
+
 Headless Chromium's full build is driven (not the headless shell, whose
 locked movement deltas do not add up), on both transports and backends.
 
-    python3 tests/e2e/test_pointer_lock.py ws-x11|wr-x11|ws-wl|wr-wl
 """
+import json
 import os
+import shutil
+import subprocess
 import sys
+import threading
 import time
 from typing import Any, Optional
 
@@ -31,10 +51,14 @@ import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
 
-WL_SOCKET = "wayland-1"
 START = (640, 360)
+# The stream the server realizes for the browser window, and so the desktop the
+# nested compositors are sized to.
+WINDOW = (1280, 720)
 # (dx, dy, repeat): one plain move, a run of small ones, and a move back.
 MOVES = ((60, 40, 1), (5, -3, 10), (-200, 100, 1))
+# What the game window is shown: a flick each way, a one-axis nudge, a diagonal.
+GAME_MOVES = ((12, 7), (-5, 9), (80, -30), (3, 0), (0, -4))
 
 # Motion messages off the shared wire tap, whichever thread owns the socket.
 MOVES_JS = ("window.__wireSent.filter(d => typeof d === 'string' && "
@@ -88,6 +112,263 @@ def at(pos: Optional[tuple], expected: tuple) -> bool:
     return pos is not None and tuple(int(round(v)) for v in pos) == expected
 
 
+def runtime_dir() -> str:
+    return os.environ.get("XDG_RUNTIME_DIR", H.WORKDIR)
+
+
+class Desktop:
+    """The session manager a desktop selector names, started the way the images
+    run it: openbox or kwin_x11 on the X test display; labwc or kwin_wayland
+    nested on the capture compositor, sized to the stream, publishing the
+    socket its own clients connect to."""
+
+    def __init__(self, name: str, wayland: bool) -> None:
+        self.name = name
+        self.wayland = wayland
+        self.proc: Optional[subprocess.Popen] = None
+        self.socket: Optional[str] = None
+        self.why = ""
+
+    def start(self, capture: str) -> bool:
+        binary = {"openbox": "openbox", "kwin": "kwin_wayland" if self.wayland else "kwin_x11",
+                  "labwc": "labwc"}[self.name]
+        if not shutil.which(binary):
+            self.why = f"{binary} not installed"
+            return False
+        if self.name == "kwin" and not shutil.which("dbus-run-session"):
+            self.why = "dbus-run-session not installed"
+            return False
+        log = open(os.path.join(H.WORKDIR, f"{binary}.log"), "w")
+        if not self.wayland:
+            display = H.require_display()
+            env = {**os.environ, "DISPLAY": display}
+            cmd = ["openbox", "--replace"] if self.name == "openbox" else \
+                ["dbus-run-session", "--", "kwin_x11", "--replace"]
+            self.proc = H.spawn(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
+            return self._wait(lambda: self._x11_managed(display), f"{binary} never took the display")
+        if not capture:
+            self.why = "the capture compositor announced no socket"
+            return False
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"),
+               "XDG_RUNTIME_DIR": runtime_dir(), "WAYLAND_DISPLAY": capture}
+        if self.name == "labwc":
+            # labwc picks its socket name; its startup command runs with that name
+            # exported, so the command is what publishes it.
+            marker = os.path.join(H.WORKDIR, "labwc-session-socket")
+            if os.path.exists(marker):
+                os.unlink(marker)
+            env.update({"WLR_BACKENDS": "wayland", "WLR_WL_OUTPUTS": "1"})
+            cmd = ["labwc", "-s", f"sh -c 'echo \"$WAYLAND_DISPLAY\" > {marker}'"]
+            self.proc = H.spawn(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
+            if not self._wait(lambda: os.path.exists(marker) and os.path.getsize(marker) > 0,
+                              "labwc never published its socket"):
+                return False
+            self.socket = open(marker).read().strip()
+        else:
+            self.socket = f"wayland-kwin-{os.getpid()}"
+            cmd = ["dbus-run-session", "--", "kwin_wayland", "--wayland-display", capture,
+                   "--socket", self.socket, "--width", str(WINDOW[0]), "--height", str(WINDOW[1]),
+                   "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities"]
+            self.proc = H.spawn(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
+            path = os.path.join(runtime_dir(), self.socket)
+            if not self._wait(lambda: os.path.exists(path), "kwin_wayland never opened its socket"):
+                return False
+        # The nested compositor's own window has to map on the capture compositor
+        # before the pointer can reach anything inside it.
+        time.sleep(2.0)
+        return True
+
+    def _wait(self, ready: Any, why: str, timeout: float = 20) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if ready():
+                return True
+            if self.proc is not None and self.proc.poll() is not None:
+                self.why = f"{self.name} exited with {self.proc.returncode}: {H.tail(self._log_path(), 3)}"
+                return False
+            time.sleep(0.25)
+        self.why = why
+        return False
+
+    def _log_path(self) -> str:
+        binary = {"openbox": "openbox", "kwin": "kwin_wayland" if self.wayland else "kwin_x11",
+                  "labwc": "labwc"}[self.name]
+        return os.path.join(H.WORKDIR, f"{binary}.log")
+
+    @staticmethod
+    def _x11_managed(display: str) -> bool:
+        """Whether a window manager holds the display, by the check window it publishes."""
+        try:
+            out = subprocess.run(["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"], capture_output=True,
+                                 text=True, timeout=5, env={**os.environ, "DISPLAY": display}).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return "window id" in out
+
+    def stop(self) -> None:
+        if self.proc is None:
+            return
+        try:
+            self.proc.terminate()
+            self.proc.wait(5)
+        except Exception:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
+
+class GameProbe:
+    """The SDL2 relative-mode window (tests/tools/sdl_relative_probe.py) on the
+    server's display, its JSON lines collected from a reader thread. On Wayland
+    it connects to `socket`: the capture compositor's, or a nested session's."""
+
+    def __init__(self, wayland: bool, socket: Optional[str] = None) -> None:
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"),
+               "XDG_RUNTIME_DIR": runtime_dir()}
+        if os.environ.get("SDL2_LIB"):
+            env["SDL2_LIB"] = os.environ["SDL2_LIB"]
+        if wayland:
+            env["SDL_VIDEODRIVER"] = "wayland"
+            env["WAYLAND_DISPLAY"] = socket or ""
+        else:
+            env["SDL_VIDEODRIVER"] = "x11"
+            env["DISPLAY"] = H.require_display()
+        self.proc = H.spawn([H.PYTHON, os.path.join(H.TOOLS, "sdl_relative_probe.py"), "120"],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+        self.lines: list = []
+        self.noise: list = []
+        # Kept as a log the runner collects, so a run that saw nothing says what it did see.
+        log = open(os.path.join(H.WORKDIR, "game-probe.log"), "w")
+
+        def read() -> None:
+            for line in self.proc.stdout:
+                log.write(line)
+                log.flush()
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        self.lines.append(json.loads(line))
+                        continue
+                    except ValueError:
+                        pass
+                if line:
+                    self.noise.append(line)
+            log.close()
+        threading.Thread(target=read, daemon=True).start()
+
+    def wait(self, kind: str, timeout: float, **match: Any) -> Optional[dict]:
+        """First line of `kind` whose fields equal `match`, or None on timeout."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for line in self.lines:
+                if line.get("kind") == kind and all(line.get(k) == v for k, v in match.items()):
+                    return line
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        return None
+
+    def unavailable(self) -> str:
+        """Why the window could not run, when it said so."""
+        for line in self.lines:
+            if line.get("kind") == "unavailable":
+                return line.get("reason", "unavailable")
+        return " ".join(self.noise)[:160]
+
+    def events(self, kind: str, start: int, count: int, timeout: float) -> list:
+        """The `kind` lines after index `start`, waited for until `count` are in."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            got = [line for line in self.lines[start:] if line.get("kind") == kind]
+            if len(got) >= count:
+                break
+            time.sleep(0.05)
+        return [line for line in self.lines[start:] if line.get("kind") == kind]
+
+    def stop(self) -> None:
+        try:
+            self.proc.terminate()
+            self.proc.wait(5)
+        except Exception:
+            pass
+
+
+def take_lock(page: Any, where: tuple) -> bool:
+    """The client's own gesture, Ctrl+Shift+click on the stream, and whether it locked."""
+    page.keyboard.down("Control")
+    page.keyboard.down("Shift")
+    page.mouse.click(*where)
+    page.keyboard.up("Shift")
+    page.keyboard.up("Control")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if page.evaluate("document.pointerLockElement !== null"):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def wire_deltas(messages: list) -> list:
+    """The non-zero relative deltas the wire carried, in order."""
+    out = []
+    for m in messages:
+        if m.startswith("m2,"):
+            parts = m.split(",")
+            d = (int(parts[1]), int(parts[2]))
+            if d != (0, 0):
+                out.append(d)
+    return out
+
+
+def game_view(page: Any, wayland: bool, res: "H.Results", socket: Optional[str] = None,
+              desktop: Optional[str] = None) -> None:
+    """What a game over the desktop sees of a locked pointer and the keyboard."""
+    probe = GameProbe(wayland, socket)
+    try:
+        mode = probe.wait("relative_mode", 20)
+        if mode is None:
+            res.skip("a game window over the desktop takes relative mouse mode", probe.unavailable())
+            return
+        res.check("a game window over the desktop takes relative mouse mode", mode.get("on"), mode)
+        # The window has to hold the pointer before it may lock it: an absolute
+        # move puts the pointer over it and a click gives it the keyboard.
+        time.sleep(0.5)
+        page.mouse.move(START[0] + 1, START[1] + 1)
+        page.mouse.click(START[0] + 1, START[1] + 1)
+        entered = probe.wait("window", 8, event="enter")
+        res.check("the pointer reaches the game window", entered is not None, probe.lines[-3:])
+        res.check("the game window locks the pointer again", take_lock(page, START))
+        time.sleep(0.5)
+        if wayland and desktop == "kwin":
+            # A nested KWin reads relative motion from its host only while it holds
+            # the host's pointer lock, and it asks for that lock when Right Ctrl is
+            # pressed inside it (its Wayland backend's toggle), not when a client of
+            # its own locks the pointer.
+            page.keyboard.press("ControlRight")
+            time.sleep(0.5)
+        probe_mark = len(probe.lines)
+        wire_mark = len(page.evaluate(MOVES_JS))
+        cursor = START
+        for dx, dy in GAME_MOVES:
+            cursor = (cursor[0] + dx, cursor[1] + dy)
+            page.mouse.move(*cursor)
+            time.sleep(0.08)
+        wire = wire_deltas(moves_since(page, wire_mark))
+        seen = [(m["dx"], m["dy"]) for m in probe.events("motion", probe_mark, len(wire), 6)]
+        res.check("the wire carried every game move as relative motion", len(wire) == len(GAME_MOVES), wire)
+        res.check("every locked move reaches the game as the delta the wire carried, one event each",
+                  seen == wire, f"game {seen} wire {wire}")
+        key_mark = len(probe.lines)
+        page.keyboard.press("w")
+        keys = [(k["down"], k["sym"]) for k in probe.events("key", key_mark, 2, 6)]
+        res.check("a key pressed under the lock reaches the game", keys == [(True, ord("w")), (False, ord("w"))], keys)
+        page.evaluate("document.exitPointerLock()")
+        time.sleep(0.3)
+    finally:
+        probe.stop()
+
+
 def wait_stream_size(page: Any, mode: str, size: tuple, timeout: float = 8) -> Optional[dict]:
     """The stream's dimensions, polled until they match `size` or time runs out."""
     deadline = time.time() + timeout
@@ -114,12 +395,15 @@ def relative_sum(messages: list) -> tuple:
     return dx, dy
 
 
-def run(mode: str, wayland: bool, res: "H.Results") -> None:
+def run(mode: str, wayland: bool, desktop: Optional[str], res: "H.Results") -> None:
     H.server_start(mode=mode, wayland=wayland)
     obs = None
+    capture = ""
     try:
         if wayland:
-            obs = H.WlObs(WL_SOCKET)
+            capture = H.capture_socket()
+            res.check("the capture compositor announced its socket", bool(capture), capture)
+            obs = H.WlObs(capture)
             res.check("wl observer mapped", obs.ready(20))
         pointer = Pointer(obs)
         with sync_playwright() as p:
@@ -143,17 +427,7 @@ def run(mode: str, wayland: bool, res: "H.Results") -> None:
                 res.check("absolute move lands the pointer at the start",
                           at(pointer.wait(server(START)), server(START)), pointer.read())
 
-                page.keyboard.down("Control")
-                page.keyboard.down("Shift")
-                page.mouse.click(*START)
-                page.keyboard.up("Shift")
-                page.keyboard.up("Control")
-                deadline = time.time() + 5
-                locked = False
-                while time.time() < deadline and not locked:
-                    locked = page.evaluate("document.pointerLockElement !== null")
-                    time.sleep(0.1)
-                res.check("Ctrl+Shift+click takes the pointer lock", locked)
+                res.check("Ctrl+Shift+click takes the pointer lock", take_lock(page, START))
                 time.sleep(0.5)
 
                 x, y = START
@@ -189,6 +463,18 @@ def run(mode: str, wayland: bool, res: "H.Results") -> None:
                 sent = moves_since(page, mark)
                 res.check("after release the motion goes out as positions",
                           sent and sent[-1].startswith("m,"), sent[-2:])
+                session = Desktop(desktop, wayland) if desktop else None
+                try:
+                    if session is None:
+                        game_view(page, wayland, res, capture or None)
+                    elif session.start(capture):
+                        res.check(f"{desktop} manages the session", True, session.socket or "")
+                        game_view(page, wayland, res, session.socket, desktop)
+                    else:
+                        res.skip(f"{desktop} manages the session", session.why)
+                finally:
+                    if session is not None:
+                        session.stop()
                 res.check("no page errors", not errors, "; ".join(errors)[:200])
             finally:
                 browser.close()
@@ -198,16 +484,19 @@ def run(mode: str, wayland: bool, res: "H.Results") -> None:
         H.server_stop()
 
 
-SELECTORS = ("ws-x11", "wr-x11", "ws-wl", "wr-wl")
+SELECTORS = ("ws-x11", "wr-x11", "ws-wl", "wr-wl",
+             "ws-x11-openbox", "ws-x11-kwin", "ws-wl-labwc", "ws-wl-kwin")
 
 
 def main() -> bool:
     which = sys.argv[1] if len(sys.argv) > 1 else "ws-x11"
     if which not in SELECTORS:
         raise SystemExit(f"unknown selector {which!r}; one of {SELECTORS}")
-    transport, backend = which.split("-")
+    parts = which.split("-")
+    transport, backend = parts[0], parts[1]
+    desktop = parts[2] if len(parts) > 2 else None
     res = H.Results(f"pointer-lock-{which}")
-    run("websockets" if transport == "ws" else "webrtc", backend == "wl", res)
+    run("websockets" if transport == "ws" else "webrtc", backend == "wl", desktop, res)
     return res.summary()
 
 

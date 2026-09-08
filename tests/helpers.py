@@ -356,6 +356,18 @@ def curl(path, method="GET", data=None, headers=None, timeout=10) -> tuple:
         return r.status, r.read()
 
 
+def capture_socket(timeout: float = 30, log: str = LOG) -> str:
+    """The Wayland socket the capture compositor announced in the server log,
+    or '' when it never did within `timeout`."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for line in server_log(log).splitlines():
+            if "Socket listening on:" in line:
+                return line.split('"')[1]
+        time.sleep(0.5)
+    return ""
+
+
 def server_log(log: str = LOG, tail: Optional[int] = None) -> str:
     """The server log, optionally only its last `tail` lines."""
     try:

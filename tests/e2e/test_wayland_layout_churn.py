@@ -44,17 +44,6 @@ def log_trouble(line: str) -> bool:
     return any(t in line for t in ("HW Encode Error", "Traceback", "panicked"))
 
 
-def capture_socket(timeout: float = 30) -> str:
-    """The compositor socket the server announced, or '' when it never did."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        for line in H.server_log().splitlines():
-            if "Socket listening on:" in line:
-                return line.split('"')[1]
-        time.sleep(0.5)
-    return ""
-
-
 def spawn_labwc(socket: str):
     """labwc nested on the capture socket, as the images run it, or None without a labwc."""
     if not shutil.which("labwc"):
@@ -125,7 +114,7 @@ def server_stacks() -> str:
 
 def drive(res: "H.Results", mode: str) -> None:
     from playwright.sync_api import sync_playwright
-    socket = capture_socket()
+    socket = H.capture_socket()
     res.check("the compositor announced its socket", bool(socket), socket)
     labwc = spawn_labwc(socket) if socket else None
     if labwc is None:
