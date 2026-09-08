@@ -2,8 +2,10 @@
 """pytest entry point for the suites in suites.py.
 
 Each suite runs as its own process, exactly as it does standalone, so a wedged
-server or a crashed browser cannot take the rest of the run with it. Select by
-tier with the markers:
+server or a crashed browser cannot take the rest of the run with it. The child
+is told its budget (`SELKIES_SUITE_DEADLINE`, read by helpers.py) so a suite
+that stalls dumps every thread's stack and exits before the kill here would
+throw that record away. Select by tier with the markers:
 
     pytest tests -m unit
     pytest tests -m "integration or e2e"
@@ -33,9 +35,11 @@ CASES: list = [
 def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
     """Run one suite as a subprocess and map its exit protocol onto pytest."""
     cmd = [PYTHON, os.path.join(TESTS, path)] + ([selector] if selector else [])
+    # A minute short of the kill, so the dump lands in the output that is kept.
+    env = dict(os.environ, SELKIES_SUITE_DEADLINE=str(max(30, timeout - 60)))
     try:
         proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,
-                              timeout=timeout)
+                              timeout=timeout, env=env)
     except subprocess.TimeoutExpired as e:
         # The checks the suite did finish are its record of where it stuck;
         # they would otherwise die with it.

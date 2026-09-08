@@ -33,19 +33,36 @@ ENGINES = ("chromium", "firefox", "webkit")
 # probe answers is about the profile and not the size of any one stream.
 FULLCOLOR_CODEC = "avc1.F4001E"
 
-PROBE_JS = """async (codec) => {
-  if (typeof VideoDecoder === 'undefined') return false;
-  try {
-    const s = await VideoDecoder.isConfigSupported(
-      {codec, codedWidth: 1280, codedHeight: 720});
-    return !!(s && s.supported);
-  } catch (e) { return false; }
+# The answer is parked on the window and collected with a deadline: an engine's
+# `isConfigSupported` has none of its own, and an evaluate awaiting a promise that
+# never settles would hold the suite to the runner's kill.
+PROBE_JS = """(codec) => {
+  window.__fullcolorProbe = undefined;
+  (async () => {
+    if (typeof VideoDecoder === 'undefined') return false;
+    try {
+      const s = await VideoDecoder.isConfigSupported(
+        {codec, codedWidth: 1280, codedHeight: 720});
+      return !!(s && s.supported);
+    } catch (e) { return false; }
+  })().then((v) => { window.__fullcolorProbe = v; }, () => { window.__fullcolorProbe = false; });
 }"""
 
 STORED_JS = """() => {
   const k = (location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_');
   return localStorage.getItem(k + '_video_fullcolor');
 }"""
+
+
+def probe_decoder(page: Any, codec: str, timeout: float = 20.0) -> Any:
+    """Whether the engine's decoder takes `codec`, or None when it never answers."""
+    page.evaluate(PROBE_JS, codec)
+    try:
+        page.wait_for_function("() => window.__fullcolorProbe !== undefined",
+                               timeout=timeout * 1000)
+    except Exception:
+        return None
+    return page.evaluate("() => window.__fullcolorProbe")
 
 
 def init_script(mode: str) -> str:
@@ -159,7 +176,8 @@ def drive(res: "H.Results", engine: str, mode: str, p: Any) -> None:
         warnings = []
         page.on("console", lambda m: warnings.append(m.text))
         page.goto(H.BASE_URL, wait_until="load")
-        decodable = page.evaluate(PROBE_JS, FULLCOLOR_CODEC)
+        decodable = probe_decoder(page, FULLCOLOR_CODEC)
+        res.check(f"[{tag}] the decoder answers the profile probe", decodable is not None, decodable)
 
         video = (C.wait_wr_video(page, timeout=45) if mode == "webrtc"
                  else C.wait_ws_video(page, timeout=45))

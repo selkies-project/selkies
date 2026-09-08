@@ -2,6 +2,7 @@
 """Shared helpers for the selkies test suites: server lifecycle, HTTP probes,
 and the X11 and Wayland observation used to prove that input arrived."""
 import ctypes
+import faulthandler
 import json
 import os
 import shutil
@@ -31,6 +32,12 @@ if _PY_BIN not in os.environ.get("PATH", "").split(os.pathsep):
 # Never inherited from DISPLAY: the suites resize the root and inject input,
 # which must not land on a session in use. private_x_server() needs nothing set.
 TEST_DISPLAY = os.environ.get("E2E_DISPLAY", "")
+# The runner's budget for this suite, in seconds. A suite that stalls (a browser
+# call with no deadline of its own, say) prints the stack of every thread to
+# stderr at the deadline and exits, which is what says where it stuck; the
+# runner's own kill would leave no such record.
+if os.environ.get("SELKIES_SUITE_DEADLINE"):
+    faulthandler.dump_traceback_later(float(os.environ["SELKIES_SUITE_DEADLINE"]), exit=True)
 
 
 def _free_port() -> int:
