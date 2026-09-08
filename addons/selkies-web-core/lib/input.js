@@ -2440,7 +2440,6 @@ export class Input {
             const lock = () => this._requestPointerLock(targetElement, lock,
                 (err) => console.error("Pointer lock failed:", err));
             lock();
-            this.cursorDiv.style.visibility = 'hidden';
             event.preventDefault();
             return;
         }
@@ -3840,8 +3839,8 @@ export class Input {
 
     /**
      * Pointer lock change: reports it to the server (`p`,
-     * `SET_NATIVE_CURSOR_RENDERING`), resets the relative carry, and on unlock
-     * releases the keyboard and shows the page-drawn cursor.
+     * `SET_NATIVE_CURSOR_RENDERING`), resets the relative carry, and swaps the
+     * page-drawn cursor for the server-composited one: hidden while locked.
      */
     _pointerLock() {
         this._relCarryX = 0;
@@ -3849,11 +3848,12 @@ export class Input {
         if (this._isStreamLocked()) {
             this.send("p,1");
             this.send("SET_NATIVE_CURSOR_RENDERING,1");
+            this.cursorDiv.style.visibility = 'hidden';
         } else {
             this.send("p,0");
             this.send("SET_NATIVE_CURSOR_RENDERING,0");
             this.resetKeyboard();
-            this.cursorDiv.style.visibility = 'visible'
+            this.cursorDiv.style.visibility = 'visible';
         }
     }
 
