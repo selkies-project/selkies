@@ -161,6 +161,8 @@ SUITES: list = [
      "selectors": ["classic", "wish", "gates", "hidpi", "second-screen"]},
     {"path": "e2e/test_mixed_dpi.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc"]},
+    {"path": "e2e/test_wayland_layout_churn.py", "tier": "e2e", "timeout": 900,
+     "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_clipboard_reads.py", "tier": "e2e", "timeout": 900,
      "selectors": ["firefox", "chromium", "webkit"]},
     {"path": "e2e/test_ack_heartbeat.py", "tier": "e2e", "timeout": 900,
