@@ -236,19 +236,10 @@ jobs:
         run: ./scripts/ci/build-web.sh
       - name: Build the test tools
         run: make -C tests/tools
+      # The same stack a development sandbox starts, on the display the
+      # workflow names
       - name: Start the display server and audio
-        run: |
-          # Same canvas and extension set as the container and AppImage servers:
-          # xrandr cannot grow a screen past its configured maximum, so a small
-          # one makes every second-display mode fail to even be created
-          Xvfb "${E2E_DISPLAY}" -screen 0 8192x4096x24 -s 0 -dpms \
-            +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" \
-            +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" \
-            +extension "XFIXES" +extension "XTEST" +iglx +render \
-            -nolisten "tcp" -ac -noreset -shmem &
-          until [ -S "/tmp/.X11-unix/X${E2E_DISPLAY#*:}" ]; do sleep 0.5; done
-          pulseaudio --start --exit-idle-time=-1
-          pactl load-module module-null-sink sink_name=output rate=48000 channels=2
+        run: scripts/ci/test-stack.sh
       # The integration tier drives Chromium as well, for the gamepad and
       # WebRTC-transport suites; only the browser matrix needs the other engines
       - name: Install Chromium

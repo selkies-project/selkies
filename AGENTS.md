@@ -49,10 +49,16 @@ Update the translations whenever user-facing strings change, adding entries wher
 
 ## Testing
 
-End-to-end testing is possible with the installed Firefox and Chrome, and Playwright/Selenium/Puppeteer/Cypress
-WebKit in place of Safari. Ask the user for permission before creating a test environment (possibly Miniforge; the
-system `libgbm.so` should likely be used for GBM support on NVIDIA and other GPUs) and take their directives on how
-it is constructed and constrained.
+Validate in a sandbox, never in the session you are shown: the devcontainer, or a host set up as the Agentic
+Development section of `docs/development.md` describes, where `scripts/ci/test-stack.sh` provides the display and
+audio the suites stream from on `E2E_DISPLAY`, apart from any desktop's `DISPLAY`. Run the cheapest tier that covers
+a change on every change (`pre-commit run --all-files`, `pytest tests -m unit`), the `integration` tier and the `e2e`
+blocks the change touches before reporting it, and a measurement for every claim that is a number. End-to-end testing
+is possible with the installed Firefox and Chrome, and Playwright/Selenium/Puppeteer/Cypress WebKit in place of
+Safari. Ask before building an environment on a machine that was not set up for one (Miniforge serves a host with a
+closed package manager; keep the system `libgbm.so` for GBM on NVIDIA and other GPUs) and take the operator's
+directives on how it is constructed and constrained. A suite that skips is a failure in CI; say which checks could
+not run where the hardware for them was not available.
 
 A defect that predates the change you are making is still in scope: fix it, or say precisely what is broken, what
 you ruled out, and what you would do next. The same applies to a failure you cannot reproduce yet — narrow it until
