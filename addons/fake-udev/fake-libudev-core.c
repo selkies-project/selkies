@@ -82,14 +82,14 @@
 #include <unistd.h>
 
 static bool g_fake_udev_log_enabled = false;
+static pthread_once_t g_log_once = PTHREAD_ONCE_INIT;
+
+static void fake_udev_logging_init(void) {
+    g_fake_udev_log_enabled = getenv("JS_LOG") != NULL;
+}
 
 static void fake_udev_logging_init_if_needed(void) {
-    static bool initialized = false;
-    if (initialized) {
-        return;
-    }
-    initialized = true;
-    g_fake_udev_log_enabled = getenv("JS_LOG") != NULL;
+    pthread_once(&g_log_once, fake_udev_logging_init);
 }
 
 #define FAKE_UDEV_LOG(level, fmt, ...) do { if (g_fake_udev_log_enabled) fprintf(stderr, "[fake_udev_" level ":%s:%d] " fmt "\n", __func__, __LINE__, ##__VA_ARGS__); } while (0)
@@ -360,17 +360,14 @@ typedef struct {
 } virtual_gamepad_definition_t;
 
 static virtual_gamepad_definition_t virtual_gamepads[NUM_VIRTUAL_GAMEPADS];
-static bool virtual_gamepads_initialized = false;
+static pthread_once_t g_gamepads_once = PTHREAD_ONCE_INIT;
 
 /* Backing storage for the formatted sysattr/property values the definitions point at. */
 static char input_phys[NUM_VIRTUAL_GAMEPADS][64];
 static char input_uniq[NUM_VIRTUAL_GAMEPADS][64];
 static char usb_serials[NUM_VIRTUAL_GAMEPADS][64];
 
-static void initialize_virtual_gamepads_data_if_needed(void) {
-    if (virtual_gamepads_initialized) {
-        return;
-    }
+static void initialize_virtual_gamepads_data(void) {
     for (int i = 0; i < NUM_VIRTUAL_GAMEPADS; ++i) {
         virtual_gamepad_definition_t *def = &virtual_gamepads[i];
         def->id = i;
@@ -425,9 +422,15 @@ static void initialize_virtual_gamepads_data_if_needed(void) {
         def->usb_parent_sysattrs[5] = (key_value_pair_t){"serial", usb_serials[i]};
         def->usb_parent_sysattrs[6] = (key_value_pair_t){NULL, NULL};
     }
-    virtual_gamepads_initialized = true;
     FAKE_UDEV_LOG_INFO("initialized %d virtual gamepads, event nodes %d..%d",
                        NUM_VIRTUAL_GAMEPADS, VIRTUAL_EVENT_ID_BASE, VIRTUAL_EVENT_ID_BASE + NUM_VIRTUAL_GAMEPADS - 1);
+}
+
+/* The pad definitions, built on first use. Every entry point that reaches them
+ * calls this, so a consumer creating its first context on two threads at once
+ * cannot read a half-written syspath. */
+static void initialize_virtual_gamepads_data_if_needed(void) {
+    pthread_once(&g_gamepads_once, initialize_virtual_gamepads_data);
 }
 
 static const virtual_gamepad_definition_t *find_virtual_def_by_syspath(const char *syspath, virtual_device_node_type_t *node_type_out) {
