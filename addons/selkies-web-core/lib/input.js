@@ -1324,7 +1324,8 @@ const _stopEvent = function (e) {
  * plain fullscreen (`onfullscreenhotkey`, `enterFullscreen` by default),
  * Ctrl+Shift+X toggles gaming mode (`ongaminghotkey`, `toggleGamingMode` by
  * default), Ctrl+Shift+G toggles the gamepad overlay (`ongamepadhotkey`), and
- * Ctrl+Shift+Click takes pointer lock. Elements carrying the
+ * Ctrl+Shift+Click takes pointer lock. Three quick Escape presses in a row
+ * also leave gaming mode (`_escapeHatch`). Elements carrying the
  * `allow-native-input` class keep native keyboard and touch handling.
  */
 export class Input {
@@ -1385,6 +1386,8 @@ export class Input {
         this._moveFlushScheduled = false;
         this.onmenuhotkey = null;
         this.gamingMode = false;
+        this._escapePresses = 0;
+        this._lastEscapeAt = 0;
         this.ongamingmode = null;
         this.onnotice = null;
         this.onfullscreenhotkey = this.enterFullscreen;
@@ -1857,6 +1860,10 @@ export class Input {
      * still streams to the remote desktop.
      */
     _handleKeyDown(event) {
+        if (this._escapeHatch(event)) {
+            _stopEvent(event);
+            return;
+        }
         if (event.ctrlKey && event.shiftKey) {
             let hotkey = null;
             if (event.code === 'KeyM' && !this.gamingMode) hotkey = this.onmenuhotkey;
@@ -2032,6 +2039,28 @@ export class Input {
     }
 
     /** Keyup handler: releases the keysym the key went down with, with the macOS Command and Windows Shift cleanups. */
+    /**
+     * Leaves gaming mode on three quick Escape presses in a row, for
+     * environments where the browser's held-Escape exit never fires. The
+     * third press is swallowed.
+     * @param {KeyboardEvent} event
+     * @returns {boolean} True when the press ended gaming mode.
+     */
+    _escapeHatch(event) {
+        if (!this.gamingMode || event.repeat) return false;
+        const now = performance.now();
+        if (event.code !== 'Escape' || now - this._lastEscapeAt > 1000) {
+            this._escapePresses = 0;
+        }
+        this._lastEscapeAt = now;
+        if (event.code !== 'Escape') return false;
+        this._escapePresses += 1;
+        if (this._escapePresses < 3) return false;
+        this._escapePresses = 0;
+        this.toggleGamingMode();
+        return true;
+    }
+
     _handleKeyUp(event) {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
