@@ -66,7 +66,7 @@ if not STEP.strip():
 def validate(tag: str, latest: str = "") -> tuple:
     """The validate step itself, run on a tag: `(accepted, step outputs)`.
 
-    `latest` is the workflow's boolean input as the step sees it: `true`, `false`, or
+    `latest` is the workflow's input as the step sees it: `auto`, `always`, `never`, or
     empty for a run that left the default.
     """
     with tempfile.TemporaryDirectory() as tmp:
@@ -115,16 +115,20 @@ for tag, (want_ok, want_pre) in TAGS.items():
         check(f"{tag} is released as {tag}",
               out.get("version") == tag.lstrip("v"), out.get("version", "<unset>"))
 
-# The `latest` input, on by default, moves the floating `latest` image tags onto
-# the release and asks for the "Latest" badge, which GitHub gives no pre-release
+# A release takes the floating `latest` image tags and the "Latest" badge and a
+# pre-release takes neither, unless the run forces it; GitHub gives no pre-release
+# the badge whatever the run asks
 LATEST = {
     ("1.2.3", ""): ("true", "true"),
-    ("1.2.3", "true"): ("true", "true"),
-    ("2.0.0.post1", ""): ("true", "true"),
-    ("1.2.3", "false"): ("false", "false"),
-    ("2.0.0rc0", ""): ("true", "false"),
-    ("0.0.0.dev0", "true"): ("true", "false"),
-    ("2.0.0rc0", "false"): ("false", "false"),
+    ("1.2.3", "auto"): ("true", "true"),
+    ("2.0.0.post1", "auto"): ("true", "true"),
+    ("2.0.0rc0", ""): ("false", "false"),
+    ("2.0.0rc0", "auto"): ("false", "false"),
+    ("0.0.0.dev0", "auto"): ("false", "false"),
+    ("2.0.0rc0", "always"): ("true", "false"),
+    ("1.2.3", "always"): ("true", "true"),
+    ("1.2.3", "never"): ("false", "false"),
+    ("2.0.0rc0", "never"): ("false", "false"),
 }
 for (tag, latest), (want_tags, want_badge) in LATEST.items():
     _, out = validate(tag, latest)

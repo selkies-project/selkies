@@ -5,12 +5,14 @@ name: Release
 # assembles a DRAFT GitHub release with every build artifact attached. The
 # draft is finalized and published manually.
 #
-# The `latest` input designates the release as the latest everywhere at once:
-# the floating `latest` image tags move onto it and the published release takes
-# the "Latest" badge. GitHub decides that badge when the draft is published,
-# from the publisher's checkbox rather than from the draft, so a run that holds
-# the badge back marks the draft's notes and release-published.yaml applies the
-# mark at publication.
+# The `latest` input decides whether the release is designated as the latest
+# everywhere at once: the floating `latest` image tags and the "Latest" badge of
+# the published release. A release is by default, a pre-release is not, and a
+# run can force either way; GitHub gives no pre-release the badge whatever the
+# run asks. GitHub decides that badge when the draft is published, from the
+# publisher's checkbox rather than from the draft, so a run that holds the badge
+# back marks the draft's notes and release-published.yaml applies the mark at
+# publication.
 #
 # A release is cut after the pinned pixelflux and pcmflux are published, so
 # everything here resolves that capture stack from PyPI -- the smoke test, the
@@ -26,9 +28,13 @@ on:
         type: string
         required: true
       latest:
-        description: Designate this release as the latest, on the floating `latest` image tags and the GitHub release
-        type: boolean
-        default: true
+        description: Designate this release as the latest (floating `latest` image tags and the release badge); auto does so for a release and not for a pre-release
+        type: choice
+        options:
+          - auto
+          - always
+          - never
+        default: auto
 
 concurrency:
   group: ${{ github.workflow }}
@@ -63,11 +69,15 @@ jobs:
             *[ab]*|*rc*|*dev*) prerelease=true ;;
             *) prerelease=false ;;
           esac
-          # The floating `latest` image tags follow the run's choice, on by
-          # default; the GitHub release takes the "Latest" badge on the same
-          # choice, except that GitHub gives no pre-release the badge
-          latest=true
-          if [ "${LATEST}" = "false" ]; then latest=false; fi
+          # A release is designated as the latest and a pre-release is not,
+          # unless the run says otherwise; the floating `latest` image tags
+          # follow that, and so does the "Latest" badge, except that GitHub
+          # gives no pre-release the badge
+          case "${LATEST:-auto}" in
+            always) latest=true ;;
+            never) latest=false ;;
+            *) if [ "${prerelease}" = "true" ]; then latest=false; else latest=true; fi ;;
+          esac
           make_latest="${latest}"
           if [ "${prerelease}" = "true" ]; then make_latest=false; fi
           {
