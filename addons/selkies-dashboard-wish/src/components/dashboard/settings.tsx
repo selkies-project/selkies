@@ -33,11 +33,12 @@
  */
 
 import { Card, CardContent } from "@/components/ui/card";
-import { displayLabel, decodableEncoders, canDecodeFullColor } from "../../../../selkies-web-core/lib/util.js";
+import { displayLabel, decodableEncoders, canDecodeFullColor, isMacDesktop } from "../../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders } from "../../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
-    USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
+    USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC,
+    RAW_POINTER_MOTION_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
@@ -302,6 +303,7 @@ export function Settings() {
         useCpu: readStored("use_cpu") !== null
             ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
         allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
+        macDesktop: isMacDesktop(),
     };
     const DEBOUNCE_DELAY = 500;
     const debouncedPostSetting = useMemo(() => debounce((setting: any) => {
@@ -441,6 +443,8 @@ export function Settings() {
     });
     const [useBrowserCursors, setUseBrowserCursors] = useConditionalSetting(
         USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    const [rawPointerMotion, setRawPointerMotion] = useConditionalSetting(
+        RAW_POINTER_MOTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     /**
      * The cursor mode the core reports as actually in effect (multi-monitor
      * forces browser cursors on), null until reported; the toggle shows it
@@ -869,6 +873,11 @@ export function Settings() {
         writeConditional(USE_BROWSER_CURSORS_SPEC, !(effectiveCursor ?? useBrowserCursors), setUseBrowserCursors, { persist: false });
     };
 
+    /** Raw pointer motion toggle; the core owns persistence, as for browser cursors. */
+    const handleRawPointerMotionToggle = () => {
+        writeConditional(RAW_POINTER_MOTION_SPEC, !rawPointerMotion, setRawPointerMotion, { persist: false });
+    };
+
     const handleForceAlignedResolutionToggle = () => {
         writeConditional(FORCE_ALIGNED_RESOLUTION_SPEC, !forceAlignedResolution, setForceAlignedResolution, { persist: true });
     };
@@ -1074,6 +1083,23 @@ export function Settings() {
                                 <Switch
                                     checked={effectiveCursor !== null ? effectiveCursor : useBrowserCursors}
                                     onCheckedChange={handleUseBrowserCursorsToggle}
+                                />
+                            </div>
+                        )}
+
+                        {(renderableSettings.rawPointerMotion ?? true) && (
+                            <div className="flex items-center justify-between">
+                                <div className="space-y-0.5">
+                                    <label className="text-sm font-medium"
+                                        title={t(rawPointerMotion
+                                            ? 'sections.screen.rawPointerMotionDisableTitle'
+                                            : 'sections.screen.rawPointerMotionEnableTitle')}>
+                                        {t('sections.screen.rawPointerMotionLabel')}
+                                    </label>
+                                </div>
+                                <Switch
+                                    checked={rawPointerMotion}
+                                    onCheckedChange={handleRawPointerMotionToggle}
                                 />
                             </div>
                         )}

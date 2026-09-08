@@ -922,6 +922,95 @@ def second_screen_auto_block(dashboard: str, dist: str) -> "H.Results":
     return res
 
 
+def open_wish_settings_tab(page, tab: str) -> bool:
+    """Open the Wish Settings panel (the Settings2 icon in the control strip)
+    and switch it to the tab labelled `tab`."""
+    trig = page.locator('button:has(svg.lucide-settings-2)').first
+    if not trig.count():
+        return False
+    trig.click(force=True, timeout=3000)
+    time.sleep(1.0)
+    tab_button = page.locator(f'[role="tab"]:has-text("{tab}")').first
+    if not tab_button.count():
+        return False
+    tab_button.click()
+    time.sleep(0.8)
+    return True
+
+
+def click_raw_pointer_motion(page, dashboard: str) -> bool:
+    """Click the raw pointer motion toggle in either dashboard's screen settings.
+
+    Returns:
+        True when the toggle was found and clicked.
+    """
+    if dashboard == "classic":
+        classic_open_video(page)
+        header = page.locator('.sidebar-section-header:has-text("Screen")').first
+        if not header.count():
+            return False
+        header.click()
+        time.sleep(1.0)
+        toggle = page.locator('#rawPointerMotionToggle')
+    else:
+        if not open_wish_settings_tab(page, "Resolution"):
+            return False
+        toggle = page.locator(
+            'div:has(> div > label:has-text("Raw pointer motion")) > button[role="switch"]')
+    if not toggle.count():
+        return False
+    toggle.first.scroll_into_view_if_needed()
+    toggle.first.click()
+    return True
+
+
+def raw_pointer_motion_block(dashboard: str, dist: str, mode: str = "websockets") -> "H.Results":
+    """The raw pointer motion toggle reaches the running client and is kept.
+
+    On this platform the setting resolves on (the server's default, and Linux
+    is not the platform the client turns it off for), so the toggle starts on;
+    a click turns it off in the live `Input`, the core persists the pick, and a
+    reload comes back off against the server's default of on. Driven on both
+    transports, since each core applies the setting itself.
+    """
+    res = H.Results(f"raw-motion-{dashboard}-{mode}")
+    H.server_start(mode=mode, wayland=False, web_root=dist)
+    state = "() => window.webrtcInput ? window.webrtcInput.constructor.rawPointerMotion : null"
+    stored = """(() => {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k.endsWith('_raw_pointer_motion')) return localStorage.getItem(k);
+      }
+      return null;
+    })()"""
+    try:
+        with sync_playwright() as p:
+            browser = C.chromium_launch(p)
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+            ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+            page = ctx.new_page()
+            page.goto(H.BASE_URL, wait_until="load")
+            time.sleep(8.0)
+            res.check("the client starts with raw pointer motion on, the server's default",
+                      page.evaluate(state) is True, page.evaluate(state))
+            clicked = click_raw_pointer_motion(page, dashboard)
+            res.check("the toggle is offered in the screen settings", clicked, clicked)
+            time.sleep(1.5)
+            res.check("a click turns raw pointer motion off in the running client",
+                      page.evaluate(state) is False, page.evaluate(state))
+            res.check("the core persists the pick", page.evaluate(stored) == "false",
+                      page.evaluate(stored))
+            page.reload(wait_until="load")
+            time.sleep(8.0)
+            res.check("a reload keeps the pick over the server default",
+                      page.evaluate(state) is False, page.evaluate(state))
+            C.close_browser(browser)
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
 def wait_second_display(timeout: float = 15.0) -> bool:
     """Whether the server logs a second display client joining."""
     deadline = time.time() + timeout
@@ -946,6 +1035,12 @@ def main() -> None:
     if which in ("all", "hidpi"):
         blocks.append(hidpi_default_block("classic", H.CLASSIC_DIST))
         blocks.append(hidpi_default_block("wish", H.WISH_DIST))
+    if which in ("all", "raw-motion"):
+        blocks.append(raw_pointer_motion_block("classic", H.CLASSIC_DIST))
+        blocks.append(raw_pointer_motion_block("wish", H.WISH_DIST))
+    if which in ("all", "raw-motion-webrtc"):
+        blocks.append(raw_pointer_motion_block("classic", H.CLASSIC_DIST, "webrtc"))
+        blocks.append(raw_pointer_motion_block("wish", H.WISH_DIST, "webrtc"))
     if which in ("all", "second-screen"):
         blocks.append(second_screen_block("classic", H.CLASSIC_DIST))
         blocks.append(second_screen_block("wish", H.WISH_DIST))

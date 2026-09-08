@@ -92,6 +92,9 @@ All messages sent to the client must be JavaScript objects with a `type` propert
 *   **`setUseBrowserCursors`**
     *   **Payload:** `{ type: 'setUseBrowserCursors', value: <boolean> }`
     *   **Description:** Toggles between using local browser cursors vs. server-rendered video cursors.
+*   **`setRawPointerMotion`**
+    *   **Payload:** `{ type: 'setRawPointerMotion', value: <boolean> }`
+    *   **Description:** Whether pointer lock asks the browser for unaccelerated (raw) movement. Persisted as the user's `raw_pointer_motion` choice; a lock already held is switched in place where the engine allows it.
 *   **`touchinput:trackpad` / `touchinput:touch`**
     *   **Payload:** `{ type: 'touchinput:trackpad' }` or `{ type: 'touchinput:touch' }`
     *   **Description:** Switches touch interaction between relative trackpad mode and absolute touch mode.

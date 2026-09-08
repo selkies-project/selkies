@@ -62,7 +62,7 @@
  * `setUseCssScaling`, `settings`, `command`, `pipelineControl`,
  * `gamepadControl`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `audioDeviceSelected`, `requestFullscreen`, `setSynth`,
- * `showVirtualKeyboard`, `setAntiAliasing`, `setUseBrowserCursors`,
+ * `showVirtualKeyboard`, `setAntiAliasing`, `setUseBrowserCursors`, `setRawPointerMotion`,
  * `touchinput:trackpad`, `touchinput:touch`, plus the `requestFileUpload` DOM
  * event. Window messages posted: `sidebarButtonStatusUpdate`,
  * `pipelineStatusUpdate`, `effectiveCursorState`, `serverSettings`,
@@ -84,8 +84,8 @@ import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-wor
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
-import { storageKeyForServerKey } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeFullColor } from './lib/util.js';
+import { storageKeyForServerKey, resolveSpec, RAW_POINTER_MOTION_SPEC } from './lib/conditional-settings.js';
+import { getRoutePrefix, getStorageAppName, canDecodeFullColor, isMacDesktop } from './lib/util.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -391,6 +391,14 @@ export default function webrtc() {
 	 */
 	let useBrowserCursors = true;
 	/**
+	 * Whether pointer lock asks for raw (unaccelerated) movement: seeded from
+	 * localStorage over the platform default on connect, resolved through the
+	 * shared ladder on every settings payload (`resolvedRawPointerMotion`),
+	 * then updated by a dashboard pick (persisted) or a server-pushed value
+	 * (not persisted, so a later server-side change stays re-pushable).
+	 */
+	let rawPointerMotion = true;
+	/**
 	 * Whether a secondary display page is connected (server display-config
 	 * broadcast). Multi-monitor forces browser-cursor rendering: the
 	 * server-drawn cursor overlay tracks only one capture region.
@@ -610,6 +618,26 @@ export default function webrtc() {
 		try {
 			window.postMessage({ type: 'effectiveCursorState', value: finalSetting }, window.location.origin);
 		} catch (e) { /* postMessage unavailable */ }
+	}
+
+	/** Applies the raw pointer motion setting to the input handler. */
+	function applyRawPointerMotion() {
+		if (input && typeof input.setRawPointerMotion === 'function') {
+			input.setRawPointerMotion(rawPointerMotion);
+		}
+	}
+
+	/**
+	 * The `raw_pointer_motion` the deployment implies, off the shared ladder: a
+	 * locked or operator value, else the client's stored pick, else the platform
+	 * default (off on macOS). Resolved here because pointer lock is taken from
+	 * the stream, whether or not a settings panel ever mounts.
+	 * @param {Object<string, object>} serverSettings The `server_settings` payload.
+	 * @returns {boolean}
+	 */
+	function resolvedRawPointerMotion(serverSettings) {
+		return resolveSpec(RAW_POINTER_MOTION_SPEC, serverSettings, { macDesktop: isMacDesktop() },
+			(key) => getStringParam(key, null));
 	}
 
 	/** Starts playback after the user's gesture and takes the wake lock. */
@@ -1699,6 +1727,15 @@ export default function webrtc() {
 					console.warn("Invalid value received for setUseBrowserCursors:", message.value);
 				}
 				break;
+			case 'setRawPointerMotion':
+				if (typeof message.value === 'boolean') {
+					rawPointerMotion = message.value;
+					setBoolParam('raw_pointer_motion', message.value);
+					applyRawPointerMotion();
+				} else {
+					console.warn("Invalid value received for setRawPointerMotion:", message.value);
+				}
+				break;
 			case 'touchinput:trackpad':
 				if (input && typeof input.setTrackpadMode === 'function') {
 					trackpadMode = true;
@@ -1818,6 +1855,11 @@ export default function webrtc() {
 			// Never persisted: only the setUseBrowserCursors message persists.
 			useBrowserCursors = !!settings.use_browser_cursors;
 			applyEffectiveCursorSetting();
+		}
+		if (settings.raw_pointer_motion !== undefined) {
+			// Never persisted: only the setRawPointerMotion message persists.
+			rawPointerMotion = !!settings.raw_pointer_motion;
+			applyRawPointerMotion();
 		}
 		if (settings.rate_control_mode !== undefined) {
 			rateControlMode = settings.rate_control_mode;
@@ -2340,6 +2382,7 @@ export default function webrtc() {
 			antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 			trackpadMode = getBoolParam('trackpadMode', false);
 			useBrowserCursors = getBoolParam('use_browser_cursors', true);
+			rawPointerMotion = getBoolParam('raw_pointer_motion', Input.rawPointerMotion);
 			force_aligned_resolution = getBoolParam('force_aligned_resolution', false);
 
 			if (!isSharedMode) {
@@ -2442,6 +2485,7 @@ export default function webrtc() {
 
 			if (trackpadMode) input.setTrackpadMode(true);
 			applyEffectiveCursorSetting();
+			applyRawPointerMotion();
 			window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
 			window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 
@@ -2890,6 +2934,11 @@ export default function webrtc() {
 				const ebc = obj.settings && obj.settings.enable_binary_clipboard;
 				if (ebc && typeof ebc.value === 'boolean') {
 					enable_binary_clipboard = ebc.locked ? ebc.value : getBoolParam('enable_binary_clipboard', ebc.value);
+				}
+				const rawMotion = resolvedRawPointerMotion(obj.settings);
+				if (rawMotion !== rawPointerMotion) {
+					rawPointerMotion = rawMotion;
+					applyRawPointerMotion();
 				}
 				maybeSendInitialClipboard();
 				window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);

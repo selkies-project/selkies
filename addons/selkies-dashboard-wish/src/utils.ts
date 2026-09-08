@@ -179,6 +179,7 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.binaryClipboard = isSettingRenderable(s.enable_binary_clipboard)
     && (s.clipboard_enabled?.value ?? true);
   newRenderable.useBrowserCursors = isSettingRenderable(s.use_browser_cursors);
+  newRenderable.rawPointerMotion = isSettingRenderable(s.raw_pointer_motion);
   newRenderable.videoBitrate = isSettingRenderable(s.video_bitrate);
   newRenderable.audioBitrate = isSettingRenderable(s.audio_bitrate);
   // The HiDPI toggle drives use_css_scaling, inverted.

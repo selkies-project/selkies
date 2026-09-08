@@ -178,6 +178,22 @@ export function getStorageAppName() {
 }
 
 /**
+ * macOS proper, a narrower question than the Mac family `navigator.platform`
+ * names: an iPad in its desktop-class default reports `MacIntel` like a Mac
+ * does, and its touch points are what tell the two apart. `navigator.platform`
+ * decides and the client hint is only a fallback for an engine that has
+ * dropped the deprecated field, since the question is which pointer
+ * acceleration curve the OS applies, not which brand the browser reports.
+ * @returns {boolean}
+ */
+export function isMacDesktop() {
+    if (typeof navigator === 'undefined') return false;
+    const platform = navigator.platform
+        || (navigator.userAgentData && navigator.userAgentData.platform) || '';
+    return /^mac/i.test(platform) && (navigator.maxTouchPoints || 0) <= 1;
+}
+
+/**
  * Whether the client is touch-first: its primary pointer is coarse. True on
  * phones and tablets, false on desktops -- including touch-screen laptops,
  * whose primary pointer is still the pointing device. The form factor is

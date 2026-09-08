@@ -59,7 +59,7 @@
  */
 
 import { GamepadManager } from './gamepad.js';
-import { Queue } from './util.js';
+import { Queue, isMacDesktop } from './util.js';
 
 /** CSS class on elements (and their descendants) whose input stays native. */
 const WHITELIST_CLASS = 'allow-native-input';
@@ -1049,22 +1049,8 @@ const browser = {
     isIOS: function() { return /iPod|iPhone|iPad/.test(navigator.platform); },
     isWindows: function() { return /Win/.test(navigator.platform); },
     isLinux: function() { return /Linux/.test(navigator.platform); },
-    /**
-     * macOS proper, which is a narrower question than `isMac`: the iPhones and
-     * the iPads are Macs to that one, and an iPad in its desktop-class default
-     * reports `MacIntel` like a Mac does. Its touch points are what tell the
-     * two apart, the same test selkies-wr-core.js and selkies-ws-core.js use.
-     * `navigator.platform` decides and the client hint is only a fallback, for
-     * an engine that has dropped the deprecated field: the question is which
-     * pointer acceleration curve the OS applies, not which brand the browser
-     * reports.
-     */
-    isMacDesktop: function() {
-        if (typeof navigator === 'undefined') return false;
-        const platform = navigator.platform
-            || (navigator.userAgentData && navigator.userAgentData.platform) || '';
-        return /^mac/i.test(platform) && (navigator.maxTouchPoints || 0) <= 1;
-    },
+    /** macOS proper, a narrower question than `isMac` (util.js). */
+    isMacDesktop,
     /**
      * Whether the engine delivers an IME commit on the textInput event; where
      * it does not exist, compositionend is the only carrier of the committed
@@ -1519,19 +1505,29 @@ export class Input {
     static _nextGuacID = 0;
 
     /**
-     * Cleared the first time an engine refuses raw pointer movement, so the
-     * option costs one refused request per page.
-     *
-     * It starts cleared on macOS, where the engine grants the option instead of
-     * refusing it and nothing replaces the acceleration curve it takes away.
-     * The client scales a locked delta by the stream box and quantizes it
-     * (`_relativeToServer`), but that gain is the same at every speed, so the
-     * slow motion the curve used to expand now covers far less of the remote
-     * screen and the pointer feels heavy. Windows grants it as well and is left
-     * on it: raw deltas are what pointer lock is for, and nobody has reported
-     * the same there.
+     * Whether pointer lock asks for raw movement: the `raw_pointer_motion`
+     * setting, which the core resolves and pushes through `setRawPointerMotion`.
+     * Until it does, the platform decides: off on macOS, where the engine grants
+     * the option instead of refusing it and nothing replaces the acceleration
+     * curve it takes away. The client scales a locked delta by the stream box
+     * and quantizes it (`_relativeToServer`), but that gain is the same at every
+     * speed, so the slow motion the curve used to expand now covers far less of
+     * the remote screen and the pointer feels heavy. Windows grants it as well
+     * and is left on it: raw deltas are what pointer lock is for, and nobody has
+     * reported the same there.
      */
-    static _unadjustedMovement = !browser.isMacDesktop();
+    static rawPointerMotion = !browser.isMacDesktop();
+
+    /**
+     * Set the first time an engine refuses raw movement, so the option costs one
+     * refused request per page whatever the setting says.
+     */
+    static _rawMotionRefused = false;
+
+    /** Whether the next lock request asks for raw movement. */
+    static _asksRawMotion() {
+        return Input.rawPointerMotion && !Input._rawMotionRefused;
+    }
 
     /** Paints the server cursor bitmap onto the cursor canvas at the current device pixel ratio and rebases the hotspot. */
     _drawAndScaleCursor() {
@@ -3291,6 +3287,29 @@ export class Input {
         }
     }
 
+    /**
+     * Applies the raw pointer motion setting. A lock the stream already holds
+     * is re-requested with the new option, which switches the running lock in
+     * place on engines that allow it rather than deferring the change to the
+     * next lock; an engine that refuses the option falls back the way a first
+     * request does.
+     * @param {boolean} enabled
+     */
+    setRawPointerMotion(enabled) {
+        const want = !!enabled;
+        if (Input.rawPointerMotion === want) return;
+        Input.rawPointerMotion = want;
+        console.log(`Input: Raw pointer motion ${want ? 'enabled' : 'disabled'}.`);
+        if (typeof document === 'undefined' || !this._isStreamLocked()) return;
+        const locked = document.pointerLockElement;
+        const again = () => {
+            if (document.pointerLockElement === locked) this._requestPointerLock(locked, () => {}, () => {});
+        };
+        this._requestPointerLock(locked, again, (err) => {
+            console.warn('Input: pointer lock did not take the raw motion change:', err);
+        });
+    }
+
     /** Switches between the CSS cursor and the page-drawn cursor canvas. */
     async setUseBrowserCursors(enabled) {
         const newMode = !!enabled;
@@ -3977,8 +3996,9 @@ export class Input {
      * games and 3D applications expect from pointer lock. Platforms that cannot
      * deliver them — Linux and Android, on every engine — reject the option
      * with NotSupportedError, and the first refusal turns it off for the page.
-     * macOS delivers them and is asked not to, since removing its curve leaves
-     * the pointer heavy and nothing here replaces it (see `_unadjustedMovement`).
+     * macOS delivers them and is not asked unless the user or the operator says
+     * so, since removing its curve leaves the pointer heavy and nothing here
+     * replaces it (see `rawPointerMotion`).
      * `again` re-runs the request the way its caller would, so guarded callers
      * re-check their guards. Engines older than the promise-returning API
      * report failures through pointerlockerror instead.
@@ -3987,13 +4007,14 @@ export class Input {
      * @param {(err: Error) => void} onFailure
      */
     _requestPointerLock(element, again, onFailure) {
-        const lockPromise = Input._unadjustedMovement
+        const askRaw = Input._asksRawMotion();
+        const lockPromise = askRaw
             ? element.requestPointerLock({ unadjustedMovement: true })
             : element.requestPointerLock();
         if (!lockPromise || typeof lockPromise.catch !== 'function') return;
         lockPromise.catch((err) => {
-            if (err && err.name === 'NotSupportedError' && Input._unadjustedMovement) {
-                Input._unadjustedMovement = false;
+            if (err && err.name === 'NotSupportedError' && askRaw) {
+                Input._rawMotionRefused = true;
                 again();
                 return;
             }

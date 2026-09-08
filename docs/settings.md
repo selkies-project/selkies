@@ -64,6 +64,7 @@ Every setting below is one entry of `SETTING_DEFINITIONS` in [`src/selkies/setti
 | `--force-aligned-resolution` | `SELKIES_FORCE_ALIGNED_RESOLUTION` | bool | `false` | Forces the display resolution to be a multiple of 16 pixels. |
 | `--enable-binary-clipboard` | `SELKIES_ENABLE_BINARY_CLIPBOARD` | bool | `true` | Allow binary data (e.g., images) on the clipboard. |
 | `--use-browser-cursors` | `SELKIES_USE_BROWSER_CURSORS` | bool | `true` | Use browser CSS cursors instead of rendering to canvas. |
+| `--raw-pointer-motion` | `SELKIES_RAW_POINTER_MOTION` | bool | `true` | Ask the browser for unaccelerated (raw) pointer movement under pointer lock, so a locked pointer travels by the mouse's own counts rather than the local acceleration curve; Windows and macOS grant it, Linux and Android refuse it and keep the curve either way. Clients leave it off on macOS unless it is chosen or set here, since that curve is what carries a slow hand across the remote screen. Clients may override per user unless the value is locked. |
 | `--use-css-scaling` | `SELKIES_USE_CSS_SCALING` | bool | `false` | HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched. |
 | `--ui-title` | `SELKIES_UI_TITLE` | str | `Selkies` | Title in top left corner of sidebar. |
 | `--ui-show-logo` | `SELKIES_UI_SHOW_LOGO` | bool | `true` | Show the Selkies logo in the sidebar. |

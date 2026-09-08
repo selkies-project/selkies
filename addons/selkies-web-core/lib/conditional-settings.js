@@ -215,11 +215,24 @@ export const USE_CPU_SPEC = boolSpec("use_cpu", false,
     (value, _ctx, io) => io.postSetting({ use_cpu: value }));
 export const FORCE_ALIGNED_RESOLUTION_SPEC = boolSpec("force_aligned_resolution", false,
     (value, _ctx, io) => io.postSetting({ force_aligned_resolution: value }));
+/**
+ * Raw pointer motion under pointer lock: whether the client asks the engine
+ * for the deltas ahead of the OS acceleration curve. Off until chosen on macOS
+ * (`ctx.macDesktop`), where the engine grants the option and the curve it
+ * removes is what carried a slow hand across the remote screen; a stored
+ * choice or an operator value overrides the platform. The core owns it,
+ * applying and persisting it on the propagated message.
+ */
+export const RAW_POINTER_MOTION_SPEC = {
+    ...boolSpec("raw_pointer_motion", true,
+        (value, _ctx, io) => io.postToCore({ type: "setRawPointerMotion", value })),
+    conditional: (ctx) => (ctx.macDesktop ? false : undefined),
+};
 
 const SETTING_SPECS = [
     HIDPI_SPEC, RATE_CONTROL_SPEC, USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC,
     VIDEO_STREAMING_MODE_SPEC, USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC,
-    FORCE_ALIGNED_RESOLUTION_SPEC,
+    FORCE_ALIGNED_RESOLUTION_SPEC, RAW_POINTER_MOTION_SPEC,
 ];
 
 /**

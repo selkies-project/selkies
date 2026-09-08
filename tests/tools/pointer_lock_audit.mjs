@@ -9,9 +9,12 @@
 // NotSupportedError, so the refusal has to end in a plain lock rather than in
 // no lock at all -- and it has to be remembered, or every lock pays for a
 // refused request. macOS is the platform that grants the option and is not
-// asked for it, since removing its acceleration curve leaves the pointer heavy
-// and the client has nothing to put in its place; which platform that is has to
-// be decided narrowly, because an iPad reports a Mac's platform string too. The lock belongs to gaming mode alone -- plain fullscreen
+// asked for it by default, since removing its acceleration curve leaves the
+// pointer heavy and the client has nothing to put in its place; which platform
+// that is has to be decided narrowly, because an iPad reports a Mac's platform
+// string too. The `raw_pointer_motion` setting decides over the platform, on
+// either side, through the shared settings ladder and the core's setter, which
+// switches a lock already held rather than waiting for the next one. The lock belongs to gaming mode alone -- plain fullscreen
 // leaves the pointer to the browser so the dashboard stays usable -- and its
 // caller guards the request (gaming mode, stream fullscreen, not already locked,
 // not a shared viewer); the request it re-runs after a refusal must pass those
@@ -21,6 +24,7 @@
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
 import { Input } from '../../addons/selkies-web-core/lib/input.js';
+import { RAW_POINTER_MOTION_SPEC, resolveSpec } from '../../addons/selkies-web-core/lib/conditional-settings.js';
 
 let failed = 0;
 
@@ -69,9 +73,10 @@ function makeInput(element, gaming = true) {
     return input;
 }
 
-/** A fresh page: the engine has not been asked for raw movement yet. */
+/** A fresh page: raw movement wanted, and the engine not yet asked for it. */
 function reset(element) {
-    Input._unadjustedMovement = true;
+    Input.rawPointerMotion = true;
+    Input._rawMotionRefused = false;
     globalThis.document = { pointerLockElement: null, fullscreenElement: element,
                             getElementById: () => null };
 }
@@ -97,7 +102,7 @@ function reset(element) {
     check('a refused option locks anyway', element.calls.join(',') === 'unadjusted,plain',
           element.calls.join(','));
     check('a refused option is not a failure', failures === 0, String(failures));
-    check('the refusal is remembered', Input._unadjustedMovement === false);
+    check('the refusal is remembered', Input._rawMotionRefused === true);
 
     element.calls.length = 0;
     lock();
@@ -114,7 +119,7 @@ function reset(element) {
     check('any other rejection is reported once',
           element.calls.join(',') === 'unadjusted' && errors.join(',') === 'WrongDocumentError',
           `${element.calls.join(',')} / ${errors.join(',')}`);
-    check('a real failure does not disable raw movement', Input._unadjustedMovement === true);
+    check('a real failure does not disable raw movement', Input._rawMotionRefused === false);
 }
 {
     const element = makeElement('no-promise');
@@ -144,7 +149,7 @@ function reset(element) {
     const loadUnder = async (nav) => {
         setNavigator(nav);
         const mod = await import(`../../addons/selkies-web-core/lib/input.js?platform=${seq++}`);
-        return mod.Input._unadjustedMovement;
+        return mod.Input.rawPointerMotion;
     };
     try {
         const asksPlainly = [
@@ -175,7 +180,7 @@ function reset(element) {
     // so there is no refusal to recover from and the first lock is the lock.
     const element = makeElement('ok');
     reset(element);
-    Input._unadjustedMovement = false;
+    Input.rawPointerMotion = false;
     const input = makeInput(element);
     let retried = 0;
     input._requestPointerLock(element, () => { retried++; }, () => {});
@@ -183,6 +188,101 @@ function reset(element) {
     check('a macOS start asks plainly the first time', element.calls.join(',') === 'plain',
           element.calls.join(','));
     check('and needs no second request', retried === 0, String(retried));
+}
+
+// --- the setting -----------------------------------------------------------
+// The platform only decides until the core resolves `raw_pointer_motion`: the
+// server's default, off on a Mac unless someone chose or the operator set it,
+// and a locked value that nobody overrides.
+{
+    const resolve = (ctx, stored, server) => resolveSpec(
+        RAW_POINTER_MOTION_SPEC, { raw_pointer_motion: server }, ctx, () => stored);
+    check('the setting defaults on where the platform grants or refuses it harmlessly',
+          resolve({ macDesktop: false }, null, { value: true }) === true);
+    check('the setting defaults off on a Mac', resolve({ macDesktop: true }, null, { value: true }) === false);
+    check('a stored choice beats the Mac default', resolve({ macDesktop: true }, 'true', { value: true }) === true);
+    check('an operator value beats the Mac default',
+          resolve({ macDesktop: true }, null, { value: true, overridden: true }) === true);
+    check('a stored choice beats an operator value that is not locked',
+          resolve({ macDesktop: false }, 'false', { value: true, overridden: true }) === false);
+    check('a locked value beats a stored choice',
+          resolve({ macDesktop: true }, 'true', { value: false, locked: true }) === false);
+    const posted = [];
+    RAW_POINTER_MOTION_SPEC.propagate(false, {}, { postToCore: (m) => posted.push(m), postSetting: () => {} });
+    check('a change is propagated to the core as setRawPointerMotion',
+          JSON.stringify(posted) === '[{"type":"setRawPointerMotion","value":false}]', JSON.stringify(posted));
+}
+{
+    // Turned off: the request asks plainly, with no refusal to recover from.
+    const element = makeElement('ok');
+    reset(element);
+    const input = makeInput(element);
+    input.setRawPointerMotion(false);
+    input._requestPointerLock(element, () => {}, () => {});
+    await sleep(10);
+    check('turned off, the lock asks plainly', element.calls.join(',') === 'plain', element.calls.join(','));
+    // Turned back on: asked for again, since nothing was refused.
+    element.calls.length = 0;
+    input.setRawPointerMotion(true);
+    input._requestPointerLock(element, () => {}, () => {});
+    await sleep(10);
+    check('turned on, the lock asks for raw movement', element.calls.join(',') === 'unadjusted',
+          element.calls.join(','));
+}
+{
+    // Turned on after a refusal: the engine is not asked twice for what it refused.
+    const element = makeElement('refuse-option');
+    reset(element);
+    const input = makeInput(element);
+    const lock = () => input._requestPointerLock(element, lock, () => {});
+    lock();
+    await sleep(10);
+    input.setRawPointerMotion(false);
+    input.setRawPointerMotion(true);
+    element.calls.length = 0;
+    lock();
+    await sleep(10);
+    check('a refusal outlives the toggle', element.calls.join(',') === 'plain', element.calls.join(','));
+}
+{
+    // Changed while the stream holds the lock: the held lock is asked again with
+    // the new option, so the change is not deferred to the next lock.
+    const element = makeElement('ok');
+    reset(element);
+    const input = makeInput(element);
+    document.pointerLockElement = element;
+    input.setRawPointerMotion(false);
+    await sleep(10);
+    check('a held lock is re-asked plainly when raw movement is turned off',
+          element.calls.join(',') === 'plain', element.calls.join(','));
+    element.calls.length = 0;
+    input.setRawPointerMotion(true);
+    await sleep(10);
+    check('and re-asked for raw movement when it is turned on', element.calls.join(',') === 'unadjusted',
+          element.calls.join(','));
+    element.calls.length = 0;
+    input.setRawPointerMotion(true);
+    await sleep(10);
+    check('an unchanged setting asks nothing', element.calls.length === 0, element.calls.join(','));
+    document.pointerLockElement = null;
+    input.setRawPointerMotion(false);
+    await sleep(10);
+    check('with no lock held nothing is asked', element.calls.length === 0, element.calls.join(','));
+}
+{
+    // The held lock is on an engine that refuses the option: the refusal is
+    // remembered and the lock is asked plainly again, so it is kept as it was.
+    const element = makeElement('refuse-option');
+    reset(element);
+    const input = makeInput(element);
+    Input.rawPointerMotion = false;
+    document.pointerLockElement = element;
+    input.setRawPointerMotion(true);
+    await sleep(20);
+    check('a held lock whose engine refuses falls back to a plain re-request',
+          element.calls.join(',') === 'unadjusted,plain' && Input._rawMotionRefused === true,
+          `${element.calls.join(',')} refused=${Input._rawMotionRefused}`);
+    document.pointerLockElement = null;
 }
 
 // --- where a lock may land -------------------------------------------------

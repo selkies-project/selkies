@@ -59,7 +59,8 @@
  * Dashboards talk to the core over same-origin window messages. The core
  * handles `setVolume`, `setMute`, `setScaleLocally`, `setSynth`,
  * `showVirtualKeyboard`, `setUseCssScaling`, `setAntiAliasing`,
- * `setUseBrowserCursors`, `setManualResolution`, `resetResolutionToWindow`,
+ * `setUseBrowserCursors`, `setRawPointerMotion`, `setManualResolution`,
+ * `resetResolutionToWindow`,
  * `settings`, `getStats`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `pipelineStatusUpdate`, `pipelineControl`, `audioDeviceSelected`,
  * `gamepadControl`, `requestFullscreen`, `command`, `touchinput:trackpad`,
@@ -117,8 +118,8 @@ import {
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
-import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor } from './lib/util.js';
+import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC } from './lib/conditional-settings.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, isMacDesktop } from './lib/util.js';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 
@@ -510,6 +511,20 @@ function applyEffectiveCursorSetting() {
     try {
         window.postMessage({ type: 'effectiveCursorState', value: finalSetting }, window.location.origin);
     } catch (e) { /* postMessage unavailable */ }
+}
+/**
+ * Whether pointer lock asks for raw (unaccelerated) movement: seeded from
+ * localStorage over the platform default at init, resolved through the shared
+ * ladder on every settings payload (`resolvedRawPointerMotion`), then updated
+ * by a dashboard pick (persisted) or a server-pushed value (not persisted, so
+ * a later server-side change stays re-pushable).
+ */
+let rawPointerMotion = true;
+/** Applies the raw pointer motion setting to the input handler. */
+function applyRawPointerMotion() {
+    if (window.webrtcInput && typeof window.webrtcInput.setRawPointerMotion === 'function') {
+        window.webrtcInput.setRawPointerMotion(rawPointerMotion);
+    }
 }
 /** Publishes the real viewport height as the `--vh` CSS unit (mobile browser chrome excluded). */
 function setRealViewportHeight() {
@@ -952,6 +967,19 @@ function resolvedCssScaling(serverSettings) {
   return HIDPI_SPEC.toServer(hidpi);
 }
 
+/**
+ * The `raw_pointer_motion` the deployment implies, off the shared ladder: a
+ * locked or operator value, else the client's stored pick, else the platform
+ * default (off on macOS). Resolved here for the reason CSS scaling is: pointer
+ * lock is taken from the stream, whether or not a settings panel ever mounts.
+ * @param {Object<string, Object>} serverSettings The `server_settings` payload.
+ * @returns {boolean}
+ */
+function resolvedRawPointerMotion(serverSettings) {
+  return resolveSpec(RAW_POINTER_MOTION_SPEC, serverSettings, { macDesktop: isMacDesktop() },
+    (key) => getStringParam(key, null));
+}
+
 function sanitizeAndStoreSettings(serverSettings) {
   console.log("Sanitizing and storing settings based on server payload.");
   const changes = {};
@@ -1055,6 +1083,7 @@ if (getStringParam('scaling_dpi', null) === null) {
 }
 antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 use_browser_cursors = getBoolParam('use_browser_cursors', true);
+rawPointerMotion = getBoolParam('raw_pointer_motion', Input.rawPointerMotion);
 enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 clipboard_in_enabled = getBoolParam('clipboard_in_enabled', true);
 clipboard_out_enabled = getBoolParam('clipboard_out_enabled', true);
@@ -3672,6 +3701,7 @@ const initializeInput = () => {
   window.webrtcInput = inputInstance;
   inputInstance.setDisplayLayouts(latestDisplayLayouts, displayId);
   applyEffectiveCursorSetting();
+  applyRawPointerMotion();
 
   if (overlayInput) {
     const handlePointerDown = (e) => {
@@ -4114,6 +4144,16 @@ function receiveMessage(event) {
         applyEffectiveCursorSetting();
       } else {
         console.warn("Invalid value received for setUseBrowserCursors:", message.value);
+      }
+      break;
+    case 'setRawPointerMotion':
+      if (typeof message.value === 'boolean') {
+        rawPointerMotion = message.value;
+        setBoolParam('raw_pointer_motion', rawPointerMotion);
+        console.log(`Set raw_pointer_motion to ${rawPointerMotion} and persisted.`);
+        applyRawPointerMotion();
+      } else {
+        console.warn("Invalid value received for setRawPointerMotion:", message.value);
       }
       break;
     case 'setManualResolution':
@@ -4687,6 +4727,11 @@ function handleSettingsMessage(settings, fromServer) {
     // Only the setUseBrowserCursors message persists this value.
     use_browser_cursors = !!settings.use_browser_cursors;
     applyEffectiveCursorSetting();
+  }
+  if (settings.raw_pointer_motion !== undefined) {
+    // Only the setRawPointerMotion message persists this value.
+    rawPointerMotion = !!settings.raw_pointer_motion;
+    applyRawPointerMotion();
   }
   if (settings.debug !== undefined) {
     debug = settings.debug;
@@ -6815,6 +6860,11 @@ class WorkerWebSocket {
               if (cssScaling !== useCssScaling) {
                   window.postMessage({ type: 'setUseCssScaling', value: cssScaling },
                                      window.location.origin);
+              }
+              const rawMotion = resolvedRawPointerMotion(obj.settings);
+              if (rawMotion !== rawPointerMotion) {
+                  rawPointerMotion = rawMotion;
+                  applyRawPointerMotion();
               }
               // After the gates above, so the one-time initial push honours them.
               maybeSendInitialClipboard();

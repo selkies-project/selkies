@@ -214,7 +214,8 @@ The table below lists all available server settings.
 | `SELKIES_MANUAL_HEIGHT` | `--manual-height` | `0` | Lock height to a fixed value. Setting this forces manual resolution mode. |
 | `SELKIES_SCALING_DPI` | `--scaling-dpi` | `'96'` | The default DPI for UI scaling. |
 | `SELKIES_ENABLE_BINARY_CLIPBOARD` | `--enable-binary-clipboard` | `False` | Allow binary data on the clipboard. |
-| `SELKIES_USE_BROWSER_CURSORS` | `--use-browser-cursors` | `False` | Use browser CSS cursors instead of rendering to canvas. |
+| `SELKIES_USE_BROWSER_CURSORS` | `--use-browser-cursors` | `True` | Use browser CSS cursors instead of rendering to canvas. |
+| `SELKIES_RAW_POINTER_MOTION` | `--raw-pointer-motion` | `True` | Ask the browser for unaccelerated (raw) pointer movement under pointer lock; clients leave it off on macOS unless it is chosen or set here. |
 | `SELKIES_USE_CSS_SCALING` | `--use-css-scaling` | `False` | HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched. |
 | `SELKIES_PORT` (or `CUSTOM_WS_PORT`) | `--port` | `8080` | Port for the data websocket server. |
 | `SELKIES_SUBFOLDER` (or `SUBFOLDER`) | `--subfolder` | `''` | URL path prefix the server is reverse-proxied under, prepended to every route. Optional: set it only when the proxy does not strip the prefix before forwarding. Slashes are optional (`desk`, `/desk` and `/desk/` are the same prefix; `/` is the root). The web client derives its own prefix from the URL it was loaded from, so this configures the server alone. |

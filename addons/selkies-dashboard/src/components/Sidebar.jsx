@@ -50,11 +50,12 @@
  * @module
  */
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
-import { displayLabel, decodableEncoders, canDecodeFullColor, getRoutePrefix, getStorageAppName, isMobileClient } from "../../../selkies-web-core/lib/util.js";
+import { displayLabel, decodableEncoders, canDecodeFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
-  USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
+  USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC,
+  RAW_POINTER_MOTION_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import PlayerGamepadButton from "./PlayerGamepadButton.jsx";
 import { getTranslator } from "../translations";
@@ -1045,6 +1046,7 @@ function Sidebar() {
     newRenderable.binaryClipboard = isRenderable('enable_binary_clipboard')
       && (s.clipboard_enabled?.value ?? true);
     newRenderable.use_browser_cursors = isRenderable('use_browser_cursors');
+    newRenderable.rawPointerMotion = isRenderable('raw_pointer_motion');
     newRenderable.video_bitrate = isRenderable('video_bitrate');
     newRenderable.audio_bitrate = isRenderable('audio_bitrate');
 
@@ -1328,6 +1330,7 @@ function Sidebar() {
     useCpu: readStored("use_cpu") !== null
       ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
     allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
+    macDesktop: isMacDesktop(),
   };
   /**
    * Each conditional setting is one hook call over a shared spec. The hook
@@ -1357,6 +1360,8 @@ function Sidebar() {
     FORCE_ALIGNED_RESOLUTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [use_browser_cursors, setUseBrowserCursors] = useConditionalSetting(
     USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [rawPointerMotion, setRawPointerMotion] = useConditionalSetting(
+    RAW_POINTER_MOTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   /**
    * The cursor value the core reports as in effect (multi-monitor forces
    * browser cursors on), `null` until reported; displayed over the stored
@@ -2259,6 +2264,10 @@ function Sidebar() {
    */
   const handleUseBrowserCursorsToggle = () => {
     writeConditional(USE_BROWSER_CURSORS_SPEC, !(effectiveCursor ?? use_browser_cursors), setUseBrowserCursors, { persist: false });
+  };
+  /** Raw pointer motion toggle; the core owns persistence, as for browser cursors. */
+  const handleRawPointerMotionToggle = () => {
+    writeConditional(RAW_POINTER_MOTION_SPEC, !rawPointerMotion, setRawPointerMotion, { persist: false });
   };
   const handleEnableBinaryClipboardToggle = () => {
     const newState = !enableBinaryClipboard;
@@ -3633,6 +3642,24 @@ function Sidebar() {
                           aria-pressed={effectiveCursor !== null ? effectiveCursor : use_browser_cursors}
                           title={t(use_browser_cursors ? "sections.screen.useNativeCursorStylesDisableTitle" : "sections.screen.useNativeCursorStylesEnableTitle",
                                   use_browser_cursors ? "Use canvas cursor rendering (Paint to canvas)" : "Use CSS cursor rendering (Replace system cursors)")}
+                        >
+                          <span className="toggle-button-sidebar-knob"></span>
+                        </button>
+                      </div>
+                    )}
+                    {(renderableSettings.rawPointerMotion ?? true) && (
+                      <div className="dev-setting-item toggle-item">
+                        <label htmlFor="rawPointerMotionToggle">
+                          {t("sections.screen.rawPointerMotionLabel", "Raw pointer motion")}
+                        </label>
+                        <button
+                          id="rawPointerMotionToggle"
+                          className={`toggle-button-sidebar ${rawPointerMotion ? "active" : ""}`}
+                          onClick={handleRawPointerMotionToggle}
+                          aria-pressed={rawPointerMotion}
+                          title={t(rawPointerMotion ? "sections.screen.rawPointerMotionDisableTitle" : "sections.screen.rawPointerMotionEnableTitle",
+                                  rawPointerMotion ? "Keep this device's pointer acceleration under pointer lock"
+                                    : "Ask the browser for unaccelerated movement under pointer lock (granted on Windows and macOS, refused on Linux and Android)")}
                         >
                           <span className="toggle-button-sidebar-knob"></span>
                         </button>
