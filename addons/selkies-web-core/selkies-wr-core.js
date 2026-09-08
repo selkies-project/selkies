@@ -2659,6 +2659,12 @@ export default function webrtc() {
 				gamingModeActive = active;
 				window.postMessage({ type: 'gamingModeUpdate', active }, window.location.origin);
 			}
+			input.onnotice = (code, message) => {
+				window.postMessage({
+					type: 'fileUpload',
+					payload: { status: 'warning', fileName: code, message, code },
+				}, window.location.origin);
+			}
 
 			webrtc.onplaystreamrequired = () => {
 				showStart = true;

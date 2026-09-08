@@ -2745,7 +2745,8 @@ function Sidebar() {
           // An unknown or absent code keeps the raw message for third-party
           // consumers: the translator answers a miss with the key itself.
           const codeKey =
-            typeof code === "string" && (code.startsWith("clipboard") || code === "commandFailed")
+            typeof code === "string" &&
+            (code.startsWith("clipboard") || code === "commandFailed" || code.startsWith("keyboardLock"))
               ? `notifications.${code}`
               : null;
           const codeMsg = codeKey ? t(codeKey, { detail: errMsg }) : null;

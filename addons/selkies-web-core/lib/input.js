@@ -1386,6 +1386,7 @@ export class Input {
         this.onmenuhotkey = null;
         this.gamingMode = false;
         this.ongamingmode = null;
+        this.onnotice = null;
         this.onfullscreenhotkey = this.enterFullscreen;
         this.ongaminghotkey = this.toggleGamingMode;
         this.ongamepadhotkey = null;
@@ -1523,6 +1524,9 @@ export class Input {
      * refused request per page whatever the setting says.
      */
     static _rawMotionRefused = false;
+
+    /** Set once the page has been told that nothing holds Escape in gaming mode. */
+    static _keyboardLockNoticed = false;
 
     /** Whether the next lock request asks for raw movement. */
     static _asksRawMotion() {
@@ -4342,7 +4346,31 @@ export class Input {
         if (navigator.keyboard && 'lock' in navigator.keyboard) {
             const keys = [ "AltLeft", "AltRight", "Tab", "Escape", "MetaLeft", "MetaRight", "ContextMenu" ];
             navigator.keyboard.lock(keys).catch(() => {});
+            return;
         }
+        this._noticeKeyboardLockUnavailable();
+    }
+
+    /**
+     * Says once per page that nothing holds Escape: without the Keyboard Lock
+     * API the browser leaves fullscreen and the pointer lock on a single
+     * press, which ends gaming mode, and the page can neither prevent that nor
+     * see the key. Brave has the API but its Shields withhold it by default
+     * with the rest of the keyboard fingerprinting surface, so the remedy is
+     * named there. The notice goes to `onnotice` with a code the dashboards
+     * translate and the English text as their fallback.
+     */
+    _noticeKeyboardLockUnavailable() {
+        if (Input._keyboardLockNoticed) return;
+        Input._keyboardLockNoticed = true;
+        const brave = typeof navigator !== 'undefined' && !!navigator.brave;
+        const code = brave ? 'keyboardLockBlockedByShields' : 'keyboardLockUnavailable';
+        const text = brave
+            ? "Brave's Shields block the keyboard lock, so a single Escape leaves gaming mode. "
+              + "Allow the keyboard API for this site under the Shields fingerprinting controls to hold Escape instead."
+            : 'This browser offers no keyboard lock, so a single Escape leaves gaming mode instead of reaching the session.';
+        console.warn('Input: ' + text);
+        if (this.onnotice) this.onnotice(code, text);
     }
 
     /** Hands the system keys back; a browser that never locked them ignores it. */

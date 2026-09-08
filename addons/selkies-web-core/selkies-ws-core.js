@@ -3650,6 +3650,12 @@ const initializeInput = () => {
     gamingModeActive = active;
     window.postMessage({ type: 'gamingModeUpdate', active }, window.location.origin);
   };
+  inputInstance.onnotice = (code, message) => {
+    window.postMessage({
+      type: 'fileUpload',
+      payload: { status: 'warning', fileName: code, message, code },
+    }, window.location.origin);
+  };
 
   inputInstance.getWindowResolution = () => {
     const videoContainer = document.querySelector('.video-container');

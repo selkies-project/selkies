@@ -485,4 +485,41 @@ function stage(ids, locked = null) {
           `gaming=${input.gamingMode} events=${events.join(',')}`);
 }
 
+// --- a keyboard the engine will not lock -----------------------------------
+// Without the Keyboard Lock API a single Escape leaves fullscreen and the
+// pointer lock, and gaming mode with them; the page can neither prevent that
+// nor see the key, so it says so once, naming Brave's Shields where those are
+// what withhold the API. An engine that locks the keyboard hears nothing.
+{
+    const element = makeElement('ok');
+    reset(element);
+    document.fullscreenElement = element;
+    Object.defineProperty(globalThis, 'navigator', { value: {}, configurable: true });
+    Input._keyboardLockNoticed = false;
+    const input = makeInput(element);
+    const notices = [];
+    input.onnotice = (code, text) => notices.push(`${code}:${text.length > 0}`);
+    input.requestKeyboardLock();
+    input.requestKeyboardLock();
+    check('a missing keyboard lock is announced once, as unavailable',
+          notices.join(',') === 'keyboardLockUnavailable:true', notices.join(','));
+
+    Object.defineProperty(globalThis, 'navigator', { value: { brave: {} }, configurable: true });
+    Input._keyboardLockNoticed = false;
+    notices.length = 0;
+    input.requestKeyboardLock();
+    check('Brave without the API is told about its Shields',
+          notices.join(',') === 'keyboardLockBlockedByShields:true', notices.join(','));
+
+    const keyboard = { calls: [], lock: () => { keyboard.calls.push('lock'); return Promise.resolve(); },
+                       unlock: () => keyboard.calls.push('unlock') };
+    Object.defineProperty(globalThis, 'navigator', { value: { keyboard }, configurable: true });
+    Input._keyboardLockNoticed = false;
+    notices.length = 0;
+    input.requestKeyboardLock();
+    check('an engine that locks the keyboard hears no notice',
+          keyboard.calls.join(',') === 'lock' && notices.length === 0,
+          `${keyboard.calls.join(',')} / ${notices.join(',')}`);
+}
+
 process.exit(failed === 0 ? 0 : 1);
