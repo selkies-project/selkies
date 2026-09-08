@@ -11,6 +11,7 @@ throw that record away. Select by tier with the markers:
     pytest tests -m "integration or e2e"
 """
 import os
+import shutil
 import subprocess
 import sys
 from typing import Optional
@@ -31,16 +32,32 @@ CASES: list = [
 ]
 
 
+def keep_logs(case: str) -> None:
+    """Copy the logs a suite left in the work directory into a folder named after it,
+    so a run's record carries every suite's server log and not only the last one's."""
+    dest = os.path.join(helpers.WORKDIR, "suite-logs", case)
+    try:
+        os.makedirs(dest, exist_ok=True)
+        for name in os.listdir(helpers.WORKDIR):
+            src = os.path.join(helpers.WORKDIR, name)
+            if name.endswith(".log") and os.path.isfile(src):
+                shutil.copy2(src, dest)
+    except OSError:
+        pass
+
+
 @pytest.mark.parametrize("path,selector,timeout", CASES)
 def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
     """Run one suite as a subprocess and map its exit protocol onto pytest."""
     cmd = [PYTHON, os.path.join(TESTS, path)] + ([selector] if selector else [])
     # A minute short of the kill, so the dump lands in the output that is kept.
     env = dict(os.environ, SELKIES_SUITE_DEADLINE=str(max(30, timeout - 60)))
+    case = path[:-3].replace("/", "-") + (f"-{selector}" if selector else "")
     try:
         proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,
                               timeout=timeout, env=env)
     except subprocess.TimeoutExpired as e:
+        keep_logs(case)
         # The checks the suite did finish are its record of where it stuck;
         # they would otherwise die with it.
         out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
@@ -50,6 +67,7 @@ def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
         raise AssertionError(
             f"{path} {selector or ''} ran past {timeout}s\n"
             + ("\n".join(out.splitlines()[-20:]) or err[-2000:])) from None
+    keep_logs(case)
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
     if proc.returncode == helpers.SKIP_EXIT:

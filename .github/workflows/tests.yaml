@@ -280,8 +280,10 @@ jobs:
       - name: Collect the server logs
         if: always()
         run: |
+          # The last suite's logs, and the copy the runner kept of every suite's
           mkdir -p suite-logs
           cp -r /tmp/selkies-tests/*.log suite-logs/ 2>/dev/null || true
+          cp -r /tmp/selkies-tests/suite-logs/. suite-logs/ 2>/dev/null || true
       - uses: actions/upload-artifact@v7
         if: always()
         with:

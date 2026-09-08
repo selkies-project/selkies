@@ -465,9 +465,18 @@ def drive(res: "H.Results", mode: str, wayland: bool) -> None:
                 (PRIMARY_CSS[0], -SECONDARY_CHROME[1]) + SECONDARY_CHROME,
                 "#display2-right")
             res.check(f"[{mode}] secondary video flows", bool(wait_video(dpage, mode)), "")
-            got_layout = wait_for(lambda: (page.evaluate(LAYOUT_JS) or {}).get("rects")
-                                  and len(page.evaluate(LAYOUT_JS)["rects"]) == 2, 30)
+            # The secondary reaches the grabbed page at its own density first and
+            # again at the primary's once the server restreams it, so the layout
+            # is awaited at the density it ends at, not merely at two rectangles.
+            def settled() -> bool:
+                layout = page.evaluate(LAYOUT_JS) or {}
+                rects = layout.get("rects") or []
+                return len(rects) == 2 and any(
+                    r["x"] == layout.get("ownW") and r.get("scale") == 2
+                    and r.get("w") == SECONDARY_CSS[0] * 2 for r in rects)
+            wait_for(settled, 30)
             layout = page.evaluate(LAYOUT_JS) or {}
+            got_layout = len(layout.get("rects") or []) == 2
             res.check(f"[{mode}] both rectangles reach the grabbed page", got_layout, layout)
             if not got_layout:
                 return

@@ -40,6 +40,7 @@ PAGE = "/tests/tools/pointer_motion_page.html"
 PORT = int(os.environ.get("E2E_MOTION_PORT", "18099"))
 LATEST: dict = {}
 WARMED: set = set()
+LAUNCHES: dict = {}
 
 # (label, motions, pixels each, seconds between): a slow careful aim, a normal
 # drag, and a flick, all at one device pixel of travel per motion or more.
@@ -165,7 +166,8 @@ def launch(browser: str, profile: str, dpr: float, query: str = "") -> subproces
 
 
 def why_silent(proc: subprocess.Popen, profile: str) -> str:
-    """What the browser was doing when the page failed to report."""
+    """What the browser was doing when the page failed to report: its state, the
+    last line it logged, and whether its profile carries a lock."""
     tail = ""
     try:
         with open(os.path.join(profile, "browser.log"), "rb") as fh:
@@ -176,30 +178,68 @@ def why_silent(proc: subprocess.Popen, profile: str) -> str:
         pass
     code = proc.poll()
     state = "still running" if code is None else f"exited {code}"
+    if os.path.lexists(os.path.join(profile, "lock")):
+        state += ", profile locked"
     return f"no report, {state}: {tail}" if tail else f"no report, {state}"
 
 
 def prepare_profile(browser: str) -> str:
-    """A profile for `browser`, warmed once for Firefox so its first run does
-    not open onboarding in the window that has to hold pointer lock."""
-    profile = os.path.join(H.WORKDIR, f"motion-profile-{browser}")
-    if browser == "firefox" and browser not in WARMED:
-        # A first run writes the profile and shows onboarding, neither of which may
-        # happen in the window holding pointer lock; user.js is rewritten per launch.
-        shutil.rmtree(profile, ignore_errors=True)
+    """A fresh profile for one launch of `browser`.
+
+    Firefox's is a copy of a profile warmed once, so a first run's onboarding never
+    opens in the window that has to hold pointer lock, and no launch inherits the
+    lock or the session of the one before it.
+    """
+    n = LAUNCHES.get(browser, 0)
+    LAUNCHES[browser] = n + 1
+    profile = os.path.join(H.WORKDIR, f"motion-profile-{browser}-{n}")
+    shutil.rmtree(profile, ignore_errors=True)
+    if browser == "firefox":
+        warm = os.path.join(H.WORKDIR, "motion-profile-firefox-warm")
+        if browser not in WARMED:
+            shutil.rmtree(warm, ignore_errors=True)
+            os.makedirs(warm, exist_ok=True)
+            subprocess.run([binary("firefox"), "--headless", "--profile", warm,
+                            "--screenshot", os.devnull, "about:blank"],
+                           capture_output=True, timeout=180)
+            WARMED.add(browser)
+        shutil.copytree(warm, profile, symlinks=True)
+        for name in ("lock", ".parentlock"):
+            try:
+                os.remove(os.path.join(profile, name))
+            except OSError:
+                pass
+    else:
         os.makedirs(profile, exist_ok=True)
-        subprocess.run([binary("firefox"), "--headless", "--profile", profile,
-                        "--screenshot", os.devnull, "about:blank"],
-                       capture_output=True, timeout=180)
-        WARMED.add(browser)
-    elif browser != "firefox":
-        shutil.rmtree(profile, ignore_errors=True)
-    os.makedirs(profile, exist_ok=True)
     return profile
 
 
-def lock(res, label: str, proc: subprocess.Popen, profile: str, d) -> bool:
-    """Wait for the probe page, then click until it holds pointer lock.
+def start(res, browser: str, dpr: float, query: str, label: str):
+    """Launch `browser` on a fresh profile and wait for the probe page's first report.
+
+    A browser that exits before the page reports is launched once more on another
+    fresh profile, with the first attempt's state recorded as a skipped check; a
+    second silence is recorded as the failure. Returns the process and its profile,
+    or `None` and the last profile.
+    """
+    for attempt in range(2):
+        profile = prepare_profile(browser)
+        LATEST.clear()
+        proc = launch(browser, profile, dpr, query)
+        # A browser that has already exited will not report, so the wait ends
+        # with it rather than running out the clock three times over.
+        if wait_for(lambda p=proc: bool(LATEST) or p.poll() is not None, 90) and LATEST:
+            return proc, profile
+        silence = why_silent(proc, profile)
+        if attempt == 0 and proc.poll() is not None:
+            res.skip(f"{label}: the browser exited before the page reported, relaunched", silence)
+            continue
+        res.check(f"{label}: the probe page loads", False, silence)
+        return None, profile
+
+
+def lock(res, label: str, d) -> bool:
+    """Click the loaded probe page until it holds pointer lock.
 
     Returns:
         True once the page reports the lock; a check has been recorded on failure.
@@ -207,12 +247,6 @@ def lock(res, label: str, proc: subprocess.Popen, profile: str, d) -> bool:
     from selkies.Xlib import X
     from selkies.Xlib.ext import xtest
 
-    # A browser that has already exited will not report, so the wait ends
-    # with it rather than running out the clock three times over.
-    if not wait_for(lambda: bool(LATEST) or proc.poll() is not None, 90) \
-            or not LATEST:
-        res.check(f"{label}: the probe page loads", False, why_silent(proc, profile))
-        return False
     root = d.screen().root
     # A browser still opening its window swallows the first click; a machine
     # under load is not a product regression, so the click is repeated.
@@ -238,13 +272,14 @@ def measure(res, browser: str, dpr: float) -> None:
     from selkies.Xlib import X
     from selkies.Xlib.ext import xtest
 
-    profile = prepare_profile(browser)
-    LATEST.clear()
     label = f"{browser} at dpr {dpr}"
     d = H.x_display()
-    proc = launch(browser, profile, dpr)
+    proc, _profile = start(res, browser, dpr, "", label)
+    if proc is None:
+        d.close()
+        return
     try:
-        if not lock(res, label, proc, profile, d):
+        if not lock(res, label, d):
             return
         root = d.screen().root
         # Raw movement is refused by every engine on Linux, so the fallback to a
@@ -284,13 +319,14 @@ def check_setting(res, browser: str, raw: bool) -> None:
     asked for. Off, the client must not ask for raw movement at all; on, it
     must ask, and an engine that refuses (every one on Linux) then gets the
     plain request that still ends in a lock."""
-    profile = prepare_profile(browser)
-    LATEST.clear()
     label = f"{browser} with raw pointer motion {'on' if raw else 'off'}"
     d = H.x_display()
-    proc = launch(browser, profile, 1, f"?raw={int(raw)}")
+    proc, _profile = start(res, browser, 1, f"?raw={int(raw)}", label)
+    if proc is None:
+        d.close()
+        return
     try:
-        if not lock(res, label, proc, profile, d):
+        if not lock(res, label, d):
             return
         asked = LATEST.get("asked") or []
         if raw:
