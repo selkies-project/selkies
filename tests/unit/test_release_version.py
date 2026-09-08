@@ -63,14 +63,18 @@ if not STEP.strip():
     sys.exit(1)
 
 
-def validate(tag: str, latest_tags: str = "auto") -> tuple:
-    """The validate step itself, run on a tag: `(accepted, step outputs)`."""
+def validate(tag: str, latest: str = "") -> tuple:
+    """The validate step itself, run on a tag: `(accepted, step outputs)`.
+
+    `latest` is the workflow's boolean input as the step sees it: `true`, `false`, or
+    empty for a run that left the default.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "github_output")
         open(out, "w").close()
         proc = subprocess.run(
             ["sh", "-c", STEP], capture_output=True, text=True, timeout=60,
-            env=dict(os.environ, TAG=tag, LATEST_TAGS=latest_tags, GITHUB_OUTPUT=out))
+            env=dict(os.environ, TAG=tag, LATEST=latest, GITHUB_OUTPUT=out))
         outputs = dict(ln.split("=", 1) for ln in open(out).read().splitlines() if "=" in ln)
     return proc.returncode == 0, outputs
 
@@ -111,20 +115,24 @@ for tag, (want_ok, want_pre) in TAGS.items():
         check(f"{tag} is released as {tag}",
               out.get("version") == tag.lstrip("v"), out.get("version", "<unset>"))
 
-# Releases take the floating `latest` image tags and pre-releases leave them
-# alone, which the maintainer can override per run
+# The `latest` input, on by default, moves the floating `latest` image tags onto
+# the release and asks for the "Latest" badge, which GitHub gives no pre-release
 LATEST = {
-    ("1.2.3", "auto"): "true",
-    ("2.0.0.post1", "auto"): "true",
-    ("2.0.0rc0", "auto"): "false",
-    ("0.0.0.dev0", "auto"): "false",
-    ("2.0.0rc0", "always"): "true",
-    ("1.2.3", "never"): "false",
+    ("1.2.3", ""): ("true", "true"),
+    ("1.2.3", "true"): ("true", "true"),
+    ("2.0.0.post1", ""): ("true", "true"),
+    ("1.2.3", "false"): ("false", "false"),
+    ("2.0.0rc0", ""): ("true", "false"),
+    ("0.0.0.dev0", "true"): ("true", "false"),
+    ("2.0.0rc0", "false"): ("false", "false"),
 }
-for (tag, mode), want in LATEST.items():
-    _, out = validate(tag, mode)
-    check(f"{tag} with latest_tags={mode} {'moves' if want == 'true' else 'leaves'} the latest tags",
-          out.get("floating_tags") == want, out.get("floating_tags", "<unset>"))
+for (tag, latest), (want_tags, want_badge) in LATEST.items():
+    _, out = validate(tag, latest)
+    label = f"latest={latest or 'default'}"
+    check(f"{tag} with {label} {'moves' if want_tags == 'true' else 'leaves'} the latest tags",
+          out.get("latest") == want_tags, out.get("latest", "<unset>"))
+    check(f"{tag} with {label} {'takes' if want_badge == 'true' else 'leaves'} the latest badge",
+          out.get("make_latest") == want_badge, out.get("make_latest", "<unset>"))
 
 # version -> what dpkg and rpm are handed, and what apk is handed
 NATIVE = {
