@@ -64,6 +64,26 @@ A defect that predates the change you are making is still in scope: fix it, or s
 you ruled out, and what you would do next. The same applies to a failure you cannot reproduce yet — narrow it until
 it is fixed or precisely described, and never let a test that fails for an unknown reason pass unremarked.
 
+## Landing a change
+
+A change is ready when four questions have answers, and the commit or pull request gives them to the reviewer:
+
+1. Was the defect, or the missing behaviour, reproduced on the code before the change? A failing check or a
+   measurement on the old tree is that answer; an argument from the source is not.
+2. Is it gone, or present, on the exact code being committed, through the path a user takes? A test that reaches the
+   result only through a switch a user would never flip (a developer toggle, a debug key, a knob of the rig) has
+   confirmed nothing.
+3. Can the change affect behaviour it was not aimed at, and what was run to know? Name the suites and measurements
+   that ran and the paths they did not cover.
+4. Is the change stripped to what makes it work? Every line the first two answers do not need is noise the maintainers
+   have to sift; drop it, or say why it stays.
+
+A change in an area a maintainer has said they are working on goes to a branch and a pull request carrying those
+answers, never straight to `main`, whatever standing permission to push `main` exists. An optional path another
+component may offer (a protocol a compositor advertises, a driver feature, a device) is taken only when its presence
+is detected and never as the default: that it is exposed is not proof it works, and a reviewer has to be able to tell
+what runs where.
+
 ## Engineering priorities
 
 - Parity between X11 and Wayland, WebSockets and WebRTC, and the default and wish dashboards: anything wired up on
