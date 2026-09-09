@@ -12,6 +12,12 @@ Chromium (platform-spoofed via CDP where a branch needs it):
 - CDP-style (insertText API): textInput and compositionend BOTH carry the
   commit. The end must see the stamp and clear the preedit instead of typing
   the text a second time.
+
+A dashboard soft modifier is then held over the two soft-keyboard anatomies:
+Android Chromium reports a tap as keyCode 229 with no key or code and the
+letter only as the assist input's text, iOS names the key on the keydown and
+echoes it as text. Both must reach the wire as the one key under the held
+Control, neither dropped nor typed twice.
 """
 import functools
 import http.server
@@ -84,6 +90,26 @@ window.__replayWithProbe = (groups, probeIdx) => {
       if (i === probeIdx) window.__mid.push(window.__decodeWire());
     }
   }
+};
+// A dashboard soft Control (a constructed keydown on window, in synth mode as
+// the dashboards set it) held over one soft-keyboard tap of `c`, in the
+// anatomy `platform` reports: Android Chromium's keyCode 229 keydown with the
+// letter only in the assist text, or iOS's named keydown plus text echo.
+window.__softChord = (platform) => {
+  const assist = document.getElementById('keyboard-input-assist');
+  const key = (type, init) => new KeyboardEvent(type, { bubbles: true, cancelable: true, ...init });
+  const tap = platform === 'android'
+    ? { key: 'Unidentified', keyCode: 229 }
+    : { key: 'c', keyCode: 67 };
+  window.__input.setSynth(true);
+  window.dispatchEvent(key('keydown', { key: 'Control', code: 'ControlLeft', ctrlKey: true }));
+  assist.dispatchEvent(key('keydown', tap));
+  assist.value = 'c';
+  assist.dispatchEvent(new Event('input', { bubbles: true }));
+  assist.dispatchEvent(key('keyup', tap));
+  window.dispatchEvent(key('keyup', { key: 'Control', code: 'ControlLeft' }));
+  window.__input.setSynth(false);
+  return window.__sent.filter((m) => !m.startsWith('kh,'));
 };
 window.__decodeWire = () => {
   let txt = '';
@@ -212,8 +238,29 @@ def run_branch(pw: Any, tag: str, platform: Optional[str], ua: Optional[str],
         browser.close()
 
 
+SOFT_CHORD_EXPECT = ["kd,65507", "kd,99", "ku,99", "ku,65507"]
+
+
+def run_soft_chord(pw: Any) -> None:
+    """A soft Control over an Android and an iOS soft-keyboard tap, on the wire as Ctrl+c once."""
+    browser = pw.chromium.launch()
+    try:
+        page = browser.new_page()
+        page.goto(f"http://127.0.0.1:{port}/tests-ime-client.html")
+        page.wait_for_function(
+            "window.__ready === true || window.__errs.length > 0", timeout=15000)
+        for platform in ("android", "ios"):
+            page.evaluate("window.__sent = []")
+            got = page.evaluate("(p) => window.__softChord(p)", platform)
+            check(f"soft Control over a {platform} keyboard tap sends Ctrl+c once",
+                  got == SOFT_CHORD_EXPECT, f"wire={got!r}")
+    finally:
+        browser.close()
+
+
 try:
     with sync_playwright() as pw:
+        run_soft_chord(pw)
         run_branch(pw, "linux-ibus", None, None,
                    [("ibus anatomy", IBUS_GROUPS, IBUS_EXPECT, IBUS_PROBES)])
         run_branch(pw, "win-ibus", "Windows", WIN_UA,

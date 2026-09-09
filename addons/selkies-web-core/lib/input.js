@@ -1070,6 +1070,19 @@ const browser = {
  *  move those around: macOS Command is sent as Alt_L. */
 const SHORTCUT_MODIFIER_CODES = ['ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight'];
 
+/**
+ * Whether a keysym is a chord modifier: one that turns the key sent under it
+ * into a shortcut rather than a character.
+ * @param {number} keysym
+ * @returns {boolean}
+ */
+function _isChordModifierKeysym(keysym) {
+    return keysym === KeyTable.XK_Control_L || keysym === KeyTable.XK_Control_R ||
+        keysym === KeyTable.XK_Alt_L || keysym === KeyTable.XK_Alt_R ||
+        keysym === KeyTable.XK_Super_L || keysym === KeyTable.XK_Super_R ||
+        keysym === KeyTable.XK_Meta_L || keysym === KeyTable.XK_Meta_R;
+}
+
 /** Keysym to `getModifierState()` name, for a code whose own name is wrong: an
  *  xkb swap leaves an Alt code holding Control_L, and the macOS remaps leave a
  *  Meta code holding Alt_L and an Alt code holding Mode_switch or Meta_L. */
@@ -1461,6 +1474,8 @@ export class Input {
          */
         this._momentaryChordMods = new Set();
         this._momentaryChordModsTimer = null;
+        /** Whether the last keydown sent a key under a chord modifier, so the text echo that may follow it is a duplicate (`_chordEchoPending`). */
+        this._chordKeySent = false;
         /** Last textInput commit, so a compositionend carrying the same text right after stays clear-only (Blink chains both). */
         this._lastTextInputCommit = null;
         this.keyboardInputAssist = document.getElementById('keyboard-input-assist');
@@ -1706,8 +1721,12 @@ export class Input {
         }
         
         this.send((down ? "kd," : "ku,") + finalKeysymToSend);
-        if (down) this._startKeyHeartbeat();
-        else if (Object.keys(this._keyDownList).length === 0) this._stopKeyHeartbeat();
+        if (down) {
+            this._noteChordKey(finalKeysymToSend);
+            this._startKeyHeartbeat();
+        } else if (Object.keys(this._keyDownList).length === 0) {
+            this._stopKeyHeartbeat();
+        }
     }
 
     /** Starts the `kh` heartbeat of held keysyms; it stops itself once nothing is held. */
@@ -1737,8 +1756,14 @@ export class Input {
      */
     _sendMomentaryKey(keysym) {
         if (keysym === null) return;
+        this._noteChordKey(keysym);
         this.send("kd," + keysym);
         this.send("ku," + keysym);
+    }
+
+    /** Records that a non-modifier key went out under a held or momentary chord modifier, for `_chordEchoPending`. */
+    _noteChordKey(keysym) {
+        if (!_isChordModifierKeysym(keysym) && this._chordModifierHeld()) this._chordKeySent = true;
     }
 
     /** Focuses the overlay element so the IME composes there, unless a real form field (dashboard inputs) holds focus. */
@@ -1879,6 +1904,7 @@ export class Input {
         }
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         if (!this._guac_markEvent(event)) return;
+        this._chordKeySent = false;
         this._releaseDesyncedModifiers(event);
         const keycode = KeyboardUtil.getKeyCode(event);
         if (keycode === 'CapsLock' && KeyboardUtil.getKey(event) === 'CapsLock') {
@@ -2266,16 +2292,16 @@ export class Input {
     }
 
     /**
-     * Types a textInput commit, unless a chord is held (the keydown path sent
-     * it, and the text echo must not also type the letter), and stamps it so
-     * the compositionend Blink chains after it only clears the preedit. Only
-     * an IME commit reaches this: plain keydowns are stopped before the
-     * browser action, and Blink can deliver a commit as textInput with an
-     * empty compositionend.
+     * Types a textInput commit, unless it is the echo of a chord the keydown
+     * path already sent (`_chordEchoPending`), and stamps it so the
+     * compositionend Blink chains after it only clears the preedit. Only an
+     * IME commit reaches this: plain keydowns are stopped before the browser
+     * action, and Blink can deliver a commit as textInput with an empty
+     * compositionend.
      */
     _handleTextInput(event) {
         if (!event.data) return;
-        if (this._chordModifierHeld()) return;
+        if (this._chordEchoPending()) return;
         this._typeText(event.data);
         this._lastTextInputCommit = { data: event.data, at: performance.now() };
         this._clearCompositionHostSoon();
@@ -2285,15 +2311,30 @@ export class Input {
     _chordModifierHeld() {
         if (this._momentaryChordMods.size > 0) return true;
         for (const code in this._keyDownList) {
-            const ks = this._keyDownList[code];
-            if (ks === KeyTable.XK_Control_L || ks === KeyTable.XK_Control_R ||
-                ks === KeyTable.XK_Alt_L || ks === KeyTable.XK_Alt_R ||
-                ks === KeyTable.XK_Super_L || ks === KeyTable.XK_Super_R ||
-                ks === KeyTable.XK_Meta_L || ks === KeyTable.XK_Meta_R) {
-                return true;
-            }
+            if (_isChordModifierKeysym(this._keyDownList[code])) return true;
         }
         return false;
+    }
+
+    /**
+     * Whether the text event being handled is the browser's echo of a chord
+     * the keydown path already sent, which must not also type the letter.
+     * Consumed once answered.
+     *
+     * A held chord modifier alone does not decide it, because the keydown
+     * path sends a key only when it can name one: a soft keyboard on Android
+     * Chromium reports a tap as keyCode 229 with no key or code, and the
+     * letter arrives only as the assist input's text, which has to go out as
+     * the plain key the held modifier turns into the shortcut (iOS names the
+     * key on the keydown and takes the momentary path, so it never depended
+     * on this). A keydown that sent nothing therefore leaves the text to be
+     * typed.
+     * @returns {boolean}
+     */
+    _chordEchoPending() {
+        if (!this._chordModifierHeld() || !this._chordKeySent) return false;
+        this._chordKeySent = false;
+        return true;
     }
 
     /**
@@ -2392,13 +2433,13 @@ export class Input {
         return false;
     }
 
-    /** Types text from the mobile keyboard assist element and clears it; a held chord was sent by the keydown path, so its echo is dropped. */
+    /** Types text from the mobile keyboard assist element and clears it, unless it is the echo of a chord the keydown path sent (`_chordEchoPending`). */
     _handleMobileInput(event) {
         const text = event.target.value;
         if (!text) {
             return;
         }
-        if (this._chordModifierHeld()) {
+        if (this._chordEchoPending()) {
             event.target.value = '';
             return;
         }
