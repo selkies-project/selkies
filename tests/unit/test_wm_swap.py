@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(REPO, "src"))
 import helpers as H  # noqa: E402
 
 from selkies import display_utils as DU  # noqa: E402
+from selkies.Xlib import X, display as xdisplay  # noqa: E402
 
 res = H.Results("wm-swap")
 
@@ -96,6 +97,41 @@ res.check("the desktop image names no window manager",
           "MULTI_MONITOR_WM" not in open(DESKTOP_IMAGE, encoding="utf-8").read())
 
 
+def wm_manages_a_window(display: str, timeout: float = 15.0) -> float:
+    """Seconds until the manager lists a window mapped now, or -1.
+
+    Openbox publishes its check window well before its event loop runs, and a
+    map request or a replacement claimed in between is never acted on, so the
+    swap has to wait for a manager that answers. Each attempt maps a fresh
+    window and gives up on it after half a second.
+    """
+    d = xdisplay.Display(display)
+    try:
+        root = d.screen().root
+        listed = d.intern_atom("_NET_CLIENT_LIST")
+        started = time.monotonic()
+        while time.monotonic() - started < timeout:
+            w = root.create_window(0, 0, 1, 1, 0, d.screen().root_depth,
+                                   X.InputOutput, X.CopyFromParent)
+            w.set_wm_name("wm-probe")
+            w.map()
+            d.flush()
+            attempt = time.monotonic()
+            managed = False
+            while not managed and time.monotonic() - attempt < 0.5:
+                prop = root.get_full_property(listed, X.AnyPropertyType)
+                managed = bool(prop) and w.id in list(prop.value)
+                if not managed:
+                    time.sleep(0.02)
+            w.destroy()
+            d.flush()
+            if managed:
+                return time.monotonic() - started
+        return -1
+    finally:
+        d.close()
+
+
 def live_openbox_check() -> None:
     """The readers against a real Openbox, and a real restart of it."""
     if H.shutil.which("openbox") is None:
@@ -124,6 +160,9 @@ def live_openbox_check() -> None:
                   DU.wm_name_matches("openbox", name) and pid == proc.pid, (name, pid, proc.pid))
         res.check("and its command line is read back from /proc",
                   DU.wm_command(pid) == ["openbox", "--replace"], DU.wm_command(pid))
+        answered = wm_manages_a_window(display)
+        res.check("and it manages a window mapped now, so its startup is over",
+                  answered >= 0, answered)
         # What the restart said and which openbox processes are left are the
         # record of a swap that did not happen, so a failure names its cause.
         said: list = []
