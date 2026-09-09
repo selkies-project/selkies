@@ -260,10 +260,13 @@ def hidpi_block(page: Any, mode: str, res: "H.Results") -> None:
 
     On, the stream is the window's physical pixels and the desktop is scaled to
     the UI-scaling pick, so the remote UI comes out the size of the local one.
-    Off, the desktop is left unscaled and the pick divides the resolution asked
-    for instead, which the browser stretches back: scaling on both sides at
-    once drew the remote UI at the pick twice over. The pick here is the
-    automatic default, this display's own scaling as a DPI.
+    Off, the remote UI is not scaled at all and the pick divides the resolution
+    asked for instead, which the browser stretches back: scaling on both sides
+    at once drew the remote UI at the pick twice over. A manual resolution is
+    the exact framebuffer either way -- a toggle must not swing the number the
+    operator asked for -- so with the flag off the pick has nothing to divide
+    there and moves nothing. The pick here is the automatic default, this
+    display's own scaling as a DPI.
     """
     pick = DPR * 96
     css_w, css_h = page.evaluate("[window.innerWidth, window.innerHeight]")
@@ -280,13 +283,30 @@ def hidpi_block(page: Any, mode: str, res: "H.Results") -> None:
     off_dpi = wait_dpi(96)
     res.check("HiDPI off leaves the desktop unscaled", off_dpi == 96, f"Xft.dpi={off_dpi}")
 
-    # The flag decides sharpness, not size: a window is drawn at the DPI and
-    # shown at the CSS box over the stream, so the same ratio either way is the
-    # same window on screen -- half the pixels, no rescaling of the desktop.
+    # In auto mode the flag decides sharpness, not size: a window is drawn at
+    # the DPI and shown at the CSS box over the stream, so the same ratio
+    # either way is the same window on screen -- half the pixels, and the
+    # desktop rescaled by nothing.
     on_px, off_px = css_w * DPR, css_w
     res.check("the flag leaves a window the size it had",
               off_dpi * on_px == on_dpi * off_px,
               f"{off_dpi} DPI over {off_px}px vs {on_dpi} over {on_px}px")
+
+    seen = len(sent)
+    post(page, {"type": "setManualResolution", "width": PRESET_W, "height": PRESET_H})
+    sent = wait_new_request(page, seen)
+    res.check("HiDPI off asks for a manual resolution exactly",
+              len(sent) > seen and sent[-1] == f"{PRESET_W}x{PRESET_H}", sent[seen:])
+    manual_dpi = wait_dpi(96)
+    res.check("and leaves the desktop unscaled there too", manual_dpi == 96,
+              f"Xft.dpi={manual_dpi}")
+
+    seen = len(sent)
+    post(page, {"type": "resetResolutionToWindow"})
+    sent = wait_new_request(page, seen)
+    window_dpi = wait_dpi(96)
+    res.check("back on the window size it is unscaled still", window_dpi == 96,
+              f"Xft.dpi={window_dpi}")
 
     seen = len(sent)
     post(page, {"type": "setUseCssScaling", "value": False})
