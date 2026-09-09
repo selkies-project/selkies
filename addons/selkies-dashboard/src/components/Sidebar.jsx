@@ -1135,6 +1135,7 @@ function Sidebar() {
   const [notifications, setNotifications] = useState([]);
   const notificationTimeouts = useRef({});
   const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
+  const [isFilesModalLoading, setIsFilesModalLoading] = useState(true);
   const [isAppsModalOpen, setIsAppsModalOpen] = useState(false);
   const [keyboardButtonPosition, setKeyboardButtonPosition] = useState({ bottom: 20, right: 20 });
   const dragInfo = useRef({
@@ -1222,7 +1223,12 @@ function Sidebar() {
   };
 
   const toggleAppsModal = () => setIsAppsModalOpen(!isAppsModalOpen);
-  const toggleFilesModal = () => setIsFilesModalOpen(!isFilesModalOpen);
+  const toggleFilesModal = () => {
+    setIsFilesModalOpen(!isFilesModalOpen);
+    if (!isFilesModalOpen) {
+      setIsFilesModalLoading(true);
+    }
+  };
   const handleShowVirtualKeyboard = useCallback(() => {
     console.log("Dashboard: Directly handling virtual keyboard pop.");
     const kbdAssistInput = document.getElementById('keyboard-input-assist');
@@ -3871,7 +3877,17 @@ function Sidebar() {
           >
             &times;
           </button>
-          <iframe src="./files/" title="Downloadable Files" />
+          {isFilesModalLoading && (
+            <div className="files-modal-loading">
+              <SpinnerIcon />
+            </div>
+          )}
+          <iframe 
+            src="./files/" 
+            title="Downloadable Files"
+            onLoad={() => setIsFilesModalLoading(false)}
+            style={{ opacity: isFilesModalLoading ? 0 : 1 }}
+          />
         </div>
       )}
       {isAppsModalOpen && (

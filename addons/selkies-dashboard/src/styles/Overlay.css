@@ -1139,6 +1139,35 @@ a:active {
     border: none;
     border-radius: 10px;
     background-color: var(--input-bg);
+    transition: opacity 0.3s ease-in-out;
+}
+
+/* Loading overlay for files modal */
+.files-modal-loading {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 15px;
+    z-index: 1062;
+    padding: 10px;
+}
+
+.files-modal-loading p {
+    color: var(--sidebar-text);
+    font-size: 1rem;
+    margin: 0;
+}
+
+.files-modal-loading svg {
+    width: 48px;
+    height: 48px;
+    display: block;
+    overflow: visible;
 }
 
 /* --- Virtual Keyboard Button --- */
