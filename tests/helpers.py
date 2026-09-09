@@ -825,15 +825,16 @@ def wl_clear(socket_name: str, timeout: float = 12) -> None:
 
 
 class WlObs:
-    """Drive the pywayland observer client (tests/tools/wlobs.py) against the
-    compositor and collect its JSONL event lines from a reader thread."""
+    """Drive a pywayland client from tests/tools against the compositor and
+    collect its JSONL event lines from a reader thread. `tool` names the client,
+    and any keyword arguments are added to its environment."""
 
-    def __init__(self, socket_name: str) -> None:
+    def __init__(self, socket_name: str, tool: str = "wlobs.py", **env: str) -> None:
         self.proc = spawn(
-            [PYTHON, os.path.join(TOOLS, "wlobs.py"), socket_name],
+            [PYTHON, os.path.join(TOOLS, tool), socket_name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             env={**os.environ, "XDG_RUNTIME_DIR": RUNTIME_DIR,
-                 "WLOBS_DURATION": "60"})
+                 "WLOBS_DURATION": "60", **env})
         self.lines: list = []
         self._start_reader()
 
