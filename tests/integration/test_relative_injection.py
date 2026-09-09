@@ -13,6 +13,10 @@ The seam back to absolute mode is pinned too: a drag held against the screen
 edge stops at the edge and unwinds from there rather than from where the deltas
 would have carried it, and the absolute move after it lands where it says,
 whatever the tracked position made of the drag.
+A game asks for more than the deltas: it locks the pointer, and a lock the
+compositor confirms but does not honour leaves the pointer moving under the
+holder, which reads every move a second time off the absolute motion it is
+still sent. The Wayland lock block pins both halves of that.
 """
 import asyncio
 import json
@@ -141,10 +145,43 @@ def wayland_block(res) -> None:
         H.server_stop()
 
 
+def lock_block(res) -> None:
+    """What a client holding a pointer lock is told: every delta, and no move."""
+    H.server_start(mode="websockets", wayland=True)
+    probe = H.WlObs(WL_SOCKET, "wl_lock_probe.py", WL_LOCK_DURATION="60")
+    try:
+        if not probe.ready(20):
+            res.skip("wayland: a client's pointer lock is confirmed",
+                     f"the lock probe never mapped: {probe.lines[-3:]}")
+            return
+        # A lock holds only a surface the pointer is already inside.
+        asyncio.run(send_all([f"m,{START[0]},{START[1]},0,0"]))
+        locked = probe.wait_for("locked", 8)
+        res.check("wayland: a client's pointer lock is confirmed",
+                  locked is not None, f"{probe.lines[-4:]}")
+        if locked is None:
+            return
+        mark = len(probe.lines)
+        deltas = [(7, 3), (-4, 11), (60, -25)]
+        asyncio.run(send_all([f"m2,{dx},{dy},0,0" for dx, dy in deltas]))
+        after = probe.lines[mark:]
+        carried = [(int(line["dx"]), int(line["dy"])) for line in after
+                   if line.get("kind") == "relative"]
+        res.check("wayland: the lock's holder is given every delta, once",
+                  carried == deltas, f"{carried}")
+        moved = [line for line in after if line.get("kind") == "motion"]
+        res.check("wayland: and is not moved as well, so it reads no delta twice",
+                  moved == [], f"{moved[:4]}")
+    finally:
+        probe.stop()
+        H.server_stop()
+
+
 def run() -> "H.Results":
     res = H.Results("relative-injection")
     x11_block(res)
     wayland_block(res)
+    lock_block(res)
     res.summary()
     return res
 
