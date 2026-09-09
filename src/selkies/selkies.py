@@ -1319,6 +1319,7 @@ class DataStreamingServer(BaseStreamingService):
                 lambda latency: self.metrics.set_latency(latency) if self.metrics else None
             )
         self.input_handler.on_mouse_pointer_visible = self.set_native_cursor_rendering
+        self.input_handler.on_session_compositor_adopted = self._resync_wayland_session_scale
 
         if ENABLE_RESIZE:
             self.input_handler.on_resize = lambda res_str, display_id='primary': on_resize_handler(
@@ -4152,32 +4153,9 @@ class DataStreamingServer(BaseStreamingService):
                                 self._update_cursor_cap(dpi_value)
 
                             if IS_WAYLAND and client_display_id:
-                                # A nested session scales its own screen (capture stays 1.0);
-                                # a plain session scales the capture output, re-read on restart.
-                                entry = self.display_clients.get(client_display_id)
-                                size = ((entry or {}).get('width'), (entry or {}).get('height'))
-                                scale_val = await self.input_handler.realize_wayland_dpi(
-                                    dpi_value, client_display_id, size)
-                                capture_scale_changed = (
-                                    entry is not None and entry.get('scale') != scale_val)
-                                if entry is not None:
-                                    entry['scale'] = scale_val
+                                # Before the restart, which reads the cap through CaptureSettings.
                                 self._update_cursor_cap(dpi_value)
-                                # A STOP_VIDEO'd display stays stopped; the next START_VIDEO
-                                # applies the stored scale.
-                                video_active = self.display_clients.get(client_display_id, {}).get('video_active', True)
-                                if video_active and capture_scale_changed:
-                                    data_logger.info(f"Wayland: restarting capture at scale {scale_val} for {client_display_id}")
-                                    await self._stop_capture_for_display(client_display_id)
-                                    if hasattr(self, 'display_layouts') and client_display_id in self.display_layouts:
-                                        layout = self.display_layouts[client_display_id]
-                                        await self._start_capture_for_display(
-                                            display_id=client_display_id,
-                                            width=layout['w'], height=layout['h'],
-                                            x_offset=layout['x'], y_offset=layout['y']
-                                        )
-                                        await self._start_backpressure_task_if_needed(client_display_id)
-                                        await self._sync_wayland_realized_geometry(client_display_id)
+                                await self._realize_wayland_display_dpi(client_display_id, dpi_value)
 
                             # Stored where SETTINGS stores its own DPI, or a later partial
                             # SETTINGS re-applies a DPI the desktop has moved off.
@@ -4565,6 +4543,62 @@ class DataStreamingServer(BaseStreamingService):
                 _close_abandoned_ws(dropped_ws)
             except (ConnectionResetError, OSError, RuntimeError):
                 pass
+
+    async def _realize_wayland_display_dpi(self, display_id: str, dpi: Any) -> None:
+        """Run the Wayland scale ladder for one display and restart its capture
+        when the scale left for the capture output changed.
+
+        A nested session scales its own screen and the capture stays 1.0; a
+        plain session scales the capture output, re-read on the restart. A
+        STOP_VIDEO'd display stays stopped: the next START_VIDEO applies the
+        stored scale.
+
+        Args:
+            display_id: The display whose screen takes the DPI.
+            dpi: The desktop DPI to realize.
+        """
+        entry = self.display_clients.get(display_id)
+        size = ((entry or {}).get('width'), (entry or {}).get('height'))
+        scale_val = await self.input_handler.realize_wayland_dpi(dpi, display_id, size)
+        if entry is None or entry.get('scale') == scale_val:
+            return
+        entry['scale'] = scale_val
+        if not entry.get('video_active', True):
+            return
+        layout = getattr(self, 'display_layouts', {}).get(display_id)
+        if layout is None:
+            return
+        data_logger.info(f"Wayland: restarting capture at scale {scale_val} for {display_id}")
+        await self._stop_capture_for_display(display_id)
+        if display_id == 'primary':
+            # The capture is a view over the primary's screen, and a capture
+            # start sizes the view alone: the screen carries the scale itself.
+            await self._size_wayland_screen(layout['w'], layout['h'])
+        await self._start_capture_for_display(
+            display_id=display_id,
+            width=layout['w'], height=layout['h'],
+            x_offset=layout['x'], y_offset=layout['y']
+        )
+        await self._start_backpressure_task_if_needed(display_id)
+        await self._sync_wayland_realized_geometry(display_id)
+
+    async def _resync_wayland_session_scale(self, dpi: Any) -> None:
+        """A session compositor was adopted after captures started: run the
+        scale ladder again for every display, so the session takes the desktop
+        DPI as its output scale and the capture output, which took it while the
+        session was still starting, drops back to 1.0.
+
+        Serialized against reconfiguration: the adoption can land during the
+        pass that started the captures it restarts.
+
+        Args:
+            dpi: The desktop DPI in force.
+        """
+        if not IS_WAYLAND or self.input_handler is None:
+            return
+        async with self._reconfigure_guard():
+            for display_id in list(self.display_clients):
+                await self._realize_wayland_display_dpi(display_id, dpi)
 
     async def _size_wayland_screen(self, width: int, height: int,
                                    grow_only: bool = False) -> None:
