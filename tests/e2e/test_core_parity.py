@@ -4,7 +4,9 @@
 Resolution: an auto-mode HiDPI client asks for the window's physical size, a
 manual preset is requested as exact framebuffer pixels, reset-to-window returns
 to the physical window size, and turning "scale locally" on in auto mode leaves
-the window-resize listener armed. Clipboard: a server with the clipboard
+the window-resize listener armed. HiDPI: the flag either streams physical
+pixels and scales the desktop, or leaves the desktop unscaled and divides the
+request by the UI-scaling pick for the browser to stretch back — never both. Clipboard: a server with the clipboard
 disabled must not arm the focus read (Chromium's permission prompt) or send any
 clipboard payload. Gamepad: a pad present before the channel opens honours the
 persisted gamepad toggle, and one pad's disconnect does not stop polling the
@@ -20,6 +22,7 @@ written against, and the webrtc core must match it.
 Usage: python test_core_parity.py [webrtc|websockets|all]
 """
 import os
+import subprocess
 import sys
 import time
 from typing import Any, Optional
@@ -156,6 +159,27 @@ def root_matches(realized: tuple, w: int, h: int) -> bool:
     return abs(realized[0] - w) <= 16 and abs(realized[1] - h) <= 16
 
 
+def wait_dpi(want: int, timeout: float = 10) -> int:
+    """Poll the resource database until Xft.dpi reads `want`.
+
+    Returns:
+        The last DPI read, 96 where the resource is unset: X's own default,
+        which is what an application reads when nothing overrides it.
+    """
+    env = {**os.environ, "DISPLAY": H.require_display()}
+    deadline = time.time() + timeout
+    dpi = 96
+    while time.time() < deadline:
+        out = subprocess.run(["xrdb", "-query"], capture_output=True, text=True,
+                             env=env).stdout
+        dpi = next((int(float(line.split(":", 1)[1]))
+                    for line in out.splitlines() if line.startswith("Xft.dpi")), 96)
+        if dpi == want:
+            return dpi
+        time.sleep(0.3)
+    return dpi
+
+
 def wait_new_request(page: Any, seen: int, timeout: float = 8) -> list:
     """Poll until the page has put more than `seen` r, requests on the wire.
 
@@ -229,6 +253,49 @@ def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
     realized = wait_root(RESIZED_W * DPR, RESIZED_H * DPR)
     res.check("window resize realized on the server",
               root_matches(realized, RESIZED_W * DPR, RESIZED_H * DPR), f"root={realized}")
+
+
+def hidpi_block(page: Any, mode: str, res: "H.Results") -> None:
+    """The HiDPI flag decides one thing, on either transport.
+
+    On, the stream is the window's physical pixels and the desktop is scaled to
+    the UI-scaling pick, so the remote UI comes out the size of the local one.
+    Off, the desktop is left unscaled and the pick divides the resolution asked
+    for instead, which the browser stretches back: scaling on both sides at
+    once drew the remote UI at the pick twice over. The pick here is the
+    automatic default, this display's own scaling as a DPI.
+    """
+    pick = DPR * 96
+    css_w, css_h = page.evaluate("[window.innerWidth, window.innerHeight]")
+    on_dpi = wait_dpi(pick)
+    res.check("HiDPI on scales the desktop to the pick", on_dpi == pick,
+              f"Xft.dpi={on_dpi} want {pick}")
+
+    seen = len(page.evaluate("window.__resSent"))
+    post(page, {"type": "setUseCssScaling", "value": True})
+    sent = wait_new_request(page, seen)
+    off_request = sent[-1] if len(sent) > seen else ""
+    res.check("HiDPI off asks for the window's CSS size",
+              off_request == f"{css_w}x{css_h}", sent[seen:])
+    off_dpi = wait_dpi(96)
+    res.check("HiDPI off leaves the desktop unscaled", off_dpi == 96, f"Xft.dpi={off_dpi}")
+
+    # The flag decides sharpness, not size: a window is drawn at the DPI and
+    # shown at the CSS box over the stream, so the same ratio either way is the
+    # same window on screen -- half the pixels, no rescaling of the desktop.
+    on_px, off_px = css_w * DPR, css_w
+    res.check("the flag leaves a window the size it had",
+              off_dpi * on_px == on_dpi * off_px,
+              f"{off_dpi} DPI over {off_px}px vs {on_dpi} over {on_px}px")
+
+    seen = len(sent)
+    post(page, {"type": "setUseCssScaling", "value": False})
+    sent = wait_new_request(page, seen)
+    res.check("HiDPI on again asks for the physical size",
+              len(sent) > seen and sent[-1] == f"{css_w * DPR}x{css_h * DPR}", sent[seen:])
+    back_dpi = wait_dpi(pick)
+    res.check("HiDPI on again scales the desktop", back_dpi == pick,
+              f"Xft.dpi={back_dpi} want {pick}")
 
 
 def clipboard_enabled_block(page: Any, res: "H.Results") -> None:
@@ -342,6 +409,7 @@ def run(mode: str) -> bool:
                 res.check("video flowing", bool(wait_video(page, mode)))
                 time.sleep(1.0)
                 resolution_block(page, mode, res)
+                hidpi_block(page, mode, res)
                 clipboard_enabled_block(page, res)
                 soft_keyboard_block(page, res)
                 page.context.close()
