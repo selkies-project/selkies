@@ -1800,7 +1800,8 @@ class WebRTCService(BaseStreamingService):
                 self._broadcast_display_config()
                 return
             did, info = secondary
-            await self._wm_swap.ensure_for(len(self.display_clients), IS_WAYLAND)
+            # display_clients holds the secondaries; the primary counts too.
+            await self._wm_swap.ensure_for(len({"primary", *self.display_clients}), IS_WAYLAND)
             if self._primary_dims is None:
                 p_w, p_h = self.media_pipeline.width, self.media_pipeline.height
                 if IS_WAYLAND:
