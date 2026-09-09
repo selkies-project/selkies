@@ -111,7 +111,7 @@ import {
   digestedPayload
 } from './lib/clipboard-sync.js';
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js';
-import { streamDensity as streamDensityOf, publishedScale } from './lib/stream-density.js';
+import { streamDensity as streamDensityOf, autoScalingDpi, publishedScale } from './lib/stream-density.js';
 import {
   createFileUploader
 } from './lib/file-upload.js';
@@ -424,7 +424,8 @@ let currentEncoderMode = 'h264enc-striped';
 let useCssScaling = false;
 /** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 function streamDensity() {
-  return streamDensityOf({ displayId, layouts: latestDisplayLayouts, useCssScaling, shared: isSharedMode });
+  return streamDensityOf({ displayId, layouts: latestDisplayLayouts, useCssScaling,
+                           localScale: scalingDPI / 96, shared: isSharedMode });
 }
 /** The density the last request was built on; a change re-requests on a secondary. */
 let appliedStreamDensity = 0;
@@ -450,18 +451,38 @@ function followStreamDensity() {
 }
 let trackpadMode = false;
 let scalingDPI = 96;
-/** `scaling_dpi` stops in 25% steps; densities between them snap to the nearest. */
-const DPI_STOPS = [96, 120, 144, 168, 192, 216, 240, 264, 288];
 /**
- * Derives the default `scaling_dpi` from the local display density so the
- * remote desktop's UI matches the local one.
- * @returns {number} The nearest entry of `DPI_STOPS`, clamped at both ends.
+ * Derives the default `scaling_dpi` from the local display scaling
+ * (lib/stream-density.js), so the remote desktop's UI matches the local one.
+ * @returns {number}
  */
 function autoDeriveDpi() {
-  const dpr = window.devicePixelRatio || 1;
-  const target = Math.round(dpr * 4) * 24;
-  return DPI_STOPS.reduce((prev, cur) =>
-    Math.abs(cur - target) < Math.abs(prev - target) ? cur : prev);
+  return autoScalingDpi();
+}
+
+/**
+ * The DPI the desktop is asked for: 96 under CSS scaling, where the pick
+ * divides the requested resolution instead (lib/stream-density.js).
+ * @returns {number}
+ */
+function effectiveScalingDpi() {
+  return useCssScaling ? 96 : scalingDPI;
+}
+
+/**
+ * Re-derives `scaling_dpi` while it sits on its automatic default; a stored
+ * value is the dashboard's explicit pick and is left alone.
+ * @param {string} reason What changed, for the log.
+ * @returns {boolean} Whether the derived value moved; the caller pushes it.
+ */
+function followDerivedDpi(reason) {
+  if (isSharedMode) return false;
+  if (getStringParam('scaling_dpi', null) !== null) return false;
+  const derived = autoDeriveDpi();
+  if (derived === scalingDPI) return false;
+  scalingDPI = derived;
+  console.log(`DPI follows ${reason}: scaling_dpi -> ${derived}.`);
+  return true;
 }
 
 let lastFollowedDpr = window.devicePixelRatio || 1;
@@ -477,13 +498,9 @@ function maybeFollowDpr() {
   const dpr = window.devicePixelRatio || 1;
   if (dpr === lastFollowedDpr) return;
   lastFollowedDpr = dpr;
-  if (isSharedMode) return;
-  if (getStringParam('scaling_dpi', null) !== null) return;
-  const derived = autoDeriveDpi();
-  if (derived === scalingDPI) return;
-  scalingDPI = derived;
-  console.log(`DPI follows devicePixelRatio: scaling_dpi -> ${derived}.`);
-  sendFullSettingsUpdateToServer('devicePixelRatio changed');
+  if (followDerivedDpi('devicePixelRatio changed')) {
+    sendFullSettingsUpdateToServer('devicePixelRatio changed');
+  }
 }
 let antiAliasingEnabled = true;
 let clipboard_in_enabled = true;
@@ -2628,7 +2645,7 @@ function getCurrentSettingsPayload() {
     for (const [key, read] of storedEntries) {
         if (hasStoredParam(key)) settingsToSend[key] = read();
     }
-    settingsToSend['scaling_dpi'] = scalingDPI;
+    settingsToSend['scaling_dpi'] = effectiveScalingDpi();
     if (detectedKeyboardLayout) {
         settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
     }
@@ -4134,6 +4151,7 @@ function receiveMessage(event) {
                 applyManualCanvasStyle(manual_width, manual_height, true);
              }
           }
+          sendFullSettingsUpdateToServer('useCssScaling changed');
         }
       } else {
         console.warn("Invalid value received for setUseCssScaling:", message.value);
@@ -4729,6 +4747,10 @@ function handleSettingsMessage(settings, fromServer) {
     // Not stored: the localStorage pin is the dashboard's explicit slider pick;
     // the payload builder rides the live value either way.
     settingsChanged = true;
+    if (useCssScaling && !window.manual_resolution && !isSharedMode
+        && typeof handleResizeUI_globalRef === 'function') {
+      handleResizeUI_globalRef();
+    }
   }
   if (settings.enable_binary_clipboard !== undefined) {
     enable_binary_clipboard = !!settings.enable_binary_clipboard;
@@ -6185,7 +6207,7 @@ class WorkerWebSocket {
       }
 
       if (settingsToSend['scaling_dpi'] === undefined) {
-        settingsToSend['scaling_dpi'] = scalingDPI;
+        settingsToSend['scaling_dpi'] = effectiveScalingDpi();
       }
       if (detectedKeyboardLayout) {
         settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
