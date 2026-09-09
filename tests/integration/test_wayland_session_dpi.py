@@ -7,7 +7,9 @@ and the capture output carries the scale only for a session that manages no
 outputs of its own (KWin) or no session at all. Applications on XWayland get
 the DPI as Xft resources either way. These checks run set_dpi against a private
 X server and read the resource database back, and pin the realization policy on
-every topology.
+every topology, and the hand-off a session adopted after the captures started
+takes: the scale it needs is already on the capture output, so the transport's
+own ladder runs again rather than this layer scaling the session on top of it.
 """
 import asyncio
 import os
@@ -119,6 +121,53 @@ for label, size in (("no size", None), ("an unrealized size", (0, 0))):
     realize(unsized, 192, None, size)
     check(f"{label} takes the scale alone", unsized.wayland_input.calls
           == [("wayland-9", 0, 2.0)], unsized.wayland_input.calls)
+
+
+def adoption(dpi: int, with_hook: bool = True) -> tuple:
+    """Run the adoption hand-off and report what it scheduled.
+
+    Args:
+        dpi: The desktop DPI in force when the session is adopted.
+        with_hook: Whether a transport installed its ladder.
+
+    Returns:
+        The DPIs the transport's ladder was handed, and the direct
+        realizations this layer scheduled itself.
+    """
+    handler = make_handler(True)
+    handler.system_dpi = dpi
+    handed: list = []
+    direct: list = []
+    scheduled: list = []
+
+    async def ladder(value) -> None:
+        handed.append(value)
+
+    async def realize_here(value, *args, **kwargs) -> None:
+        direct.append(value)
+
+    handler.realize_wayland_dpi = realize_here
+    handler.on_session_compositor_adopted = ladder if with_hook else None
+    handler._spawn_task = lambda coro: scheduled.append(asyncio.ensure_future(coro))
+
+    async def run() -> None:
+        handler._schedule_session_scale()
+        if scheduled:
+            await asyncio.gather(*scheduled)
+
+    asyncio.run(run())
+    return handed, direct
+
+
+handed, direct = adoption(192)
+check("an adopted session hands the DPI to the transport's ladder",
+      handed == [192] and not direct, f"handed={handed} direct={direct}")
+handed, direct = adoption(96)
+check("a desktop at unity has nothing for it to run",
+      not handed and not direct, f"handed={handed} direct={direct}")
+handed, direct = adoption(192, with_hook=False)
+check("a transport with no ladder installed scales the session here",
+      not handed and direct == [192], f"handed={handed} direct={direct}")
 
 if not shutil.which("Xvfb") or not shutil.which("xrdb"):
     print("SKIP Xvfb/xrdb not installed; resource-merge checks need an X server",
