@@ -55,7 +55,7 @@ import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC,
-  RAW_POINTER_MOTION_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
+  RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import PlayerGamepadButton from "./PlayerGamepadButton.jsx";
 import { getTranslator } from "../translations";
@@ -1047,6 +1047,7 @@ function Sidebar() {
       && (s.clipboard_enabled?.value ?? true);
     newRenderable.use_browser_cursors = isRenderable('use_browser_cursors');
     newRenderable.rawPointerMotion = isRenderable('raw_pointer_motion');
+    newRenderable.macCmdAsCtrl = isRenderable('mac_cmd_as_ctrl') && isMacDesktop();
     newRenderable.video_bitrate = isRenderable('video_bitrate');
     newRenderable.audio_bitrate = isRenderable('audio_bitrate');
 
@@ -1362,6 +1363,8 @@ function Sidebar() {
     USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [rawPointerMotion, setRawPointerMotion] = useConditionalSetting(
     RAW_POINTER_MOTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [macCmdAsCtrl, setMacCmdAsCtrl] = useConditionalSetting(
+    MAC_CMD_AS_CTRL_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   /**
    * The cursor value the core reports as in effect (multi-monitor forces
    * browser cursors on), `null` until reported; displayed over the stored
@@ -2276,6 +2279,10 @@ function Sidebar() {
   /** Raw pointer motion toggle; the core owns persistence, as for browser cursors. */
   const handleRawPointerMotionToggle = () => {
     writeConditional(RAW_POINTER_MOTION_SPEC, !rawPointerMotion, setRawPointerMotion, { persist: false });
+  };
+  /** Command-as-Control toggle; the core owns persistence, as above. */
+  const handleMacCmdAsCtrlToggle = () => {
+    writeConditional(MAC_CMD_AS_CTRL_SPEC, !macCmdAsCtrl, setMacCmdAsCtrl, { persist: false });
   };
   const handleEnableBinaryClipboardToggle = () => {
     const newState = !enableBinaryClipboard;
@@ -3669,6 +3676,24 @@ function Sidebar() {
                           title={t(rawPointerMotion ? "sections.screen.rawPointerMotionDisableTitle" : "sections.screen.rawPointerMotionEnableTitle",
                                   rawPointerMotion ? "Keep this device's pointer acceleration under pointer lock"
                                     : "Ask the browser for unaccelerated movement under pointer lock (granted on Windows and macOS, refused on Linux and Android)")}
+                        >
+                          <span className="toggle-button-sidebar-knob"></span>
+                        </button>
+                      </div>
+                    )}
+                    {(renderableSettings.macCmdAsCtrl ?? false) && (
+                      <div className="dev-setting-item toggle-item">
+                        <label htmlFor="macCmdAsCtrlToggle">
+                          {t("sections.screen.macCmdAsCtrlLabel", "Command sends Control")}
+                        </label>
+                        <button
+                          id="macCmdAsCtrlToggle"
+                          className={`toggle-button-sidebar ${macCmdAsCtrl ? "active" : ""}`}
+                          onClick={handleMacCmdAsCtrlToggle}
+                          aria-pressed={macCmdAsCtrl}
+                          title={t(macCmdAsCtrl ? "sections.screen.macCmdAsCtrlDisableTitle" : "sections.screen.macCmdAsCtrlEnableTitle",
+                                  macCmdAsCtrl ? "Send Command as the Super key the session's window manager may bind"
+                                    : "Send Command chords as their Control chords, so Cmd+C copies remotely")}
                         >
                           <span className="toggle-button-sidebar-knob"></span>
                         </button>

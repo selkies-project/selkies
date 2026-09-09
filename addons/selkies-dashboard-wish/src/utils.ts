@@ -24,7 +24,7 @@
  * @module
  */
 
-import { getRoutePrefix, getStorageAppName, isMobileClient } from "../../selkies-web-core/lib/util.js";
+import { getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../selkies-web-core/lib/util.js";
 
 export { isMobileClient };
 
@@ -180,6 +180,8 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
     && (s.clipboard_enabled?.value ?? true);
   newRenderable.useBrowserCursors = isSettingRenderable(s.use_browser_cursors);
   newRenderable.rawPointerMotion = isSettingRenderable(s.raw_pointer_motion);
+  // Offered only where Command exists to remap.
+  newRenderable.macCmdAsCtrl = isSettingRenderable(s.mac_cmd_as_ctrl) && isMacDesktop();
   newRenderable.videoBitrate = isSettingRenderable(s.video_bitrate);
   newRenderable.audioBitrate = isSettingRenderable(s.audio_bitrate);
   // The HiDPI toggle drives use_css_scaling, inverted.

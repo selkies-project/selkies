@@ -118,7 +118,7 @@ import {
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
-import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC } from './lib/conditional-settings.js';
+import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, isMacDesktop } from './lib/util.js';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
@@ -524,6 +524,18 @@ let rawPointerMotion = true;
 function applyRawPointerMotion() {
     if (window.webrtcInput && typeof window.webrtcInput.setRawPointerMotion === 'function') {
         window.webrtcInput.setRawPointerMotion(rawPointerMotion);
+    }
+}
+/**
+ * Whether a macOS Command chord is sent as its Control chord, resolved off the
+ * shared ladder on every settings payload, then updated by a dashboard pick
+ * (persisted) or a server-pushed value (not persisted).
+ */
+let macCmdAsCtrl = true;
+/** Applies the Command-as-Control setting to the input handler. */
+function applyMacCmdAsCtrl() {
+    if (window.webrtcInput && typeof window.webrtcInput.setMacCmdAsCtrl === 'function') {
+        window.webrtcInput.setMacCmdAsCtrl(macCmdAsCtrl);
     }
 }
 /** Publishes the real viewport height as the `--vh` CSS unit (mobile browser chrome excluded). */
@@ -977,6 +989,18 @@ function resolvedCssScaling(serverSettings) {
  */
 function resolvedRawPointerMotion(serverSettings) {
   return resolveSpec(RAW_POINTER_MOTION_SPEC, serverSettings, { macDesktop: isMacDesktop() },
+    (key) => getStringParam(key, null));
+}
+
+/**
+ * The `mac_cmd_as_ctrl` the deployment implies, off the shared ladder. Resolved
+ * here for the reason raw pointer motion is: the keyboard is taken from the
+ * stream, whether or not a settings panel ever mounts.
+ * @param {Object<string, Object>} serverSettings The `server_settings` payload.
+ * @returns {boolean}
+ */
+function resolvedMacCmdAsCtrl(serverSettings) {
+  return resolveSpec(MAC_CMD_AS_CTRL_SPEC, serverSettings, { macDesktop: isMacDesktop() },
     (key) => getStringParam(key, null));
 }
 
@@ -3708,6 +3732,7 @@ const initializeInput = () => {
   inputInstance.setDisplayLayouts(latestDisplayLayouts, displayId);
   applyEffectiveCursorSetting();
   applyRawPointerMotion();
+  applyMacCmdAsCtrl();
 
   if (overlayInput) {
     const handlePointerDown = (e) => {
@@ -4140,6 +4165,16 @@ function receiveMessage(event) {
         applyRawPointerMotion();
       } else {
         console.warn("Invalid value received for setRawPointerMotion:", message.value);
+      }
+      break;
+    case 'setMacCmdAsCtrl':
+      if (typeof message.value === 'boolean') {
+        macCmdAsCtrl = message.value;
+        setBoolParam('mac_cmd_as_ctrl', macCmdAsCtrl);
+        console.log(`Set mac_cmd_as_ctrl to ${macCmdAsCtrl} and persisted.`);
+        applyMacCmdAsCtrl();
+      } else {
+        console.warn("Invalid value received for setMacCmdAsCtrl:", message.value);
       }
       break;
     case 'setManualResolution':
@@ -4718,6 +4753,11 @@ function handleSettingsMessage(settings, fromServer) {
     // Only the setRawPointerMotion message persists this value.
     rawPointerMotion = !!settings.raw_pointer_motion;
     applyRawPointerMotion();
+  }
+  if (settings.mac_cmd_as_ctrl !== undefined) {
+    // Only the setMacCmdAsCtrl message persists this value.
+    macCmdAsCtrl = !!settings.mac_cmd_as_ctrl;
+    applyMacCmdAsCtrl();
   }
   if (settings.debug !== undefined) {
     debug = settings.debug;
@@ -6851,6 +6891,11 @@ class WorkerWebSocket {
               if (rawMotion !== rawPointerMotion) {
                   rawPointerMotion = rawMotion;
                   applyRawPointerMotion();
+              }
+              const cmdAsCtrl = resolvedMacCmdAsCtrl(obj.settings);
+              if (cmdAsCtrl !== macCmdAsCtrl) {
+                  macCmdAsCtrl = cmdAsCtrl;
+                  applyMacCmdAsCtrl();
               }
               // After the gates above, so the one-time initial push honours them.
               maybeSendInitialClipboard();

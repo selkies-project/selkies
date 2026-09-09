@@ -229,10 +229,19 @@ export const RAW_POINTER_MOTION_SPEC = {
     conditional: (ctx) => (ctx.macDesktop ? false : undefined),
 };
 
+/**
+ * Whether a macOS Command chord is sent as its Control chord. On unless chosen
+ * or set otherwise; only macOS clients read it (`ctx.macDesktop` decides
+ * whether a panel offers it at all). The core owns it, applying and persisting
+ * it on the propagated message.
+ */
+export const MAC_CMD_AS_CTRL_SPEC = boolSpec("mac_cmd_as_ctrl", true,
+    (value, _ctx, io) => io.postToCore({ type: "setMacCmdAsCtrl", value }));
+
 const SETTING_SPECS = [
     HIDPI_SPEC, RATE_CONTROL_SPEC, USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC,
     VIDEO_STREAMING_MODE_SPEC, USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC,
-    FORCE_ALIGNED_RESOLUTION_SPEC, RAW_POINTER_MOTION_SPEC,
+    FORCE_ALIGNED_RESOLUTION_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC,
 ];
 
 /**

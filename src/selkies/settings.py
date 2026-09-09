@@ -345,6 +345,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Ask the browser for unaccelerated (raw) pointer movement under pointer lock, so a locked pointer travels by the mouse's own counts rather than the local acceleration curve; Windows and macOS grant it, Linux and Android refuse it and keep the curve either way. Clients leave it off on macOS unless it is chosen or set here, since that curve is what carries a slow hand across the remote screen. Clients may override per user unless the value is locked.",
     },
     {
+        "name": "mac_cmd_as_ctrl",
+        "type": "bool",
+        "default": True,
+        "help": "Send a macOS client's Command chords as their Control chords, so Cmd+C copies in the remote application the way it does locally. Turn it off where the session's window manager takes Super as its own modifier: remapped, a Cmd+Return bound to open a terminal arrives as Ctrl+Return, and Cmd+C interrupts the foreground program instead of copying. Command then arrives as the Super it physically is. Only macOS clients read it. Clients may override per user unless the value is locked.",
+    },
+    {
         "name": "use_css_scaling",
         "type": "bool",
         "default": False,

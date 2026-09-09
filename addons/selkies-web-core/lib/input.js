@@ -1544,6 +1544,17 @@ export class Input {
     static rawPointerMotion = !browser.isMacDesktop();
 
     /**
+     * Whether a macOS Command chord reaches the session as its Control chord:
+     * the `mac_cmd_as_ctrl` setting, which the core pushes through
+     * `setMacCmdAsCtrl`. On by default, so Cmd+C copies in the remote
+     * application the way it does locally. Off sends Command as the Super it
+     * physically is, which is what a session whose window manager takes Super
+     * as its own modifier needs: remapped, its Cmd+Return arrives as
+     * Ctrl+Return and its Cmd+C interrupts the foreground program.
+     */
+    static macCmdAsCtrl = true;
+
+    /**
      * Set the first time an engine refuses raw movement, so the option costs one
      * refused request per page whatever the setting says.
      */
@@ -1983,7 +1994,7 @@ export class Input {
             return;
         }
 
-        if (browser.isMac() && _isPhysicalKey(event) && code !== "MetaLeft" &&
+        if (browser.isMac() && Input.macCmdAsCtrl && _isPhysicalKey(event) && code !== "MetaLeft" &&
             code !== "MetaRight" && event.metaKey && !event.ctrlKey && !event.altKey) {
             if (this._keyDownList["MetaLeft"] || this._keyDownList["MetaRight"]) {
                 console.log(`macOS: Cmd+key detected for code '${code}'. Remapping Cmd to Ctrl.`);
@@ -2000,7 +2011,11 @@ export class Input {
 
         if ((browser.isMac() || browser.isIOS()) && _isPhysicalKey(event)) {
             switch (keysym) {
-                case KeyTable.XK_Super_L: keysym = KeyTable.XK_Alt_L; break;
+                // Command stands in for Alt only while it stands in for Control:
+                // sent as itself, it has to arrive as the Super it is.
+                case KeyTable.XK_Super_L:
+                    if (Input.macCmdAsCtrl) keysym = KeyTable.XK_Alt_L;
+                    break;
                 // X11 convention maps the right Command key onto Super_L.
                 case KeyTable.XK_Super_R: keysym = KeyTable.XK_Super_L; break;
                 case KeyTable.XK_Alt_L: keysym = KeyTable.XK_Mode_switch; break;
@@ -3443,6 +3458,24 @@ export class Input {
         this._requestPointerLock(locked, again, (err) => {
             console.warn('Input: pointer lock did not take the raw motion change:', err);
         });
+    }
+
+    /**
+     * Applies the Command-as-Control setting. Any Control this swapped in is
+     * released first, so the change cannot leave one held.
+     * @param {boolean} enabled
+     */
+    setMacCmdAsCtrl(enabled) {
+        const want = !!enabled;
+        if (Input.macCmdAsCtrl === want) return;
+        Input.macCmdAsCtrl = want;
+        console.log(`Input: macOS Command sent as ${want ? 'Control' : 'Super'}.`);
+        if (this._macCmdSwapped) {
+            if ('ControlLeft' in this._keyDownList) {
+                this._sendKeyEvent(this._keyDownList['ControlLeft'], 'ControlLeft', false);
+            }
+            this._macCmdSwapped = false;
+        }
     }
 
     /** Switches between the CSS cursor and the page-drawn cursor canvas. */

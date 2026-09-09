@@ -38,7 +38,7 @@ import { sessionAuthHeaders } from "../../../../selkies-web-core/lib/session-tok
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC,
-    RAW_POINTER_MOTION_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
+    RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
@@ -445,6 +445,8 @@ export function Settings() {
         USE_BROWSER_CURSORS_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     const [rawPointerMotion, setRawPointerMotion] = useConditionalSetting(
         RAW_POINTER_MOTION_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    const [macCmdAsCtrl, setMacCmdAsCtrl] = useConditionalSetting(
+        MAC_CMD_AS_CTRL_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     /**
      * The cursor mode the core reports as actually in effect (multi-monitor
      * forces browser cursors on), null until reported; the toggle shows it
@@ -877,6 +879,9 @@ export function Settings() {
     const handleRawPointerMotionToggle = () => {
         writeConditional(RAW_POINTER_MOTION_SPEC, !rawPointerMotion, setRawPointerMotion, { persist: false });
     };
+    const handleMacCmdAsCtrlToggle = () => {
+        writeConditional(MAC_CMD_AS_CTRL_SPEC, !macCmdAsCtrl, setMacCmdAsCtrl, { persist: false });
+    };
 
     const handleForceAlignedResolutionToggle = () => {
         writeConditional(FORCE_ALIGNED_RESOLUTION_SPEC, !forceAlignedResolution, setForceAlignedResolution, { persist: true });
@@ -1100,6 +1105,23 @@ export function Settings() {
                                 <Switch
                                     checked={rawPointerMotion}
                                     onCheckedChange={handleRawPointerMotionToggle}
+                                />
+                            </div>
+                        )}
+
+                        {(renderableSettings.macCmdAsCtrl ?? false) && (
+                            <div className="flex items-center justify-between">
+                                <div className="space-y-0.5">
+                                    <label className="text-sm font-medium"
+                                        title={t(macCmdAsCtrl
+                                            ? 'sections.screen.macCmdAsCtrlDisableTitle'
+                                            : 'sections.screen.macCmdAsCtrlEnableTitle')}>
+                                        {t('sections.screen.macCmdAsCtrlLabel')}
+                                    </label>
+                                </div>
+                                <Switch
+                                    checked={macCmdAsCtrl}
+                                    onCheckedChange={handleMacCmdAsCtrlToggle}
                                 />
                             </div>
                         )}

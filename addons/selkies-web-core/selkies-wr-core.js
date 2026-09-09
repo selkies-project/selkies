@@ -84,7 +84,7 @@ import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-wor
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
-import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC } from './lib/conditional-settings.js';
+import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeFullColor, isMacDesktop } from './lib/util.js';
 
 installAuthGuard();
@@ -628,6 +628,19 @@ export default function webrtc() {
 	}
 
 	/**
+	 * Whether a macOS Command chord is sent as its Control chord, resolved off
+	 * the shared ladder on every settings payload, then updated by a dashboard
+	 * pick (persisted) or a server-pushed value (not persisted).
+	 */
+	let macCmdAsCtrl = true;
+	/** Applies the Command-as-Control setting to the input handler. */
+	function applyMacCmdAsCtrl() {
+		if (input && typeof input.setMacCmdAsCtrl === 'function') {
+			input.setMacCmdAsCtrl(macCmdAsCtrl);
+		}
+	}
+
+	/**
 	 * The `raw_pointer_motion` the deployment implies, off the shared ladder: a
 	 * locked or operator value, else the client's stored pick, else the platform
 	 * default (off on macOS). Resolved here because pointer lock is taken from
@@ -637,6 +650,18 @@ export default function webrtc() {
 	 */
 	function resolvedRawPointerMotion(serverSettings) {
 		return resolveSpec(RAW_POINTER_MOTION_SPEC, serverSettings, { macDesktop: isMacDesktop() },
+			(key) => getStringParam(key, null));
+	}
+
+	/**
+	 * The `mac_cmd_as_ctrl` the deployment implies, off the shared ladder.
+	 * Resolved here for the reason raw pointer motion is: the keyboard is taken
+	 * from the stream, whether or not a settings panel ever mounts.
+	 * @param {Object<string, object>} serverSettings The `server_settings` payload.
+	 * @returns {boolean}
+	 */
+	function resolvedMacCmdAsCtrl(serverSettings) {
+		return resolveSpec(MAC_CMD_AS_CTRL_SPEC, serverSettings, { macDesktop: isMacDesktop() },
 			(key) => getStringParam(key, null));
 	}
 
@@ -1756,6 +1781,15 @@ export default function webrtc() {
 					console.warn("Invalid value received for setRawPointerMotion:", message.value);
 				}
 				break;
+			case 'setMacCmdAsCtrl':
+				if (typeof message.value === 'boolean') {
+					macCmdAsCtrl = message.value;
+					setBoolParam('mac_cmd_as_ctrl', message.value);
+					applyMacCmdAsCtrl();
+				} else {
+					console.warn("Invalid value received for setMacCmdAsCtrl:", message.value);
+				}
+				break;
 			case 'touchinput:trackpad':
 				if (input && typeof input.setTrackpadMode === 'function') {
 					trackpadMode = true;
@@ -1880,6 +1914,11 @@ export default function webrtc() {
 			// Never persisted: only the setRawPointerMotion message persists.
 			rawPointerMotion = !!settings.raw_pointer_motion;
 			applyRawPointerMotion();
+		}
+		if (settings.mac_cmd_as_ctrl !== undefined) {
+			// Never persisted: only the setMacCmdAsCtrl message persists.
+			macCmdAsCtrl = !!settings.mac_cmd_as_ctrl;
+			applyMacCmdAsCtrl();
 		}
 		if (settings.rate_control_mode !== undefined) {
 			rateControlMode = settings.rate_control_mode;
@@ -2478,6 +2517,7 @@ export default function webrtc() {
 			if (trackpadMode) input.setTrackpadMode(true);
 			applyEffectiveCursorSetting();
 			applyRawPointerMotion();
+			applyMacCmdAsCtrl();
 			window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
 			window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 
@@ -2935,6 +2975,11 @@ export default function webrtc() {
 				if (rawMotion !== rawPointerMotion) {
 					rawPointerMotion = rawMotion;
 					applyRawPointerMotion();
+				}
+				const cmdAsCtrl = resolvedMacCmdAsCtrl(obj.settings);
+				if (cmdAsCtrl !== macCmdAsCtrl) {
+					macCmdAsCtrl = cmdAsCtrl;
+					applyMacCmdAsCtrl();
 				}
 				const cssScaling = resolvedCssScaling(obj.settings);
 				if (cssScaling !== useCssScaling) {

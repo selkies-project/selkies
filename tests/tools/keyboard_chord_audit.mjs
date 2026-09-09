@@ -330,4 +330,25 @@ const softHeld = wire('soft-keyboard',
 check('a soft modifier survives a physical key pressed under it',
       softHeld === `kd,${XK.Control_L} kd,99`, softHeld);
 
+// macOS Command: remapped to Control by default, and sent as the Super it is
+// when the session's window manager wants that modifier for itself.
+const cmdChord = [['down', 'MetaLeft'], ['down', 'KeyC', 'c']];
+const asCtrl = wire('blink-mac', cmdChord);
+check('Cmd+C reaches the server as its Ctrl chord while the setting is on',
+      asCtrl === `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,99`, asCtrl);
+Input.macCmdAsCtrl = false;
+try {
+    const asSuper = wire('blink-mac', cmdChord);
+    check('Cmd+C reaches it as Super with the setting off',
+          asSuper === `kd,${XK.Super_L} kd,99`, asSuper);
+    const cmdReturn = wire('blink-mac', [['down', 'MetaLeft'], ['down', 'Enter']]);
+    check('Cmd+Return keeps Super too, which is what a Super-modifier session binds',
+          cmdReturn === `kd,${XK.Super_L} kd,65293`, cmdReturn);
+} finally {
+    Input.macCmdAsCtrl = true;
+}
+const restored = wire('blink-mac', cmdChord);
+check('the setting back on restores the Ctrl chord',
+      restored === asCtrl, restored);
+
 process.exit(failed === 0 ? 0 : 1);
