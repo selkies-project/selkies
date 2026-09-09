@@ -111,7 +111,7 @@ import {
   digestedPayload
 } from './lib/clipboard-sync.js';
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js';
-import { streamDensity as streamDensityOf } from './lib/stream-density.js';
+import { streamDensity as streamDensityOf, publishedScale } from './lib/stream-density.js';
 import {
   createFileUploader
 } from './lib/file-upload.js';
@@ -2561,23 +2561,26 @@ function sendFullSettingsUpdateToServer(reason) {
 
 /**
  * This page's remote pixels per CSS pixel, reported so a neighboring display
- * can scale a cross-display drag's travel over this one: the presented stream
- * box where one is measurable (manual mode scales it freely), else the device
- * pixel ratio the resolution request was built with.
- * @param {number} dpr
+ * can scale a cross-display drag's travel over this one and stream at this
+ * page's density (lib/stream-density.js).
+ * @param {number} dpr The density the resolution request was built with.
  * @returns {number}
  */
 function currentDisplayScale(dpr) {
     const canvas = document.getElementById('videoCanvas');
-    if (canvas && canvas.width > 0) {
-        const sinks = [canvas, document.getElementById('videoStream'),
-                       document.getElementById('videoWorkerCanvas')];
-        for (const el of sinks) {
-            const r = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-            if (r && r.width > 0) return canvas.width / r.width;
-        }
+    let css = null;
+    for (const id of ['videoCanvas', 'videoStream', 'videoWorkerCanvas']) {
+        const el = document.getElementById(id);
+        const r = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        if (r && r.width > 0) { css = [r.width, r.height]; break; }
     }
-    return dpr;
+    const realized = (latestDisplayLayouts || {})[displayId];
+    return publishedScale({
+        stream: canvas && canvas.width > 0 ? [canvas.width, canvas.height] : null,
+        css,
+        realized: realized ? [realized.w, realized.h] : null,
+        density: dpr,
+    });
 }
 
 /**

@@ -92,13 +92,8 @@ def new_display_context(browser: Any, mode: str, css: Tuple[int, int], dpr: int,
     ctx.add_init_script(DESKTOP_INIT % desk_x)
     page = ctx.new_page()
     page.console_errors = []
-    page.console_trace = []
-    def on_console(m):
-        if m.type == "error":
-            page.console_errors.append(m.text)
-        if "settings update" in m.text or "Sending resolution" in m.text or "density" in m.text:
-            page.console_trace.append(m.text[:110])
-    page.on("console", on_console)
+    page.on("console",
+            lambda m: page.console_errors.append(m.text) if m.type == "error" else None)
     page.goto(H.BASE_URL + "/" + url_hash, wait_until="load")
     return page
 
@@ -122,6 +117,20 @@ def hover(page: Any, cx: int, cy: int) -> Tuple[int, int]:
 def secondary_rect(page: Any) -> dict:
     layout = page.evaluate(LAYOUT_JS) or {}
     return next((r for r in layout.get("rects", []) if r["x"] > 0), {})
+
+
+def own_rect(page: Any) -> dict:
+    """The page's own rectangle in the layout, carrying the scale it published."""
+    return (page.evaluate(LAYOUT_JS) or {}).get("own") or {}
+
+
+def published(page: Any) -> list:
+    """The display scales this page has reported to the server, in order. A
+    secondary that never adopted the primary's density and a primary that
+    never published its own are the same failure from the layout alone."""
+    sent = page.evaluate("(window.__wireSent || [])"
+                         ".filter(d => typeof d === 'string' && d.startsWith('SETTINGS,'))")
+    return [json.loads(m[len("SETTINGS,"):]).get("displayScale") for m in sent]
 
 
 def density_case(res: "H.Results", mode: str, browser: Any,
@@ -156,11 +165,15 @@ def density_case(res: "H.Results", mode: str, browser: Any,
         res.check(f"{tag} the secondary's buffer is at the primary's density in its own CSS box",
                   sink_ok and abs(sink.get("cssW", 0) - SECONDARY_CSS[0]) <= 2
                   and abs(sink.get("density", 0) - primary_dpr) < 0.01, sink)
+        # What the secondary streams at is read off this, so a primary that
+        # publishes the ratio of a stream its box has not caught up with yet
+        # sends the secondary to a density neither screen has.
+        res.check(f"{tag} the primary publishes its own density",
+                  wait_for(lambda: own_rect(page).get("scale") == primary_dpr, 15),
+                  f"primary published {published(page)}")
         laid = wait_for(lambda: secondary_rect(page).get("scale") == primary_dpr, 15)
-        settings = dpage.evaluate("(window.__wireSent || []).filter(d => typeof d === 'string' && d.startsWith('SETTINGS,'))")
-        reported = [json.loads(m[len('SETTINGS,'):]).get("displayScale") for m in settings]
         res.check(f"{tag} the secondary publishes the primary's scale with the layout",
-                  laid, f"reported displayScale={reported} trace={dpage.console_trace[-6:]}")
+                  laid, f"primary published {published(page)}, secondary {published(dpage)}")
 
         # A point on the secondary lands where the density puts it.
         pos = hover(dpage, 100, 100)

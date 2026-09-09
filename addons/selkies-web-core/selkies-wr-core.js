@@ -77,7 +77,7 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import { streamDensity as streamDensityOf } from "./lib/stream-density.js";
+import { streamDensity as streamDensityOf, publishedScale } from "./lib/stream-density.js";
 import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, writeImageToLocalClipboard, digestedPayload } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
@@ -1073,18 +1073,17 @@ export default function webrtc() {
 		}
 		settingsToSend['useCssScaling'] = useCssScaling;
 		// This page's remote pixels per CSS pixel, so a neighboring display can
-		// scale a cross-display drag's travel over this one: the fitted video
-		// box where one is measurable, else the device pixel ratio the
-		// resolution request was built with.
-		settingsToSend['displayScale'] = (() => {
-			const v = videoElement;
-			if (v && v.videoWidth > 0 && v.videoHeight > 0) {
-				const r = v.getBoundingClientRect();
-				const fit = Math.min(r.width / v.videoWidth, r.height / v.videoHeight);
-				if (fit > 0) return 1 / fit;
-			}
-			return dpr;
-		})();
+		// scale a cross-display drag's travel over this one and stream at this
+		// page's density (lib/stream-density.js).
+		const box = videoElement ? videoElement.getBoundingClientRect() : null;
+		const realized = (latestDisplayLayouts || {})[storageDisplayId];
+		settingsToSend['displayScale'] = publishedScale({
+			stream: videoElement && videoElement.videoWidth > 0
+				? [videoElement.videoWidth, videoElement.videoHeight] : null,
+			css: box && box.width > 0 ? [box.width, box.height] : null,
+			realized: realized ? [realized.w, realized.h] : null,
+			density: dpr,
+		});
 
 		try {
 			const settingsJson = JSON.stringify(settingsToSend);

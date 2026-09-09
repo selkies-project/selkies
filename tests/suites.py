@@ -80,6 +80,7 @@ SUITES: list = [
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_realized_layout.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_display_stream_box.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_stream_density.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_dpi_verb_owner.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_session_screen_kwin.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_outputless_x_server.py", "tier": "unit", "timeout": 120},
