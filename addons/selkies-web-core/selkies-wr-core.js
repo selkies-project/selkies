@@ -2067,34 +2067,6 @@ export default function webrtc() {
 	}
 
 	/**
-	 * Forwards the control keys mobile keyboards emit as keydown on the
-	 * off-screen assist input (Enter, Backspace); typed characters are handled
-	 * by the Input class's own listener on the element.
-	 */
-	function setupKeyBoardAssisstant() {
-		if (isSharedMode) {
-			console.log("Shared mode detected, skipping keyboard assistant setup.");
-			return;
-		}
-		const keyboardInputAssist = document.getElementById('keyboard-input-assist');
-		if (keyboardInputAssist && input) {
-		keyboardInputAssist.addEventListener('keydown', (event) => {
-			if (event.key === 'Enter' || event.keyCode === 13) {
-			input._sendMomentaryKey(0xFF0D);
-			event.preventDefault();
-			keyboardInputAssist.value = '';
-			} else if (event.key === 'Backspace' || event.keyCode === 8) {
-			input._sendMomentaryKey(0xFF08);
-			event.preventDefault();
-			}
-		});
-		console.log("Added 'input' and 'keydown' listeners to #keyboard-input-assist.");
-		} else {
-			console.error(" Could not add listeners to keyboard assist: Element or Input handler instance not found.");
-		}
-	}
-
-	/**
 	 * Tells the dashboard why a clipboard-image upload was skipped, in the
 	 * `fileUpload` warning channel transfer warnings use.
 	 * @param {string} reason Human-readable reason.
@@ -2508,8 +2480,6 @@ export default function webrtc() {
 			applyRawPointerMotion();
 			window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
 			window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
-
-			setupKeyBoardAssisstant();
 
 			signaling.onstatus = (message) => {
 				pushCapped(logEntries, applyTimestamp("[signaling] " + message));

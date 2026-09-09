@@ -29,6 +29,8 @@ function makeInput() {
     input.send = (msg) => input.sent.push(msg);
     input._momentaryChordMods = new Set();
     input._keyDownList = {};
+    input._assistTyped = '';
+    input.isComposing = false;
     input._clearCompositionHostSoon = () => {};
     return input;
 }
@@ -38,9 +40,9 @@ function pressed(sent) {
     return sent.filter((m) => m.startsWith('kd,')).map((m) => Number(m.slice(3)));
 }
 
-function typeMobile(text) {
-    const input = makeInput();
+function typeMobile(text, input = makeInput()) {
     const target = { value: text };
+    input.keyboardInputAssist = target;
     input._handleMobileInput({ target });
     return { sent: input.sent, target };
 }
@@ -77,13 +79,24 @@ check('non-ASCII latin sends its keysym', pressed(typeMobile('é').sent).join(',
 check('CJK sends a unicode keysym',
       pressed(typeMobile('漢').sent).join(',') === String(0x01000000 | 0x6f22));
 
-// A held chord is the keydown path's to send; the echo must not type the letter too.
+// A chord key the keydown path already sent (iOS names the key on the keydown)
+// must not be typed again by its text echo.
 const chorded = makeInput();
 chorded._keyDownList = { ControlLeft: 0xffe3 };
-const chordTarget = { value: 'c' };
-chorded._handleMobileInput({ target: chordTarget });
-check('chord echo types nothing', chorded.sent.length === 0, chorded.sent.join(' '));
-check('chord echo still clears the field', chordTarget.value === '');
+chorded._chordKeySent = true;
+const echo = typeMobile('c', chorded);
+check('chord echo types nothing', echo.sent.length === 0, echo.sent.join(' '));
+check('chord echo still clears the field', echo.target.value === '');
+
+// A tap the keydown path could not name (Android reports keyCode 229 with no
+// key) reaches the wire only as the assist text, so under a held modifier it
+// goes out once as the plain key the modifier turns into the shortcut.
+const unnamed = makeInput();
+unnamed._keyDownList = { ControlLeft: 0xffe3 };
+const tap = typeMobile('c', unnamed);
+check('unnamed tap under a held chord types the key once',
+      tap.sent.join(' ') === 'kd,99 ku,99', tap.sent.join(' '));
+check('unnamed tap clears the field', tap.target.value === '');
 
 // The assist field is drained, or the next input event retypes everything before it.
 check('field cleared after typing', upper.target.value === '');

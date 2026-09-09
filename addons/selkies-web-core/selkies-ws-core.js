@@ -3851,26 +3851,6 @@ const initializeInput = () => {
     console.warn("initializeInput: overlayInput not found, cannot attach drag/drop listeners.");
   }
 
-  const keyboardInputAssist = document.getElementById('keyboard-input-assist');
-  if (keyboardInputAssist && inputInstance && !isSharedMode) {
-    // Typed characters go through Input's own listener on this element; only
-    // the control keys mobile keyboards emit as keydown are forwarded here.
-    keyboardInputAssist.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' || event.keyCode === 13) {
-        inputInstance._sendMomentaryKey(0xFF0D);
-        event.preventDefault();
-        keyboardInputAssist.value = '';
-      } else if (event.key === 'Backspace' || event.keyCode === 8) {
-        inputInstance._sendMomentaryKey(0xFF08);
-        event.preventDefault();
-      }
-    });
-    console.log("initializeInput: Added 'input' and 'keydown' listeners to #keyboard-input-assist.");
-  } else if (isSharedMode) {
-    console.log("Shared mode: Keyboard input assist listeners NOT attached.");
-  } else {
-    console.error("initializeInput: Could not add listeners to keyboard assist: Element or Input handler instance not found.");
-  }
   console.log("Input system initialized.");
 };
 

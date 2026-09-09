@@ -18,6 +18,14 @@ Android Chromium reports a tap as keyCode 229 with no key or code and the
 letter only as the assist input's text, iOS names the key on the keydown and
 echoes it as text. Both must reach the wire as the one key under the held
 Control, neither dropped nor typed twice.
+
+Finally the two soft-keyboard anatomies of the assist field itself, captured
+from an iPad and an Android phone: iOS keeps the Pinyin preedit in the field
+as composition text (syllables set apart by U+2006), shortens it on Backspace,
+replaces it with the picked candidate and confirms as a deleteCompositionText
+followed by an insertFromComposition of the same text; Android commits each
+letter as plain insertText with no composition at all. The wire must carry
+the preedit as a rolling diff and the commit exactly once.
 """
 import functools
 import http.server
@@ -111,6 +119,29 @@ window.__softChord = (platform) => {
   window.__input.setSynth(false);
   return window.__sent.filter((m) => !m.startsWith('kh,'));
 };
+// Replays a captured soft-keyboard trace on the assist field: each step is
+// [kind, data, value, inputType]; an input step sets the field's value first,
+// as the engine has by the time the event fires.
+window.__assistReplay = (steps) => {
+  const assist = document.getElementById('keyboard-input-assist');
+  assist.dispatchEvent(new FocusEvent('focus'));
+  for (const [kind, data, value, inputType] of steps) {
+    let ev;
+    if (kind === 'keydown' || kind === 'keyup') {
+      ev = new KeyboardEvent(kind, { key: data, keyCode: 229, bubbles: true, cancelable: true });
+    } else if (kind.startsWith('composition')) {
+      ev = new CompositionEvent(kind, { data, bubbles: true });
+    } else if (kind === 'textInput') {
+      ev = document.createEvent('TextEvent');
+      ev.initTextEvent('textInput', true, true, window, data, 0, '');
+    } else {
+      assist.value = value;
+      ev = new InputEvent('input', { data, inputType, bubbles: true });
+    }
+    assist.dispatchEvent(ev);
+  }
+};
+window.__assistValue = () => document.getElementById('keyboard-input-assist').value;
 window.__decodeWire = () => {
   let txt = '';
   for (const m of window.__sent) {
@@ -118,6 +149,7 @@ window.__decodeWire = () => {
       const ks = parseInt(m.slice(3), 10);
       if (ks === 65288) txt = txt.slice(0, -1);
       else if (ks >= 0x01000000) txt += String.fromCodePoint(ks - 0x01000000);
+      else if (ks >= 0x20 && ks < 0x100) txt += String.fromCharCode(ks);
     }
   }
   return txt;
@@ -240,6 +272,83 @@ def run_branch(pw: Any, tag: str, platform: Optional[str], ua: Optional[str],
 
 SOFT_CHORD_EXPECT = ["kd,65507", "kd,99", "ku,99", "ku,65507"]
 
+SEP = "\u2006"
+# iPad, Chinese Pinyin keyboard: d d d, Backspace, candidate 大的.
+IOS_ASSIST = [
+    ["keydown", "d"],
+    ["compositionstart", ""],
+    ["compositionupdate", "d"],
+    ["input", "d", "d", "insertCompositionText"],
+    ["keyup", "d"],
+    ["keydown", "d"],
+    ["compositionupdate", "d" + SEP + "d"],
+    ["input", "d" + SEP + "d", "d" + SEP + "d", "insertCompositionText"],
+    ["keyup", "d"],
+    ["keydown", "d"],
+    ["compositionupdate", SEP.join("ddd")],
+    ["input", SEP.join("ddd"), SEP.join("ddd"), "insertCompositionText"],
+    ["keyup", "d"],
+    ["keydown", "Backspace"],
+    ["compositionupdate", "d" + SEP + "d"],
+    ["input", "d" + SEP + "d", "d" + SEP + "d", "insertCompositionText"],
+    ["keyup", "Backspace"],
+    ["compositionupdate", "大的"],
+    ["input", "大的", "大的", "insertCompositionText"],
+    ["input", None, "", "deleteCompositionText"],
+    ["textInput", "大的"],
+    ["input", "大的", "大的", "insertFromComposition"],
+    ["compositionend", "大的"],
+]
+IOS_ASSIST_EXPECT = "大的"
+# Android, Gboard Chinese keyboard: the picked word arrives as plain text, and
+# an English keyboard commits letter by letter the same way.
+ANDROID_ASSIST = [
+    ["keydown", "Unidentified"],
+    ["textInput", "得到的"],
+    ["input", "得到的", "得到的", "insertText"],
+    ["keyup", "Unidentified"],
+    ["keydown", "Unidentified"],
+    ["textInput", " "],
+    ["input", " ", " ", "insertText"],
+    ["keyup", "Unidentified"],
+    ["keydown", "Unidentified"],
+    ["textInput", "x"],
+    ["input", "x", "x", "insertText"],
+    ["keyup", "Unidentified"],
+]
+ANDROID_ASSIST_EXPECT = "得到的 x"
+
+
+def run_assist(pw: Any, engine: str) -> None:
+    """The assist field's iOS and Android anatomies mirror the local text once, and the field empties after.
+
+    Run in WebKit, the only engine whose InputEvent carries iOS's
+    `deleteCompositionText` and `insertFromComposition` names, and in Chromium,
+    which blanks them, so the handler is shown not to depend on either.
+    """
+    browser = getattr(pw, engine).launch()
+    try:
+        page = browser.new_page()
+        page.goto(f"http://127.0.0.1:{port}/tests-ime-client.html")
+        page.wait_for_function(
+            "window.__ready === true || window.__errs.length > 0", timeout=15000)
+        for name, steps, expect in (("ios pinyin", IOS_ASSIST, IOS_ASSIST_EXPECT),
+                                    ("android", ANDROID_ASSIST, ANDROID_ASSIST_EXPECT)):
+            page.evaluate("window.__sent = []")
+            page.evaluate("(s) => window.__assistReplay(s)", steps)
+            time.sleep(0.3)
+            got = page.evaluate("window.__decodeWire()")
+            check(f"{engine}: assist {name} mirrors local text remotely", got == expect,
+                  f"remote={got!r} expect={expect!r}")
+            sent = page.evaluate("window.__sent")
+            commits = sum(1 for m in sent if m == "kd," + str(0x01000000 + ord(expect[0])))
+            check(f"{engine}: assist {name} types the commit once, not erased and retyped",
+                  commits == 1, f"presses={commits} wire={sent!r}")
+            value = page.evaluate("window.__assistValue()")
+            check(f"{engine}: assist {name} leaves the field empty", value == "", repr(value))
+    finally:
+        browser.close()
+
 
 def run_soft_chord(pw: Any) -> None:
     """A soft Control over an Android and an iOS soft-keyboard tap, on the wire as Ctrl+c once."""
@@ -261,6 +370,8 @@ def run_soft_chord(pw: Any) -> None:
 try:
     with sync_playwright() as pw:
         run_soft_chord(pw)
+        run_assist(pw, "webkit")
+        run_assist(pw, "chromium")
         run_branch(pw, "linux-ibus", None, None,
                    [("ibus anatomy", IBUS_GROUPS, IBUS_EXPECT, IBUS_PROBES)])
         run_branch(pw, "win-ibus", "Windows", WIN_UA,

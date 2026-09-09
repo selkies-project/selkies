@@ -33,7 +33,9 @@
  * keyup was lost, and modifiers a trusted event reports up are healed. IME
  * composition streams the preedit as momentary presses diffed per codepoint;
  * a shortcut chord pressed mid-composition is held until the commit lands so
- * it applies after the text. Chords on non-Latin layouts resolve from the
+ * it applies after the text. A soft keyboard types into the off-screen assist
+ * field, whose value is mirrored to the server by the same diff and emptied
+ * once nothing composes in it. Chords on non-Latin layouts resolve from the
  * physical key position, and a chord whose modifier keydown never reached the
  * server is sent self-contained, wrapped in the missing modifiers. macOS
  * Command is remapped onto Control, and Windows defers a ControlLeft keydown
@@ -1479,6 +1481,10 @@ export class Input {
         /** Last textInput commit, so a compositionend carrying the same text right after stays clear-only (Blink chains both). */
         this._lastTextInputCommit = null;
         this.keyboardInputAssist = document.getElementById('keyboard-input-assist');
+        /** The assist field's value as last typed on the server. */
+        this._assistTyped = "";
+        /** Whether the composition in progress is in the assist field. */
+        this._assistComposing = false;
 
         this._activeTouches = new Map();
         this._activeTouchIdentifier = null;
@@ -2154,11 +2160,18 @@ export class Input {
      * @param {string} newText
      */
     _updateCompositionText(newText) {
-        const oldValue = this.compositionString;
-        const newValue = newText || "";
+        this.compositionString = this._streamTextDiff(this.compositionString, newText || "");
+    }
 
-        const oldChars = Array.from(oldValue);
-        const newChars = Array.from(newValue);
+    /**
+     * Sends the backspaces and presses, per codepoint, that turn `oldText` into `newText`.
+     * @param {string} oldText
+     * @param {string} newText
+     * @returns {string} `newText`, to keep as the typed state.
+     */
+    _streamTextDiff(oldText, newText) {
+        const oldChars = Array.from(oldText);
+        const newChars = Array.from(newText);
         let diff_start = 0;
         while (diff_start < oldChars.length && diff_start < newChars.length && oldChars[diff_start] === newChars[diff_start]) {
             diff_start++;
@@ -2175,8 +2188,7 @@ export class Input {
                 this._sendMomentaryKey(keysym);
             }
         }
-
-        this.compositionString = newValue;
+        return newText;
     }
 
     /**
@@ -2264,11 +2276,51 @@ export class Input {
      */
     _clearCompositionHostSoon() {
         setTimeout(() => {
+            if (this.isComposing) return;
             const el = this.element;
-            if (!this.isComposing && el && el.tagName === 'INPUT' && el.value) {
+            if (el && el.tagName === 'INPUT' && el.value) {
                 el.value = '';
             }
+            this._resetAssist();
         }, 0);
+    }
+
+    /** Empties the assist field and forgets what was typed from it. */
+    _resetAssist() {
+        const assist = this.keyboardInputAssist;
+        if (assist && assist.value) assist.value = '';
+        this._assistTyped = "";
+    }
+
+    /** Composition start in the assist field: only the state is raised, since the field's input events carry the preedit. */
+    _assistCompositionStart(event) {
+        if (!this._guac_markEvent(event)) return;
+        this.isComposing = true;
+        this._assistComposing = true;
+        this._lastTextInputCommit = null;
+        this._pendingChord = null;
+    }
+
+    /** Composition end in the assist field: the wire is brought level with the field (a cancel erases), then the field is emptied. */
+    _assistCompositionEnd(event) {
+        if (!this._guac_markEvent(event)) return;
+        if (!this._assistComposing) return;
+        if (this._pendingChord !== null) {
+            setTimeout(() => this._flushPendingChord(), 0);
+        }
+        this.isComposing = false;
+        this._assistComposing = false;
+        this._assistTyped = this._streamTextDiff(this._assistTyped, event.target.value || "");
+        this._clearCompositionHostSoon();
+    }
+
+    /** Focus change on the assist field: the dashboards empty it without an input event, and a blur abandons a composition without an end. */
+    _assistFocusChange() {
+        if (this._assistComposing) {
+            this._assistComposing = false;
+            this.isComposing = false;
+        }
+        this._assistTyped = "";
     }
 
     /**
@@ -2433,18 +2485,28 @@ export class Input {
         return false;
     }
 
-    /** Types text from the mobile keyboard assist element and clears it, unless it is the echo of a chord the keydown path sent (`_chordEchoPending`). */
+    /**
+     * Mirrors the assist field onto the server: each input event sends the
+     * diff from the value as last typed, and the field is emptied once
+     * nothing composes in it. The value is the source because the engines
+     * differ in what an event carries: Android commits plain text, iOS keeps
+     * the Pinyin preedit in the field and replaces it with the candidate.
+     * Emptying the field mid-composition aborts the composition, which
+     * then restarts on every key and re-sends the whole preedit. WebKit
+     * confirms by emptying and refilling the field in two events, so an
+     * empty field mid-composition waits for the next event: the refill is
+     * then a no-op, and a composition end erases what a cancel left.
+     */
     _handleMobileInput(event) {
-        const text = event.target.value;
-        if (!text) {
-            return;
-        }
+        const field = event.target;
         if (this._chordEchoPending()) {
-            event.target.value = '';
+            this._resetAssist();
             return;
         }
-        this._typeText(text);
-        event.target.value = '';
+        const value = field.value || "";
+        if (this.isComposing && !value) return;
+        this._assistTyped = this._streamTextDiff(this._assistTyped, value);
+        if (!this.isComposing) this._resetAssist();
     }
 
     /**
@@ -4234,6 +4296,10 @@ export class Input {
         // A frozen background tab stops the heartbeat, so keys are released first.
         this.listeners_context.push(addListener(document, 'freeze', this.resetKeyboard, this));
         this.listeners_context.push(addListener(this.keyboardInputAssist, 'input', this._handleMobileInput, this));
+        this.listeners_context.push(addListener(this.keyboardInputAssist, 'compositionstart', this._assistCompositionStart, this));
+        this.listeners_context.push(addListener(this.keyboardInputAssist, 'compositionend', this._assistCompositionEnd, this));
+        this.listeners_context.push(addListener(this.keyboardInputAssist, 'focus', this._assistFocusChange, this));
+        this.listeners_context.push(addListener(this.keyboardInputAssist, 'blur', this._assistFocusChange, this));
         this.listeners_context.push(addListener(document, 'mousedown', this._handleOutsideClick, this, true));
         this.listeners_context.push(addListener(document, 'touchstart', this._handleOutsideClick, this, true));
 
