@@ -43,7 +43,6 @@ import inspect
 import base64
 import contextlib
 import gzip
-import importlib.metadata
 import hmac
 import json
 import logging
@@ -249,19 +248,8 @@ except (ImportError, RuntimeError) as e:
     data_logger.warning("pcmflux library not found. Audio capture is unavailable. (%s)", e)
 
 try:
-    import pixelflux
     from pixelflux import CaptureSettings, ScreenCapture
 
-    # One check for the build Selkies pins, at import: a pixelflux without
-    # this surface would fail on every capture start and client connect.
-    if not hasattr(pixelflux, "SOFTWARE_ENCODERS") or not hasattr(CaptureSettings(), "codec"):
-        try:
-            installed = importlib.metadata.version("pixelflux")
-        except Exception:
-            installed = "unknown version"
-        raise SystemExit(
-            f"pixelflux {installed} is not the release Selkies pins: it has no "
-            "SOFTWARE_ENCODERS or CaptureSettings.codec. Install the pinned pixelflux.")
     X11_CAPTURE_AVAILABLE = True
     data_logger.info("pixelflux library found. Striped encoding modes available.")
 except (ImportError, RuntimeError) as e:

@@ -1165,17 +1165,13 @@ def software_encoders() -> Dict[str, str]:
     others by what the FFmpeg it links carries ("x265" or "kvazaar", "libvpx",
     "svt-av1"). A codec without an entry has no software path in that build.
     Rendering the settings reference needs no extension, and reads as the
-    default x264 build. A pixelflux without the table predates the codec API
-    and has no software path here at all; the server reports it at startup.
+    default x264 build.
     """
     try:
         import pixelflux
     except ImportError:
         return {"h264": "x264"}
-    table = getattr(pixelflux, "SOFTWARE_ENCODERS", None)
-    if table is None:
-        return {}
-    return {str(k): str(v) for k, v in dict(table).items()}
+    return {str(k): str(v) for k, v in dict(pixelflux.SOFTWARE_ENCODERS).items()}
 
 
 def software_video_path(encoder: str, use_cpu: bool) -> bool:
