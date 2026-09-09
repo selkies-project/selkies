@@ -3503,6 +3503,12 @@ class WebRTCInput:
         _app_wl_is_separate: True once a resolved app compositor is confirmed
             distinct from the capture compositor, so
             `_has_separate_app_compositor` answers without re-resolving.
+        on_session_compositor_adopted: Awaitable a transport installs, taking
+            the desktop DPI, to run its scale ladder again for every display
+            once a nested session compositor is adopted after captures
+            started: the session takes the scale and the capture output, which
+            took it while the session was still starting, drops it. Unset,
+            only the session is scaled.
         _x_event_wake, _x_watcher_fd: Event-driven wake for the keymap watch:
             a loop reader on the input connection's fd sets the Event, so it
             blocks with zero wakeups instead of polling the socket.
@@ -3723,6 +3729,7 @@ class WebRTCInput:
         self.multipart_clipboard_kind = None
         self.data_server_instance = data_server_instance
         self.on_update_settings = lambda settings_json, display_id="primary": logger_webrtc_input.warning("unhandled update_settings")
+        self.on_session_compositor_adopted = None
         self.is_wayland = is_wayland
         self.wayland_input = None
         self._client_kb_layout = None
@@ -6277,10 +6284,19 @@ class WebRTCInput:
 
     def _schedule_session_scale(self) -> None:
         """A session compositor was just adopted: hand it the effective DPI as
-        its output scale. A scale applied before it existed landed on the
-        capture output, which the session does not follow. An operator-set DPI
-        governs the desktop (client syncs never reach it then); otherwise the
-        last client-synced DPI does. 96 is unity, so nothing to apply."""
+        its output scale, through the transport's ladder when it installed
+        `on_session_compositor_adopted`, so the capture output gives that
+        scale up in the same pass.
+
+        A scale applied before the session existed landed on the capture
+        output, and the session does not take it from there: its screen keeps
+        the capture's pixel mode as its own, so scaling the session on top of
+        a scaled capture draws the desktop at twice the size and shows a
+        quarter of it, upscaled — what a client that lands while the session
+        is still starting sees until the DPI is re-applied. An operator-set
+        DPI governs the desktop (client syncs never reach it then); otherwise
+        the last client-synced DPI does. 96 is unity, so nothing to apply and
+        nothing the capture could have taken."""
         try:
             if settings._overridden.get("scaling_dpi", False):
                 dpi = int(float(settings.scaling_dpi))
@@ -6293,6 +6309,10 @@ class WebRTCInput:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
+            return
+        hook = self.on_session_compositor_adopted
+        if hook is not None:
+            self._spawn_task(hook(dpi))
             return
         self._spawn_task(self.realize_wayland_dpi(dpi))
 

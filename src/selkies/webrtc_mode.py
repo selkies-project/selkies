@@ -630,6 +630,7 @@ class WebRTCService(BaseStreamingService):
 
         self.input_handler.on_scaling_ratio = self.handle_scaling
         self.input_handler.on_resize = self.on_resize_handler
+        self.input_handler.on_session_compositor_adopted = self._resync_wayland_session_scale
 
         self.gpu_monitor.on_stats = self.handle_gpu_stats
         self.system_monitor.on_timer = self.handle_system_monitor
@@ -2100,24 +2101,7 @@ class WebRTCService(BaseStreamingService):
 
         if IS_WAYLAND:
             self._last_applied_dpi = int(dpi_value)
-            for did, pipeline in list(self.display_pipelines.items()):
-                if pipeline is None:
-                    continue
-                new_scale = (await self.input_handler.realize_wayland_dpi(
-                    dpi_value, did, (pipeline.width, pipeline.height))
-                    if self.input_handler else float(dpi_value) / 96.0)
-                if pipeline.scale == new_scale:
-                    continue
-                pipeline.scale = new_scale
-                if pipeline.is_media_pipeline_running():
-                    if did == "primary":
-                        # The capture is a view over the primary's screen, and a
-                        # capture start sizes the view alone: the screen carries
-                        # the scale to the session (its window's preferred
-                        # fractional scale).
-                        await self._size_wayland_screen(pipeline.width, pipeline.height)
-                    await pipeline.restart_screen_capture()
-                    await self._push_wayland_realized_geometry(did, pipeline)
+            await self._realize_wayland_dpi(dpi_value)
             await self._apply_wayland_cursor_size(dpi_value)
             return
 
@@ -2134,6 +2118,49 @@ class WebRTCService(BaseStreamingService):
             logger.info(f"Successfully set cursor size to {new_cursor_size}")
         else:
             logger.error(f"Failed to set cursor size to {new_cursor_size}")
+
+    async def _realize_wayland_dpi(self, dpi_value: int) -> None:
+        """Run the Wayland scale ladder for every display's pipeline and
+        restart the captures whose scale changed.
+
+        Args:
+            dpi_value: The desktop DPI to realize.
+        """
+        for did, pipeline in list(self.display_pipelines.items()):
+            if pipeline is None:
+                continue
+            new_scale = (await self.input_handler.realize_wayland_dpi(
+                dpi_value, did, (pipeline.width, pipeline.height))
+                if self.input_handler else float(dpi_value) / 96.0)
+            if pipeline.scale == new_scale:
+                continue
+            pipeline.scale = new_scale
+            if pipeline.is_media_pipeline_running():
+                if did == "primary":
+                    # The capture is a view over the primary's screen, and a
+                    # capture start sizes the view alone: the screen carries
+                    # the scale to the session (its window's preferred
+                    # fractional scale).
+                    await self._size_wayland_screen(pipeline.width, pipeline.height)
+                await pipeline.restart_screen_capture()
+                await self._push_wayland_realized_geometry(did, pipeline)
+
+    async def _resync_wayland_session_scale(self, dpi: Any) -> None:
+        """A session compositor was adopted after captures started: run the
+        scale ladder again for every display, so the session takes the desktop
+        DPI as its output scale and the capture output, which took it while the
+        session was still starting, drops back to 1.0.
+
+        Args:
+            dpi: The desktop DPI in force.
+        """
+        if not IS_WAYLAND or self.input_handler is None:
+            return
+        try:
+            dpi_value = int(float(dpi))
+        except (TypeError, ValueError):
+            return
+        await self._realize_wayland_dpi(dpi_value)
 
     async def handle_system_monitor(self, t: float) -> None:
         """System-monitor tick: push CPU/memory stats and a ping to clients,
