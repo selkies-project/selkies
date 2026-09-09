@@ -1226,6 +1226,28 @@ a.cite-link:active {
     border: none;
     border-radius: var(--radius);
     background-color: var(--surface-inset);
+    transition: opacity 0.2s ease-in-out;
+}
+
+/* Centred over the frame's own area, which the frame still occupies while it
+   loads behind this. */
+.files-modal-loading {
+    position: absolute;
+    top: 44px;
+    left: 16px;
+    right: 16px;
+    bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--sidebar-text);
+    pointer-events: none;
+}
+
+.files-modal-loading p {
+    margin-top: 10px;
+    color: var(--text-muted);
 }
 
 /* --- Second-display placement arrows --- */

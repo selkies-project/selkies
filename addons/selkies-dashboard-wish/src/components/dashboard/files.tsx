@@ -98,6 +98,33 @@ interface FilesDialogProps {
  * click in the iframe, which blurs the window and closes the menus, leaves
  * it open.
  */
+/**
+ * The download frame and the spinner standing in for it. Its own component so
+ * each opening mounts it afresh, which is what brings the spinner back.
+ */
+function FilesFrame() {
+    const [loading, setLoading] = useState(true);
+    return (
+        <div className="relative flex-1 overflow-hidden">
+            {loading && (
+                <div className="absolute inset-0 flex justify-center items-center pointer-events-none">
+                    <div className="flex flex-col items-center gap-4">
+                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                        <span className="text-muted-foreground">{t('filesModal.loading')}</span>
+                    </div>
+                </div>
+            )}
+            <iframe
+                src={withSessionToken("api/files/")}
+                title={t('filesModal.iframeTitle')}
+                onLoad={() => setLoading(false)}
+                style={{ opacity: loading ? 0 : 1 }}
+                className="w-full h-[calc(90vh-8rem)] border-0 transition-opacity duration-200"
+            />
+        </div>
+    );
+}
+
 export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
@@ -126,13 +153,7 @@ export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
                     </div>
                 </DialogHeader>
 
-                <div className="flex-1 overflow-hidden">
-                    <iframe
-                        src={withSessionToken("api/files/")}
-                        title={t('filesModal.iframeTitle')}
-                        className="w-full h-[calc(90vh-8rem)] border-0"
-                    />
-                </div>
+                {open && <FilesFrame />}
             </DialogContent>
         </Dialog>
     );

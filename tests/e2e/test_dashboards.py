@@ -299,6 +299,43 @@ def classic_layout_check(page, res: "H.Results") -> None:
               and flipped["modalBg"] == "rgb(255, 255, 255)", flipped)
     page.locator('.theme-toggle').click()
     time.sleep(0.4)
+    settled = page.evaluate("""() => {
+      const f = document.querySelector('.files-modal iframe');
+      return {spinner: document.querySelectorAll('.files-modal-loading').length,
+              opacity: getComputedStyle(f).opacity};
+    }""")
+    res.check("a loaded file index shows the frame and no spinner",
+              settled == {"spinner": 0, "opacity": "1"}, settled)
+    page.locator('.files-modal-close').click()
+    time.sleep(0.4)
+
+    # Watched rather than sampled: the frame loads from this same process in a
+    # few milliseconds, far inside any poll interval, so the spinner is caught
+    # by recording that it was mounted at all.
+    page.evaluate("""() => {
+      window.__spinner = {seen: false, label: null};
+      const note = () => {
+        const el = document.querySelector('.files-modal-loading');
+        if (el) {
+          window.__spinner.seen = true;
+          const p = el.querySelector('p');
+          window.__spinner.label = p ? p.textContent : '';
+        }
+      };
+      new MutationObserver(note).observe(document.body, {childList: true, subtree: true});
+      note();
+    }""")
+    page.locator('button[title="Download Files"]').first.click()
+    time.sleep(2.5)
+    spun = page.evaluate("""() => {
+      const f = document.querySelector('.files-modal iframe');
+      return {seen: window.__spinner.seen, label: window.__spinner.label,
+              spinner: document.querySelectorAll('.files-modal-loading').length,
+              opacity: f ? getComputedStyle(f).opacity : null};
+    }""")
+    res.check("opening the files modal shows a labelled spinner that the loaded frame clears",
+              spun["seen"] and bool(spun["label"]) and spun["spinner"] == 0
+              and spun["opacity"] == "1", spun)
     page.locator('.files-modal-close').click()
     time.sleep(0.4)
     # Leave the sidebar as found: the blocks after this one open it themselves.

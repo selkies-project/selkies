@@ -1433,6 +1433,7 @@ function Sidebar() {
   const [notifications, setNotifications] = useState([]);
   const notificationTimeouts = useRef({});
   const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
+  const [isFilesModalLoading, setIsFilesModalLoading] = useState(true);
   const [isAppsModalOpen, setIsAppsModalOpen] = useState(false);
   const [keyboardButtonPosition, setKeyboardButtonPosition] = useState({ bottom: 20, right: 20 });
   const dragInfo = useRef({
@@ -1844,7 +1845,14 @@ function Sidebar() {
   };
 
   const toggleAppsModal = () => setIsAppsModalOpen(!isAppsModalOpen);
-  const toggleFilesModal = () => setIsFilesModalOpen(!isFilesModalOpen);
+  const toggleFilesModal = () => {
+    // The frame reloads whenever the modal reopens, so the spinner comes back
+    // with it; its own onLoad clears it.
+    if (!isFilesModalOpen) {
+      setIsFilesModalLoading(true);
+    }
+    setIsFilesModalOpen(!isFilesModalOpen);
+  };
   /**
    * Pops the on-screen keyboard by focusing the core's `#keyboard-input-assist`
    * input; the next touch on the stream overlay blurs it again.
@@ -4798,7 +4806,18 @@ function Sidebar() {
               &times;
             </button>
           </div>
-          <iframe src={withSessionToken("./api/files/")} title={t("filesModal.iframeTitle")} />
+          {isFilesModalLoading && (
+            <div className="files-modal-loading">
+              <SpinnerIcon />
+              <p>{t("filesModal.loading", "Loading files...")}</p>
+            </div>
+          )}
+          <iframe
+            src={withSessionToken("./api/files/")}
+            title={t("filesModal.iframeTitle")}
+            onLoad={() => setIsFilesModalLoading(false)}
+            style={{ opacity: isFilesModalLoading ? 0 : 1 }}
+          />
         </div>
       )}
       {isAppsModalOpen && (

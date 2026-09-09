@@ -253,7 +253,8 @@ const en = {
     zeroBytes: "0 Bytes",
     filesModal: {
         closeAlt: "Close files modal",
-        iframeTitle: "Downloadable Files"
+        iframeTitle: "Downloadable Files",
+        loading: "Loading files..."
     }
 };
 
@@ -495,7 +496,8 @@ const es = {
     zeroBytes: "0 Bytes",
     filesModal: {
         closeAlt: "Cerrar modal de archivos",
-        iframeTitle: "Archivos Descargables"
+        iframeTitle: "Archivos Descargables",
+        loading: "Cargando archivos..."
     }
 };
 
@@ -737,7 +739,8 @@ const zh = {
     zeroBytes: "0 字节",
     filesModal: {
         closeAlt: "关闭文件模态框",
-        iframeTitle: "可下载文件"
+        iframeTitle: "可下载文件",
+        loading: "正在加载文件..."
     }
 };
 
@@ -979,7 +982,8 @@ const hi = {
     zeroBytes: "0 बाइट्स",
     filesModal: {
         closeAlt: "फ़ाइलें मोडल बंद करें",
-        iframeTitle: "डाउनलोड करने योग्य फ़ाइलें"
+        iframeTitle: "डाउनलोड करने योग्य फ़ाइलें",
+        loading: "फ़ाइलें लोड हो रही हैं..."
     }
 };
 
@@ -1221,7 +1225,8 @@ const pt = {
     zeroBytes: "0 Bytes",
     filesModal: {
         closeAlt: "Fechar modal de arquivos",
-        iframeTitle: "Arquivos para Download"
+        iframeTitle: "Arquivos para Download",
+        loading: "Carregando arquivos..."
     }
 };
 
@@ -1464,7 +1469,8 @@ const fr = {
     zeroBytes: "0 Octets",
     filesModal: {
         closeAlt: "Fermer la modale des fichiers",
-        iframeTitle: "Fichiers téléchargeables"
+        iframeTitle: "Fichiers téléchargeables",
+        loading: "Chargement des fichiers..."
     }
 };
 
@@ -1706,7 +1712,8 @@ const ru = {
     zeroBytes: "0 Байт",
     filesModal: {
         closeAlt: "Закрыть модальное окно файлов",
-        iframeTitle: "Файлы для скачивания"
+        iframeTitle: "Файлы для скачивания",
+        loading: "Загрузка файлов..."
     }
 };
 
@@ -1948,7 +1955,8 @@ const de = {
     zeroBytes: "0 Bytes",
     filesModal: {
         closeAlt: "Dateimodal schließen",
-        iframeTitle: "Herunterladbare Dateien"
+        iframeTitle: "Herunterladbare Dateien",
+        loading: "Dateien werden geladen..."
     }
 };
 
@@ -2190,7 +2198,8 @@ const tr = {
     zeroBytes: "0 Bayt",
     filesModal: {
         closeAlt: "Dosya modalını kapat",
-        iframeTitle: "İndirilebilir Dosyalar"
+        iframeTitle: "İndirilebilir Dosyalar",
+        loading: "Dosyalar yükleniyor..."
     }
 };
 
@@ -2432,7 +2441,8 @@ const it = {
     zeroBytes: "0 Byte",
     filesModal: {
         closeAlt: "Chiudi modale file",
-        iframeTitle: "File Scaricabili"
+        iframeTitle: "File Scaricabili",
+        loading: "Caricamento file..."
     }
 };
 
@@ -2674,7 +2684,8 @@ const nl = {
     zeroBytes: "0 bytes",
     filesModal: {
         closeAlt: "Bestandsmodal sluiten",
-        iframeTitle: "Downloadbare bestanden"
+        iframeTitle: "Downloadbare bestanden",
+        loading: "Bestanden laden..."
     }
 };
 
@@ -2916,7 +2927,8 @@ const ar = {
     zeroBytes: "0 بايت",
     filesModal: {
         closeAlt: "إغلاق نافذة الملفات",
-        iframeTitle: "ملفات قابلة للتحميل"
+        iframeTitle: "ملفات قابلة للتحميل",
+        loading: "جارٍ تحميل الملفات..."
     }
 };
 
@@ -3158,7 +3170,8 @@ const ko = {
     zeroBytes: "0 바이트",
     filesModal: {
         closeAlt: "파일 모달 닫기",
-        iframeTitle: "다운로드 가능한 파일"
+        iframeTitle: "다운로드 가능한 파일",
+        loading: "파일 로드 중..."
     }
 };
 
@@ -3400,7 +3413,8 @@ const ja = {
     zeroBytes: "0 バイト",
     filesModal: {
         closeAlt: "ファイルモーダルを閉じる",
-        iframeTitle: "ダウンロード可能なファイル"
+        iframeTitle: "ダウンロード可能なファイル",
+        loading: "ファイルを読み込み中..."
     }
 };
 
@@ -3642,7 +3656,8 @@ const vi = {
     zeroBytes: "0 Byte",
     filesModal: {
         closeAlt: "Đóng modal tệp",
-        iframeTitle: "Tệp có thể tải xuống"
+        iframeTitle: "Tệp có thể tải xuống",
+        loading: "Đang tải tệp..."
     }
 };
 
@@ -3884,7 +3899,8 @@ const th = {
     zeroBytes: "0 ไบต์",
     filesModal: {
         closeAlt: "ปิดหน้าต่างไฟล์",
-        iframeTitle: "ไฟล์ที่สามารถดาวน์โหลดได้"
+        iframeTitle: "ไฟล์ที่สามารถดาวน์โหลดได้",
+        loading: "กำลังโหลดไฟล์..."
     }
 };
 
@@ -4126,7 +4142,8 @@ const fil = {
     zeroBytes: "0 Bytes",
     filesModal: {
         closeAlt: "Isara ang modal ng mga file",
-        iframeTitle: "Mga Nada-download na File"
+        iframeTitle: "Mga Nada-download na File",
+        loading: "Nilo-load ang mga file..."
     }
 };
 
@@ -4368,7 +4385,8 @@ const da = {
     zeroBytes: "0 bytes",
     filesModal: {
         closeAlt: "Luk fil-modal",
-        iframeTitle: "Downloadbare Filer"
+        iframeTitle: "Downloadbare Filer",
+        loading: "Indlæser filer..."
     }
 };
 
