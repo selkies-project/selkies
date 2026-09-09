@@ -12,7 +12,7 @@ lands.
 
 Uses `E2E_DISPLAY` when set; otherwise starts a throwaway Xvfb wide enough for
 the two-display union.
-Usage: python3 tests/e2e/test_mixed_dpi.py
+Usage: python3 tests/e2e/test_mixed_dpi.py [websockets|webrtc|all]
 """
 import json
 import os
@@ -26,6 +26,7 @@ import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
 
+MODES = ("websockets", "webrtc")
 PRIMARY_CSS = (1512, 806)
 SECONDARY_CSS = (1920, 936)
 
@@ -205,14 +206,14 @@ def drive(res: "H.Results", mode: str) -> None:
             browser.close()
 
 
-def main() -> "H.Results":
+def main(selection: str) -> "H.Results":
     res = H.Results("mixed-dpi")
     xproc = None
     if not H.TEST_DISPLAY:
         xproc, xdisp = H.private_x_server(width=8192, height=4096)
         H.TEST_DISPLAY = xdisp
     try:
-        for mode in ("websockets", "webrtc"):
+        for mode in (MODES if selection == "all" else (selection,)):
             drive(res, mode)
     finally:
         H.server_stop()
@@ -223,5 +224,5 @@ def main() -> "H.Results":
 
 
 if __name__ == "__main__":
-    r = main()
+    r = main(sys.argv[1] if len(sys.argv) > 1 else "all")
     sys.exit(0 if not r.failed() else 1)
