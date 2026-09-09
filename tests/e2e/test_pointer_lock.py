@@ -42,6 +42,7 @@ locked movement deltas do not add up), on both transports and backends.
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -115,7 +116,7 @@ def at(pos: Optional[tuple], expected: tuple) -> bool:
 
 
 def runtime_dir() -> str:
-    return os.environ.get("XDG_RUNTIME_DIR", H.WORKDIR)
+    return H.RUNTIME_DIR
 
 
 class Desktop:
@@ -146,7 +147,7 @@ class Desktop:
             env = {**os.environ, "DISPLAY": display}
             cmd = ["openbox", "--replace"] if self.name == "openbox" else \
                 ["dbus-run-session", "--", "kwin_x11", "--replace"]
-            self.proc = H.spawn(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
+            self.proc = H.spawn(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             return self._wait(lambda: self._x11_managed(display), f"{binary} never took the display")
         if not capture:
             self.why = "the capture compositor announced no socket"
@@ -161,7 +162,7 @@ class Desktop:
                 os.unlink(marker)
             env.update({"WLR_BACKENDS": "wayland", "WLR_WL_OUTPUTS": "1"})
             cmd = ["labwc", "-s", f"sh -c 'echo \"$WAYLAND_DISPLAY\" > {marker}'"]
-            self.proc = H.spawn(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
+            self.proc = H.spawn(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             if not self._wait(lambda: os.path.exists(marker) and os.path.getsize(marker) > 0,
                               "labwc never published its socket"):
                 return False
@@ -175,7 +176,7 @@ class Desktop:
             cmd = ["dbus-run-session", "--", "kwin_wayland", "--wayland-display", capture,
                    "--socket", self.socket, "--width", str(WINDOW[0]), "--height", str(WINDOW[1]),
                    "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities"]
-            self.proc = H.spawn(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
+            self.proc = H.spawn(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             path = os.path.join(runtime_dir(), self.socket)
             if not self._wait(lambda: os.path.exists(path), "kwin_wayland never opened its socket"):
                 return False
@@ -212,16 +213,21 @@ class Desktop:
         return "window id" in out
 
     def stop(self) -> None:
+        """Ends the manager and everything it started: a KWin runs under
+        dbus-run-session, and ending only that would leave it holding the display
+        and its socket for the suites that follow."""
         if self.proc is None:
             return
-        try:
-            self.proc.terminate()
-            self.proc.wait(5)
-        except Exception:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
             try:
-                self.proc.kill()
-            except Exception:
-                pass
+                os.killpg(os.getpgid(self.proc.pid), sig)
+            except (ProcessLookupError, PermissionError):
+                return
+            try:
+                self.proc.wait(5)
+                return
+            except subprocess.TimeoutExpired:
+                continue
 
 
 class GameProbe:

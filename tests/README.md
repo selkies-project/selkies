@@ -44,7 +44,7 @@ every interpreter the package supports.
 | --- | --- | --- |
 | `E2E_DISPLAY` | none; required | X display the server streams from. Deliberately not defaulted and never inherited from `DISPLAY`: the suites inject input and resize the root window, so pointing them at a real session damages it. Provision a throwaway server (`Xvfb :N -screen 0 8192x4096x24 -noreset`) and name it here. |
 | `E2E_PORT` | a free port | Server port; everything the server exposes, `/api/metrics` included, is on it. Left unset each suite process takes its own, so runs do not have to be serialised. Set it when something in front of the server needs a fixed one. |
-| `E2E_WORKDIR` | `$TMPDIR/selkies-tests` | Server log, shim recordings and other scratch. Run through `pytest`, each suite's logs are also copied into `suite-logs/<suite>/` under it, which CI uploads. |
+| `E2E_WORKDIR` | `$TMPDIR/selkies-tests` | Server log, shim recordings and other scratch. Run through `pytest`, each suite's logs are also copied into `suite-logs/<suite>/` under it, which CI uploads. Its `run/` is the `XDG_RUNTIME_DIR` every compositor, observer and client the suites start is given, so their sockets never land in a desktop session's own. |
 | `SELKIES_TEST_PYTHON` | the interpreter running the tests | Interpreter the server under test runs on. |
 | `E2E_CHROME` | unset | System Chrome/Chromium binary. Unset uses Playwright's bundled Chromium. |
 | `E2E_FIREFOX_PROFILE` | `$E2E_WORKDIR/firefox-profile` | Persistent Firefox profile; clipboard permission does not survive a fresh one, and `tests/tools/fetch-openh264.sh` seeds the OpenH264 plugin into it. Firefox negotiates no H.264 without that plugin, and the WebRTC block skips. |
