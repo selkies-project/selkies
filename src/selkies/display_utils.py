@@ -1212,7 +1212,8 @@ class MultiMonitorWindowManager:
                 f"Multi-monitor setup: {running or 'no window manager'} keeps its "
                 "monitor set current; no restart.")
             return
-        command = wm_command(await current_wm_pid()) or [needing]
+        replacing = await current_wm_pid()
+        command = wm_command(replacing) or [needing]
         if "--replace" not in command:
             command.append("--replace")
         logger_app_resize.info(
@@ -1229,7 +1230,7 @@ class MultiMonitorWindowManager:
             return
         # Before the layout applies: a WM snapshotting the monitor set mid-swap
         # re-tiles maximized windows across the whole framebuffer.
-        if not await wait_for_wm(needing):
+        if not await wait_for_wm(needing, replacing):
             logger_app_resize.warning(
                 f"{needing} restart not confirmed; applying layout anyway.")
 
@@ -1273,20 +1274,24 @@ def wm_name_matches(command_name: str, wm_name: str) -> bool:
     return bool(want) and bool(have) and (want.startswith(have) or have.startswith(want))
 
 
-async def wait_for_wm(name_substring: str, timeout: float = 3.0) -> bool:
-    """Wait until the EWMH WM name is the window manager ``name_substring``
-    starts (`wm_name_matches`).
+async def wait_for_wm(name_substring: str, replacing: int = 0,
+                      timeout: float = 3.0) -> bool:
+    """Wait until the window manager ``name_substring`` starts is the one
+    running (`wm_name_matches`) and, given the process id of the one it
+    replaces, no longer that one.
 
     Used after a WM --replace so layout changes are not applied while two
-    window managers hand over the selection (the incoming WM snapshots the
-    monitor set it starts against).
+    window managers hand over the selection: the incoming WM snapshots the
+    monitor set it starts against, and the outgoing one answers to the same
+    name until it is gone.
 
     Returns:
-        True when the name matched within ``timeout`` seconds.
+        True when the manager matched within ``timeout`` seconds.
     """
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
-        if wm_name_matches(name_substring, await current_wm_name()):
+        if wm_name_matches(name_substring, await current_wm_name()) and (
+                not replacing or await current_wm_pid() not in (0, replacing)):
             return True
         if asyncio.get_running_loop().time() >= deadline:
             return False

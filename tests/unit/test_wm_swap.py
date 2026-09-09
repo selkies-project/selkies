@@ -53,7 +53,7 @@ def restart_attempt(running_wm: str = "Openbox", cmdline=("openbox", "--config-f
     def fake_wm_command(pid: int) -> list:
         return list(cmdline) if pid == 4242 else []
 
-    async def fake_wait(_name: str) -> bool:
+    async def fake_wait(_name: str, _replacing: int = 0) -> bool:
         return True
 
     saved = (DU.asyncio.create_subprocess_exec, DU.current_wm_name, DU.current_wm_pid,
@@ -173,6 +173,9 @@ def live_openbox_check() -> None:
             asyncio.run(DU.MultiMonitorWindowManager().ensure_for(2, False))
         finally:
             DU.logger_app_resize.removeHandler(handler)
+        on_return = DU._sync_wm_pid()
+        res.check("ensure_for returns only once the replacement manages",
+                  on_return not in (0, proc.pid), (on_return, proc.pid, said))
         deadline = time.time() + 10
         while time.time() < deadline and (proc.poll() is None
                                           or DU._sync_wm_pid() in (0, proc.pid)):
