@@ -127,7 +127,7 @@ def push_clipboard(wayland: bool, payload: bytes) -> dict:
     """Put `payload` on the session clipboard as text, as an application would."""
     if wayland:
         env = {**os.environ, "WAYLAND_DISPLAY": "wayland-1",
-               "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", H.WORKDIR)}
+               "XDG_RUNTIME_DIR": H.RUNTIME_DIR}
         proc = subprocess.Popen(["wl-copy", "-t", "text/plain"],
                                 stdin=subprocess.PIPE, env=env)
         proc.stdin.write(payload)

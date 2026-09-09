@@ -83,7 +83,7 @@ def spawn_server(log: str) -> subprocess.Popen:
     """A server bound to SOCK, logging to `log`; not waited for."""
     env = {"PATH": os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"),
            "DISPLAY": H.require_display(),
-           "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", H.WORKDIR),
+           "XDG_RUNTIME_DIR": H.RUNTIME_DIR,
            "SELKIES_MODE": "websockets", "SELKIES_ENABLE_BASIC_AUTH": "false",
            "SELKIES_ENABLE_HTTPS": "false", "SELKIES_WEB_ROOT": H.CORE_DIST,
            "SELKIES_PORT": str(H.PORT), "SELKIES_UNIX_SOCKET": SOCK}

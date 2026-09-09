@@ -63,6 +63,11 @@ WISH_DIST = os.path.join(REPO, "addons/selkies-dashboard-wish/dist")
 
 WORKDIR = os.environ.get("E2E_WORKDIR", os.path.join(tempfile.gettempdir(), "selkies-tests"))
 os.makedirs(WORKDIR, exist_ok=True)
+# The XDG runtime directory every compositor, observer and client the suites
+# start is given: the session's own would collect their sockets beside the
+# desktop's, and a stale socket there can be mistaken for a live compositor.
+RUNTIME_DIR = os.path.join(WORKDIR, "run")
+os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
 LOG = os.path.join(WORKDIR, "selkies-server.log")
 PIDFILE = os.path.join(WORKDIR, "selkies-server.pid")
 
@@ -170,6 +175,28 @@ def pulse_setup() -> None:
     ask("set-default-sink", "output")
 
 
+def pulse_server() -> Optional[str]:
+    """The sound server's address as libpulse takes it in `PULSE_SERVER`, read
+    back from `pactl info`. The suites run their children under a runtime
+    directory of their own (`RUNTIME_DIR`), where libpulse would look for a
+    sound server that is not there; the one the suites set up listens under
+    the session's, so its address has to travel explicitly. An address the
+    environment already names wins."""
+    if os.environ.get("PULSE_SERVER"):
+        return os.environ["PULSE_SERVER"]
+    pactl = shutil.which("pactl")
+    if not pactl:
+        return None
+    try:
+        out = subprocess.run([pactl, "info"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in out.splitlines():
+        if line.startswith("Server String:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
 def pulse_null_sink(name: str, **opts: Any) -> Optional[str]:
     """Load a null sink named `name`, returning the module id to unload later.
 
@@ -251,7 +278,7 @@ def server_start(mode: str = "websockets", wayland: bool = False,
     env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": os.path.expanduser("~"),
-        "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", WORKDIR),
+        "XDG_RUNTIME_DIR": RUNTIME_DIR,
         "SELKIES_PORT": str(port),
         "SELKIES_ENABLE_BASIC_AUTH": "false",
         "SELKIES_MODE": mode,
@@ -269,6 +296,9 @@ def server_start(mode: str = "websockets", wayland: bool = False,
         env["PYTHONWARNINGS"] = os.environ["PYTHONWARNINGS"]
     if not wayland:
         env["DISPLAY"] = require_display()
+    pulse = pulse_server()
+    if pulse:
+        env["PULSE_SERVER"] = pulse
     if extra_env:
         env.update(extra_env)
     with open(log, "w") as lf:
@@ -759,7 +789,7 @@ def _wl_env(socket_name: str) -> dict:
     the missing dependency it is.
     """
     return {**os.environ, "WAYLAND_DISPLAY": socket_name,
-            "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", WORKDIR)}
+            "XDG_RUNTIME_DIR": RUNTIME_DIR}
 
 
 def wl_paste(socket_name: str, timeout: float = 6) -> str:
@@ -791,7 +821,7 @@ def wl_clear(socket_name: str, timeout: float = 12) -> None:
     subprocess.run(
         ["env", "WAYLAND_DISPLAY=" + socket_name, "wl-copy", "-c"],
         capture_output=True, timeout=timeout,
-        env={**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", WORKDIR)})
+        env={**os.environ, "XDG_RUNTIME_DIR": RUNTIME_DIR})
 
 
 class WlObs:
@@ -802,7 +832,7 @@ class WlObs:
         self.proc = spawn(
             [PYTHON, os.path.join(TOOLS, "wlobs.py"), socket_name],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            env={**os.environ, "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", WORKDIR),
+            env={**os.environ, "XDG_RUNTIME_DIR": RUNTIME_DIR,
                  "WLOBS_DURATION": "60"})
         self.lines: list = []
         self._start_reader()

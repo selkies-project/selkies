@@ -45,7 +45,7 @@ def png(seed: int) -> bytes:
 
 def _wl_env() -> dict:
     return {**os.environ, "WAYLAND_DISPLAY": WL_SOCKET,
-            "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", H.WORKDIR)}
+            "XDG_RUNTIME_DIR": H.RUNTIME_DIR}
 
 
 def session_image(wayland: bool) -> tuple:

@@ -49,7 +49,7 @@ def spawn_labwc(socket: str):
     if not shutil.which("labwc"):
         return None
     env = dict(os.environ, WAYLAND_DISPLAY=socket, WLR_BACKENDS="wayland",
-               XDG_RUNTIME_DIR=os.environ.get("XDG_RUNTIME_DIR", H.WORKDIR), WLR_WL_OUTPUTS="1")
+               XDG_RUNTIME_DIR=H.RUNTIME_DIR, WLR_WL_OUTPUTS="1")
     env.pop("DISPLAY", None)
     log = open(os.path.join(H.WORKDIR, "labwc.log"), "w")
     proc = H.spawn(["labwc"], env=env, stdout=log, stderr=subprocess.STDOUT)

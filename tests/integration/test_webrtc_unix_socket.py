@@ -27,7 +27,7 @@ os.path.exists(SOCK) and os.unlink(SOCK)
 
 env = {"PATH": os.environ.get("PATH", ""),
        "HOME": os.path.expanduser("~"), "DISPLAY": H.require_display(),
-       "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", H.WORKDIR),
+       "XDG_RUNTIME_DIR": H.RUNTIME_DIR,
        "SELKIES_MODE": "webrtc", "SELKIES_ENABLE_BASIC_AUTH": "false",
        "SELKIES_WEB_ROOT": H.CORE_DIST,
        "SELKIES_TURN_REST_URI": ""}

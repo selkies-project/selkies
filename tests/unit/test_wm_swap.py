@@ -13,6 +13,7 @@ The decision is driven against stand-ins; the readers are then checked against
 a real Openbox on the test display, restarted for real.
 """
 import asyncio
+import logging
 import os
 import subprocess
 import sys
@@ -123,16 +124,26 @@ def live_openbox_check() -> None:
                   DU.wm_name_matches("openbox", name) and pid == proc.pid, (name, pid, proc.pid))
         res.check("and its command line is read back from /proc",
                   DU.wm_command(pid) == ["openbox", "--replace"], DU.wm_command(pid))
-        asyncio.run(DU.MultiMonitorWindowManager().ensure_for(2, False))
+        # What the restart said and which openbox processes are left are the
+        # record of a swap that did not happen, so a failure names its cause.
+        said: list = []
+        handler = logging.Handler()
+        handler.emit = lambda record: said.append(record.getMessage())
+        DU.logger_app_resize.addHandler(handler)
+        try:
+            asyncio.run(DU.MultiMonitorWindowManager().ensure_for(2, False))
+        finally:
+            DU.logger_app_resize.removeHandler(handler)
         deadline = time.time() + 10
         while time.time() < deadline and (proc.poll() is None
                                           or DU._sync_wm_pid() in (0, proc.pid)):
             time.sleep(0.2)
         new_pid = DU._sync_wm_pid()
+        procs = subprocess.run(["pgrep", "-a", "openbox"], capture_output=True, text=True).stdout.split("\n")
         res.check("the first extend restarts it: the old process exits and a new one manages",
                   proc.poll() is not None and new_pid not in (0, proc.pid)
                   and DU.wm_name_matches("openbox", DU._sync_wm_name()),
-                  (proc.poll(), new_pid, proc.pid))
+                  (proc.poll(), new_pid, proc.pid, said, [x for x in procs if x]))
         if new_pid not in (0, proc.pid):
             os.kill(new_pid, 15)
     finally:
