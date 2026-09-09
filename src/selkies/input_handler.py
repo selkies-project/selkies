@@ -6310,7 +6310,7 @@ class WebRTCInput:
             asyncio.get_running_loop()
         except RuntimeError:
             return
-        hook = self.on_session_compositor_adopted
+        hook = getattr(self, "on_session_compositor_adopted", None)
         if hook is not None:
             self._spawn_task(hook(dpi))
             return
