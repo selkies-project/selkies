@@ -60,6 +60,7 @@ def launch(pw, mode: str, fragment: str = ""):
     browser = C.chromium_launch(pw)
     ctx = browser.new_context(viewport={"width": 1280, "height": 720})
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+    ctx.add_init_script(C.WIRE_TAP_JS)
     ctx.add_init_script(PAD_INIT)
     page = ctx.new_page()
     errors = []
@@ -134,6 +135,10 @@ def run_player_slot(mode: str, results: "H.Results") -> None:
                 page.evaluate(f"window.{action}")
                 time.sleep(0.25)
             time.sleep(0.5)
+            # What the page sent for its pad, so a missing association on the
+            # server can be told from an announcement the client never made.
+            sent = [m for m in page.evaluate("window.__wireSent || []")
+                    if isinstance(m, str) and m.startswith("js,")]
             browser.close()
     finally:
         server_log = H.server_log()
@@ -142,7 +147,8 @@ def run_player_slot(mode: str, results: "H.Results") -> None:
     events = decode(STREAM)
     results.check(f"{mode}: a player-2 link is given slot 1",
                   "virtual gamepad slot 1" in server_log
-                  and "virtual gamepad slot 0" not in server_log)
+                  and "virtual gamepad slot 0" not in server_log,
+                  f"client sent {sent[:3]}")
     results.check(f"{mode}: its pad reaches the kernel device",
                   (ih.EV_KEY, ih.BTN_A, 1) in events, f"{len(events)} events")
     results.check(f"{mode}: no other slot was driven",

@@ -168,6 +168,10 @@ class Desktop:
             self.socket = open(marker).read().strip()
         else:
             self.socket = f"wayland-kwin-{os.getpid()}"
+            # KWin hides its restricted globals (fake input, screencast) from clients
+            # it did not start unless told not to; pixelflux reaches a nested KWin
+            # only under this, as the KDE images run it.
+            env["KWIN_WAYLAND_NO_PERMISSION_CHECKS"] = "1"
             cmd = ["dbus-run-session", "--", "kwin_wayland", "--wayland-display", capture,
                    "--socket", self.socket, "--width", str(WINDOW[0]), "--height", str(WINDOW[1]),
                    "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities"]

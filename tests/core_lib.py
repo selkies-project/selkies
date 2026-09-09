@@ -70,11 +70,29 @@ def wire_hook_js(body: str) -> str:
 """ % body
 
 
+# Every RTCPeerConnection the page opens, in `window.__pcs`, so a stream that
+# never shows a frame can be asked what it received and decoded.
+PC_TAP_JS = """
+(() => {
+  const PC = window.RTCPeerConnection;
+  if (!PC) return;
+  window.__pcs = [];
+  const Tapped = function (...args) {
+    const pc = new PC(...args);
+    window.__pcs.push(pc);
+    return pc;
+  };
+  Tapped.prototype = PC.prototype;
+  Object.setPrototypeOf(Tapped, PC);
+  window.RTCPeerConnection = Tapped;
+})();
+"""
+
 # Text messages the page sent, in `window.__wireSent`. Only strings are kept:
 # a binary payload is transferred to the socket worker and detached, so a
 # reference held here would read as empty.
 WIRE_TAP_JS = ("window.__wireSent = [];\n" + wire_hook_js(
-    "if (typeof data === 'string') window.__wireSent.push(data);"))
+    "if (typeof data === 'string') window.__wireSent.push(data);") + PC_TAP_JS)
 
 
 def chromium_launch(pw: Any, extra_args: Optional[list] = None) -> Any:
@@ -393,7 +411,9 @@ def wait_ws_video(page: Any, timeout: float = 15) -> Optional[dict]:
 
 def wait_wr_video(page: Any, timeout: float = 45) -> Optional[dict]:
     """Wait for a decoding WebRTC `<video>`; its dimensions and audio track
-    count as a dict, or None on timeout."""
+    count as a dict, or None on timeout, when what the page's peer connection
+    received and decoded is printed so a stream that never showed can be read
+    from the run's output."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         info = page.evaluate("""(() => {
@@ -407,7 +427,47 @@ def wait_wr_video(page: Any, timeout: float = 45) -> Optional[dict]:
         if info:
             return info
         time.sleep(0.5)
+    print(f"[wr-video] no decoded frame in {timeout:.0f}s: {wr_video_state(page)}", flush=True)
     return None
+
+
+WR_VIDEO_STATE_JS = """(async () => {
+  const out = {};
+  const v = document.querySelector('video');
+  out.video = v ? {readyState: v.readyState, w: v.videoWidth, h: v.videoHeight, paused: v.paused,
+                   error: v.error ? v.error.code : null,
+                   tracks: v.srcObject && v.srcObject.getTracks ? v.srcObject.getTracks().map(
+                     (t) => `${t.kind}:${t.readyState}${t.muted ? ':muted' : ''}`) : null} : null;
+  out.pcs = [];
+  for (const pc of (window.__pcs || [])) {
+    const p = {connection: pc.connectionState, ice: pc.iceConnectionState, signaling: pc.signalingState,
+               inbound: []};
+    try {
+      const stats = await pc.getStats();
+      const codecs = {};
+      stats.forEach((r) => { if (r.type === 'codec') codecs[r.id] = r.mimeType + ' ' + (r.sdpFmtpLine || ''); });
+      stats.forEach((r) => {
+        if (r.type === 'inbound-rtp') {
+          p.inbound.push({kind: r.kind, packets: r.packetsReceived, bytes: r.bytesReceived,
+                          lost: r.packetsLost, frames: r.framesReceived, decoded: r.framesDecoded,
+                          dropped: r.framesDropped, keyframes: r.keyFramesDecoded, pli: r.pliCount,
+                          decoder: r.decoderImplementation, codec: codecs[r.codecId] || r.codecId});
+        }
+      });
+    } catch (e) { p.statsError = String(e); }
+    out.pcs.push(p);
+  }
+  return out;
+})()"""
+
+
+def wr_video_state(page: Any) -> Any:
+    """What the page's `<video>` and peer connections report: element state and
+    the inbound video counters, or the error that kept them from being read."""
+    try:
+        return page.evaluate(WR_VIDEO_STATE_JS)
+    except Exception as e:
+        return f"unreadable: {e}"
 
 
 def page_fps(page: Any, timeout: float = 10) -> float:
