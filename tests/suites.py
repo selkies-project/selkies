@@ -156,7 +156,7 @@ SUITES: list = [
                    "striped", "sink"]},
     {"path": "e2e/test_full_color.py", "tier": "e2e", "timeout": 900,
      "selectors": ["ws-chromium", "ws-firefox", "ws-webkit", "wr-chromium", "wr-webkit",
-                   "ws-locked", "ws-pinned"]},
+                   "ws-locked", "ws-pinned", "ws-stalled", "wr-stalled"]},
     {"path": "e2e/test_dashboards.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["classic", "wish", "gates", "hidpi", "hidpi-webrtc", "raw-motion",
                    "raw-motion-webrtc", "second-screen"]},

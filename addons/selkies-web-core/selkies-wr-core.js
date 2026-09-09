@@ -986,11 +986,13 @@ export default function webrtc() {
 	 * Where the decoder has no 4:4:4 profile a full-colour stream is not a
 	 * heavier picture but no picture, so the setting is dropped rather than
 	 * asked for. Written to storage, which is what every payload and both
-	 * dashboards read, so the toggle shows what the stream is.
+	 * dashboards read, so the toggle shows what the stream is. The decoder is
+	 * only asked where full colour is on, since the first settings payload
+	 * waits here and the answer settles nothing for a stream not asking for it.
 	 */
 	async function settleFullColorSupport() {
-		if (await canDecodeFullColor()) return;
 		if (!getBoolParam('video_fullcolor', false)) return;
+		if (await canDecodeFullColor()) return;
 		console.warn('[Selkies] full colour (4:4:4) is off: this browser decodes H.264 4:2:0 only.');
 		setBoolParam('video_fullcolor', false);
 	}

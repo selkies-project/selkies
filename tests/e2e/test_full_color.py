@@ -21,6 +21,7 @@ Usage: python3 tests/e2e/test_full_color.py ws-webkit
 """
 import os
 import sys
+import time
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -97,6 +98,51 @@ REFUSE_FULLCOLOR_JS = """
 # The stripe decoders on the page rather than in the video worker, where a
 # script injected into the page cannot reach them.
 PAGE_DECODE_URL = H.BASE_URL + "/?offscreen_worker=false"
+
+# A decoder that takes the probe and never answers it, which is what WebKit's
+# does on a loaded machine.
+STALL_PROBE_JS = """
+(() => {
+  if (typeof VideoDecoder === 'undefined') return;
+  VideoDecoder.isConfigSupported = () => new Promise(() => {});
+})();
+"""
+
+
+def settings_sent(page: Any) -> int:
+    """How many settings payloads the page has put on the wire."""
+    return page.evaluate("(window.__wireSent || [])"
+                         ".filter(d => typeof d === 'string' && d.startsWith('SETTINGS,')).length")
+
+
+def drive_stalled(res: "H.Results", p: Any, mode: str) -> None:
+    """A decoder that never answers the probe, on the transport under test.
+
+    The client asks its own decoder before it asks the server for anything, so
+    an unanswered probe stands between the session and its first message: what
+    must not happen is the session waiting on it. Full colour is dropped as it
+    is for a decoder that refuses outright, since an engine that will not say
+    cannot be shown a stream only its 4:4:4 profile could decode.
+    """
+    browser = C.chromium_launch(p)
+    try:
+        ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+        ctx.add_init_script(init_script(mode) + STALL_PROBE_JS + C.WIRE_TAP_JS)
+        page = ctx.new_page()
+        started = time.time()
+        page.goto(H.BASE_URL, wait_until="load")
+        deadline = started + 45
+        while time.time() < deadline and not settings_sent(page):
+            time.sleep(0.5)
+        res.check("[stalled] the session's settings reach the server", settings_sent(page) > 0,
+                  f"{settings_sent(page)} sent in {time.time() - started:.0f}s")
+        video = (C.wait_wr_video(page, timeout=60) if mode == "webrtc"
+                 else C.wait_ws_video(page, timeout=60))
+        res.check("[stalled] and the stream plays", bool(video), video)
+        res.check("[stalled] full colour is dropped, as for a decoder that refuses",
+                  page.evaluate(STORED_JS) == "false", page.evaluate(STORED_JS))
+    finally:
+        C.close_browser(browser)
 
 
 def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
@@ -213,6 +259,8 @@ def main() -> "H.Results":
         with sync_playwright() as p:
             if locked:
                 drive_locked(res, p, pinned=engine == "pinned")
+            elif engine == "stalled":
+                drive_stalled(res, p, mode)
             else:
                 drive(res, engine, mode, p)
     finally:

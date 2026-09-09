@@ -114,6 +114,13 @@ export const decodableEncoders = (encoders) => encoders.filter(canDecodeEncoder)
 
 /** Cached answer of `canDecodeFullColor`, so the probe runs once. */
 let fullColorProbe = null;
+/**
+ * How long an engine is given to answer the probe. A decoder that stalls
+ * instead of answering must not hold the session up: the answer settles one
+ * setting, while a session waits on it to start. Measured answers are
+ * immediate, the first in a page costing a media stack its warm-up.
+ */
+const FULLCOLOR_PROBE_TIMEOUT_MS = 10000;
 
 /**
  * Whether this engine's `VideoDecoder` will take H.264 full colour (4:4:4).
@@ -131,16 +138,22 @@ let fullColorProbe = null;
  * since a level is a ceiling and a size beyond it is a pair an implementation
  * may reject on its own. What a real stream is decoded with comes from its
  * keyframe's SPS instead.
- * @returns {Promise<boolean>} False where there is no `VideoDecoder` at all.
+ * @returns {Promise<boolean>} False where there is no `VideoDecoder` at all,
+ *     and where one is asked but never answers.
  */
 export function canDecodeFullColor() {
     if (!fullColorProbe) {
         fullColorProbe = (async () => {
             if (typeof VideoDecoder === "undefined") return false;
             try {
-                const support = await VideoDecoder.isConfigSupported({
-                    codec: "avc1.F4001E", codedWidth: 320, codedHeight: 240,
-                });
+                // The timer stands in for the refusal a decoder without the
+                // profile gives, so an engine that never answers reads as one.
+                const support = await Promise.race([
+                    VideoDecoder.isConfigSupported({
+                        codec: "avc1.F4001E", codedWidth: 320, codedHeight: 240,
+                    }),
+                    new Promise((resolve) => setTimeout(resolve, FULLCOLOR_PROBE_TIMEOUT_MS)),
+                ]);
                 return !!(support && support.supported);
             } catch (err) {
                 return false;

@@ -2492,10 +2492,12 @@ body {
  * setting is turned off rather than asked for. It is written to storage, not
  * merely dropped from one payload: every payload is built from storage, and
  * the dashboards read the same keys, so the toggle shows what the stream is.
+ * The decoder is only asked where full colour is on, since the session waits
+ * here to start and the answer settles nothing for a stream not asking for it.
  */
 async function settleFullColorSupport() {
-    if (await canDecodeFullColor()) return;
     if (!getBoolParam('video_fullcolor', false)) return;
+    if (await canDecodeFullColor()) return;
     console.warn('[Selkies] full colour (4:4:4) is off: this browser decodes H.264 4:2:0 only.');
     video_fullcolor = false;
     setBoolParam('video_fullcolor', false);
