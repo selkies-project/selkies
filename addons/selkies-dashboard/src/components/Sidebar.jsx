@@ -3601,9 +3601,12 @@ function Sidebar() {
                           className={`toggle-button-sidebar ${hidpiEnabled ? "active" : ""}`}
                           onClick={handleHidpiToggle}
                           aria-pressed={hidpiEnabled}
-                          disabled={serverSettings?.enable_resize?.value === false}
+                          disabled={serverSettings?.enable_resize?.value === false
+                            || conditionalCtx.manualActive}
                           title={serverSettings?.enable_resize?.value === false
                             ? t("sections.screen.hidpiDisabledNoResizeTitle", "Resolution changes are disabled by the server (enable_resize)")
+                            : conditionalCtx.manualActive
+                            ? t("sections.screen.hidpiDisabledManualTitle", "A manual resolution is streamed as exact pixels either way; UI scaling sizes its desktop")
                             : t(hidpiEnabled ? "sections.screen.hidpiDisableTitle" : "sections.screen.hidpiEnableTitle",
                                 hidpiEnabled ? "Disable HiDPI (Use CSS Scaling)" : "Enable HiDPI (Pixel Perfect)")}
                         >

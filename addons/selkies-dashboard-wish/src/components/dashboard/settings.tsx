@@ -1134,12 +1134,15 @@ export function Settings() {
                                             <label className="text-sm font-medium"
                                                 title={serverSettings?.enable_resize?.value === false
                                                     ? t('sections.screen.hidpiDisabledNoResizeTitle')
+                                                    : conditionalCtx.manualActive
+                                                    ? t('sections.screen.hidpiDisabledManualTitle')
                                                     : undefined}>{t('sections.screen.hidpiLabel')}</label>
                                         </div>
                                         <Switch
                                             checked={hidpiEnabled}
                                             onCheckedChange={handleHidpiToggle}
-                                            disabled={serverSettings?.enable_resize?.value === false}
+                                            disabled={serverSettings?.enable_resize?.value === false
+                                                || conditionalCtx.manualActive}
                                         />
                                     </div>
                                 )}
