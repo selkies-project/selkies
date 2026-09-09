@@ -2151,6 +2151,9 @@ class WebRTCService(BaseStreamingService):
         DPI as its output scale and the capture output, which took it while the
         session was still starting, drops back to 1.0.
 
+        Serialized against the layout pass: the adoption can land during the
+        one that started the captures it restarts.
+
         Args:
             dpi: The desktop DPI in force.
         """
@@ -2160,7 +2163,8 @@ class WebRTCService(BaseStreamingService):
             dpi_value = int(float(dpi))
         except (TypeError, ValueError):
             return
-        await self._realize_wayland_dpi(dpi_value)
+        async with self._display_lock:
+            await self._realize_wayland_dpi(dpi_value)
 
     async def handle_system_monitor(self, t: float) -> None:
         """System-monitor tick: push CPU/memory stats and a ping to clients,
