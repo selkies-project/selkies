@@ -260,13 +260,14 @@ def hidpi_block(page: Any, mode: str, res: "H.Results") -> None:
 
     On, the stream is the window's physical pixels and the desktop is scaled to
     the UI-scaling pick, so the remote UI comes out the size of the local one.
-    Off, the remote UI is not scaled at all and the pick divides the resolution
-    asked for instead, which the browser stretches back: scaling on both sides
-    at once drew the remote UI at the pick twice over. A manual resolution is
-    the exact framebuffer either way -- a toggle must not swing the number the
-    operator asked for -- so with the flag off the pick has nothing to divide
-    there and moves nothing. The pick here is the automatic default, this
-    display's own scaling as a DPI.
+    Off, the remote UI is not scaled and the pick divides the resolution asked
+    for instead, which the browser stretches back: scaling on both sides at
+    once drew the remote UI at the pick twice over. A manual resolution is the
+    exact framebuffer either way -- a toggle must not swing the number the
+    operator asked for -- so there the pick has no request to divide and
+    reaches the desktop whatever the flag says, which is one application and
+    not two. The pick here is the automatic default, this display's own
+    scaling as a DPI.
     """
     pick = DPR * 96
     css_w, css_h = page.evaluate("[window.innerWidth, window.innerHeight]")
@@ -292,20 +293,25 @@ def hidpi_block(page: Any, mode: str, res: "H.Results") -> None:
               off_dpi * on_px == on_dpi * off_px,
               f"{off_dpi} DPI over {off_px}px vs {on_dpi} over {on_px}px")
 
+    # A manual resolution is the exact framebuffer whatever the flag says, so
+    # the pick has no request to divide there and governs the desktop instead:
+    # one application, not the two CSS scaling used to make.
     seen = len(sent)
     post(page, {"type": "setManualResolution", "width": PRESET_W, "height": PRESET_H})
     sent = wait_new_request(page, seen)
     res.check("HiDPI off asks for a manual resolution exactly",
               len(sent) > seen and sent[-1] == f"{PRESET_W}x{PRESET_H}", sent[seen:])
-    manual_dpi = wait_dpi(96)
-    res.check("and leaves the desktop unscaled there too", manual_dpi == 96,
-              f"Xft.dpi={manual_dpi}")
+    manual_dpi = wait_dpi(pick)
+    res.check("and the pick still reaches the desktop there", manual_dpi == pick,
+              f"Xft.dpi={manual_dpi} want {pick}")
 
     seen = len(sent)
     post(page, {"type": "resetResolutionToWindow"})
     sent = wait_new_request(page, seen)
+    res.check("back on the window size the request is physical again",
+              len(sent) > seen and sent[-1] == f"{css_w}x{css_h}", sent[seen:])
     window_dpi = wait_dpi(96)
-    res.check("back on the window size it is unscaled still", window_dpi == 96,
+    res.check("and the desktop is unscaled again", window_dpi == 96,
               f"Xft.dpi={window_dpi}")
 
     seen = len(sent)

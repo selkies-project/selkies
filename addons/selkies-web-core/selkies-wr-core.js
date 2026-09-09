@@ -1197,10 +1197,16 @@ export default function webrtc() {
 	/**
 	 * The DPI the desktop is asked for: 96 under CSS scaling, where the pick
 	 * divides the requested resolution instead (lib/stream-density.js).
+	 *
+	 * A manual resolution is the exact framebuffer either way -- a HiDPI
+	 * toggle must not swing the size the operator asked for -- so there is
+	 * nothing for the pick to divide there and it governs the desktop, HiDPI
+	 * or not. Applying it once is not the double scaling that CSS scaling
+	 * had: the request it would have divided is fixed.
 	 * @returns {number}
 	 */
 	function effectiveScalingDpi() {
-		return useCssScaling ? 96 : scalingDPI;
+		return (useCssScaling && !window.manualResolution) ? 96 : scalingDPI;
 	}
 
 	/** Sends the desktop the DPI in force. */
@@ -1541,6 +1547,7 @@ export default function webrtc() {
 				setBoolParam('manual_resolution', false);
 				enableAutoResize();
 				handleResizeUI();
+				pushScalingDpi();
 				break;
 			case "setManualResolution":
 				if (isSharedMode) { break; }
@@ -1561,6 +1568,9 @@ export default function webrtc() {
 				setBoolParam('manual_resolution', true);
 				disableAutoResize();
 				sendResolutionToServer(manualWidth, manualHeight);
+				// The DPI the desktop is asked for turns on whether the resolution is
+				// manual, so the flip carries the new answer.
+				pushScalingDpi();
 				applyManualStyle(manualWidth, manualHeight, scaleLocal);
 				break;
 			case "setUseCssScaling":

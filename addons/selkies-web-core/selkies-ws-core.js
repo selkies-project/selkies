@@ -463,10 +463,16 @@ function autoDeriveDpi() {
 /**
  * The DPI the desktop is asked for: 96 under CSS scaling, where the pick
  * divides the requested resolution instead (lib/stream-density.js).
+ *
+ * A manual resolution is the exact framebuffer either way -- a HiDPI toggle
+ * must not swing the size the operator asked for -- so there is nothing for
+ * the pick to divide there and it governs the desktop, HiDPI or not. Applying
+ * it once is not the double scaling that CSS scaling had: the request it would
+ * have divided is fixed.
  * @returns {number}
  */
 function effectiveScalingDpi() {
-  return useCssScaling ? 96 : scalingDPI;
+  return (useCssScaling && !window.manual_resolution) ? 96 : scalingDPI;
 }
 
 /**
@@ -4221,6 +4227,9 @@ function receiveMessage(event) {
       setBoolParam('manual_resolution', true);
       disableAutoResize();
       sendResolutionToServer(manual_width, manual_height);
+      // The DPI the desktop is asked for turns on whether the resolution is
+      // manual, so the flip carries the new answer.
+      sendFullSettingsUpdateToServer('manual resolution set');
       applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
       if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') {
         console.log("Clearing VNC stripe decoders due to manual resolution change.");
@@ -4254,6 +4263,7 @@ function receiveMessage(event) {
         }
       }
       enableAutoResize();
+      sendFullSettingsUpdateToServer('manual resolution cleared');
       break;
     case 'settings':
       console.log('Received settings message:', message.settings);
