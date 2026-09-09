@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Shared helpers for the selkies test suites: server lifecycle, HTTP probes,
 and the X11 and Wayland observation used to prove that input arrived."""
+import contextlib
 import ctypes
 import faulthandler
+import functools
 import json
 import os
 import shutil
@@ -12,8 +14,10 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from typing import Any, Iterable, NoReturn, Optional
+import weakref
+from typing import Any, Iterable, Iterator, NoReturn, Optional
 
 REPO = os.environ.get(
     "SELKIES_REPO",
@@ -32,12 +36,89 @@ if _PY_BIN not in os.environ.get("PATH", "").split(os.pathsep):
 # Never inherited from DISPLAY: the suites resize the root and inject input,
 # which must not land on a session in use. private_x_server() needs nothing set.
 TEST_DISPLAY = os.environ.get("E2E_DISPLAY", "")
-# The runner's budget for this suite, in seconds. A suite that stalls (a browser
-# call with no deadline of its own, say) prints the stack of every thread to
-# stderr at the deadline and exits, which is what says where it stuck; the
-# runner's own kill would leave no such record.
+# The runner's budget for this suite, in seconds. A suite that stalls prints the
+# stack of every thread to stderr at the deadline and exits, which is what says
+# where it stuck; the runner's own kill would leave no such record.
 if os.environ.get("SELKIES_SUITE_DEADLINE"):
     faulthandler.dump_traceback_later(float(os.environ["SELKIES_SUITE_DEADLINE"]), exit=True)
+
+
+class PageStalled(RuntimeError):
+    """A browser call the engine never answered."""
+
+
+# How long a browser is given to answer a call that carries no deadline of its
+# own. Every legitimate one is orders of magnitude quicker; the bound exists for
+# an engine that has stopped answering altogether. 0 turns it off.
+PAGE_CALL_TIMEOUT = float(os.environ.get("E2E_PAGE_CALL_TIMEOUT", "60"))
+# Receivers that have already outlasted the bound. An engine wedged once stays
+# wedged, so the calls after the first are refused instead of waited out.
+_stalled: "weakref.WeakSet" = weakref.WeakSet()
+_guarded = 0
+
+
+@contextlib.contextmanager
+def answers_within(seconds: float, what: str = "the browser") -> Iterator[None]:
+    """Raise `PageStalled` if the block outlasts `seconds`.
+
+    Only the main thread can take a signal, so a call off it is left plain, as
+    is one already inside a bound: the process has a single interval timer and
+    a nested wait would move the outer deadline.
+    """
+    global _guarded
+    if seconds <= 0 or _guarded or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def expired(signum: int, frame: Any) -> NoReturn:
+        raise PageStalled(f"{what} did not answer within {seconds:.0f}s")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    _guarded += 1
+    try:
+        yield
+    finally:
+        _guarded -= 1
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _bound_browser_calls() -> None:
+    """Put every deadline-less Playwright call under `answers_within`.
+
+    `evaluate` asks the page a question and waits for the answer with no
+    timeout of any kind, and a close waits on a teardown the same way, while
+    the calls that wait on the page (`wait_for_function`, a click) all carry
+    one. An engine whose renderer wedges therefore stops a suite dead until the
+    runner kills it, and the only record left is what had already been printed.
+    Wrapped here, once, rather than at the hundreds of call sites.
+    """
+    try:
+        from playwright.sync_api import Browser, BrowserContext, Frame, Page
+    except ImportError:
+        return
+    for cls, name, what in ((Page, "evaluate", "the page"),
+                            (Frame, "evaluate", "the frame"),
+                            (Browser, "close", "the browser"),
+                            (BrowserContext, "close", "the browser context")):
+        call = getattr(cls, name)
+
+        def bounded(self: Any, *args: Any, _call: Any = call, _what: str = what,
+                    **kwargs: Any) -> Any:
+            if self in _stalled:
+                raise PageStalled(f"{_what} stopped answering earlier in this suite")
+            try:
+                with answers_within(PAGE_CALL_TIMEOUT, _what):
+                    return _call(self, *args, **kwargs)
+            except PageStalled:
+                _stalled.add(self)
+                raise
+
+        setattr(cls, name, functools.wraps(call)(bounded))
+
+
+_bound_browser_calls()
 
 
 def _free_port() -> int:

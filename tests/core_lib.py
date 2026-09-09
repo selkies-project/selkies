@@ -4,7 +4,6 @@ import json
 import os
 import platform
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -164,11 +163,9 @@ def launch_browser(pw: Any, engine: str = "chromium") -> Any:
 def close_browser(closer: Any, timeout: float = 30) -> bool:
     """Close a browser or persistent context, abandoning one that will not go.
 
-    An engine that wedges while tearing a session down blocks the close with no
-    deadline of its own, and the suite then reaches its own timeout and is
-    killed, which throws away every result it had already printed. The wait is
-    bounded here instead: the checks are done by the time anything closes, so a
-    browser that will not answer is reported and left to the driver to reap.
+    Every browser call is bounded (helpers.py); this gives a close a shorter
+    deadline than that and says so, the checks being done by the time anything
+    closes, so a browser that will not answer is left to the driver to reap.
 
     Args:
         closer: The browser or persistent context to close.
@@ -177,26 +174,16 @@ def close_browser(closer: Any, timeout: float = 30) -> bool:
     Returns:
         Whether the close returned on its own.
     """
-    def expired(signum: int, frame: Any) -> None:
-        raise TimeoutError(f"the browser did not close within {timeout:.0f}s")
-
-    if threading.current_thread() is not threading.main_thread():
-        # Only the main thread can take a signal; a caller off it closes plainly.
-        closer.close()
-        return True
-    previous = signal.signal(signal.SIGALRM, expired)
-    signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
-        closer.close()
+        with H.answers_within(timeout, "the browser"):
+            closer.close()
         return True
-    except TimeoutError as e:
-        print(f"note: {e}; abandoning it", flush=True)
+    except H.PageStalled:
+        print(f"note: the browser did not close within {timeout:.0f}s; abandoning it",
+              flush=True)
         return False
     except Exception:
         return True
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
 
 
 # Persistent Firefox profile: Firefox grants clipboard access only to a profile
@@ -393,16 +380,21 @@ def wait_ws_video(page: Any, timeout: float = 15) -> Optional[dict]:
     the decoded-frame requirement wait_wr_video gets from videoWidth.
 
     Returns:
-        The canvas dimensions as a dict, or None on timeout.
+        The canvas dimensions as a dict, or None on timeout or on a page that
+        stopped answering, both of which are the absence of video.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        info = page.evaluate("""(() => {
-          if (!(window.videoChunksReceived > 0)) return null;
-          const cs = document.querySelectorAll('canvas');
-          for (const c of cs) { if (c.width >= 640) return {w: c.width, h: c.height}; }
-          return null;
-        })()""")
+        try:
+            info = page.evaluate("""(() => {
+              if (!(window.videoChunksReceived > 0)) return null;
+              const cs = document.querySelectorAll('canvas');
+              for (const c of cs) { if (c.width >= 640) return {w: c.width, h: c.height}; }
+              return null;
+            })()""")
+        except H.PageStalled as e:
+            print(f"[ws-video] {e}", flush=True)
+            return None
         if info:
             return info
         time.sleep(0.5)
@@ -416,14 +408,18 @@ def wait_wr_video(page: Any, timeout: float = 45) -> Optional[dict]:
     from the run's output."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        info = page.evaluate("""(() => {
-          const v = document.querySelector('video');
-          if (v && v.readyState >= 2 && v.videoWidth > 0) {
-            return {w: v.videoWidth, h: v.videoHeight,
-                    audio: v.srcObject && v.srcObject.getAudioTracks ? v.srcObject.getAudioTracks().length : -1};
-          }
-          return null;
-        })()""")
+        try:
+            info = page.evaluate("""(() => {
+              const v = document.querySelector('video');
+              if (v && v.readyState >= 2 && v.videoWidth > 0) {
+                return {w: v.videoWidth, h: v.videoHeight,
+                        audio: v.srcObject && v.srcObject.getAudioTracks ? v.srcObject.getAudioTracks().length : -1};
+              }
+              return null;
+            })()""")
+        except H.PageStalled as e:
+            print(f"[wr-video] {e}", flush=True)
+            return None
         if info:
             return info
         time.sleep(0.5)
@@ -474,7 +470,11 @@ def page_fps(page: Any, timeout: float = 10) -> float:
     """First non-zero client fps reading, or 0 after `timeout` seconds."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        fps = page.evaluate("window.fps")
+        try:
+            fps = page.evaluate("window.fps")
+        except H.PageStalled as e:
+            print(f"[page-fps] {e}", flush=True)
+            return 0
         if fps and fps > 0:
             return fps
         time.sleep(0.5)
@@ -614,7 +614,6 @@ class Churn:
 
     def start(self) -> None:
         """Map the window and start drawing; returns once frames are flowing."""
-        import threading
         from selkies.Xlib import X, display as xdisp
         if self._thread is not None:
             return

@@ -46,6 +46,7 @@ every interpreter the package supports.
 | `E2E_PORT` | a free port | Server port; everything the server exposes, `/api/metrics` included, is on it. Left unset each suite process takes its own, so runs do not have to be serialised. Set it when something in front of the server needs a fixed one. |
 | `E2E_WORKDIR` | `$TMPDIR/selkies-tests` | Server log, shim recordings and other scratch. Run through `pytest`, each suite's logs are also copied into `suite-logs/<suite>/` under it, which CI uploads. Its `run/` is the `XDG_RUNTIME_DIR` every compositor, observer and client the suites start is given, so their sockets never land in a desktop session's own. |
 | `SELKIES_TEST_PYTHON` | the interpreter running the tests | Interpreter the server under test runs on. |
+| `E2E_PAGE_CALL_TIMEOUT` | `60` | Seconds a browser is given to answer a call that carries no deadline of its own (`evaluate`, a close). An engine whose renderer wedges would otherwise hold a suite to the runner's kill; past the bound the call raises and the suite reports. 0 turns it off. |
 | `E2E_CHROME` | unset | System Chrome/Chromium binary. Unset uses Playwright's bundled Chromium. |
 | `E2E_FIREFOX_PROFILE` | `$E2E_WORKDIR/firefox-profile` | Persistent Firefox profile; clipboard permission does not survive a fresh one, and `tests/tools/fetch-openh264.sh` seeds the OpenH264 plugin into it. Firefox negotiates no H.264 without that plugin, and the WebRTC block skips. |
 | `E2E_TURN_REST_URI` | unset | TURN REST endpoint. WebRTC runs on host candidates alone without it. |
