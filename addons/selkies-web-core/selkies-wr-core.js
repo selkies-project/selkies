@@ -77,7 +77,7 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import { streamDensity as streamDensityOf, publishedScale } from "./lib/stream-density.js";
+import { streamDensity as streamDensityOf, autoScalingDpi, publishedScale } from "./lib/stream-density.js";
 import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, writeImageToLocalClipboard, digestedPayload } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
@@ -500,7 +500,8 @@ export default function webrtc() {
 	let latestDisplayLayouts = null;
 	/** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 	function streamDensity() {
-		return streamDensityOf({ displayId: storageDisplayId, layouts: latestDisplayLayouts, useCssScaling, shared: isSharedMode });
+		return streamDensityOf({ displayId: storageDisplayId, layouts: latestDisplayLayouts, useCssScaling,
+		                         localScale: scalingDPI / 96, shared: isSharedMode });
 	}
 	/** The density the last request was built on; a change re-requests on a secondary. */
 	let appliedStreamDensity = 0;
@@ -1066,7 +1067,7 @@ export default function webrtc() {
 			settingsToSend['manual_height'] = alignResolution(manualHeight);
 		}
 		if (settingsToSend['scaling_dpi'] === undefined) {
-			settingsToSend['scaling_dpi'] = scalingDPI;
+			settingsToSend['scaling_dpi'] = effectiveScalingDpi();
 		}
 		if (detectedKeyboardLayout) {
 			settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
@@ -1184,21 +1185,43 @@ export default function webrtc() {
 		console.log(`Resized to window resolution: ${logicalWidth}x${logicalHeight} (css ${targetWidth}x${targetHeight})`);
 	}
 
-	/** The DPI slider stops, in 25% steps from 96. */
-	const DPI_STOPS = [96, 120, 144, 168, 192, 216, 240, 264, 288];
-
 	/**
-	 * Derives `scaling_dpi` from the local display scaling so remote fonts
-	 * match local ones: dpr 1.5 is 144, 2 is 192. Snapping to the nearest stop
-	 * puts a density the stops do not name (a 3.5x phone, a 133% desktop) on
-	 * the closest one and clamps at both ends.
+	 * Derives the default `scaling_dpi` from the local display scaling
+	 * (lib/stream-density.js), so remote fonts match local ones.
 	 * @returns {number}
 	 */
 	function autoDeriveDpi() {
-		const dpr = window.devicePixelRatio || 1;
-		const target = Math.round(dpr * 4) * 24;
-		return DPI_STOPS.reduce((prev, cur) =>
-			Math.abs(cur - target) < Math.abs(prev - target) ? cur : prev);
+		return autoScalingDpi();
+	}
+
+	/**
+	 * The DPI the desktop is asked for: 96 under CSS scaling, where the pick
+	 * divides the requested resolution instead (lib/stream-density.js).
+	 * @returns {number}
+	 */
+	function effectiveScalingDpi() {
+		return useCssScaling ? 96 : scalingDPI;
+	}
+
+	/** Sends the desktop the DPI in force. */
+	function pushScalingDpi() {
+		try { webrtc.sendDataChannelMessage(`s,${effectiveScalingDpi()}`); } catch (_) { /* reconnect reseeds */ }
+	}
+
+	/**
+	 * Re-derives `scaling_dpi` while it sits on its automatic default; a stored
+	 * value is the dashboard's explicit pick and is left alone.
+	 * @param {string} reason What changed, for the log.
+	 * @returns {boolean} Whether the derived value moved; the caller pushes it.
+	 */
+	function followDerivedDpi(reason) {
+		if (isSharedMode) return false;
+		if (getStringParam('scaling_dpi', null) !== null) return false;
+		const derived = autoDeriveDpi();
+		if (derived === scalingDPI) return false;
+		scalingDPI = derived;
+		console.log(`DPI follows ${reason}: scaling_dpi -> ${derived}.`);
+		return true;
 	}
 
 	let lastFollowedDpr = window.devicePixelRatio || 1;
@@ -1213,13 +1236,7 @@ export default function webrtc() {
 		const dpr = window.devicePixelRatio || 1;
 		if (dpr === lastFollowedDpr) return;
 		lastFollowedDpr = dpr;
-		if (isSharedMode) return;
-		if (getStringParam('scaling_dpi', null) !== null) return;
-		const derived = autoDeriveDpi();
-		if (derived === scalingDPI) return;
-		scalingDPI = derived;
-		console.log(`DPI follows devicePixelRatio: scaling_dpi -> ${derived}.`);
-		try { webrtc.sendDataChannelMessage(`s,${derived}`); } catch (_) { /* reconnect reseeds */ }
+		if (followDerivedDpi('devicePixelRatio changed')) pushScalingDpi();
 	}
 
 	/**
@@ -1380,7 +1397,7 @@ export default function webrtc() {
 			console.log("Skipping loading last session settings in shared mode.");
 			return;
 		}
-		if (webrtc) { try { webrtc.sendDataChannelMessage(`s,${scalingDPI}`); } catch (_) {} }
+		if (webrtc) pushScalingDpi();
 		if (trackpadMode && webrtc) {
 			try { webrtc.sendDataChannelMessage('SET_NATIVE_CURSOR_RENDERING,1'); } catch (_) {}
 		}
@@ -1574,6 +1591,7 @@ export default function webrtc() {
 							sendResolutionToServer(autoWidth, autoHeight);
 							resetToWindowResolution(autoWidth, autoHeight);
 						}
+						pushScalingDpi();
 					}
 				} else {
 					console.warn("Invalid value received for setUseCssScaling:", message.value);
@@ -1882,7 +1900,10 @@ export default function webrtc() {
 				// Not persisted: the pin belongs to the dashboard's explicit slider pick; pinning
 				// every post would freeze the DPI across displays of different devicePixelRatio.
 				scalingDPI = dpi;
-				webrtc.sendDataChannelMessage(`s,${dpi}`);
+				pushScalingDpi();
+				if (useCssScaling && !window.manualResolution && !isSharedMode) {
+					handleResizeUI();
+				}
 			}
 		}
 		if (settings.enable_binary_clipboard !== undefined) {

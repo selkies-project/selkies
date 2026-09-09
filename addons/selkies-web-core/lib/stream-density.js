@@ -5,16 +5,22 @@
  * every page at the primary's density is what shows that UI at the same
  * physical size on screens of different pixel densities: a page asks for its
  * CSS size at that density and the browser resamples the stream by the ratio
- * to its own. The primary streams at its own density (1 under CSS scaling); a
- * secondary at the primary's, which the primary reports as its display scale
- * and the server carries in every layout broadcast, and at its own until that
- * arrives. A shared viewer follows the controller and keeps its own.
+ * to its own. The primary streams at the device pixel ratio, or under CSS
+ * scaling at the ratio divided by the UI-scaling pick, which the desktop then
+ * does not apply as a DPI: windows keep the same proportion of the screen
+ * either way. A secondary streams at the primary's, which the primary reports
+ * as its display scale and the server carries in every layout broadcast, and
+ * at its own until that arrives. A shared viewer follows the controller and
+ * keeps its own.
  * @param {{displayId: string, layouts: (Object|null), useCssScaling: boolean,
- *     shared: boolean}} page
+ *     localScale: (number|undefined), shared: boolean}} page `localScale` is
+ *     the UI-scaling pick as a factor (1 is 100%).
  * @returns {number}
  */
-export function streamDensity({ displayId, layouts, useCssScaling, shared }) {
-    const own = useCssScaling ? 1 : (window.devicePixelRatio || 1);
+export function streamDensity({ displayId, layouts, useCssScaling, localScale, shared }) {
+    const dpr = window.devicePixelRatio || 1;
+    const stretch = (Number.isFinite(localScale) && localScale > 0) ? localScale : 1;
+    const own = useCssScaling ? dpr / stretch : dpr;
     if (shared || !displayId || displayId === 'primary') return own;
     const primary = layouts && layouts.primary;
     const scale = primary ? Number(primary.scale) : NaN;
@@ -22,6 +28,22 @@ export function streamDensity({ displayId, layouts, useCssScaling, shared }) {
     // A measured scale carries the rounding of the primary's aligned buffer;
     // the request is sized on the density it stands for.
     return Math.round(scale * 100) / 100;
+}
+
+/** `scaling_dpi` stops in 25% steps from 96; densities between them snap to the nearest. */
+export const DPI_STOPS = [96, 120, 144, 168, 192, 216, 240, 264, 288];
+
+/**
+ * The default `scaling_dpi`: the local display scaling as a desktop DPI, so
+ * the remote UI comes out the size of the local one — 1.5 is 144, 2 is 192,
+ * snapped to the nearest stop and clamped at both ends.
+ * @returns {number} One of `DPI_STOPS`.
+ */
+export function autoScalingDpi() {
+    const dpr = window.devicePixelRatio || 1;
+    const target = Math.round(dpr * 4) * 24;
+    return DPI_STOPS.reduce((prev, cur) =>
+        Math.abs(cur - target) < Math.abs(prev - target) ? cur : prev);
 }
 
 /**

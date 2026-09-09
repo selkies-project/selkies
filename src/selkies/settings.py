@@ -354,7 +354,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "use_css_scaling",
         "type": "bool",
         "default": False,
-        "help": "HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched.",
+        "help": "HiDPI when false, if true a lower resolution is sent from the client and the canvas is stretched; the UI scaling pick then divides that resolution and the desktop stays at 96 DPI.",
     },
     {
         "name": "ui_title",
