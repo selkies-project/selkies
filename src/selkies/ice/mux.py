@@ -34,12 +34,14 @@ loss as they do on UDP.
 """
 import asyncio
 import logging
+import os
 import socket
 import struct
 from typing import Any, Callable, Optional
 
 from . import stun
 from .turn import UDP_SOCKET_BUFFER_SIZE
+from .utils import bind_errno
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +256,12 @@ class UdpMux:
             raise
 
     async def _bind(self, address: str) -> _UdpMuxSocket:
+        """The socket on `address`, bound on first use.
+
+        Raises:
+            OSError: The bind failed, carrying the kernel's code and reason
+                even where the loop's own wrapper reports neither.
+        """
         if self._closed:
             raise OSError("UDP mux is closed")
         sock = self._sockets.get(address)
@@ -261,9 +269,15 @@ class UdpMux:
             return sock
         loop = asyncio.get_running_loop()
         point = _MuxPoint(address, self.port)
-        transport, sock = await loop.create_datagram_endpoint(
-            lambda: _UdpMuxSocket(point), local_addr=(address, self.port)
-        )
+        try:
+            transport, sock = await loop.create_datagram_endpoint(
+                lambda: _UdpMuxSocket(point), local_addr=(address, self.port)
+            )
+        except OSError as exc:
+            code = bind_errno(exc)
+            if exc.errno is None and code is not None:
+                raise OSError(code, os.strerror(code)) from exc
+            raise
         raw = transport.get_extra_info("socket")
         if raw is not None:
             raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, UDP_SOCKET_BUFFER_SIZE)

@@ -34,6 +34,7 @@
 import os
 import secrets
 import string
+from typing import Optional
 
 
 def random_string(length: int) -> str:
@@ -43,3 +44,20 @@ def random_string(length: int) -> str:
 
 def random_transaction_id() -> bytes:
     return os.urandom(12)
+
+
+def bind_errno(exc: OSError) -> Optional[int]:
+    """The kernel's code for a bind failure, wherever the loop left it.
+
+    uvloop reports a datagram bind it could not place as an OSError of its own
+    that carries no code and keeps the kernel's on the cause, so whether
+    another port could succeed is decided from there; a code on the failure
+    itself is the loop's own and wins.
+
+    Returns:
+        The errno, or None when neither the failure nor its cause carries one.
+    """
+    if exc.errno is not None:
+        return exc.errno
+    cause = exc.__cause__
+    return cause.errno if isinstance(cause, OSError) else None

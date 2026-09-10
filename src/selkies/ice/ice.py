@@ -50,7 +50,7 @@ import ifaddr
 
 from . import mdns, mux, stun, turn
 from .candidate import Candidate, candidate_foundation, candidate_priority
-from .utils import random_string
+from .utils import bind_errno, random_string
 
 logger = logging.getLogger(__name__)
 
@@ -1233,7 +1233,7 @@ class Connection:
                         # Only an occupied port can be cured by trying another
                         # one; anything else (address gone, permissions) would
                         # fail across the whole window identically.
-                        if exc.errno != errno.EADDRINUSE:
+                        if bind_errno(exc) != errno.EADDRINUSE:
                             break
                 if protocol is None:
                     self.__log_info("Could not bind to %s - %s", address, last_error)
