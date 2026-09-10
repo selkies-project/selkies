@@ -59,9 +59,13 @@ scripts/ci/fetch.sh \
     "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${ARCH}.AppImage" \
     "${WORK}/linuxdeploy.AppImage"
 cp infra/appimage/linuxdeploy-plugin-conda.sh "${WORK}/linuxdeploy-plugin-conda.sh"
-# The plugin downloads Miniforge from the same rate-limited host
+# The plugin reads both of these from beside itself: Miniforge comes from the
+# same rate-limited host as linuxdeploy, and the prefix it installs needs its
+# entry points pointed at the interpreter before an AppImage can carry them.
 cp scripts/ci/fetch.sh "${WORK}/fetch.sh"
-chmod +x "${WORK}/linuxdeploy.AppImage" "${WORK}/linuxdeploy-plugin-conda.sh" "${WORK}/fetch.sh"
+cp infra/appimage/relocate-shebangs.sh "${WORK}/relocate-shebangs.sh"
+chmod +x "${WORK}/linuxdeploy.AppImage" "${WORK}/linuxdeploy-plugin-conda.sh" \
+    "${WORK}/fetch.sh" "${WORK}/relocate-shebangs.sh"
 # linuxdeploy resolves `--plugin conda` by searching PATH
 export PATH="${WORK}:${PATH}"
 
@@ -205,7 +209,13 @@ fi
 # its own pulseaudio, falling back to a host binary otherwise)
 if [ ! -e "${PULSE_SERVER#unix:}" ] && [ ! -S "${PULSE_SERVER#unix:}" ]; then
     if [ -x "${ENV_BIN}/pulseaudio" ]; then
-        "${ENV_BIN}/pulseaudio" --verbose --log-target=file:/tmp/pulseaudio_selkies.log --disallow-exit --exit-idle-time="-1" &
+        # The bundled daemon has its module directory and startup script
+        # compiled in at the path the prefix was built at, and refuses to run
+        # having loaded no module, so both are named here instead. Its
+        # daemon.conf and client.conf carry no uncommented setting, so the
+        # copies it does not find cost nothing.
+        "${ENV_BIN}/pulseaudio" --verbose --log-target=file:/tmp/pulseaudio_selkies.log --disallow-exit --exit-idle-time="-1" \
+            -p "${HERE}/usr/conda/lib/pulseaudio/modules" -F "${HERE}/usr/conda/etc/pulse/default.pa" &
     elif command -v pulseaudio >/dev/null 2>&1; then
         pulseaudio --verbose --log-target=file:/tmp/pulseaudio_selkies.log --disallow-exit --exit-idle-time="-1" &
     fi

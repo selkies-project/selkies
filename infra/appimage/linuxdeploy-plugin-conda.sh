@@ -106,6 +106,14 @@ if [ -n "${REQUIREMENTS}" ]; then
     "${PREFIX}/bin/pip" install -U ${REQUIREMENTS}
 fi
 
+# Every entry point conda and pip generated names the interpreter by this
+# prefix's path, which exists only on the machine that built the AppImage, so
+# they are pointed at it relative to themselves. The sibling script is required
+# rather than optional: without it the AppDir assembles and nothing in it runs.
+RELOCATE="${HERE}/relocate-shebangs.sh"
+[ -x "${RELOCATE}" ] || { echo "${RELOCATE} is missing" >&2; exit 1; }
+"${RELOCATE}" "${PREFIX}"
+
 # linuxdeploy looks for the entry points in usr/bin
 mkdir -p "${APPDIR}/usr/bin"
 for path in "${PREFIX}"/bin/*; do
