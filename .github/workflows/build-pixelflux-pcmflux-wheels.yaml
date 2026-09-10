@@ -121,7 +121,7 @@ jobs:
           repository: selkies-project/${{ matrix.project }}
           ref: main
       - name: Build wheels (${{ matrix.platform }}_${{ matrix.target.arch }})
-        uses: pypa/cibuildwheel@v4.2.0
+        uses: pypa/cibuildwheel@v4.2.1
         env:
           # Every interpreter cibuildwheel offers, floored by python_requires.
           CIBW_BUILD: "*-${{ matrix.platform }}_${{ matrix.target.arch }}"
