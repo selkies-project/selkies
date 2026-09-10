@@ -105,6 +105,7 @@ def webrtc_service(module: FakeCompositor) -> W.WebRTCService:
     svc.media_pipeline = type("Pipeline", (), {"capture_module": module, "scale": 1.0})()
     svc.input_handler = None
     svc._wayland_ctl_module = None
+    svc._display_dpis = {}
     return svc
 
 
