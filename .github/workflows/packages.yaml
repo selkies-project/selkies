@@ -88,7 +88,11 @@ jobs:
             install: apt-get update -qq && apt-get install -y -qq /out/*.deb
           - name: rpm-fedora
             tag: fc
-            image: fedora:latest
+            # The oldest Fedora still supported, not the newest: the venv the
+            # package carries is tied to the interpreter it was built with, so
+            # building on the oldest is what makes one package cover every
+            # release that is maintained. Bumped when Fedora retires it.
+            image: fedora:43
             script: infra/packaging/rpm.sh
             install: dnf install -y -q /out/*.rpm
           - name: rpm-el9
@@ -97,7 +101,7 @@ jobs:
             script: infra/packaging/rpm.sh
             install: dnf install -y -q /out/*.rpm
           - name: apk
-            image: alpine:3
+            image: alpine:latest
             script: infra/packaging/apk.sh
             install: apk add --quiet --allow-untrusted /out/*.apk
           - name: arch
