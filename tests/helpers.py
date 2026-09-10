@@ -54,6 +54,12 @@ PAGE_CALL_TIMEOUT = float(os.environ.get("E2E_PAGE_CALL_TIMEOUT", "60"))
 # Receivers that have already outlasted the bound. An engine wedged once stays
 # wedged, so the calls after the first are refused instead of waited out.
 _stalled: "weakref.WeakSet" = weakref.WeakSet()
+# Backstop on x_own_clipboard()'s serving thread, for a caller that never sets
+# its stop flag. Every block that owns the clipboard sets it in a `finally`, so
+# this only has to outlast the longest of them: an owner that stopped answering
+# while its block still ran would read as an empty clipboard, which is a
+# passing check away from a real one.
+SELECTION_SERVE_MAX_S = 600.0
 _guarded = 0
 
 
@@ -730,32 +736,35 @@ def x_own_clipboard(payload: bytes) -> tuple:
         # the CLIPBOARD owner with nobody answering, wedging the next block's
         # server-side clipboard read and with it that server's X event queue.
         try:
-            deadline = time.monotonic() + 25.0
-            while not stop["flag"] and time.monotonic() < deadline:
-                if ext.pending_events():
-                    e = ext.next_event()
-                    if isinstance(e, xevent.SelectionRequest):
-                        if e.target == targets:
-                            e.requestor.change_property(e.property, targets, 32, [utf8])
-                        else:
-                            # ChangeProperty's length field is 16-bit, so a payload
-                            # larger than 64 KiB must be appended in chunks.
-                            from selkies.Xlib import X as Xconst
-                            off = 0
-                            first = True
-                            while off < len(payload) or (first and not payload):
-                                chunk = payload[off:off + 60000]
-                                e.requestor.change_property(
-                                    e.property, e.target, 8, chunk,
-                                    mode=Xconst.PropModeReplace if first else Xconst.PropModeAppend)
-                                first = False
-                                off += len(chunk)
-                        e.requestor.send_event(xevent.SelectionNotify(
+            deadline = time.monotonic() + SELECTION_SERVE_MAX_S
+            while not stop["flag"]:
+                if time.monotonic() > deadline:
+                    print(f"x_own_clipboard: no stop within {SELECTION_SERVE_MAX_S:.0f}s; "
+                          "releasing CLIPBOARD", file=sys.stderr)
+                    break
+                if not ext.pending_events():
+                    time.sleep(0.005)
+                    continue
+                e = ext.next_event()
+                if isinstance(e, xevent.SelectionRequest):
+                    if e.target == targets:
+                        e.requestor.change_property(e.property, targets, 32, [utf8])
+                    else:
+                        # ChangeProperty's length field is 16-bit, so a payload
+                        # larger than 64 KiB must be appended in chunks.
+                        off = 0
+                        first = True
+                        while off < len(payload) or (first and not payload):
+                            chunk = payload[off:off + 60000]
+                            e.requestor.change_property(
+                                e.property, e.target, 8, chunk,
+                                mode=X.PropModeReplace if first else X.PropModeAppend)
+                            first = False
+                            off += len(chunk)
+                    e.requestor.send_event(xevent.SelectionNotify(
                         time=e.time, requestor=e.requestor, selection=e.selection,
                         target=e.target, property=e.property), propagate=False)
-                    ext.flush()
-            else:
-                time.sleep(0.005)
+                ext.flush()
         finally:
             try:
                 ext.close()
