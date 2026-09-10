@@ -110,7 +110,10 @@ env CONDA_CHANNELS="${CONDA_CHANNELS}" \
     --appdir AppDir \
     --plugin conda
 
-# Fails the build rather than shipping an AppImage that cannot start
+# Fails the build early rather than carrying a prefix that cannot start. This
+# runs at the path the prefix was installed to, so it says nothing about the
+# absolute paths inside it; scripts/ci/verify-appimage.sh covers those from an
+# extracted copy once the AppImage exists.
 AppDir/usr/conda/bin/selkies --help > /dev/null
 
 # 3b) The interposers, for containers with no reachable /dev/uinput or
@@ -234,6 +237,11 @@ ln -sf usr/share/applications/selkies.desktop AppDir/selkies.desktop
 
 mkdir -p out
 mv "${OUTPUT}" out/
+# The AppDir goes before the AppImage is checked: an absolute path the build
+# left inside the payload resolves while the prefix it names is still there, so
+# a payload that runs nowhere else would pass every check below.
+rm -rf AppDir
+scripts/ci/verify-appimage.sh "out/${OUTPUT}"
 # The conda package is noarch, so exactly one architecture's job publishes it
 if [ "${ARCH}" = "${CONDA_PACKAGE_ARCH:-x86_64}" ]; then
   cp "${PKG}" out/
