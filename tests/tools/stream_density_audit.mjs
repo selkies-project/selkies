@@ -14,7 +14,8 @@
 // streamDensity reads the display's own density off the window.
 globalThis.window = { devicePixelRatio: 2 };
 
-const { streamDensity, publishedScale, autoScalingDpi, DPI_STOPS } = await import(
+const { streamDensity, publishedScale, autoScalingDpi, resolutionScalingDpi,
+        DPI_STOPS } = await import(
     '../../addons/selkies-web-core/lib/stream-density.js');
 
 let failed = 0;
@@ -133,6 +134,29 @@ const AT_PRIMARY = { layouts: { primary: { w: 1512, h: 806, scale: 1 } } };
     check('and one past the last stop is clamped there',
         at(3.5) === DPI_STOPS[DPI_STOPS.length - 1], at(3.5));
     window.devicePixelRatio = 2;
+}
+
+{
+    // A resolution the operator set is a framebuffer of its own: the pick
+    // follows it rather than the screen showing it, off the shorter side, so
+    // an ultrawide is not read as a dense screen and a turned one is the same
+    // screen. The local density is left out of it entirely.
+    window.devicePixelRatio = 1;
+    const at = (w, h) => resolutionScalingDpi(w, h);
+    const standard = [[1920, 1080], [2560, 1440], [3840, 2160]].map(([w, h]) => at(w, h));
+    check('a manual resolution picks the DPI its own size asks for',
+        standard.join() === '96,120,192', standard.join());
+    check('a resolution below the unity rows stays at the first stop',
+        at(1280, 720) === DPI_STOPS[0], at(1280, 720));
+    check('an ultrawide is read as wide, not dense', at(3840, 1080) === 96, at(3840, 1080));
+    check('and a portrait screen as the same screen turned',
+        at(1080, 1920) === 96, at(1080, 1920));
+    check('past the last stop it is clamped there',
+        at(7680, 4320) === DPI_STOPS[DPI_STOPS.length - 1], at(7680, 4320));
+    window.devicePixelRatio = 2;
+    check('a size not yet known falls back to the display scaling',
+        at(0, 0) === autoScalingDpi(), at(0, 0));
+    check('and a known one ignores it', at(1920, 1080) === 96, at(1920, 1080));
 }
 
 console.log(`\n[stream-density] ${failed ? 'FAILED' : 'OK'}`);
