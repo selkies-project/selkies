@@ -62,8 +62,13 @@ requirements:
 
 tests:
   - script:
-      # The full `selkies --help` smoke test lives in scripts/ci/appimage.sh,
-      # where the pip-only dependencies are present too
+      # This environment is the run dependencies and nothing else, pixelflux
+      # and pcmflux having no conda-forge package: what it proves is that the
+      # entry point conda rewrote for a prefix of its own answers, and that the
+      # web client travels inside the package rather than beside it in a source
+      # tree. Streaming needs the pip-only dependencies and is covered where
+      # they are, by scripts/ci/verify-appimage.sh.
+      - selkies --help > /dev/null
       - python -c "import importlib.resources as r; assert (r.files('selkies.selkies_web') / 'index.html').is_file()"
 
 about:

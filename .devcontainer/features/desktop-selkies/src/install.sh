@@ -82,6 +82,17 @@ else
     PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 "selkies==${RELEASE#v}"
 fi
 
+# The commands start-selkies.sh runs. A release from the line before 2.0
+# installs them under other names, and a container built on one would come up
+# with a desktop and no server, so the release that lacks them is named here
+# instead of leaving that to a session.
+for command in selkies selkies-resize; do
+    if ! command -v "${command}" > /dev/null; then
+        echo "selkies $(pip3 show selkies | sed -n 's/^Version: //p') provides no ${command} command; set this feature's release option to a tag that does" >&2
+        exit 1
+    fi
+done
+
 mkdir -p /etc/OpenCL/vendors && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
 
 # Copy turnserver script

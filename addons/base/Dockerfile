@@ -623,6 +623,17 @@ RUN --mount=type=bind,source=addons/base/wheels,target=/tmp/wheels \
     PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --force-reinstall ${PKGS}; \
     rm -rf /tmp/picked
 
+# Fails the image build rather than publishing one whose payload cannot start.
+# The libraries are the ones the capture stack opens by name at run time, which
+# no ELF dependency names: only the apt lines above put them here, and nothing
+# else in this repository's testing runs inside the image.
+# tests/unit/test_package_deps.py holds this list to the one the native
+# packages are verified against.
+RUN set -e; \
+    selkies --help > /dev/null; \
+    python3 -c "import selkies, pixelflux, pcmflux"; \
+    python3 -c "import ctypes; [ctypes.CDLL(name) for name in ('libwayland-server.so.0', 'libEGL.so.1', 'libgbm.so.1', 'libpulse.so.0', 'libva.so.2', 'libdrm.so.2', 'libxkbcommon.so.0', 'libpixman-1.so.0')]"
+
 # XLibre's server replaces the distribution's /usr/bin/Xvfb; chowned
 # to the session user like the rest of the image so fakeroot-sudo apt can
 # still write under /usr after the copy

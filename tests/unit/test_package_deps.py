@@ -18,6 +18,10 @@ REPO = os.path.dirname(TESTS)
 PYPROJECT = os.path.join(REPO, "pyproject.toml")
 RECIPE = os.path.join(REPO, "infra", "appimage", "recipe.yaml")
 APPIMAGE = os.path.join(REPO, "scripts", "ci", "appimage.sh")
+# Both prove the libraries the capture stack opens by name are present, one
+# inside the image build and one in a pristine container of a packaged distro
+DOCKERFILE = os.path.join(REPO, "addons", "base", "Dockerfile")
+VERIFY_PACKAGE = os.path.join(REPO, "scripts", "ci", "verify-package.sh")
 
 # conda-forge spells a few of them differently.
 CONDA_NAME = {"msgpack": "msgpack-python", "pillow": "pillow"}
@@ -93,6 +97,25 @@ mismatched = [f"{n}: wheel {allowed[n]!r} vs recipe {recipe[n]!r}"
               for n in sorted(set(allowed) & set(recipe))
               if allowed[n] != recipe[n]]
 check("the floors agree", not mismatched, "; ".join(mismatched))
+
+def runtime_libraries(path: str, anchor: str) -> set:
+    """The library names the `ctypes` check after `anchor` in `path` loads.
+
+    Only that list counts: both files name other libraries elsewhere, the
+    image the NVIDIA driver's among them.
+    """
+    body = open(path, encoding="utf-8").read()
+    listed = re.split(r"[)\]]", body.split(anchor, 1)[1], maxsplit=1)[0]
+    return set(re.findall(r"""["'](lib[^"']+)["']""", listed))
+
+
+image_libs = runtime_libraries(DOCKERFILE, "ctypes.CDLL(name) for name in (")
+package_libs = runtime_libraries(VERIFY_PACKAGE, "NEEDED = [")
+check("the image build names runtime-loaded libraries", bool(image_libs),
+      f"{len(image_libs)} in addons/base/Dockerfile")
+check("the image and the packages are held to the same ones",
+      image_libs == package_libs,
+      " ".join(sorted(image_libs ^ package_libs)) or "")
 
 appimage = open(APPIMAGE, encoding="utf-8").read()
 for name in sorted(PIP_ONLY):
