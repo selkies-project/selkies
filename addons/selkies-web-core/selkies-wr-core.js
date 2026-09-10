@@ -1100,6 +1100,8 @@ export default function webrtc() {
 	/**
 	 * Sizes and centers the video element for a manual resolution; the exact
 	 * size is centered too, or a larger viewport would pin the box top-left.
+	 * Exact is one stream pixel per device pixel, independent of the HiDPI
+	 * flag, which a manual resolution does not read.
 	 * @param {number} targetWidth Stream width in pixels.
 	 * @param {number} targetHeight Stream height in pixels.
 	 * @param {boolean} scaleToFit Letterbox into the container instead of showing the exact size.
@@ -1143,16 +1145,19 @@ export default function webrtc() {
 			videoElement.style.objectFit = 'contain';
 			console.log(`Applied manual style (Scaled): CSS ${cssWidth}x${cssHeight}, Pos ${leftOffset},${topOffset}`);
 		} else {
-			const topOffset = (containerHeight - targetHeight) / 2;
-			const leftOffset = (containerWidth - targetWidth) / 2;
+			const pixelsPerCss = window.devicePixelRatio || 1;
+			const cssWidth = targetWidth / pixelsPerCss;
+			const cssHeight = targetHeight / pixelsPerCss;
+			const topOffset = (containerHeight - cssHeight) / 2;
+			const leftOffset = (containerWidth - cssWidth) / 2;
 			videoElement.style.position = 'absolute';
-			videoElement.style.width = `${targetWidth}px`;
-			videoElement.style.height = `${targetHeight}px`;
+			videoElement.style.width = `${cssWidth}px`;
+			videoElement.style.height = `${cssHeight}px`;
 			videoElement.style.top = `${topOffset}px`;
 			videoElement.style.left = `${leftOffset}px`;
 			// 'fill' ignores the aspect ratio; the stream already matches the box.
 			videoElement.style.objectFit = 'fill';
-			console.log(`Applied manual style (Exact): CSS ${targetWidth}x${targetHeight}, Pos ${leftOffset},${topOffset}`);
+			console.log(`Applied manual style (Exact): CSS ${cssWidth}x${cssHeight}, Pos ${leftOffset},${topOffset}`);
 		}
 		updateVideoImageRendering();
 	}

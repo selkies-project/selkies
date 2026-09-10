@@ -2,8 +2,9 @@
 """Client behaviours that must not differ by transport, driven from a dpr-2 browser.
 
 Resolution: an auto-mode HiDPI client asks for the window's physical size, a
-manual preset is requested as exact framebuffer pixels, reset-to-window returns
-to the physical window size, and turning "scale locally" on in auto mode leaves
+manual preset is requested as exact framebuffer pixels and shown, with "scale
+locally" off, at one stream pixel per device pixel, reset-to-window returns to
+the physical window size, and turning "scale locally" on in auto mode leaves
 the window-resize listener armed. HiDPI: the flag either streams physical
 pixels and scales the desktop, or leaves the desktop unscaled and divides the
 request by the UI-scaling pick for the browser to stretch back — never both. Clipboard: a server with the clipboard
@@ -215,8 +216,25 @@ def button_reports(page: Any) -> int:
     return page.evaluate("window.__padSent.filter((t) => t === 'b').length")
 
 
+def sink_box(page: Any, mode: str) -> dict:
+    """The CSS box the transport's sink is styled to.
+
+    Read off the style: the websockets core hides the canvas once a sink
+    renders, so its layout measures zero.
+
+    Returns:
+        `width`, `height`, `left` and `top` in CSS pixels.
+    """
+    sink = "videoStream" if mode == "webrtc" else "videoCanvas"
+    return page.evaluate(f"""(() => {{
+      const s = document.getElementById('{sink}').style;
+      return {{width: parseFloat(s.width), height: parseFloat(s.height),
+               left: parseFloat(s.left), top: parseFloat(s.top)}};
+    }})()""")
+
+
 def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
-    """Auto -> preset -> reset -> scale-locally + resize, at dpr 2."""
+    """Auto -> preset -> exact box -> reset -> scale-locally + resize, at dpr 2."""
     phys_w, phys_h = VIEW_W * DPR, VIEW_H * DPR
     # The first realization rides the whole cold path; loaded runners stretch it.
     realized = wait_root(phys_w, phys_h, timeout=30)
@@ -233,6 +251,26 @@ def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
     realized = wait_root(PRESET_W, PRESET_H)
     res.check("manual preset realized on the server",
               root_matches(realized, PRESET_W, PRESET_H), f"root={realized}")
+
+    # Scale-locally off is one stream pixel per device pixel.
+    post(page, {"type": "setScaleLocally", "value": False})
+    time.sleep(0.3)
+    box = sink_box(page, mode)
+    want_w, want_h = PRESET_W / DPR, PRESET_H / DPR
+    fits = (abs(box["width"] - want_w) < 1 and abs(box["height"] - want_h) < 1
+            and box["left"] >= 0 and box["top"] >= 0
+            and box["left"] + box["width"] <= VIEW_W
+            and box["top"] + box["height"] <= VIEW_H)
+    res.check("exact box is the preset over the density, inside the viewport",
+              fits, f"{box} want {want_w}x{want_h}")
+    post(page, {"type": "setUseCssScaling", "value": True})
+    time.sleep(0.3)
+    off_box = sink_box(page, mode)
+    res.check("exact box ignores the HiDPI flag", off_box == box,
+              f"{off_box} after HiDPI off, {box} before")
+    post(page, {"type": "setUseCssScaling", "value": False})
+    time.sleep(0.3)
+    sent = page.evaluate("window.__resSent")
 
     seen = len(sent)
     post(page, {"type": "resetResolutionToWindow"})

@@ -2795,7 +2795,9 @@ function syncSinkToCanvasStyle() {
  * Sizes the canvas for a manual resolution: the backing buffer at the target
  * size (DPR-scaled unless CSS scaling, shared mode or manual mode pin it to
  * 1), the CSS box either scaled to fit the container or exact and centered.
- * The overlay input follows the box and the input handler is told to resize.
+ * Exact is one stream pixel per device pixel, independent of the HiDPI flag,
+ * which a manual resolution does not read. The overlay input follows the box
+ * and the input handler is told to resize.
  * The per-row JPEG stripe ids, keyed by row offset, are reset because a
  * geometry change invalidates them.
  * @param {number} targetWidth
@@ -2857,10 +2859,13 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     canvas.style.objectFit = 'contain';
     console.log(`Applied manual style (Scaled): CSS ${cssWidth.toFixed(2)}x${cssHeight.toFixed(2)}, Buffer ${internalBufferWidth}x${internalBufferHeight}, Pos ${leftOffset.toFixed(2)},${topOffset.toFixed(2)}`);
   } else {
-    cssWidthStr = `${targetWidth}px`;
-    cssHeightStr = `${targetHeight}px`;
-    const topOffset = (containerHeight - targetHeight) / 2;
-    const leftOffset = (containerWidth - targetWidth) / 2;
+    const pixelsPerCss = window.devicePixelRatio || 1;
+    const cssWidth = targetWidth / pixelsPerCss;
+    const cssHeight = targetHeight / pixelsPerCss;
+    cssWidthStr = `${cssWidth}px`;
+    cssHeightStr = `${cssHeight}px`;
+    const topOffset = (containerHeight - cssHeight) / 2;
+    const leftOffset = (containerWidth - cssWidth) / 2;
     topStr = `${topOffset}px`;
     leftStr = `${leftOffset}px`;
 
@@ -2870,7 +2875,7 @@ function applyManualCanvasStyle(targetWidth, targetHeight, scaleToFit) {
     canvas.style.top = topStr;
     canvas.style.left = leftStr;
     canvas.style.objectFit = 'fill';
-    console.log(`Applied manual style (Exact): CSS ${targetWidth}x${targetHeight}, Buffer ${internalBufferWidth}x${internalBufferHeight}, Pos ${leftOffset.toFixed(2)},${topOffset.toFixed(2)}`);
+    console.log(`Applied manual style (Exact): CSS ${cssWidth.toFixed(2)}x${cssHeight.toFixed(2)}, Buffer ${internalBufferWidth}x${internalBufferHeight}, Pos ${leftOffset.toFixed(2)},${topOffset.toFixed(2)}`);
   }
   canvas.style.display = 'block';
   updateCanvasImageRendering();
