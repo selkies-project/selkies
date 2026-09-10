@@ -19,7 +19,13 @@ A second page withholds the Keyboard Lock API the way Brave's Shields do, and
 there the client has to say so once and a single Escape has to end the mode,
 which is what a user of that browser gets.
 
-    python3 tests/e2e/test_gaming_mode.py x11|wl
+The `-two` selectors lay a second display beside the locked one and walk the
+remote pointer onto it, since a lock is one page's and the pointer is the whole
+desktop's: what has to hold is that the lock survives the crossing and the
+deltas keep going out, with the drawing side of it read off the pixels in
+tests/integration/test_locked_cursor_across_displays.py.
+
+    python3 tests/e2e/test_gaming_mode.py x11|wl|x11-two|wl-two
 """
 import os
 import shutil
@@ -40,6 +46,13 @@ CENTER = (800, 450)
 # Deltas a hand makes: a flick each way, a one-axis nudge, a diagonal.
 MOVES = ((12, 7), (-5, 9), (80, -30), (3, 0), (0, -4))
 ESCAPE_HOLD = 3.0
+# The display beside the locked one: a headless page is the whole of it here,
+# since the lock and the wire are what the two-display block reads.
+NEIGHBOUR_CSS = (1280, 720)
+# How far past the seam the travel lands the remote pointer, and the step it
+# travels in.
+OVER = 320
+CROSS_STEP = 80
 
 NOTICE_TAP_JS = """
 window.__notices = [];
@@ -59,6 +72,7 @@ Object.defineProperty(navigator, 'brave', { value: {}, configurable: true });
 MODE_JS = ("({ fullscreen: document.fullscreenElement !== null, "
            "locked: document.pointerLockElement !== null, "
            "gaming: !!(window.webrtcInput && window.webrtcInput.gamingMode) })")
+LAYOUT_JS = "window.webrtcInput && window.webrtcInput._layout"
 
 
 class Desk:
@@ -228,6 +242,118 @@ def shielded(res: "H.Results", desk: Desk, page: Any, tag: str) -> None:
               page.evaluate("window.__notices"))
 
 
+def wait_layout(page: Any, timeout: float) -> dict:
+    """The page's multi-display layout, once both rectangles have reached it."""
+    deadline = time.time() + timeout
+    layout: dict = {}
+    while time.time() < deadline:
+        layout = page.evaluate(LAYOUT_JS) or {}
+        if len(layout.get("rects") or []) == 2:
+            break
+        time.sleep(0.25)
+    return layout
+
+
+def neighbour_page(p: Any) -> tuple:
+    """A headless page for the display beside the locked one, so the session
+    lays out two of them and the framebuffer spans both."""
+    kwargs: dict = {"headless": True, "args": C.BROWSER_ARGS}
+    if C.CHROME_PATH:
+        kwargs["executable_path"] = C.CHROME_PATH
+    browser = p.chromium.launch(**kwargs)
+    ctx = browser.new_context(
+        viewport={"width": NEIGHBOUR_CSS[0], "height": NEIGHBOUR_CSS[1]},
+        device_scale_factor=1)
+    ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+    page = ctx.new_page()
+    page.goto(H.BASE_URL + "/#display2-right", wait_until="load")
+    return browser, page
+
+
+def crossed(res: "H.Results", p: Any, desk: Desk, page: Any, wayland: bool,
+            tag: str) -> None:
+    """Gaming mode on the primary, and the remote pointer walked onto the neighbour.
+
+    One lock covers the whole desktop with nothing written for it: a locked
+    page has only deltas to send and sends them wherever they land, the server
+    bounds the one pointer by the union of the display rectangles rather than
+    by the locked page's own, and each capture draws the cursor from that one
+    position -- which test_locked_cursor_across_displays reads off the pixels
+    each display is sent. The half a browser holds is what this checks: the
+    lock does not break when the pointer it can no longer place leaves the
+    display the page shows, and no absolute position goes out in place of the
+    deltas. The crossing itself is read from the X pointer; on the Wayland
+    backend, which has none to read, the seam is test_wayland_seam's.
+    """
+    browser, dpage = neighbour_page(p)
+    try:
+        res.check(f"{tag}: the neighbour's video flows",
+                  bool(C.wait_ws_video(dpage, timeout=30)), "")
+        if not enter_gaming_mode(res, desk, page, tag):
+            return
+        # Fullscreen resized the stream the seam is measured from, so the
+        # layout is read after the lock, not before it.
+        layout = wait_layout(page, 30)
+        rects = layout.get("rects") or []
+        res.check(f"{tag}: the locked page is given both rectangles", len(rects) == 2, layout)
+        if len(rects) != 2:
+            return
+        seam = layout["ownW"]
+        rect = next((r for r in rects if r["x"] == seam), None)
+        if rect is None:
+            res.check(f"{tag}: the neighbour is laid out at the seam", False, layout)
+            return
+
+        start = None if wayland else C.x11_mouse_pos()
+        travel = seam + OVER - start[0] if start else seam
+        moves = [(CROSS_STEP, 0)] * (travel // CROSS_STEP) + [(travel % CROSS_STEP, 0)]
+        moves = [m for m in moves if m[0]]
+        mark = len(page.evaluate(PL.MOVES_JS))
+        for dx, dy in moves:
+            desk.move(dx, dy)
+            time.sleep(0.05)
+        time.sleep(0.8)
+        sent = PL.moves_since(page, mark)
+        wire = PL.wire_deltas(sent)
+        positions = [m for m in sent if m.startswith("m,")]
+        # A page that lost the lock has positions to send again, so the absence
+        # of them is the crossing being a locked one. The distance travels
+        # through the page's own CSS-to-stream scale, which rounds each event
+        # its own way, so the count is what is owed exactly.
+        res.check(f"{tag}: the travel goes out as one delta a move, with no position among them",
+                  len(wire) == len(moves) and not positions
+                  and abs(sum(d[0] for d in wire) - travel) <= len(moves),
+                  f"{len(wire)}/{len(moves)} deltas summing {sum(d[0] for d in wire)} "
+                  f"of {travel}, positions {positions[:2]}")
+        mode = page.evaluate(MODE_JS)
+        res.check(f"{tag}: the lock holds with the pointer on the neighbour",
+                  mode["fullscreen"] and mode["locked"] and mode["gaming"], mode)
+        if start is None:
+            return
+        pos = C.x11_mouse_pos()
+        res.check(f"{tag}: the deltas carry the remote pointer onto the neighbour",
+                  rect["x"] <= pos[0] < rect["x"] + rect["w"],
+                  f"{start} -> {pos}, neighbour at {rect['x']} wide {rect['w']}")
+        # A hand's worth of movement once it is there: relative input on the
+        # neighbour is the other half of what the lock is holding. What the
+        # pointer owes is the wire, injected verbatim, whatever the page's
+        # scale made of the hand's own distance.
+        mark = len(page.evaluate(PL.MOVES_JS))
+        for dx, dy in MOVES:
+            desk.move(dx, dy)
+            time.sleep(0.1)
+        time.sleep(0.5)
+        wire = PL.wire_deltas(PL.moves_since(page, mark))
+        moved = C.x11_mouse_pos()
+        want = (pos[0] + sum(d[0] for d in wire), pos[1] + sum(d[1] for d in wire))
+        res.check(f"{tag}: the pointer keeps taking the deltas while it is there",
+                  moved == want and len(wire) == len(MOVES),
+                  f"{pos} -> {moved} want {want} from {wire}")
+    finally:
+        dpage.context.close()
+        browser.close()
+
+
 def enter_gaming_mode(res: "H.Results", desk: Desk, page: Any, tag: str) -> bool:
     """Focus the stream and press the chord; True once the page is fullscreen and locked."""
     desk.click(*CENTER)
@@ -241,7 +367,7 @@ def enter_gaming_mode(res: "H.Results", desk: Desk, page: Any, tag: str) -> bool
     return ok
 
 
-def run(wayland: bool, res: "H.Results") -> None:
+def run(wayland: bool, res: "H.Results", two: bool = False) -> None:
     if not shutil.which("openbox"):
         H.skip_suite("openbox is not installed, and a fullscreen browser window needs a window manager")
     chrome = C.CHROME_PATH or shutil.which("google-chrome")
@@ -265,6 +391,10 @@ def run(wayland: bool, res: "H.Results") -> None:
                 page = open_page(browser, shields=False)
                 video = C.wait_ws_video(page, timeout=30)
                 res.check("chrome: video flowing", bool(video), video)
+                if two:
+                    crossed(res, p, desk, page, wayland, "chrome")
+                    page.context.close()
+                    return
                 probe = game_window(res, desk, wayland, capture, "chrome")
                 if probe is not None and enter_gaming_mode(res, desk, page, "chrome"):
                     played(res, desk, page, probe, "chrome")
@@ -286,7 +416,7 @@ def run(wayland: bool, res: "H.Results") -> None:
         H.server_stop()
 
 
-SELECTORS = ("x11", "wl")
+SELECTORS = ("x11", "wl", "x11-two", "wl-two")
 
 
 def main() -> bool:
@@ -294,7 +424,7 @@ def main() -> bool:
     if which not in SELECTORS:
         raise SystemExit(f"unknown selector {which!r}; one of {SELECTORS}")
     res = H.Results(f"gaming-mode-{which}")
-    run(which == "wl", res)
+    run(which.startswith("wl"), res, two=which.endswith("-two"))
     return res.summary()
 
 

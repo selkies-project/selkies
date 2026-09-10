@@ -228,7 +228,7 @@ SUITES: list = [
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl",
                    "ws-x11-openbox", "ws-x11-kwin", "ws-wl-labwc", "ws-wl-kwin"]},
     {"path": "e2e/test_gaming_mode.py", "tier": "e2e", "timeout": 600,
-     "selectors": ["x11", "wl"]},
+     "selectors": ["x11", "wl", "x11-two", "wl-two"]},
     {"path": "e2e/test_keyboard_layout.py", "tier": "e2e", "timeout": 600,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/test_encoders.py", "tier": "e2e", "timeout": 900,
