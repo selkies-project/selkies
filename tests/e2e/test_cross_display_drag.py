@@ -42,6 +42,7 @@ the two-display union.
 Usage: python3 tests/e2e/test_cross_display_drag.py wl
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -414,6 +415,16 @@ def managed_window_drag(res: "H.Results", mode: str, page: Any, seam: int,
             proc.kill()
 
 
+def realized_scale(display_id: str, log: str) -> Any:
+    """The scale the server last realized for `display_id`, from its own log.
+
+    Returns:
+        The scale as a float, or None where the log carries none for it.
+    """
+    hits = re.findall(rf"realized geometry for '{display_id}': \d+x\d+ @ scale ([0-9.]+)", log)
+    return float(hits[-1]) if hits else None
+
+
 def secondary_density(res: "H.Results", mode: str, dpage: Any, wayland: bool) -> None:
     """A secondary restored on a screen of another density: on X11 it is
     refused the desktop's DPI, on Wayland its own screen takes it.
@@ -431,15 +442,18 @@ def secondary_density(res: "H.Results", mode: str, dpage: Any, wayland: bool) ->
         "width": SECONDARY_CSS[0], "height": SECONDARY_CSS[1],
         "deviceScaleFactor": 2, "mobile": False})
     if wayland:
-        # A nested session scales its own screen; a plain one the capture output.
+        # The scale the server realized for each display, which is what a
+        # Wayland session carries per screen: the nested compositor's own
+        # `scaled to` line is printed only where there is one to nest in.
+        before = realized_scale("primary", H.server_log())
         scaled = wait_for(
-            lambda: H.server_log().find("('display2') scaled to 2.0", mark) >= 0
-            or H.server_log().find("restarting capture at scale 2.0 for display2", mark) >= 0, 15)
+            lambda: realized_scale("display2", H.server_log()[mark:]) == 2.0, 20)
         res.check(f"[{mode}] a secondary rederiving its density scales its own screen",
                   scaled, H.server_log(tail=3))
         time.sleep(2.0)
         res.check(f"[{mode}] and the primary's screen keeps its scale",
-                  H.server_log().find("('primary') scaled to", mark) < 0, "")
+                  realized_scale("primary", H.server_log()[mark:]) in (None, before),
+                  f"was {before}, now {realized_scale('primary', H.server_log()[mark:])}")
     else:
         refused = wait_for(
             lambda: H.server_log().find("Ignoring DPI 192 from 'display2'", mark) >= 0, 15)

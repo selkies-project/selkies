@@ -2157,11 +2157,15 @@ class WebRTCService(BaseStreamingService):
         for did, pipeline in targets:
             if pipeline is None:
                 continue
-            if display_id is None and did != "primary":
-                dpi_value = self._display_dpi(did)
+            # Per display, never over the argument: a session-wide pass that
+            # reassigned it would hand the next display the last secondary's
+            # DPI, and the primary is not always the first pipeline (it is
+            # re-inserted last when it reconnects behind a live secondary).
+            target_dpi = (self._display_dpi(did)
+                          if display_id is None and did != "primary" else dpi_value)
             new_scale = (await self.input_handler.realize_wayland_dpi(
-                dpi_value, did, (pipeline.width, pipeline.height))
-                if self.input_handler else float(dpi_value) / 96.0)
+                target_dpi, did, (pipeline.width, pipeline.height))
+                if self.input_handler else float(target_dpi) / 96.0)
             if pipeline.scale == new_scale:
                 continue
             pipeline.scale = new_scale
