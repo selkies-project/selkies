@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Two displays on screens of different pixel density share one physical UI size.
+"""Two displays on screens of different pixel density each stream at their own.
 
-The desktop renders its UI at one DPI, the primary page's. A secondary page
-therefore streams at the primary's density rather than its own: it asks for
-its CSS size times the primary's stream-pixels-per-CSS-pixel, and the browser
-resamples the stream by the ratio to its own screen. Checked both ways round
-(a denser primary, then a denser secondary), on both transports: the monitor
-the server realizes for the secondary, the secondary's own buffer against its
-CSS box, the scale it publishes with the layout, and where a pointer on it
-lands.
+A page asks for its CSS size times its own stream-pixels-per-CSS-pixel, so
+every display is one stream pixel per device pixel; on X11 the desktop keeps
+one DPI, the primary's, and the secondary shows the UI at another physical
+size rather than resampled. Checked both ways round (a denser primary, then a
+denser secondary), on both transports: the monitor the server realizes for the
+secondary, the secondary's own buffer against its CSS box, the scale it
+publishes with the layout, and where a pointer on it lands.
 
 Uses `E2E_DISPLAY` when set; otherwise starts a throwaway Xvfb wide enough for
 the two-display union.
@@ -126,9 +125,7 @@ def own_rect(page: Any) -> dict:
 
 
 def published(page: Any) -> list:
-    """The display scales this page has reported to the server, in order. A
-    secondary that never adopted the primary's density and a primary that
-    never published its own are the same failure from the layout alone."""
+    """The display scales this page has reported to the server, in order."""
     sent = page.evaluate("(window.__wireSent || [])"
                          ".filter(d => typeof d === 'string' && d.startsWith('SETTINGS,'))")
     return [json.loads(m[len("SETTINGS,"):]).get("displayScale") for m in sent]
@@ -136,7 +133,7 @@ def published(page: Any) -> list:
 
 def density_case(res: "H.Results", mode: str, browser: Any,
                  primary_dpr: int, secondary_dpr: int) -> None:
-    """One arrangement: the secondary must end up at the primary's density."""
+    """One arrangement: the secondary must end up at its own density."""
     tag = f"[{mode}] primary x{primary_dpr}, secondary x{secondary_dpr}:"
     page = new_display_context(browser, mode, PRIMARY_CSS, primary_dpr, 0)
     res.check(f"{tag} primary video flows", bool(wait_video(page, mode)), "")
@@ -144,15 +141,12 @@ def density_case(res: "H.Results", mode: str, browser: Any,
     dpage = new_display_context(browser, mode, SECONDARY_CSS, secondary_dpr,
                                 PRIMARY_CSS[0], "#display2-right")
     res.check(f"{tag} secondary video flows", bool(wait_video(dpage, mode)), "")
-    want = (SECONDARY_CSS[0] * primary_dpr, SECONDARY_CSS[1] * primary_dpr)
+    want = (SECONDARY_CSS[0] * secondary_dpr, SECONDARY_CSS[1] * secondary_dpr)
     try:
-        # The server realizes the secondary's monitor at the primary's density;
-        # a secondary whose own density differs re-requests once the layout
-        # carries the primary's scale.
         realized = wait_for(
             lambda: monitors(H.TEST_DISPLAY).get("selkies-display2", (0, 0))[:2] == want, 30)
         got = monitors(H.TEST_DISPLAY)
-        res.check(f"{tag} the secondary's monitor is its CSS size at the primary's density",
+        res.check(f"{tag} the secondary's monitor is its CSS size at its own density",
                   realized, f"want {want} monitors={got}")
         res.check(f"{tag} the primary's monitor keeps its own density",
                   got.get("selkies-primary", (0,))[0] == primary_w, got)
@@ -163,23 +157,22 @@ def density_case(res: "H.Results", mode: str, browser: Any,
         # the cursor and pointer at the same density.
         sink_ok = wait_for(lambda: (dpage.evaluate(SINK_JS) or {}).get("w") == want[0], 15)
         sink = dpage.evaluate(SINK_JS) or {}
-        res.check(f"{tag} the secondary's buffer is at the primary's density in its own CSS box",
+        res.check(f"{tag} the secondary's buffer is at its own density in its own CSS box",
                   sink_ok and abs(sink.get("cssW", 0) - SECONDARY_CSS[0]) <= 2
-                  and abs(sink.get("density", 0) - primary_dpr) < 0.01, sink)
-        # What the secondary streams at is read off this, so a primary that
-        # publishes the ratio of a stream its box has not caught up with yet
-        # sends the secondary to a density neither screen has.
+                  and abs(sink.get("density", 0) - secondary_dpr) < 0.01, sink)
+        # The cross-display drag converts through these, so each page has to
+        # publish the ratio its box draws at.
         res.check(f"{tag} the primary publishes its own density",
                   wait_for(lambda: own_rect(page).get("scale") == primary_dpr, 15),
                   f"primary published {published(page)}")
-        laid = wait_for(lambda: secondary_rect(page).get("scale") == primary_dpr, 15)
-        res.check(f"{tag} the secondary publishes the primary's scale with the layout",
+        laid = wait_for(lambda: secondary_rect(page).get("scale") == secondary_dpr, 15)
+        res.check(f"{tag} the secondary publishes its own scale with the layout",
                   laid, f"primary published {published(page)}, secondary {published(dpage)}")
 
         # A point on the secondary lands where the density puts it.
         pos = hover(dpage, 100, 100)
-        expect = (primary_w + 100 * primary_dpr, 100 * primary_dpr)
-        res.check(f"{tag} a pointer on the secondary maps at the primary's density",
+        expect = (primary_w + 100 * secondary_dpr, 100 * secondary_dpr)
+        res.check(f"{tag} a pointer on the secondary maps at its own density",
                   abs(pos[0] - expect[0]) <= 2 and abs(pos[1] - expect[1]) <= 2,
                   f"got {pos} expected {expect}")
         errors = [m for m in page.console_errors + dpage.console_errors

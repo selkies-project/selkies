@@ -241,6 +241,8 @@ class WebRTCService(BaseStreamingService):
         self._client_stream_boxes: Dict[
             str, Tuple[Tuple[float, float, float, float], float]] = {}
         self.display_pipelines: Dict[str, MediaPipelinePixel] = {}
+        # The DPI each secondary's page asked for; the primary's is _last_applied_dpi.
+        self._display_dpis: Dict[str, int] = {}
         self._last_idr_request_times: Dict[str, float] = {}
         self._display_lock = asyncio.Lock()
         self._primary_dims: Optional[Tuple[int, int]] = None
@@ -1124,6 +1126,7 @@ class WebRTCService(BaseStreamingService):
         async with self._display_lock:
             pipeline = self.display_pipelines.pop(display_id, None)
             self.display_clients.pop(display_id, None)
+            self._display_dpis.pop(display_id, None)
             self.display_layouts.pop(display_id, None)
             self._client_scales.pop(display_id, None)
             self._client_stream_boxes.pop(display_id, None)
@@ -1267,7 +1270,8 @@ class WebRTCService(BaseStreamingService):
             return False
         oid = wayland_output_id(did)
         s = layouts[did]
-        scale = float(getattr(self.media_pipeline, "scale", 1.0) or 1.0)
+        dpi = self._display_dpi(did)
+        scale = float(dpi) / 96.0
         try:
             outputs = {o[0]: o for o in await asyncio.to_thread(module.list_outputs)}
         except Exception as e:
@@ -1300,9 +1304,11 @@ class WebRTCService(BaseStreamingService):
             return True
         if self.input_handler:
             # The screen this display owns, grown just ahead of the output
-            # that adopts its host window.
+            # that adopts its host window, then given the display's own DPI;
+            # what the session leaves is this output's capture scale.
             await self.input_handler.ensure_session_screen(
                 did, size=(s["w"], s["h"]), scale=scale)
+            scale = await self.input_handler.realize_wayland_dpi(dpi, did, (s["w"], s["h"]))
         try:
             created = bool(await asyncio.to_thread(
                 module.create_output, oid, s["w"], s["h"], s["x"], s["y"], scale))
@@ -1653,6 +1659,7 @@ class WebRTCService(BaseStreamingService):
         holds _display_lock."""
         pipeline = self.display_pipelines.pop(did, None)
         self.display_clients.pop(did, None)
+        self._display_dpis.pop(did, None)
         self.display_layouts.pop(did, None)
         self._client_scales.pop(did, None)
         self._client_stream_boxes.pop(did, None)
@@ -1704,6 +1711,7 @@ class WebRTCService(BaseStreamingService):
         """
         pipeline = self.display_pipelines.pop(did, None)
         self.display_clients.pop(did, None)
+        self._display_dpis.pop(did, None)
         self.display_layouts.pop(did, None)
         self._client_scales.pop(did, None)
         self._client_stream_boxes.pop(did, None)
@@ -1896,9 +1904,7 @@ class WebRTCService(BaseStreamingService):
                 # copying whatever the primary was left with (a no-op field on X11).
                 if IS_WAYLAND and self.input_handler is not None:
                     pipeline.scale = await self.input_handler.realize_wayland_dpi(
-                        getattr(self, "_last_applied_dpi", None)
-                        or getattr(settings, "scaling_dpi", 96) or 96,
-                        did, (s["w"], s["h"]))
+                        self._display_dpi(did), did, (s["w"], s["h"]))
                 else:
                     pipeline.scale = getattr(self.media_pipeline, "scale", 1.0)
                 # The native-cursor toggle is global across displays.
@@ -2059,7 +2065,7 @@ class WebRTCService(BaseStreamingService):
         logger.info(f"Cursor size cap {ih.cursor_size_cap}px for DPI {dpi_value} "
                     f"({updated} live capture(s) updated).")
 
-    async def handle_scaling(self, dpi_value: float) -> None:
+    async def handle_scaling(self, dpi_value: float, display_id: str = "primary") -> None:
         """Apply a client DPI sync to the desktop (X11 xrdb/cursor themes) or
         run the per-display Wayland scale ladder.
 
@@ -2074,7 +2080,13 @@ class WebRTCService(BaseStreamingService):
         scale ladder per display: the session compositor scales the screen
         backing it, and only what it leaves becomes that display's capture
         scale, whose change restarts the capture (the WS path threads the same
-        scale through CaptureSettings).
+        scale through CaptureSettings). On Wayland a secondary's page scales
+        the screen it owns and nothing else: the cursor cap and size stay the
+        primary's. X11 has one DPI, so a secondary's is refused there.
+
+        Args:
+            dpi_value: The DPI the page asked for.
+            display_id: The display whose page sent it.
         """
         try:
             dpi_value = min(SCALING_DPI_MAX,
@@ -2084,6 +2096,17 @@ class WebRTCService(BaseStreamingService):
             return
         if settings._overridden.get("scaling_dpi", False):
             logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
+            return
+        display_id = display_id or "primary"
+        if display_id != "primary":
+            if not IS_WAYLAND:
+                logger.info(f"Ignoring DPI {dpi_value} from '{display_id}': "
+                            "the desktop DPI follows the primary display.")
+                return
+            if self._display_dpis.get(display_id) == int(dpi_value):
+                return
+            self._display_dpis[display_id] = int(dpi_value)
+            await self._realize_wayland_dpi(dpi_value, display_id)
             return
         if getattr(self, "_last_applied_dpi", None) == int(dpi_value):
             logger.debug(f"DPI already {int(dpi_value)}; skipping re-apply.")
@@ -2119,19 +2142,30 @@ class WebRTCService(BaseStreamingService):
         else:
             logger.error(f"Failed to set cursor size to {new_cursor_size}")
 
-    async def _realize_wayland_dpi(self, dpi_value: int) -> None:
-        """Run the Wayland scale ladder for every display's pipeline and
+    async def _realize_wayland_dpi(self, dpi_value: int,
+                                   display_id: Optional[str] = None) -> None:
+        """Run the Wayland scale ladder for one display's pipeline, or the
+        primary's and every secondary at the DPI its own page asked for, and
         restart the captures whose scale changed.
 
         Args:
-            dpi_value: The desktop DPI to realize.
+            dpi_value: The DPI to realize; the primary's when `display_id` is None.
+            display_id: The one display to scale, else all of them.
         """
-        for did, pipeline in list(self.display_pipelines.items()):
+        targets = ([(display_id, self.display_pipelines.get(display_id))]
+                   if display_id else list(self.display_pipelines.items()))
+        for did, pipeline in targets:
             if pipeline is None:
                 continue
+            # Per display, never over the argument: a session-wide pass that
+            # reassigned it would hand the next display the last secondary's
+            # DPI, and the primary is not always the first pipeline (it is
+            # re-inserted last when it reconnects behind a live secondary).
+            target_dpi = (self._display_dpi(did)
+                          if display_id is None and did != "primary" else dpi_value)
             new_scale = (await self.input_handler.realize_wayland_dpi(
-                dpi_value, did, (pipeline.width, pipeline.height))
-                if self.input_handler else float(dpi_value) / 96.0)
+                target_dpi, did, (pipeline.width, pipeline.height))
+                if self.input_handler else float(target_dpi) / 96.0)
             if pipeline.scale == new_scale:
                 continue
             pipeline.scale = new_scale
@@ -2155,7 +2189,7 @@ class WebRTCService(BaseStreamingService):
         one that started the captures it restarts.
 
         Args:
-            dpi: The desktop DPI in force.
+            dpi: The primary's DPI; each other display re-applies its own.
         """
         if not IS_WAYLAND or self.input_handler is None:
             return
@@ -2165,6 +2199,12 @@ class WebRTCService(BaseStreamingService):
             return
         async with self._display_lock:
             await self._realize_wayland_dpi(dpi_value)
+
+    def _display_dpi(self, display_id: str) -> int:
+        """The DPI a display's page asked for, else the primary's, else the configured default."""
+        own = self._display_dpis.get(display_id) if display_id != "primary" else None
+        return int(own or getattr(self, "_last_applied_dpi", None)
+                   or float(getattr(settings, "scaling_dpi", 96) or 96))
 
     async def handle_system_monitor(self, t: float) -> None:
         """System-monitor tick: push CPU/memory stats and a ping to clients,
@@ -2294,11 +2334,12 @@ class WebRTCService(BaseStreamingService):
         rides the `r,` input message). Video keys apply to the SENDING display
         only (websockets model); audio and the clipboard policy are
         stream-global whichever display asserts them. A `scaling_dpi` in the
-        primary's payload runs `handle_scaling` (websockets parity: the client
-        seeds its DPR-derived value into its very first payload, so the right
-        scale lands on the first sync rather than the dashboard's later
-        correction); a secondary's `displayPosition` may move it to any side
-        of the primary after joining.
+        primary's payload, or in any display's on Wayland, runs
+        `handle_scaling` (websockets parity: the client seeds its DPR-derived
+        value into its very first payload, so the right scale lands on the
+        first sync rather than the dashboard's later correction); a
+        secondary's `displayPosition` may move it to any side of the primary
+        after joining.
         """
         settings_allowed_to_update = [
             "rate_control_mode",
@@ -2335,9 +2376,9 @@ class WebRTCService(BaseStreamingService):
             await self.input_handler.apply_client_keyboard_layout(kb_layout)
 
         dpi_val = settings_json.get("scaling_dpi")
-        if dpi_val is not None and display_id == "primary":
+        if dpi_val is not None and (display_id == "primary" or IS_WAYLAND):
             try:
-                await self.handle_scaling(float(dpi_val))
+                await self.handle_scaling(float(dpi_val), display_id)
             except (TypeError, ValueError):
                 logger.warning(f"Ignoring malformed scaling_dpi in SETTINGS: {dpi_val!r}")
 

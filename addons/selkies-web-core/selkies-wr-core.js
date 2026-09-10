@@ -65,8 +65,8 @@
  * `showVirtualKeyboard`, `setAntiAliasing`, `setUseBrowserCursors`, `setRawPointerMotion`,
  * `touchinput:trackpad`, `touchinput:touch`, plus the `requestFileUpload` DOM
  * event. Window messages posted: `sidebarButtonStatusUpdate`,
- * `pipelineStatusUpdate`, `effectiveCursorState`, `serverSettings`,
- * `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
+ * `pipelineStatusUpdate`, `effectiveCursorState`, `scalingDpiFollowed`,
+ * `serverSettings`, `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
  * `clientRoleUpdate`, `toggleDashboard`, `toggleTouchGamepad`. Flags read:
  * `window.__selkiesModeSwitching` (a mode switch in progress suppresses
  * alerts and recovery reloads), `window.__selkiesAuthProbe` (re-presents the
@@ -500,8 +500,7 @@ export default function webrtc() {
 	let latestDisplayLayouts = null;
 	/** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 	function streamDensity() {
-		return streamDensityOf({ displayId: storageDisplayId, layouts: latestDisplayLayouts, useCssScaling,
-		                         localScale: scalingDPI / 96, shared: isSharedMode,
+		return streamDensityOf({ useCssScaling, localScale: scalingDPI / 96,
 		                         manual: window.manualResolution });
 	}
 	/** The density the last request was built on; a change re-requests on a secondary. */
@@ -510,7 +509,7 @@ export default function webrtc() {
 	let reportedStreamDensity = 0;
 	/**
 	 * Hands the density to the input layer and, on a secondary whose density
-	 * moved with the primary's, requests the stream at it again.
+	 * moved (a HiDPI or UI-scaling change), requests the stream at it again.
 	 */
 	function followStreamDensity() {
 		const density = streamDensity();
@@ -518,7 +517,7 @@ export default function webrtc() {
 		const changed = appliedStreamDensity > 0 && Math.abs(density - appliedStreamDensity) > 1e-6;
 		appliedStreamDensity = density;
 		if (changed && storageDisplayId !== 'primary' && !window.manualResolution) {
-			console.log(`Stream density follows the primary: ${density}.`);
+			console.log(`Stream density changed: ${density}.`);
 			handleResizeUI();
 		}
 	}
@@ -528,7 +527,7 @@ export default function webrtc() {
 		'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
 		'manual_resolution', 'manual_width', 'manual_height',
 		'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
-		'video_bitrate', 'force_aligned_resolution'
+		'video_bitrate', 'force_aligned_resolution', 'scaling_dpi'
 	];
 	const storageKeyFor = (key) => {
 		const prefixedKey = `${storageAppName}_${key}`;
@@ -1226,7 +1225,8 @@ export default function webrtc() {
 
 	/**
 	 * Re-derives `scaling_dpi` while it sits on its automatic default; a stored
-	 * value is the dashboard's explicit pick and is left alone.
+	 * value is the dashboard's explicit pick and is left alone. The new value
+	 * is posted as `scalingDpiFollowed` so the dashboards show it.
 	 * @param {string} reason What changed, for the log.
 	 * @returns {boolean} Whether the derived value moved; the caller pushes it.
 	 */
@@ -1237,6 +1237,7 @@ export default function webrtc() {
 		if (derived === scalingDPI) return false;
 		scalingDPI = derived;
 		console.log(`DPI follows ${reason}: scaling_dpi -> ${derived}.`);
+		window.postMessage({ type: 'scalingDpiFollowed', value: derived }, window.location.origin);
 		return true;
 	}
 

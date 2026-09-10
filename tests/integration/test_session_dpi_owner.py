@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""One desktop, one DPI: the primary display's page owns it.
+"""One X11 desktop, one DPI: the primary display's page owns it.
 
 Every display page derives its `scaling_dpi` from the density of the screen it
-is shown on, and the server applies it to the session -- Xft resources on X11,
-the session compositor's output scale on Wayland -- not to one display's
-region. Two pages on screens of different densities therefore each ask for a
-different desktop, and the desktop rescales for whichever spoke last, which is
-whenever a window is restored or dragged between monitors. A secondary's DPI is
-refused instead, and it says so rather than moving the whole session.
+is shown on, and on X11 the server applies it to the session as Xft resources,
+not to one display's region. Two pages on screens of different densities
+therefore each ask for a different desktop, and the desktop rescales for
+whichever spoke last, which is whenever a window is restored or dragged
+between monitors. A secondary's DPI is refused instead, and it says so rather
+than moving the whole session. On Wayland each display's screen carries its
+own output scale, so the rule does not apply there.
 
 Driven with raw websockets clients: what is under test is the server's rule,
 not a browser's derivation.

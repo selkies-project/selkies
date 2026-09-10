@@ -67,8 +67,9 @@
  * `touchinput:touch` and `sidebarVisibilityChanged`, and posts
  * `pipelineStatusUpdate`, `sidebarButtonStatusUpdate`, `serverSettings`,
  * `systemApps`, `stats` (to the parent window), `clientRoleUpdate`,
- * `effectiveCursorState`, `trackpadModeUpdate`, `clipboardContentUpdate`,
- * the clipboard preview of lib/clipboard-sync.js, `fileUpload`,
+ * `effectiveCursorState`, `scalingDpiFollowed`, `trackpadModeUpdate`,
+ * `clipboardContentUpdate`, the clipboard preview of lib/clipboard-sync.js,
+ * `fileUpload`,
  * `toggleDashboard` and `toggleTouchGamepad`. The `window` globals it
  * publishes for the dashboards and the tests are `webrtcInput` (the Input
  * handler), `fps`, `videoChunksReceived`, `videoDivertOn`, `videoStripeRows`
@@ -332,7 +333,7 @@ const PER_DISPLAY_SETTINGS = [
     'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
     'manual_resolution', 'manual_width', 'manual_height',
     'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
-    'video_bitrate', 'force_aligned_resolution'
+    'video_bitrate', 'force_aligned_resolution', 'scaling_dpi'
 ];
 let micStream = null;
 let micAudioContext = null;
@@ -424,8 +425,7 @@ let currentEncoderMode = 'h264enc-striped';
 let useCssScaling = false;
 /** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 function streamDensity() {
-  return streamDensityOf({ displayId, layouts: latestDisplayLayouts, useCssScaling,
-                           localScale: scalingDPI / 96, shared: isSharedMode,
+  return streamDensityOf({ useCssScaling, localScale: scalingDPI / 96,
                            manual: window.manual_resolution });
 }
 /** The density the last request was built on; a change re-requests on a secondary. */
@@ -436,7 +436,7 @@ let reportedStreamDensity = 0;
 let lastRequestedStreamRes = null;
 /**
  * Hands the density to the input layer and, on a secondary whose density
- * moved with the primary's, requests the stream at it again.
+ * moved (a HiDPI or UI-scaling change), requests the stream at it again.
  */
 function followStreamDensity() {
   const density = streamDensity();
@@ -446,7 +446,7 @@ function followStreamDensity() {
   const changed = appliedStreamDensity > 0 && Math.abs(density - appliedStreamDensity) > 1e-6;
   appliedStreamDensity = density;
   if (changed && displayId !== 'primary' && !window.manual_resolution && handleResizeUI_globalRef) {
-    console.log(`Stream density follows the primary: ${density}.`);
+    console.log(`Stream density changed: ${density}.`);
     handleResizeUI_globalRef();
   }
 }
@@ -482,7 +482,8 @@ function effectiveScalingDpi() {
 
 /**
  * Re-derives `scaling_dpi` while it sits on its automatic default; a stored
- * value is the dashboard's explicit pick and is left alone.
+ * value is the dashboard's explicit pick and is left alone. The new value is
+ * posted as `scalingDpiFollowed` so the dashboards show it.
  * @param {string} reason What changed, for the log.
  * @returns {boolean} Whether the derived value moved; the caller pushes it.
  */
@@ -493,6 +494,7 @@ function followDerivedDpi(reason) {
   if (derived === scalingDPI) return false;
   scalingDPI = derived;
   console.log(`DPI follows ${reason}: scaling_dpi -> ${derived}.`);
+  window.postMessage({ type: 'scalingDpiFollowed', value: derived }, window.location.origin);
   return true;
 }
 

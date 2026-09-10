@@ -1,40 +1,28 @@
 /**
  * The density a display page streams at: stream pixels per CSS pixel.
  *
- * The desktop renders its UI at one DPI, the primary page's, so streaming
- * every page at the primary's density is what shows that UI at the same
- * physical size on screens of different pixel densities: a page asks for its
- * CSS size at that density and the browser resamples the stream by the ratio
- * to its own. The primary streams at the device pixel ratio, or under CSS
- * scaling at the ratio divided by the UI-scaling pick, which the desktop then
- * does not apply as a DPI: windows keep the same proportion of the screen
- * either way. A manual resolution is the exception both ways round: it is the
- * framebuffer the operator asked for, so there is nothing for the pick to
- * divide and it governs the desktop DPI instead, and a page dividing here as
- * well would apply it twice -- publishing a density its own box does not draw
- * at, which is then what its neighbours stream at. A secondary streams at the
- * primary's, which the primary reports as its display scale and the server
- * carries in every layout broadcast, and at its own until that arrives. A
- * shared viewer follows the controller and keeps its own.
- * @param {{displayId: string, layouts: (Object|null), useCssScaling: boolean,
- *     localScale: (number|undefined), shared: boolean,
+ * A page asks for its CSS size at the density of the screen it is on, so the
+ * stream is one pixel per device pixel there. The primary streams at the
+ * device pixel ratio, or under CSS scaling at the ratio divided by the
+ * UI-scaling pick, which the desktop then does not apply as a DPI: windows
+ * keep the same proportion of the screen either way. A manual resolution is
+ * the exception both ways round: it is the framebuffer the operator asked
+ * for, so there is nothing for the pick to divide and it governs the desktop
+ * DPI instead, and a page dividing here as well would apply it twice --
+ * publishing a density its own box does not draw at. On Wayland each screen
+ * takes its own page's DPI; on X11 the desktop has one, the primary's, so a
+ * secondary on a screen of another density shows the UI at another physical
+ * size rather than at another resolution.
+ * @param {{useCssScaling: boolean, localScale: (number|undefined),
  *     manual: (boolean|undefined)}} page `localScale` is the UI-scaling pick
  *     as a factor (1 is 100%); `manual` is whether this page's resolution is
  *     the operator's own.
  * @returns {number}
  */
-export function streamDensity({ displayId, layouts, useCssScaling, localScale, shared,
-                                manual }) {
+export function streamDensity({ useCssScaling, localScale, manual }) {
     const dpr = window.devicePixelRatio || 1;
     const stretch = (Number.isFinite(localScale) && localScale > 0) ? localScale : 1;
-    const own = (useCssScaling && !manual) ? dpr / stretch : dpr;
-    if (shared || !displayId || displayId === 'primary') return own;
-    const primary = layouts && layouts.primary;
-    const scale = primary ? Number(primary.scale) : NaN;
-    if (!Number.isFinite(scale) || scale <= 0) return own;
-    // A measured scale carries the rounding of the primary's aligned buffer;
-    // the request is sized on the density it stands for.
-    return Math.round(scale * 100) / 100;
+    return (useCssScaling && !manual) ? dpr / stretch : dpr;
 }
 
 /** `scaling_dpi` stops in 25% steps from 96; densities between them snap to the nearest. */
