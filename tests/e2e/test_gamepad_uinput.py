@@ -135,6 +135,18 @@ def run_player_slot(mode: str, results: "H.Results") -> None:
                 page.evaluate(f"window.{action}")
                 time.sleep(0.25)
             time.sleep(0.5)
+            # A pad announced before the server has registered this link's slot
+            # is dropped by the slot gate, which knows of no slot to allow yet,
+            # and the button sends that follow still route by index -- so the
+            # pad drives its slot with no association recorded. The client's own
+            # repair is to announce again, which is what a re-attach does.
+            if "virtual gamepad slot" not in H.server_log():
+                page.evaluate("window.webrtcInput && window.webrtcInput.resyncGamepads"
+                              " && window.webrtcInput.resyncGamepads()")
+                for _ in range(20):
+                    if "virtual gamepad slot" in H.server_log():
+                        break
+                    time.sleep(0.25)
             # What the page sent for its pad, so a missing association on the
             # server can be told from an announcement the client never made.
             sent = [m for m in page.evaluate("window.__wireSent || []")

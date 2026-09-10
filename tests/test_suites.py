@@ -46,6 +46,18 @@ def keep_logs(case: str) -> None:
         pass
 
 
+# What `helpers.answers_within` prints when a browser stops answering. WebKit's
+# video process wedges on a loaded runner often enough to take a suite with it,
+# and every call after that reads as absent video, so a run that says so is not
+# a result: it is repeated once, both attempts printed, and a wedge that
+# repeats fails as it did before.
+STALLED = ("did not answer within", "stopped answering earlier")
+
+
+def stalled(text: str) -> bool:
+    return any(mark in text for mark in STALLED)
+
+
 @pytest.mark.parametrize("path,selector,timeout", CASES)
 def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
     """Run one suite as a subprocess and map its exit protocol onto pytest."""
@@ -56,6 +68,14 @@ def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
     try:
         proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,
                               timeout=timeout, env=env)
+        if proc.returncode != 0 and stalled(proc.stdout + proc.stderr):
+            sys.stdout.write(proc.stdout)
+            sys.stderr.write(proc.stderr)
+            print(f"note: {case} lost a browser mid-run; running it once more",
+                  flush=True)
+            keep_logs(case + "-stalled")
+            proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,
+                                  timeout=timeout, env=env)
     except subprocess.TimeoutExpired as e:
         keep_logs(case)
         # The checks the suite did finish are its record of where it stuck;
