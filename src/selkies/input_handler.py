@@ -3714,7 +3714,7 @@ class WebRTCInput:
         self.on_client_fps = lambda fps: logger_webrtc_input.warning("unhandled on_client_fps")
         self.on_client_latency = lambda latency: logger_webrtc_input.warning("unhandled on_client_latency")
         self.on_resize = lambda res, display_id="primary": logger_webrtc_input.warning("unhandled on_resize")
-        self.on_scaling_ratio = lambda res: logger_webrtc_input.warning("unhandled on_scaling_ratio")
+        self.on_scaling_ratio = lambda res, display_id="primary": logger_webrtc_input.warning("unhandled on_scaling_ratio")
         self.on_ping_response = lambda latency: logger_webrtc_input.warning("unhandled on_ping_response")
         self.on_cursor_change = self._on_cursor_change
         async def _unhandled_webrtc_stats(webrtc_stat_type, webrtc_stats):
@@ -7829,13 +7829,13 @@ class WebRTCInput:
             scale = toks[1]
             if not re.fullmatch(r"^\d+(\.\d+)?$", scale):
                 logger_webrtc_input.warning(f"Rejecting scaling change, invalid: {scale}")
-            elif display_id != "primary":
-                # One desktop, one DPI: the primary's page owns it.
+            elif display_id != "primary" and not getattr(self, "is_wayland", False):
+                # X11 has one DPI, the primary's; Wayland scales each screen.
                 logger_webrtc_input.info(
                     f"Ignoring DPI {scale} from '{display_id}': "
                     "the desktop DPI follows the primary display.")
             else:
-                _s = self.on_scaling_ratio(float(scale))
+                _s = self.on_scaling_ratio(float(scale), display_id)
                 if asyncio.iscoroutine(_s): await _s
         elif msg_type == "cmd":
             if not settings.command_enabled[0]:

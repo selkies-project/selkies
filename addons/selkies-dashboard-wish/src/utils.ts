@@ -44,7 +44,7 @@ const PER_DISPLAY_SETTINGS = [
   'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
   'manual_resolution', 'manual_width', 'manual_height',
   'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
-  'video_bitrate', 'force_aligned_resolution',
+  'video_bitrate', 'force_aligned_resolution', 'scaling_dpi',
 ];
 
 const urlHash = typeof window !== 'undefined' ? window.location.hash : '';

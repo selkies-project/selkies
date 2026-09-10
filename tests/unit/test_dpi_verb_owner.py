@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""The DPI sync verb from a secondary display is refused at the shared dispatch.
+"""The DPI sync verb from a secondary display at the shared dispatch.
 
-One desktop carries one DPI and the primary display's page owns it (the
+On X11 one desktop carries one DPI and the primary display's page owns it (the
 SETTINGS payload already says so on both transports). A page also re-derives
 its DPI from a live device pixel ratio change -- its window restored on a
 screen of another density -- and the WebRTC core sends that as the bare `s`
 verb over the data channel, which reaches the desktop through the input
 dispatch alone. A secondary's has to stop there too, or two windows on screens
-of different densities rescale the whole session at every restore.
+of different densities rescale the whole session at every restore. On Wayland
+each display's screen carries its own scale, so the verb passes with the
+display that sent it.
 
 Drives the message dispatch directly; no browser, no server, no display.
 """
@@ -37,8 +39,9 @@ class Log(logging.Handler):
 
 async def scenario(res: "H.Results") -> None:
     handler = object.__new__(WebRTCInput)
+    handler.is_wayland = False
     applied: list = []
-    handler.on_scaling_ratio = lambda dpi: applied.append(dpi)
+    handler.on_scaling_ratio = lambda dpi, display_id="primary": applied.append(dpi)
     log = Log()
     logger = logging.getLogger("webrtc_input")
     logger.addHandler(log)
@@ -61,6 +64,13 @@ async def scenario(res: "H.Results") -> None:
         res.check("a malformed sync is rejected before anything looks at who sent it",
                   applied == [192.0, 96.5] and
                   any("Rejecting scaling change" in line for line in log.lines), applied)
+
+        handler.is_wayland = True
+        routed: list = []
+        handler.on_scaling_ratio = lambda dpi, display_id="primary": routed.append((dpi, display_id))
+        await handler.on_message("s,96", "display2")
+        res.check("on Wayland a secondary's sync passes with its display",
+                  routed == [(96.0, "display2")], routed)
     finally:
         logger.removeHandler(log)
 

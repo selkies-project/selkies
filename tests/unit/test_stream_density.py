@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """What density a page streams at, and what scale it publishes for its neighbours.
 
-The desktop renders its UI at the primary page's density, so a secondary
-streams at the primary's rather than its own and reads that density off the
-scale the primary publishes with the layout. A page publishes it by measuring
-the box it draws the stream in, which only answers the question while the box
-is showing the stream the server realized: one still holding the stream from
-before a resize measures that stream's ratio, and the neighbour that adopts it
-streams at a density nothing on either screen has. With HiDPI off the desktop
+Every page streams at the density of the screen it is on, so a display is one
+stream pixel per device pixel wherever it is shown. A page publishes the scale
+of its box with the layout, for the cross-display drag, by measuring the box it
+draws the stream in, which only answers the question while the box is showing
+the stream the server realized: one still holding the stream from before a
+resize measures that stream's ratio. With HiDPI off the desktop
 is left at 96 DPI and the UI-scaling pick divides the resolution asked for
 instead, the browser stretching the stream back by it, so the pick decides what
 a page requests as much as the display's own scaling does. The rules are

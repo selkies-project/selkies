@@ -11,7 +11,8 @@
  * State arrives through the `message` events the core posts on `window`:
  * `serverSettings` (the server's settings payload, per key a `value`,
  * `allowed`, `min`/`max`, `default`, `locked` and `overridden`),
- * `effectiveCursorState` and `audioDeviceSelected`. Changes go back as
+ * `effectiveCursorState`, `scalingDpiFollowed` (the UI-scaling default the
+ * core re-derived) and `audioDeviceSelected`. Changes go back as
  * `window.postMessage` messages: `settings` (debounced key/value batches the
  * core forwards to the server), `mode`, `setScaleLocally`,
  * `setManualResolution`, `resetResolutionToWindow`, `setAntiAliasing`, and
@@ -502,6 +503,11 @@ export function Settings() {
             }
             if (event.data?.type === "effectiveCursorState" && typeof event.data.value === "boolean") {
                 setEffectiveCursor(event.data.value);
+            }
+            // The core's derived pick; a stored pick is the user's and stays.
+            if (event.data?.type === "scalingDpiFollowed" && typeof event.data.value === "number"
+                    && localStorage.getItem(getPrefixedKey("scaling_dpi")) === null) {
+                setSelectedDpi(event.data.value);
             }
             // Echo of this dashboard's own pick: the dropdown shows what the core was told.
             if (event.data?.type === "audioDeviceSelected" && event.data.deviceId) {

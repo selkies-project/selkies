@@ -5,8 +5,8 @@
  */
 
 // The density a display page streams at and the scale it publishes for its
-// neighbours. Both are pure functions of the layout the server broadcast and
-// the box the page draws, so they are checked here rather than through two
+// neighbours. Both are pure functions of the page's own screen, its settings
+// and the box it draws, so they are checked here rather than through two
 // browsers on two densities.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
@@ -25,80 +25,56 @@ function check(label, ok, detail = '') {
     console.log(`${ok ? 'PASS' : 'FAIL'}  [stream-density] ${label}  ${detail}`);
 }
 
-const AT_PRIMARY = { layouts: { primary: { w: 1512, h: 806, scale: 1 } } };
-
 {
-    const own = streamDensity({ displayId: 'primary', useCssScaling: false, ...AT_PRIMARY });
-    check('the primary streams at its own density', own === 2, own);
+    const own = streamDensity({ useCssScaling: false });
+    check('a page streams at its own density', own === 2, own);
 }
 
 {
     // The automatic pick is the display's own scaling as a DPI, so the stream
     // comes out at the CSS size and the browser stretches it back.
-    const matched = streamDensity({ displayId: 'primary', useCssScaling: true,
-                                    localScale: 2, ...AT_PRIMARY });
+    const matched = streamDensity({ useCssScaling: true, localScale: 2 });
     check('CSS scaling at the pick the display scales by asks for the CSS size',
         matched === 1, matched);
 }
 
 {
-    const unscaled = streamDensity({ displayId: 'primary', useCssScaling: true,
-                                     localScale: 1, ...AT_PRIMARY });
+    const unscaled = streamDensity({ useCssScaling: true, localScale: 1 });
     check('a 100% pick under CSS scaling asks for native pixels, nothing to stretch',
         unscaled === 2, unscaled);
 }
 
 {
-    const stretched = streamDensity({ displayId: 'primary', useCssScaling: true,
-                                      localScale: 4, ...AT_PRIMARY });
+    const stretched = streamDensity({ useCssScaling: true, localScale: 4 });
     check('a pick past the display\'s own scaling asks for less than the CSS size',
         stretched === 0.5, stretched);
 }
 
 {
-    const hidpi = streamDensity({ displayId: 'primary', useCssScaling: false,
-                                  localScale: 2, ...AT_PRIMARY });
+    const hidpi = streamDensity({ useCssScaling: false, localScale: 2 });
     check('the pick leaves the density alone with HiDPI on, where the desktop takes it',
         hidpi === 2, hidpi);
 }
 
 {
-    const broken = streamDensity({ displayId: 'primary', useCssScaling: true,
-                                   localScale: 0, ...AT_PRIMARY });
+    const broken = streamDensity({ useCssScaling: true, localScale: 0 });
     check('an unusable pick stretches by nothing', broken === 2, broken);
 }
 
 {
     // The operator's framebuffer is fixed, so the pick reaches the desktop as
     // its DPI; dividing here too would publish a density the page's own box
-    // does not draw at, and the neighbour would stream at that.
-    const fixed = streamDensity({ displayId: 'primary', useCssScaling: true,
-                                  localScale: 1.5, manual: true, ...AT_PRIMARY });
+    // does not draw at.
+    const fixed = streamDensity({ useCssScaling: true, localScale: 1.5, manual: true });
     check('a manual resolution streams at the display\'s density, pick or no pick',
         fixed === 2, fixed);
 }
 
 {
-    const neighbour = streamDensity({ displayId: 'display2', useCssScaling: true,
-                                      localScale: 1.5, manual: false,
-                                      layouts: { primary: { w: 3024, h: 1612, scale: 2 } } });
-    check("and its neighbour streams at the density it published", neighbour === 2, neighbour);
-}
-
-{
-    const second = streamDensity({ displayId: 'display2', useCssScaling: false, ...AT_PRIMARY });
-    check("a secondary streams at the primary's published scale", second === 1, second);
-}
-
-{
-    const alone = streamDensity({ displayId: 'display2', useCssScaling: false, layouts: null });
-    check('and at its own until the layout carries one', alone === 2, alone);
-}
-
-{
-    const viewer = streamDensity({ displayId: 'display2', useCssScaling: false, shared: true,
-                                   ...AT_PRIMARY });
-    check('a shared viewer keeps its own density', viewer === 2, viewer);
+    window.devicePixelRatio = 1;
+    const low = streamDensity({ useCssScaling: false });
+    window.devicePixelRatio = 2;
+    check('a page on a plain screen streams at one pixel per CSS pixel', low === 1, low);
 }
 
 {

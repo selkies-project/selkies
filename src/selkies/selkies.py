@@ -2988,11 +2988,10 @@ class DataStreamingServer(BaseStreamingService):
                     if new_dpi is not None and new_dpi != old_settings.get("scaling_dpi"):
                         data_logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
                     new_dpi = old_settings.get("scaling_dpi")
-                elif display_id != 'primary' and new_dpi != old_settings.get("scaling_dpi"):
-                    # The desktop has one DPI and every display page derives its
-                    # own from the density it is shown at, so a secondary on a
-                    # different screen would rescale the whole session each time
-                    # its window is restored. The primary's page owns it.
+                elif (not IS_WAYLAND and display_id != 'primary'
+                      and new_dpi != old_settings.get("scaling_dpi")):
+                    # X11 has one DPI, and every page derives its own from the
+                    # screen it is shown on: the primary's page owns it.
                     data_logger.info(
                         f"Ignoring DPI {new_dpi} from '{display_id}': the desktop DPI follows the primary display."
                     )
@@ -3005,14 +3004,17 @@ class DataStreamingServer(BaseStreamingService):
                             new_cursor_size = cursor_size_for_dpi(new_dpi, CURSOR_SIZE)
                             await set_cursor_size(new_cursor_size)
                         self._update_cursor_cap(new_dpi)
-                    if IS_WAYLAND:
-                        # Only what the session compositor leaves becomes the capture
-                        # scale, which the 'scale' restart trigger below reads.
+                    elif display_id == 'primary' or display_id in (self.display_layouts or {}):
+                        # Each display scales its own screen. Only what the session
+                        # compositor leaves becomes the capture scale, which the
+                        # 'scale' restart trigger below reads. A secondary without
+                        # an output yet is scaled by the layout pass that grows it.
                         display_state['scale'] = (
                             await self.input_handler.realize_wayland_dpi(
                                 new_dpi, display_id,
                                 (display_state.get('width'), display_state.get('height')))
                             if self.input_handler else float(new_dpi) / 96.0)
+                    if IS_WAYLAND and display_id == 'primary':
                         self._update_cursor_cap(new_dpi)
                         await self._apply_wayland_cursor_size(new_dpi)
 
@@ -4135,8 +4137,8 @@ class DataStreamingServer(BaseStreamingService):
                                 # An operator-set DPI (CLI/env) governs the desktop.
                                 data_logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
                                 continue
-                            if client_display_id and client_display_id != 'primary':
-                                # One desktop, one DPI: the primary's page owns it.
+                            if client_display_id and client_display_id != 'primary' and not IS_WAYLAND:
+                                # X11 has one DPI, the primary's; Wayland scales each screen.
                                 data_logger.info(
                                     f"Ignoring DPI {dpi_value} from '{client_display_id}': "
                                     "the desktop DPI follows the primary display."
@@ -4153,8 +4155,10 @@ class DataStreamingServer(BaseStreamingService):
                                 self._update_cursor_cap(dpi_value)
 
                             if IS_WAYLAND and client_display_id:
-                                # Before the restart, which reads the cap through CaptureSettings.
-                                self._update_cursor_cap(dpi_value)
+                                # The delivery cap is one per session, the primary's;
+                                # before the restart, which reads it through CaptureSettings.
+                                if client_display_id == 'primary':
+                                    self._update_cursor_cap(dpi_value)
                                 await self._realize_wayland_display_dpi(client_display_id, dpi_value)
 
                             # Stored where SETTINGS stores its own DPI, or a later partial
@@ -4165,7 +4169,8 @@ class DataStreamingServer(BaseStreamingService):
 
                             if CURSOR_SIZE is not None:
                                 if IS_WAYLAND:
-                                    await self._apply_wayland_cursor_size(dpi_value)
+                                    if client_display_id in (None, 'primary'):
+                                        await self._apply_wayland_cursor_size(dpi_value)
                                 else:
                                     new_cursor_size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
 
@@ -4592,13 +4597,20 @@ class DataStreamingServer(BaseStreamingService):
         pass that started the captures it restarts.
 
         Args:
-            dpi: The desktop DPI in force.
+            dpi: The primary's DPI; each other display re-applies its own.
         """
         if not IS_WAYLAND or self.input_handler is None:
             return
         async with self._reconfigure_guard():
             for display_id in list(self.display_clients):
-                await self._realize_wayland_display_dpi(display_id, dpi)
+                await self._realize_wayland_display_dpi(
+                    display_id, dpi if display_id == 'primary' else self._display_dpi(display_id))
+
+    def _display_dpi(self, display_id: str) -> Any:
+        """The DPI a display's page asked for, else the configured default."""
+        client = self.display_clients.get(display_id) or {}
+        return (client.get('scaling_dpi')
+                or getattr(app_settings, "scaling_dpi", "96") or 96)
 
     async def _size_wayland_screen(self, width: int, height: int,
                                    grow_only: bool = False) -> None:
@@ -4808,10 +4820,17 @@ class DataStreamingServer(BaseStreamingService):
                 continue
             layout = layouts[did]
             client = self.display_clients.get(did) or {}
-            scale = float(client.get('scale', 1.0) or 1.0)
+            dpi = self._display_dpi(did)
+            scale = float(dpi) / 96.0
             if self.input_handler:
                 await self.input_handler.ensure_session_screen(
                     did, size=(layout['w'], layout['h']), scale=scale)
+                # The screen exists now, so the display's own DPI can reach it;
+                # what the session leaves is this output's capture scale.
+                scale = await self.input_handler.realize_wayland_dpi(
+                    dpi, did, (layout['w'], layout['h']))
+                if client:
+                    client['scale'] = scale
             created = False
             try:
                 created = bool(await asyncio.to_thread(

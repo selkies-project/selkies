@@ -18,7 +18,8 @@
  * Messages it consumes from the core: `serverSettings` (the settings payload
  * that gates which controls render and seeds their values),
  * `pipelineStatusUpdate` and `sidebarButtonStatusUpdate`,
- * `effectiveCursorState`, `clientRoleUpdate`, `gamingModeUpdate`,
+ * `effectiveCursorState`, `scalingDpiFollowed` (the UI-scaling default the
+ * core re-derived), `clientRoleUpdate`, `gamingModeUpdate`,
  * `toggleDashboard` and `toggleTouchGamepad` (the core-owned Ctrl+Shift+M and
  * Ctrl+Shift+G chords), `gamepadControl`, `clipboardContentUpdate`,
  * `audioDeviceSelected` (its own selection mirrored back, so the dropdowns
@@ -89,7 +90,7 @@ const PER_DISPLAY_SETTINGS = [
     'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
     'manual_resolution', 'manual_width', 'manual_height', 'encoder',
     'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
-    'video_bitrate', 'force_aligned_resolution'
+    'video_bitrate', 'force_aligned_resolution', 'scaling_dpi'
 ];
 
 const encoderOptions = [
@@ -2906,6 +2907,11 @@ function Sidebar() {
         } else if (message.type === "trackpadModeUpdate") {
           if (typeof message.enabled === 'boolean') {
             setIsTrackpadModeActive(message.enabled);
+          }
+        } else if (message.type === "scalingDpiFollowed") {
+          // The core's derived pick; a stored pick is the user's and stays.
+          if (Number.isFinite(message.value) && readStored("scaling_dpi") === null) {
+            setSelectedDpi(message.value);
           }
         }
       }
