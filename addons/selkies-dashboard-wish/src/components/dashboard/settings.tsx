@@ -75,22 +75,49 @@ const dpiScalingOptions = [
     { label: "275%", value: 264 },
     { label: "300%", value: 288 },
 ];
+/** The rows a 96 DPI desktop is for, which a manual resolution is read against. */
+const DPI_UNITY_ROWS = 1080;
+
 /**
- * The default `scaling_dpi`: the local display scaling (devicePixelRatio) put
- * through the core's autoDeriveDpi formula, so the remote desktop's fonts and
- * UI match the local environment. The density is snapped to the nearest option
- * and clamped at both ends, and it is independent of the resolution.
+ * The default `scaling_dpi`, derived as the core derives it
+ * (lib/stream-density.js): from a manual resolution when one is set, since
+ * that framebuffer decides how large the desktop draws its UI and the local
+ * screen says nothing about it, and otherwise from the local display scaling
+ * (devicePixelRatio), so the remote desktop's fonts and UI match the local
+ * environment. A manual resolution is read off its shorter side -- an
+ * ultrawide is wide rather than dense -- and either density is snapped to the
+ * nearest option and clamped at both ends.
  *
  * The ladder that governs the desktop is an operator override (which the
  * server refuses to let clients clobber), then the stored pick, then this
  * derived default; the cores send stored-else-derived on every connect.
  */
-const deriveDpiFromDpr = (): number => {
+const deriveDpi = (manual: { w: number; h: number }): number => {
+    const rows = Math.min(manual.w || 0, manual.h || 0);
     const dpr = window.devicePixelRatio || 1;
-    const target = Math.round(dpr * 4) * 24;
+    const target = rows > 0 ? 96 * rows / DPI_UNITY_ROWS : Math.round(dpr * 4) * 24;
     return dpiScalingOptions.reduce((prev, curr) =>
         Math.abs(curr.value - target) < Math.abs(prev.value - target) ? curr : prev
     ).value;
+};
+
+/**
+ * The manual resolution in force, as the cores resolve it: a deployment that
+ * forces one and names its size wins, since the core takes the server's over
+ * the client's there; otherwise the stored pick, and zeroes for a session
+ * sized to its window.
+ */
+const manualResolution = (serverSettings: any): { w: number; h: number } => {
+    const forced = serverSettings?.manual_resolution?.value === true;
+    const server = {
+        w: parseInt(serverSettings?.manual_width?.value, 10) || 0,
+        h: parseInt(serverSettings?.manual_height?.value, 10) || 0,
+    };
+    if (forced && server.w > 0 && server.h > 0) return server;
+    return {
+        w: parseInt(localStorage.getItem(getPrefixedKey('manual_width')) ?? '', 10) || 0,
+        h: parseInt(localStorage.getItem(getPrefixedKey('manual_height')) ?? '', 10) || 0,
+    };
 };
 
 const commonResolutionValues = [
@@ -264,7 +291,7 @@ export function Settings() {
     });
 
     const [selectedDpi, setSelectedDpi] = useState(() => {
-        return parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")) ?? "", 10) || deriveDpiFromDpr();
+        return parseInt(localStorage.getItem(getPrefixedKey("scaling_dpi")) ?? "", 10) || deriveDpi(manualResolution(serverSettings));
     });
 
     const [videoBitRate, setVideoBitRate] = useState(() => {
@@ -590,7 +617,7 @@ export function Settings() {
             const stored = getStoredInt("scaling_dpi");
             const storedAllowed = s_scaling_dpi.allowed.includes(String(stored));
             const serverVal = parseInt(s_scaling_dpi.value, 10);
-            const derived = deriveDpiFromDpr();
+            const derived = deriveDpi(manualResolution(serverSettings));
             const willPostDerived = !storedAllowed && !s_scaling_dpi.overridden
                 && derived !== serverVal;
             const final = s_scaling_dpi.overridden ? serverVal
@@ -899,6 +926,21 @@ export function Settings() {
     };
 
     /**
+     * A resolution the operator sets carries its own UI-scaling default, since
+     * the framebuffer asked for decides how large the desktop draws its UI.
+     * Not stored, so it stays a default: a stored pick, or a locked or
+     * operator-explicit server value, outranks it as it does at connect.
+     */
+    const deriveDpiForResolution = () => {
+        const s = serverSettings?.scaling_dpi;
+        if (s?.locked || s?.overridden) return;
+        if (s?.allowed?.includes(String(parseInt(readStored('scaling_dpi') ?? '', 10)))) return;
+        const derived = deriveDpi(manualResolution(serverSettings));
+        setSelectedDpi(derived);
+        debouncedPostSetting({ scaling_dpi: derived });
+    };
+
+    /**
      * Restores HiDPI to its default on reset-to-window. Unlike the
      * resolution-derived writes, which respect a pinned choice, a reset means
      * "back to defaults", so the client's own pin is dropped even under an
@@ -918,17 +960,18 @@ export function Settings() {
     };
 
     /**
-     * Returns UI scaling to its derived (devicePixelRatio) default on
-     * reset-to-window: the pinned client choice is dropped and the derived
-     * value propagates like a user change. A locked or operator-overridden
-     * value governs scaling instead, the same gate as the startup
-     * derived-default post, so nothing happens then.
+     * Returns UI scaling to its derived default on reset-to-window, which with
+     * no resolution of its own left to read is the local display's scaling:
+     * the pinned client choice is dropped and the derived value propagates
+     * like a user change. A locked or operator-overridden value governs
+     * scaling instead, the same gate as the startup derived-default post, so
+     * nothing happens then.
      */
     const resetDpiToDerivedDefault = () => {
         const s = serverSettings?.scaling_dpi;
         if (s?.locked || s?.overridden) return;
         localStorage.removeItem(getPrefixedKey('scaling_dpi'));
-        const derived = deriveDpiFromDpr();
+        const derived = deriveDpi(manualResolution(serverSettings));
         setSelectedDpi(derived);
         debouncedPostSetting({ scaling_dpi: derived });
     };
@@ -952,6 +995,7 @@ export function Settings() {
         localStorage.setItem(getPrefixedKey('manual_height'), evenHeight.toString());
         window.postMessage({ type: 'setManualResolution', width: evenWidth, height: evenHeight }, window.location.origin);
         deriveHidpiForResolution(true);
+        deriveDpiForResolution();
     };
 
     const handleResetResolution = () => {
@@ -1217,6 +1261,7 @@ export function Settings() {
                                                                 localStorage.setItem(getPrefixedKey('manual_height'), evenHeight.toString());
                                                                 window.postMessage({ type: 'setManualResolution', width: evenWidth, height: evenHeight }, window.location.origin);
                                                                 deriveHidpiForResolution(true);
+                                                                deriveDpiForResolution();
                                                             }
                                                         }
                                                     }}

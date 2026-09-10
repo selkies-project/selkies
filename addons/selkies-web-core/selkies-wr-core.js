@@ -77,7 +77,7 @@
 import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
-import { streamDensity as streamDensityOf, autoScalingDpi, publishedScale } from "./lib/stream-density.js";
+import { streamDensity as streamDensityOf, autoScalingDpi, resolutionScalingDpi, publishedScale } from "./lib/stream-density.js";
 import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, writeImageToLocalClipboard, digestedPayload } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
@@ -1186,12 +1186,16 @@ export default function webrtc() {
 	}
 
 	/**
-	 * Derives the default `scaling_dpi` from the local display scaling
-	 * (lib/stream-density.js), so remote fonts match local ones.
+	 * Derives the default `scaling_dpi` (lib/stream-density.js): from the local
+	 * display scaling, so remote fonts match local ones, or from a manual
+	 * resolution, which is a framebuffer of its own that the local screen says
+	 * nothing about. A stored pick overrides either.
 	 * @returns {number}
 	 */
 	function autoDeriveDpi() {
-		return autoScalingDpi();
+		return window.manualResolution
+			? resolutionScalingDpi(manualWidth, manualHeight)
+			: autoScalingDpi();
 	}
 
 	/**
@@ -1545,6 +1549,10 @@ export default function webrtc() {
 				setIntParam('manual_width', null);
 				setIntParam('manual_height', null);
 				setBoolParam('manual_resolution', false);
+				// Before the auto path resumes: it builds its request from the
+				// pick, so a re-derivation behind it would leave the stream at
+				// the old one.
+				followDerivedDpi('manual resolution cleared');
 				enableAutoResize();
 				handleResizeUI();
 				pushScalingDpi();
@@ -1567,9 +1575,11 @@ export default function webrtc() {
 				setIntParam('manual_height', manualHeight);
 				setBoolParam('manual_resolution', true);
 				disableAutoResize();
+				followDerivedDpi('manual resolution set');
 				sendResolutionToServer(manualWidth, manualHeight);
 				// The DPI the desktop is asked for turns on whether the resolution is
-				// manual, so the flip carries the new answer.
+				// manual and, on its automatic default, on the resolution itself, so
+				// the flip carries the new answer.
 				pushScalingDpi();
 				applyManualStyle(manualWidth, manualHeight, scaleLocal);
 				break;
@@ -3033,6 +3043,9 @@ export default function webrtc() {
 						manualWidth = serverWidth;
 						manualHeight = serverHeight;
 						applyManualStyle(manualWidth, manualHeight, scaleLocal);
+						// The framebuffer a deployment names arrives after the
+						// connect, so the DPI default follows it here.
+						if (followDerivedDpi('server resolution')) pushScalingDpi();
 					} else {
 						console.warn("Server dictated manual mode but did not provide valid dimensions.");
 					}

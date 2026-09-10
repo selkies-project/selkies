@@ -32,6 +32,14 @@ export function streamDensity({ displayId, layouts, useCssScaling, localScale, s
 
 /** `scaling_dpi` stops in 25% steps from 96; densities between them snap to the nearest. */
 export const DPI_STOPS = [96, 120, 144, 168, 192, 216, 240, 264, 288];
+/** The rows a 96 DPI desktop is for, which a resolution is read against. */
+export const DPI_UNITY_ROWS = 1080;
+
+/** The stop nearest a density, clamped at both ends. */
+function snapDpi(target) {
+    return DPI_STOPS.reduce((prev, cur) =>
+        Math.abs(cur - target) < Math.abs(prev - target) ? cur : prev);
+}
 
 /**
  * The default `scaling_dpi`: the local display scaling as a desktop DPI, so
@@ -41,9 +49,27 @@ export const DPI_STOPS = [96, 120, 144, 168, 192, 216, 240, 264, 288];
  */
 export function autoScalingDpi() {
     const dpr = window.devicePixelRatio || 1;
-    const target = Math.round(dpr * 4) * 24;
-    return DPI_STOPS.reduce((prev, cur) =>
-        Math.abs(cur - target) < Math.abs(prev - target) ? cur : prev);
+    return snapDpi(Math.round(dpr * 4) * 24);
+}
+
+/**
+ * The default `scaling_dpi` for a resolution the operator set: that
+ * framebuffer read as a desktop DPI, so one asked for in 4K is not drawn with
+ * the UI of a 1080p desktop, nor a small one with a dense laptop's.
+ *
+ * Read off the shorter side, against the rows 96 DPI is for: an ultrawide is
+ * wide rather than dense, and a screen turned portrait is the same screen. The
+ * local display scaling says nothing about it — the operator's number is the
+ * framebuffer whatever screen shows it — so it stands in only for a size not
+ * yet known.
+ * @param {number} width Pixels the operator asked for.
+ * @param {number} height
+ * @returns {number} One of `DPI_STOPS`.
+ */
+export function resolutionScalingDpi(width, height) {
+    const rows = Math.min(Number(width) || 0, Number(height) || 0);
+    if (!(rows > 0)) return autoScalingDpi();
+    return snapDpi(96 * rows / DPI_UNITY_ROWS);
 }
 
 /**

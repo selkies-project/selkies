@@ -111,7 +111,7 @@ import {
   digestedPayload
 } from './lib/clipboard-sync.js';
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js';
-import { streamDensity as streamDensityOf, autoScalingDpi, publishedScale } from './lib/stream-density.js';
+import { streamDensity as streamDensityOf, autoScalingDpi, resolutionScalingDpi, publishedScale } from './lib/stream-density.js';
 import {
   createFileUploader
 } from './lib/file-upload.js';
@@ -452,12 +452,16 @@ function followStreamDensity() {
 let trackpadMode = false;
 let scalingDPI = 96;
 /**
- * Derives the default `scaling_dpi` from the local display scaling
- * (lib/stream-density.js), so the remote desktop's UI matches the local one.
+ * Derives the default `scaling_dpi` (lib/stream-density.js): from the local
+ * display scaling, so the remote desktop's UI matches the local one, or from a
+ * manual resolution, which is a framebuffer of its own that the local screen
+ * says nothing about. A stored pick overrides either.
  * @returns {number}
  */
 function autoDeriveDpi() {
-  return autoScalingDpi();
+  return window.manual_resolution
+    ? resolutionScalingDpi(manual_width, manual_height)
+    : autoScalingDpi();
 }
 
 /**
@@ -1123,11 +1127,6 @@ useCssScaling = getBoolParam('useCssScaling', false);
 trackpadMode = getBoolParam('trackpadMode', false);
 rateControlMode = getStringParam('rate_control_mode', rateControlMode);
 videoBitrate = getIntParam('video_bitrate', videoBitrate);
-if (getStringParam('scaling_dpi', null) === null) {
-  scalingDPI = autoDeriveDpi();
-} else {
-  scalingDPI = getIntParam('scaling_dpi', 96);
-}
 antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 use_browser_cursors = getBoolParam('use_browser_cursors', true);
 rawPointerMotion = getBoolParam('raw_pointer_motion', Input.rawPointerMotion);
@@ -1143,6 +1142,12 @@ if (isSharedMode) {
 } else {
     manual_width = getIntParam('manual_width', null);
     manual_height = getIntParam('manual_height', null);
+}
+
+if (getStringParam('scaling_dpi', null) === null) {
+  scalingDPI = autoDeriveDpi();
+} else {
+  scalingDPI = getIntParam('scaling_dpi', 96);
 }
 
 /**
@@ -4226,9 +4231,11 @@ function receiveMessage(event) {
       setIntParam('manual_height', manual_height);
       setBoolParam('manual_resolution', true);
       disableAutoResize();
+      followDerivedDpi('manual resolution set');
       sendResolutionToServer(manual_width, manual_height);
       // The DPI the desktop is asked for turns on whether the resolution is
-      // manual, so the flip carries the new answer.
+      // manual and, on its automatic default, on the resolution itself, so the
+      // flip carries the new answer.
       sendFullSettingsUpdateToServer('manual resolution set');
       applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
       if (currentEncoderMode === 'h264enc' || currentEncoderMode === 'h264enc-striped') {
@@ -4262,6 +4269,9 @@ function receiveMessage(event) {
           canvasContext.clearRect(0, 0, canvas.width, canvas.height);
         }
       }
+      // Before the auto path resumes: it builds its request from the pick, so
+      // a re-derivation behind it would leave the stream at the old one.
+      followDerivedDpi('manual resolution cleared');
       enableAutoResize();
       sendFullSettingsUpdateToServer('manual resolution cleared');
       break;
@@ -6954,6 +6964,12 @@ class WorkerWebSocket {
                           manual_width = serverWidth;
                           manual_height = serverHeight;
                           applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
+                          // The framebuffer a deployment names arrives after the
+                          // connect, so the DPI default follows it here; the
+                          // re-send this triggers finds the value already moved.
+                          if (followDerivedDpi('server resolution')) {
+                              sendFullSettingsUpdateToServer('server resolution');
+                          }
                       } else {
                           console.warn("Server dictated manual mode but did not provide valid dimensions.");
                       }
