@@ -216,18 +216,23 @@ def button_reports(page: Any) -> int:
     return page.evaluate("window.__padSent.filter((t) => t === 'b').length")
 
 
-def sink_box(page: Any, mode: str) -> dict:
+def sink_box(page: Any, mode: str) -> Optional[dict]:
     """The CSS box the transport's sink is styled to.
 
     Read off the style: the websockets core hides the canvas once a sink
-    renders, so its layout measures zero.
+    renders, so its layout measures zero. Each core names its own element --
+    the WebRTC one creates a `stream` video, the websockets one styles the
+    `videoCanvas` every sink of its own follows.
 
     Returns:
-        `width`, `height`, `left` and `top` in CSS pixels.
+        `width`, `height`, `left` and `top` in CSS pixels, or None where the
+        page has no such element, which a check reports rather than raising.
     """
-    sink = "videoStream" if mode == "webrtc" else "videoCanvas"
+    sink = "stream" if mode == "webrtc" else "videoCanvas"
     return page.evaluate(f"""(() => {{
-      const s = document.getElementById('{sink}').style;
+      const el = document.getElementById('{sink}');
+      if (!el) return null;
+      const s = el.style;
       return {{width: parseFloat(s.width), height: parseFloat(s.height),
                left: parseFloat(s.left), top: parseFloat(s.top)}};
     }})()""")
@@ -257,16 +262,16 @@ def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
     time.sleep(0.3)
     box = sink_box(page, mode)
     want_w, want_h = PRESET_W / DPR, PRESET_H / DPR
-    fits = (abs(box["width"] - want_w) < 1 and abs(box["height"] - want_h) < 1
-            and box["left"] >= 0 and box["top"] >= 0
-            and box["left"] + box["width"] <= VIEW_W
-            and box["top"] + box["height"] <= VIEW_H)
+    fits = bool(box) and (abs(box["width"] - want_w) < 1 and abs(box["height"] - want_h) < 1
+                          and box["left"] >= 0 and box["top"] >= 0
+                          and box["left"] + box["width"] <= VIEW_W
+                          and box["top"] + box["height"] <= VIEW_H)
     res.check("exact box is the preset over the density, inside the viewport",
               fits, f"{box} want {want_w}x{want_h}")
     post(page, {"type": "setUseCssScaling", "value": True})
     time.sleep(0.3)
     off_box = sink_box(page, mode)
-    res.check("exact box ignores the HiDPI flag", off_box == box,
+    res.check("exact box ignores the HiDPI flag", bool(off_box) and off_box == box,
               f"{off_box} after HiDPI off, {box} before")
     post(page, {"type": "setUseCssScaling", "value": False})
     time.sleep(0.3)

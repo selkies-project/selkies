@@ -1166,6 +1166,41 @@ def _running_desktop(name: str, session_binary: str) -> bool:
     return bool(which(session_binary))
 
 
+#: Options that start a desktop session rather than a window manager: the hook
+#: that runs the session's autostart, and the session-manager id the running
+#: instance registered. Reusing them would launch every autostart application
+#: a second time and claim an id that is already held.
+RESTART_DROPS_OPTIONS = ("--startup", "--sm-client-id")
+
+
+def restart_command(command: List[str]) -> List[str]:
+    """`command` reduced to what restarts the manager alone.
+
+    The command line a session started its manager with carries the autostart
+    hook (Openbox's `--startup openbox-autostart`), and a restart that keeps
+    it runs the desktop's autostart again: a terminal, a panel and everything
+    else the session opens, once per restart. The manager is being restarted
+    only to re-read the monitor set, so the session's own options are dropped.
+
+    Args:
+        command: The manager's command line, as it was started.
+
+    Returns:
+        The command line to restart it with.
+    """
+    kept: List[str] = []
+    drop_value = False
+    for arg in command:
+        if drop_value:
+            drop_value = False
+            continue
+        if arg.split("=", 1)[0] in RESTART_DROPS_OPTIONS:
+            drop_value = "=" not in arg
+            continue
+        kept.append(arg)
+    return kept
+
+
 #: Window managers measured to read the RandR monitor set only as they start,
 #: by the leading run of letters and digits of the name they advertise: a
 #: session extending onto a second display restarts one of these so it reads
@@ -1185,7 +1220,9 @@ class MultiMonitorWindowManager:
     published. Which managers need that is measured
     (`RESTART_TO_READ_MONITORS`), not configured, and the one running is
     restarted with the command line it was started with plus `--replace`, so
-    it keeps the configuration chain its session gave it. Both transports
+    it keeps the configuration chain its session gave it, less the options
+    that would run the session's autostart again (`restart_command`). Both
+    transports
     share this state: once per session, since a second restart would take
     window management away from whoever is using it. Wayland sessions manage
     their own windows and never restart.
@@ -1213,7 +1250,7 @@ class MultiMonitorWindowManager:
                 "monitor set current; no restart.")
             return
         replacing = await current_wm_pid()
-        command = wm_command(replacing) or [needing]
+        command = restart_command(wm_command(replacing)) or [needing]
         if "--replace" not in command:
             command.append("--replace")
         logger_app_resize.info(

@@ -81,6 +81,13 @@ res.check("xfwm4 is restarted as well",
           restart_attempt(running_wm="Xfwm4", cmdline=("xfwm4",)))
 res.check("a manager whose command line cannot be read is restarted by name",
           restart_attempt(cmdline=()) == ["openbox --replace"], restart_attempt(cmdline=()))
+hook = ("openbox", "--startup", "/usr/lib/openbox-autostart OPENBOX", "--config-file", "/tmp/rc.xml")
+res.check("the session's autostart hook is dropped, so the restart opens no applications",
+          restart_attempt(cmdline=hook) == ["openbox --config-file /tmp/rc.xml --replace"],
+          restart_attempt(cmdline=hook))
+res.check("so is a session-manager id the running instance holds",
+          restart_attempt(cmdline=("openbox", "--sm-client-id", "10c")) == ["openbox --replace"],
+          restart_attempt(cmdline=("openbox", "--sm-client-id", "10c")))
 res.check("kwin_x11 is left alone: a restart does not change its CRTC screens",
           restart_attempt(running_wm="KWin", cmdline=("kwin_x11",)) == [])
 res.check("a manager that follows monitor changes live is left alone",
@@ -194,5 +201,66 @@ def live_openbox_check() -> None:
             proc.wait(timeout=5)
 
 
+def live_autostart_check() -> None:
+    """A real restart runs the session's autostart hook no second time.
+
+    Openbox is started the way a desktop session starts it, with the hook that
+    runs the autostart, and the hook records every run: a restart that kept it
+    would open the session's applications again, one set per extend.
+    """
+    if H.shutil.which("openbox") is None:
+        res.skip("a real restart runs no autostart twice", "no openbox on PATH")
+        return
+    display = H.require_display()
+    os.environ["DISPLAY"] = display
+    DU._drop_module_display()
+    marker = os.path.join(H.WORKDIR, "wm-autostart.log")
+    script = os.path.join(H.WORKDIR, "wm-autostart.sh")
+    with open(script, "w", encoding="utf-8") as f:
+        f.write(f"#!/bin/sh\necho ran >> {marker}\n")
+    os.chmod(script, 0o755)
+    open(marker, "w", encoding="utf-8").close()
+    stale = DU._sync_wm_pid()
+    if stale:
+        os.kill(stale, 15)
+        deadline = time.time() + 10
+        while time.time() < deadline and DU._sync_wm_pid() == stale:
+            time.sleep(0.2)
+    proc = H.spawn(["openbox", "--replace", "--startup", script],
+                   env={**os.environ, "DISPLAY": display},
+                   stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    def runs() -> int:
+        return open(marker, encoding="utf-8").read().count("ran")
+
+    try:
+        # Both, before the restart is asked for: the hook runs after Openbox
+        # takes over, and a restart aimed at a manager that has not yet would
+        # reuse the command line of the one it replaced.
+        deadline = time.time() + 20
+        while time.time() < deadline and not (DU._sync_wm_pid() == proc.pid and runs() == 1):
+            time.sleep(0.2)
+        res.check("the session's autostart runs as Openbox starts",
+                  DU._sync_wm_pid() == proc.pid and runs() == 1,
+                  (DU._sync_wm_pid(), proc.pid, runs()))
+        asyncio.run(DU.MultiMonitorWindowManager().ensure_for(2, False))
+        deadline = time.time() + 15
+        while time.time() < deadline and DU._sync_wm_pid() in (0, proc.pid):
+            time.sleep(0.2)
+        new_pid = DU._sync_wm_pid()
+        time.sleep(1.5)
+        res.check("and the restart leaves it at that", runs() == 1,
+                  f"{runs()} runs, manager now {new_pid}")
+        res.check("the replacement carries no startup hook",
+                  new_pid not in (0, proc.pid) and "--startup" not in DU.wm_command(new_pid),
+                  (new_pid, proc.pid, DU.wm_command(new_pid)))
+        if new_pid not in (0, proc.pid):
+            os.kill(new_pid, 15)
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
 live_openbox_check()
+live_autostart_check()
 sys.exit(0 if res.summary() else 1)
