@@ -9,8 +9,10 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers as H
 import core_lib as C
+import test_dpi_accuracy as DA
 from playwright.sync_api import sync_playwright
 
 
@@ -812,6 +814,70 @@ def hidpi_default_block(dashboard: str, dist: str, mode: str = "websockets") -> 
     return res
 
 
+# A preset the local density would never ask for, and the pick its own size
+# derives: the shorter side against the 1080 rows 96 DPI is for.
+DPI_PRESET = "2560x1440"
+DPI_PRESET_PICK = 120
+
+
+def wait_xft(want: int, timeout: float = 20) -> int:
+    """The desktop's Xft.dpi, polled until it reads `want` or time runs out."""
+    deadline = time.time() + timeout
+    got = DA.xft_dpi()
+    while time.time() < deadline and got != want:
+        time.sleep(0.5)
+        got = DA.xft_dpi()
+    return got
+
+
+def dpi_for_resolution_block(dashboard: str, dist: str) -> "H.Results":
+    """A resolution picked in the dashboard carries the UI-scaling default with it.
+
+    The picker and the desktop have to land on the same number: the framebuffer
+    asked for is what the desktop's UI is sized from, the screen showing it
+    says nothing about it, and the dashboard posts its own derived value over
+    the core's whenever the two differ. Driven through the control a user uses,
+    at dpr 1, where the display itself would ask for 96 whatever the resolution
+    is. The classic dashboard's selects are what can be driven; the Wish
+    dashboard mirrors the same formula, which
+    tests/unit/test_dpi_default_mirror.py holds it to.
+    """
+    res = H.Results(f"dpi-for-resolution-{dashboard}")
+    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    try:
+        with sync_playwright() as p:
+            browser = C.chromium_launch(p)
+            ctx = browser.new_context(viewport={"width": 1000, "height": 700},
+                                      device_scale_factor=1)
+            page = ctx.new_page()
+            page.goto(H.BASE_URL, wait_until="load")
+            res.check("video flowing", bool(wait_canvas(page, 30)), "")
+            page.locator('.toggle-handle').first.click()
+            time.sleep(0.8)
+            header = page.locator('.sidebar-section-header:has-text("Screen")').first
+            header.scroll_into_view_if_needed()
+            header.click()
+            time.sleep(0.8)
+            # The desktop's own DPI is left where the last session put it until
+            # something changes it, so the picker is where the starting pick
+            # reads: the display's, with no resolution of its own to follow.
+            before = page.locator("#uiScalingSelect").input_value()
+            res.check("the picker starts on the display's own pick", before == "96", before)
+            page.select_option("#resolutionPresetSelect", DPI_PRESET)
+            time.sleep(1.0)
+            dpi = wait_xft(DPI_PRESET_PICK)
+            res.check(f"a {DPI_PRESET} preset scales the desktop to its own pick",
+                      dpi == DPI_PRESET_PICK, f"Xft.dpi={dpi}")
+            shown = page.locator("#uiScalingSelect").input_value()
+            res.check("and the picker shows the same number",
+                      shown == str(DPI_PRESET_PICK), shown)
+            browser.close()
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
 def second_screen_block(dashboard: str, dist: str) -> "H.Results":
     """A refused second-display window leaves the placement arrows up.
 
@@ -1082,6 +1148,8 @@ def main() -> None:
     if which in ("all", "raw-motion-webrtc"):
         blocks.append(raw_pointer_motion_block("classic", H.CLASSIC_DIST, "webrtc"))
         blocks.append(raw_pointer_motion_block("wish", H.WISH_DIST, "webrtc"))
+    if which in ("all", "dpi-resolution"):
+        blocks.append(dpi_for_resolution_block("classic", H.CLASSIC_DIST))
     if which in ("all", "second-screen"):
         blocks.append(second_screen_block("classic", H.CLASSIC_DIST))
         blocks.append(second_screen_block("wish", H.WISH_DIST))

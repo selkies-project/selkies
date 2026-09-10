@@ -39,6 +39,11 @@ VIEW_W, VIEW_H = 1000, 700
 DPR = 2
 PRESET_W, PRESET_H = 1280, 720
 RESIZED_W, RESIZED_H = 1100, 680
+# A manual resolution the local density would never ask for, and the pick it
+# derives: its shorter side against the 1080 rows 96 DPI is for. Neither 96 nor
+# the dpr's 192, so the desktop's DPI tells the two rules apart.
+MANUAL_W, MANUAL_H = 2560, 1440
+MANUAL_DPI = 120
 
 WIRE_TAP = """
 (() => {
@@ -295,15 +300,17 @@ def hidpi_block(page: Any, mode: str, res: "H.Results") -> None:
 
     # A manual resolution is the exact framebuffer whatever the flag says, so
     # the pick has no request to divide there and governs the desktop instead:
-    # one application, not the two CSS scaling used to make.
+    # one application, not the two CSS scaling used to make. On its automatic
+    # default the pick is that framebuffer's own, since it decides how large
+    # the desktop draws its UI and the screen showing it says nothing about it.
     seen = len(sent)
-    post(page, {"type": "setManualResolution", "width": PRESET_W, "height": PRESET_H})
+    post(page, {"type": "setManualResolution", "width": MANUAL_W, "height": MANUAL_H})
     sent = wait_new_request(page, seen)
     res.check("HiDPI off asks for a manual resolution exactly",
-              len(sent) > seen and sent[-1] == f"{PRESET_W}x{PRESET_H}", sent[seen:])
-    manual_dpi = wait_dpi(pick)
-    res.check("and the pick still reaches the desktop there", manual_dpi == pick,
-              f"Xft.dpi={manual_dpi} want {pick}")
+              len(sent) > seen and sent[-1] == f"{MANUAL_W}x{MANUAL_H}", sent[seen:])
+    manual_dpi = wait_dpi(MANUAL_DPI)
+    res.check("and the resolution's own pick reaches the desktop there",
+              manual_dpi == MANUAL_DPI, f"Xft.dpi={manual_dpi} want {MANUAL_DPI}")
 
     seen = len(sent)
     post(page, {"type": "resetResolutionToWindow"})
