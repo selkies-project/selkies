@@ -14,7 +14,7 @@
 // streamDensity reads the display's own density off the window.
 globalThis.window = { devicePixelRatio: 2 };
 
-const { streamDensity, publishedScale } = await import(
+const { streamDensity, publishedScale, autoScalingDpi, DPI_STOPS } = await import(
     '../../addons/selkies-web-core/lib/stream-density.js');
 
 let failed = 0;
@@ -32,8 +32,39 @@ const AT_PRIMARY = { layouts: { primary: { w: 1512, h: 806, scale: 1 } } };
 }
 
 {
-    const scaled = streamDensity({ displayId: 'primary', useCssScaling: true, ...AT_PRIMARY });
-    check('CSS scaling makes that density 1', scaled === 1, scaled);
+    // The automatic pick is the display's own scaling as a DPI, so the stream
+    // comes out at the CSS size and the browser stretches it back.
+    const matched = streamDensity({ displayId: 'primary', useCssScaling: true,
+                                    localScale: 2, ...AT_PRIMARY });
+    check('CSS scaling at the pick the display scales by asks for the CSS size',
+        matched === 1, matched);
+}
+
+{
+    const unscaled = streamDensity({ displayId: 'primary', useCssScaling: true,
+                                     localScale: 1, ...AT_PRIMARY });
+    check('a 100% pick under CSS scaling asks for native pixels, nothing to stretch',
+        unscaled === 2, unscaled);
+}
+
+{
+    const stretched = streamDensity({ displayId: 'primary', useCssScaling: true,
+                                      localScale: 4, ...AT_PRIMARY });
+    check('a pick past the display\'s own scaling asks for less than the CSS size',
+        stretched === 0.5, stretched);
+}
+
+{
+    const hidpi = streamDensity({ displayId: 'primary', useCssScaling: false,
+                                  localScale: 2, ...AT_PRIMARY });
+    check('the pick leaves the density alone with HiDPI on, where the desktop takes it',
+        hidpi === 2, hidpi);
+}
+
+{
+    const broken = streamDensity({ displayId: 'primary', useCssScaling: true,
+                                   localScale: 0, ...AT_PRIMARY });
+    check('an unusable pick stretches by nothing', broken === 2, broken);
 }
 
 {
@@ -89,6 +120,19 @@ const AT_PRIMARY = { layouts: { primary: { w: 1512, h: 806, scale: 1 } } };
     const scale = publishedScale({ stream: [1280, 720], css: [2560, 1440],
                                    realized: [1280, 720], density: 2 });
     check('a stream scaled below its box publishes that ratio', scale === 0.5, scale);
+}
+
+{
+    // The default pick is the display's own scaling as a desktop DPI, so both
+    // cores derive it from the same place.
+    const at = (dpr) => { window.devicePixelRatio = dpr; return autoScalingDpi(); };
+    const derived = [1, 1.25, 1.5, 2].map(at);
+    check('the default pick is the display scaling as a DPI',
+        derived.join() === '96,120,144,192', derived.join());
+    check('a density between the stops takes the nearest', at(1.75) === 168, at(1.75));
+    check('and one past the last stop is clamped there',
+        at(3.5) === DPI_STOPS[DPI_STOPS.length - 1], at(3.5));
+    window.devicePixelRatio = 2;
 }
 
 console.log(`\n[stream-density] ${failed ? 'FAILED' : 'OK'}`);
