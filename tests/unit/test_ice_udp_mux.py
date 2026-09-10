@@ -5,13 +5,16 @@ Two connections attached to one mux socket connect to peers of their own at
 the same time and each receives only its own peer's data; the pair that
 remains keeps working after the other closes; a STUN server's answer reaches
 the connection that asked without the server being learned as anyone's peer;
-a port in use fails `open` at once and leaves nothing bound; an address the
-mux was not opened on is bound on first use; NAT1TO1 rewrites a muxed
-candidate like any other; a configured port range yields to the mux; and a
-datagram nobody attached for is dropped without disturbing a session. Runs
-against the vendored `selkies.ice` alone.
+a port in use fails `open` at once, naming the reason, and leaves nothing
+bound; an address the mux was not opened on is bound on first use; NAT1TO1
+rewrites a muxed candidate like any other; a configured port range yields to
+the mux; and a datagram nobody attached for is dropped without disturbing a
+session. Every case runs on the stock loop and on uvloop, which the service
+prefers and which reports a refused bind as a wrapper of its own. Runs against
+the vendored `selkies.ice` alone.
 """
 import asyncio
+import errno
 import os
 import socket
 import sys
@@ -26,6 +29,8 @@ from selkies.ice import stun  # noqa: E402
 
 passed = failed = 0
 LOOPBACK = "127.0.0.1"
+# The event loop the cases below are running on, named in every check line.
+loop_name = "asyncio"
 
 
 def check(label: str, ok, detail="") -> None:
@@ -34,7 +39,19 @@ def check(label: str, ok, detail="") -> None:
         passed += 1
     else:
         failed += 1
-    print(f"{'PASS' if ok else 'FAIL'}  [ice-udp-mux] {label}  {detail}", flush=True)
+    print(f"{'PASS' if ok else 'FAIL'}  [ice-udp-mux] {label} on {loop_name}  {detail}",
+          flush=True)
+
+
+def loops() -> list:
+    """Each event loop the service can run on, with the runner that owns it."""
+    runners = [("asyncio", asyncio.run)]
+    try:
+        import uvloop
+    except ImportError:
+        return runners
+    runners.append(("uvloop", uvloop.run))
+    return runners
 
 
 def free_udp_port() -> int:
@@ -199,7 +216,8 @@ async def port_in_use_fails_open() -> None:
         await mux.open([LOOPBACK])
         check("a port in use fails open", False, "no OSError")
     except OSError as exc:
-        check("a port in use fails open", True, exc)
+        check("a port in use fails open with the kernel's reason",
+              exc.errno == errno.EADDRINUSE, exc)
     finally:
         blocker.close()
     check("and leaves nothing bound", mux.listen_addresses == [], mux.listen_addresses)
@@ -235,7 +253,12 @@ async def main_async() -> None:
 
 
 def main() -> int:
-    asyncio.run(main_async())
+    global loop_name
+    runners = loops()
+    print(f"[ice-udp-mux] cases run on {', '.join(n for n, _ in runners)}", flush=True)
+    for name, run in runners:
+        loop_name = name
+        run(main_async())
     print(f"[ice-udp-mux] {passed} passed, {failed} failed", flush=True)
     return 1 if failed else 0
 

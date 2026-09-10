@@ -4,9 +4,11 @@
 Each block starts a WebRTC server with one topology setting and drives
 Chromium, Firefox and WebKit through Playwright, reading what the browser's
 own RTCPeerConnection.getStats() says about the nominated candidate pair.
-The port range confines the server's candidate to its window; the UDP mux
-puts every session, a controller and a shared viewer at once, on the one
-port; the TCP mux carries a session whose UDP candidates were stripped from
+The port range confines the server's candidate to its window, yields the one
+port left of a window whose others are held, and carries a second display in
+a window with two ports to spare; the UDP mux puts every
+session, a controller and a shared viewer at once, on the one port; the TCP
+mux carries a session whose UDP candidates were stripped from
 the offer, as a network that blocks UDP would, while an unstripped session
 still prefers UDP; ICE-lite makes the browser take the controlling role of an
 `a=ice-lite` offer; and the combined block runs all of them together, on
@@ -155,6 +157,40 @@ def free_port(*kinds: int) -> int:
     raise RuntimeError("no port free on every mux address")
 
 
+def port_window(held: int, free: int) -> tuple:
+    """A window of `held` + `free` consecutive UDP ports, its lowest `held` bound.
+
+    Every port is bound on every host address first, so a window another
+    process sits in is found here rather than mid-check, and the high ones are
+    then released: a gather has to retry past what stays held to reach them.
+
+    Returns:
+        The sockets holding the low ports, the window, and the free ports.
+
+    Raises:
+        RuntimeError: No window that wide was free across the addresses.
+    """
+    addresses = mux_addresses()
+    for _ in range(20):
+        base = min(free_port(socket.SOCK_DGRAM), 65536 - held - free)
+        bound, spare = [], []
+        try:
+            for offset in range(held + free):
+                for family, address in addresses:
+                    sock = socket.socket(family, socket.SOCK_DGRAM)
+                    (bound if offset < held else spare).append(sock)
+                    sock.bind((address, base + offset))
+        except OSError:
+            for sock in bound + spare:
+                sock.close()
+            continue
+        for sock in spare:
+            sock.close()
+        return (bound, (base, base + held + free - 1),
+                [base + held + offset for offset in range(free)])
+    raise RuntimeError(f"no window of {held + free} free UDP ports on every address")
+
+
 def open_engine(pw: Any, engine: str, strip_udp: bool = False, url_hash: str = "") -> tuple:
     """A page of `engine` on the server, instrumented; returns (browser, ctx, page, errors)."""
     browser, ctx = TB.engine_launch(pw, engine)
@@ -270,6 +306,57 @@ def portrange_block() -> H.Results:
                     close_engine(browser, ctx)
     finally:
         H.server_stop()
+
+    held, window, free = port_window(15, 1)
+    tag = "a window with one port left"
+    try:
+        H.server_start(mode="webrtc",
+                       extra_env={"SELKIES_WEBRTC_PORT_RANGE": f"{window[0]}-{window[1]}"})
+        try:
+            with sync_playwright() as pw:
+                browser, ctx, page, errors = open_engine(pw, "chromium")
+                try:
+                    session_checks(res, tag, page, "chromium", "udp", port=free[0])
+                    res.check(f"{tag}: no page errors", not errors, errors)
+                finally:
+                    close_engine(browser, ctx)
+        finally:
+            H.server_stop()
+    finally:
+        for sock in held:
+            sock.close()
+
+    # Two displays in a window with two ports to spare: the second display's
+    # gather reaches one only past the held ports and the first display's.
+    held, window, _ = port_window(8, 2)
+    tag = "a window with two ports to spare"
+    try:
+        H.server_start(mode="webrtc",
+                       extra_env={"SELKIES_WEBRTC_PORT_RANGE": f"{window[0]}-{window[1]}"})
+        try:
+            with sync_playwright() as pw:
+                engines: list = []
+                try:
+                    for label, url_hash in (("primary", ""), ("second display", "#display2-right")):
+                        engines.append((label, *open_engine(pw, "chromium", url_hash=url_hash)))
+                    sockets = []
+                    for label, _browser, _ctx, page, errors in engines:
+                        where = f"{tag}: {label}"
+                        video_check(res, where, page, "chromium")
+                        pairs = pair_checks(res, where, page, "udp", window=window)
+                        sockets += [(p["remoteAddress"], int(p["remotePort"] or 0))
+                                    for p in pairs[:1]]
+                        res.check(f"{where}: no page errors", not errors, errors)
+                    res.check(f"{tag}: the displays hold a socket each",
+                              len(set(sockets)) == 2, sockets)
+                finally:
+                    for _label, browser, ctx, _page, _errors in engines:
+                        close_engine(browser, ctx)
+        finally:
+            H.server_stop()
+    finally:
+        for sock in held:
+            sock.close()
     return res
 
 
