@@ -3248,12 +3248,16 @@ export class Input {
             if (ry > L.ownH) gy = L.ownY + L.ownH + (ry - L.ownH) * ky;
             else if (ry < 0) gy = L.ownY + ry * ky;
         }
+        // Onto the nearest display's last pixel, not its exclusive edge: a
+        // neighbour shorter than this display leaves a corner belonging to
+        // neither, and the edge itself is the first column of that gap.
         let cx = gx, cy = gy;
         bestD = Infinity;
         for (let i = 0; i < L.rects.length; i++) {
             const r = L.rects[i];
-            const px = gx < r.x ? r.x : (gx > r.x + r.w ? r.x + r.w : gx);
-            const py = gy < r.y ? r.y : (gy > r.y + r.h ? r.y + r.h : gy);
+            const rr = r.x + r.w - 1, rb = r.y + r.h - 1;
+            const px = gx < r.x ? r.x : (gx > rr ? rr : gx);
+            const py = gy < r.y ? r.y : (gy > rb ? rb : gy);
             const dx = gx - px, dy = gy - py;
             const d = dx * dx + dy * dy;
             if (d < bestD) { bestD = d; cx = px; cy = py; }

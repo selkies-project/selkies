@@ -42,6 +42,7 @@ the two-display union.
 Usage: python3 tests/e2e/test_cross_display_drag.py wl
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -414,6 +415,16 @@ def managed_window_drag(res: "H.Results", mode: str, page: Any, seam: int,
             proc.kill()
 
 
+def realized_scale(display_id: str, log: str) -> Any:
+    """The scale the server last realized for `display_id`, from its own log.
+
+    Returns:
+        The scale as a float, or None where the log carries none for it.
+    """
+    hits = re.findall(rf"realized geometry for '{display_id}': \d+x\d+ @ scale ([0-9.]+)", log)
+    return float(hits[-1]) if hits else None
+
+
 def secondary_density(res: "H.Results", mode: str, dpage: Any, wayland: bool) -> None:
     """A secondary restored on a screen of another density: on X11 it is
     refused the desktop's DPI, on Wayland its own screen takes it.
@@ -431,15 +442,18 @@ def secondary_density(res: "H.Results", mode: str, dpage: Any, wayland: bool) ->
         "width": SECONDARY_CSS[0], "height": SECONDARY_CSS[1],
         "deviceScaleFactor": 2, "mobile": False})
     if wayland:
-        # A nested session scales its own screen; a plain one the capture output.
+        # The scale the server realized for each display, which is what a
+        # Wayland session carries per screen: the nested compositor's own
+        # `scaled to` line is printed only where there is one to nest in.
+        before = realized_scale("primary", H.server_log())
         scaled = wait_for(
-            lambda: H.server_log().find("('display2') scaled to 2.0", mark) >= 0
-            or H.server_log().find("restarting capture at scale 2.0 for display2", mark) >= 0, 15)
+            lambda: realized_scale("display2", H.server_log()[mark:]) == 2.0, 20)
         res.check(f"[{mode}] a secondary rederiving its density scales its own screen",
                   scaled, H.server_log(tail=3))
         time.sleep(2.0)
         res.check(f"[{mode}] and the primary's screen keeps its scale",
-                  H.server_log().find("('primary') scaled to", mark) < 0, "")
+                  realized_scale("primary", H.server_log()[mark:]) in (None, before),
+                  f"was {before}, now {realized_scale('primary', H.server_log()[mark:])}")
     else:
         refused = wait_for(
             lambda: H.server_log().find("Ignoring DPI 192 from 'display2'", mark) >= 0, 15)
@@ -554,9 +568,15 @@ def drive(res: "H.Results", mode: str, wayland: bool) -> None:
                 clamped = moved_to(page, edge + 3000, 400, wayland)
                 res.check("far overshoot clamps at the union's edge",
                           abs(clamped[0] - (union_r - 1)) <= 1, f"{clamped} union={union_r}")
+                # A neighbour shorter than this display leaves a corner that
+                # belongs to neither, and the desktop has no pixel there: the
+                # crossing lands on the last pixel of a display, whichever.
                 low = moved_to(page, 2000, 1000, wayland)
-                res.check("the corner below the neighbor's bottom is out of reach",
-                          low[1] <= d2["y"] + d2["h"], f"{low} d2={d2}")
+                inside = [r for r in layout["rects"]
+                          if r["x"] <= low[0] < r["x"] + r["w"]
+                          and r["y"] <= low[1] < r["y"] + r["h"]]
+                res.check("a drag into the corner beside a shorter neighbor stays on a display",
+                          bool(inside), f"{low} rects={layout['rects']}")
                 left = moved_to(page, -300, 400, wayland)
                 res.check("an edge with no neighbor still clamps",
                           left[0] == 0, left)
@@ -667,10 +687,11 @@ SYNTH_JS = """(() => {
   // 40 CSS px below the seam at scale 2 -> 80 remote px into the neighbor.
   const a = map(down, 'primary', 300, 540, 1, 1);
   if (!a || a[0] !== 300 || a[1] !== 580) return false;
-  // Sideways past the narrower neighbor clamps to the nearest union point,
-  // here the primary's own bottom edge.
+  // Sideways past the narrower neighbor clamps to the nearest display's last
+  // pixel, here the primary's own bottom row: the row below it belongs to the
+  // neighbor only as far as the neighbor is wide, and this is past that.
   const b = map(down, 'primary', 950, 540, 1, 1);
-  if (!b || b[0] !== 950 || b[1] !== 500) return false;
+  if (!b || b[0] !== 950 || b[1] !== 499) return false;
   const left = {primary: {x: 600, y: 0, w: 1000, h: 500, scale: 2},
                 display2: {x: 0, y: 0, w: 600, h: 500, scale: 1}};
   // 100 own-remote px past the left edge at own scale 2 -> 50 remote px.
@@ -687,7 +708,7 @@ SYNTH_JS = """(() => {
   // Past that box -- the desktop beside the window -- the overshoot converts
   // and clamps as it does with no box published at all.
   const e = map(apart, 'primary', 2100, -150, 1, 1, 2100, -50);
-  if (!e || e[0] !== 1800 || e[1] !== 0) return false;
+  if (!e || e[0] !== 1799 || e[1] !== 0) return false;
   // Boxes that overlap on the desktop -- one window over the other, or an
   // engine reporting screen coordinates relative to its own window -- are
   // not crossed through: the overshoot converts as with no box at all.
