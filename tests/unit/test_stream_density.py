@@ -7,8 +7,11 @@ scale the primary publishes with the layout. A page publishes it by measuring
 the box it draws the stream in, which only answers the question while the box
 is showing the stream the server realized: one still holding the stream from
 before a resize measures that stream's ratio, and the neighbour that adopts it
-streams at a density nothing on either screen has. The rule is JavaScript, so
-the checks live in tests/tools/stream_density_audit.mjs.
+streams at a density nothing on either screen has. With HiDPI off the desktop
+is left at 96 DPI and the UI-scaling pick divides the resolution asked for
+instead, the browser stretching the stream back by it, so the pick decides what
+a page requests as much as the display's own scaling does. The rules are
+JavaScript, so the checks live in tests/tools/stream_density_audit.mjs.
 """
 import os
 import shutil
