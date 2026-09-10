@@ -134,6 +134,8 @@ SUITES: list = [
     {"path": "integration/test_wayland_session_screens.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_gpu_probe.py", "tier": "integration", "timeout": 180},
     {"path": "integration/test_two_display_pixels.py", "tier": "integration", "timeout": 600},
+    {"path": "integration/test_locked_cursor_across_displays.py", "tier": "integration",
+     "timeout": 600},
     {"path": "integration/test_extended_monitor_outputs.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_monitor_change_announced.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_retype_case.py", "tier": "integration", "timeout": 300},
