@@ -69,6 +69,23 @@ const AT_PRIMARY = { layouts: { primary: { w: 1512, h: 806, scale: 1 } } };
 }
 
 {
+    // The operator's framebuffer is fixed, so the pick reaches the desktop as
+    // its DPI; dividing here too would publish a density the page's own box
+    // does not draw at, and the neighbour would stream at that.
+    const fixed = streamDensity({ displayId: 'primary', useCssScaling: true,
+                                  localScale: 1.5, manual: true, ...AT_PRIMARY });
+    check('a manual resolution streams at the display\'s density, pick or no pick',
+        fixed === 2, fixed);
+}
+
+{
+    const neighbour = streamDensity({ displayId: 'display2', useCssScaling: true,
+                                      localScale: 1.5, manual: false,
+                                      layouts: { primary: { w: 3024, h: 1612, scale: 2 } } });
+    check("and its neighbour streams at the density it published", neighbour === 2, neighbour);
+}
+
+{
     const second = streamDensity({ displayId: 'display2', useCssScaling: false, ...AT_PRIMARY });
     check("a secondary streams at the primary's published scale", second === 1, second);
 }

@@ -425,7 +425,8 @@ let useCssScaling = false;
 /** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 function streamDensity() {
   return streamDensityOf({ displayId, layouts: latestDisplayLayouts, useCssScaling,
-                           localScale: scalingDPI / 96, shared: isSharedMode });
+                           localScale: scalingDPI / 96, shared: isSharedMode,
+                           manual: window.manual_resolution });
 }
 /** The density the last request was built on; a change re-requests on a secondary. */
 let appliedStreamDensity = 0;

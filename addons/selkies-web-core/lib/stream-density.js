@@ -8,19 +8,26 @@
  * to its own. The primary streams at the device pixel ratio, or under CSS
  * scaling at the ratio divided by the UI-scaling pick, which the desktop then
  * does not apply as a DPI: windows keep the same proportion of the screen
- * either way. A secondary streams at the primary's, which the primary reports
- * as its display scale and the server carries in every layout broadcast, and
- * at its own until that arrives. A shared viewer follows the controller and
- * keeps its own.
+ * either way. A manual resolution is the exception both ways round: it is the
+ * framebuffer the operator asked for, so there is nothing for the pick to
+ * divide and it governs the desktop DPI instead, and a page dividing here as
+ * well would apply it twice -- publishing a density its own box does not draw
+ * at, which is then what its neighbours stream at. A secondary streams at the
+ * primary's, which the primary reports as its display scale and the server
+ * carries in every layout broadcast, and at its own until that arrives. A
+ * shared viewer follows the controller and keeps its own.
  * @param {{displayId: string, layouts: (Object|null), useCssScaling: boolean,
- *     localScale: (number|undefined), shared: boolean}} page `localScale` is
- *     the UI-scaling pick as a factor (1 is 100%).
+ *     localScale: (number|undefined), shared: boolean,
+ *     manual: (boolean|undefined)}} page `localScale` is the UI-scaling pick
+ *     as a factor (1 is 100%); `manual` is whether this page's resolution is
+ *     the operator's own.
  * @returns {number}
  */
-export function streamDensity({ displayId, layouts, useCssScaling, localScale, shared }) {
+export function streamDensity({ displayId, layouts, useCssScaling, localScale, shared,
+                                manual }) {
     const dpr = window.devicePixelRatio || 1;
     const stretch = (Number.isFinite(localScale) && localScale > 0) ? localScale : 1;
-    const own = useCssScaling ? dpr / stretch : dpr;
+    const own = (useCssScaling && !manual) ? dpr / stretch : dpr;
     if (shared || !displayId || displayId === 'primary') return own;
     const primary = layouts && layouts.primary;
     const scale = primary ? Number(primary.scale) : NaN;

@@ -501,7 +501,8 @@ export default function webrtc() {
 	/** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 	function streamDensity() {
 		return streamDensityOf({ displayId: storageDisplayId, layouts: latestDisplayLayouts, useCssScaling,
-		                         localScale: scalingDPI / 96, shared: isSharedMode });
+		                         localScale: scalingDPI / 96, shared: isSharedMode,
+		                         manual: window.manualResolution });
 	}
 	/** The density the last request was built on; a change re-requests on a secondary. */
 	let appliedStreamDensity = 0;
