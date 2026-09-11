@@ -14,11 +14,11 @@ name: Release
 # back marks the draft's notes and release-published.yaml applies the mark at
 # publication.
 #
-# A release is cut after the pinned pixelflux and pcmflux are published, so
-# everything here resolves that capture stack from PyPI -- the smoke test, the
-# images, the packages and the AppImages alike ship what users install. The
-# per-commit main-HEAD wheels the other workflows build are for the builds that
-# run ahead of a release, where the pinned version exists nowhere else.
+# The pinned pixelflux and pcmflux come from the release each project cut for
+# that version, so a release needs nothing of them on PyPI: the smoke test, the
+# images, the packages and the AppImages all install the wheels those projects
+# published. `capture_stack: pypi` resolves them from PyPI instead, which is
+# what proves the path a user installing the wheel from there takes.
 
 on:
   workflow_dispatch:
@@ -35,6 +35,13 @@ on:
           - always
           - never
         default: auto
+      capture_stack:
+        description: Where the pinned pixelflux and pcmflux come from
+        type: choice
+        options:
+          - releases
+          - pypi
+        default: releases
 
 concurrency:
   group: ${{ github.workflow }}
@@ -96,19 +103,34 @@ jobs:
     with:
       package_version: ${{ needs.validate.outputs.version }}
 
+  capture-stack:
+    name: Capture stack (pinned releases)
+    needs: validate
+    # The wheels pixelflux and pcmflux released for the pinned versions, which
+    # everything below installs. A run resolving them from PyPI skips this.
+    if: ${{ inputs.capture_stack != 'pypi' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
+    with:
+      pinned: true
+
   wheel-smoke:
     name: Smoke test the wheel
-    needs: [validate, wheel]
+    needs: [validate, wheel, capture-stack]
+    if: >-
+      ${{ !cancelled() && needs.wheel.result == 'success'
+          && contains(fromJSON('["success", "skipped"]'), needs.capture-stack.result) }}
     permissions:
       contents: read
     uses: ./.github/workflows/smoke-wheel.yaml
     with:
-      # A release is cut once the pinned pixelflux and pcmflux are published, so
-      # the smoke test resolves them from PyPI: what it proves installable is
-      # then the artifact users get, not a main-HEAD build of the capture stack.
-      # A pin that is not published yet fails here, which is the release being
-      # cut too early.
-      capture_stack_published: true
+      # What the smoke test proves installable is what the release ships: the
+      # capture stack this run fetched, or PyPI's copy of the same versions. A
+      # pin that is published in neither place fails here, which is the release
+      # being cut too early.
+      wheels_ready: ${{ inputs.capture_stack != 'pypi' }}
+      capture_stack_published: ${{ inputs.capture_stack == 'pypi' }}
 
   images:
     name: Build and publish multi-arch images
@@ -123,7 +145,7 @@ jobs:
       tag_prefix: v${{ needs.validate.outputs.version }}
       floating_tags: ${{ needs.validate.outputs.latest == 'true' }}
       wheel_artifact: selkies-wheel
-      capture_stack_published: true
+      capture_stack_published: ${{ inputs.capture_stack == 'pypi' }}
 
   packages:
     name: Build native packages
@@ -134,7 +156,7 @@ jobs:
     with:
       package_version: ${{ needs.validate.outputs.version }}
       wheel_artifact: selkies-wheel
-      capture_stack_published: true
+      capture_stack_published: ${{ inputs.capture_stack == 'pypi' }}
 
   draft-release:
     name: Assemble draft release
@@ -156,6 +178,9 @@ jobs:
           # Drop the empty image-digest placeholder files (64-hex filenames);
           # they only exist for the multi-arch manifest merge
           find release-artifacts -type f -regextype posix-extended -regex '.*/[0-9a-f]{64}' -delete
+          # The capture stack rides inside the images and packages; its wheels
+          # stay on the pixelflux and pcmflux releases this run took them from
+          find release-artifacts -type f \( -name 'pixelflux-*.whl' -o -name 'pcmflux-*.whl' \) -delete
           find release-artifacts -type f -exec mv {} release/ \;
           ls -la release/
       # A release held off the badge carries the marker release-published.yaml
