@@ -101,17 +101,15 @@ def random_sequence_number() -> int:
 
 
 #: The colour signal a stream was converted with, as the ITU-T H.273 codes the RTP
-#: colour-space header extension carries, keyed by RTP MIME type: BT.709 primaries, transfer
-#: and matrix at limited range, and the BT.601 matrix for VP8, which is held to the only one a
-#: keyframe header's single colour-space bit can name. A receiver that reads the extension
-#: takes it over the bitstream, which is the only way VP8 can be told anything at all and the
-#: only channel left for a decoder that drops what its bitstream declares.
+#: colour-space header extension carries, for the two codecs whose bitstream cannot state it:
+#: BT.709 primaries, transfer and matrix at limited range, with the BT.601 matrix for VP8,
+#: which is held to the only one a keyframe header's single colour-space bit can name. A
+#: receiver that reads the extension takes it over the bitstream, so H.264, H.265 and AV1 are
+#: left to their own headers rather than told here — theirs carry the range as well, which a
+#: 4:4:4 session signals as full and this table has no way to know.
 RTP_COLOR_SPACE = {
-    "video/h264": (1, 1, 1, 1),
-    "video/h265": (1, 1, 1, 1),
-    "video/vp9": (1, 1, 1, 1),
-    "video/av1": (1, 1, 1, 1),
     "video/vp8": (1, 1, 6, 1),
+    "video/vp9": (1, 1, 1, 1),
 }
 
 

@@ -34,20 +34,14 @@ def test_offered_for_video() -> None:
 
 
 def test_matrix_per_codec() -> None:
-    # Every video codec the server offers, at BT.709 primaries and transfer and limited range;
-    # the matrix is BT.709 except on VP8, which converts the one matrix its keyframe header can
-    # name.
-    assert RTP_COLOR_SPACE == {
-        "video/h264": (1, 1, 1, 1),
-        "video/h265": (1, 1, 1, 1),
-        "video/vp9": (1, 1, 1, 1),
-        "video/av1": (1, 1, 1, 1),
-        "video/vp8": (1, 1, 6, 1),
-    }
-    # Every video codec the offer carries has a signal, so a codec added later cannot ship
-    # without one; the repair streams carry no picture and need none.
-    offered = {c.mimeType.lower() for c in CODECS["video"]}
-    assert offered - {"video/rtx", "video/flexfec-03"} == set(RTP_COLOR_SPACE)
+    # Only the two codecs whose bitstream cannot state a colour space are told one, at BT.709
+    # primaries and transfer and limited range; the matrix is BT.709 except on VP8, which
+    # converts the one its keyframe header can name. The rest declare their own signal, range
+    # included, and a receiver that preferred this table to their headers would read the wrong
+    # range from a 4:4:4 session.
+    assert RTP_COLOR_SPACE == {"video/vp8": (1, 1, 6, 1), "video/vp9": (1, 1, 1, 1)}
+    # Both are codecs the offer actually carries.
+    assert set(RTP_COLOR_SPACE) <= {c.mimeType.lower() for c in CODECS["video"]}
 
 
 def test_wire_form_and_round_trip() -> None:
