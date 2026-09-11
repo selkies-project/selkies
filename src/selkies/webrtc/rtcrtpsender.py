@@ -100,14 +100,28 @@ def random_sequence_number() -> int:
     return random16() % 32768
 
 
+#: The colour signal a stream was converted with, as the ITU-T H.273 codes the RTP
+#: colour-space header extension carries, keyed by RTP MIME type: BT.709 primaries, transfer
+#: and matrix at limited range, and the BT.601 matrix for VP8, which is held to the only one a
+#: keyframe header's single colour-space bit can name. A receiver that reads the extension
+#: takes it over the bitstream, which is the only way VP8 can be told anything at all and the
+#: only channel left for a decoder that drops what its bitstream declares.
+RTP_COLOR_SPACE = {
+    "video/h264": (1, 1, 1, 1),
+    "video/h265": (1, 1, 1, 1),
+    "video/vp9": (1, 1, 1, 1),
+    "video/av1": (1, 1, 1, 1),
+    "video/vp8": (1, 1, 6, 1),
+}
+
+
 class RTCEncodedFrame:
     def __init__(self, payloads: list[bytes], timestamp: int, audio_level: int,
-                 keyframe: bool = False, color_space: Optional[tuple] = None):
+                 keyframe: bool = False):
         self.payloads = payloads
         self.timestamp = timestamp
         self.audio_level = audio_level
         self.keyframe = keyframe
-        self.color_space = color_space
 
 
 class RTCRtpSender(AsyncIOEventEmitter):
@@ -415,8 +429,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if not payloads:
             return None
 
-        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe,
-                               getattr(data, "color_space", None))
+        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe)
 
     async def _retransmit(self, sequence_number: int) -> None:
         """
@@ -518,14 +531,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     # set min and max to 0 to hint the receiver to render frames as soon as possible
                     packet.extensions.playout_delay = (0, 0)
                     # The colour signal rides every packet of a key frame, as libwebrtc sends
-                    # it; the receiver keeps it for the frames that follow. Only VP8 and VP9
-                    # need it: their bitstreams cannot name primaries apart from the matrix.
-                    if (
-                        enc_frame.keyframe
-                        and enc_frame.color_space is not None
-                        and codec.mimeType.lower() in ("video/vp8", "video/vp9")
-                    ):
-                        packet.extensions.color_space = enc_frame.color_space
+                    # it; the receiver keeps it for the frames that follow.
+                    color_space = RTP_COLOR_SPACE.get(codec.mimeType.lower())
+                    if enc_frame.keyframe and color_space is not None:
+                        packet.extensions.color_space = color_space
                     # video-timing rides the LAST packet of a frame. The encode legs
                     # happen in the capture library and aren't visible here (0 =
                     # unknown). packetization-complete is real; pacer-exit repeats it
