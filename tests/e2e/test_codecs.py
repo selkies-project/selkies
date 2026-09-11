@@ -104,10 +104,12 @@ def wait_settled_encoder(page: Any, timeout: float = 20) -> Optional[str]:
 def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: str,
                 probe: str, rtp_mime: str, res: "H.Results") -> None:
     tag = f"{engine} {encoder}"
-    # WebKit paints VP8, which carries no colour matrix, as BT.709 on both
-    # transports, and VP9 as BT.709 over RTP, where its receiver ignores the
-    # matrix the header declares; the stream is BT.601 for every other engine.
-    matrix = not (engine == "webkit" and (encoder == "vp8enc" or (encoder == "vp9enc" and mode == "webrtc")))
+    # Every stream declares the matrix it converts with -- BT.709, or BT.601 for
+    # VP8, whose keyframe header carries a single bit that can name no other.
+    # WebKit's GStreamer ports ignore that for VP8 and paint BT.709 above 576
+    # lines whatever the client is told, which shifts the saturated block by
+    # twenty levels through no fault of the stream.
+    matrix = not (engine == "webkit" and encoder == "vp8enc")
     # The codec under test is the default; the ladder's rungs stay allowed.
     H.server_start(mode=mode, wayland=wayland,
                    extra_env={"SELKIES_ENCODER": f"{encoder},h264enc,jpeg"})

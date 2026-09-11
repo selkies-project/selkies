@@ -40,10 +40,13 @@ PAINT = (40, 120, 220)
 PAINT_ARGB = "ff2878dc"
 TOLERANCE = 24
 # A saturated second block on X11 guards the colour matrix: a stream converted
-# with one matrix and painted with another lands tens of levels off here, where
-# the first block barely moves. Every engine paints a matched stream within 5.
-SATURATED = (0, 255, 0)
-SATURATED_ARGB = "ff00ff00"
+# with one matrix and painted with another lands more than twenty levels off
+# here, where the first block barely moves. Red rather than green, because
+# libyuv -- which Chromium and Firefox both convert through -- clamps the
+# BT.709 Cb-to-blue coefficient to 2.0 from 2.112, which costs a green block
+# eleven levels of blue and this one two.
+SATURATED = (255, 0, 0)
+SATURATED_ARGB = "ffff0000"
 SATURATED_TOLERANCE = 10
 # Where the X11 windows sit, and a spot well outside them.
 BLOCK = (100, 100, 300, 200)
