@@ -109,10 +109,10 @@ jobs:
         with:
           name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
           path: dist/
-      # Fresh pixelflux/pcmflux wheels, built from the main HEAD of the
-      # selkies-project/* repos by the orchestrating run; absence is tolerated
-      # (standalone dispatch) and the Dockerfile falls back to PyPI
-      - name: Download pixelflux wheels (main HEAD)
+      # The pixelflux/pcmflux wheels the orchestrating run resolved: each
+      # project's main HEAD, or the pinned release at a release. Absence is
+      # tolerated (standalone dispatch) and the Dockerfile falls back to PyPI
+      - name: Download the pixelflux wheels
         if: ${{ !inputs.capture_stack_published }}
         uses: actions/download-artifact@v8
         continue-on-error: true
@@ -120,7 +120,7 @@ jobs:
           pattern: pixelflux-wheels-*
           path: dist/
           merge-multiple: true
-      - name: Download pcmflux wheels (main HEAD)
+      - name: Download the pcmflux wheels
         if: ${{ !inputs.capture_stack_published }}
         uses: actions/download-artifact@v8
         continue-on-error: true
@@ -137,16 +137,15 @@ jobs:
             exit 0
           fi
           for project in pixelflux pcmflux; do
-            # Away from a release what ships has to be the build the suites ran
-            # against, and the pinned version exists nowhere but this run, so
-            # the wheels are required rather than preferred: the orchestrating
-            # workflow puts them here before calling, and a standalone dispatch
-            # has to supply them the same way.
+            # What ships has to be the capture stack this run resolved, which
+            # exists nowhere else, so the wheels are required rather than
+            # preferred: the orchestrating workflow puts them here before
+            # calling, and a standalone dispatch has to supply them the same way.
             if ! ls "dist/${project}"-*.whl > /dev/null 2>&1; then
-              echo "::error::No main-HEAD ${project} wheel in dist/; run this through ci.yaml, which builds the capture stack first"
+              echo "::error::No ${project} wheel in dist/; run this through ci.yaml or release.yaml, which resolve the capture stack first"
               exit 1
             fi
-            echo "${project}: main-HEAD wheel from this run"
+            echo "${project}: wheel from this run"
           done
       - name: Prepare wheels directory
         run: |

@@ -87,6 +87,7 @@ SUITES: list = [
     {"path": "unit/test_session_screen_kwin.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_outputless_x_server.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_release_version.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_capture_stack.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_start_verdict.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_twcc_feedback.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webcam_abi.py", "tier": "unit", "timeout": 120},

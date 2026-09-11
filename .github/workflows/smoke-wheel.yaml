@@ -48,13 +48,13 @@ jobs:
       contents: read
     uses: ./.github/workflows/build-wheel.yaml
 
-  # Away from a release the pinned pixelflux/pcmflux are a coordinated
-  # pre-release, published per commit rather than to PyPI, so the smoke test can
-  # only install them from a wheel this run has in hand: the caller's, when it
-  # says so with wheels_ready, else this run's own. Cutting a release is the
-  # other way round -- the versions the wheel pins are on PyPI by then, and
-  # resolving them there is what proves the artifact users will install. The
-  # test suites run under the same contract.
+  # The pinned pixelflux/pcmflux are installed from a wheel this run has in
+  # hand: the caller's, when it says so with wheels_ready, else this run's own.
+  # Away from a release those are each project's per-commit pre-release, which
+  # no index carries; at a release they are the wheels the projects released for
+  # the pinned versions, unless the run resolves those from PyPI instead, which
+  # is what proves the artifact a user installing from there gets. The test
+  # suites run under the same contract.
   wheels:
     name: Capture stack (main HEAD)
     if: ${{ !inputs.wheels_ready && !inputs.capture_stack_published }}
@@ -105,11 +105,11 @@ jobs:
             exit 0
           fi
           for project in pixelflux pcmflux; do
-            # Fatal rather than a note: away from a release the pinned version
-            # exists only as this run's wheel, so without one the install below
-            # fails inside pip's resolver instead of naming what never arrived.
+            # Fatal rather than a note: the pinned version exists only as this
+            # run's wheel, so without one the install below fails inside pip's
+            # resolver instead of naming what never arrived.
             if ! ls "sibling-wheels/${project}"-*.whl > /dev/null 2>&1; then
-              echo "::error::No main-HEAD ${project} wheel for the smoke test"
+              echo "::error::No ${project} wheel for the smoke test"
               exit 1
             fi
           done
@@ -118,9 +118,9 @@ jobs:
           PUBLISHED: ${{ inputs.capture_stack_published }}
         run: |
           python3 -m venv /tmp/selkies-venv
-          # Away from a release the capture stack goes in from this run's wheels
-          # first, so the pin is already satisfied when the index is consulted
-          # and no build can quietly take a different one from PyPI.
+          # The capture stack goes in from this run's wheels first, so the pin
+          # is already satisfied when the index is consulted and no build can
+          # quietly take a different one from PyPI.
           if [ "${PUBLISHED}" != "true" ]; then
             /tmp/selkies-venv/bin/pip install --no-index --find-links "$PWD/sibling-wheels" pixelflux pcmflux
           fi

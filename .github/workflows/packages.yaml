@@ -135,9 +135,10 @@ jobs:
         with:
           name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
           path: dist/
-      # Fresh pixelflux/pcmflux wheels from the main HEAD of selkies-project/*;
-      # absence is tolerated (standalone dispatch) and mkvenv.sh uses PyPI
-      - name: Download pixelflux wheels (main HEAD)
+      # The pixelflux/pcmflux wheels the orchestrating run resolved: each
+      # project's main HEAD, or the pinned release at a release. Absence is
+      # tolerated (standalone dispatch) and mkvenv.sh leaves them to PyPI
+      - name: Download the pixelflux wheels
         if: ${{ !inputs.capture_stack_published }}
         uses: actions/download-artifact@v8
         continue-on-error: true
@@ -145,7 +146,7 @@ jobs:
           pattern: pixelflux-wheels-*
           path: dist/
           merge-multiple: true
-      - name: Download pcmflux wheels (main HEAD)
+      - name: Download the pcmflux wheels
         if: ${{ !inputs.capture_stack_published }}
         uses: actions/download-artifact@v8
         continue-on-error: true
@@ -162,16 +163,15 @@ jobs:
             exit 0
           fi
           for project in pixelflux pcmflux; do
-            # Away from a release what ships has to be the build the suites ran
-            # against, and the pinned version exists nowhere but this run, so
-            # the wheels are required rather than preferred: the orchestrating
-            # workflow puts them here before calling, and a standalone dispatch
-            # has to supply them the same way.
+            # What ships has to be the capture stack this run resolved, which
+            # exists nowhere else, so the wheels are required rather than
+            # preferred: the orchestrating workflow puts them here before
+            # calling, and a standalone dispatch has to supply them the same way.
             if ! ls "dist/${project}"-*.whl > /dev/null 2>&1; then
-              echo "::error::No main-HEAD ${project} wheel in dist/; run this through ci.yaml, which builds the capture stack first"
+              echo "::error::No ${project} wheel in dist/; run this through ci.yaml or release.yaml, which resolve the capture stack first"
               exit 1
             fi
-            echo "${project}: main-HEAD wheel from this run"
+            echo "${project}: wheel from this run"
           done
       - name: Build the package inside the target distro container
         env:
@@ -242,9 +242,8 @@ jobs:
           remove_packages: azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* mysql* mongodb*
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
-      # Fresh pixelflux/pcmflux wheels from the main HEAD of selkies-project/*,
-      # required for the same reason the packages above require them
-      - name: Download pixelflux wheels (main HEAD)
+      # The same wheels the packages above carry, required for the same reason
+      - name: Download the pixelflux wheels
         if: ${{ !inputs.capture_stack_published }}
         uses: actions/download-artifact@v8
         continue-on-error: true
@@ -252,7 +251,7 @@ jobs:
           pattern: pixelflux-wheels-*
           path: pixelflux-pcmflux-wheels/
           merge-multiple: true
-      - name: Download pcmflux wheels (main HEAD)
+      - name: Download the pcmflux wheels
         if: ${{ !inputs.capture_stack_published }}
         uses: actions/download-artifact@v8
         continue-on-error: true
@@ -270,16 +269,16 @@ jobs:
           fi
           for project in pixelflux pcmflux; do
             if ! ls "pixelflux-pcmflux-wheels/${project}"-*.whl > /dev/null 2>&1; then
-              echo "::error::No main-HEAD ${project} wheel; run this through ci.yaml, which builds the capture stack first"
+              echo "::error::No ${project} wheel; run this through ci.yaml or release.yaml, which resolve the capture stack first"
               exit 1
             fi
-            echo "${project}: main-HEAD wheel from this run"
+            echo "${project}: wheel from this run"
           done
       - name: Build the AppImage (rattler-build + linuxdeploy-plugin-conda)
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}
-          # Left unset for a release: appimage.sh then names the projects rather
-          # than wheel paths, and pip resolves the pinned releases from PyPI.
+          # Left unset where the run resolves the capture stack from PyPI:
+          # appimage.sh then names the projects rather than wheel paths.
           PIXELFLUX_PCMFLUX_WHEELS_DIR: ${{ inputs.capture_stack_published && '' || format('{0}/pixelflux-pcmflux-wheels', github.workspace) }}
         run: ./scripts/ci/appimage.sh "${{ matrix.arch.name }}"
       - uses: actions/upload-artifact@v7
