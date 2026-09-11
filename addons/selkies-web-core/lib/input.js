@@ -4196,12 +4196,17 @@ export class Input {
     }
 
     /**
-     * Acquires pointer lock for the fullscreen stream in gaming mode. Chrome
-     * rejects a request made while the fullscreen transition is still
-     * settling (WrongDocumentError), so it retries over a few short intervals.
+     * Acquires pointer lock for the fullscreen stream in gaming mode. The
+     * attached input context decides, not the role: a viewer granted mouse and
+     * keyboard access is a collaborator whose relative motion the server takes,
+     * while a page holding no context -- a plain viewer, or a controller whose
+     * input authority was handed away -- must not capture the pointer for
+     * motion nothing would receive. Chrome rejects a request made while the
+     * fullscreen transition is still settling (WrongDocumentError), so it
+     * retries over a few short intervals.
      */
     _armPointerLock(attempt = 0) {
-        if (this.isSharedMode || !this.gamingMode || !this._isStreamFullscreen()) return;
+        if (!this.inputAttached || !this.gamingMode || !this._isStreamFullscreen()) return;
         if (this._isStreamLocked()) return;
         this._requestPointerLock(this.element, () => this._armPointerLock(attempt), (err) => {
             if (attempt < 5) {
@@ -4220,7 +4225,7 @@ export class Input {
      */
     _onFullscreenChange() {
         if (this._isStreamFullscreen()) {
-            if (!this.isSharedMode && this.gamingMode) {
+            if (this.inputAttached && this.gamingMode) {
                 this._armPointerLock();
                 this.requestKeyboardLock();
             }
@@ -4362,6 +4367,8 @@ export class Input {
         this.listeners_context.push(addListener(this.element, 'mousedown', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(window, 'mousemove', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(window, 'mouseup', this._mouseButtonMovement, this));
+        // Set before the locks below, which take it as the grant to hold the pointer.
+        this.inputAttached = true;
 
         if (this._isStreamFullscreen() && this.gamingMode) {
              this._armPointerLock();
@@ -4370,7 +4377,6 @@ export class Input {
              this._pointerLock();
         }
         this._windowMath();
-        this.inputAttached = true;
     }
 
     /**

@@ -24,6 +24,12 @@ locks again, and requires every move to reach it as exactly the delta the
 wire carried, one event per message, and a key pressed under the lock to
 arrive as that key. Without a libSDL2 to load the block is skipped.
 
+A `-collab` selector drives the other page that holds the pointer: a viewer the
+server granted mouse and keyboard access, which keeps the viewer role and the
+input context together. Gaming mode is where its relative motion comes from, so
+there the mode is entered by the client's own Ctrl+Shift+X chord rather than by
+a click, and the deltas have to reach the desktop the same way a controller's do.
+
 A desktop selector runs that block under the session manager the images run
 the game under: openbox or kwin_x11 managing the X test display, or labwc or
 kwin_wayland nested on the capture compositor with the game as a client of
@@ -34,6 +40,7 @@ pointer as absolute motion only, an open gap rather than a fault in the path.
 
     python3 tests/e2e/test_pointer_lock.py ws-x11|wr-x11|ws-wl|wr-wl
     python3 tests/e2e/test_pointer_lock.py ws-x11-openbox|ws-x11-kwin|ws-wl-labwc|ws-wl-kwin
+    python3 tests/e2e/test_pointer_lock.py ws-x11-collab|wr-x11-collab
 
 Headless Chromium's full build is driven (not the headless shell, whose
 locked movement deltas do not add up), on both transports and backends.
@@ -54,6 +61,11 @@ import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
 
+# The secure-mode tokens the collaborator block provisions: a viewer holding
+# mk_control is the collaborator the server grants an input context.
+MASTER_TOKEN = "e2e-pointer-master"
+VIEW_TOKEN = "e2e-pointer-view-Qx9"
+
 START = (640, 360)
 # The stream the server realizes for the browser window, and so the desktop the
 # nested compositors are sized to.
@@ -68,7 +80,7 @@ MOVES_JS = ("window.__wireSent.filter(d => typeof d === 'string' && "
             "(d.startsWith('m,') || d.startsWith('m2,')))")
 
 
-def launch(p: Any, mode: str) -> tuple:
+def launch(p: Any, mode: str, query: str = "") -> tuple:
     """The full Chromium build on the stream page, with the wire tap installed."""
     kw = {"headless": True, "args": C.BROWSER_ARGS}
     if C.CHROME_PATH:
@@ -82,7 +94,7 @@ def launch(p: Any, mode: str) -> tuple:
     page = ctx.new_page()
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
-    page.goto(H.BASE_URL + "/", wait_until="load")
+    page.goto(H.BASE_URL + "/" + query, wait_until="load")
     return browser, page, errors
 
 
@@ -321,6 +333,21 @@ def take_lock(page: Any, where: tuple) -> bool:
     return False
 
 
+def enter_gaming_mode(page: Any) -> bool:
+    """The client's own chord, Ctrl+Shift+X, and whether it ended in a lock."""
+    page.keyboard.down("Control")
+    page.keyboard.down("Shift")
+    page.keyboard.press("KeyX")
+    page.keyboard.up("Shift")
+    page.keyboard.up("Control")
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        if page.evaluate("document.pointerLockElement !== null"):
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def wire_deltas(messages: list) -> list:
     """The non-zero relative deltas the wire carried, in order."""
     out = []
@@ -496,8 +523,77 @@ def run(mode: str, wayland: bool, desktop: Optional[str], res: "H.Results") -> N
         H.server_stop()
 
 
+def run_collab(mode: str, res: "H.Results") -> None:
+    """A viewer the server granted mouse and keyboard access, in gaming mode.
+
+    The grant attaches the page's input context while it keeps the viewer role,
+    and the server takes relative motion from it (`m2` is in the collaborator's
+    allowed prefixes), so what has to hold is that gaming mode holds the pointer
+    for such a page at all and that its deltas reach the desktop.
+    """
+    H.server_start(mode=mode, wayland=False,
+                   extra_env={"SELKIES_MASTER_TOKEN": MASTER_TOKEN})
+    try:
+        status, _ = H.curl("/api/tokens", method="POST",
+                           data={VIEW_TOKEN: {"role": "viewer", "slot": None, "mk_control": True}},
+                           headers={"Authorization": f"Bearer {MASTER_TOKEN}"})
+        res.check("the viewer token is provisioned with mouse and keyboard access",
+                  status == 200, status)
+        pointer = Pointer(None)
+        with sync_playwright() as p:
+            browser, page, errors = launch(p, mode, f"?token={VIEW_TOKEN}")
+            try:
+                video = C.wait_ws_video(page, timeout=30) if mode == "websockets" else C.wait_wr_video(page)
+                res.check("video flowing", bool(video), video)
+                state = "window.webrtcInput ? [window.webrtcInput.isSharedMode, window.webrtcInput.isInputAttached()] : null"
+                granted = False
+                deadline = time.time() + 20
+                while time.time() < deadline and not granted:
+                    granted = page.evaluate(state) == [True, True]
+                    if not granted:
+                        time.sleep(0.25)
+                res.check("the page keeps the viewer role and holds the granted input context",
+                          granted, page.evaluate(state))
+                time.sleep(1.0)
+                cursor = START
+                page.mouse.move(*cursor)
+                time.sleep(0.5)
+                res.check("Ctrl+Shift+X locks the pointer for the collaborator",
+                          enter_gaming_mode(page))
+                time.sleep(0.5)
+                res.check("the desktop pointer is readable", pointer.read() is not None, pointer.read())
+                # How far a delta travels is the stream box the client measured,
+                # which a viewer's own window does not decide; what the pointer
+                # has to do is move by the deltas that went out, in the direction
+                # the hand moved.
+                for dx, dy, repeat in MOVES:
+                    mark = len(page.evaluate(MOVES_JS))
+                    before = pointer.read()
+                    for _ in range(repeat):
+                        cursor = (cursor[0] + dx, cursor[1] + dy)
+                        page.mouse.move(*cursor)
+                        time.sleep(0.05)
+                    label = f"{repeat} x ({dx},{dy})" if repeat > 1 else f"({dx},{dy})"
+                    sent = moves_since(page, mark)
+                    res.check(f"the collaborator's locked move {label} went out as relative motion",
+                              sent and all(m.startswith("m2,") for m in sent), sent[:4])
+                    total = relative_sum(sent)
+                    res.check(f"the collaborator's locked move {label} carries the hand's direction",
+                              all(t * h > 0 for t, h in zip(total, (dx * repeat, dy * repeat))), total)
+                    expected = (before[0] + total[0], before[1] + total[1])
+                    pos = pointer.wait(expected)
+                    res.check(f"the collaborator's locked move {label} moves the desktop pointer by what the wire carried",
+                              at(pos, expected), f"{pos} wanted {expected}")
+                res.check("no page errors", not errors, "; ".join(errors)[:200])
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+
+
 SELECTORS = ("ws-x11", "wr-x11", "ws-wl", "wr-wl",
-             "ws-x11-openbox", "ws-x11-kwin", "ws-wl-labwc", "ws-wl-kwin")
+             "ws-x11-openbox", "ws-x11-kwin", "ws-wl-labwc", "ws-wl-kwin",
+             "ws-x11-collab", "wr-x11-collab")
 
 
 def main() -> bool:
@@ -506,9 +602,13 @@ def main() -> bool:
         raise SystemExit(f"unknown selector {which!r}; one of {SELECTORS}")
     parts = which.split("-")
     transport, backend = parts[0], parts[1]
-    desktop = parts[2] if len(parts) > 2 else None
+    extra = parts[2] if len(parts) > 2 else None
     res = H.Results(f"pointer-lock-{which}")
-    run("websockets" if transport == "ws" else "webrtc", backend == "wl", desktop, res)
+    mode = "websockets" if transport == "ws" else "webrtc"
+    if extra == "collab":
+        run_collab(mode, res)
+    else:
+        run(mode, backend == "wl", extra, res)
     return res.summary()
 
 

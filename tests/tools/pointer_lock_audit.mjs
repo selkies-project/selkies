@@ -17,7 +17,7 @@
 // switches a lock already held rather than waiting for the next one. The lock belongs to gaming mode alone -- plain fullscreen
 // leaves the pointer to the browser so the dashboard stays usable -- and its
 // caller guards the request (gaming mode, stream fullscreen, not already locked,
-// not a shared viewer); the request it re-runs after a refusal must pass those
+// an input context attached); the request it re-runs after a refusal must pass those
 // guards again, since the page can leave fullscreen while the first one is still
 // pending.
 //
@@ -65,10 +65,11 @@ function makeElement(outcome) {
 }
 
 /** An Input with only what the pointer lock paths touch. */
-function makeInput(element, gaming = true) {
+function makeInput(element, gaming = true, attached = true) {
     const input = Object.create(Input.prototype);
     input.element = element;
     input.isSharedMode = false;
+    input.inputAttached = attached;
     input.gamingMode = gaming;
     return input;
 }
@@ -404,15 +405,37 @@ function stage(ids, locked = null) {
     document.pointerLockElement = element;
     input._armPointerLock();
     document.pointerLockElement = null;
-    input.isSharedMode = true;
+    input.inputAttached = false;
     input._armPointerLock();
     await sleep(10);
-    input.isSharedMode = false;
+    input.inputAttached = true;
     input.gamingMode = false;
     input._armPointerLock();
     await sleep(10);
-    check('no lock outside fullscreen, when locked, when shared, or outside gaming mode',
+    check('no lock outside fullscreen, when locked, without an input context, or outside gaming mode',
           element.calls.length === 0, element.calls.join(','));
+}
+{
+    // A viewer the server granted mouse and keyboard access holds a context
+    // while it keeps the viewer role, and gaming mode is where its relative
+    // motion comes from; a viewer holding no context is the one refused.
+    const element = makeElement('ok');
+    reset(element);
+    const input = makeInput(element);
+    input.isSharedMode = true;
+    input._armPointerLock();
+    await sleep(10);
+    check('a viewer granted an input context locks the pointer in gaming mode',
+          element.calls.length === 1, element.calls.join(','));
+
+    const refused = makeElement('ok');
+    reset(refused);
+    const viewer = makeInput(refused, true, false);
+    viewer.isSharedMode = true;
+    viewer._armPointerLock();
+    await sleep(10);
+    check('a viewer without one is refused it',
+          refused.calls.length === 0, refused.calls.join(','));
 }
 
 // --- the two fullscreen modes ---------------------------------------------
