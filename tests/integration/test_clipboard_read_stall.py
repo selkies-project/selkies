@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""The connect-time clipboard read-back must not hold the messages behind it.
+"""The clipboard read-back must not hold the messages behind it.
 
-Every client sends `cr` as soon as its connection is up, ahead of the messages
-that bring the session to the size and density its page asked for. An X
-selection whose owner has stopped answering conversion requests -- a browser
-being torn down still owns CLIPBOARD -- is read to the reader's own timeout
-rather than failing fast, so a read awaited on the dispatch loop stops the
-session there: measured at ~93 s, over which the desktop keeps whatever size
-the last client left it and nothing the user types arrives.
+`cr` is the first thing a client sends on a new connection, ahead of the
+messages that bring the session to the size and density its page asked for. An
+X selection whose owner answers no conversion request -- a browser being torn
+down still owns CLIPBOARD -- is read to the reader's own bound, tens of
+seconds, so the read is answered off the dispatch loop and the session comes up
+while it is still outstanding.
 
 The dispatcher is the one both transports share, so the websockets wire covers
 the WebRTC data channel with it.
