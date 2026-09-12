@@ -207,20 +207,20 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "audit_webhook_url",
         "type": "str",
         "default": "",
-        "help": "Optional HTTPS URL that receives best-effort JSON POSTs for clipboard and file-transfer events. Only metadata is sent (event type, byte size, mime type, timestamp); payload content is never logged. Empty disables the audit channel.",
+        "help": 'URL that receives one JSON POST per clipboard transfer, file upload and file download, carrying metadata only (the event, an RFC 3339 timestamp, byte size, MIME type or file name) and never the content. Events are delivered in order over one keep-alive connection; a collector that is slow or down loses what overflows the queue rather than stalling the session. Empty (default) sends nothing.',
     },
     {
         "name": "audit_webhook_token",
         "type": "str",
         "default": "",
-        "sensitive": True,
-        "help": "Optional Bearer token sent as Authorization header on audit webhook POSTs. Use this to authenticate Selkies against the audit collector. Empty omits the Authorization header.",
+        "help": 'Bearer token sent in the Authorization header of every audit POST. Empty sends no header.',
     },
     {
         "name": "audit_webhook_timeout",
-        "type": "str",
-        "default": "2.0",
-        "help": "Per-request timeout in seconds (float) for audit webhook POSTs. Audit is fire-and-forget; on timeout the event is dropped with a warning log line. Default 2.0.",
+        "type": "float",
+        "default": 2.0,
+        "min": 0.1,
+        "help": 'Seconds one audit POST may take before it counts as failed and the next event is sent.',
     },
     {
         "name": "framerate",
@@ -1094,6 +1094,7 @@ SENSITIVE_SETTING_NAMES = frozenset({
     "turn_password",
     "cloudflare_turn_token_id",
     "cloudflare_turn_api_token",
+    "audit_webhook_token",
 })
 for _setting_def in SETTING_DEFINITIONS:
     if _setting_def["name"] in SENSITIVE_SETTING_NAMES:
@@ -1863,6 +1864,7 @@ CLIENT_PAYLOAD_EXCLUDED = [
     'webcam_socket_path', 'webcam_device',
     'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind',
     'wayland_host_display', 'app_wayland_display',
+    'audit_webhook_url', 'audit_webhook_timeout',
 ]
 
 

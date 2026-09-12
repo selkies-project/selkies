@@ -104,7 +104,7 @@ from .input_handler import (
 )
 from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting
 from .settings import settings as app_settings
-from . import audit as _audit
+from . import audit
 from .webcam import (
     MSG_WEBCAM_DISABLED,
     MSG_WEBCAM_KEYFRAME,
@@ -899,7 +899,8 @@ class SelkiesStreamingApp:
                 return
             data_bytes = data.encode('utf-8') if not is_binary and isinstance(data, str) else data
             total_size = len(data_bytes)
-            _audit.emit("clipboard.send", mime_type=mime_type, size_bytes=total_size)
+            if total_size:
+                audit.emit("clipboard.send", mime_type=mime_type, size_bytes=total_size)
             clients = self.data_streaming_server.clients
             # One payload at a time per client: the start/data/finish frames
             # carry no transfer id, so a send racing another (a clipboard
