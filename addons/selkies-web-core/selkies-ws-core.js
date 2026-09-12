@@ -1163,6 +1163,7 @@ rawPointerMotion = getBoolParam('raw_pointer_motion', Input.rawPointerMotion);
 enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 clipboard_in_enabled = getBoolParam('clipboard_in_enabled', true);
 clipboard_seamless = getBoolParam('clipboard_seamless', true);
+keyboardShortcuts = getBoolParam('keyboard_shortcuts', true);
 clipboard_out_enabled = getBoolParam('clipboard_out_enabled', true);
 force_aligned_resolution = getBoolParam('force_aligned_resolution', force_aligned_resolution);
 

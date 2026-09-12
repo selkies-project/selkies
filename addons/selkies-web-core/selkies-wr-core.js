@@ -2548,6 +2548,7 @@ export default function webrtc() {
 			clipboard_in_enabled = getBoolParam('clipboard_in_enabled', clipboard_in_enabled);
 			clipboard_out_enabled = getBoolParam('clipboard_out_enabled', clipboard_out_enabled);
 			clipboard_seamless = getBoolParam('clipboard_seamless', clipboard_seamless);
+			keyboardShortcuts = getBoolParam('keyboard_shortcuts', keyboardShortcuts);
 			crf = getIntParam('video_crf', crf);
 			antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 			trackpadMode = getBoolParam('trackpadMode', false);

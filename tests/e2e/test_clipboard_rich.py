@@ -170,6 +170,25 @@ def policy_block() -> "H.Results":
             source.close()
             browser.close()
 
+    # The panel writes the choice and the core stores it; a reload has to find it.
+    H.server_start(mode="websockets", wayland=False, web_root=DASH,
+                   extra_env={"PYTHONPATH": os.path.join(H.REPO, "src")})
+    with sync_playwright() as p:
+        browser, page = page_with_clipboard(p, "websockets")
+        try:
+            page.evaluate("""window.postMessage(
+                { type: 'settings', settings: { keyboard_shortcuts: false } },
+                window.location.origin)""")
+            time.sleep(1.5)
+            page.reload(wait_until="load")
+            time.sleep(12.0)
+            fullscreen, held = chord(page)
+            res.check("a chord choice made in the panel survives a reload",
+                      fullscreen is False and held is True,
+                      f"fullscreen={fullscreen} held in the session={held}")
+        finally:
+            browser.close()
+
     for shortcuts, takes_browser in (("true", True), ("false", False)):
         H.server_start(mode="websockets", wayland=False, web_root=DASH,
                        extra_env={"PYTHONPATH": os.path.join(H.REPO, "src"),
