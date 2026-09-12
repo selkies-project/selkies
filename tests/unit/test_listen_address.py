@@ -3,17 +3,19 @@
 
 A server that listens on every interface by default is reachable from the
 network before anyone chose to expose it, so the built-in address is
-``localhost``, bound on both loopback families, and ``0.0.0.0`` is what a
-container or a documented command passes on purpose. A name is bound on
-every address it resolves to, a comma-separated list on all of them, and a
-loopback family the host does not carry is skipped rather than failing the
-start; a port already taken, or a name that does not resolve, still fails and
-leaves nothing bound.
+``localhost``, bound on both loopback families, and ``--public`` (or
+``0.0.0.0,::``) is what a container or a documented command passes on
+purpose; the two spellings choose the same listener, so given together they
+refuse the start. A name is bound on every address it resolves to, a
+comma-separated list on all of them, and a loopback family the host does not
+carry is skipped rather than failing the start; a port already taken, or a
+name that does not resolve, still fails and leaves nothing bound.
 """
 import asyncio
 import errno
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -24,7 +26,7 @@ REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 
 from selkies.settings import SETTING_DEFINITIONS, AppSettings  # noqa: E402
-from selkies.stream_server import CentralizedStreamServer, _bind_listen_sockets  # noqa: E402
+from selkies.stream_server import EXIT_CONFIG_ERROR, CentralizedStreamServer, _bind_listen_sockets  # noqa: E402
 
 passed = failed = 0
 
@@ -63,7 +65,23 @@ def host_has(family: int, address: str) -> bool:
         return False
 
 
+def port_free(port: int) -> bool:
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+            probe.listen(1)
+        except OSError:
+            return False
+    return True
+
+
 HAS_V6 = host_has(socket.AF_INET6, "::1")
+
+
+def v6(*hosts) -> list:
+    """The hosts this machine can bind: the IPv6 ones only where it has ::1."""
+    return sorted(h for h in hosts if HAS_V6 or "::" not in h)
 
 
 def lan_address() -> str:
@@ -191,22 +209,28 @@ def get_status(url: str) -> str:
         return type(exc).__name__
 
 
+def settings_for(port: int, *flags: str) -> AppSettings:
+    sys.argv = ["selkies", "--enable-basic-auth=false", "--enable-https=false", f"--port={port}", *flags]
+    return AppSettings(SETTING_DEFINITIONS)
+
+
 async def server_cases() -> None:
     lan = lan_address()
     log = logging.getLogger("stream_server")
     sink = _Capture()
     log.addHandler(sink)
+    v6_status = "200" if HAS_V6 else "URLError"
     try:
-        for addr, expect in (
-            ("", {"127.0.0.1": "200", "::1": "200" if HAS_V6 else "URLError", "lan": "URLError"}),
-            ("0.0.0.0", {"127.0.0.1": "200", "::1": "URLError", "lan": "200"}),
+        for flags, bound, expect in (
+            ([], v6("127.0.0.1", "[::1]"), {"127.0.0.1": "200", "::1": v6_status, "lan": "URLError"}),
+            (["--addr=0.0.0.0"], ["0.0.0.0"], {"127.0.0.1": "200", "::1": "URLError", "lan": "200"}),
+            (["--public"], v6("0.0.0.0", "[::]"), {"127.0.0.1": "200", "::1": v6_status, "lan": "200"}),
+            (["--public=false", "--addr=127.0.0.1"], ["127.0.0.1"],
+             {"127.0.0.1": "200", "::1": "URLError", "lan": "URLError"}),
         ):
             port = free_port()
-            sys.argv = ["selkies", "--enable-basic-auth=false", "--enable-https=false", f"--port={port}"]
-            if addr:
-                sys.argv.append(f"--addr={addr}")
-            settings = AppSettings(SETTING_DEFINITIONS)
-            if not addr:
+            settings = settings_for(port, *flags)
+            if not flags:
                 check("the built-in listen address is localhost", settings.addr == "localhost", settings.addr)
             server = CentralizedStreamServer(settings)
             sink.lines.clear()
@@ -220,35 +244,64 @@ async def server_cases() -> None:
                 }
             finally:
                 await server.stop_server()
-            label = addr or "the default"
-            check(f"{label}: the start line names every bound address",
-                  running and f"{addr or '127.0.0.1'}:{port}" in running[-1]
-                  and ((f"[::1]:{port}" in running[-1]) == (HAS_V6 and not addr)), running[-1:])
+            label = " ".join(flags) or "the default"
+            named = sorted(re.findall(r"https?://(\S+):%d" % port, running[-1])) if running else running
+            check(f"{label}: the start line names every bound address", named == bound, named)
             check(f"{label}: reachable exactly as documented", got == expect, got)
-            with socket.socket() as probe:
-                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                try:
-                    probe.bind(("127.0.0.1", port))
-                    probe.listen(1)
-                    released = True
-                except OSError:
-                    released = False
-            check(f"{label}: the address is free again after stop", released)
+            check(f"{label}: the address is free again after stop", port_free(port))
+
+        port = free_port()
+        for flags, env in ((["--public", "--addr=127.0.0.1"], {}), (["--addr=127.0.0.1"], {"SELKIES_PUBLIC": "true"})):
+            os.environ.update(env)
+            try:
+                settings = settings_for(port, *flags)
+            finally:
+                for name in env:
+                    del os.environ[name]
+            label = " ".join(f"{k}={v}" for k, v in env.items()) + " " + " ".join(flags)
+            check(f"{label}: resolves to every interface", settings.addr == "0.0.0.0,::", settings.addr)
+            sink.lines.clear()
+            try:
+                await CentralizedStreamServer(settings).start_server()
+                check(f"{label}: refuses to start", False, "started")
+            except SystemExit as exc:
+                check(f"{label}: refuses to start", exc.code == EXIT_CONFIG_ERROR, exc.code)
+            check(f"{label}: says both were given",
+                  any("--public and --addr" in ln for ln in sink.lines), sink.lines[-1:])
+            check(f"{label}: binds nothing", port_free(port))
     finally:
         log.removeHandler(sink)
+
+
+def flag_cases() -> None:
+    port = free_port()
+    settings = settings_for(port, "--public")
+    check("a bare --public is on and does not swallow the next flag",
+          settings.public[0] and settings.port == port, (settings.public, settings.port))
+    check("a bare bool flag is on for every bool setting",
+          settings_for(port, "--enable-resize").enable_resize[0])
+    check("--public=false is off", not settings_for(port, "--public=false").public[0])
+    os.environ["SELKIES_PUBLIC"] = ""
+    try:
+        settings = settings_for(port)
+    finally:
+        del os.environ["SELKIES_PUBLIC"]
+    check("SELKIES_PUBLIC= keeps the loopback default",
+          settings.addr == "localhost" and not settings.was_provided("public"), settings.addr)
 
 
 def help_case() -> None:
     out = subprocess.run([sys.executable, "-m", "selkies", "--help"], capture_output=True, text=True,
                          cwd=REPO, env={**os.environ, "PYTHONPATH": os.path.join(REPO, "src")}).stdout
-    check("--help documents the loopback default and 0.0.0.0",
-          "--addr" in out and "loopback" in out and "0.0.0.0" in out, out[:0])
+    check("--help documents the loopback default, --public and 0.0.0.0",
+          "--addr" in out and "--public" in out and "loopback" in out and "0.0.0.0" in out, out[:0])
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO)
     asyncio.run(binder_cases())
     asyncio.run(server_cases())
+    flag_cases()
     help_case()
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

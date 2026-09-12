@@ -1869,6 +1869,22 @@ class CentralizedStreamServer:
         )
         raise SystemExit(EXIT_CONFIG_ERROR)
 
+    def _require_one_listen_setting(self) -> None:
+        """Refuse `--public` beside an explicit `--addr`: both choose the TCP
+        listen addresses, and letting one win in silence would leave the
+        operator who typed the other believing it took effect.
+
+        Raises:
+            SystemExit: With `EXIT_CONFIG_ERROR`, as for missing credentials.
+        """
+        if self.settings.public[0] and self.settings.was_provided("addr"):
+            logger.error(
+                "--public and --addr (SELKIES_PUBLIC, SELKIES_ADDR) were both given: "
+                "--public listens on every interface, --addr on the addresses it "
+                "names. Pass one of them."
+            )
+            raise SystemExit(EXIT_CONFIG_ERROR)
+
     async def switch_to_mode(self, mode_name: str) -> None:
         """Stop the active streaming service and start ``mode_name`` in its place.
 
@@ -2594,6 +2610,7 @@ class CentralizedStreamServer:
             The configured application (also stored on ``self.app``).
         """
         self._require_configured_credentials()
+        self._require_one_listen_setting()
 
         self.app = web.Application(middlewares=[self._auth_middleware])
         self.app["supervisor"] = self

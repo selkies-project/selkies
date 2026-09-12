@@ -27,8 +27,9 @@ Override value syntax, by setting type:
   default, the full list is the allowed options; a single value locks the
   choice. Invalid items are dropped; an entirely-invalid override keeps the
   full built-in menu and default.
-- Bool (case-insensitive): `"true"`/`"1"` is on, anything else off; a
-  `"|locked"` suffix (e.g. `"true|locked"`) forbids the client changing it.
+- Bool (case-insensitive): `"true"`/`"1"` is on, anything else off, and a
+  bare flag (`--public`) is on; a `"|locked"` suffix (e.g. `"true|locked"`)
+  forbids the client changing it.
 - Range: `"8-240"` restricts the allowed span (initial value = built-in
   default, clamped in); a bare value `"60"` keeps the built-in span and makes
   it the initial value, widening the span if it falls outside (so legacy
@@ -86,7 +87,13 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "addr",
         "type": "str",
         "default": "localhost",
-        "help": 'Address the streaming service listens on: a host name or IP address, or a comma-separated list of them, bound on every address each resolves to. The default binds the loopback addresses only (127.0.0.1,::1); "0.0.0.0,::" accepts connections on every interface of both families.',
+        "help": 'Address the streaming service listens on: a host name or IP address, or a comma-separated list of them, bound on every address each resolves to. The default binds the loopback addresses only (127.0.0.1,::1); to accept connections on every interface pass --public instead, never both.',
+    },
+    {
+        "name": "public",
+        "type": "bool",
+        "default": False,
+        "help": 'Accept connections on every interface, IPv4 and IPv6 (0.0.0.0,::), instead of the loopback addresses only; the bare flag turns it on. Given together with --addr, the server refuses to start.',
     },
     {
         "name": "port",
@@ -1288,7 +1295,8 @@ class AppSettings:
 
         Every flag parses as a raw string (type conversion happens later in
         `_process_and_set_attributes`) so CLI and environment values flow
-        through the identical parsing path. Both `--my-setting` and
+        through the identical parsing path; a bool flag given bare reads as
+        "true". Both `--my-setting` and
         `--my_setting` are registered: dashes are the documented spelling, but
         the setting's own name is what every environment variable uses, so
         the underscore form is accepted rather than dropped as unknown.
@@ -1309,6 +1317,7 @@ class AppSettings:
                 type=str,
                 default=None,
                 help=f"{setting['help']} ({env_help_text})",
+                **({"nargs": "?", "const": "true"} if setting["type"] == "bool" else {}),
             )
 
     def _process_and_set_attributes(self, args: argparse.Namespace) -> None:
@@ -1704,6 +1713,8 @@ class AppSettings:
         published to clients are CRF alone; an encoder-derived "cbr" would
         leave the dashboards showing a bitrate slider the encoder ignores and
         hiding the CRF slider in force. Microphone forwarding requires audio.
+        A public listener is the both-family wildcard address, so the server
+        binds from `addr` alone.
         The clipboard policy is normalized to exactly one of its four values.
         The TURN username (the REST service's x-auth-user and the HMAC
         credential alike) defaults to a generic name so the credential stays
@@ -1765,6 +1776,9 @@ class AppSettings:
         if not self.turn_rest_username:
             self.turn_rest_username = "selkies"
 
+        if self.public[0]:
+            self.addr = "0.0.0.0,::"
+
 settings = AppSettings(SETTING_DEFINITIONS)
 
 # Non-bool settings a client may not change once an operator set them;
@@ -1823,7 +1837,7 @@ def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) ->
 # Never broadcast to clients: listener, filesystem and lifecycle-hook settings
 # a browser has no use for and that disclose host layout.
 CLIENT_PAYLOAD_EXCLUDED = [
-    'port', 'addr', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',
+    'port', 'addr', 'public', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',
     'audio_device_name', 'watermark_path', 'recording_socket',
     'file_manager_path', 'run_after_connect', 'run_after_disconnect',
     'https_cert', 'rtc_config_json', 'app_ready_file', 'js_socket_path',
