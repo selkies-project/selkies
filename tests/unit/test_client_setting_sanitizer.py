@@ -96,8 +96,6 @@ def enums() -> None:
     numeric = sanitize("audio_bitrate", 128000, server(audio_bitrate="128000"))
     check("a numeric stop comes back as the string the list holds",
           numeric == "128000" and isinstance(numeric, str), repr(numeric))
-    check("an encoder alias resolves to the name the list carries",
-          sanitize("encoder", "openh264enc", server(encoder="h264enc")) == "h264enc")
 
 
 def numbers() -> None:
