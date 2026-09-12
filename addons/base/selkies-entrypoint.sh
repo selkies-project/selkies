@@ -74,6 +74,5 @@ if [ "${wayland}" != "true" ] && [ "${wayland}" != "1" ]; then
   selkies-resize 1920x1080
 fi
 
-# The published port is the container's boundary, so listen on every interface;
-# spelled as addresses so that a later --addr among the arguments still wins
-exec selkies --addr=0.0.0.0,:: --port="${SELKIES_PORT:-8080}" "$@"
+# The published port is the container's boundary, so listen on every interface
+exec selkies --public --port="${SELKIES_PORT:-8080}" "$@"

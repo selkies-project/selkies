@@ -92,6 +92,11 @@ for command in selkies selkies-resize; do
         exit 1
     fi
 done
+# A release that ignores --public would come up listening on loopback only.
+if ! python3 -c 'from selkies.settings import SETTING_DEFINITIONS as s; assert any(d["name"] == "public" for d in s)' 2> /dev/null; then
+    echo "selkies $(pip3 show selkies | sed -n 's/^Version: //p') has no --public option; set this feature's release option to a tag that does" >&2
+    exit 1
+fi
 
 mkdir -p /etc/OpenCL/vendors && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
 

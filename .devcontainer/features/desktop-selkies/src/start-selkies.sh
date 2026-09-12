@@ -80,10 +80,9 @@ fi
 # Preset the resolution (X11 backend only)
 [ "${SELKIES_WAYLAND:-false}" != "true" ] && selkies-resize 1920x1080
 
-# Start Selkies on every interface; spelled as addresses so that a later
-# --addr among the arguments still wins
+# Start Selkies
 exec selkies \
-    --addr="0.0.0.0,::" \
+    --public \
     --port="${SELKIES_PORT:-${WEB_PORT:-8080}}" \
     --enable-resize="${SELKIES_ENABLE_RESIZE:-true}" \
     "$@"
