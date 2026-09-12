@@ -1,5 +1,6 @@
 #include <linux/uinput.h>
 #include <linux/input.h>
+#include <linux/joystick.h>
 #include <stdio.h>
 int main(void) {
     printf("UI_DEV_CREATE %lu\n",  (unsigned long)UI_DEV_CREATE);
@@ -18,5 +19,12 @@ int main(void) {
     printf("off_setup_ff %zu\n", __builtin_offsetof(struct uinput_setup, ff_effects_max));
     printf("UINPUT_MAX_NAME_SIZE %d\n", UINPUT_MAX_NAME_SIZE);
     printf("BUS_USB %d\n", BUS_USB);
+    printf("sizeof_js_event %zu\n", sizeof(struct js_event));
+    printf("off_js_value %zu\n", __builtin_offsetof(struct js_event, value));
+    printf("off_js_type %zu\n", __builtin_offsetof(struct js_event, type));
+    printf("off_js_number %zu\n", __builtin_offsetof(struct js_event, number));
+    printf("JS_EVENT_BUTTON %d\n", JS_EVENT_BUTTON);
+    printf("JS_EVENT_AXIS %d\n", JS_EVENT_AXIS);
+    printf("JS_EVENT_INIT %d\n", JS_EVENT_INIT);
     return 0;
 }

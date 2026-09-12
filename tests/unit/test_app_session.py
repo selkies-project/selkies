@@ -4,7 +4,8 @@
 app_session() maps the backend and the compositor topology onto the display(s)
 a launched application must use, and app_launch_env() turns that into DISPLAY /
 WAYLAND_DISPLAY / XDG_SESSION_TYPE and adopts the desktop's session bus from
-its own processes.
+its own processes. Underneath both sits the display name itself: only a local
+name has a socket to probe, and a remote one must never be connected to.
 """
 import os
 import shutil
@@ -36,7 +37,25 @@ def make_handler(is_wayland, app_display="wayland-1", separate=False):
     return h
 
 
+def display_names():
+    """The socket a display name resolves to, which is what the liveness probe
+    connects to and what tells a local server from a remote one."""
+    local = {":0": "/tmp/.X11-unix/X0", ":12.1": "/tmp/.X11-unix/X12",
+             "unix:3": "/tmp/.X11-unix/X3", "unix:3.0": "/tmp/.X11-unix/X3",
+             " :4 ": "/tmp/.X11-unix/X4"}
+    for name, want in local.items():
+        check(f"'{name}' names a local socket", ih.x_display_socket(name) == want,
+              ih.x_display_socket(name))
+    remote = ("host:0", "192.168.0.2:0", "localhost:10.0", "tcp/host:0", "::1:0",
+              "", ":", ":abc", ":0.")
+    unresolved = [n for n in remote if ih.x_display_socket(n) is not None]
+    check("a remote or malformed name has no socket", not unresolved, unresolved)
+    check("a remote display is reported dead rather than connected to",
+          ih.x_display_live("host:0") is False)
+
+
 def main():
+    display_names()
     saved_live = ih.x_display_live
     saved_xwl = ih.x_display_is_xwayland
     saved_list = ih.live_x_displays
