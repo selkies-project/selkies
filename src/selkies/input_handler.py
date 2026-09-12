@@ -3710,7 +3710,6 @@ class WebRTCInput:
         self.on_clipboard_read = self._on_clipboard_read
         self.on_set_fps = lambda fps, display_id="primary": logger_webrtc_input.warning("unhandled on_set_fps")
         self.on_request_keyframe = lambda display_id="primary": logger_webrtc_input.warning("unhandled on_request_keyframe")
-        self.on_set_enable_resize = lambda enable_resize, res: logger_webrtc_input.warning("unhandled on_set_enable_resize")
         self.on_client_fps = lambda fps: logger_webrtc_input.warning("unhandled on_client_fps")
         self.on_client_latency = lambda latency: logger_webrtc_input.warning("unhandled on_client_latency")
         self.on_resize = lambda res, display_id="primary": logger_webrtc_input.warning("unhandled on_resize")
@@ -7885,15 +7884,6 @@ class WebRTCInput:
                 await self.on_set_fps(fps, display_id)
             except Exception as e:
                 logger_webrtc_input.error(f"Error fps change: {e}")
-        elif msg_type == "_arg_resize":
-            if len(toks) == 3:
-                enabled, res_str = toks[1].lower() == "true", toks[2]
-                enable_res = None
-                if re.fullmatch(r"^\d+x\d+$", res_str):
-                    w,h = [int(i)+int(i)%2 for i in res_str.split("x")]; enable_res = f"{w}x{h}"
-                elif res_str: logger_webrtc_input.warning(f"Invalid resolution for enable_resize: {res_str}")
-                self.on_set_enable_resize(enabled, enable_res)
-            else: logger_webrtc_input.error("Invalid _arg_resize command format")
         elif msg_type == "_f": 
             try: self.on_client_fps(int(toks[1]))
             except (ValueError, IndexError): logger_webrtc_input.error(f"Failed to parse client FPS: {toks}")
