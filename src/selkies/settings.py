@@ -204,6 +204,25 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. The congestion-control pacing protects the video stream without it, in both directions and end to end through a reverse proxy; the cap is for holding transfers to a fixed share regardless.',
     },
     {
+        "name": "audit_webhook_url",
+        "type": "str",
+        "default": "",
+        "help": 'URL that receives one JSON POST per clipboard transfer, file upload and file download, carrying metadata only (the event, an RFC 3339 timestamp, byte size, MIME type or file name) and never the content. Events are delivered in order over one keep-alive connection; a collector that is slow or down loses what overflows the queue rather than stalling the session. Empty (default) sends nothing.',
+    },
+    {
+        "name": "audit_webhook_token",
+        "type": "str",
+        "default": "",
+        "help": 'Bearer token sent in the Authorization header of every audit POST. Empty sends no header.',
+    },
+    {
+        "name": "audit_webhook_timeout",
+        "type": "float",
+        "default": 2.0,
+        "min": 0.1,
+        "help": 'Seconds one audit POST may take before it counts as failed and the next event is sent.',
+    },
+    {
         "name": "framerate",
         "type": "range",
         "default": "8-240",
@@ -1075,6 +1094,7 @@ SENSITIVE_SETTING_NAMES = frozenset({
     "turn_password",
     "cloudflare_turn_token_id",
     "cloudflare_turn_api_token",
+    "audit_webhook_token",
 })
 for _setting_def in SETTING_DEFINITIONS:
     if _setting_def["name"] in SENSITIVE_SETTING_NAMES:
@@ -1844,6 +1864,7 @@ CLIENT_PAYLOAD_EXCLUDED = [
     'webcam_socket_path', 'webcam_device',
     'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind',
     'wayland_host_display', 'app_wayland_display',
+    'audit_webhook_url', 'audit_webhook_timeout',
 ]
 
 

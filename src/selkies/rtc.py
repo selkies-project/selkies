@@ -63,6 +63,7 @@ except (ImportError, RuntimeError):
     pcmflux = None
 
 from .settings import settings as app_settings, inflate_gz_bounded, pipeline_starts_on, software_encoders, software_video_path
+from . import audit
 from .ice import TcpMux, UdpMux
 from .ice.ice import get_host_addresses
 from .webcam import CODEC_BY_NAME, get_shared_webcam, webcam_locked_off, webcam_uplink_allowed
@@ -643,6 +644,9 @@ class RTCApp:
             if channel is None or channel.readyState != "open":
                 return
             requester = channel
+        if data_bytes and (requester is not None
+                           or next(self._iter_open_data_channels(), None) is not None):
+            audit.emit("clipboard.send", mime_type=mime_type, size_bytes=len(data_bytes))
 
         def send_typed(msg_type: str, payload: Any) -> None:
             if requester is not None:

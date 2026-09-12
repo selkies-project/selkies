@@ -94,6 +94,7 @@ from .display_utils import (
 )
 from .media_pipeline import RateControlMode
 from .settings import settings
+from . import audit
 try:
     from pixelflux import VirtualKeyboardUnavailable as PixelfluxVkUnavailable
 except Exception:
@@ -7729,6 +7730,7 @@ class WebRTCInput:
                     # must find the clipboard set. Bytes pass straight through; a
                     # multi-MB decode and re-encode on the loop would be redundant.
                     if await self.write_clipboard(data, mime_type=mime_type):
+                        audit.emit("clipboard.receive", mime_type=mime_type, size_bytes=len(data), multipart=True)
                         if mime_type == "text/plain":
                             logger_webrtc_input.info(f"Set multi-part clipboard content, length: {len(data)}")
                         else:
@@ -7819,6 +7821,7 @@ class WebRTCInput:
                     data_bytes = base64.b64decode(b64_data)
                     # In-line so a paste keystroke right behind it pastes this content.
                     if await self.write_clipboard(data_bytes, mime_type=mime_type):
+                        audit.emit("clipboard.receive", mime_type=mime_type, size_bytes=len(data_bytes), multipart=False)
                         logger_webrtc_input.info(f"Set binary clipboard content ({mime_type}), size: {len(data_bytes)} bytes")
                 except Exception as e:
                     logger_webrtc_input.error(f"Binary clipboard write error: {e}")
@@ -7830,6 +7833,7 @@ class WebRTCInput:
                     data = base64.b64decode(toks[1]).decode("utf-8", 'ignore')
                     # In-line for paste-after-copy ordering (see the cb branch).
                     if await self.write_clipboard(data):
+                        audit.emit("clipboard.receive", mime_type="text/plain", size_bytes=len(data.encode()), multipart=False)
                         logger_webrtc_input.info(f"Set clipboard content, length: {len(data)}")
                 except Exception as e:
                     logger_webrtc_input.error(f"Clipboard decode error: {e}")

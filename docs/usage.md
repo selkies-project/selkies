@@ -44,6 +44,20 @@ The side menu's files section uploads files into the session and browses the sam
 
 `--file-manager-path` (`FILE_MANAGER_PATH`, default `~/Desktop`) is the directory both directions use, created at startup when missing. Transfers in either direction are paced against the video stream so a large one does not stall the session, measured end to end so a reverse proxy in front changes nothing; `--file-transfer-limit-mbps` adds a fixed cap on top for operators who want one.
 
+## Audit Trail
+
+`--audit-webhook-url` (`SELKIES_AUDIT_WEBHOOK_URL`) POSTs one JSON object to a collector for every clipboard transfer, file upload and file download, for deployments that have to produce a record of what moved. Metadata only: the content is never sent, and neither is anything identifying the client, since Selkies has no first-class user of its own. Nothing is sent without a URL. `--audit-webhook-token` adds an `Authorization: Bearer` header a proxy in front of the collector can check, and `--audit-webhook-timeout` bounds one POST; the URL is used as given, so a collector anywhere but this host wants `https://`.
+
+| `event` | Fields | Recorded when |
+| --- | --- | --- |
+| `clipboard.send` | `mime_type`, `size_bytes` | the session's clipboard goes out to the clients |
+| `clipboard.receive` | `mime_type`, `size_bytes`, `multipart` | a client's clipboard is written into the session |
+| `file.upload.end` | `filename`, `size_bytes` | an upload lands in the file-manager directory |
+| `file.upload.error` | `filename`, `error` | an upload is refused or fails, `filename` as the client asked for it |
+| `file.download` | `filename`, `size_bytes` | a file is served out of the file-manager directory |
+
+Every object also carries `ts`, an RFC 3339 UTC timestamp with milliseconds taken when the transfer happened, and both transports emit the same objects. An event costs the session an enqueue and nothing else: one task delivers the queue in order over a single keep-alive connection, so a collector that is slow or down never paces the stream. The queue holds 1024 events and drops what overflows, a POST that fails drops its event with no retry, and each outage is logged once.
+
 ## Session Sharing
 
 The side menu's sharing section hands out links to the running session. Each one is the page's own address with a fragment on the end, and it carries no credential of its own — whatever already guards the page (HTTP Basic authentication, a reverse proxy) guards the link too, so treat a copied link as one:

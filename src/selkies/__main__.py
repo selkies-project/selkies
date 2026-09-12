@@ -31,6 +31,7 @@ from .webrtc_mode import WebRTCService
 from .selkies import DataStreamingServer
 from .stream_server import CentralizedStreamServer
 from .webcam import stop_shared_webcam
+from . import audit
 
 
 logging.basicConfig(level=logging.INFO)
@@ -123,6 +124,7 @@ async def run() -> None:
         await server.run()
     finally:
         await stop_shared_webcam()
+        await audit.close()
 
 
 def main() -> None:
