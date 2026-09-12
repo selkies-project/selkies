@@ -21,7 +21,6 @@ exec turnserver \
     --lt-cred-mech \
     --user="selkies:${TURN_RANDOM_PASSWORD:-selkies}" \
     --no-cli \
-    --cli-password="${TURN_RANDOM_PASSWORD:-selkies}" \
     --userdb="${XDG_RUNTIME_DIR}/turnserver-turndb" \
     --pidfile="${XDG_RUNTIME_DIR}/turnserver.pid" \
     --log-file="stdout" \

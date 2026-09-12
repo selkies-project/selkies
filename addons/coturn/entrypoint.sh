@@ -45,7 +45,6 @@ turnserver \
     --use-auth-secret \
     --static-auth-secret="${TURN_SHARED_SECRET:-changeme}" \
     --no-cli \
-    --cli-password="$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 24)" \
     --userdb="/tmp/turnserver-turndb" \
     --pidfile="/tmp/turnserver.pid" \
     --log-file="stdout" \
