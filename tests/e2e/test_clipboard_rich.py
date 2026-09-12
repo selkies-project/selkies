@@ -170,6 +170,21 @@ def policy_block() -> "H.Results":
             source.close()
             browser.close()
 
+    # Reading markup out of the browser is the same clipboard read images need,
+    # so the image switch decides whether a rich copy leaves the browser as one.
+    H.server_start(mode="websockets", wayland=False, web_root=DASH,
+                   extra_env={"PYTHONPATH": os.path.join(H.REPO, "src"),
+                              "SELKIES_ENABLE_BINARY_CLIPBOARD": "false"})
+    with sync_playwright() as p:
+        browser, page = page_with_clipboard(p, "websockets")
+        try:
+            write_rich(page, "<b>plain only</b>", "plain only")
+            res.check("with the image clipboard off a rich copy still reaches the session as text",
+                      (convert("UTF8_STRING") or b"").decode() == "plain only", convert("UTF8_STRING"))
+            res.check("and it carries no markup", convert("text/html") is None, convert("text/html"))
+        finally:
+            browser.close()
+
     # The panel writes the choice and the core stores it; a reload has to find it.
     H.server_start(mode="websockets", wayland=False, web_root=DASH,
                    extra_env={"PYTHONPATH": os.path.join(H.REPO, "src")})
