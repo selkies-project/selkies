@@ -3756,6 +3756,10 @@ class WebRTCInput:
         self._xclip_missing_warned = False
         self._last_clipboard_request_ts = {}
         self._clipboard_request_debounce = 0.25
+        # Connections whose clipboard read-back is still waiting on the
+        # selection owner; a repeat from one of them would only queue another
+        # executor thread behind the same owner.
+        self._clipboard_reads = set()
         self._bg_tasks = set()
         self.keyboard_queue = asyncio.Queue(maxsize=4096)
         self.keyboard_worker_task = None
@@ -7734,19 +7738,36 @@ class WebRTCInput:
                 self._reset_multipart_clipboard()
         elif msg_type == "cr":
             if self.enable_clipboard in ["true", "out"]:
-                data, mime_type = await self.read_clipboard(use_binary=self.enable_binary_clipboard in ["true", "out"])
-                if data:
-                    # Tagged (reply_to) so the client treats it cache-only without
-                    # its connect-time 5 s heuristic, and sent to this client alone:
-                    # unasked-for, another client would cache content it never pastes.
-                    await self.send_clipboard_data(
-                        data, mime_type, reply_to="cr", conn_id=conn_id)
+                clip_key = conn_id if conn_id is not None else display_id
+                use_binary = self.enable_binary_clipboard in ["true", "out"]
+
+                async def _answer_clipboard_read():
+                    """Read and answer as a task (REQUEST_CLIPBOARD parity): an
+                    owner that never converts the selection holds the read for
+                    its timeout, and this one arrives at connect, ahead of the
+                    DPI sync and the session's first resolution request."""
+                    try:
+                        data, mime_type = await self.read_clipboard(use_binary=use_binary)
+                        if data:
+                            # Tagged (reply_to) so the client treats it cache-only without
+                            # its connect-time 5 s heuristic, and sent to this client alone:
+                            # unasked-for, another client would cache content it never pastes.
+                            await self.send_clipboard_data(
+                                data, mime_type, reply_to="cr", conn_id=conn_id)
+                        else:
+                            # Reply even when empty: the tag settles the client's connect-time
+                            # fetch, so a real change seconds later is not taken for the snapshot.
+                            logger_webrtc_input.debug("No clipboard content; sending empty tagged reply")
+                            await self.send_clipboard_data(
+                                "", "text/plain", reply_to="cr", conn_id=conn_id)
+                    finally:
+                        self._clipboard_reads.discard(clip_key)
+
+                if clip_key in self._clipboard_reads:
+                    logger_webrtc_input.debug("Clipboard read-back already in flight; dropping the repeat")
                 else:
-                    # Reply even when empty: the tag settles the client's connect-time
-                    # fetch, so a real change seconds later is not taken for the snapshot.
-                    logger_webrtc_input.debug("No clipboard content; sending empty tagged reply")
-                    await self.send_clipboard_data(
-                        "", "text/plain", reply_to="cr", conn_id=conn_id)
+                    self._clipboard_reads.add(clip_key)
+                    self._spawn_task(_answer_clipboard_read())
             else: logger_webrtc_input.warning("Rejecting clipboard read: outbound clipboard disabled.")
         elif msg_type == "REQUEST_CLIPBOARD":
             if self.enable_clipboard in ["true", "out"]:
