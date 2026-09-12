@@ -1783,7 +1783,7 @@ class RTCApp:
                 peer_id, display_id or "primary", msg == "START_VIDEO")
         return self.on_data_message(msg, display_id or "primary", conn_id=peer_id)
 
-    async def on_peer_connection_established(self, client_peer_id: str, client_type: ClientType, display_id: str = "primary") -> None:
+    async def on_peer_connection_established(self, client_peer_id: str, display_id: str = "primary") -> None:
         """Start the display's capture when a peer finishes connecting.
 
         Every consumer asks, not just the controller: a lone viewer must get
@@ -1833,7 +1833,7 @@ class RTCApp:
         elif state == "disconnected":
             logger.warning("Peer connection disconnected", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "connected":
-            await self.on_peer_connection_established(client_peer_id, client_type, display_id)
+            await self.on_peer_connection_established(client_peer_id, display_id)
             logger.info("Peer connection established", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "closed":
             self.peer_connections.pop(client_peer_id, None)

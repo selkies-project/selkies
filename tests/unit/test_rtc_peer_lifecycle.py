@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
-from selkies.rtc import RTCApp, ClientType
+from selkies.rtc import RTCApp
 
 
 class Service:
@@ -66,7 +66,7 @@ async def scenario(res: H.Results) -> None:
               sorted(app.peer_connections))
     res.check("lone viewer: primary graph built", "primary" in app.displays,
               sorted(app.displays))
-    await app.on_peer_connection_established("v1", ClientType.VIEWER, "primary")
+    await app.on_peer_connection_established("v1", "primary")
     res.check("lone viewer: connected viewer starts the display media",
               svc.started == ["primary"], svc.started)
 
