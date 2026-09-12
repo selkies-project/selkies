@@ -4,9 +4,8 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # Build selkies-<ver>-<arch>.AppImage on the runner for this architecture.
-# Uses rattler-build to package selkies as a conda package (which also ships as
-# a release artifact), then assembles the AppImage with linuxdeploy and the
-# conda plugin in infra/appimage.
+# Uses rattler-build to package selkies as a conda package, then assembles the
+# AppImage with linuxdeploy and the conda plugin in infra/appimage.
 #
 # Usage: scripts/ci/appimage.sh [arch]   (any `uname -m` name; defaults to this host)
 
@@ -242,7 +241,7 @@ mv "${OUTPUT}" out/
 # a payload that runs nowhere else would pass every check below.
 rm -rf AppDir
 scripts/ci/verify-appimage.sh "out/${OUTPUT}"
-# The conda package is noarch, so exactly one architecture's job publishes it
+# The conda package is noarch, so exactly one architecture's job uploads it
 if [ "${ARCH}" = "${CONDA_PACKAGE_ARCH:-x86_64}" ]; then
   cp "${PKG}" out/
 fi

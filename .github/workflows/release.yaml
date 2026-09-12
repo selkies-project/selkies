@@ -181,6 +181,10 @@ jobs:
           # The capture stack rides inside the images and packages; its wheels
           # stay on the pixelflux and pcmflux releases this run took them from
           find release-artifacts -type f \( -name 'pixelflux-*.whl' -o -name 'pcmflux-*.whl' \) -delete
+          # Artifacts of the run rather than of the release: the build record
+          # docker/build-push-action uploads per image, and the conda package
+          # the AppImage is assembled from
+          find release-artifacts -type f \( -name '*.dockerbuild' -o -name '*.conda' \) -delete
           find release-artifacts -type f -exec mv {} release/ \;
           ls -la release/
       # A release held off the badge carries the marker release-published.yaml
