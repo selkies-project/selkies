@@ -845,6 +845,7 @@ class WebRTCService(BaseStreamingService):
         locked size is the server's own, beyond a client alignment toggle.
         """
         display_id = display_id or "primary"
+        logger.info(f"on_resize_handler for display '{display_id}' with resolution: {res}")
         if display_id == "primary" and not self.args.enable_resize:
             logger.warning(f"remote resizing disabled, skipping resize to {res}")
             return
@@ -944,7 +945,7 @@ class WebRTCService(BaseStreamingService):
                     or self._last_resize_request == (target_w, target_h)
                 )
             ):
-                logger.debug(f"Resolution already {target_w}x{target_h}; skipping re-apply.")
+                logger.info(f"Redundant resize request for primary to {target_w}x{target_h}. No action.")
                 return
 
             if IS_WAYLAND:
