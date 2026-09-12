@@ -359,6 +359,18 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Allow binary data (e.g., images) on the clipboard.",
     },
     {
+        "name": "clipboard_seamless",
+        "type": "bool",
+        "default": True,
+        "help": "Synchronize the clipboard as the session and the browser change it, so a copy on either side is ready to paste on the other without asking. Turn it off to move clipboard content only when the user asks for it, through the side menu's clipboard box, which suits a session whose content should not follow the user out of it by accident. The direction settings still bound what moves either way. Clients may override per user unless the value is locked.",
+    },
+    {
+        "name": "keyboard_shortcuts",
+        "type": "bool",
+        "default": True,
+        "help": "Let the client keep its own chords (Control+Shift with F, M, X or G, and Control+Shift+click) instead of passing them to the session. Turn it off where an application in the session binds the same chords; the side menu's buttons still reach every function, and pressing Escape three times still leaves gaming mode. Clients may override per user unless the value is locked.",
+    },
+    {
         "name": "use_browser_cursors",
         "type": "bool",
         "default": True,

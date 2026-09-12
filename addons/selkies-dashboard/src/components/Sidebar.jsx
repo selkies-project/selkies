@@ -1079,6 +1079,12 @@ function Sidebar() {
     newRenderable.uiScaling = isRenderable('scaling_dpi');
     newRenderable.binaryClipboard = isRenderable('enable_binary_clipboard')
       && (s.clipboard_enabled?.value ?? true);
+    // A direction the server refuses is not offered rather than offered dead.
+    newRenderable.clipboardUp = s.clipboard_in_enabled?.value ?? true;
+    newRenderable.clipboardDown = s.clipboard_out_enabled?.value ?? true;
+    newRenderable.clipboardSeamless = isRenderable('clipboard_seamless')
+      && (s.clipboard_enabled?.value ?? true);
+    newRenderable.keyboardShortcuts = isRenderable('keyboard_shortcuts');
     newRenderable.use_browser_cursors = isRenderable('use_browser_cursors');
     newRenderable.rawPointerMotion = isRenderable('raw_pointer_motion');
     newRenderable.macCmdAsCtrl = isRenderable('mac_cmd_as_ctrl') && isMacDesktop();
@@ -1419,6 +1425,14 @@ function Sidebar() {
     const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
     return saved !== null ? saved === 'true' : DEFAULT_ENABLE_BINARY_CLIPBOARD;
   });
+  const storedBool = (key, fallback) => {
+    const saved = localStorage.getItem(getPrefixedKey(key));
+    return saved !== null ? saved === 'true' : fallback;
+  };
+  const [clipboardUp, setClipboardUp] = useState(() => storedBool("clipboard_in_enabled", true));
+  const [clipboardDown, setClipboardDown] = useState(() => storedBool("clipboard_out_enabled", true));
+  const [clipboardSeamless, setClipboardSeamless] = useState(() => storedBool("clipboard_seamless", true));
+  const [keyboardShortcuts, setKeyboardShortcuts] = useState(() => storedBool("keyboard_shortcuts", true));
   const [presetValue, setPresetValue] = useState("");
   const [clientFps, setClientFps] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
@@ -2356,6 +2370,12 @@ function Sidebar() {
     const newState = !enableBinaryClipboard;
     setEnableBinaryClipboard(newState);
     debouncedPostSetting({ enable_binary_clipboard: newState });
+  };
+  /** One clipboard or shortcut switch: optimistic, then posted like any setting. */
+  const toggleClientSetting = (key, value, setValue) => {
+    setValue(value);
+    localStorage.setItem(getPrefixedKey(key), String(value));
+    debouncedPostSetting({ [key]: value });
   };
   const handleSetManualResolution = () => {
     const width = parseInt(manual_width.trim(), 10),
@@ -4429,6 +4449,63 @@ function Sidebar() {
                 </div>
                 {sectionsOpen.clipboard && (
                   <div className="sidebar-section-content" id="clipboard-content">
+                    {(renderableSettings.clipboardUp ?? true) && (
+                      <div className="dev-setting-item toggle-item">
+                        <label
+                          htmlFor="clipboardUpToggle"
+                          title={t("sections.clipboard.upDetails")}
+                        >
+                          {t("sections.clipboard.upLabel", "Send to session")}
+                        </label>
+                        <button
+                          id="clipboardUpToggle"
+                          className={`toggle-button-sidebar ${clipboardUp ? "active" : ""}`}
+                          onClick={() => toggleClientSetting("clipboard_in_enabled", !clipboardUp, setClipboardUp)}
+                          aria-pressed={clipboardUp}
+                          title={t("sections.clipboard.upLabel", "Send to session")}
+                        >
+                          <span className="toggle-button-sidebar-knob"></span>
+                        </button>
+                      </div>
+                    )}
+                    {(renderableSettings.clipboardDown ?? true) && (
+                      <div className="dev-setting-item toggle-item">
+                        <label
+                          htmlFor="clipboardDownToggle"
+                          title={t("sections.clipboard.downDetails")}
+                        >
+                          {t("sections.clipboard.downLabel", "Receive from session")}
+                        </label>
+                        <button
+                          id="clipboardDownToggle"
+                          className={`toggle-button-sidebar ${clipboardDown ? "active" : ""}`}
+                          onClick={() => toggleClientSetting("clipboard_out_enabled", !clipboardDown, setClipboardDown)}
+                          aria-pressed={clipboardDown}
+                          title={t("sections.clipboard.downLabel", "Receive from session")}
+                        >
+                          <span className="toggle-button-sidebar-knob"></span>
+                        </button>
+                      </div>
+                    )}
+                    {(renderableSettings.clipboardSeamless ?? true) && (
+                      <div className="dev-setting-item toggle-item">
+                        <label
+                          htmlFor="clipboardSeamlessToggle"
+                          title={t("sections.clipboard.seamlessDetails")}
+                        >
+                          {t("sections.clipboard.seamlessLabel", "Seamless")}
+                        </label>
+                        <button
+                          id="clipboardSeamlessToggle"
+                          className={`toggle-button-sidebar ${clipboardSeamless ? "active" : ""}`}
+                          onClick={() => toggleClientSetting("clipboard_seamless", !clipboardSeamless, setClipboardSeamless)}
+                          aria-pressed={clipboardSeamless}
+                          title={t("sections.clipboard.seamlessLabel", "Seamless")}
+                        >
+                          <span className="toggle-button-sidebar-knob"></span>
+                        </button>
+                      </div>
+                    )}
                     {(renderableSettings.binaryClipboard ?? true) && (
                       <div className="dev-setting-item toggle-item">
                         <label 
@@ -4750,6 +4827,25 @@ function Sidebar() {
                 </div>
                 {sectionsOpen.shortcuts && (
                   <div className="sidebar-section-content" id="shortcuts-content">
+                    {(renderableSettings.keyboardShortcuts ?? true) && (
+                      <div className="dev-setting-item toggle-item">
+                        <label
+                          htmlFor="keyboardShortcutsToggle"
+                          title={t("sections.shortcuts.enabledDetails")}
+                        >
+                          {t("sections.shortcuts.enabledLabel", "Shortcuts active")}
+                        </label>
+                        <button
+                          id="keyboardShortcutsToggle"
+                          className={`toggle-button-sidebar ${keyboardShortcuts ? "active" : ""}`}
+                          onClick={() => toggleClientSetting("keyboard_shortcuts", !keyboardShortcuts, setKeyboardShortcuts)}
+                          aria-pressed={keyboardShortcuts}
+                          title={t("sections.shortcuts.enabledLabel", "Shortcuts active")}
+                        >
+                          <span className="toggle-button-sidebar-knob"></span>
+                        </button>
+                      </div>
+                    )}
                     {[
                       { combo: "Ctrl + Shift + F", label: t("sections.shortcuts.fullscreen", "Toggle fullscreen") },
                       { combo: "Ctrl + Shift + X", label: t("sections.shortcuts.gamingMode", "Toggle gaming mode") },
