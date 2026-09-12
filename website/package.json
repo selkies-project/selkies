@@ -9,6 +9,7 @@
     "prebuild": "node scripts/sync-assets.mjs && node scripts/generate-python-docs.mjs && node scripts/generate-web-docs.mjs",
     "build": "next build",
     "postbuild": "node scripts/mirror-page-urls.mjs",
+    "build:versions": "node scripts/build-versions.mjs",
     "typecheck": "next typegen && tsc --noEmit",
     "check-links": "node scripts/check-links.mjs",
     "generate:api": "node scripts/generate-python-docs.mjs && node scripts/generate-web-docs.mjs"
@@ -19,6 +20,7 @@
     "fumadocs-mdx": "15.2.2",
     "fumadocs-python": "^0.1.1",
     "fumadocs-ui": "npm:@fumadocs/base-ui@16.14.2",
+    "lucide-react": "^1.45.0",
     "next": "16.3.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

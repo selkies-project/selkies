@@ -165,7 +165,9 @@ npm install
 npm run dev          # http://localhost:3000
 ```
 
-`npm run build` writes the site to `website/out`, which is what the `Docs` workflow uploads, and `npm run check-links` fails on any link or anchor in that output that does not resolve.
+`npm run build` writes the site to `website/out`, and `npm run check-links` fails on any link or anchor in that output that does not resolve.
+
+The published site carries every version: `npm run build:versions`, which is what the `Docs` workflow uploads, builds one copy per release tag from the first that shipped the site and one for `main`. The newest release is built as `latest`, which its own version segment and the site root redirect to. The sidebar's version dropdown switches between them. Every version is rendered by the current `website/` over that version's own pages and source, so a fix to the site reaches every version the next time it is published.
 
 ### Developer Reference
 

@@ -27,18 +27,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Every release tag that carries the site is built beside main.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Build the static site
+      - name: Build the static site, one version per release and main
         working-directory: website
         # Lockfiles are gitignored in this repository, so `npm ci` has nothing
         # to install from
         run: |
           npm install --no-audit --no-fund
-          npm run build
+          npm run build:versions
 
       - name: Check every link and anchor in the built site
         working-directory: website
