@@ -3822,14 +3822,13 @@ class WebRTCInput:
         """Route a command notice (``command_error``/``command_done``) to the
         transport (see send_cursor_data).
 
-        Each transport carries the system action on its own wire format. Over
-        WebRTC ``conn_id`` is the requesting peer's id, so the notice targets
-        that peer's channel; the websockets transport notifies its requesting
-        socket in its own cmd branch and only broadcasts here.
+        Each transport carries the system action on its own wire format and
+        addresses the requester by the identity its own connections carry: the
+        peer id over WebRTC, the socket identity over websockets.
         """
         try:
             if self._ws_transport():
-                self.rtc_app.send_system_action(action)
+                self.rtc_app.send_system_action(action, conn_id=conn_id)
             else:
                 self.rtc_app.send_system_action(action, peer_id=conn_id)
         except Exception:

@@ -101,7 +101,6 @@ from .input_handler import (
     VIEWER_ALLOWED_PREFIXES,
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
-    run_client_command,
 )
 from .settings import settings, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, effective_use_cpu, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting
 from .settings import settings as app_settings
@@ -172,7 +171,7 @@ TARGET_FRAMERATE = 60
 # Secure mode: the messages only the input-authority holder may send. A set, and
 # built once, because the check runs per client message.
 SECURE_INPUT_PREFIXES = frozenset((
-    "kd", "ku", "kh", "kr", "m", "m2", "co",
+    "kd", "ku", "kh", "kr", "m", "m2", "co", "cmd",
     "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb",
     "REQUEST_CLIPBOARD",
 ))
@@ -998,8 +997,13 @@ class SelkiesStreamingApp:
         else:
             data_logger.warning("Cannot broadcast cursor data: no clients connected or server not ready.")
 
-    def send_system_action(self, action: str) -> None:
-        """Broadcast a system action (e.g. ``command_error,<text>``) to clients."""
+    def send_system_action(self, action: str, conn_id: Optional[int] = None) -> None:
+        """Send a system action (e.g. ``command_error,<text>``) to clients.
+
+        Addressed to the connection that asked for it when one is named, as an
+        answer that belongs to one client rather than to the session;
+        broadcast otherwise.
+        """
         if (
             self.data_streaming_server
             and getattr(self.data_streaming_server, "clients", None)
@@ -1010,7 +1014,8 @@ class SelkiesStreamingApp:
             clients_ref = self.data_streaming_server.clients
 
             async def _broadcast_system_helper():
-                await _broadcast_to_clients(clients_ref, msg, per_client_timeout=2.0)
+                await _broadcast_to_clients(clients_ref, msg, per_client_timeout=2.0,
+                                            only=conn_id)
 
             asyncio.run_coroutine_threadsafe(
                 _broadcast_system_helper(), self.async_event_loop
@@ -1320,14 +1325,12 @@ class DataStreamingServer(BaseStreamingService):
             )
         self.input_handler.on_mouse_pointer_visible = self.set_native_cursor_rendering
         self.input_handler.on_session_compositor_adopted = self._resync_wayland_session_scale
+        self.input_handler.on_scaling_ratio = self._handle_scaling
 
         if ENABLE_RESIZE:
-            self.input_handler.on_resize = lambda res_str, display_id='primary': on_resize_handler(
-                res_str, self.app, self, display_id
-            )
+            self.input_handler.on_resize = self._handle_resize
         else:
-            # Only the resolution is frozen: a DPI sync still scales the desktop,
-            # applied in this transport's own message loop.
+            # Only the resolution is frozen: a DPI sync still scales the desktop.
             self.input_handler.on_resize = lambda res_str, display_id='primary': logger.warning("Resize disabled.")
         logger.info("DataStreamingServer initialization complete.")
 
@@ -1374,6 +1377,77 @@ class DataStreamingServer(BaseStreamingService):
             return
         for name, value in live_fields.items():
             setattr(cs, name, value)
+
+    async def _handle_resize(self, res_str: str, display_id: str = 'primary') -> None:
+        """Route a client resize once the display it names has been laid out.
+
+        The layout comes from the connection's initial SETTINGS, which this
+        transport's own message loop processes, so the wait is bounded: a
+        client that sends `r,` first would otherwise deadlock it.
+        """
+        try:
+            await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            data_logger.warning("Ignoring resize request received before initial SETTINGS.")
+            return
+        await on_resize_handler(res_str, self.app, self, display_id)
+
+    async def _handle_scaling(self, dpi_value: float, display_id: str = 'primary') -> None:
+        """Apply a client DPI sync to the desktop (WebRTC `handle_scaling` parity).
+
+        Fractional DPI is legal on the shared verb; the desktop property itself
+        is integral and bounded by the declared span, and an operator-set DPI
+        governs the desktop over any client's. X11 takes one DPI for the
+        session; on Wayland the display's own screen takes it, while the cursor
+        cap and size stay the primary's. The DPI is stored where SETTINGS
+        stores it, or a later partial SETTINGS re-applies one the desktop has
+        moved off. The wait is the one `_handle_resize` documents.
+        """
+        try:
+            await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            data_logger.warning("Ignoring DPI sync received before initial SETTINGS.")
+            return
+        try:
+            dpi_value = min(SCALING_DPI_MAX,
+                            max(SCALING_DPI_MIN, int(round(float(dpi_value)))))
+        except (TypeError, ValueError, OverflowError):
+            data_logger.error(f"Invalid DPI value: {dpi_value!r}")
+            return
+        if app_settings._overridden.get("scaling_dpi", False):
+            data_logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
+            return
+        data_logger.info(f"Received DPI setting from client: {dpi_value}")
+        try:
+            if not IS_WAYLAND:
+                if await set_dpi(dpi_value):
+                    data_logger.info(f"Successfully set DPI to {dpi_value}")
+                else:
+                    data_logger.error(f"Failed to set DPI to {dpi_value}")
+                self._update_cursor_cap(dpi_value)
+            else:
+                # Before the restart, which reads the cap through CaptureSettings.
+                if display_id in (None, 'primary'):
+                    self._update_cursor_cap(dpi_value)
+                await self._realize_wayland_display_dpi(display_id, dpi_value)
+
+            dpi_state = self.display_clients.get(display_id)
+            if dpi_state is not None:
+                dpi_state["scaling_dpi"] = dpi_value
+
+            if CURSOR_SIZE is not None:
+                if IS_WAYLAND:
+                    if display_id in (None, 'primary'):
+                        await self._apply_wayland_cursor_size(dpi_value)
+                else:
+                    new_cursor_size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
+                    data_logger.info(f"Attempting to set cursor size to: {new_cursor_size} (based on DPI {dpi_value})")
+                    if await set_cursor_size(new_cursor_size):
+                        data_logger.info(f"Successfully set cursor size to {new_cursor_size}")
+                    else:
+                        data_logger.error(f"Failed to set cursor size to {new_cursor_size}")
+        except Exception as e_dpi:
+            data_logger.error(f"Error applying DPI {dpi_value}: {e_dpi}", exc_info=True)
 
     async def _handle_opcode_fps(self, fps: Any, display_id: str = 'primary') -> None:
         """Live framerate for the shared '_arg_fps' verb (WebRTC-mode parity):
@@ -4075,38 +4149,6 @@ class DataStreamingServer(BaseStreamingService):
                             if self.clients:
                                 await _broadcast_to_clients(self.clients, "AUDIO_STOPPED", per_client_timeout=2.0)
 
-                    elif message.startswith("r,"):
-                        # Bounded: this loop is what would process the initial SETTINGS, so
-                        # an unbounded wait deadlocks when a client sends r, first.
-                        try:
-                            await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
-                        except asyncio.TimeoutError:
-                            data_logger.warning("Ignoring resize request received before initial SETTINGS.")
-                            continue
-                        raddr = remote_address
-                        
-                        parts = message.split(',')
-                        if len(parts) != 3:
-                            data_logger.warning(f"Malformed resize request from {raddr}: {message}")
-                            continue
-                        
-                        target_res_str = parts[1]
-                        display_id = parts[2]
-
-                        client_info = self.display_clients.get(display_id)
-                        if not client_info:
-                            data_logger.warning(f"Resize request for unknown display_id '{display_id}' from {raddr}. Ignoring.")
-                            continue
-                        
-                        current_res_str = f"{client_info.get('width', 0)}x{client_info.get('height', 0)}"
-
-                        if target_res_str == current_res_str:
-                            data_logger.info(f"Received redundant resize request for {display_id} ({target_res_str}). No action taken.")
-                            continue
-                        data_logger.info(f"Received resize request for {display_id}: {target_res_str} from {raddr}")
-
-                        await on_resize_handler(target_res_str, self.app, self, display_id)
-
                     elif message.startswith("SET_NATIVE_CURSOR_RENDERING,"):
                         try:
                             await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
@@ -4120,108 +4162,6 @@ class DataStreamingServer(BaseStreamingService):
                             await self.set_native_cursor_rendering(new_capture_cursor)
                         except (IndexError, ValueError) as e:
                             data_logger.warning(f"Malformed SET_NATIVE_CURSOR_RENDERING message: {message}, error: {e}")
-
-                    elif message.startswith("s,"):
-                        try:
-                            await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
-                        except asyncio.TimeoutError:
-                            data_logger.warning("Ignoring DPI sync received before initial SETTINGS.")
-                            continue
-                        try:
-                            dpi_value_str = message.split(",")[1]
-                            # Fractional DPI is legal on the shared verb; the desktop
-                            # property is integral and bounded (see _scaling_dpi_bounds).
-                            dpi_value = min(SCALING_DPI_MAX,
-                                            max(SCALING_DPI_MIN, int(round(float(dpi_value_str)))))
-                            if app_settings._overridden.get("scaling_dpi", False):
-                                # An operator-set DPI (CLI/env) governs the desktop.
-                                data_logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
-                                continue
-                            if client_display_id and client_display_id != 'primary' and not IS_WAYLAND:
-                                # X11 has one DPI, the primary's; Wayland scales each screen.
-                                data_logger.info(
-                                    f"Ignoring DPI {dpi_value} from '{client_display_id}': "
-                                    "the desktop DPI follows the primary display."
-                                )
-                                continue
-
-                            data_logger.info(f"Received DPI setting from client: {dpi_value}")
-
-                            if not IS_WAYLAND:
-                                if await set_dpi(dpi_value):
-                                    data_logger.info(f"Successfully set DPI to {dpi_value}")
-                                else:
-                                    data_logger.error(f"Failed to set DPI to {dpi_value}")
-                                self._update_cursor_cap(dpi_value)
-
-                            if IS_WAYLAND and client_display_id:
-                                # The delivery cap is one per session, the primary's;
-                                # before the restart, which reads it through CaptureSettings.
-                                if client_display_id == 'primary':
-                                    self._update_cursor_cap(dpi_value)
-                                await self._realize_wayland_display_dpi(client_display_id, dpi_value)
-
-                            # Stored where SETTINGS stores its own DPI, or a later partial
-                            # SETTINGS re-applies a DPI the desktop has moved off.
-                            dpi_state = self.display_clients.get(client_display_id)
-                            if dpi_state is not None:
-                                dpi_state["scaling_dpi"] = dpi_value
-
-                            if CURSOR_SIZE is not None:
-                                if IS_WAYLAND:
-                                    if client_display_id in (None, 'primary'):
-                                        await self._apply_wayland_cursor_size(dpi_value)
-                                else:
-                                    new_cursor_size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
-
-                                    data_logger.info(f"Attempting to set cursor size to: {new_cursor_size} (based on DPI {dpi_value})")
-                                    if await set_cursor_size(new_cursor_size):
-                                        data_logger.info(f"Successfully set cursor size to {new_cursor_size}")
-                                    else:
-                                        data_logger.error(f"Failed to set cursor size to {new_cursor_size}")
-
-                        except ValueError:
-                            data_logger.error(f"Invalid DPI value in message: {message}")
-                        except IndexError:
-                            data_logger.error(f"Malformed DPI message: {message}")
-                        except Exception as e_dpi:
-                            data_logger.error(f"Error processing DPI message '{message}': {e_dpi}", exc_info=True)
-
-                    elif message.startswith("cmd,"):
-                        if not settings.command_enabled[0]:
-                            data_logger.warning("Received 'cmd' message, but command execution is disabled by server settings.")
-                            continue
-
-                        if self.is_secure_mode and not self._holds_input_authority(websocket):
-                            data_logger.warning(f"BLOCK (Secure Mode): 'cmd' from {remote_address} dropped; client does not hold input authority.")
-                            continue
-
-                        toks = message.split(',')
-                        if len(toks) > 1:
-                            command_to_run = ",".join(toks[1:])
-                            data_logger.info(f"Attempting to execute command: '{command_to_run}'")
-
-                            async def _send_cmd_status(action, ws=websocket):
-                                try:
-                                    await ws.send_str(
-                                        "system," + json.dumps({"action": action}))
-                                except Exception:
-                                    pass
-
-                            async def _notify_cmd_error(text):
-                                await _send_cmd_status(f"command_error,{text}")
-
-                            async def _notify_cmd_done(cmd):
-                                await _send_cmd_status(f"command_done,{cmd}")
-                                if self.input_handler:
-                                    await self.input_handler.note_app_command_finished(cmd)
-
-                            await run_client_command(
-                                command_to_run, data_logger, notify=_notify_cmd_error,
-                                env=self.input_handler.app_launch_env() if self.input_handler else None,
-                                done=_notify_cmd_done)
-                        else:
-                            data_logger.warning("Received 'cmd' message without a command string.")
 
                     else:
                         if message.startswith("js,"):

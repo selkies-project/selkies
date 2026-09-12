@@ -198,6 +198,19 @@ def run() -> "H.Results":
                       err.endswith(": selkies-proot-absent install demo-app")
                       and "127" in err, err)
 
+            # The resize and DPI verbs reach the desktop through the dispatch
+            # both transports share. This core carries both in its SETTINGS
+            # payload, so the bare verbs are exercised here.
+            st = loglen()
+            await ws.send("s,144")
+            res.check("s: a DPI sync from the wire scales the desktop",
+                      wait_log_from(st, "Successfully set DPI to 144", 8), "")
+
+            st = loglen()
+            await ws.send("r,1600x900")
+            res.check("r: a resize naming no display takes the connection's",
+                      wait_log_from(st, "for display 'primary' with resolution: 1600x900", 8), "")
+
             # What the command printed is the only thing that says why, and the
             # apps panel shows the notice verbatim.
             failing = "sh -c 'echo proot error: ptrace denied >&2; exit 3'"
