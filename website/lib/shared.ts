@@ -60,7 +60,7 @@ const segmentAt = basePath.lastIndexOf('/');
 export const siteRootPath = docsVersions ? basePath.slice(0, segmentAt) : basePath;
 
 /** The segment this build is served under: a version or one of its aliases. */
-export const versionSegment = docsVersions ? basePath.slice(segmentAt + 1) : undefined;
+const versionSegment = docsVersions ? basePath.slice(segmentAt + 1) : undefined;
 
 export const currentVersion =
   versionSegment === undefined

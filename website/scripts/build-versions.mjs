@@ -192,7 +192,6 @@ const tags = releases();
 const newest = tags.at(-1);
 const index = {
   default: newest ? LATEST : BRANCH,
-  // The branch heads the list, then the releases newest first.
   versions: [
     { version: BRANCH, kind: 'branch', aliases: [] },
     ...tags.map((t) => ({ version: t.segment, kind: 'release', aliases: t === newest ? [LATEST] : [] })).reverse(),

@@ -31,7 +31,7 @@ function Aliases({ aliases }: Pick<DocsVersion, 'aliases'>) {
  * version: a link points at that version's index, and a click probes the
  * page's own address there first and takes it when it answers.
  */
-export function VersionSwitcher() {
+export function VersionSwitcher({ className }: { className?: string }) {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
   if (!docsVersions || !currentVersion) return null;
@@ -51,7 +51,14 @@ export function VersionSwitcher() {
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger className="flex items-center gap-2 rounded-lg border bg-fd-secondary/50 p-2 text-start text-fd-secondary-foreground transition-colors hover:bg-fd-accent data-open:bg-fd-accent data-open:text-fd-accent-foreground">
+      <PopoverTrigger
+        className={[
+          'flex items-center gap-2 rounded-lg border bg-fd-secondary/50 p-2 text-start text-fd-secondary-foreground transition-colors hover:bg-fd-accent data-open:bg-fd-accent data-open:text-fd-accent-foreground',
+          className,
+        ]
+          .filter(Boolean)
+          .join(' ')}
+      >
         <div>
           <p className="text-sm font-medium">
             <span className="sr-only">Version </span>

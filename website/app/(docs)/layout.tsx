@@ -8,8 +8,10 @@ export default function Layout({ children }: LayoutProps<'/'>) {
   return (
     <DocsLayout
       tree={source.getPageTree()}
-      // A plain build is the only version of itself and has nothing to switch to.
-      sidebar={{ banner: docsVersions && <VersionSwitcher /> }}
+      // The sidebar's foot stacks the GitHub link and theme switch row above
+      // its footer; ordering the dropdown first puts it above that row. A
+      // plain build is the only version of itself and has nothing to switch to.
+      sidebar={{ footer: docsVersions && <VersionSwitcher className="order-first mb-2" /> }}
       {...baseOptions()}
     >
       {children}
