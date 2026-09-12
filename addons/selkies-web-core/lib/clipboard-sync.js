@@ -109,6 +109,42 @@ export async function writeImageToLocalClipboard(blob, mime, toPng) {
 }
 
 /**
+ * Wire type for a copy carrying more than one flavour: the markup and the plain
+ * text its source wrote for it, as a JSON object of mime to content. It never
+ * reaches a clipboard itself; the flavours inside it do.
+ */
+export const CLIPBOARD_FLAVOURS_MIME = 'application/x-selkies-clipboard-flavours';
+
+/** The wire payload for one copy's flavours. */
+export function packClipboardFlavours({ html, text }) {
+    const flavours = { 'text/html': html };
+    if (text) flavours['text/plain'] = text;
+    return new TextEncoder().encode(JSON.stringify(flavours)).buffer;
+}
+
+/** The flavours a wire payload carries, as `{html, text}`. */
+export function unpackClipboardFlavours(bytes) {
+    const flavours = JSON.parse(new TextDecoder().decode(bytes));
+    return { html: flavours['text/html'] || '', text: flavours['text/plain'] || '' };
+}
+
+/**
+ * One copy's flavours as a single clipboard item, so pasting into a rich editor
+ * takes the markup and pasting into a plain field takes the text the session
+ * itself held rather than a rendering of the markup.
+ */
+export function clipboardItemForFlavours({ html, text }) {
+    const item = { 'text/html': new Blob([html], { type: 'text/html' }) };
+    if (text) item['text/plain'] = new Blob([text], { type: 'text/plain' });
+    return new ClipboardItem(item);
+}
+
+/** The same flavours, written to the local clipboard. */
+export function writeFlavoursToLocalClipboard(flavours) {
+    return navigator.clipboard.write([clipboardItemForFlavours(flavours)]);
+}
+
+/**
  * Reads the local clipboard for the focus and gesture send path.
  *
  * Chromium's `read()`/`getType()` throw `DataError` on large text and some
@@ -141,6 +177,12 @@ export async function readLocalClipboard(binaryEnabled) {
         if (imageType) {
             const blob = await item.getType(imageType);
             return { kind: 'image', blob, mime: imageType };
+        }
+        if (item.types.includes('text/html')) {
+            const html = await (await item.getType('text/html')).text();
+            const text = item.types.includes('text/plain')
+                ? await (await item.getType('text/plain')).text() : '';
+            if (html) return { kind: 'flavours', html, text };
         }
         if (item.types.includes('text/plain')) {
             const blob = await item.getType('text/plain');
@@ -393,6 +435,12 @@ export function createLocalClipboardSender({
                     if (explicitHasPrecedence()) return;
                     await sendClipboardData(arrayBuffer, res.mime);
                     console.log(`Sent binary clipboard: ${res.mime}, size: ${res.blob.size} bytes`);
+                } else if (res.kind === 'flavours') {
+                    if (!dedupeText || res.html !== lastText) {
+                        await sendClipboardData(packClipboardFlavours(res), CLIPBOARD_FLAVOURS_MIME);
+                        lastText = res.html;
+                        console.log(`Sent clipboard markup with its text, ${res.html.length} characters`);
+                    }
                 } else if (!dedupeText || res.text !== lastText) {
                     await sendClipboardData(res.text);
                     lastText = res.text;

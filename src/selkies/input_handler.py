@@ -686,8 +686,8 @@ class _X11ClipboardMonitor:
         _read_lock: One in-flight conversion or offer at a time.
         _abort_read: Set by offer() so a read still waiting on a slow owner
             gives up rather than holding a client's paste behind it.
-        _own_data: Payload staged by offer() and served by the event thread.
-        _own_mime_atom: Image mime atom of the staged payload (None for text).
+        _own_offers: (atom, payload) per target staged by offer() and served
+            by the event thread, one entry per flavour and per text alias.
         _own_clipboard: Whether CLIPBOARD itself is still ours; the payload
             stays staged while PRIMARY is, but a reader only cares about this.
         _cmd_r, _cmd_w: Self-pipe carrying caller requests to the event thread.
@@ -768,6 +768,7 @@ class _X11ClipboardMonitor:
         self._image_targets = [(self._d.get_atom(m), m) for m in (
             'image/png', 'image/jpeg', 'image/bmp', 'image/webp', 'image/svg+xml',
             'image/svg')]
+        self._html_atom = self._d.get_atom('text/html')
         self._text_targets = [(self._d.get_atom(t), t) for t in (
             'UTF8_STRING', 'text/plain;charset=utf-8', 'STRING')]
         self._uri_list_atom = self._d.get_atom('text/uri-list')
@@ -791,9 +792,7 @@ class _X11ClipboardMonitor:
         self._reply_lock = threading.Lock()
         self._abort_read = threading.Event()
         self._read_lock = threading.Lock()
-        self._own_data = None
-        self._own_mime_atom = None
-        self._own_is_text = False
+        self._own_offers: list = []
         self._pending_own = None
         self._own_done = threading.Event()
         self._own_ok = False
@@ -877,16 +876,12 @@ class _X11ClipboardMonitor:
                     return
             except Exception:
                 pass
-            self._own_data = None
-            self._own_mime_atom = None
+            self._own_offers = []
 
-    def _take_ownership(self, payload: tuple) -> None:
-        """On the event thread: stage the payload and claim CLIPBOARD + PRIMARY."""
-        data, mime_atom, is_text = payload
+    def _take_ownership(self, offers: list) -> None:
+        """On the event thread: stage the offers and claim CLIPBOARD + PRIMARY."""
         try:
-            self._own_data = data
-            self._own_mime_atom = mime_atom
-            self._own_is_text = is_text
+            self._own_offers = offers
             self._win.set_selection_owner(self._clipboard, X.CurrentTime)
             self._win.set_selection_owner(self._primary, X.CurrentTime)
             self._d.flush()
@@ -907,18 +902,15 @@ class _X11ClipboardMonitor:
         granted = X.NONE
         try:
             requestor = ev.requestor
-            data = self._own_data
-            if data is not None and ev.target == self._targets:
-                offered = [self._targets]
-                if self._own_is_text:
-                    offered += self._text_alias_atoms
-                elif self._own_mime_atom is not None:
-                    offered.append(self._own_mime_atom)
-                requestor.change_property(prop, self._atom_atom, 32, offered)
+            offers = self._own_offers
+            data = None
+            if offers and ev.target != self._multiple:
+                data = next((p for atom, p in offers if atom == ev.target), None)
+            if offers and ev.target == self._targets:
+                requestor.change_property(prop, self._atom_atom, 32,
+                                          [self._targets] + [a for a, _p in offers])
                 granted = prop
-            elif data is not None and ev.target != self._multiple and (
-                    (self._own_is_text and ev.target in self._text_alias_atoms)
-                    or ev.target == self._own_mime_atom):
+            elif data is not None:
                 requestor.change_property(prop, ev.target, 8,
                                           data[:self._WRITE_CHUNK])
                 offset = self._WRITE_CHUNK
@@ -1088,7 +1080,14 @@ class _X11ClipboardMonitor:
 
     def read(self, use_binary: bool) -> tuple:
         """Blocking read (call via executor): (data, mime) like read_clipboard —
-        text as str with mime 'text/plain', images as bytes with their mime."""
+        text as str with mime 'text/plain', markup as str with 'text/html',
+        images as bytes with their mime.
+
+        Images come first where the caller takes them, since a copied picture
+        offers markup of its own (an `img` tag pointing back at a page) that is
+        worth less than the picture; a text selection carries no image target,
+        so its markup wins over the plain text beneath it.
+        """
         reply = self._convert_and_wait(self._targets)
         if not reply or reply[1] != 32:
             # A fresh owner (xclip mid-fork) may not serve requests for a moment
@@ -1110,6 +1109,19 @@ class _X11ClipboardMonitor:
                     resolved = self._resolve_uri_list_image(bytes(got[0]))
                     if resolved is not None:
                         return resolved
+        if self._html_atom in offered:
+            got = self._convert_and_wait(self._html_atom)
+            if got is not None and got[0]:
+                html = bytes(got[0])
+                plain = b''
+                for atom, _name in self._text_targets:
+                    if atom in offered:
+                        beside = self._convert_and_wait(atom)
+                        if beside is not None and beside[0]:
+                            plain = bytes(beside[0])
+                            break
+                entries = [("text/html", html)] + ([("text/plain", plain)] if plain else [])
+                return clipboard_envelope(entries), CLIPBOARD_FLAVOURS_MIME
         for atom, _name in self._text_targets:
             if atom in offered:
                 got = self._convert_and_wait(atom)
@@ -1150,19 +1162,24 @@ class _X11ClipboardMonitor:
                 continue
         return None
 
-    def offer(self, data: Union[str, bytes], mime_type: str) -> bool:
-        """Blocking (call via executor): take CLIPBOARD ownership and serve `data`
-        until another app copies. Returns True when ownership was acquired."""
-        if not data:
+    def offer(self, entries: List[Tuple[str, Union[str, bytes]]]) -> bool:
+        """Blocking (call via executor): take CLIPBOARD ownership and serve one
+        payload per `(mime, data)` entry until another app copies, so a paste
+        into a rich editor takes the markup and one into a plain field takes the
+        text. Returns True when ownership was acquired."""
+        offerable = dict((m, a) for a, m in self._image_targets)
+        offerable['text/html'] = self._html_atom
+        offers: list = []
+        for mime_type, data in entries:
+            if not data:
+                continue
+            payload = data if isinstance(data, bytes) else data.encode('utf-8')
+            if mime_type == "text/plain":
+                offers += [(atom, payload) for atom in self._text_alias_atoms]
+            elif mime_type in offerable:
+                offers.append((offerable[mime_type], payload))
+        if not offers:
             return False
-        is_text = mime_type == "text/plain"
-        data_bytes = data if isinstance(data, bytes) else data.encode('utf-8')
-        mime_atom = None
-        if not is_text:
-            known = dict((m, a) for a, m in self._image_targets)
-            mime_atom = known.get(mime_type)
-            if mime_atom is None:
-                return False
         # A read of the old selection is worth nothing next to content a client
         # just pasted, and waiting behind a slow owner would hold that paste for
         # as long as the owner takes to answer.
@@ -1171,7 +1188,7 @@ class _X11ClipboardMonitor:
             self._abort_read.clear()
             self._own_done.clear()
             self._own_ok = False
-            self._pending_own = (data_bytes, mime_atom, is_text)
+            self._pending_own = offers
             os.write(self._cmd_w, b"o")
             if not self._own_done.wait(self._READ_TIMEOUT_S):
                 # Withdrawn: taken late, the ownership would revert the
@@ -1894,6 +1911,38 @@ logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
 # Bound on one multi-part clipboard transfer; the declared size and the
 # accumulated chunks are both checked so a client cannot balloon memory.
 MULTIPART_CLIPBOARD_MAX_SIZE = 64 * 1024 * 1024
+
+# A copy carrying more than one flavour (markup and the plain text a source
+# wrote for it) rides the binary clipboard verbs under this type, as a JSON
+# object of mime to content. It never reaches a real clipboard: the flavours
+# inside it do.
+CLIPBOARD_FLAVOURS_MIME = "application/x-selkies-clipboard-flavours"
+
+
+def clipboard_envelope(entries: List[Tuple[str, bytes]]) -> bytes:
+    """Pack `(mime, data)` entries into the multi-flavour payload. Every flavour
+    it carries is text, so JSON holds them as they are."""
+    return json.dumps({mime: data.decode("utf-8", "replace")
+                       for mime, data in entries}).encode("utf-8")
+
+
+def clipboard_flavours(payload: bytes) -> List[Tuple[str, bytes]]:
+    """Unpack the multi-flavour payload into `(mime, data)` entries, richest
+    first, so a caller writes markup as the session's own flavour and offers the
+    plain text beside it.
+
+    Raises:
+        ValueError: The payload is not the documented JSON object.
+    """
+    decoded = json.loads(payload.decode("utf-8"))
+    if not isinstance(decoded, dict) or not decoded:
+        raise ValueError("clipboard flavours must be a non-empty object")
+    entries = [(mime, decoded[mime].encode("utf-8"))
+               for mime in ("text/html", "text/plain")
+               if isinstance(decoded.get(mime), str) and decoded[mime]]
+    if not entries:
+        raise ValueError(f"no usable clipboard flavour in {sorted(decoded)}")
+    return entries
 
 # Re-reads the outbound monitor gives one selection-change edge whose read came
 # back empty, before treating the selection as genuinely empty.
@@ -5073,7 +5122,7 @@ class WebRTCInput:
                     await asyncio.get_running_loop().run_in_executor(
                         None, clear_fn, self._app_wayland_display())
             else:
-                self.wayland_input.set_clipboard("text/plain", b"")
+                self.wayland_input.set_clipboard([("text/plain", b"")])
         except Exception as e:
             logger_webrtc_input.debug(f"post-injection clipboard clear failed: {e}")
 
@@ -6404,6 +6453,17 @@ class WebRTCInput:
                         None, read_fn, display, target_mime)
                     if data:
                         return bytes(data), target_mime
+            if 'text/html' in available_types:
+                html = await loop.run_in_executor(None, read_fn, display, 'text/html')
+                if html:
+                    plain = b''
+                    beside = next((m for m in ('text/plain;charset=utf-8', 'text/plain',
+                                               'UTF8_STRING') if m in available_types), None)
+                    if beside:
+                        plain = bytes(await loop.run_in_executor(
+                            None, read_fn, display, beside) or b'')
+                    entries = [("text/html", bytes(html))] + ([("text/plain", plain)] if plain else [])
+                    return clipboard_envelope(entries), CLIPBOARD_FLAVOURS_MIME
             text_mimes = ['text/plain;charset=utf-8', 'text/plain',
                           'UTF8_STRING', 'STRING', 'TEXT']
             source_mime = next((m for m in text_mimes if m in available_types), None)
@@ -6458,7 +6518,8 @@ class WebRTCInput:
                     if use_binary:
                         return bytes(raw), native_mime
                 else:
-                    return bytes(raw).decode('utf-8', errors='replace'), 'text/plain'
+                    text = bytes(raw).decode('utf-8', errors='replace')
+                    return text, ('text/html' if native_mime == 'text/html' else 'text/plain')
             return await self._app_clipboard_read(use_binary)
         monitor = await self._ensure_x11_clipboard_monitor_async()
         if monitor is not None:
@@ -6536,7 +6597,8 @@ class WebRTCInput:
             return None, None
 
     async def write_clipboard(self, data: Union[str, bytes],
-                              mime_type: str = "text/plain") -> bool:
+                              mime_type: str = "text/plain",
+                              flavours: Optional[List[Tuple[str, bytes]]] = None) -> bool:
         """Set the session clipboard, native first with forked fallbacks.
 
         Wayland sets pixelflux's own selection in-process (or writes through
@@ -6556,11 +6618,15 @@ class WebRTCInput:
         input_bytes = data if isinstance(data, bytes) else data.encode('utf-8')
         self._clipboard_last_bytes = input_bytes
         self._clipboard_self_write = input_bytes
+        # `data`/`mime_type` stay the flavour the session reads back and echoes
+        # against; `flavours` is everything the copy carried, offered together.
+        entries = [(m, d if isinstance(d, bytes) else d.encode('utf-8'))
+                   for m, d in (flavours or [(mime_type, input_bytes)])]
 
         if self.is_wayland:
             if not self._has_separate_app_compositor():
                 try:
-                    self.wayland_input.set_clipboard(mime_type, input_bytes)
+                    self.wayland_input.set_clipboard(entries)
                     # The compositor does not echo its own selection back; a
                     # later read (another client joining) must still see it.
                     self._wl_native_last = (input_bytes, mime_type)
@@ -6572,22 +6638,24 @@ class WebRTCInput:
                 if monitor is not None:
                     try:
                         loop = asyncio.get_running_loop()
-                        if await loop.run_in_executor(None, monitor.offer, input_bytes, mime_type):
+                        if await loop.run_in_executor(None, monitor.offer, entries):
                             ok = True
                     except Exception as e:
                         logger_webrtc_input.warning(f"X11 clipboard offer on the Wayland session failed: {e}")
                 return ok
             # Text is offered under every conventional target; apps pick their own.
-            if mime_type == "text/plain":
-                entries = [(m, input_bytes) for m in (
-                    "text/plain;charset=utf-8", "text/plain",
-                    "UTF8_STRING", "STRING", "TEXT")]
-            else:
-                entries = [(mime_type, input_bytes)]
+            offered: list = []
+            for mime, payload in entries:
+                if mime == "text/plain":
+                    offered += [(m, payload) for m in (
+                        "text/plain;charset=utf-8", "text/plain",
+                        "UTF8_STRING", "STRING", "TEXT")]
+                else:
+                    offered.append((mime, payload))
             try:
                 await asyncio.get_running_loop().run_in_executor(
                     None, self.wayland_input.clipboard_write_app,
-                    self._app_wayland_display(), entries)
+                    self._app_wayland_display(), offered)
                 return True
             except Exception as e:
                 logger_webrtc_input.warning(f"data-control clipboard write failed: {e}")
@@ -6601,7 +6669,7 @@ class WebRTCInput:
         if monitor is not None:
             try:
                 loop = asyncio.get_running_loop()
-                ok = await loop.run_in_executor(None, monitor.offer, input_bytes, mime_type)
+                ok = await loop.run_in_executor(None, monitor.offer, entries)
                 if ok:
                     return True
             except Exception as e:
@@ -7670,7 +7738,9 @@ class WebRTCInput:
                 logger_webrtc_input.warning("Rejecting multi-part clipboard write: inbound clipboard disabled.")
         elif msg_type == "cbs":
             # Direction gate and binary gate: the server enforces its own policy.
-            if self.enable_clipboard in ["true", "in"] and self.enable_binary_clipboard in ["true", "in"]:
+            if self.enable_clipboard in ["true", "in"] and (
+                    toks[2:3] == [CLIPBOARD_FLAVOURS_MIME]
+                    or self.enable_binary_clipboard in ["true", "in"]):
                 try:
                     transfer_id = toks[1]
                     declared_size = int(toks[3])
@@ -7726,10 +7796,14 @@ class WebRTCInput:
                     logger_webrtc_input.info(f"Finished multi-part clipboard receive. Total size: {received_size}")
                     data = self.multipart_clipboard_buffer.getvalue()
                     mime_type = self.multipart_clipboard_mime_type
+                    flavours = None
+                    if mime_type == CLIPBOARD_FLAVOURS_MIME:
+                        flavours = clipboard_flavours(data)
+                        mime_type, data = flavours[0]
                     # Awaited in-line: a paste keystroke right behind the transfer
                     # must find the clipboard set. Bytes pass straight through; a
                     # multi-MB decode and re-encode on the loop would be redundant.
-                    if await self.write_clipboard(data, mime_type=mime_type):
+                    if await self.write_clipboard(data, mime_type=mime_type, flavours=flavours):
                         audit.emit("clipboard.receive", mime_type=mime_type, size_bytes=len(data), multipart=True)
                         if mime_type == "text/plain":
                             logger_webrtc_input.info(f"Set multi-part clipboard content, length: {len(data)}")
@@ -7814,13 +7888,19 @@ class WebRTCInput:
             else:
                 logger_webrtc_input.warning("Rejecting REQUEST_CLIPBOARD: outbound clipboard disabled.")
         elif msg_type == "cb":
-            # Same double gate as cbs.
-            if self.enable_clipboard in ["true", "in"] and self.enable_binary_clipboard in ["true", "in"]:
+            # Same double gate as cbs, minus the binary half for a flavour set.
+            if self.enable_clipboard in ["true", "in"] and (
+                    toks[1:2] == [CLIPBOARD_FLAVOURS_MIME]
+                    or self.enable_binary_clipboard in ["true", "in"]):
                 try:
                     _, mime_type, b64_data = toks
                     data_bytes = base64.b64decode(b64_data)
+                    flavours = None
+                    if mime_type == CLIPBOARD_FLAVOURS_MIME:
+                        flavours = clipboard_flavours(data_bytes)
+                        mime_type, data_bytes = flavours[0]
                     # In-line so a paste keystroke right behind it pastes this content.
-                    if await self.write_clipboard(data_bytes, mime_type=mime_type):
+                    if await self.write_clipboard(data_bytes, mime_type=mime_type, flavours=flavours):
                         audit.emit("clipboard.receive", mime_type=mime_type, size_bytes=len(data_bytes), multipart=False)
                         logger_webrtc_input.info(f"Set binary clipboard content ({mime_type}), size: {len(data_bytes)} bytes")
                 except Exception as e:

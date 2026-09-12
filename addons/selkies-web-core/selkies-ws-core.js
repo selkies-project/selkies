@@ -106,6 +106,9 @@ import {
   createMultipartClipboardState,
   createTaggedClipboardFetch,
   writeImageToLocalClipboard,
+  writeFlavoursToLocalClipboard,
+  unpackClipboardFlavours,
+  CLIPBOARD_FLAVOURS_MIME,
   localClipboardBlocker,
   createDeferredClipboardWriter,
   clipboardPreviewMessage,
@@ -528,6 +531,8 @@ function maybeFollowDpr() {
 let antiAliasingEnabled = true;
 let clipboard_in_enabled = true;
 let clipboard_out_enabled = true;
+/** Whether the clipboard follows every change on its own, or only when asked. */
+let clipboard_seamless = true;
 /**
  * The cursor-rendering preference in force: seeded from localStorage at init,
  * then updated by a dashboard pick (persisted) or a server-pushed value (not
@@ -576,6 +581,18 @@ let macCmdAsCtrl = true;
 function applyMacCmdAsCtrl() {
     if (window.webrtcInput && typeof window.webrtcInput.setMacCmdAsCtrl === 'function') {
         window.webrtcInput.setMacCmdAsCtrl(macCmdAsCtrl);
+    }
+}
+/**
+ * Whether the client keeps its own chords. Resolved off the stream like the
+ * other keyboard settings, since an application in the session may bind the
+ * same chords whether or not a settings panel ever mounts.
+ */
+let keyboardShortcuts = true;
+/** Applies the chord setting to the input handler. */
+function applyKeyboardShortcuts() {
+    if (window.webrtcInput && typeof window.webrtcInput.setShortcutsEnabled === 'function') {
+        window.webrtcInput.setShortcutsEnabled(keyboardShortcuts);
     }
 }
 /** Publishes the real viewport height as the `--vh` CSS unit (mobile browser chrome excluded). */
@@ -1145,6 +1162,7 @@ use_browser_cursors = getBoolParam('use_browser_cursors', true);
 rawPointerMotion = getBoolParam('raw_pointer_motion', Input.rawPointerMotion);
 enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 clipboard_in_enabled = getBoolParam('clipboard_in_enabled', true);
+clipboard_seamless = getBoolParam('clipboard_seamless', true);
 clipboard_out_enabled = getBoolParam('clipboard_out_enabled', true);
 force_aligned_resolution = getBoolParam('force_aligned_resolution', force_aligned_resolution);
 
@@ -3801,6 +3819,7 @@ const initializeInput = () => {
 
   const initialSlot = clientSlot;
   inputInstance = new Input(overlayInput, sendInputFunction, isSharedMode, playerInputTargetIndex, useCssScaling, initialSlot);
+  inputInstance.setShortcutsEnabled(keyboardShortcuts);
 
   inputInstance.onmenuhotkey = () => {
     window.postMessage({ type: 'toggleDashboard' }, window.location.origin);
@@ -4879,6 +4898,15 @@ function handleSettingsMessage(settings, fromServer) {
     storeBool('enable_binary_clipboard', enable_binary_clipboard);
     settingsChanged = true;
   }
+  if (settings.keyboard_shortcuts !== undefined) {
+    keyboardShortcuts = !!settings.keyboard_shortcuts;
+    storeBool('keyboard_shortcuts', keyboardShortcuts);
+    applyKeyboardShortcuts();
+  }
+  if (settings.clipboard_seamless !== undefined) {
+    clipboard_seamless = !!settings.clipboard_seamless;
+    storeBool('clipboard_seamless', clipboard_seamless);
+  }
   if (settings.clipboard_in_enabled !== undefined) {
     clipboard_in_enabled = !!settings.clipboard_in_enabled;
     storeBool('clipboard_in_enabled', clipboard_in_enabled);
@@ -4998,7 +5026,7 @@ function initWebsockets() {
     isChromium,
     getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
     isSharedMode: () => isSharedMode,
-    canSync: () => !!window.clipboard_enabled,
+    canSync: () => !!window.clipboard_enabled && clipboard_seamless,
     canRead: () => !!clipboard_in_enabled,
     binaryEnabled: () => !!enable_binary_clipboard,
     sendClipboardData: (data, mime, onSkip) => sendClipboardData(data, mime, onSkip),
@@ -5017,7 +5045,7 @@ function initWebsockets() {
     isChromium,
     clipboardSync,
     sendClipboardData: (data, mime) => sendClipboardData(data, mime),
-    canSync: () => !isSharedMode && !!window.clipboard_enabled,
+    canSync: () => !isSharedMode && !!window.clipboard_enabled && clipboard_seamless,
     canRead: () => !!clipboard_in_enabled,
     canWrite: () => !!clipboard_out_enabled,
     binaryEnabled: () => !!enable_binary_clipboard,
@@ -7283,7 +7311,15 @@ class WorkerWebSocket {
                 }
             }
         } else if (event.data.startsWith('clipboard_binary,')) {
-            if (!enable_binary_clipboard) {
+            const parts = event.data.split(',');
+            if (parts.length < 3) {
+                console.error('Malformed binary clipboard message from server:', event.data);
+                return;
+            }
+            const mimeType = parts[1];
+            // A flavour set is text, so the image switch is not its switch.
+            const isFlavours = mimeType === CLIPBOARD_FLAVOURS_MIME;
+            if (!isFlavours && !enable_binary_clipboard) {
                 console.warn("Received binary clipboard data from server, but feature is disabled on client. Ignoring.");
                 return;
             }
@@ -7292,23 +7328,30 @@ class WorkerWebSocket {
                 return;
             }
             try {
-                const parts = event.data.split(',');
-                if (parts.length < 3) {
-                    console.error('Malformed binary clipboard message from server:', event.data);
-                    return;
-                }
-                const mimeType = parts[1];
                 const base64Data = parts[2];
                 // Consumed before the async decode, which runs in the worker.
                 const isInitClipboardFetch = consumeInitClipboardFetch();
                 clipboardWorker.decode(base64Data, mimeType).then(({ result, hash, byteLength }) => {
                     const bytes = result;
+                    if (isFlavours) {
+                        const flavours = unpackClipboardFlavours(bytes);
+                        const digest = digestedPayload(byteLength, hash);
+                        const isFresh = clipboardSync.shouldSend(digest, mimeType);
+                        clipboardSync.resolveServer(flavours.text || flavours.html, null, mimeType, digest);
+                        window.postMessage(clipboardPreviewMessage(flavours.text || flavours.html),
+                                           window.location.origin);
+                        if (isInitClipboardFetch || !isFresh || !clipboard_seamless) return;
+                        deferredClipboardWriter.write(
+                            () => writeFlavoursToLocalClipboard(flavours), {
+                                onFailure: (err) => console.error('Could not copy session markup to local: ' + err),
+                            });
+                        return;
+                    }
                     const blob = new Blob([bytes], { type: mimeType });
                     const digest = digestedPayload(byteLength, hash);
                     const isFreshContent = clipboardSync.shouldSend(digest, mimeType);
                     clipboardSync.resolveServer(undefined, blob, mimeType, digest);
-                    if (isInitClipboardFetch) return;
-                    if (!isFreshContent) return;
+                    if (isInitClipboardFetch || !isFreshContent || !clipboard_seamless) return;
                     deferredClipboardWriter.write(
                         () => writeImageToLocalClipboard(blob, mimeType, reencodePngOffThread), {
                             onSuccess: () => {
@@ -7329,7 +7372,7 @@ class WorkerWebSocket {
           try {
             const base64Payload = event.data.substring(10);
             // Gated synchronously, since message order defines the connect-time fetch.
-            const writeLocal = !consumeInitClipboardFetch() && clipboard_out_enabled;
+            const writeLocal = !consumeInitClipboardFetch() && clipboard_out_enabled && clipboard_seamless;
             clipboardWorker.decode(base64Payload, 'text/plain').then(({ result }) => {
                 const decodedText = result;
                 const isFreshContent = clipboardSync.shouldSend(decodedText, 'text/plain');
