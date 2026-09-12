@@ -53,6 +53,7 @@ except ImportError:
     import importlib.resources as importlib_resources
 
 from abc import ABCMeta, abstractmethod
+from . import audit
 
 
 logger = logging.getLogger("stream_server")
@@ -2194,24 +2195,28 @@ class CentralizedStreamServer:
         and are refused for view-only credentials (the view-only password, a
         viewer-role session token).
         """
-        if self._viewer_ceiling(request):
-            return web.json_response(
-                {"status": "error", "message": "View-only credentials cannot upload files"},
-                status=403,
-            )
         settings = request.app["settings"]
+        rel = urllib.parse.unquote(request.headers.get("X-Upload-Path", "") or "")
+
+        def failed(message: str, status: int = 400) -> web.Response:
+            """Refuse the transfer, recording the attempt and why it was refused."""
+            audit.emit("file.upload.error", filename=rel, error=message)
+            return web.json_response({"status": "error", "message": message}, status=status)
+
+        if self._viewer_ceiling(request):
+            return failed("View-only credentials cannot upload files", 403)
         if "upload" not in settings.file_transfers:
-            return web.json_response({"status": "error", "message": "uploads disabled"}, status=403)
+            return failed("uploads disabled", 403)
         root = getattr(settings, "file_manager_path", "") or ""
         if not root:
-            return web.json_response({"status": "error", "message": "uploads disabled"}, status=403)
+            return failed("uploads disabled", 403)
         root = os.path.expanduser(root)
-        rel = urllib.parse.unquote(request.headers.get("X-Upload-Path", "") or "")
         sane = os.path.normpath(rel.strip("/\\"))
         parts = [c for c in sane.split(os.sep) if c and c != "."]
         if not parts or ".." in parts:
-            return web.json_response({"status": "error", "message": "invalid upload path"}, status=400)
+            return failed("invalid upload path")
         dest = os.path.join(root, *parts)
+        name = "/".join(parts)
         real_root = os.path.realpath(root)
         parent = os.path.realpath(os.path.dirname(dest))
         try:
@@ -2219,19 +2224,16 @@ class CentralizedStreamServer:
         except ValueError:
             within = False
         if not within:
-            return web.json_response({"status": "error", "message": "path escape rejected"}, status=400)
+            return failed("path escape rejected")
         try:
             os.makedirs(parent, exist_ok=True)
         except OSError as e:
-            return web.json_response({"status": "error", "message": f"mkdir failed: {e}"}, status=500)
+            return failed(f"mkdir failed: {e}", 500)
 
         upload_id = request.headers.get("X-Upload-Id")
         offset_header = request.headers.get("X-Upload-Offset")
         if (upload_id is None) != (offset_header is None):
-            return web.json_response(
-                {"status": "error", "message": "X-Upload-Id and X-Upload-Offset must be sent together"},
-                status=400,
-            )
+            return failed("X-Upload-Id and X-Upload-Offset must be sent together")
 
         if upload_id is None:
             staging = _upload_staging_path(dest, os.urandom(8).hex())
@@ -2242,7 +2244,7 @@ class CentralizedStreamServer:
                     os.remove(staging)
                 except OSError:
                     pass
-                return web.json_response({"status": "error", "message": str(e)}, status=400)
+                return failed(str(e))
             _carry_destination_mode(staging, dest)
             try:
                 os.replace(staging, dest)
@@ -2251,17 +2253,18 @@ class CentralizedStreamServer:
                     os.remove(staging)
                 except OSError:
                     pass
-                return web.json_response({"status": "error", "message": f"finalize failed: {e}"}, status=500)
+                return failed(f"finalize failed: {e}", 500)
             logger.info(f"HTTP upload finished: {dest} ({written} bytes)")
+            audit.emit("file.upload.end", filename=name, size_bytes=written)
             return web.json_response({"status": "success", "bytes": written})
 
         try:
             offset = int(offset_header or "")
             total = int(request.headers["X-Upload-Total"]) if "X-Upload-Total" in request.headers else -1
         except ValueError:
-            return web.json_response({"status": "error", "message": "malformed chunk headers"}, status=400)
+            return failed("malformed chunk headers")
         if offset < 0 or ("X-Upload-Total" in request.headers and total < 0):
-            return web.json_response({"status": "error", "message": "malformed chunk headers"}, status=400)
+            return failed("malformed chunk headers")
         final = request.headers.get("X-Upload-Final") == "1"
         part_path = _upload_staging_path(dest, _upload_staging_token(dest))
 
@@ -2291,18 +2294,14 @@ class CentralizedStreamServer:
             if (state is None or state["id"] != upload_id
                     or state["offset"] != offset or part_size != offset):
                 self._discard_chunked_upload(dest, part_path)
-                return web.json_response(
-                    {"status": "error",
-                     "message": f"chunk sequence mismatch at offset {offset}; transfer discarded"},
-                    status=409,
-                )
+                return failed(f"chunk sequence mismatch at offset {offset}; transfer discarded", 409)
 
         state["busy"] = True
         try:
             written = await self._stream_upload_body(request, part_path, append=offset > 0)
         except Exception as e:
             self._discard_chunked_upload(dest, part_path)
-            return web.json_response({"status": "error", "message": str(e)}, status=400)
+            return failed(str(e))
         state["busy"] = False
         state["offset"] = offset + written
         state["ts"] = time.monotonic()
@@ -2313,18 +2312,16 @@ class CentralizedStreamServer:
         received = state["offset"]
         if total >= 0 and received != total:
             self._discard_chunked_upload(dest, part_path)
-            return web.json_response(
-                {"status": "error", "message": f"size mismatch: received {received}, expected {total}"},
-                status=400,
-            )
+            return failed(f"size mismatch: received {received}, expected {total}")
         _carry_destination_mode(part_path, dest)
         try:
             os.replace(part_path, dest)
         except OSError as e:
             self._discard_chunked_upload(dest, part_path)
-            return web.json_response({"status": "error", "message": f"finalize failed: {e}"}, status=500)
+            return failed(f"finalize failed: {e}", 500)
         self._chunked_uploads.pop(dest, None)
         logger.info(f"HTTP chunked upload finished: {dest} ({received} bytes)")
+        audit.emit("file.upload.end", filename=name, size_bytes=received)
         return web.json_response({"status": "success", "bytes": received, "complete": True})
 
     async def handle_status(self, _: web.Request) -> web.Response:
@@ -2475,6 +2472,8 @@ class CentralizedStreamServer:
                              "If-Range", "If-Unmodified-Since")
             )
             size = (await asyncio.to_thread(full_path.stat)).st_size
+            if request.method == "GET":
+                audit.emit("file.download", filename="/".join(parts), size_bytes=size)
             cap = self.transfer_cap if self.transfer_cap.active else None
             gauge = (
                 self._session_gauge(request)
