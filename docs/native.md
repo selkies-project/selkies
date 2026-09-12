@@ -13,14 +13,14 @@ export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-proje
 
 ## Packages
 
-Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkies-resize` and `selkies-gpu-probe` on `PATH`, carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line:
+Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkies-resize` and `selkies-gpu-probe` on `PATH`, carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line, with `SELKIES_VERSION` set to the release you are installing. A pre-release's packages carry its version the way each packager orders it (`2.0.0~rc0` for dpkg and rpm, `2.0.0_rc0` for apk), and the asset names on the release page spell a `~` as `.`:
 
 ```bash
 # Ubuntu and Debian. The suffix names the distribution the package was built in
 # (ubuntu24.04, ubuntu26.04, bookworm, trixie); this reads yours from os-release
 . /etc/os-release
 DISTRO="$([ "${ID}" = "ubuntu" ] && echo "ubuntu${VERSION_ID}" || echo "${VERSION_CODENAME}")"
-PKG="selkies_${SELKIES_VERSION}-1~${DISTRO}_$(dpkg --print-architecture).deb"
+PKG="selkies_${SELKIES_VERSION}-1.${DISTRO}_$(dpkg --print-architecture).deb"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${PKG}"
 sudo apt-get install -y "./${PKG}"
 ```
