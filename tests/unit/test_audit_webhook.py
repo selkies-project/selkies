@@ -276,7 +276,7 @@ async def hook_cases() -> None:
           handler._reset_multipart_clipboard()
           written: list = []
 
-          async def write_clipboard(data, mime_type="text/plain"):
+          async def write_clipboard(data, mime_type="text/plain", flavours=None):
               written.append((data, mime_type))
               return mime_type != "text/refused"
 

@@ -50,6 +50,21 @@ export function Clipboard() {
 		return saved !== null ? saved === 'true' : true;
 	});
 	const fileInputRef = useRef<HTMLInputElement>(null);
+	const storedBool = (key: string, fallback: boolean) => {
+		const saved = localStorage.getItem(getPrefixedKey(key));
+		return saved !== null ? saved === 'true' : fallback;
+	};
+	const [clipboardUp, setClipboardUp] = useState(() => storedBool("clipboard_in_enabled", true));
+	const [clipboardDown, setClipboardDown] = useState(() => storedBool("clipboard_out_enabled", true));
+	const [clipboardSeamless, setClipboardSeamless] = useState(() => storedBool("clipboard_seamless", true));
+
+	/** One clipboard switch: optimistic, stored, then posted like any setting. */
+	const toggleClientSetting = (key: string, value: boolean,
+		setValue: (v: boolean) => void) => {
+		setValue(value);
+		localStorage.setItem(getPrefixedKey(key), String(value));
+		window.postMessage({ type: 'settings', settings: { [key]: value } }, window.location.origin);
+	};
 
 	const handleBinaryClipboardToggle = () => {
 		const newState = !enableBinaryClipboard;
@@ -161,6 +176,36 @@ export function Clipboard() {
 
 	return (
 		<div className="w-[300px] p-4 flex flex-col gap-2">
+			{(renderableSettings.clipboardUp ?? true) && (
+				<div className="flex items-center justify-between">
+					<Label className="text-sm font-medium" title={t('sections.clipboard.upDetails')}>{t('sections.clipboard.upLabel')}</Label>
+					<Switch
+						checked={clipboardUp}
+						onCheckedChange={() => toggleClientSetting("clipboard_in_enabled", !clipboardUp, setClipboardUp)}
+					/>
+				</div>
+			)}
+
+			{(renderableSettings.clipboardDown ?? true) && (
+				<div className="flex items-center justify-between">
+					<Label className="text-sm font-medium" title={t('sections.clipboard.downDetails')}>{t('sections.clipboard.downLabel')}</Label>
+					<Switch
+						checked={clipboardDown}
+						onCheckedChange={() => toggleClientSetting("clipboard_out_enabled", !clipboardDown, setClipboardDown)}
+					/>
+				</div>
+			)}
+
+			{(renderableSettings.clipboardSeamless ?? true) && (
+				<div className="flex items-center justify-between">
+					<Label className="text-sm font-medium" title={t('sections.clipboard.seamlessDetails')}>{t('sections.clipboard.seamlessLabel')}</Label>
+					<Switch
+						checked={clipboardSeamless}
+						onCheckedChange={() => toggleClientSetting("clipboard_seamless", !clipboardSeamless, setClipboardSeamless)}
+					/>
+				</div>
+			)}
+
 			{(renderableSettings.binaryClipboard ?? true) && (
 				<div className="flex items-center justify-between">
 					<Label className="text-sm font-medium" title={t('sections.clipboard.binaryModeDetails')}>{t('sections.clipboard.binaryModeLabel')}</Label>

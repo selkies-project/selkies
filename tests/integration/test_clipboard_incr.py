@@ -214,7 +214,7 @@ def run() -> "H.Results":
         threading.Thread(target=monitor.read, args=(True,), daemon=True).start()
         time.sleep(0.5)
         started = time.monotonic()
-        took = monitor.offer(b"what the client pasted", "text/plain")
+        took = monitor.offer([("text/plain", b"what the client pasted")])
         elapsed = time.monotonic() - started
         state["flag"] = True
         res.check("a write does not wait out a slow read",
@@ -228,7 +228,7 @@ def run() -> "H.Results":
         threading.Thread(target=monitor.read, args=(True,), daemon=True).start()
         time.sleep(0.6)
         started = time.monotonic()
-        took = monitor.offer(b"pasted mid-stream", "text/plain")
+        took = monitor.offer([("text/plain", b"pasted mid-stream")])
         elapsed = time.monotonic() - started
         state["flag"] = True
         res.check("a paste is served between a streaming owner's chunks",

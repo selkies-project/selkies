@@ -27,6 +27,8 @@ The side menu is available by clicking the small button on the right side of the
 
 `Control + Shift + G` toggles the on-screen touch gamepad overlay (the [Universal Touch Gamepad](component.md#universal-touch-gamepad)), which is also available from the side menu.
 
+These chords are taken by the client before the session sees them, which collides with an application inside the session that binds the same ones. The shortcuts section of the side menu has a switch that hands every one of them to the session instead; the side menu's own buttons still reach each function, and pressing Escape three times still leaves gaming mode. `--keyboard-shortcuts` sets the starting position for every client and can be locked.
+
 ## Clipboard
 
 Clipboard synchronization works in both directions and is supported across Chromium, Firefox, and Safari (a valid HTTPS context, or `localhost`, is still required by browsers).
@@ -35,6 +37,10 @@ Clipboard synchronization works in both directions and is supported across Chrom
 - **Copy from the session:** `Control + C` (`Command + C` on macOS) reads the remote session's current clipboard back to your browser. On Firefox and Safari the client requests the latest server clipboard and writes it once it arrives, falling back to a synchronous copy when the browser blocks the asynchronous clipboard API.
 
 Image (binary) clipboard contents can also be transferred when binary clipboard support is enabled (see `enable_binary_clipboard`). Larger contents are sent in multiple parts automatically.
+
+Formatted content keeps its formatting. A copy that carries markup travels with the plain text its source wrote for it, so pasting into a rich editor keeps the styling and pasting into a terminal or a plain field gets the text rather than a rendering of the markup. Content leaving the session keeps its formatting whatever else is set; sending formatted content from the browser reads the clipboard the same way images are read, so that direction follows `enable_binary_clipboard` and falls back to plain text when it is off.
+
+The side menu's clipboard section carries three switches. **Send to session** and **Receive from session** each turn one direction off for this browser, within whatever `--enable-clipboard` already allows; a direction the server refuses is not offered at all. **Seamless** is what makes the clipboard follow every copy on either side by itself. Turned off, nothing moves automatically and the clipboard box in that same section becomes the deliberate path in both directions, which suits a session whose content should not follow the user out of it by accident. `--clipboard-seamless` sets the starting position for every client and can be locked.
 
 Clipboard behaviour is controlled by the server option `SELKIES_ENABLE_CLIPBOARD`/`--enable-clipboard`, which takes `true` (both directions), `in` (paste into session only), `out` (copy from session only), or `false`, plus `SELKIES_ENABLE_BINARY_CLIPBOARD`/`--enable-binary-clipboard` for the image clipboard. The client settings `clipboard_in_enabled` and `clipboard_out_enabled` are derived from that policy and can be toggled per browser within it.
 

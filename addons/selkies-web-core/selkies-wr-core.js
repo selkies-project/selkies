@@ -78,7 +78,7 @@ import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
 import { streamDensity as streamDensityOf, autoScalingDpi, resolutionScalingDpi, publishedScale } from "./lib/stream-density.js";
-import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, writeImageToLocalClipboard, digestedPayload } from "./lib/clipboard-sync.js";
+import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, writeImageToLocalClipboard, clipboardItemForFlavours, unpackClipboardFlavours, CLIPBOARD_FLAVOURS_MIME, digestedPayload } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
@@ -252,6 +252,8 @@ export default function webrtc() {
 	/** Server-synced direction gates: in is client to server, out is server to client. */
 	let clipboard_in_enabled = true;
 	let clipboard_out_enabled = true;
+	/** Whether the clipboard follows every change on its own, or only when asked. */
+	let clipboard_seamless = true;
 	let windowResolution = [];
 	let encoderLabel = "";
 	let encoder = "";
@@ -642,6 +644,14 @@ export default function webrtc() {
 	function applyMacCmdAsCtrl() {
 		if (input && typeof input.setMacCmdAsCtrl === 'function') {
 			input.setMacCmdAsCtrl(macCmdAsCtrl);
+		}
+	}
+	/** Whether the client keeps its own chords rather than passing them on. */
+	let keyboardShortcuts = true;
+	/** Applies the chord setting to the input handler. */
+	function applyKeyboardShortcuts() {
+		if (input && typeof input.setShortcutsEnabled === 'function') {
+			input.setShortcutsEnabled(keyboardShortcuts);
 		}
 	}
 
@@ -1997,6 +2007,15 @@ export default function webrtc() {
 			storeBool('enable_binary_clipboard', enable_binary_clipboard);
 			console.log(`Binary clipboard support ${enable_binary_clipboard ? 'enabled' : 'disabled'}`);
 		}
+		if (settings.keyboard_shortcuts !== undefined) {
+			keyboardShortcuts = !!settings.keyboard_shortcuts;
+			storeBool('keyboard_shortcuts', keyboardShortcuts);
+			applyKeyboardShortcuts();
+		}
+		if (settings.clipboard_seamless !== undefined) {
+			clipboard_seamless = !!settings.clipboard_seamless;
+			storeBool('clipboard_seamless', clipboard_seamless);
+		}
 		if (settings.clipboard_in_enabled !== undefined) {
 			clipboard_in_enabled = !!settings.clipboard_in_enabled;
 			storeBool('clipboard_in_enabled', clipboard_in_enabled);
@@ -2172,7 +2191,7 @@ export default function webrtc() {
 		isChromium,
 		getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
 		isSharedMode: () => isSharedMode,
-		canSync: () => clipboardStatus === "enabled" && !!window.clipboard_enabled,
+		canSync: () => clipboardStatus === "enabled" && !!window.clipboard_enabled && clipboard_seamless,
 		canRead: () => !!clipboard_in_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
 		sendClipboardData: (data, mime, onSkip) => sendClipboardData(data, mime, onSkip),
@@ -2186,7 +2205,7 @@ export default function webrtc() {
 		isChromium,
 		clipboardSync,
 		sendClipboardData: (data, mime) => sendClipboardData(data, mime),
-		canSync: () => !isSharedMode && clipboardStatus === "enabled" && !!window.clipboard_enabled,
+		canSync: () => !isSharedMode && clipboardStatus === "enabled" && !!window.clipboard_enabled && clipboard_seamless,
 		canRead: () => !!clipboard_in_enabled,
 		canWrite: () => !!clipboard_out_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
@@ -2335,7 +2354,8 @@ export default function webrtc() {
 	 * @returns {Promise<{isMultipart: boolean, mimeType: ?string, content: ?(string|ClipboardItem)}>}
 	 *     `content` is null while a multipart transfer is in progress, on
 	 *     failure, and for images on insecure origins, which have no
-	 *     ClipboardItem.
+	 *     ClipboardItem. `preview` carries a flavour set's text, which the
+	 *     item itself does not hand back synchronously.
 	 */
 	async function handleClipboardData(msg) {
 		if (!msg.data) {
@@ -2346,6 +2366,7 @@ export default function webrtc() {
 		let mimeType = msg.data.mime_type || multipartClipboard.mimeType;
 		let is_text =  mimeType === 'text/plain' ? true : false;
 		let content = null;
+		let preview = null;
 		let isMultipart = false;
 		switch (msg.type) {
 			case "clipboard-msg":
@@ -2354,6 +2375,12 @@ export default function webrtc() {
 					const { result } = await clipboardWorker.decode(msg.data.content, mimeType);
 					if (is_text) {
 						return { isMultipart, mimeType, content: result };
+					}
+					if (mimeType === CLIPBOARD_FLAVOURS_MIME) {
+						if (typeof ClipboardItem === 'undefined') return { isMultipart, mimeType, content: null };
+						const flavours = unpackClipboardFlavours(result);
+						return { isMultipart, mimeType, content: clipboardItemForFlavours(flavours),
+							preview: flavours.text || flavours.html };
 					}
 					blob = new Blob([result], { type: mimeType });
 					if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
@@ -2390,6 +2417,10 @@ export default function webrtc() {
 						content = result;
 					} else if (typeof ClipboardItem === 'undefined') {
 						content = null;
+					} else if (mimeType === CLIPBOARD_FLAVOURS_MIME) {
+						const flavours = unpackClipboardFlavours(result);
+						content = clipboardItemForFlavours(flavours);
+						preview = flavours.text || flavours.html;
 					} else {
 						let blob = new Blob([result], { type: mimeType });
 						if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
@@ -2401,7 +2432,7 @@ export default function webrtc() {
 				} catch (err) {
 					console.error("Worker decoding failed:", err);
 				}
-				return { isMultipart: false, mimeType, content };
+				return { isMultipart: false, mimeType, content, preview };
 			default:
 				console.warn("Unknown clipboard cmd received");
 		}
@@ -2516,6 +2547,8 @@ export default function webrtc() {
 			enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 			clipboard_in_enabled = getBoolParam('clipboard_in_enabled', clipboard_in_enabled);
 			clipboard_out_enabled = getBoolParam('clipboard_out_enabled', clipboard_out_enabled);
+			clipboard_seamless = getBoolParam('clipboard_seamless', clipboard_seamless);
+			keyboardShortcuts = getBoolParam('keyboard_shortcuts', keyboardShortcuts);
 			crf = getIntParam('video_crf', crf);
 			antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 			trackpadMode = getBoolParam('trackpadMode', false);
@@ -2586,6 +2619,7 @@ export default function webrtc() {
 				webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
+			input.setShortcutsEnabled(keyboardShortcuts);
 			input.setDisplayLayouts(latestDisplayLayouts, displayId);
 			/**
 			 * Assigned before attach(), so the pad resync inside it and a pad
@@ -2813,12 +2847,13 @@ export default function webrtc() {
 					return;
 				}
 				const isInitClipboardFetch = consumeInitClipboardFetch();
-				const {isMultipart, mimeType, content} = await handleClipboardData(msg);
+				const {isMultipart, mimeType, content, preview} = await handleClipboardData(msg);
 				const isText = mimeType === "text/plain";
+				const isFlavours = mimeType === CLIPBOARD_FLAVOURS_MIME;
 				if (isMultipart || content === null) {
 					return;
 				}
-				const canWriteLocal = !isInitClipboardFetch &&
+				const canWriteLocal = !isInitClipboardFetch && clipboard_seamless &&
 					clipboardStatus === 'enabled' && clipboard_out_enabled;
 
 				if (isText) {
@@ -2832,6 +2867,17 @@ export default function webrtc() {
 							() => navigator.clipboard.writeText(content), {
 								onSuccess: () => console.log('Successfully wrote text from server to local clipboard.'),
 								onFailure: (err) => console.log('Could not copy text to clipboard: ', err),
+							});
+					}
+				} else if (isFlavours) {
+					const digest = digestedPayload(preview.length, preview);
+					const isFresh = clipboardSync.shouldSend(digest, mimeType);
+					clipboardSync.resolveServer(preview, null, mimeType, digest);
+					window.postMessage(clipboardPreviewMessage(preview), window.location.origin);
+					if (canWriteLocal && isFresh) {
+						deferredClipboardWriter.write(
+							() => navigator.clipboard.write([content]), {
+								onFailure: (err) => console.log('Could not copy session markup to clipboard: ', err),
 							});
 					}
 				} else if (enable_binary_clipboard) {

@@ -178,6 +178,12 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.uiScaling = isSettingRenderable(s.scaling_dpi);
   newRenderable.binaryClipboard = isSettingRenderable(s.enable_binary_clipboard)
     && (s.clipboard_enabled?.value ?? true);
+  // A direction the server refuses is not offered rather than offered dead.
+  newRenderable.clipboardUp = s.clipboard_in_enabled?.value ?? true;
+  newRenderable.clipboardDown = s.clipboard_out_enabled?.value ?? true;
+  newRenderable.clipboardSeamless = isSettingRenderable(s.clipboard_seamless)
+    && (s.clipboard_enabled?.value ?? true);
+  newRenderable.keyboardShortcuts = isSettingRenderable(s.keyboard_shortcuts);
   newRenderable.useBrowserCursors = isSettingRenderable(s.use_browser_cursors);
   newRenderable.rawPointerMotion = isSettingRenderable(s.raw_pointer_motion);
   // Offered only where Command exists to remap.

@@ -4,13 +4,18 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+import { useState } from "react";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { computeRenderableSettings, getLastServerSettings, getPrefixedKey } from "@/utils";
 import { t } from "@/i18n";
 
 /**
- * The keyboard-shortcuts card: the core-owned chords and the citation notice.
+ * The keyboard-shortcuts card: the core-owned chords, the switch that hands
+ * them to the session instead, and the citation notice.
  * @module
  */
 
@@ -22,11 +27,29 @@ const shortcuts = [
 	{ label: t('sections.shortcuts.pointerLock'), combo: "Ctrl + Shift + Left Click" },
 ];
 
-/** Renders the shortcut list. */
+/** Renders the switch and the shortcut list. */
 export function ShortcutsMenu() {
+	const renderableSettings: any = computeRenderableSettings(getLastServerSettings());
+	const [enabled, setEnabled] = useState(() => {
+		const saved = localStorage.getItem(getPrefixedKey("keyboard_shortcuts"));
+		return saved !== null ? saved === 'true' : true;
+	});
+	const toggle = () => {
+		const value = !enabled;
+		setEnabled(value);
+		localStorage.setItem(getPrefixedKey("keyboard_shortcuts"), String(value));
+		window.postMessage({ type: 'settings', settings: { keyboard_shortcuts: value } },
+			window.location.origin);
+	};
 	return (
 		<Card className="w-[320px] bg-background/95 backdrop-blur-sm border shadow-sm">
 			<CardContent className="p-4">
+				{(renderableSettings.keyboardShortcuts ?? true) && (
+					<div className="flex items-center justify-between mb-3">
+						<Label className="text-sm font-medium" title={t('sections.shortcuts.enabledDetails')}>{t('sections.shortcuts.enabledLabel')}</Label>
+						<Switch checked={enabled} onCheckedChange={toggle} />
+					</div>
+				)}
 				<Alert className="mb-3">
 					<AlertTitle>{t('sections.shortcuts.title')}</AlertTitle>
 					<AlertDescription>

@@ -94,6 +94,7 @@ from .display_utils import (
     align_dims_16,
 )
 from .input_handler import (
+    CLIPBOARD_FLAVOURS_MIME,
     BULK_DRAIN_TIMEOUT_S,
     WebRTCInput as InputHandler,
     CLIPBOARD_CHUNK_SIZE,
@@ -892,7 +893,11 @@ class SelkiesStreamingApp:
             return
         try:
             is_binary = mime_type != "text/plain"
-            if is_binary and not self.data_streaming_server.enable_binary_clipboard:
+            # Markup travels on the binary verbs because it carries a mime, but
+            # it is text: the image gate is not its gate.
+            if is_binary and not mime_type.startswith("text/") \
+                    and mime_type != CLIPBOARD_FLAVOURS_MIME \
+                    and not self.data_streaming_server.enable_binary_clipboard:
                 data_logger.warning(
                     f"Attempted to send binary clipboard data ({mime_type}) but feature is disabled on server."
                 )

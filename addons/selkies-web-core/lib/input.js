@@ -1339,8 +1339,9 @@ const _stopEvent = function (e) {
  * plain fullscreen (`onfullscreenhotkey`, `enterFullscreen` by default),
  * Ctrl+Shift+X toggles gaming mode (`ongaminghotkey`, `toggleGamingMode` by
  * default), Ctrl+Shift+G toggles the gamepad overlay (`ongamepadhotkey`), and
- * Ctrl+Shift+Click takes pointer lock. Three quick Escape presses in a row
- * also leave gaming mode (`_escapeHatch`). Elements carrying the
+ * Ctrl+Shift+Click takes pointer lock; `shortcutsEnabled` false passes every
+ * one of them to the session instead. Three quick Escape presses in a row
+ * also leave gaming mode (`_escapeHatch`), whatever that flag says. Elements carrying the
  * `allow-native-input` class keep native keyboard and touch handling.
  */
 export class Input {
@@ -1401,6 +1402,7 @@ export class Input {
         this._moveFlushScheduled = false;
         this.onmenuhotkey = null;
         this.gamingMode = false;
+        this.shortcutsEnabled = true;
         this._escapePresses = 0;
         this._lastEscapeAt = 0;
         this.ongamingmode = null;
@@ -1906,7 +1908,7 @@ export class Input {
             _stopEvent(event);
             return;
         }
-        if (event.ctrlKey && event.shiftKey) {
+        if (event.ctrlKey && event.shiftKey && this.shortcutsEnabled) {
             let hotkey = null;
             if (event.code === 'KeyM' && !this.gamingMode) hotkey = this.onmenuhotkey;
             else if (event.code === 'KeyF' && document.fullscreenElement === null) hotkey = this.onfullscreenhotkey;
@@ -2585,7 +2587,7 @@ export class Input {
                 event.preventDefault();
             }
         }
-        if (down && event.button === 0 && event.ctrlKey && event.shiftKey) {
+        if (down && event.button === 0 && event.ctrlKey && event.shiftKey && this.shortcutsEnabled) {
             const targetElement = this._streamLockTargets().includes(event.target)
                 ? event.target : this.element;
             const lock = () => this._requestPointerLock(targetElement, lock,
@@ -3469,6 +3471,11 @@ export class Input {
      * released first, so the change cannot leave one held.
      * @param {boolean} enabled
      */
+    /** Whether the client keeps its own chords rather than passing them on. */
+    setShortcutsEnabled(enabled) {
+        this.shortcutsEnabled = !!enabled;
+    }
+
     setMacCmdAsCtrl(enabled) {
         const want = !!enabled;
         if (Input.macCmdAsCtrl === want) return;
