@@ -71,6 +71,7 @@ function makeInput(element, gaming = true, attached = true) {
     input.isSharedMode = false;
     input.inputAttached = attached;
     input.gamingMode = gaming;
+    input.shortcutsEnabled = true;
     return input;
 }
 
