@@ -34,9 +34,11 @@ A desktop selector runs that block under the session manager the images run
 the game under: openbox or kwin_x11 managing the X test display, or labwc or
 kwin_wayland nested on the capture compositor with the game as a client of
 the nested one, which then relays the motion it is given as a Wayland client
-itself. Without that manager installed the block is skipped. Under a nested
-kwin_wayland the delta check is recorded as skipped: KWin relays its host's
-pointer as absolute motion only, an open gap rather than a fault in the path.
+itself. Without that manager installed the block is skipped. A nested
+kwin_wayland turns the seat's motion into absolute events and takes deltas
+only through `org_kde_kwin_fake_input`, which it advertises to a client while
+`KWIN_WAYLAND_NO_PERMISSION_CHECKS` is in its environment, as the KDE image
+sets it and this harness does.
 
     python3 tests/e2e/test_pointer_lock.py ws-x11|wr-x11|ws-wl|wr-wl
     python3 tests/e2e/test_pointer_lock.py ws-x11-openbox|ws-x11-kwin|ws-wl-labwc|ws-wl-kwin
@@ -360,8 +362,7 @@ def wire_deltas(messages: list) -> list:
     return out
 
 
-def game_view(page: Any, wayland: bool, res: "H.Results", socket: Optional[str] = None,
-              desktop: Optional[str] = None) -> None:
+def game_view(page: Any, wayland: bool, res: "H.Results", socket: Optional[str] = None) -> None:
     """What a game over the desktop sees of a locked pointer and the keyboard."""
     probe = GameProbe(wayland, socket)
     try:
@@ -389,15 +390,8 @@ def game_view(page: Any, wayland: bool, res: "H.Results", socket: Optional[str] 
         wire = wire_deltas(moves_since(page, wire_mark))
         seen = [(m["dx"], m["dy"]) for m in probe.events("motion", probe_mark, len(wire), 6)]
         res.check("the wire carried every game move as relative motion", len(wire) == len(GAME_MOVES), wire)
-        if wayland and desktop == "kwin":
-            # KWin's nested backend relays its host's pointer as absolute motion
-            # only, so a game under it reads no deltas; recorded as the open gap it
-            # is rather than as a failure of the path under test.
-            res.skip("every locked move reaches the game as the delta the wire carried, one event each",
-                     f"a nested kwin_wayland relays absolute motion only; game saw {seen}")
-        else:
-            res.check("every locked move reaches the game as the delta the wire carried, one event each",
-                      seen == wire, f"game {seen} wire {wire}")
+        res.check("every locked move reaches the game as the delta the wire carried, one event each",
+                  seen == wire, f"game {seen} wire {wire}")
         key_mark = len(probe.lines)
         page.keyboard.press("w")
         keys = [(k["down"], k["sym"]) for k in probe.events("key", key_mark, 2, 6)]
@@ -508,7 +502,7 @@ def run(mode: str, wayland: bool, desktop: Optional[str], res: "H.Results") -> N
                         game_view(page, wayland, res, capture or None)
                     elif session.start(capture):
                         res.check(f"{desktop} manages the session", True, session.socket or "")
-                        game_view(page, wayland, res, session.socket, desktop)
+                        game_view(page, wayland, res, session.socket)
                     else:
                         res.skip(f"{desktop} manages the session", session.why)
                 finally:
