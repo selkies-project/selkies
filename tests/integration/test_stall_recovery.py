@@ -82,7 +82,7 @@ class Client:
             now = time.monotonic()
             if isinstance(m, (bytes, bytearray)) and len(m) >= 4 and m[0] in (0x03, 0x04):
                 fid = (m[2] << 8) | m[3]
-                idr = m[0] == 0x04 and m[1] == 0x01
+                idr = m[0] == 0x04 and (m[1] & 0x0F) == 0x01
                 if fid != self.last_id:
                     self.last_id, self.last_at = fid, now
                     self.frames.append((now, fid, idr))

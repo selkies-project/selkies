@@ -148,7 +148,7 @@ class FrameCounter:
             self.raw_headers.add(b[0])
             if b[0] == 0x04:
                 self.h264 += 1
-                if b[1] == 0x01:
+                if (b[1] & 0x0F) == 0x01:
                     self.idr_flag += 1
                 payload = b[10:] if len(b) > 10 else b""
                 i = 0
