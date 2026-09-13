@@ -25,9 +25,6 @@ import { fileURLToPath } from 'node:url';
 const site = dirname(dirname(fileURLToPath(import.meta.url)));
 const repoRoot = dirname(site);
 const siteDir = basename(site);
-// Directories inside the site directory that belong to a version rather than
-// to the tooling, and so stay as the tag has them.
-const CONTENT = [];
 // The branch the working tree stands for; gitConfig.branch in lib/shared.ts.
 const BRANCH = 'main';
 const LATEST = 'latest';
@@ -89,15 +86,14 @@ async function exportTag(tag, tree) {
   run('tar', ['-xf', archive, '-C', tree]);
   await rm(archive);
 
-  const keep = new Set(CONTENT.map((dir) => join(siteDir, dir)));
-  for (const entry of await readdir(join(tree, siteDir))) {
-    if (!keep.has(join(siteDir, entry))) await rm(join(tree, siteDir, entry), { recursive: true });
-  }
-  // Tracked and unignored files, so a local change to the tooling is what
-  // every version is built with, and nothing generated or installed leaks in.
+  // The site directory is the tooling's, and the tag's copy of it gives way to
+  // the tracked and unignored files of the working tree, so a local change to
+  // the tooling is what every version is built with, and nothing generated or
+  // installed leaks in.
+  await rm(join(tree, siteDir), { recursive: true });
   const tooling = git(['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', siteDir])
     .split('\0')
-    .filter((file) => file && ![...keep].some((dir) => file.startsWith(`${dir}/`)));
+    .filter(Boolean);
   for (const file of tooling) {
     await mkdir(join(tree, dirname(file)), { recursive: true });
     await cp(join(repoRoot, file), join(tree, file));
