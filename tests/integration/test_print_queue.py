@@ -46,6 +46,14 @@ def sample_pdf() -> bytes:
     return out + b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(OBJECTS) + 1, xref)
 
 
+def alive(pid: int) -> bool:
+    """Whether `pid` is a live process, a zombie counting as gone."""
+    try:
+        return "Z" not in open(f"/proc/{pid}/stat").read().split(")")[-1].split()[0]
+    except OSError:
+        return False
+
+
 def pages(path: str) -> int:
     """Pages in the PDF at `path`; none for a document that never landed."""
     try:
@@ -125,6 +133,29 @@ async def main() -> None:
         res.check("the scheduler stops with the queue", queue.process is None and not os.path.exists(f"/proc/{pid}"))
         res.check("a second start replaces the state under the same root",
                   await queue.start() and "running" in run("lpstat", "-r").stdout)
+        # A server killed outright leaves its scheduler running the program;
+        # the next start replaces it rather than tripping over it.
+        stale = queue.process
+        other = printing.PrintQueue(spool)
+        res.check("a queue starts beside a scheduler a dead server left running its program",
+                  await other.start() and "running" in run("lpstat", "-r").stdout
+                  and other.process.pid != stale.pid, other.process and other.process.pid)
+        await other.stop()
+        script = ("import asyncio, sys; sys.argv = ['selkies']; sys.path.insert(0, %r)\n"
+                  "from selkies import printing\n"
+                  "async def go():\n"
+                  "    q = printing.PrintQueue(%r)\n"
+                  "    await q.start(); print(q.process.pid, flush=True); await asyncio.sleep(60)\n"
+                  "asyncio.run(go())\n") % (os.path.join(REPO, "src"), spool)
+        child = subprocess.Popen([sys.executable, "-c", script], env={**os.environ, "PATH": path},
+                                 stdout=subprocess.PIPE, text=True)
+        scheduler = int(child.stdout.readline().strip() or 0)
+        child.kill()
+        child.wait()
+        deadline = time.time() + 5
+        while time.time() < deadline and alive(scheduler):
+            time.sleep(0.1)
+        res.check("the scheduler dies with a server killed outright", scheduler > 0 and not alive(scheduler), scheduler)
     finally:
         await queue.stop()
         if res.failed():

@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 import shutil
+import signal
 import tempfile
 from importlib.resources import files
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -114,6 +115,17 @@ class SpoolWatcher(FileSystemEventHandler):
         self.loop.create_task(self.on_document(name, size))
 
 
+def _die_with_parent() -> None:
+    """Asks the kernel to end the scheduler when the server is gone, however
+    it went: one killed outright would otherwise leave the scheduler holding
+    the socket and the program for the next start to trip over."""
+    try:
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+
+
 class PrintQueue:
     """The session's print queue: a CUPS scheduler run as this user under the
     runtime directory, with one queue, Selkies, whose backend writes each job
@@ -207,19 +219,27 @@ ErrorPolicy retry-job
                         "(cups-daemon and cups-filters provide one)")
             return False
         cupsd, server_bin, data_dir = found
-        self._prepare(server_bin, data_dir)
         # The scheduler runs as a copy of the program: a distribution confines
         # the system scheduler, by its path, to the system's directories and
         # backends, which a queue under the runtime directory has neither of.
+        # The copy is renamed into place, which a scheduler still running the
+        # old copy (left by a server that died without stopping it) never
+        # blocks the way writing over its program would.
         program = os.path.join(self.root, "cupsd")
-        shutil.copy2(cupsd, program)
-        args = ["-f", "-c", os.path.join(self.root, "cupsd.conf"), "-s", os.path.join(self.root, "cups-files.conf")]
         try:
-            self.process = await asyncio.create_subprocess_exec(
-                program, *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            self._prepare(server_bin, data_dir)
+            shutil.copy2(cupsd, program + ".new")
+            os.replace(program + ".new", program)
+        except OSError as exc:
+            logger.warning("No print queue: cannot set the scheduler up under %s: %s", self.root, exc)
+            return False
+        args = ["-f", "-c", os.path.join(self.root, "cupsd.conf"), "-s", os.path.join(self.root, "cups-files.conf")]
+        spawn = dict(stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                     preexec_fn=_die_with_parent)
+        try:
+            self.process = await asyncio.create_subprocess_exec(program, *args, **spawn)
         except OSError:
-            self.process = await asyncio.create_subprocess_exec(
-                cupsd, *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            self.process = await asyncio.create_subprocess_exec(cupsd, *args, **spawn)
         for _ in range(100):
             if os.path.exists(self.socket) or self.process.returncode is not None:
                 break
