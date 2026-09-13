@@ -304,20 +304,35 @@ export const av1LevelIdx = (width, height, fps) => {
  * @param {boolean} chromium Whether the engine takes a High profile guess.
  * @returns {string}
  */
+/**
+ * The `level_idc`, as a two-hex-digit string, an H.264 stream of this geometry declares, floored
+ * across the common frame rates like the encoder's own ladder so a rate change moves nothing.
+ * Mirrors `h264_level` in pixelflux `codec.rs`.
+ * @param {number} width
+ * @param {number} height
+ * @param {number} fps
+ * @returns {string}
+ */
+export const h264LevelIdc = (width, height, fps) => {
+  const mbs = Math.ceil(width / 16) * Math.ceil(height / 16);
+  const mbps = mbs * Math.max(fps > 0 ? fps : 60, 60);
+  const levels = [
+    [0x29, 8192, 245760], [0x2A, 8704, 522240], [0x32, 22080, 589824], [0x33, 36864, 983040],
+    [0x34, 36864, 2073600], [0x3C, 139264, 4177920], [0x3D, 139264, 8355840], [0x3E, 139264, 16711680],
+  ];
+  for (const [idc, maxFs, maxMbps] of levels) {
+    if (mbs <= maxFs && mbps <= maxMbps) return idc.toString(16).toUpperCase().padStart(2, '0');
+  }
+  return '3E';
+};
+
 export const guessAvcCodec = (width, height, is444, fps, chromium) => {
   if (!chromium) return 'avc1.42E01E';
-  const effFps = (typeof fps === 'number' && fps > 0) ? fps : 60;
-  const pixelsPerSecond = width * height * effFps;
-  // The encoders' emitted profile_idc: High (0x64) for 4:2:0, High 4:4:4 (0xF4) for 4:4:4.
+  // The encoders' emitted profile_idc: High (0x64) for 4:2:0, High 4:4:4 (0xF4) for 4:4:4. The
+  // level matches the encoder's per-geometry choice (floored across the common rates), so the
+  // decoder configured before the first key frame does not reconfigure when its SPS arrives.
   const profile = is444 ? 'F400' : '6400';
-  // Floored at level 5.2 (0x34), the encoders' emitted level, so the first
-  // key frame does not trigger a level-only reconfigure.
-  let level;
-  if (pixelsPerSecond <= 3840 * 2160 * 60) level = '34';
-  else if (pixelsPerSecond <= 7680 * 4320 * 30) level = '3C';
-  else if (pixelsPerSecond <= 7680 * 4320 * 60) level = '3D';
-  else level = '3E';
-  return `avc1.${profile}${level}`;
+  return `avc1.${profile}${h264LevelIdc(width, height, fps)}`;
 };
 
 /**
