@@ -10,14 +10,20 @@ delivers -- a window walked across the boundary has to appear on the first,
 then on both, then on the second.
 
 The pointer that would drive such a drag is checked too: a button held on the
-first screen keeps the host delivering motion to that screen's window past its
-edge, and the nested compositor has to carry its cursor -- and the window a
-drag holds -- onto the second screen rather than clamp it at the first one's
-last column. That is the labwc seam patch the container images carry
-(`labwc-seam.patch`); a labwc without the patches clamps by design, so the
-crossing is skipped there, keyed off the control socket the same patch set
-adds. The grab is observed from a client of the NESTED compositor, since that
-is the chain a desktop session runs through.
+first screen would keep the host delivering motion to that screen's window
+past its edge, where the nested compositor clamps its cursor at the screen's
+last column, so the host releases the grab at the crossing and the pointer
+enters the second screen's window -- the nested compositor then carries its
+cursor, and the window a drag holds, onto the second screen. The grab is
+observed from a client of the NESTED compositor, since that is the chain a
+desktop session runs through.
+
+The same seam between screens of different scales: the session lays its
+screens out in its logical space, where a screen at scale 2 is half its mode,
+so its neighbour has to close up to that logical edge, both when the scale
+lands and when the capture arrangement is applied again, and a drag across
+the seam has to put the session's cursor where the host pointer is on either
+screen, at that screen's own scale.
 
 Usage: python3 tests/integration/test_wayland_seam.py
 """
@@ -244,20 +250,13 @@ def main() -> "H.Results":
                   second[0] <= PRESENT and second[1] > PRESENT, second)
 
         # What a drag rides on. The grab is held across the boundary: the host
-        # keeps sending the first screen's window motion past its edge, and the
-        # nested compositor has to carry its cursor onto the second screen
-        # (labwc-seam.patch) rather than clamp it at the first one's last column.
-        # The patched labwc announces itself by its control socket; one without
-        # the patches clamps by design, so the crossing is only asked of a
-        # compositor that can cross.
-        if not os.path.exists(os.path.join(RUNTIME, "labwc.sock")):
-            res.skip("a held grab crosses the boundary",
-                     "this labwc carries no selkies patches and clamps at the boundary")
-            res.skip("injected buttons reach the session's clients",
-                     "observed only under the held-grab drive")
-            obs = None
-        elif not (obs := H.WlObs(inner)).ready(20):
+        # hands the pointer to the second screen's window at the crossing, and
+        # the nested compositor carries its cursor onto that screen rather than
+        # clamp it at the first one's last column.
+        obs = H.WlObs(inner, XDG_RUNTIME_DIR=RUNTIME)
+        if not obs.ready(20):
             res.skip("a held grab crosses the boundary", "no observer surface")
+            res.skip("injected buttons reach the session's clients", "no observer surface")
         else:
             time.sleep(1.0)
             obs.lines.clear()
@@ -283,7 +282,72 @@ def main() -> "H.Results":
                       f"reached x={reach}, boundary at {DISPLAY[0]}")
             res.check("injected buttons reach the session's clients",
                       len(clicks) >= 1, clicks)
-            obs.proc.terminate()
+        obs.stop()
+
+        ctl = pixelflux.ScreenCapture()
+        half = (DISPLAY[0] // 2, DISPLAY[1] // 2)
+
+        def placed(want, deadline=5.0):
+            got = None
+            end = time.monotonic() + deadline
+            while got != want and time.monotonic() < end:
+                got = [(s[1], s[2]) for s in ctl.list_app_screens(inner)]
+                time.sleep(0.2)
+            return got
+
+        res.check("the first screen takes scale 2",
+                  ctl.set_app_screen_geometry(inner, DISPLAY[0], DISPLAY[1], 2.0, 0))
+        want = [(0, 0), (half[0], 0)]
+        got = placed(want)
+        res.check("the second screen closes up to the scaled screen's logical edge",
+                  got == want, got)
+        ctl.set_app_screen_layout(
+            inner, [(0, 0, DISPLAY[0], DISPLAY[1]), (DISPLAY[0], 0, DISPLAY[0], DISPLAY[1])])
+        got = placed(want)
+        res.check("the capture arrangement applied again keeps it there", got == want, got)
+
+        # A drag either way across the seam, observed by a client fullscreen on
+        # the screen it starts on: the last position it is handed is where the
+        # host pointer ended, in the logical space of the screen it ended on.
+        for tag, output, size, press, end, want_at in (
+            ("from the scaled screen", 0, half, (1500, 400),
+             (DISPLAY[0] + 600, 400), (half[0] + 600, 400)),
+            ("onto the scaled screen", 1, DISPLAY, (DISPLAY[0] + 480, 400),
+             (500, 400), (250 - half[0], 200)),
+        ):
+            obs = H.WlObs(inner, XDG_RUNTIME_DIR=RUNTIME, WLOBS_OUTPUT=str(output))
+            if not obs.ready(20):
+                res.skip(f"{tag}: the session's cursor lands where the pointer is",
+                         "no observer surface")
+                obs.stop()
+                continue
+            mapped = next(ln for ln in obs.lines if ln.get("kind") == "mapped")
+            if mapped.get("configured"):
+                res.check(f"{tag}: the observer covers its screen at that screen's scale",
+                          (mapped.get("w"), mapped.get("h")) == size, mapped)
+            else:
+                res.skip(f"{tag}: the observer covers its screen at that screen's scale",
+                         "this compositor leaves the fullscreen size to the client")
+            time.sleep(1.0)
+            obs.lines.clear()
+            left_cap.inject_mouse_move(float(press[0]), float(press[1]))
+            time.sleep(0.4)
+            left_cap.inject_mouse_button(272, 1)
+            time.sleep(0.3)
+            step = 50 if end[0] > press[0] else -50
+            for x in list(range(press[0], end[0], step)) + [end[0]]:
+                left_cap.inject_mouse_move(float(x), float(end[1]))
+                time.sleep(0.03)
+            time.sleep(0.6)
+            left_cap.inject_mouse_button(272, 0)
+            released = obs.wait_for("ptr_button", timeout=10, state=0)
+            motions = [ln for ln in obs.lines if ln.get("kind") == "ptr_motion"]
+            last = (motions[-1]["x"], motions[-1]["y"]) if motions else None
+            res.check(f"{tag}: the session's cursor lands where the pointer is",
+                      released is not None and last is not None
+                      and abs(last[0] - want_at[0]) <= 4 and abs(last[1] - want_at[1]) <= 4,
+                      f"last {last}, wanted {want_at}")
+            obs.stop()
     finally:
         if patch is not None:
             patch.close()

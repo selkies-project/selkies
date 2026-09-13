@@ -14,8 +14,8 @@ cross-screen hop must land at the hopped-to position (the capture compositor
 repeats a motion whenever pointer focus changes windows, because a nested
 wlroots backend reads positions from motion events alone), and a held drag
 must carry the session's cursor across the boundary onto a screen that did
-not exist at the session's start (`labwc-seam.patch`; an unpatched labwc
-clamps at the first screen's last column).
+not exist at the session's start (the capture compositor hands the drag to
+that screen's window at the crossing).
 
 The same rig then drives selkies' own session-screen logic: displays own
 screens by the names `ADD_SCREEN` coined, so a removal never picks a
@@ -155,7 +155,7 @@ def main() -> "H.Results":
                   placed == 2 and got == [(0, 0), (W, 0)],
                   f"placed={placed} got={got}")
 
-        obs = H.WlObs(inner)
+        obs = H.WlObs(inner, XDG_RUNTIME_DIR=RUNTIME)
         if not obs.ready(20):
             res.skip("a click lands where a single hop moved", "no observer surface")
             res.skip("a held drag crosses onto the grown screen", "no observer surface")

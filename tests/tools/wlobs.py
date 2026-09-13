@@ -23,6 +23,9 @@ from pywayland.protocol.xdg_shell import XdgWmBase
 
 SOCKET = sys.argv[1] if len(sys.argv) > 1 else "wayland-1"
 DURATION = float(os.environ.get("WLOBS_DURATION", "25"))
+# Which of the compositor's outputs, in announcement order, the observer
+# surface goes fullscreen on.
+OUTPUT = int(os.environ.get("WLOBS_OUTPUT", "0"))
 # Solid ARGB8888 colour (hex, e.g. ff2878dc) painted on the observer surface,
 # so a captured frame carries a known picture; unset leaves the surface
 # transparent and the compositor's own background shows through it.
@@ -57,7 +60,7 @@ registry = display.get_registry()
 handles = {
     "seat": None, "comp": None, "shm": None,
     "xdg": None, "ddm": None, "seat_iface": None, "seat_version": 1,
-    "dd": None, "output": None,
+    "dd": None, "output": None, "outputs_seen": 0,
 }
 
 
@@ -72,8 +75,10 @@ def on_global(reg, name, iface, version):
         handles["xdg"] = reg.bind(name, XdgWmBase, version)
     elif iface == "wl_data_device_manager" and handles["ddm"] is None:
         handles["ddm"] = reg.bind(name, WlDataDeviceManager, version)
-    elif iface == "wl_output" and handles["output"] is None:
-        handles["output"] = reg.bind(name, WlOutput, version)
+    elif iface == "wl_output":
+        if handles["outputs_seen"] == OUTPUT:
+            handles["output"] = reg.bind(name, WlOutput, version)
+        handles["outputs_seen"] += 1
 
 
 def on_global_remove(reg, name):
@@ -236,7 +241,8 @@ pool.destroy()
 surf.attach(buf, 0, 0)
 surf.commit()
 display.roundtrip()
-emit("mapped")
+# `configured` says the size is the compositor's, not the fallback.
+emit("mapped", w=W, h=H, configured=bool(asked_size[0]))
 
 end = time.time() + DURATION
 while time.time() < end:
