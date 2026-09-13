@@ -24,7 +24,7 @@ out the period.
 
 import json
 import time
-import psutil
+from .system_usage import SystemUsage
 import asyncio
 import inspect
 import aiohttp
@@ -1553,12 +1553,13 @@ logger_gpu = logging.getLogger("gpu_monitor")
 logger_gpu.setLevel(logging.INFO)
 
 class SystemMonitor:
-    """Periodically samples CPU and memory usage via psutil.
+    """Periodically samples CPU and memory usage, the session's own cgroup's
+    where it has one (`system_usage`).
 
     The latest sample is exposed on `cpu_percent`, `mem_total`, and
     `mem_used`; the optional async `on_timer` callback fires once per period
-    with the current timestamp. psutil calls run in a worker thread so
-    sampling never blocks the event loop.
+    with the current timestamp. Sampling runs in a worker thread so it never
+    blocks the event loop.
     """
 
     def __init__(self, period: int = 1, enabled: bool = True):
@@ -1569,6 +1570,7 @@ class SystemMonitor:
         self.cpu_percent: float = 0
         self.mem_total: int = 0
         self.mem_used: int = 0
+        self._usage = SystemUsage()
 
         self.on_timer: Optional[Callable[[float], Awaitable[None]]] = None
 
@@ -1582,9 +1584,7 @@ class SystemMonitor:
 
     def _get_system_metrics(self) -> Tuple[float, int, int]:
         """Returns `(cpu_percent, mem_total_bytes, mem_used_bytes)`; blocking."""
-        cpu = psutil.cpu_percent()
-        mem = psutil.virtual_memory()
-        return cpu, mem.total, mem.used
+        return self._usage.sample()
 
     async def _monitor_loop(self) -> None:
         """Samples until stopped."""

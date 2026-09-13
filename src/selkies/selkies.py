@@ -61,7 +61,6 @@ try:
 except ImportError:  # no ioctl to ask a socket what it still owes the network
     fcntl = None
 
-import psutil
 from aiohttp import web, WSMsgType, WSCloseCode
 
 from . import audio_config
@@ -117,6 +116,7 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
+from .system_usage import SystemUsage
 from .stream_server import (BaseStreamingService, TransferPacer, UplinkGauge, _uplink_session_state, note_pong, uplink_rtt_ms,
                             socket_gauge)
 from .webrtc_utils import Metrics
@@ -6018,21 +6018,22 @@ async def _collect_system_stats_ws(shared_data: dict, interval_seconds: float = 
     """Singleton collector: poll CPU/memory into the shared stats dict.
 
     One instance serves every connection's stats sender (per-connection
-    collectors would mean N psutil polls per second).
+    collectors would mean N polls per second). The figures are the session's
+    own cgroup's where it has one (`system_usage`).
     """
     data_logger.debug(
         f"System monitor loop (WS mode) started, interval: {interval_seconds}s"
     )
+    usage = SystemUsage()
     try:
         while True:
-            cpu = psutil.cpu_percent()
-            mem = psutil.virtual_memory()
+            cpu, mem_total, mem_used = await asyncio.to_thread(usage.sample)
             shared_data["system"] = {
                 "type": "system_stats",
                 "timestamp": datetime.now().isoformat(),
                 "cpu_percent": cpu,
-                "mem_total": mem.total,
-                "mem_used": mem.used,
+                "mem_total": mem_total,
+                "mem_used": mem_used,
             }
             await asyncio.sleep(interval_seconds)
     except asyncio.CancelledError:
