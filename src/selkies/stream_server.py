@@ -2389,8 +2389,9 @@ class CentralizedStreamServer:
         if self._viewer_ceiling(request):
             return web.Response(status=403, text="View-only credentials cannot take printed documents")
         name = printing.document_name(request.match_info.get("name", ""))
-        path = self.print_spool / name if name else None
-        if path is None or not path.is_file():
+        base = str(self.print_spool)
+        path = pathlib.Path(os.path.realpath(os.path.join(base, name))) if name else None
+        if path is None or os.path.commonpath([base, str(path)]) != base or not path.is_file():
             return web.Response(status=404, text="No such document")
         return _AuditedFileResponse(path, name, event="print.document", remove=True,
                                     headers={"Content-Disposition": "inline"})
@@ -2455,7 +2456,8 @@ class CentralizedStreamServer:
         except json.JSONDecodeError:
             return web.Response(status=400, text="Body is not JSON")
         except RuntimeError as exc:
-            return web.Response(status=409, text=str(exc))
+            logger.warning(f"Recording request refused: {exc}")
+            return web.Response(status=409, text="Recording request refused; the server log names the reason")
         return web.json_response(status)
 
     async def _start_recording_audio(self, pixelflux: Any) -> str:
@@ -2511,7 +2513,8 @@ class CentralizedStreamServer:
         try:
             png = await asyncio.to_thread(screenshot, output)
         except RuntimeError as exc:
-            return web.Response(status=404, text=str(exc))
+            logger.warning(f"Screenshot of display {display!r} refused: {exc}")
+            return web.Response(status=404, text="No such display")
         return web.Response(body=png, content_type="image/png")
 
     def pending_print_documents(self) -> List[Tuple[str, int]]:

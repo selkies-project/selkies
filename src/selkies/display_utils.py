@@ -477,8 +477,9 @@ def wayland_output_id(display_id: Optional[str]) -> int:
     """
     if not display_id or display_id == "primary":
         return 1
-    m = re.search(r"(\d+)$", str(display_id))
-    n = int(m.group(1)) if m else 2
+    name = str(display_id)
+    digits = name[len(name.rstrip("0123456789")):]
+    n = int(digits) if 0 < len(digits) <= 9 else 2
     return n if n >= 2 else 2
 
 
