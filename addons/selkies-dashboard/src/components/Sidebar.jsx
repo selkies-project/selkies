@@ -3395,7 +3395,7 @@ function Sidebar() {
                         <option key={enc} value={enc} disabled={!canPlayEncoder(enc, isWebrtc)}>
                           {canPlayEncoder(enc, isWebrtc)
                             ? displayLabel(enc)
-                            : `${displayLabel(enc)} [${t("sections.video.encoderUnsupported")}]`}
+                            : `${displayLabel(enc)} (${t("sections.video.encoderUnsupported")})`}
                         </option>
                       ))}
                     </select>
