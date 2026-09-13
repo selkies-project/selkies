@@ -55,8 +55,7 @@ build wlroots https://gitlab.freedesktop.org/wlroots/wlroots.git "${WLROOTS_VERS
 
 git clone --depth 1 --branch "${LABWC_VERSION}" \
     https://github.com/labwc/labwc.git "${SRC}/labwc"
-git -C "${SRC}/labwc" apply "${PATCH_DIR}/labwc-ipc.patch" \
-    "${PATCH_DIR}/labwc-seam.patch" "${PATCH_DIR}/labwc-screens.patch"
+git -C "${SRC}/labwc" apply "${PATCH_DIR}/labwc-ipc.patch" "${PATCH_DIR}/labwc-screens.patch"
 meson setup "${SRC}/labwc/build" "${SRC}/labwc" \
     --prefix="${PREFIX}" --libdir=lib --buildtype=release \
     -Dxwayland=enabled -Dnls=enabled

@@ -257,7 +257,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         wayland-protocols \
         xwayland && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-seam.patch addons/base/patches/labwc-screens.patch /build/patches/
+COPY addons/base/patches/labwc-ipc.patch addons/base/patches/labwc-screens.patch /build/patches/
 COPY addons/base/build-labwc.sh /build/
 RUN /build/build-labwc.sh && mkdir -p /build-out/lib && cp -a /usr/lib/*.so* /build-out/lib/
 
