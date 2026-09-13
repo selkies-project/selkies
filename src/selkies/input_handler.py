@@ -2146,6 +2146,18 @@ def character_to_layout_keysym(char: str) -> int:
     return codepoint if 0x20 <= codepoint <= 0xFF else (0x01000000 | codepoint)
 
 
+def is_function_keysym(keysym: int) -> bool:
+    """Whether a keysym names a key rather than a glyph.
+
+    The X function block (0xFF00 to 0xFFFF: navigation, editing, F-keys
+    and the keypad) and the XF86 vendor block carry no shifted glyph for a
+    held Shift or AltGr to move onto, so a level modifier the client holds
+    with one of them is the chord the user meant (Shift+Home selects to the
+    line start) and is never lifted around the press.
+    """
+    return 0xFF00 <= keysym <= 0xFFFF or 0x10080000 <= keysym <= 0x1008FFFF
+
+
 @functools.lru_cache(maxsize=4096)
 def overlay_bind_keysym(keysym: int) -> int:
     """The keysym VALUE an overlay slot carries for `keysym`.
@@ -4686,13 +4698,15 @@ class WebRTCInput:
 
         Args:
             neutralize: Whether a conflicting held Shift/AltGr is lifted around
-                the key. None derives it from the client's held modifiers:
-                lifted around plain keystrokes only, since while a chord
-                modifier (Ctrl/Alt/Super/...) is down every held modifier is
-                part of the chord. A server-synthesized chord passes False,
-                since a Shift it pressed through this injector is not in
-                active_modifiers and would be lifted for the very key it
-                modifies.
+                the key. None derives it from the keysym and the client's held
+                modifiers: lifted around plain glyphs only, since while a
+                chord modifier (Ctrl/Alt/Super/...) is down every held
+                modifier is part of the chord, and a function keysym
+                (`is_function_keysym`) has no glyph level for the held
+                modifier to disturb, so Shift+Arrow selection keeps its Shift.
+                A server-synthesized chord passes False, since a Shift it
+                pressed through this injector is not in active_modifiers and
+                would be lifted for the very key it modifies.
         """
         if down:
             if (self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS) and keysym in CYRILLIC_TO_QWERTY_KEYSYM:
@@ -4705,6 +4719,7 @@ class WebRTCInput:
 
         if neutralize is None:
             neutralize = (keysym not in self.MODIFIER_KEYSYMS
+                          and not is_function_keysym(keysym)
                           and not (self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS))
         held_level_mods = frozenset(self.active_modifiers & self.LEVEL_MODIFIER_KEYSYMS)
 
