@@ -4,14 +4,16 @@
 A hardware H.264 decoder can accept its config and then fail at decode() —
 isConfigSupported does not predict it — so the client retries the same encoder
 with hardwareAcceleration 'prefer-software' before the ladder closes the socket,
-degrades the encoder and reloads. These blocks inject exactly that failure into
-a real browser and check each arm of the decision.
+degrades the encoder and reloads. A decoder can also take its config and then neither output a frame nor error, so nothing
+signals the ladder; the ``silent`` block injects that and checks the no-output watchdog trips
+the same retry. These blocks inject exactly those failures into a real browser and check each
+arm of the decision.
 
 The ``nowebcodecs`` block is the rung below the ladder: an engine with no WebCodecs
 at all is not refused but pinned to the striped-JPEG encoder at pre-flight, and
 the dashboard offers it nothing else.
 
-Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|ladder|healthy|striped|nowebcodecs|all]
+Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|ladder|healthy|silent|striped|nowebcodecs|all]
 """
 import os
 import sys
@@ -32,9 +34,10 @@ STORAGE_KEY_JS = (
 
 
 def shim_js(fail_mode: str) -> str:
-    """Make every VideoDecoder in the page report an asynchronous decode error,
-    either only on the default (hardware) path or on every path, and record the
-    acceleration each decoder was configured with."""
+    """Make every VideoDecoder in the page fail on a chosen path and record the acceleration
+    each decoder was configured with. ``hardware``/``all`` raise an asynchronous decode error;
+    ``silent`` accepts the chunk on the hardware path but never outputs and never errors, the
+    case the no-output watchdog exists for."""
     return """
     (() => {
       const Real = window.VideoDecoder;
@@ -62,6 +65,8 @@ def shim_js(fail_mode: str) -> str:
                                                        'EncodingError')), 0);
           return;
         }
+        // Swallow the chunk on the hardware path: no frame out, no error raised.
+        if (MODE === 'silent' && !soft) return;
         return origDecode.call(this, chunk);
       };
       window.VideoDecoder = new Proxy(Real, {
@@ -108,20 +113,22 @@ ENCODER_JS = """
 
 
 def open_client(pw, fail_mode: str = "none", seed_preference: bool = False,
-                encoder: Optional[str] = None, query: str = ""):
-    """Launch Chromium with the decode-failure shim installed.
+                encoder: Optional[str] = None, query: str = "", engine: str = "chromium"):
+    """Launch a browser with the decode-failure shim installed.
 
     Args:
         pw: Active Playwright instance.
-        fail_mode: ``none``, ``hardware``, or ``all`` decode failure injection.
+        fail_mode: ``none``, ``hardware``, ``all``, or ``silent`` decode failure injection.
         seed_preference: Pre-store the software-decode preference key.
         encoder: Optional encoder to pin in localStorage before load.
         query: Optional query string appended to the stream URL.
+        engine: ``chromium``, ``firefox``, or ``webkit``. The shim needs WebCodecs, so on an
+            engine without it (Playwright WebKit) it no-ops and the client takes its jpeg path.
 
     Returns:
         Tuple of (browser, page) with the stream page loaded.
     """
-    browser = C.chromium_launch(pw)
+    browser = C.chromium_launch(pw) if engine == "chromium" else C.launch_browser(pw, engine)
     ctx = browser.new_context(viewport={"width": 1280, "height": 720},
                               device_scale_factor=1)
     ctx.add_init_script(NAV_JS)
@@ -342,9 +349,49 @@ def block_nowebcodecs(r: "H.Results") -> None:
                 navs = page.evaluate("Number(sessionStorage.getItem('__navs') || 0)")
                 r.check("page never reloaded", navs == 1, navs)
                 opened = TD.classic_open_video(page)
-                options = page.evaluate("Array.from(document.querySelectorAll('#encoderSelect option')).map(o => o.value)") if opened else []
-                r.check("dashboard offers only the jpeg encoder", opened and options == ["jpeg"], str(options))
+                # The menu lists every allowed encoder and disables the ones this engine cannot
+                # play, labelling them unsupported, so jpeg is the only selectable option here.
+                options = page.evaluate(
+                    "Array.from(document.querySelectorAll('#encoderSelect option'))"
+                    ".map(o => ({ value: o.value, disabled: o.disabled }))") if opened else []
+                enabled = [o["value"] for o in options if not o["disabled"]]
+                r.check("dashboard enables only the jpeg encoder", opened and enabled == ["jpeg"], str(options))
                 r.check("no page errors", not errors, "; ".join(errors)[:200])
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+
+
+def block_silent(r: "H.Results") -> None:
+    """Hardware decode accepts the stream and then produces nothing, never erroring: the
+    no-output watchdog trips the same software retry a decode error would, software decodes,
+    and the page does not reload.
+
+    The failure shim only reaches page-scope decoders, so the video worker is disabled and the
+    full-frame page decoder, whose silent stall nothing else would report, is what is exercised.
+    """
+    from playwright.sync_api import sync_playwright
+    H.server_start(mode="websockets")
+    try:
+        with sync_playwright() as pw:
+            browser, page = open_client(pw, fail_mode="silent",
+                                        encoder="h264enc",
+                                        query="offscreen_worker=false")
+            try:
+                state = wait_for(page, lambda s: s["decoded"] > 0
+                                 and "prefer-software" in s["cfgs"], timeout=40)
+                r.check("hardware decode was tried first",
+                        state["cfgs"][:1] == ["default"], state["cfgs"][:6])
+                r.check("watchdog switched to software after the silent stall",
+                        "prefer-software" in state["cfgs"], state["cfgs"][:6])
+                r.check("frames decode once software takes over", state["decoded"] > 0,
+                        state["decoded"])
+                time.sleep(6)
+                after = read_state(page)
+                r.check("page never reloaded", after["navs"] == 1, after["navs"])
+                r.check("still decoding", after["decoded"] > state["decoded"],
+                        (state["decoded"], after["decoded"]))
             finally:
                 browser.close()
     finally:
@@ -353,6 +400,7 @@ def block_nowebcodecs(r: "H.Results") -> None:
 
 BLOCKS = {"retry": block_retry, "persisted": block_persisted,
           "ladder": block_ladder, "healthy": block_healthy,
+          "silent": block_silent,
           "striped": block_striped, "nowebcodecs": block_nowebcodecs}
 
 if __name__ == "__main__":
