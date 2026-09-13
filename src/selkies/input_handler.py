@@ -7797,13 +7797,17 @@ class WebRTCInput:
                     data = self.multipart_clipboard_buffer.getvalue()
                     mime_type = self.multipart_clipboard_mime_type
                     flavours = None
-                    if mime_type == CLIPBOARD_FLAVOURS_MIME:
-                        flavours = clipboard_flavours(data)
-                        mime_type, data = flavours[0]
+                    try:
+                        if mime_type == CLIPBOARD_FLAVOURS_MIME:
+                            flavours = clipboard_flavours(data)
+                            mime_type, data = flavours[0]
+                    except ValueError as e:
+                        logger_webrtc_input.error(f"Multi-part clipboard flavours rejected: {e}")
+                        data = None
                     # Awaited in-line: a paste keystroke right behind the transfer
                     # must find the clipboard set. Bytes pass straight through; a
                     # multi-MB decode and re-encode on the loop would be redundant.
-                    if await self.write_clipboard(data, mime_type=mime_type, flavours=flavours):
+                    if data is not None and await self.write_clipboard(data, mime_type=mime_type, flavours=flavours):
                         audit.emit("clipboard.receive", mime_type=mime_type, size_bytes=len(data), multipart=True)
                         if mime_type == "text/plain":
                             logger_webrtc_input.info(f"Set multi-part clipboard content, length: {len(data)}")

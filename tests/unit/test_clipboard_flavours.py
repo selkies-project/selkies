@@ -98,6 +98,14 @@ async def dispatch_cases() -> None:
     check("a malformed envelope writes nothing and raises nothing", handler.written == [])
 
     handler = _Handler()
+    await handler._dispatch_message(f"cbs,t1,{CLIPBOARD_FLAVOURS_MIME},2")
+    await handler._dispatch_message(f"cbd,t1,{base64.b64encode(b'{}').decode()}")
+    await handler._dispatch_message("cbe,t1")
+    check("a malformed multi-part envelope writes nothing and closes the transfer",
+          handler.written == [] and not handler.multipart_clipboard_in_progress,
+          (handler.written, handler.multipart_clipboard_in_progress))
+
+    handler = _Handler()
     raw = clipboard_envelope(entries)
     half = len(raw) // 2
     await handler._dispatch_message(f"cbs,t1,{CLIPBOARD_FLAVOURS_MIME},{len(raw)}")
