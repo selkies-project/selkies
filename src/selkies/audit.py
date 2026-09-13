@@ -44,7 +44,6 @@ def emit(event: str, **fields: Any) -> None:
         _sender = asyncio.get_running_loop().create_task(_deliver(_queue))
     try:
         _queue.put_nowait({"event": event, "ts": time.time(), **fields})
-        _overflowing = False
     except asyncio.QueueFull:
         if not _overflowing:
             logger.warning("Audit webhook queue full (%d events); dropping events until it drains", QUEUE_BOUND)
@@ -53,6 +52,7 @@ def emit(event: str, **fields: Any) -> None:
 
 async def _deliver(queue: asyncio.Queue) -> None:
     """Send queued events one by one; an outage is logged once, its end too."""
+    global _overflowing
     headers = {}
     if settings.audit_webhook_token:
         headers["Authorization"] = f"Bearer {settings.audit_webhook_token}"
@@ -71,9 +71,10 @@ async def _deliver(queue: asyncio.Queue) -> None:
                 failure = str(exc) or type(exc).__name__
             finally:
                 queue.task_done()
+            if queue.empty():
+                _overflowing = False
             if failure and not failing:
-                logger.warning("Audit webhook %s failed: %s; events are dropped until it answers",
-                               settings.audit_webhook_url, failure)
+                logger.warning("Audit webhook failed: %s; events are dropped until it answers", failure)
             elif failing and not failure:
                 logger.info("Audit webhook delivering again")
             failing = bool(failure)
@@ -84,13 +85,13 @@ async def close() -> None:
     global _queue, _sender, _closing
     if _sender is None:
         return
-    # The flag ends the loop at an event boundary, so shutting down never means
-    # interrupting a request in flight; the cancel only breaks the idle wait.
-    _closing = True
     try:
         await asyncio.wait_for(_queue.join(), settings.audit_webhook_timeout)
     except asyncio.TimeoutError:
         pass
+    # The flag ends the loop at an event boundary; the cancel breaks the idle
+    # wait, or the request a stalled collector is still holding.
+    _closing = True
     _sender.cancel()
     try:
         await _sender

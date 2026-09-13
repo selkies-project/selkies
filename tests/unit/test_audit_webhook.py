@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import tempfile
+import calendar
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -136,8 +137,8 @@ async def delivery_cases(sink: _Capture) -> None:
               all(RFC3339.match(e["ts"]) for e in got), [e["ts"] for e in got])
         check("timestamps come from emit time and keep order",
               [e["ts"] for e in got] == sorted(e["ts"] for e in got)
-              and abs(time.time() - time.mktime(time.strptime(got[0]["ts"][:19], "%Y-%m-%dT%H:%M:%S"))
-                      + time.timezone) < 5, got[0]["ts"])
+              and abs(time.time() - calendar.timegm(time.strptime(got[0]["ts"][:19], "%Y-%m-%dT%H:%M:%S"))) < 5,
+              got[0]["ts"])
         check("the token rides the Authorization header of every POST",
               all(h.get("Authorization") == "Bearer s3cret" for h in collector.headers), collector.headers[:1])
         check("the body is JSON", all(h.get("Content-Type") == "application/json" for h in collector.headers))
