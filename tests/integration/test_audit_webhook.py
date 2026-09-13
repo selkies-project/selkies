@@ -164,11 +164,14 @@ def main() -> H.Results:
         res.check("a download is served", status == 200 and served == body, status)
         asyncio.run(clipboard_round_trip())
 
-        got = collector.wait(6)
+        got = collector.wait(7)
         kinds = [e["event"] for e in got]
+        # The clipboard round trip's page connects and disconnects; its
+        # disconnect may land after the wait.
         res.check("every channel is recorded",
-                  set(kinds) == {"clipboard.receive", "clipboard.send", "file.download",
-                                 "file.upload.end", "file.upload.error"}, kinds)
+                  set(kinds) - {"session.disconnect"} == {"clipboard.receive", "clipboard.send", "file.download",
+                                                          "file.upload.end", "file.upload.error", "session.connect"},
+                  kinds)
         by_event = {e["event"]: e for e in got}
         res.check("the upload carries its path and size",
                   (by_event.get("file.upload.end", {}).get("filename"),
