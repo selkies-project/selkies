@@ -118,7 +118,7 @@ from .webcam import (
 )
 from .stream_server import (BaseStreamingService, TransferPacer, UplinkGauge, _uplink_session_state, note_pong, uplink_rtt_ms,
                             socket_gauge)
-from .webrtc_utils import Metrics
+from .metrics import Metrics
 
 BACKPRESSURE_ALLOWED_DESYNC_MS = 2000
 BACKPRESSURE_LATENCY_THRESHOLD_MS = 50
@@ -1098,12 +1098,11 @@ class DataStreamingServer(BaseStreamingService):
             was started with.
         _pcmflux_reported_failure: `(module id, reason)` of the failure already
             logged for the current audio run.
-        _shared_stats_ws: Instance-wide dict the singleton collectors write and
-            the per-connection stats senders read.
+        _resource_monitor: The one sampler of CPU, memory and GPU every
+            connection's stats sender reads (`resource_stats.ResourceMonitor`),
+            started with the first connection and stopped with the last.
         _shared_network_stats: Instance-wide bandwidth/latency holder so every
             connection reads one consistent value.
-        _gpu_available: Cached once behind `_gpu_probe_lock`, so concurrent
-            first connections do not each spawn a blocking nvidia-smi probe.
         _last_keyframe_request: Display id to monotonic time of the last IDR
             request; `_last_keyframe_log` and `_keyframe_log_suppressed`
             throttle only the log line, never the request.
@@ -1174,13 +1173,9 @@ class DataStreamingServer(BaseStreamingService):
         self._initial_video_bitrate = get_initial_value('video_bitrate')
         self.video_bitrate = self._initial_video_bitrate
 
-        self._system_monitor_task_ws = None
-        self._gpu_monitor_task_ws = None
+        self._resource_monitor: Optional[resource_stats.ResourceMonitor] = None
         self._network_monitor_task_ws = None
-        self._shared_stats_ws = {}
         self._shared_network_stats = {}
-        self._gpu_available = None
-        self._gpu_probe_lock = asyncio.Lock()
         self.uinput_mouse_socket = UINPUT_MOUSE_SOCKET
         self.js_socket_path = settings.js_socket_path
         self.enable_clipboard = settings.enable_clipboard
@@ -2159,6 +2154,17 @@ class DataStreamingServer(BaseStreamingService):
         page resumes on it instead of paying a full pipeline rebuild."""
         entry = self.display_clients.get('primary')
         return entry is not None and entry.get('ws') not in self.clients
+
+    async def _stop_stats_collectors(self) -> None:
+        """Ends the stats collectors with the last client, nulling each ref so
+        a fast reconnect restarts them and never reads a dead one's figures."""
+        task, self._network_monitor_task_ws = self._network_monitor_task_ws, None
+        if task and not task.done():
+            task.cancel()
+        monitor, self._resource_monitor = self._resource_monitor, None
+        if monitor is not None:
+            await monitor.stop()
+        self._shared_network_stats.clear()
 
     async def _stop_primary_if_unconsumed(self, reason: str) -> None:
         """Stop the primary capture once nothing decodes it — the last unpaused
@@ -3481,38 +3487,13 @@ class DataStreamingServer(BaseStreamingService):
                 async with self._reconfigure_guard():
                     await self._regate_audio_redundancy()
 
-            if self._gpu_available is None:
-                async with self._gpu_probe_lock:
-                    if self._gpu_available is None:
-                        self._gpu_available = bool(
-                            await asyncio.get_running_loop().run_in_executor(
-                                None, resource_stats.get_gpus
-                            )
-                        )
-
-            if (
-                self._system_monitor_task_ws is None
-                or self._system_monitor_task_ws.done()
-            ):
-                self._system_monitor_task_ws = asyncio.create_task(
-                    _collect_system_stats_ws(self._shared_stats_ws)
-                )
-            if self._gpu_available and (
-                self._gpu_monitor_task_ws is None
-                or self._gpu_monitor_task_ws.done()
-            ):
-                self._gpu_monitor_task_ws = asyncio.create_task(
-                    _collect_gpu_stats_ws(
-                        self._shared_stats_ws,
-                        gpu_id=gpu_id_for_stats,
-                        dri_node=dri_node_for_stats,
-                        metrics=getattr(self, 'metrics', None),
-                    )
-                )
+            if self._resource_monitor is None:
+                self._resource_monitor = resource_stats.ResourceMonitor(
+                    gpu_id=gpu_id_for_stats, dri_node=dri_node_for_stats,
+                    metrics=getattr(self, 'metrics', None))
+                self._resource_monitor.start()
             stats_sender_task_ws = asyncio.create_task(
-                _send_stats_periodically_ws(
-                    websocket, self._shared_stats_ws, self
-                )
+                _send_stats_periodically_ws(websocket, self._resource_monitor, self)
             )
             if self._network_monitor_task_ws is None or self._network_monitor_task_ws.done():
                 self._network_monitor_task_ws = asyncio.create_task(
@@ -4353,19 +4334,9 @@ class DataStreamingServer(BaseStreamingService):
                     )
                     if not self.clients:
                         data_logger.info("Last client gone after the grace period. Tearing down singleton collectors and pipelines.")
-                        for _singleton_attr in (
-                            "_network_monitor_task_ws",
-                            "_system_monitor_task_ws",
-                            "_gpu_monitor_task_ws",
-                        ):
-                            _singleton_task = getattr(self, _singleton_attr, None)
-                            if _singleton_task and not _singleton_task.done():
-                                _singleton_task.cancel()
-                            setattr(self, _singleton_attr, None)
+                        await self._stop_stats_collectors()
                         self.capture_cursor = False
                         self._last_keyframe_request.clear()
-                        self._shared_stats_ws.clear()
-                        self._shared_network_stats.clear()
                         # Self-acquires _reconfigure_lock; it must not be held here.
                         await self.shutdown_pipelines()
 
@@ -4430,21 +4401,9 @@ class DataStreamingServer(BaseStreamingService):
             # A display-owning socket's last-client teardown ran in the grace task above.
             if disconnected_display_id is None and not self.clients:
                  data_logger.info(f"Last client ({raddr}) disconnected. All pipelines should have been stopped by reconfigure_displays.")
-                 # Each ref is nulled: cancel is async, and a fast reconnect must restart them.
-                 for _singleton_attr in (
-                     "_network_monitor_task_ws",
-                     "_system_monitor_task_ws",
-                     "_gpu_monitor_task_ws",
-                 ):
-                     _singleton_task = getattr(self, _singleton_attr, None)
-                     if _singleton_task and not _singleton_task.done():
-                         _singleton_task.cancel()
-                     setattr(self, _singleton_attr, None)
+                 await self._stop_stats_collectors()
                  self.capture_cursor = False
                  self._last_keyframe_request.clear()
-                 # A reconnect must not briefly read a dead collector's stale stats.
-                 self._shared_stats_ws.clear()
-                 self._shared_network_stats.clear()
                  # Self-acquires _reconfigure_lock; it must not be held here.
                  await self.shutdown_pipelines()
 
@@ -6013,105 +5972,6 @@ class DataStreamingServer(BaseStreamingService):
         return conns
 
 
-async def _collect_system_stats_ws(shared_data: dict, interval_seconds: float = 1) -> None:
-    """Singleton collector: poll CPU/memory into the shared stats dict.
-
-    One instance serves every connection's stats sender (per-connection
-    collectors would mean N polls per second). The figures are the session's
-    own cgroup's where it limits the session, else the node's (`resource_stats.SystemUsage`).
-    """
-    data_logger.debug(
-        f"System monitor loop (WS mode) started, interval: {interval_seconds}s"
-    )
-    usage = resource_stats.SystemUsage()
-    try:
-        while True:
-            cpu, mem_total, mem_used = await asyncio.to_thread(usage.sample)
-            shared_data["system"] = {
-                "type": "system_stats",
-                "timestamp": datetime.now().isoformat(),
-                "cpu_percent": cpu,
-                "mem_total": mem_total,
-                "mem_used": mem_used,
-            }
-            await asyncio.sleep(interval_seconds)
-    except asyncio.CancelledError:
-        data_logger.info("System monitor (WS) cancelled.")
-    except Exception as e:
-        data_logger.error(f"System monitor (WS) error: {e}", exc_info=True)
-
-
-async def _collect_gpu_stats_ws(
-    shared_data: dict,
-    gpu_id: int = 0,
-    interval_seconds: float = 1,
-    dri_node: str = "",
-    metrics: Optional[Metrics] = None,
-) -> None:
-    """Singleton collector: poll the pipeline's GPU into the shared stats dict.
-
-    Args:
-        shared_data: The instance-wide stats dict the per-connection senders read.
-        gpu_id: Index into the unfiltered GPU list.
-        interval_seconds: Poll interval.
-        dri_node: When set and it filters to exactly one GPU, that GPU wins
-            over the index — stats must describe the GPU the pipeline
-            captures/encodes on.
-        metrics: Optional Prometheus gauges fed alongside the dict.
-    """
-    data_logger.debug(
-        f"GPU monitor loop (WS mode) for GPU {gpu_id} (node {dri_node or 'any'}), "
-        f"interval: {interval_seconds}s"
-    )
-    def _pick(gpus):
-        """The pipeline's GPU: a dri_node match is exactly it; the index applies
-        only to the unfiltered list."""
-        idx = 0 if (dri_node and len(gpus) == 1) else gpu_id
-        return gpus[idx] if 0 <= idx < len(gpus) else None
-
-    try:
-        # get_gpus() may spawn or block on vendor tools.
-        gpus = await asyncio.to_thread(resource_stats.get_gpus, dri_node)
-        if not gpus:
-            data_logger.warning("No GPUs detected for GPU monitor (WS).")
-            return
-        if _pick(gpus) is None:
-            data_logger.error(f"Invalid GPU ID {gpu_id} for GPU monitor (WS).")
-            return
-
-        while True:
-            try:
-                gpus = await asyncio.to_thread(resource_stats.get_gpus, dri_node)
-                gpu = _pick(gpus) if gpus else None
-                if gpu is None:
-                    data_logger.error(f"GPU {gpu_id} no longer available.")
-                    break
-                shared_data["gpu"] = {
-                    "type": "gpu_stats",
-                    "timestamp": datetime.now().isoformat(),
-                    "gpu_id": gpu_id,
-                    "load": gpu.load,
-                    # Dashboards read gpu_percent (0..100), the field the WebRTC data
-                    # channel sends; load stays the 0..1 fraction for other consumers.
-                    "gpu_percent": gpu.load * 100,
-                    "memory_total": gpu.memoryTotal * 1024 * 1024,
-                    "memory_used": gpu.memoryUsed * 1024 * 1024,
-                }
-                if metrics is not None:
-                    metrics.set_gpu_utilization(gpu.load * 100)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e_gpu_stat:
-                data_logger.error(
-                    f"GPU monitor (WS): Error getting stats for ID {gpu_id}: {e_gpu_stat}"
-                )
-                await asyncio.sleep(interval_seconds * 2)
-            await asyncio.sleep(interval_seconds)
-    except asyncio.CancelledError:
-        data_logger.info("GPU monitor (WS) cancelled.")
-    except Exception as e:
-        data_logger.error(f"GPU monitor (WS) error: {e}", exc_info=True)
-
 async def _collect_network_stats_ws(shared_data: dict, server_instance: DataStreamingServer,
                                     interval_seconds: float = 2) -> None:
     """Singleton collector: derive sent-bandwidth and smoothed latency.
@@ -6150,20 +6010,20 @@ async def _collect_network_stats_ws(shared_data: dict, server_instance: DataStre
 
 async def _send_stats_periodically_ws(
     websocket: web.WebSocketResponse,
-    shared_data: dict,
+    monitor: "resource_stats.ResourceMonitor",
     server_instance: DataStreamingServer,
     interval_seconds: float = 5,
 ) -> None:
-    """Per-connection sender: push the singleton collectors' stats to one socket.
+    """Per-connection sender: push the shared collectors' latest stats to one socket.
 
-    Reads (never pops) the shared dicts, since many per-connection senders
-    share the same collectors; ends itself when the socket dies.
+    Reads (never pops) the monitor's and the network collector's figures, since
+    every connection's sender shares them; ends itself when the socket dies.
     """
     try:
         while True:
             await asyncio.sleep(interval_seconds)
-            system_stats = shared_data.get("system")
-            gpu_stats = shared_data.get("gpu")
+            system_stats = monitor.system
+            gpu_stats = monitor.gpu
             network_stats = server_instance._shared_network_stats.get("network")
             try:
                 if not websocket:

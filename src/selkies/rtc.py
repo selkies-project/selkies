@@ -740,12 +740,11 @@ class RTCApp:
             "cursor", data)
 
     def send_gpu_stats(self, load: float, memory_total: int, memory_used: int) -> None:
-        """Broadcast GPU stats (load fraction, memory in MiB) to all peers."""
-
+        """Broadcast GPU stats (load fraction, memory in bytes) to all peers."""
         self.__send_data_channel_message("gpu_stats", {
             "gpu_percent": load * 100,
-            "mem_total": memory_total * 1024 * 1024,
-            "mem_used": memory_used * 1024 * 1024,
+            "mem_total": memory_total,
+            "mem_used": memory_used,
         })
 
     def send_system_action(self, action: str, peer_id: Optional[str] = None) -> None:

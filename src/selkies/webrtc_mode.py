@@ -63,7 +63,9 @@ from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_
                             WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id,
                             wayland_reposition_primary, wayland_shrink_output,
                             parse_resize_dims, cursor_size_for_dpi, align_dims_16)
-from .webrtc_utils import SystemMonitor, Metrics, GPUMonitor, get_rtc_configuration
+from .webrtc_utils import get_rtc_configuration
+from .metrics import Metrics
+from . import resource_stats
 from .settings import (settings, AppSettings, SETTING_DEFINITIONS,
                        build_client_settings_payload, sanitize_client_setting)
 from types import SimpleNamespace
@@ -219,8 +221,7 @@ class WebRTCService(BaseStreamingService):
         self.media_pipeline: Optional[MediaPipelinePixel] = None
         self.rtc_app: Optional[RTCApp] = None
         self.input_handler: Optional[WebRTCInput] = None
-        self.system_monitor: Optional[SystemMonitor] = None
-        self.gpu_monitor: Optional[GPUMonitor] = None
+        self.resource_monitor: Optional[resource_stats.ResourceMonitor] = None
         self.metrics: Optional[Metrics] = None
         self.peer_id = 1
         self.args: Optional[SimpleNamespace] = None
@@ -411,14 +412,12 @@ class WebRTCService(BaseStreamingService):
             self.media_pipeline.scale = await self.input_handler.realize_wayland_dpi(
                 getattr(settings, "scaling_dpi", "96") or 96)
 
-        self.system_monitor = SystemMonitor()
-        # Always enabled: resource_stats reports nothing without a supported GPU/tool.
-        # Keyed to the pipeline's render node so stats describe the encoding GPU.
+        # Keyed to the pipeline's render node so the GPU stats describe the encoding GPU.
         stats_gpu_id = parse_gpu_id(getattr(self.args, "gpu_id", ""))
-        self.gpu_monitor = GPUMonitor(
+        self.resource_monitor = resource_stats.ResourceMonitor(
             gpu_id=stats_gpu_id if (stats_gpu_id or 0) > 0 else 0,
-            enabled=True,
             dri_node=getattr(self.args, "encode_dri", "") or "",
+            metrics=self.metrics,
         )
 
         self.create_peer_manager(rtc_config)
@@ -641,8 +640,7 @@ class WebRTCService(BaseStreamingService):
         self.input_handler.on_resize = self.on_resize_handler
         self.input_handler.on_session_compositor_adopted = self._resync_wayland_session_scale
 
-        self.gpu_monitor.on_stats = self.handle_gpu_stats
-        self.system_monitor.on_timer = self.handle_system_monitor
+        self.resource_monitor.on_tick = self.handle_resource_tick
 
     def _second_screen_availability(self) -> Tuple[bool, str]:
         """Whether this session can actually attach a second display, and the
@@ -2235,37 +2233,29 @@ class WebRTCService(BaseStreamingService):
         return int(own or getattr(self, "_last_applied_dpi", None)
                    or float(getattr(settings, "scaling_dpi", 96) or 96))
 
-    async def handle_system_monitor(self, t: float) -> None:
-        """System-monitor tick: push CPU/memory stats and a ping to clients,
-        and recover the audio capture if its worker died since the last tick.
+    async def handle_resource_tick(self, t: float) -> None:
+        """Resource-monitor tick: push the CPU, memory and GPU figures and a
+        ping to clients, and recover the audio capture if its worker died since
+        the last tick.
 
         pcmflux reports a clean start while its worker is still coming up, so a
         device that dies during bring-up (or later) only shows through
         `last_error`; polling it here cycles the audio capture. Audio lives on
         the primary pipeline; the call no-ops on the audio-less secondaries.
         """
-        if self.input_handler and self.rtc_app and self.system_monitor:
+        monitor = self.resource_monitor
+        if self.input_handler and self.rtc_app and monitor and monitor.system:
             self.input_handler.ping_start = t
-            self.rtc_app.send_system_stats(
-                self.system_monitor.cpu_percent,
-                self.system_monitor.mem_total,
-                self.system_monitor.mem_used,
-            )
+            system, gpu = monitor.system, monitor.gpu
+            self.rtc_app.send_system_stats(system["cpu_percent"], system["mem_total"], system["mem_used"])
+            if gpu:
+                self.rtc_app.send_gpu_stats(gpu["load"], gpu["memory_total"], gpu["memory_used"])
             self.rtc_app.send_ping(t)
         if self.media_pipeline is not None:
             try:
                 await self.media_pipeline.recover_audio_if_failed()
             except Exception as e:
                 logger.debug(f"audio health poll skipped: {e}")
-
-    async def handle_gpu_stats(
-        self, load: float, memory_total: int, memory_used: int
-    ) -> None:
-        """GPU-monitor tick: push GPU stats to clients and into metrics."""
-        if self.rtc_app:
-            self.rtc_app.send_gpu_stats(load, memory_total, memory_used)
-        if self.metrics:
-            self.metrics.set_gpu_utilization(load * 100)
 
     _VIDEO_SETTING_APPLIERS: Dict[str, Callable[[MediaPipelinePixel, Any], Awaitable[Any]]] = {
         "rate_control_mode": lambda p, v: p.update_rate_control_mode(RateControlMode(v)),
@@ -2728,10 +2718,8 @@ class WebRTCService(BaseStreamingService):
         if self.args.congestion_control or bool(settings.webrtc_pacer[0]):
             self.tasks.append(asyncio.create_task(self._congestion_control_loop()))
 
-        if self.gpu_monitor:
-            self.gpu_monitor.start()
-        if self.system_monitor:
-            self.system_monitor.start()
+        if self.resource_monitor:
+            self.resource_monitor.start()
         if self.signaling_client:
             self.signaling_client.start()
 
@@ -2877,13 +2865,9 @@ class WebRTCService(BaseStreamingService):
                 )
             )
 
-        if self.gpu_monitor:
+        if self.resource_monitor:
             stop_coros.append(
-                (_await_with_timeout(self.gpu_monitor.stop(), "gpu_monitor", 2.0))
-            )
-        if self.system_monitor:
-            stop_coros.append(
-                (_await_with_timeout(self.system_monitor.stop(), "system_monitor", 2.0))
+                (_await_with_timeout(self.resource_monitor.stop(), "resource_monitor", 2.0))
             )
 
         if self.mon_hmac_turn:
@@ -2946,8 +2930,7 @@ class WebRTCService(BaseStreamingService):
                 logger.exception("Error releasing the shared ICE ports")
         self.rtc_app = None
         self.input_handler = None
-        self.system_monitor = None
-        self.gpu_monitor = None
+        self.resource_monitor = None
         self.metrics = None
         self.mon_hmac_turn = None
         self.mon_rest_api = None

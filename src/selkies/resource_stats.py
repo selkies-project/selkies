@@ -3,7 +3,8 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 """Live readings for the dashboards' gauges: GPU utilization and memory,
-universal across vendors, and the session's CPU and memory (`SystemUsage`).
+universal across vendors, the session's CPU and memory (`SystemUsage`), and
+the one sampler both transports run over them (`ResourceMonitor`).
 
 Sources, best-first per vendor: NVIDIA reads NVML in-process via ``nvidia-ml-py``
 (the API behind nvitop/nvtop; exact PCI identity, no subprocess per poll) with a
@@ -20,6 +21,7 @@ Objects expose ``.load`` as a 0..1 fraction and ``.memoryTotal`` /
 ``.memoryUsed`` in MiB, the units the stats collectors serialize.
 """
 
+import asyncio
 import glob
 import logging
 import os
@@ -27,7 +29,8 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from datetime import datetime
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 import psutil
 
@@ -41,7 +44,7 @@ try:
 except Exception:
     GPUMonitorFactory = None
 
-logger = logging.getLogger("gpu_stats")
+logger = logging.getLogger("resource_stats")
 
 # GPU presence is reported through this logger; aitop re-emits vendor detection
 # at INFO on every factory build, so keep its detection chatter off the stream.
@@ -522,3 +525,96 @@ class SystemUsage:
             vm = psutil.virtual_memory()
             mem = (vm.total, vm.used)
         return round(percent, 1), mem[0], mem[1]
+
+
+class ResourceMonitor:
+    """Samples the session's CPU and memory, and the GPU its pipeline encodes
+    on, once a period off the event loop, and keeps the latest sample in the
+    shapes the pages take.
+
+    `system` is always the last `SystemUsage` sample; `gpu` is the card's last
+    reading, None while it cannot be read, and never polled again once the
+    first probe finds no GPU, since a vendor tool may be spawned per query.
+    `on_tick` runs after each sample with the time, for whatever a transport
+    sends on the same cadence; `metrics`, when given, takes the GPU utilization.
+    The GPU is `dri_node`'s card when that narrows the list to one, else the
+    `gpu_id`th of the unfiltered list.
+    """
+
+    def __init__(self, period: float = 1.0, gpu_id: int = 0, dri_node: str = "",
+                 metrics: Optional[Any] = None) -> None:
+        self.period = max(1.0, float(period))
+        self.gpu_id = gpu_id
+        self.dri_node = dri_node
+        self.metrics = metrics
+        self.system: Optional[Dict[str, Any]] = None
+        self.gpu: Optional[Dict[str, Any]] = None
+        self.on_tick: Optional[Callable[[float], Awaitable[None]]] = None
+        self._usage = SystemUsage()
+        self._probe_gpu = True
+        self._stop: Optional[asyncio.Event] = None
+        self._task: Optional[asyncio.Task] = None
+
+    def _gpu_sample(self) -> Optional[Dict[str, Any]]:
+        gpus = get_gpus(self.dri_node)
+        idx = 0 if (self.dri_node and len(gpus) == 1) else self.gpu_id
+        if not gpus or not 0 <= idx < len(gpus):
+            return None
+        gpu = gpus[idx]
+        return {
+            "type": "gpu_stats",
+            "timestamp": datetime.now().isoformat(),
+            "gpu_id": self.gpu_id,
+            "load": gpu.load,
+            "gpu_percent": gpu.load * 100,
+            "memory_total": gpu.memoryTotal * 1024 * 1024,
+            "memory_used": gpu.memoryUsed * 1024 * 1024,
+        }
+
+    def _sample(self) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """One blocking sample of both, for a worker thread."""
+        cpu, total, used = self._usage.sample()
+        system = {"type": "system_stats", "timestamp": datetime.now().isoformat(),
+                  "cpu_percent": cpu, "mem_total": total, "mem_used": used}
+        gpu = None
+        if self._probe_gpu:
+            try:
+                gpu = self._gpu_sample()
+            except Exception as exc:
+                logger.warning(f"GPU stats unavailable this tick: {exc}")
+            if gpu is None and self.gpu is None:
+                self._probe_gpu = False
+                logger.info(f"No GPU with ID {self.gpu_id} found; GPU stats disabled.")
+        return system, gpu
+
+    async def _loop(self) -> None:
+        try:
+            while self._stop is not None and not self._stop.is_set():
+                self.system, self.gpu = await asyncio.to_thread(self._sample)
+                if self.metrics is not None and self.gpu is not None:
+                    self.metrics.set_gpu_utilization(self.gpu["gpu_percent"])
+                if self.on_tick is not None:
+                    await self.on_tick(time.time())
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=self.period)
+                except asyncio.TimeoutError:
+                    pass
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error(f"Resource monitor error: {exc}", exc_info=True)
+
+    def start(self) -> None:
+        """Starts sampling on the running loop; a second start is a no-op."""
+        if self._task is not None and not self._task.done():
+            return
+        self._stop = asyncio.Event()
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        """Ends the loop at once and waits for it."""
+        if self._stop is not None:
+            self._stop.set()
+        if self._task is not None:
+            await self._task
+            self._task = None
