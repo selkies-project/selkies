@@ -982,10 +982,12 @@ class RTCApp:
         this offer's display is using (defaults: the primary/global encoder and
         the configured full-colour and software-encoding settings).
 
-        Full colour is a 4:4:4 bitstream, so the H.264 profile-level-id is
-        rewritten to High 4:4:4 (`f4001f`) rather than handing the decoder a
-        4:2:0 baseline profile that cannot match what it receives; 4:2:0 keeps
-        `42e01f`, the profile Firefox negotiates. A session known to encode on
+        Full colour is a 4:4:4 bitstream, so the H.264 profile-level-id of
+        the display's own video section is rewritten to High 4:4:4 (`f4001f`)
+        rather than handing the decoder a 4:2:0 baseline profile that cannot
+        match what it receives; 4:2:0 keeps `42e01f`, the profile Firefox
+        negotiates. The recvonly webcam section, which the browser encodes,
+        keeps the profiles it offered. A session known to encode on
         OpenH264 (the software encoder of a GPL-free pixelflux build, forced
         onto the CPU) is excluded: it always emits limited-range 4:2:0, and a
         4:4:4 profile makes decoders misread its color range (visibly darker
@@ -1022,19 +1024,26 @@ class RTCApp:
         elif 'rtx-time=125' not in sdp_text:
             logger.warning("injecting modified rtx-time to SDP")
             sdp_text = re.sub(r'rtx-time=\d+', r'rtx-time=125', sdp_text)
-        if "h264" in encoder or "x264" in encoder or "h265" in encoder or "x265" in encoder:
-            if 'sps-pps-idr-in-keyframe' not in sdp_text:
-                logger.warning("injecting sps-pps-idr-in-keyframe to SDP")
-                sdp_text = sdp_text.replace('packetization-mode=', 'sps-pps-idr-in-keyframe=1;packetization-mode=')
-            elif 'sps-pps-idr-in-keyframe=1' not in sdp_text:
-                logger.warning("injecting modified sps-pps-idr-in-keyframe to SDP")
-                sdp_text = re.sub(r'sps-pps-idr-in-keyframe=\d+', r'sps-pps-idr-in-keyframe=1', sdp_text)
-            if ("h264" in encoder or "x264" in encoder) and fullcolor \
-                    and not (software_path and software_encoders().get("h264") == "openh264"):
-                sdp_text = re.sub(r'profile-level-id=[0-9A-Fa-f]{6}',
-                                  'profile-level-id=f4001f', sdp_text)
-        if "vp9" in encoder and fullcolor:
-            sdp_text = re.sub(r'\bprofile-id=0\b', 'profile-id=1', sdp_text)
+        # The codec rewrites describe the display's own stream. The webcam
+        # m-section is recvonly here and the browser's to encode: a profile it
+        # has no encoder for makes it reject that section, and the camera's
+        # sender is stopped with it.
+        sections = re.split(r'(?m)(?=^m=)', sdp_text)
+        for i, section in enumerate(sections):
+            if not section.startswith('m=video') or 'a=recvonly' in section:
+                continue
+            if "h264" in encoder or "x264" in encoder or "h265" in encoder or "x265" in encoder:
+                if 'sps-pps-idr-in-keyframe' not in section:
+                    section = section.replace('packetization-mode=', 'sps-pps-idr-in-keyframe=1;packetization-mode=')
+                else:
+                    section = re.sub(r'sps-pps-idr-in-keyframe=\d+', 'sps-pps-idr-in-keyframe=1', section)
+                if ("h264" in encoder or "x264" in encoder) and fullcolor \
+                        and not (software_path and software_encoders().get("h264") == "openh264"):
+                    section = re.sub(r'profile-level-id=[0-9A-Fa-f]{6}', 'profile-level-id=f4001f', section)
+            if "vp9" in encoder and fullcolor:
+                section = re.sub(r'\bprofile-id=0\b', 'profile-id=1', section)
+            sections[i] = section
+        sdp_text = ''.join(sections)
         if "opus/" in sdp_text.lower():
             frame_ms = float(getattr(app_settings, 'audio_frame_duration_ms', '10') or 10)
             # A 2.5 ms frame advertises 3; pcmflux keeps the real frame.

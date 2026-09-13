@@ -487,6 +487,83 @@ SEND_AV1_JS = """async () => {
 }"""
 
 
+# The H.264 profiles of the offer's two video sections as the browser holds
+# them: the display's own stream, and the webcam section it is asked to encode.
+OFFER_PROFILES_JS = """() => {
+  const out = {display: [], webcam: []};
+  for (const section of window.__pcs[0].remoteDescription.sdp.split(/(?=^m=)/m)) {
+    if (!section.startsWith('m=video')) continue;
+    const key = section.includes('a=recvonly') ? 'webcam' : 'display';
+    for (const m of section.matchAll(/profile-level-id=([0-9A-Fa-f]{6})/g)) out[key].push(m[1].toLowerCase());
+  }
+  return out;
+}"""
+
+# Stops the transceiver the camera rides, the state a rejected webcam section
+# leaves behind: its sender then refuses every track.
+STOP_WEBCAM_SENDER_JS = """() => {
+  const t = window.__pcs[0].getTransceivers().find((t) =>
+    t.direction === 'sendonly' && t.receiver.track && t.receiver.track.kind === 'video');
+  if (!t) return 'no webcam transceiver';
+  t.stop();
+  return 'stopped';
+}"""
+
+LIVE_VIDEO_SENDER_JS = "() => window.__pcs[0].getSenders().some((s) => s.track && s.track.kind === 'video')"
+
+
+def fullcolor_block() -> "H.Results":
+    """The camera comes out of /dev/video0 over WebRTC while the screen streams
+    4:4:4: the High 4:4:4 profile the offer is rewritten to describes the
+    display's own stream, and the webcam section the browser encodes keeps the
+    profiles it can. A sender the browser has stopped leaves the camera
+    released, so the control reports the webcam off and a retry asks again."""
+    res = H.Results("webcam-fullcolor")
+    cam = PublishedCamera(flat_frames()).start()
+    H.server_start(mode="webrtc", wayland=False,
+                   extra_env={"SELKIES_WEBCAM_ENABLED": "false",
+                              "SELKIES_WEBCAM_PIXEL_FORMAT": "I420",
+                              "SELKIES_VIDEO_FULLCOLOR": "true"})
+    try:
+        with sync_playwright() as p:
+            browser, page, errors = launch(p, "chromium", cam.sock_dir, "webrtc", init_js=PC_JS)
+            logs = []
+            page.on("console", lambda m: logs.append(m.text) if "Webcam capture error" in m.text else None)
+            video = C.wait_wr_video(page)
+            res.check("stream up", bool(video), str(video)[:100])
+            offered = page.evaluate(OFFER_PROFILES_JS)
+            res.check("the display's stream is offered as High 4:4:4",
+                      offered["display"] and set(offered["display"]) == {"f4001f"}, offered)
+            res.check("the webcam section keeps the profiles the browser can encode",
+                      offered["webcam"] and "42e01f" in offered["webcam"], offered)
+            toggle(page, True)
+            res.check("webcam reports active", wait_status(page, True), str(page.evaluate("window.__camStatus")))
+            res.check("the uplink carries H.264", C.wait_log("Webcam uplink carries h264.", timeout=10), "")
+            r = wait_for_picture([((640, 360), GREEN), ((20, 20), BLACK)])
+            res.check("30 frames reach /dev/video0", r.get("rc") == 0 and r.get("frames") == "30",
+                      f"rc={r.get('rc')} frames={r.get('frames')} err={r.get('error', '')}")
+            res.check("centre is the camera's green", near(r["samples"].get((640, 360)), GREEN), str(r["samples"]))
+            toggle(page, False)
+            res.check("webcam reports inactive", wait_status(page, False), str(page.evaluate("window.__camStatus")))
+            res.check("the camera's transceiver is stopped", page.evaluate(STOP_WEBCAM_SENDER_JS) == "stopped")
+            for attempt in ("first", "second"):
+                page.evaluate("window.__camStatus = []")
+                toggle(page, True)
+                res.check(f"{attempt} attempt on a stopped sender: the webcam stays reported off",
+                          not wait_status(page, True, timeout=6)
+                          and page.evaluate("window.__camStatus")[-1:] == [False],
+                          str(page.evaluate("window.__camStatus")))
+            res.check("the refused attempts left no camera track on a sender",
+                      page.evaluate(LIVE_VIDEO_SENDER_JS) is False)
+            res.check("each refusal is logged, none escapes the page",
+                      len(logs) == 2 and not errors, f"{logs[:2]} {errors[:2]}")
+            browser.close()
+    finally:
+        H.server_stop()
+        cam.stop()
+    return res
+
+
 def av1_block() -> "H.Results":
     """The camera comes out of /dev/video0 over WebRTC when the browser sends it
     as AV1, steered onto that codec once its track is on: one OBU's fragments
@@ -797,6 +874,8 @@ def main() -> int:
         ok = detail_block().summary()
     elif sel == "av1":
         ok = av1_block().summary()
+    elif sel == "fullcolor":
+        ok = fullcolor_block().summary()
     elif sel == "webrtcpref":
         ok = webrtcpref_block().summary()
     elif sel == "encoderpref":

@@ -394,7 +394,9 @@ export class WebRTCClient {
 	 * @param {{width?: number, height?: number, fps?: number}} hints Capture hints.
 	 * @returns {Promise<boolean>} False when getUserMedia is unavailable.
 	 * @throws {Error} When the server withheld the webcam m-line (the webcam
-	 *     is locked off); raised before prompting for permission.
+	 *     is locked off), raised before prompting for permission; or when the
+	 *     sender refuses the track (its transceiver stopped), the camera
+	 *     released again.
 	 */
 	async setWebcam(enabled, deviceId = null, { width = 1280, height = 720, fps = 30, codec = 'auto' } = {}) {
 		if (enabled) {
@@ -405,13 +407,21 @@ export class WebRTCClient {
 			if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
 			const video = { width: { ideal: width }, height: { ideal: height }, frameRate: { ideal: fps } };
 			if (deviceId) video.deviceId = { exact: deviceId };
-			this._webcamStream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
-			const track = this._webcamStream.getVideoTracks()[0];
-			if (this._webcamTransceiver && this._webcamTransceiver.sender && track) {
-				await this._setSenderActive(this._webcamTransceiver.sender, true);
-				await this._webcamTransceiver.sender.replaceTrack(track);
-				await this.setWebcamCodec(codec);
+			const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+			const track = stream.getVideoTracks()[0];
+			try {
+				if (track) {
+					await this._setSenderActive(this._webcamTransceiver.sender, true);
+					await this._webcamTransceiver.sender.replaceTrack(track);
+				}
+			} catch (e) {
+				// A camera the sender did not take is released, so the next
+				// attempt asks for it again rather than reporting this one as on.
+				stream.getTracks().forEach((t) => t.stop());
+				throw e;
 			}
+			this._webcamStream = stream;
+			await this.setWebcamCodec(codec);
 			return true;
 		}
 		if (this._webcamTransceiver && this._webcamTransceiver.sender) {
