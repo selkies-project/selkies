@@ -253,6 +253,14 @@ async def hook_cases() -> None:
               r = await client.get("/api/files/sub/plain.bin")
               await r.read()
               check("a download is served", r.status == 200, r.status)
+              r = await client.get("/api/files/sub/plain.bin", headers={"Range": "bytes=0-1023"})
+              await r.read()
+              check("a range is served", r.status == 206, r.status)
+              server.transfer_cap = TransferPacer(static_bps=100_000_000)
+              r = await client.get("/api/files/sub/plain.bin")
+              await r.read()
+              check("a capped download is served", r.status == 200, r.status)
+              server.transfer_cap = TransferPacer(static_bps=0)
               r = await client.head("/api/files/sub/plain.bin")
               check("HEAD answers", r.status == 200, r.status)
               r = await client.get("/api/files/missing.bin")
@@ -268,8 +276,12 @@ async def hook_cases() -> None:
                             ("file.upload.error", "broken.bin", None, "size mismatch: received 4096, expected 8192"),
                             ("file.upload.error", "../escape.bin", None, "invalid upload path"),
                             ("file.upload.error", "policy.bin", None, "uploads disabled")], got)
-          check("downloads: one event per GET of a file, none for HEAD or a miss",
-                got[5:] == [("file.download", "sub/plain.bin", 4096, None)], got[5:])
+          downloads = [(e["filename"], e["size_bytes"], e["partial"])
+                       for e in collector.events if e["event"] == "file.download"]
+          check("downloads: one event per file that went out, with the bytes served and a range "
+                "marked partial, none for HEAD or a miss",
+                downloads == [("sub/plain.bin", 4096, False), ("sub/plain.bin", 1024, True),
+                              ("sub/plain.bin", 4096, False)], downloads)
 
           collector.events.clear()
           handler = WebRTCInput.__new__(WebRTCInput)

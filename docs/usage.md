@@ -60,7 +60,7 @@ The side menu's files section uploads files into the session and browses the sam
 | `clipboard.receive` | `mime_type`, `size_bytes`, `multipart` | a client's clipboard is written into the session |
 | `file.upload.end` | `filename`, `size_bytes` | an upload lands in the file-manager directory |
 | `file.upload.error` | `filename`, `error` | an upload is refused or fails, `filename` as the client asked for it |
-| `file.download` | `filename`, `size_bytes` | a file is served out of the file-manager directory |
+| `file.download` | `filename`, `size_bytes`, `partial` | a file went out of the file-manager directory whole, or the range of it a client asked for (`partial`), with the bytes served; a download the client stopped early is not recorded |
 
 Every object also carries `ts`, an RFC 3339 UTC timestamp with milliseconds taken when the transfer happened, and both transports emit the same objects. An event costs the session an enqueue and nothing else: one task delivers the queue in order over a single keep-alive connection, so a collector that is slow or down never paces the stream. The queue holds 1024 events and drops what overflows, a POST that fails drops its event with no retry, and each outage is logged once.
 

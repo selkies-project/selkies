@@ -144,6 +144,23 @@ TRANSFER_CHUNK_MAX_BYTES: int = 1 << 20
 TRANSFER_MIN_GAUGED_BYTES: int = 4 * 1024 * 1024
 
 
+class _AuditedFileResponse(web.FileResponse):
+    """A file served by aiohttp, recorded for the audit once it went out: the
+    whole file or the range asked for, with the bytes served. A download the
+    client stops before the end raises out of `prepare` and is not recorded."""
+
+    def __init__(self, path: pathlib.Path, served: str, **kwargs: Any) -> None:
+        super().__init__(path, **kwargs)
+        self._served = served
+
+    async def prepare(self, request: web.BaseRequest) -> Any:
+        writer = await super().prepare(request)
+        if request.method == "GET" and self.status in (200, 206):
+            audit.emit("file.download", filename=self._served,
+                       size_bytes=self.content_length or 0, partial=self.status == 206)
+        return writer
+
+
 def _gauged_chunk_size(pacer: "TransferPacer") -> int:
     """The chunk a gauged transfer moves next, sized to the pacer's rate.
 
@@ -2472,8 +2489,7 @@ class CentralizedStreamServer:
                              "If-Range", "If-Unmodified-Since")
             )
             size = (await asyncio.to_thread(full_path.stat)).st_size
-            if request.method == "GET":
-                audit.emit("file.download", filename="/".join(parts), size_bytes=size)
+            served = "/".join(parts)
             cap = self.transfer_cap if self.transfer_cap.active else None
             gauge = (
                 self._session_gauge(request)
@@ -2522,6 +2538,7 @@ class CentralizedStreamServer:
                         await response.write(chunk)
                         sent += len(chunk)
                     await response.write_eof()
+                    audit.emit("file.download", filename=served, size_bytes=size, partial=False)
                 except ConnectionError as e:
                     logger.info(
                         f"Download '{full_path.name}' stopped by the client "
@@ -2529,8 +2546,8 @@ class CentralizedStreamServer:
                 finally:
                     await asyncio.to_thread(fh.close)
                 return response
-            return web.FileResponse(
-                full_path,
+            return _AuditedFileResponse(
+                full_path, served,
                 headers={
                     "Content-Disposition":
                         f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quoted}'
