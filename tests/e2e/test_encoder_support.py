@@ -25,8 +25,8 @@ from playwright.sync_api import sync_playwright
 
 UNSUPPORTED = "not supported by this browser"
 NOTICE = "H.265 video, which this browser cannot decode"
-H265 = "H.265 (Full Frame)"
-H264 = "H.264 (Full Frame)"
+H265 = "H.265"
+H264 = "H.264"
 
 
 def wait_video(page: Any, mode: str) -> Optional[dict]:
