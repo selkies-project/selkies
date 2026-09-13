@@ -1080,8 +1080,9 @@ class _X11ClipboardMonitor:
 
     def read(self, use_binary: bool) -> tuple:
         """Blocking read (call via executor): (data, mime) like read_clipboard —
-        text as str with mime 'text/plain', markup as str with 'text/html',
-        images as bytes with their mime.
+        text as str with mime 'text/plain', markup with the text beneath it as
+        one envelope under CLIPBOARD_FLAVOURS_MIME, images as bytes with their
+        mime.
 
         Images come first where the caller takes them, since a copied picture
         offers markup of its own (an `img` tag pointing back at a page) that is
@@ -6480,6 +6481,24 @@ class WebRTCInput:
             self._invalidate_app_wl_display_if_dead(display)
         return None, None
 
+    @staticmethod
+    def _native_clipboard_payload(entries: List[Tuple[str, bytes]], use_binary: bool) -> tuple:
+        """What the capture compositor's own selection reads as, from the
+        flavours its callback delivered: a picture as bytes with its mime where
+        pictures are taken, markup with the text beneath it as one envelope,
+        text as str; (None, None) for a picture where none is taken."""
+        image = next(((data, mime) for mime, data in entries if mime.startswith('image/')), None)
+        if image is not None:
+            return image if use_binary else (None, None)
+        html = next((data for mime, data in entries if mime == 'text/html'), None)
+        plain = next((data for mime, data in entries if mime != 'text/html'), None)
+        if html:
+            return clipboard_envelope([("text/html", html)] + ([("text/plain", plain)] if plain else [])), \
+                CLIPBOARD_FLAVOURS_MIME
+        if plain is not None:
+            return plain.decode('utf-8', errors='replace'), 'text/plain'
+        return None, None
+
     async def read_clipboard(self, use_binary: bool = False) -> tuple:
         """Read the session clipboard.
 
@@ -6497,8 +6516,10 @@ class WebRTCInput:
                 before falling back to text.
 
         Returns:
-            (data, mime): text as str with mime 'text/plain', images as bytes
-            with their mime, or (None, None) when nothing is readable.
+            (data, mime): text as str with mime 'text/plain', markup with the
+            text beneath it as one envelope under CLIPBOARD_FLAVOURS_MIME,
+            images as bytes with their mime, or (None, None) when nothing is
+            readable.
         """
         if self.is_wayland:
             monitor = await self._ensure_x11_clipboard_monitor_async()
@@ -6513,13 +6534,9 @@ class WebRTCInput:
             cached = (None if self._has_separate_app_compositor()
                       else getattr(self, '_wl_native_last', None))
             if cached is not None:
-                raw, native_mime = cached
-                if native_mime.startswith('image/'):
-                    if use_binary:
-                        return bytes(raw), native_mime
-                else:
-                    text = bytes(raw).decode('utf-8', errors='replace')
-                    return text, ('text/html' if native_mime == 'text/html' else 'text/plain')
+                data, mime = self._native_clipboard_payload(cached, use_binary)
+                if data is not None:
+                    return data, mime
             return await self._app_clipboard_read(use_binary)
         monitor = await self._ensure_x11_clipboard_monitor_async()
         if monitor is not None:
@@ -6629,7 +6646,7 @@ class WebRTCInput:
                     self.wayland_input.set_clipboard(entries)
                     # The compositor does not echo its own selection back; a
                     # later read (another client joining) must still see it.
-                    self._wl_native_last = (input_bytes, mime_type)
+                    self._wl_native_last = entries
                     ok = True
                 except Exception as e:
                     logger_webrtc_input.warning(f"native wayland clipboard set failed: {e}")
@@ -6807,14 +6824,15 @@ class WebRTCInput:
             loop = asyncio.get_running_loop()
             queue = asyncio.Queue(maxsize=4)
 
-            def _on_clip(mime, data):
+            def _on_clip(entries):
+                entries = [(mime, bytes(data)) for mime, data in entries]
                 # Cache for on-demand reads (cr/REQUEST_CLIPBOARD).
-                self._wl_native_last = (bytes(data), mime)
+                self._wl_native_last = entries
 
                 def _put():
                     if queue.full():
                         queue.get_nowait()
-                    queue.put_nowait((data, mime))
+                    queue.put_nowait(entries)
                 loop.call_soon_threadsafe(_put)
 
             self.wayland_input.set_clipboard_callback(_on_clip)
@@ -7039,14 +7057,7 @@ class WebRTCInput:
 
                     use_binary = self.enable_binary_clipboard in ["true", "out"]
                     if wl_native_item is not None:
-                        raw, native_mime = wl_native_item
-                        if native_mime.startswith('image/') and use_binary:
-                            curr_data, curr_mime = bytes(raw), native_mime
-                        elif not native_mime.startswith('image/'):
-                            curr_data = bytes(raw).decode('utf-8', errors='replace')
-                            curr_mime = 'text/plain'
-                        else:
-                            curr_data, curr_mime = None, None
+                        curr_data, curr_mime = self._native_clipboard_payload(wl_native_item, use_binary)
                     elif x11_monitor is not None:
                         loop = asyncio.get_running_loop()
                         curr_data, curr_mime = await loop.run_in_executor(

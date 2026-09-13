@@ -43,8 +43,8 @@ class FakeWaylandInput:
     def clipboard_clear_app(self, display: str) -> None:
         self.cleared.append(display)
 
-    def set_clipboard(self, mime: str, data) -> None:
-        self.set_calls.append((mime, data))
+    def set_clipboard(self, entries) -> None:
+        self.set_calls.append(entries)
 
 
 def make_handler(vk_error: bool = True, separate: bool = True,

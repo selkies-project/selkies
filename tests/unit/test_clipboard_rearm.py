@@ -23,7 +23,8 @@ REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 
 from selkies import input_handler as ih  # noqa: E402
-from selkies.input_handler import WebRTCInput  # noqa: E402
+from selkies.input_handler import (  # noqa: E402
+    CLIPBOARD_FLAVOURS_MIME, WebRTCInput, clipboard_envelope)
 
 results = []
 
@@ -71,15 +72,15 @@ class FakeCompositor:
         if self.selection is not None:
             self._deliver_current()
 
-    def copy(self, mime: str, data: bytes) -> None:
-        self.selection = (mime, data)
+    def copy(self, *entries) -> None:
+        """A client copy offering these `(mime, data)` flavours."""
+        self.selection = list(entries)
         if self.callback is not None:
             self._deliver_current()
 
     def _deliver_current(self) -> None:
         self.reads += 1
-        mime, data = self.selection
-        t = threading.Thread(target=self.callback, args=(mime, data))
+        t = threading.Thread(target=self.callback, args=(list(self.selection),))
         t.start()
         t.join(2.0)
 
@@ -129,7 +130,7 @@ async def main() -> None:
     check("the compositor callback is armed at monitor start",
           len(comp.arms) == 1 and comp.callback is not None, str(len(comp.arms)))
     check("arming is said once", len(lines_with("native compositor callback active")) == 1)
-    comp.copy("text/plain", b"one")
+    comp.copy(("text/plain", b"one"))
     await asyncio.sleep(0.5)
     check("a copy reaches the clients", h.sent == [("one", "text/plain")], str(h.sent))
     # Two full idle timeouts of the loop.
@@ -144,7 +145,7 @@ async def main() -> None:
     check("the same selection handed over again reaches the clients",
           h.sent == [("one", "text/plain"), ("one", "text/plain")], str(h.sent))
     image = bytes(range(256)) * (3 * 1024 * 4)
-    comp.copy("image/png", image)
+    comp.copy(("image/png", image))
     await asyncio.sleep(0.8)
     check("a large image is sent once", h.sent[2:] == [(image, "image/png")], str(len(h.sent)))
     comp._deliver_current()
@@ -183,9 +184,17 @@ async def main() -> None:
     await asyncio.sleep(2.6)
     check("the arm holds once the backend answers, with no further registration",
           armed and len(comp.arms) == arms_after, f"{armed} {arms_after}->{len(comp.arms)}")
-    comp.copy("text/plain", b"two")
+    comp.copy(("text/plain", b"two"))
     await asyncio.sleep(0.5)
     check("copies flow after the late arm", h.sent == [("two", "text/plain")], str(h.sent))
+    rich = [("text/html", b"<b>rich</b>"), ("text/plain", b"rich")]
+    comp.copy(rich[0], ("text/plain;charset=utf-8", b"rich"))
+    await asyncio.sleep(0.5)
+    check("a rich copy reaches the clients as one envelope of its flavours",
+          h.sent[1:] == [(clipboard_envelope(rich), CLIPBOARD_FLAVOURS_MIME)], str(h.sent[1:]))
+    data, mime = await h.read_clipboard()
+    check("and is read on demand as the same envelope",
+          (data, mime) == (clipboard_envelope(rich), CLIPBOARD_FLAVOURS_MIME), mime)
     await stop_monitor(h, task)
 
 

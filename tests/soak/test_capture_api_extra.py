@@ -493,7 +493,7 @@ def main() -> Results:
         try:
             # Set before watching: the watch must fire with the selection
             # current at registration, not only on the next change.
-            wc.set_clipboard("text/plain;charset=utf-8", b"watch-probe")
+            wc.set_clipboard([("text/plain;charset=utf-8", b"watch-probe")])
             time.sleep(0.3)
             seen = []
             wc.clipboard_watch_app("wayland-1",

@@ -340,7 +340,7 @@ def main() -> "H.Results":
         except Exception as e:
             res.check("wayland type_text_wayland", False, repr(e)[:140])
         try:
-            wc.set_clipboard("text/plain;charset=utf-8", b"cap-clip-probe")
+            wc.set_clipboard([("text/plain;charset=utf-8", b"cap-clip-probe")])
             time.sleep(0.3)
             wc.clipboard_types_app("wayland-1")
             data = wc.clipboard_read_app("wayland-1", "text/plain;charset=utf-8")
