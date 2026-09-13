@@ -2,7 +2,9 @@
 """What density a page streams at, and what scale it publishes for its neighbours.
 
 Every page streams at the density of the screen it is on, so a display is one
-stream pixel per device pixel wherever it is shown. A page publishes the scale
+stream pixel per device pixel wherever it is shown, except an X11 secondary on
+a screen denser than the primary, which streams at the primary's published
+scale so the desktop's one DPI shows the UI at one size. A page publishes the scale
 of its box with the layout, for the cross-display drag, by measuring the box it
 draws the stream in, which only answers the question while the box is showing
 the stream the server realized: one still holding the stream from before a

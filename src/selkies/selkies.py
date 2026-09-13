@@ -1627,13 +1627,15 @@ class DataStreamingServer(BaseStreamingService):
         await self.broadcast_display_config()
 
     def _display_config_payload(self) -> dict:
-        """DISPLAY_CONFIG_UPDATE body: the display roster, plus each laid-out
-        display's rectangle, its client's reported CSS-to-remote scale and the
-        desktop box that client draws it in, so a page can map a cross-display
-        drag into its neighbor's region."""
+        """DISPLAY_CONFIG_UPDATE body: the display roster, the backend, plus
+        each laid-out display's rectangle, its client's reported CSS-to-remote
+        scale and the desktop box that client draws it in, so a page can map a
+        cross-display drag into its neighbor's region and, on X11, a secondary
+        can follow the primary's density."""
         payload = {
             "type": "display_config_update",
             "displays": list(self.display_clients.keys()),
+            "wayland": IS_WAYLAND,
         }
         layouts = {}
         for did, rect in (self.display_layouts or {}).items():

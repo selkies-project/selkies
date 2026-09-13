@@ -10,19 +10,34 @@
  * for, so there is nothing for the pick to divide and it governs the desktop
  * DPI instead, and a page dividing here as well would apply it twice --
  * publishing a density its own box does not draw at. On Wayland each screen
- * takes its own page's DPI; on X11 the desktop has one, the primary's, so a
- * secondary on a screen of another density shows the UI at another physical
- * size rather than at another resolution.
+ * takes its own page's DPI. On X11 the desktop has one, the primary's, so a
+ * secondary streams no denser than the primary's published scale: denser
+ * would only draw that UI smaller, so it asks for the primary's density and
+ * the browser stretches the stream, which keeps the UI one size across the
+ * screens; a screen less dense than the primary keeps its own density, since
+ * the primary's would ask for a buffer beyond the screen's pixels, and shows
+ * the UI larger. The primary's scale arrives with the layout, and a secondary
+ * streams at its own until it does; a shared viewer keeps its own.
  * @param {{useCssScaling: boolean, localScale: (number|undefined),
- *     manual: (boolean|undefined)}} page `localScale` is the UI-scaling pick
- *     as a factor (1 is 100%); `manual` is whether this page's resolution is
- *     the operator's own.
+ *     manual: (boolean|undefined), displayId: (string|undefined),
+ *     layouts: (Object|null|undefined), shared: (boolean|undefined),
+ *     wayland: (boolean|undefined)}} page `localScale` is the UI-scaling
+ *     pick as a factor (1 is 100%); `manual` is whether this page's
+ *     resolution is the operator's own; `layouts` is the last display-config
+ *     update's, whose `primary.scale` is the primary's published scale, and
+ *     `wayland` the backend that update names.
  * @returns {number}
  */
-export function streamDensity({ useCssScaling, localScale, manual }) {
+export function streamDensity({ useCssScaling, localScale, manual, displayId, layouts, shared, wayland }) {
     const dpr = window.devicePixelRatio || 1;
     const stretch = (Number.isFinite(localScale) && localScale > 0) ? localScale : 1;
-    return (useCssScaling && !manual) ? dpr / stretch : dpr;
+    const own = (useCssScaling && !manual) ? dpr / stretch : dpr;
+    if (wayland || shared || manual || !displayId || displayId === 'primary') return own;
+    const primary = Number(layouts && layouts.primary && layouts.primary.scale);
+    if (!(primary > 0) || primary >= own) return own;
+    // A measured scale carries the rounding of the primary's aligned buffer;
+    // the request is sized on the density it stands for.
+    return Math.round(primary * 100) / 100;
 }
 
 /** `scaling_dpi` stops in 25% steps from 96; densities between them snap to the nearest. */

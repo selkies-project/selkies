@@ -78,6 +78,35 @@ function check(label, ok, detail = '') {
 }
 
 {
+    // On X11 the desktop is drawn for the primary's density: a denser
+    // secondary asks for that density and the browser stretches the stream.
+    const layouts = { primary: { scale: 1 } };
+    const capped = streamDensity({ useCssScaling: false, displayId: 'display2', layouts });
+    check('an X11 secondary denser than the primary streams at the primary\'s scale', capped === 1, capped);
+    const wayland = streamDensity({ useCssScaling: false, displayId: 'display2', layouts, wayland: true });
+    check('a Wayland secondary keeps its own density, its screen taking its own scale', wayland === 2, wayland);
+    const shared = streamDensity({ useCssScaling: false, displayId: 'display2', layouts, shared: true });
+    check('a shared viewer keeps its own density', shared === 2, shared);
+    const manual = streamDensity({ useCssScaling: false, displayId: 'display2', layouts, manual: true });
+    check('a manual resolution on a secondary is not resampled to the primary', manual === 2, manual);
+    const unknown = streamDensity({ useCssScaling: false, displayId: 'display2', layouts: null });
+    check('a secondary streams at its own density until the primary\'s scale arrives', unknown === 2, unknown);
+    const primary = streamDensity({ useCssScaling: false, displayId: 'primary', layouts });
+    check('the primary never follows its own published scale', primary === 2, primary);
+    const measured = streamDensity({ useCssScaling: false, displayId: 'display2', layouts: { primary: { scale: 1.3333 } } });
+    check('a measured primary scale is taken to two decimals', measured === 1.33, measured);
+}
+
+{
+    // A secondary less dense than the primary keeps its own: the primary's
+    // density would ask for a buffer beyond its screen's pixels.
+    window.devicePixelRatio = 1;
+    const own = streamDensity({ useCssScaling: false, displayId: 'display2', layouts: { primary: { scale: 2 } } });
+    window.devicePixelRatio = 2;
+    check('an X11 secondary less dense than the primary keeps its own density', own === 1, own);
+}
+
+{
     const scale = publishedScale({ stream: [3024, 1612], css: [1512, 806],
                                    realized: [3024, 1612], density: 1 });
     check('a box showing the realized stream publishes its ratio', scale === 2, scale);

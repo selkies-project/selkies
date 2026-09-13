@@ -505,10 +505,13 @@ export default function webrtc() {
 	const storageDisplayId = window.location.hash.startsWith('#display2') ? 'display2' : 'primary';
 	/** Display rectangles (+ per-page scale) from the last display-config update. */
 	let latestDisplayLayouts = null;
+	/** Whether the server runs on Wayland, as the last display-config update named it. */
+	let serverWayland = false;
 	/** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 	function streamDensity() {
-		return streamDensityOf({ useCssScaling, localScale: scalingDPI / 96,
-		                         manual: window.manualResolution });
+		return streamDensityOf({ useCssScaling, localScale: scalingDPI / 96, manual: window.manualResolution,
+		                         displayId: storageDisplayId, layouts: latestDisplayLayouts, shared: isSharedMode,
+		                         wayland: serverWayland });
 	}
 	/** The density the last request was built on; a change re-requests on a secondary. */
 	let appliedStreamDensity = 0;
@@ -516,7 +519,8 @@ export default function webrtc() {
 	let reportedStreamDensity = 0;
 	/**
 	 * Hands the density to the input layer and, on a secondary whose density
-	 * moved (a HiDPI or UI-scaling change), requests the stream at it again.
+	 * moved (a HiDPI or UI-scaling change, or on X11 the primary's scale),
+	 * requests the stream at it again.
 	 */
 	function followStreamDensity() {
 		const density = streamDensity();
@@ -2933,6 +2937,7 @@ export default function webrtc() {
 			webrtc.ondisplayconfig = (config) => {
 				const displays = (config && config.displays) || [];
 				latestDisplayLayouts = (config && config.layouts) || null;
+				serverWayland = !!(config && config.wayland);
 				if (input && input.setDisplayLayouts) {
 					input.setDisplayLayouts(latestDisplayLayouts, displayId);
 				}

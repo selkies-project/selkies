@@ -2036,12 +2036,13 @@ class WebRTCService(BaseStreamingService):
         self._broadcast_display_config()
 
     def _display_config_payload(self) -> Dict[str, Any]:
-        """display_config_update body: the display roster, plus each laid-out
-        display's rectangle, its client's reported CSS-to-remote scale and the
-        desktop box that client draws it in, so a page can map a cross-display
-        drag into its neighbor's region."""
+        """display_config_update body: the display roster, the backend, plus
+        each laid-out display's rectangle, its client's reported CSS-to-remote
+        scale and the desktop box that client draws it in, so a page can map a
+        cross-display drag into its neighbor's region and, on X11, a secondary
+        can follow the primary's density."""
         displays = ["primary"] + [d for d in self.display_clients.keys() if d != "primary"]
-        payload: Dict[str, Any] = {"displays": displays}
+        payload: Dict[str, Any] = {"displays": displays, "wayland": IS_WAYLAND}
         layouts = {}
         for did, rect in (self.display_layouts or {}).items():
             entry: Dict[str, Any] = dict(rect)

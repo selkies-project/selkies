@@ -437,10 +437,12 @@ const isFullFrameVideo = (mode) => mode !== 'jpeg' && mode !== 'h264enc-striped'
 /** Whether an encoder wire value streams video at all rather than JPEG stills. */
 const isVideoEncoder = (mode) => mode !== 'jpeg';
 let useCssScaling = false;
+/** Whether the server runs on Wayland, as the last display-config update named it. */
+let serverWayland = false;
 /** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 function streamDensity() {
-  return streamDensityOf({ useCssScaling, localScale: scalingDPI / 96,
-                           manual: window.manual_resolution });
+  return streamDensityOf({ useCssScaling, localScale: scalingDPI / 96, manual: window.manual_resolution,
+                           displayId, layouts: latestDisplayLayouts, shared: isSharedMode, wayland: serverWayland });
 }
 /** The density the last request was built on; a change re-requests on a secondary. */
 let appliedStreamDensity = 0;
@@ -450,7 +452,8 @@ let reportedStreamDensity = 0;
 let lastRequestedStreamRes = null;
 /**
  * Hands the density to the input layer and, on a secondary whose density
- * moved (a HiDPI or UI-scaling change), requests the stream at it again.
+ * moved (a HiDPI or UI-scaling change, or on X11 the primary's scale),
+ * requests the stream at it again.
  */
 function followStreamDensity() {
   const density = streamDensity();
@@ -7474,6 +7477,7 @@ class WorkerWebSocket {
                 const payload = JSON.parse(jsonPayload);
 
                 latestDisplayLayouts = payload.layouts || null;
+                serverWayland = !!payload.wayland;
                 if (window.webrtcInput && window.webrtcInput.setDisplayLayouts) {
                     window.webrtcInput.setDisplayLayouts(latestDisplayLayouts, displayId);
                 }
