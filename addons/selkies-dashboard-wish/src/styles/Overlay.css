@@ -53,6 +53,15 @@ body {
     z-index: 2100;
 }
 
+/* Radix portals (menus, tooltips, dialogs) are body children, so the dashboard
+   root's stacking context would cover them where they overlap a panel; they
+   take the layer above it. Important, as Radix sets the popper's z-index inline. */
+[data-radix-popper-content-wrapper],
+[data-slot="dialog-overlay"],
+[data-slot="dialog-content"] {
+    z-index: 2200 !important;
+}
+
 /* --- Gamepad visualizer --- */
 .gamepad-visualizer-instance {
     margin-bottom: 20px;
