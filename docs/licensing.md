@@ -22,7 +22,7 @@ LGPL additionally requires the library stay replaceable), **permissive**
 ## Where the GPL code is
 
 A Selkies installation has no GPL code of its own. Two dependencies bring
-GPL-licensed libraries into an installation made from PyPI wheels:
+GPL-licensed libraries into an installation made from the release wheels:
 
 | Source | GPL component | How it gets in | How to leave it out |
 | --- | --- | --- | --- |
@@ -111,7 +111,7 @@ so it matches the sources.
 ## The default is GPL-enabled
 
 pixelflux builds with its GPL components on by default (libx264 for software
-H.264), and that is the supported default for every deployment — PyPI wheels,
+H.264), and that is the supported default for every deployment — the release wheels,
 the container images and the AppImage, which may therefore bundle a GPL FFmpeg
 through pixelflux. `PIXELFLUX_ENABLE_GPL=0` is the opt-out for operators who
 need a copyleft-free build; the sections below describe both.

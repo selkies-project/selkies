@@ -29,15 +29,15 @@
 #   - Audio: PipeWire with the PulseAudio, ALSA, JACK and V4L2 interfaces,
 #     recorded through the PulseAudio one by pcmflux
 #   - Embedded coTURN for WebRTC firewall traversal
-#   - Selkies installed with pip: from wheels dropped into `wheels/`, or from
-#     PyPI (latest release) when `wheels/` is empty
+#   - Selkies installed with pip from the wheels dropped into `wheels/` (its
+#     own and the pixelflux/pcmflux ones the run resolved), else from the
+#     GitHub releases, the index last
 #
 # Supported bases: Ubuntu 26.04 and Debian Trixie, and later releases of both
 # (select with --build-arg DISTRIB_IMAGE=ubuntu|debian DISTRIB_RELEASE=26.04|trixie).
 
 ARG DISTRIB_IMAGE="ubuntu"
 ARG DISTRIB_RELEASE="26.04"
-ARG PYPI_PACKAGE="selkies"
 # The X server the session runs on, built here rather than installed: the
 # distribution's Xvfb has neither glamor nor DRI3, so GL clients render in
 # software even with a GPU present. XLibre's Xvfb has both, on Mesa's GBM and
@@ -271,7 +271,6 @@ LABEL org.opencontainers.image.licenses="MPL-2.0"
 
 ARG DISTRIB_IMAGE
 ARG DISTRIB_RELEASE
-ARG PYPI_PACKAGE
 
 # Every network fetch in this image is retried, because a build that reaches for
 # a package index, a signing key or a wheel is one transient failure away from
@@ -600,28 +599,30 @@ ENV __GL_SYNC_TO_VBLANK="0"
 # Keep the log dir present for in-session apt runs.
 RUN install -d /var/log/apt
 
-# Install Selkies with pip: from the wheels dropped into `wheels/`, or the
-# latest PyPI release when `wheels/` is empty. When fresh pixelflux/pcmflux
-# wheels (built from the main HEAD of selkies-project/pixelflux and
-# selkies-project/pcmflux) ride along, pip selects the ones matching this image's
-# Python and platform; everything else still resolves from PyPI.
-# `wheels/` is bind-mounted rather than copied: it holds every interpreter and
-# platform variant while this image installs only the matching ones, so a copy
-# would commit the whole set to a layer no later removal can reclaim.
+# Install Selkies with pip from the wheels dropped into `wheels/`: its own and
+# the pixelflux/pcmflux ones the run resolved, of which pip selects the ones
+# matching this image's Python and platform. A wheel missing there (a build
+# outside CI) is taken from the GitHub releases instead, and only one no
+# release carries is left to the index. The capture stack goes in from the
+# wheels ahead of the index, so its pin is met before any resolver looks
+# there. `wheels/` is bind-mounted rather than copied: it holds every
+# interpreter and platform variant while this image installs only the matching
+# ones, so a copy would commit the whole set to a layer no later removal can
+# reclaim.
+COPY .devcontainer/features/desktop-selkies/src/fetch-release-wheels.sh /tmp/fetch-release-wheels.sh
 RUN --mount=type=bind,source=addons/base/wheels,target=/tmp/wheels \
     set -e; \
-    SELKIES_WHL="$(ls /tmp/wheels/selkies-*.whl 2>/dev/null || true)"; \
-    if [ -z "${SELKIES_WHL}" ]; then \
-      PKGS="${PYPI_PACKAGE}"; \
-    else \
-      PKGS="${SELKIES_WHL}"; \
-      if ls /tmp/wheels/pixelflux-*.whl > /dev/null 2>&1; then \
-        pip3 download --no-cache-dir --no-deps --no-index --find-links /tmp/wheels --dest /tmp/picked pixelflux pcmflux > /dev/null; \
-        PKGS="${PKGS} $(ls /tmp/picked/*.whl)"; \
+    mkdir -p /tmp/picked; \
+    cp /tmp/wheels/*.whl /tmp/picked/ 2> /dev/null || true; \
+    bash /tmp/fetch-release-wheels.sh /tmp/picked; \
+    for project in pixelflux pcmflux; do \
+      if ls /tmp/picked/${project}-*.whl > /dev/null 2>&1; then \
+        PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --no-index --find-links /tmp/picked ${project}; \
       fi; \
-    fi; \
-    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --force-reinstall ${PKGS}; \
-    rm -rf /tmp/picked
+    done; \
+    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --find-links /tmp/picked \
+      "$(ls /tmp/picked/selkies-*.whl 2> /dev/null || echo selkies)"; \
+    rm -rf /tmp/picked /tmp/fetch-release-wheels.sh
 
 # Fails the image build rather than publishing one whose payload cannot start.
 # The libraries are the ones the capture stack opens by name at run time, which

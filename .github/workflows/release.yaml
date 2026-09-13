@@ -15,10 +15,10 @@ name: Release
 # publication.
 #
 # The pinned pixelflux and pcmflux come from the release each project cut for
-# that version, so a release needs nothing of them on PyPI: the smoke test, the
-# images, the packages and the AppImages all install the wheels those projects
-# published. `capture_stack: pypi` resolves them from PyPI instead, which is
-# what proves the path a user installing the wheel from there takes.
+# that version: the smoke test, the images, the packages and the AppImages all
+# install the wheels those projects published. `capture_stack: pypi` is the
+# explicit choice to resolve them from PyPI instead, for a release made after
+# the two were published there; nothing takes that road on its own.
 
 on:
   workflow_dispatch:
@@ -36,7 +36,7 @@ on:
           - never
         default: auto
       capture_stack:
-        description: Where the pinned pixelflux and pcmflux come from
+        description: Where the pinned pixelflux and pcmflux come from; pypi only once they are published there
         type: choice
         options:
           - releases

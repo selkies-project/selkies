@@ -25,7 +25,7 @@ on:
         type: string
         default: ""
       capture_stack_published:
-        description: The pinned pixelflux/pcmflux are released on PyPI, so this build resolves them there
+        description: Resolve the pinned pixelflux/pcmflux from PyPI, an explicit choice for a build made after they were published there
         type: boolean
         default: false
   workflow_call:
@@ -43,7 +43,7 @@ on:
         type: string
         default: ""
       capture_stack_published:
-        description: The pinned pixelflux/pcmflux are released on PyPI, so this build resolves them there
+        description: Resolve the pinned pixelflux/pcmflux from PyPI, an explicit choice for a build made after they were published there
         type: boolean
         default: false
 
@@ -111,7 +111,8 @@ jobs:
           path: dist/
       # The pixelflux/pcmflux wheels the orchestrating run resolved: each
       # project's main HEAD, or the pinned release at a release. Absence is
-      # tolerated (standalone dispatch) and the Dockerfile falls back to PyPI
+      # tolerated (standalone dispatch): the Dockerfile takes what is missing
+      # from the GitHub releases, and the index only where those have nothing
       - name: Download the pixelflux wheels
         if: ${{ !inputs.capture_stack_published }}
         uses: actions/download-artifact@v8

@@ -80,8 +80,8 @@ CONDA_PYTHON_VERSION="3.12"
 # x264-free avcodec stack inside the AppImage
 CONDA_PACKAGES="selkies;ffmpeg=*=*lgpl*;libxcb;pulseaudio;libva;libxkbcommon;zlib"
 # Runtime dependencies with no conda-forge package. pixelflux and pcmflux come
-# from the freshly built master-HEAD wheels when CI supplies them (the AppImage
-# env always runs Python 3.12, see CONDA_PYTHON_VERSION above), else from PyPI.
+# from the wheels the run resolved (the AppImage env always runs Python 3.12,
+# see CONDA_PYTHON_VERSION above); the index only where the run chose it.
 PIP_REQUIREMENTS="pulsectl-asyncio aitop"
 for project in pixelflux pcmflux; do
   wheel=""
@@ -90,8 +90,8 @@ for project in pixelflux pcmflux; do
         -name "${project}-*cp312*manylinux*${ARCH}*.whl" | head -n1)"
   fi
   # A wheels directory that yielded nothing means the AppImage carries whatever
-  # PyPI resolves rather than the build meant to ride along, so say so. No
-  # directory at all is the release path, where PyPI is the right answer.
+  # the index resolves rather than the build meant to ride along, so say so. No
+  # directory at all is the run's explicit choice of the index.
   if [ -z "${wheel}" ] && [ -n "${PIXELFLUX_PCMFLUX_WHEELS_DIR:-}" ]; then
     echo "::warning::No ${project} wheel in ${PIXELFLUX_PCMFLUX_WHEELS_DIR}; the AppImage resolves it from PyPI"
   fi

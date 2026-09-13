@@ -75,23 +75,21 @@ if [ "${DESKTOP:-lxqt}" != "none" ]; then
     ./install-desktop-environment.sh
 fi
 
-# Install Selkies from PyPI (latest release or a requested release tag)
-if [ "${RELEASE:-latest}" = "latest" ]; then
-    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --upgrade selkies
-else
-    PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 "selkies==${RELEASE#v}"
-fi
-
-# The commands start-selkies.sh runs. A release from the line before 2.0
-# installs them under other names, and a container built on one would come up
-# with a desktop and no server, so the release that lacks them is named here
-# instead of leaving that to a session.
-for command in selkies selkies-resize; do
-    if ! command -v "${command}" > /dev/null; then
-        echo "selkies $(pip3 show selkies | sed -n 's/^Version: //p') provides no ${command} command; set this feature's release option to a tag that does" >&2
-        exit 1
+# Install Selkies from the wheels its GitHub releases carry -- the release asked
+# for, else the newest one, and the newest pixelflux and pcmflux releases --
+# looked in ahead of the index, which only resolves what no release carries.
+WHEELS="$(mktemp -d)"
+./fetch-release-wheels.sh "${WHEELS}" "${RELEASE:-latest}"
+# The capture stack goes in from the wheels ahead of the index the remaining
+# dependencies come from, so its pin is met before any resolver looks there.
+for project in pixelflux pcmflux; do
+    if ls "${WHEELS}/${project}"-*.whl > /dev/null 2>&1; then
+        PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --no-index --find-links "${WHEELS}" "${project}"
     fi
 done
+SELKIES="$(ls "${WHEELS}"/selkies-*.whl 2> /dev/null || echo "selkies${RELEASE:+==${RELEASE#v}}")"
+PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --find-links "${WHEELS}" "${SELKIES}"
+rm -rf "${WHEELS}"
 
 mkdir -p /etc/OpenCL/vendors && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
 

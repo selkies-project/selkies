@@ -7,7 +7,7 @@
         "release": {
             "type": "string",
             "default": "latest",
-            "description": "The selkies release tag."
+            "description": "The selkies GitHub release to install; latest is the newest one."
         },
         "xserver": {
             "type": "string",

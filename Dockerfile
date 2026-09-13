@@ -29,30 +29,26 @@ FROM python:3-slim AS py-build
 
 LABEL maintainer="https://github.com/danisla,https://github.com/ehfd"
 
-ARG PYPI_PACKAGE="selkies"
 ARG PACKAGE_VERSION="0.0.0.dev0"
 
 # Set through the environment rather than as flags on the install below,
 # because the install is not the only pip this stage runs: `python3 -m build`
 # provisions an isolated environment of its own and pip-installs the build
-# backend into it from PyPI, and that call is reached through the environment
-# or not at all.
+# backend into it from the index, and that call is reached through the
+# environment or not at all.
 ENV PIP_RETRIES="5" \
     PIP_TIMEOUT="60"
 
 RUN python3 -m pip install --no-cache-dir --upgrade build
 
-WORKDIR /opt/pypi
+WORKDIR /opt/build
 
 COPY src ./src
 COPY README.md pyproject.toml ./
 # Include the production built web files in the wheel package
 COPY --from=web-build /build/src/selkies/selkies_web ./src/selkies/selkies_web
 
-# Patch the package name and version
-RUN sed -i \
-    -e "s|^name =.*|name = \"${PYPI_PACKAGE}\"|g" \
-    -e "s|^version =.*|version = \"${PACKAGE_VERSION}\"|g" \
-    pyproject.toml
+# Stamp the version
+RUN sed -i -e "s|^version =.*|version = \"${PACKAGE_VERSION}\"|g" pyproject.toml
 
 RUN python3 -m build

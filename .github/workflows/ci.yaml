@@ -136,8 +136,8 @@ jobs:
 
   wheel-smoke:
     name: Smoke test the wheel
-    # Installs the built wheel against the main-HEAD capture stack, which PyPI
-    # does not carry, so it waits for the job that puts those wheels in reach.
+    # Installs the built wheel against the main-HEAD capture stack, which only
+    # this run's artifacts carry, so it waits for the job that puts them in reach.
     needs: [wheel, pixelflux-pcmflux]
     permissions:
       contents: read

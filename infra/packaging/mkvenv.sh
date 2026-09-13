@@ -13,7 +13,7 @@ python3 -m venv /opt/selkies
 WHEELS="$(ls /dist/selkies-*-py3-none-any.whl)"
 # CI drops the pixelflux/pcmflux wheels this run pinned into /dist; pick the
 # one matching this distro's Python and platform. A project with no wheel at
-# all resolves from PyPI as a dependency of the selkies wheel, but one whose
+# all resolves from the index as a dependency of the selkies wheel, but one whose
 # wheels are present without a build for this interpreter is a gap in the
 # matrix, and naming that interpreter beats pip's resolver error.
 mkdir -p /tmp/picked

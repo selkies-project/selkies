@@ -21,7 +21,7 @@ on:
         type: string
         default: ""
       capture_stack_published:
-        description: The pinned pixelflux/pcmflux are released on PyPI, so this build resolves them there
+        description: Resolve the pinned pixelflux/pcmflux from PyPI, an explicit choice for a build made after they were published there
         type: boolean
         default: false
   workflow_call:
@@ -35,7 +35,7 @@ on:
         type: string
         default: ""
       capture_stack_published:
-        description: The pinned pixelflux/pcmflux are released on PyPI, so this build resolves them there
+        description: Resolve the pinned pixelflux/pcmflux from PyPI, an explicit choice for a build made after they were published there
         type: boolean
         default: false
 
@@ -137,7 +137,7 @@ jobs:
           path: dist/
       # The pixelflux/pcmflux wheels the orchestrating run resolved: each
       # project's main HEAD, or the pinned release at a release. Absence is
-      # tolerated (standalone dispatch) and mkvenv.sh leaves them to PyPI
+      # tolerated (standalone dispatch) and mkvenv.sh leaves them to the index
       - name: Download the pixelflux wheels
         if: ${{ !inputs.capture_stack_published }}
         uses: actions/download-artifact@v8

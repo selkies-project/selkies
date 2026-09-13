@@ -86,7 +86,7 @@ jobs:
         run: python tests/tools/assert_no_skips.py unit-report.xml
 
   # pixelflux and pcmflux ship as wheels this run has in hand rather than from
-  # PyPI, which carries neither pre-release. The caller passes them in as
+  # an index, which carries neither pre-release. The caller passes them in as
   # artifacts when it has already resolved them; a standalone run resolves them
   # here, downloading each project's per-commit pre-release or building what
   # has none yet.
@@ -188,8 +188,8 @@ jobs:
       - name: Verify the patched labwc
         run: labwc --version
       # The suites have to exercise the pixelflux and pcmflux that the images,
-      # packages and AppImages ship, which come from main HEAD rather than the
-      # last PyPI release. Whichever job resolved them left them here.
+      # packages and AppImages ship, which come from main HEAD rather than any
+      # released version. Whichever job resolved them left them here.
       - name: Download the pixelflux wheels (main HEAD)
         uses: actions/download-artifact@v8
         continue-on-error: true
@@ -212,16 +212,16 @@ jobs:
           # packages the very artifact these suites ran against instead of
           # spending another build on a second copy of it.
           python -m pip wheel --no-deps -w dist .
-          # The pinned pixelflux/pcmflux are a pre-release, not on PyPI: resolve
-          # them from the main-HEAD wheels downloaded above. The test extras
+          # The pinned pixelflux/pcmflux are a pre-release no index carries:
+          # resolve them from the main-HEAD wheels downloaded above. The test extras
           # (pytest, playwright, ...) come from the wheel's own [test] group.
           mkdir -p main-wheels
           wheel="$(ls dist/selkies-*.whl)"
           python -m pip install --find-links "$PWD/main-wheels" "${wheel}[test]"
           ABI="cp$(python -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
           WHEEL_GLOB="*${ABI}-*manylinux*$(uname -m)*.whl"
-          # Fatal rather than a note: a run that quietly drops to PyPI tests a
-          # capture stack nothing ships, and reports it as a pass.
+          # Fatal rather than a note: a run that quietly took an index's copy
+          # tests a capture stack nothing ships, and reports it as a pass.
           for project in pixelflux pcmflux; do
             found="$(find main-wheels -maxdepth 1 -name "${project}-${WHEEL_GLOB}" 2>/dev/null)"
             if [ -z "${found}" ]; then
