@@ -2390,10 +2390,10 @@ class CentralizedStreamServer:
             return web.Response(status=403, text="View-only credentials cannot take printed documents")
         name = printing.document_name(request.match_info.get("name", ""))
         base = str(self.print_spool)
-        path = pathlib.Path(os.path.realpath(os.path.join(base, name))) if name else None
-        if path is None or os.path.commonpath([base, str(path)]) != base or not path.is_file():
+        full = os.path.normpath(os.path.join(base, name)) if name else ""
+        if not full.startswith(base + os.sep) or not os.path.isfile(full):
             return web.Response(status=404, text="No such document")
-        return _AuditedFileResponse(path, name, event="print.document", remove=True,
+        return _AuditedFileResponse(pathlib.Path(full), name, event="print.document", remove=True,
                                     headers={"Content-Disposition": "inline"})
 
     def _active_service(self) -> Optional[BaseStreamingService]:
