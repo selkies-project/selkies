@@ -1,6 +1,6 @@
 """The kernel gamepad backend, driven in-process against the /dev/uinput
 emulator: what the kernel would receive has to match the evdev stream the
-Joystick Interposer serves, byte for byte, and the device has to be set up with
+Input Interposer serves, byte for byte, and the device has to be set up with
 the same identity and axis ranges."""
 import asyncio
 import os

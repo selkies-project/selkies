@@ -71,7 +71,7 @@ every interpreter the package supports.
 
 `make -C tests/tools gamepad` builds the interposer-side inspection tools
 (`jsread`, `sdlenum`, `sdlread`, `udevscan`), which need SDL2 and libudev. They
-are for looking at what an application sees through the Joystick Interposer, and
+are for looking at what an application sees through the Input Interposer, and
 are not part of any tier. `jsread` reads the joydev node directly, `sdlenum`
 lists what SDL2 enumerates, `sdlread` opens one of those pads and prints the
 button, axis and hat events SDL2 delivers for it, and `udevscan` shows the
@@ -107,7 +107,7 @@ a wheel from `WHEEL_DIR` or `dist/` when one is there and builds one into
 scripts build a virtualenv, so it hands them the interpreter running the tests
 rather than a distro `python3` that may lack `ensurepip`.
 
-Those scripts also compile the Joystick Interposer into each package, including
+Those scripts also compile the Input Interposer into each package, including
 a 32-bit variant wherever the compiler can produce one. A host without a
 multilib toolchain can unpack one and point `MULTILIB_SYSROOT` at it, and the
 simulation covers that branch instead of skipping it:

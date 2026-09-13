@@ -69,7 +69,7 @@ done
 # Configure joystick interposer and fake-udev (container-only gamepad plumbing)
 # $LIB is a dynamic-loader token; the backslash keeps the shell off it.
 export LIB_PREFIX="/usr/\$LIB"
-export SELKIES_INTERPOSER="${LIB_PREFIX}/selkies_joystick_interposer.so"
+export SELKIES_INTERPOSER="${LIB_PREFIX}/selkies_input_interposer.so"
 export LIBUDEV_PACKAGE="${LIBUDEV_PACKAGE:-libudev}"
 export LIBUDEV_PKG_VERSION="${LIBUDEV_PKG_VERSION:-1.0.0}"
 export FAKE_UDEV_LIB="${LIB_PREFIX}/${LIBUDEV_PACKAGE}.so.${LIBUDEV_PKG_VERSION}-fake"

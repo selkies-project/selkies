@@ -26,7 +26,7 @@ rm -rf "$SB"; mkdir -p "$SB"/{repo,dist,out,stubs,log,home} "$SB/etc/apk/keys" "
 cp -r "$REPO/infra" "$SB/repo/"
 # only what the packaging scripts read: addons/ also holds node_modules
 mkdir -p "$SB/repo/addons"
-cp -r "$REPO/addons/js-interposer" "$REPO/addons/v4l2-interposer" "$SB/repo/addons/"
+cp -r "$REPO/addons/input-interposer" "$REPO/addons/v4l2-interposer" "$SB/repo/addons/"
 cp "$WHEEL_SRC"/selkies-*.whl "$SB/dist/"
 # infra/packaging/mkvenv.sh installs the capture stack out of the same directory
 # when it is there, which is how CI packages the very pixelflux and pcmflux the

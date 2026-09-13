@@ -51,9 +51,9 @@ sudo /usr/bin/pulseaudio --system --verbose --log-target=file:/tmp/pulseaudio.lo
 sudo mkdir -pm1777 /dev/input
 
 # If installed, add the joystick interposer to LD_PRELOAD
-if [ -e "/usr/lib/x86_64-linux-gnu/selkies_joystick_interposer.so" ]; then
+if [ -e "/usr/lib/x86_64-linux-gnu/selkies_input_interposer.so" ]; then
     # $LIB is a dynamic-loader token; the backslash keeps the shell off it.
-    export SELKIES_INTERPOSER="/usr/\$LIB/selkies_joystick_interposer.so"
+    export SELKIES_INTERPOSER="/usr/\$LIB/selkies_input_interposer.so"
     export LD_PRELOAD="${SELKIES_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
     # No fake-udev here, so SDL2 applications need the evdev nodes by name. One
     # entry per slot: naming js0 as well would show slot 0 twice.

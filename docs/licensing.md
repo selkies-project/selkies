@@ -9,7 +9,7 @@ Selkies is licensed under the [Mozilla Public License 2.0](https://github.com/se
 (`LICENSE` in the repository, `license = "MPL-2.0"` in `pyproject.toml`). MPL-2.0
 is file-level copyleft: a modified MPL file stays MPL when distributed, the
 larger work around it may be under any license. The Python package, the web
-client, the addons (Joystick Interposer, V4L2 interposer, fake-udev, coturn and
+client, the addons (Input Interposer, V4L2 interposer, fake-udev, coturn and
 TURN REST helpers, universal touch gamepad) and the build and packaging scripts
 all carry MPL-2.0 headers.
 
@@ -102,7 +102,7 @@ so it matches the sources.
 
 | Component | License | Links or loads | Notes |
 | --- | --- | --- | --- |
-| Joystick Interposer (`addons/js-interposer`, `selkies_joystick_interposer.so`) | MPL-2.0 | libc, libdl | `LD_PRELOAD` library |
+| Input Interposer (`addons/input-interposer`, `selkies_input_interposer.so`) | MPL-2.0 | libc, libdl | `LD_PRELOAD` library |
 | V4L2 interposer (`addons/v4l2-interposer`) | MPL-2.0 | libc, libdl; `dlopen`s libpipewire-0.3 (MIT) when a PipeWire source is configured | shares its ring layout with pixelflux's `VirtualCamera` |
 | fake-udev (`addons/fake-udev`) | MPL-2.0 (own `libudev.h` declarations, no systemd code) | libc, libdl; `dlopen`s the system libudev (LGPL) for everything but the virtual gamepads | replaces the LGPL libudev only by ABI, for virtual gamepads |
 | coturn addon (`addons/coturn`) | MPL-2.0 scripts around the coturn image | runs coturn (BSD-3-Clause) | TURN server |

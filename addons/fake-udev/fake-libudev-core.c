@@ -501,7 +501,7 @@ static void build_dyn_definition(int idx, int num, const udyn_desc_t *d) {
 
     snprintf(def->input_parent_sysname, sizeof(def->input_parent_sysname), "input%d", num);
     snprintf(def->input_parent_syspath, sizeof(def->input_parent_syspath),
-             "/sys/devices/virtual/selkies_uinput%d/input/%s", num, def->input_parent_sysname);
+             "/sys/devices/virtual/selkies_uinput%d/input/input%d", num, num);
     def->input_parent_sysattrs[0] = (key_value_pair_t){"id/vendor", dyn_vid_buf[idx]};
     def->input_parent_sysattrs[1] = (key_value_pair_t){"id/product", dyn_pid_buf[idx]};
     def->input_parent_sysattrs[2] = (key_value_pair_t){"id/version", dyn_ver_buf[idx]};
@@ -518,7 +518,8 @@ static void build_dyn_definition(int idx, int num, const udyn_desc_t *d) {
     def->input_parent_properties[2] = (key_value_pair_t){NULL, NULL};
 
     snprintf(def->event_sysname, sizeof(def->event_sysname), "event%d", num);
-    snprintf(def->event_syspath, sizeof(def->event_syspath), "%s/%s", def->input_parent_syspath, def->event_sysname);
+    snprintf(def->event_syspath, sizeof(def->event_syspath),
+             "/sys/devices/virtual/selkies_uinput%d/input/input%d/event%d", num, num, num);
     snprintf(def->event_devnode, sizeof(def->event_devnode), "/dev/input/event%d", num);
     def->event_properties[0] = (key_value_pair_t){"DEVNAME", def->event_devnode};
     def->event_properties[1] = (key_value_pair_t){"ID_INPUT", "1"};
@@ -540,7 +541,7 @@ static void build_dyn_definition(int idx, int num, const udyn_desc_t *d) {
     def->js_devnode[0] = '\0';
 
     snprintf(def->usb_parent_sysname, sizeof(def->usb_parent_sysname), "selkies_uinput_usb%d", num);
-    snprintf(def->usb_parent_syspath, sizeof(def->usb_parent_syspath), "/sys/devices/virtual/usb/%s", def->usb_parent_sysname);
+    snprintf(def->usb_parent_syspath, sizeof(def->usb_parent_syspath), "/sys/devices/virtual/usb/selkies_uinput_usb%d", num);
     def->usb_parent_sysattrs[0] = (key_value_pair_t){"idVendor", dyn_vid_buf[idx]};
     def->usb_parent_sysattrs[1] = (key_value_pair_t){"idProduct", dyn_pid_buf[idx]};
     def->usb_parent_sysattrs[2] = (key_value_pair_t){"product", dyn_name_buf[idx]};
@@ -549,8 +550,9 @@ static void build_dyn_definition(int idx, int num, const udyn_desc_t *d) {
 
 /* Reads selkies_event<N>.desc, returning true on a well-formed descriptor. */
 static bool udyn_read_desc(int num, udyn_desc_t *out) {
-    char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/selkies_event%d.desc", fake_udev_socket_dir(), num);
+    char dir[256], path[320];
+    snprintf(dir, sizeof(dir), "%s", fake_udev_socket_dir());
+    snprintf(path, sizeof(path), "%s/selkies_event%d.desc", dir, num);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return false;
     size_t got = 0;

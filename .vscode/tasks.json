@@ -9,7 +9,7 @@
             "command": "sudo make install",
             "problemMatcher": [],
             "options": {
-                "cwd": "${workspaceFolder}/addons/js-interposer"
+                "cwd": "${workspaceFolder}/addons/input-interposer"
             }
         },
         {

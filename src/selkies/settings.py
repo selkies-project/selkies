@@ -984,7 +984,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "js_socket_path",
         "type": "str",
         "default": "/tmp",
-        "help": "Directory to write the Selkies Joystick Interposer communication sockets to, default: /tmp, results in socket files: /tmp/selkies_js{0-3}.sock",
+        "help": "Directory to write the Selkies Input Interposer communication sockets to, default: /tmp, results in socket files: /tmp/selkies_js{0-3}.sock",
     },
     {
         "name": "webcam_socket_path",
@@ -1027,7 +1027,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "uinput_gamepad",
         "type": "str",
         "default": "auto",
-        "help": 'Register gamepads as kernel devices through /dev/uinput, which applications (Steam, Proton, in-desktop browsers) find without the Joystick Interposer or fake-udev: "auto" does so only where the interposer is not configured for the session and /dev/uinput is writable — typically a desktop host rather than a container — while "true" always attempts it and "false" never does.',
+        "help": 'Register gamepads as kernel devices through /dev/uinput, which applications (Steam, Proton, in-desktop browsers) find without the Input Interposer or fake-udev: "auto" does so only where the interposer is not configured for the session and /dev/uinput is writable — typically a desktop host rather than a container — while "true" always attempts it and "false" never does.',
     },
     {
         "name": "gpu_id",

@@ -130,7 +130,7 @@ for packager in ("deb.sh", "rpm.sh", "apk.sh", "arch.sh"):
         check(f"{packager} stages the {addon.rsplit('.', 1)[0]}",
               f"/{addon}" in body, f"infra/packaging/{packager}")
 
-for source, env in (("js-interposer/joystick_interposer.c", "SELKIES_INTERPOSER"),
+for source, env in (("input-interposer/input_interposer.c", "SELKIES_INTERPOSER"),
                     ("v4l2-interposer/v4l2_interposer.c", "SELKIES_WEBCAM_INTERPOSER")):
     check(f"the AppImage compiles {os.path.basename(source)}", source in appimage,
           "scripts/ci/appimage.sh")

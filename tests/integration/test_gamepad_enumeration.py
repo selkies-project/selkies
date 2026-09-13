@@ -21,15 +21,15 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
-INTERPOSER_DIR = os.path.join(H.REPO, "addons", "js-interposer")
+INTERPOSER_DIR = os.path.join(H.REPO, "addons", "input-interposer")
 
 
 def build_interposer(workdir: str) -> str:
     """Compile the interposer into `workdir`, returning the .so path."""
-    so = os.path.join(workdir, "selkies_joystick_interposer.so")
+    so = os.path.join(workdir, "selkies_input_interposer.so")
     subprocess.run(
         ["gcc", "-O2", "-shared", "-fPIC", "-o", so,
-         os.path.join(INTERPOSER_DIR, "joystick_interposer.c"), "-ldl", "-pthread"],
+         os.path.join(INTERPOSER_DIR, "input_interposer.c"), "-ldl", "-pthread"],
         check=True, capture_output=True, text=True)
     return so
 

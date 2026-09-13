@@ -9,24 +9,26 @@ CFLAGS ?= -O2
 LIBDIR = $(PREFIX)/lib/$(shell $(CC) -print-multiarch | sed -e 's/i.*86/i386/')
 LIBDIR32 = $(PREFIX)/lib/$(shell $(CC) -m32 -print-multiarch 2>/dev/null | sed -e 's/i.*86/i386/')
 
-all: selkies_joystick_interposer.so
+all: selkies_input_interposer.so
 
 # 32-bit build for the Wine and Steam catalog; needs gcc-multilib on amd64
-all32: selkies_joystick_interposer_x86.so
+all32: selkies_input_interposer_x86.so
 
-selkies_joystick_interposer.so: joystick_interposer.c
+selkies_input_interposer.so: input_interposer.c
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< -ldl -pthread
 
-selkies_joystick_interposer_x86.so: joystick_interposer.c
+selkies_input_interposer_x86.so: input_interposer.c
 	$(CC) -m32 $(CFLAGS) -shared -fPIC -o $@ $< -ldl -pthread
 
 install: all
 	mkdir -p $(LIBDIR)
-	cp selkies_joystick_interposer.so $(LIBDIR)/
+	cp selkies_input_interposer.so $(LIBDIR)/
+	ln -sf selkies_input_interposer.so $(LIBDIR)/selkies_joystick_interposer.so
 
 install32: all32
 	mkdir -p $(LIBDIR32)
-	cp selkies_joystick_interposer_x86.so $(LIBDIR32)/selkies_joystick_interposer.so
+	cp selkies_input_interposer_x86.so $(LIBDIR32)/selkies_input_interposer.so
+	ln -sf selkies_input_interposer.so $(LIBDIR32)/selkies_joystick_interposer.so
 
 clean:
 	rm -f *.so

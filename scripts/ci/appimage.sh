@@ -133,8 +133,10 @@ CONDA_CC="$(find "${CC_ENV}/bin" -name '*-linux-gnu-gcc' | head -n1)"
 CONDA_SYSROOT="$(find "${CC_ENV}" -maxdepth 2 -type d -name sysroot | head -n1)"
 mkdir -p AppDir/usr/lib
 "${CONDA_CC}" --sysroot="${CONDA_SYSROOT}" -shared -fPIC -O2 \
-    -o AppDir/usr/lib/selkies_joystick_interposer.so \
-    addons/js-interposer/joystick_interposer.c -ldl -lpthread
+    -o AppDir/usr/lib/selkies_input_interposer.so \
+    addons/input-interposer/input_interposer.c -ldl -lpthread
+# Back-compat name for deployments that preload the pre-rename path.
+ln -sf selkies_input_interposer.so AppDir/usr/lib/selkies_joystick_interposer.so
 "${CONDA_CC}" --sysroot="${CONDA_SYSROOT}" -shared -fPIC -O2 \
     -o AppDir/usr/lib/selkies_v4l2_interposer.so \
     addons/v4l2-interposer/v4l2_interposer.c -ldl -lpthread
@@ -142,7 +144,7 @@ rm -rf "${CC_ENV}"
 
 # The floor is the whole point of compiling these with conda, and the fallback
 # above would raise it silently, so each result is checked rather than assumed
-for lib in selkies_joystick_interposer selkies_v4l2_interposer; do
+for lib in selkies_input_interposer selkies_v4l2_interposer; do
     floor="$(objdump -T "AppDir/usr/lib/${lib}.so" \
         | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n1)"
     echo "${lib} requires at most ${floor}"
@@ -179,7 +181,7 @@ export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 # needs gamepads where /dev/uinput is unreachable, or the webcam where no
 # v4l2loopback device is. Deliberately not added to LD_PRELOAD here: selkies
 # itself must keep seeing the real device nodes.
-export SELKIES_INTERPOSER="${HERE}/usr/lib/selkies_joystick_interposer.so"
+export SELKIES_INTERPOSER="${HERE}/usr/lib/selkies_input_interposer.so"
 export SELKIES_WEBCAM_INTERPOSER="${HERE}/usr/lib/selkies_v4l2_interposer.so"
 
 # A help or version query prints and exits, so it starts no display or audio server

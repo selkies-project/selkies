@@ -163,13 +163,14 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         ca-certificates \
         libpipewire-0.3-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-COPY addons/js-interposer /build/js-interposer
+COPY addons/input-interposer /build/input-interposer
 COPY addons/fake-udev /build/fake-udev
 COPY addons/v4l2-interposer /build/v4l2-interposer
 RUN set -e; \
     LIBDIR="$(gcc -print-multiarch)"; \
     mkdir -p "/opt/add-ons/lib/${LIBDIR}"; \
-    gcc -shared -fPIC -o /opt/add-ons/lib/${LIBDIR}/selkies_joystick_interposer.so /build/js-interposer/joystick_interposer.c -ldl -pthread; \
+    gcc -shared -fPIC -o /opt/add-ons/lib/${LIBDIR}/selkies_input_interposer.so /build/input-interposer/input_interposer.c -ldl -pthread; \
+    ln -sf selkies_input_interposer.so /opt/add-ons/lib/${LIBDIR}/selkies_joystick_interposer.so; \
     make -C /build/v4l2-interposer; \
     cp /build/v4l2-interposer/selkies_v4l2_interposer.so "/opt/add-ons/lib/${LIBDIR}/"; \
     make -C /build/fake-udev; \
@@ -181,7 +182,8 @@ RUN set -e; \
         apt-get update && apt-get install --no-install-recommends -y gcc-multilib; \
         LIB32DIR="$(gcc -m32 -print-multiarch)"; \
         mkdir -p "/opt/add-ons/lib/${LIB32DIR}"; \
-        gcc -m32 -shared -fPIC -o /opt/add-ons/lib/${LIB32DIR}/selkies_joystick_interposer.so /build/js-interposer/joystick_interposer.c -ldl -pthread; \
+        gcc -m32 -shared -fPIC -o /opt/add-ons/lib/${LIB32DIR}/selkies_input_interposer.so /build/input-interposer/input_interposer.c -ldl -pthread; \
+        ln -sf selkies_input_interposer.so /opt/add-ons/lib/${LIB32DIR}/selkies_joystick_interposer.so; \
         make -C /build/v4l2-interposer all32; \
         cp /build/v4l2-interposer/selkies_v4l2_interposer_x86.so "/opt/add-ons/lib/${LIB32DIR}/selkies_v4l2_interposer.so"; \
         make -C /build/fake-udev all32; \

@@ -36,7 +36,7 @@ services:
     ###
     image: selkies-base:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
     build:
-      # Repository root: the Dockerfile also pulls in addons/js-interposer,
+      # Repository root: the Dockerfile also pulls in addons/input-interposer,
       # addons/fake-udev and addons/v4l2-interposer
       context: .
       dockerfile: addons/base/Dockerfile

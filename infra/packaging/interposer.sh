@@ -3,14 +3,14 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# Stage the Joystick Interposer into a package root, so every native package
+# Stage the Input Interposer into a package root, so every native package
 # carries it. Unlike fake-udev it shadows nothing: the library is inert until an
 # application is started with it preloaded.
 #
 # Usage: interposer.sh <pkg-root>
 set -eu
 PKG_ROOT="${1:?usage: interposer.sh <pkg-root>}"
-SRC="$(dirname "$(readlink -f "$0")")/../../addons/js-interposer/joystick_interposer.c"
+SRC="$(dirname "$(readlink -f "$0")")/../../addons/input-interposer/input_interposer.c"
 CC="${CC:-gcc}"
 
 # `/usr/$LIB`, which is how the interposer is preloaded, expands at load time to
@@ -25,9 +25,11 @@ else
     LIBDIR="usr/lib"
 fi
 mkdir -p "${PKG_ROOT}/${LIBDIR}"
-"${CC}" -O2 -shared -fPIC -o "${PKG_ROOT}/${LIBDIR}/selkies_joystick_interposer.so" \
+"${CC}" -O2 -shared -fPIC -o "${PKG_ROOT}/${LIBDIR}/selkies_input_interposer.so" \
     "${SRC}" -ldl -pthread
-echo "interposer: /${LIBDIR}/selkies_joystick_interposer.so"
+# Back-compat name for deployments that preload the pre-rename path.
+ln -sf selkies_input_interposer.so "${PKG_ROOT}/${LIBDIR}/selkies_joystick_interposer.so"
+echo "interposer: /${LIBDIR}/selkies_input_interposer.so"
 
 # The 32-bit variant serves the Wine and Steam catalog, which `/usr/$LIB`
 # resolves to per process bitness. It needs a multilib toolchain, which only
@@ -44,6 +46,7 @@ else
     LIB32DIR="usr/lib"
 fi
 mkdir -p "${PKG_ROOT}/${LIB32DIR}"
-"${CC}" -m32 -O2 -shared -fPIC -o "${PKG_ROOT}/${LIB32DIR}/selkies_joystick_interposer.so" \
+"${CC}" -m32 -O2 -shared -fPIC -o "${PKG_ROOT}/${LIB32DIR}/selkies_input_interposer.so" \
     "${SRC}" -ldl -pthread
-echo "interposer: /${LIB32DIR}/selkies_joystick_interposer.so"
+ln -sf selkies_input_interposer.so "${PKG_ROOT}/${LIB32DIR}/selkies_joystick_interposer.so"
+echo "interposer: /${LIB32DIR}/selkies_input_interposer.so"

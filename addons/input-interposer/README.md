@@ -1,22 +1,24 @@
-# Selkies Joystick (Gamepad) Interposer
+# Selkies Input Interposer
 
 An `LD_PRELOAD` library for interposing application calls to open a Linux joystick/gamepad device and pass data through a unix domain socket.
 
 This allows the Selkies remote desktop application interface to pass gamepad events over the WebRTC `RTCDataChannel` or WebSockets, and translate them to joystick/gamepad events to emulate devices without requiring access to /dev/input/js0 or depending on kernel modules including `uinput`.
 
+It also serves the reverse direction: an application preloaded with it that opens `/dev/uinput` to create its own virtual input device gets a working device that sibling preloaded applications read as an ordinary `/dev/input/eventN`, so uinput-based tools (Steam Input, gamepad remappers) work in a container with no kernel node. See [Application-created devices](#application-created-devices). The library was formerly named `selkies_joystick_interposer.so`; the build installs that name as a symlink for backward compatibility.
+
 ## Compiling
 
 ```bash
-gcc -shared -fPIC -ldl -o selkies_joystick_interposer.so joystick_interposer.c
+gcc -shared -fPIC -ldl -o selkies_input_interposer.so input_interposer.c
 ```
 
 To compile the `i386` library for Wine and other 32-bit packages, add `-m32` with the `gcc-multilib` package installed.
 
 ## Installing
 
-1. Install to your library path (may be `/usr/lib/x86_64-linux-gnu/selkies_joystick_interposer.so` and `/usr/lib/i386-linux-gnu/selkies_joystick_interposer.so` for Ubuntu), also available as a tarball or `.deb` installer.
+1. Install to your library path (may be `/usr/lib/x86_64-linux-gnu/selkies_input_interposer.so` and `/usr/lib/i386-linux-gnu/selkies_input_interposer.so` for Ubuntu), also available as a tarball or `.deb` installer.
 
-If using Wine with `x86_64`, both `/usr/lib/x86_64-linux-gnu/selkies_joystick_interposer.so` and `/usr/lib/i386-linux-gnu/selkies_joystick_interposer.so` are likely required.
+If using Wine with `x86_64`, both `/usr/lib/x86_64-linux-gnu/selkies_input_interposer.so` and `/usr/lib/i386-linux-gnu/selkies_input_interposer.so` are likely required.
 
 2. The `/dev/input` directory has to exist for the interposer to augment it:
 
@@ -29,7 +31,7 @@ Each of the four gamepad slots is interposed as both a joydev node (`js0`-`js3`)
 3. Use the below command before running your target application, so the interposer library intercepts its joystick/gamepad calls (the single quotes are required in the first line).
 
 ```bash
-export SELKIES_INTERPOSER='/usr/$LIB/selkies_joystick_interposer.so'
+export SELKIES_INTERPOSER='/usr/$LIB/selkies_input_interposer.so'
 export LD_PRELOAD="${SELKIES_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
 ```
 
@@ -43,10 +45,10 @@ The backend is the other end of these sockets and needs no preload;
 Otherwise, if you only need one architecture, the below is an equivalent command.
 
 ```bash
-export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/selkies_joystick_interposer.so${LD_PRELOAD:+:${LD_PRELOAD}}"
+export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/selkies_input_interposer.so${LD_PRELOAD:+:${LD_PRELOAD}}"
 ```
 
-You can replace `/usr/$LIB/selkies_joystick_interposer.so` with any non-root path of your choice if using the `.tar.gz` tarball. Make sure the correct `selkies_joystick_interposer.so` is installed in that path.
+You can replace `/usr/$LIB/selkies_input_interposer.so` with any non-root path of your choice if using the `.tar.gz` tarball. Make sure the correct `selkies_input_interposer.so` is installed in that path.
 
 Chromium, Electron and other binaries built with `_FORTIFY_SOURCE` open devices through glibc's checked entry points (`__open64_2`, `__openat64_2`, `__read_chk`) rather than `open()`; the interposer hooks those too, so a browser's Gamepad API sees the pads with nothing further to set.
 
@@ -71,7 +73,7 @@ SELKIES_JS_SOCKET_PATH=/tmp/selkies-js-test python3 tests/tools/gamepad/gpserver
 
 ```bash
 export SELKIES_JS_SOCKET_PATH=/tmp/selkies-js-test
-LD_PRELOAD='/usr/$LIB/selkies_joystick_interposer.so' tests/tools/gamepad/jsread /dev/input/js0
+LD_PRELOAD='/usr/$LIB/selkies_input_interposer.so' tests/tools/gamepad/jsread /dev/input/js0
 ```
 
 `jsread` prints the device name from `JSIOCGNAME` and the first few `js_event` records; any joydev client (`jstest /dev/input/js0`, for instance) works the same way.
@@ -81,10 +83,14 @@ LD_PRELOAD='/usr/$LIB/selkies_joystick_interposer.so' tests/tools/gamepad/jsread
 ```bash
 export SELKIES_JS_SOCKET_PATH=/tmp/selkies-js-test
 export SDL_JOYSTICK_DEVICE=/dev/input/event1000
-LD_PRELOAD='/usr/$LIB/selkies_joystick_interposer.so' timeout 10 tests/tools/gamepad/sdlread
+LD_PRELOAD='/usr/$LIB/selkies_input_interposer.so' timeout 10 tests/tools/gamepad/sdlread
 ```
 
 `sdlread` prints the name, GUID, vendor/product and axis/button/hat counts SDL read out of the interposer, then one line per event. `tests/tools/gamepad/sdlenum` lists what SDL enumerates without opening anything.
+
+## Application-created devices
+
+Where `/dev/uinput` is not writable — the usual case in an unprivileged container — an application preloaded with the interposer that opens it to create a device is served in userspace instead of failing. The `UI_SET_*BIT`, `UI_ABS_SETUP` and `UI_DEV_SETUP` setup ioctls are accumulated, `UI_DEV_CREATE` binds a socket for the new device under `SELKIES_JS_SOCKET_PATH` and writes a descriptor beside it (`selkies_event<N>.sock`/`.desc`, with `N` at or above 3000, clear of the four gamepad slots), and the `input_event` records the application writes fan out to every sibling process that opens the resulting `/dev/input/event<N>`. Those siblings read it as an ordinary evdev device: its `EVIOCG*` identity and capabilities come from the descriptor, and [fake-udev](https://github.com/selkies-project/selkies/tree/main/addons/fake-udev/README.md) enumerates it (as a joystick, mouse or keyboard per its capability bits) so `libudev` consumers such as SDL2 discover it. Where `/dev/uinput` **is** writable, the open is not interposed and the kernel creates a real device, so a bare-metal host is unaffected. This needs no configuration; it is the same preload the gamepad sockets use.
 
 ## Unix domain socket protocol
 

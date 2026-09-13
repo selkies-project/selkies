@@ -5,7 +5,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 */
 
 /*
-    Selkies Joystick Interposer
+    Selkies Input Interposer
 
     An LD_PRELOAD library that redirects /dev/input/jsN and /dev/input/eventN
     access onto Unix domain sockets served by the Selkies backend, so gamepad
@@ -462,7 +462,7 @@ __attribute__((constructor)) void init_interposer() {
 #endif
     load_real_func((void *)&real_inotify_add_watch, "inotify_add_watch");
     load_real_func((void *)&real_inotify_rm_watch, "inotify_rm_watch");
-    sji_log_info("Selkies Joystick Interposer initialized. Logging is %s.", g_sji_log_enabled ? "ENABLED" : "DISABLED");
+    sji_log_info("Selkies Input Interposer initialized. Logging is %s.", g_sji_log_enabled ? "ENABLED" : "DISABLED");
 }
 
 static int make_socket_nonblocking(int sockfd) {
@@ -576,13 +576,13 @@ static void udyn_sock_dir(char *out, size_t n) {
 }
 
 static void udyn_sock_path(int num, char *out, size_t n) {
-    char dir[PATH_MAX];
+    char dir[256];
     udyn_sock_dir(dir, sizeof(dir));
     snprintf(out, n, "%s/selkies_event%d.sock", dir, num);
 }
 
 static void udyn_desc_path(int num, char *out, size_t n) {
-    char dir[PATH_MAX];
+    char dir[256];
     udyn_sock_dir(dir, sizeof(dir));
     snprintf(out, n, "%s/selkies_event%d.desc", dir, num);
 }
@@ -1518,7 +1518,7 @@ static int udyn_open_creator(void) {
 /* Writes the descriptor atomically (temp file then rename) so a consumer never
  * reads a half-written one. */
 static int udyn_write_desc(int num, const udyn_desc_t *d) {
-    char path[PATH_MAX], tmp[PATH_MAX];
+    char path[320], tmp[400];
     udyn_desc_path(num, path, sizeof(path));
     snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
     int fd = real_open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);

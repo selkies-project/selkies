@@ -2513,11 +2513,11 @@ def uinput_writable() -> bool:
 
 
 def interposer_configured() -> bool:
-    """Whether this session preloads the Joystick Interposer into applications,
+    """Whether this session preloads the Input Interposer into applications,
     which already delivers gamepad events without any kernel device."""
     if os.environ.get("SELKIES_INTERPOSER"):
         return True
-    return "selkies_joystick_interposer" in os.environ.get("LD_PRELOAD", "")
+    return "selkies_input_interposer" in os.environ.get("LD_PRELOAD", "")
 
 
 def uinput_gamepads_enabled(mode: Optional[str]) -> bool:
@@ -2535,14 +2535,14 @@ def uinput_gamepads_enabled(mode: Optional[str]) -> bool:
         logger_selkies_gamepad.warning(f"Unrecognized uinput_gamepad value '{mode}'; using 'auto'.")
     if not forced and interposer_configured():
         logger_selkies_gamepad.info(
-            "Joystick Interposer is configured for this session; kernel gamepads stay off."
+            "Input Interposer is configured for this session; kernel gamepads stay off."
         )
         return False
     if not uinput_writable():
         log = logger_selkies_gamepad.error if forced else logger_selkies_gamepad.info
         log(
             f"{UINPUT_PATH} is missing or not writable, so gamepads reach applications only "
-            "through the Joystick Interposer. Load the uinput module and grant this user "
+            "through the Input Interposer. Load the uinput module and grant this user "
             "write access to enable kernel gamepads."
         )
         return False
@@ -2748,7 +2748,7 @@ class SelkiesGamepad:
             self.uinput_enabled = False
             logger_selkies_gamepad.error(
                 f"Gamepad {self.js_sock_path}: could not create a kernel device ({e}); "
-                "this slot now reaches applications only through the Joystick Interposer."
+                "this slot now reaches applications only through the Input Interposer."
             )
             return
         self.uinput = device

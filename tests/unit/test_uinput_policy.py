@@ -12,8 +12,8 @@ sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 import selkies.input_handler as ih  # noqa: E402
 
-INTERPOSER = "/usr/$LIB/selkies_joystick_interposer.so"
-PRELOADED = "/usr/lib/x86_64-linux-gnu/selkies_joystick_interposer.so"
+INTERPOSER = "/usr/$LIB/selkies_input_interposer.so"
+PRELOADED = "/usr/lib/x86_64-linux-gnu/selkies_input_interposer.so"
 
 fails = []
 
