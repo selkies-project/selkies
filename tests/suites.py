@@ -128,6 +128,7 @@ SUITES: list = [
     {"path": "integration/test_stall_recovery.py", "tier": "integration", "timeout": 900,
      "selectors": ["h264enc", "jpeg"]},
     {"path": "integration/test_gamepad_enumeration.py", "tier": "integration", "timeout": 300},
+    {"path": "integration/test_uinput_interposer.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_ack_latency.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_overlay_recycle.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_clipboard_incr.py", "tier": "integration", "timeout": 300},
