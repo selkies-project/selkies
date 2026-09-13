@@ -34,6 +34,11 @@ _overflowing = False
 _closing = False
 
 
+def rfc3339(ts: float) -> str:
+    """`ts`, seconds since the epoch, as an RFC 3339 UTC timestamp with milliseconds."""
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def emit(event: str, **fields: Any) -> None:
     """Queue one event and return at once."""
     global _queue, _sender, _overflowing
@@ -62,8 +67,7 @@ async def _deliver(queue: asyncio.Queue) -> None:
                                      connector=aiohttp.TCPConnector(limit=1)) as session:
         while not _closing:
             payload = await queue.get()
-            payload["ts"] = datetime.fromtimestamp(payload["ts"], timezone.utc).isoformat(
-                timespec="milliseconds").replace("+00:00", "Z")
+            payload["ts"] = rfc3339(payload["ts"])
             try:
                 async with session.post(settings.audit_webhook_url, json=payload) as response:
                     failure = f"HTTP {response.status}" if response.status >= 400 else ""

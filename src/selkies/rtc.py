@@ -779,6 +779,37 @@ class RTCApp:
             if open_channel is not None and open_channel.readyState == "open":
                 self.send_message_to_channel(open_channel, "print_document", payload)
 
+    async def sessions(self) -> List[Dict[str, Any]]:
+        """The pages on this transport, with the round trip the peer's RTCP
+        receiver reports carry for the video it is sent."""
+        out = []
+        for peer_id, obj in list(self.peer_connections.items()):
+            peer_conn, rtt = obj.get("peer_conn"), None
+            if peer_conn is not None and peer_conn.connectionState == "connected":
+                try:
+                    report = await asyncio.wait_for(peer_conn.getStats(), 1.0)
+                    rtts = [s.roundTripTime for s in report.values()
+                            if getattr(s, "type", "") == "remote-inbound-rtp" and s.roundTripTime]
+                    rtt = round(max(rtts) * 1000, 1) if rtts else None
+                except Exception:
+                    rtt = None
+            out.append({"id": peer_id, "transport": "webrtc",
+                        "role": "controller" if obj.get("client_type") is ClientType.CONTROLLER else "viewer",
+                        "slot": obj.get("client_slot"), "display": obj.get("display_id") or "primary",
+                        "connected_at": audit.rfc3339(obj["connected_at"]) if obj.get("connected_at") else None,
+                        "rtt_ms": rtt})
+        return out
+
+    async def disconnect_peer(self, peer_id: str) -> bool:
+        """Close the peer `peer_id` names; the state change then reaps it."""
+        obj = self.peer_connections.get(peer_id)
+        if not obj:
+            return False
+        peer_conn = obj.get("peer_conn")
+        if peer_conn is not None:
+            await peer_conn.close()
+        return True
+
     def send_framerate(self, framerate: int) -> None:
         """Broadcast the current framerate to all peers."""
         logger.info("sending framerate")
@@ -2045,11 +2076,14 @@ class RTCApp:
             if _perms:
                 peer_slot = _perms.get("slot")
 
+        audit.emit("session.connect", transport="webrtc",
+                   role="controller" if client_type is ClientType.CONTROLLER else "viewer", slot=peer_slot)
         self.peer_connections[client_peer_id] = {
             "peer_conn": peer_connection,
             "data_channel": data_channel,
             "client_type": client_type,
             "client_slot": peer_slot,
+            "connected_at": time.time(),
             "display_id": display_id,
             "channel_consumers": [input_consumer],
             "mic_state": mic_state,
@@ -2348,6 +2382,11 @@ class RTCApp:
         consumers, this peer's own mic playback and webcam sink, the
         `on_peer_gone` hook with the entry, then the display's media when
         nothing consumes it any more."""
+        if peer_obj.get("connected_at"):
+            audit.emit("session.disconnect", transport="webrtc",
+                       role="controller" if peer_obj.get("client_type") is ClientType.CONTROLLER else "viewer",
+                       slot=peer_obj.get("client_slot"),
+                       duration_s=round(time.time() - peer_obj["connected_at"], 3))
         await self._cancel_channel_consumers(peer_obj)
         await self._stop_mic_playback_state(peer_obj.get("mic_state"))
         self._close_webcam_state(peer_obj.get("webcam_state"))

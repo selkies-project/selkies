@@ -54,13 +54,13 @@ The side menu's files section uploads files into the session and browses the sam
 
 The session has a printer named **Selkies**, and a document printed to it opens in the browser's own print dialog, ready for whatever printer the browser can reach. Each printed document also appears in the side menu's printing section, which opens with the first one, where it can be printed again or saved as a PDF; its **Print automatically** switch is what opens the dialog on arrival, and off it leaves the documents in the list. A browser that does not show a PDF in a frame leaves every document in the list too, where **Save** hands over the file.
 
-Selkies runs the queue itself, as the session user, from a CUPS scheduler installed on the host: `cups-daemon` with the `cups-filters` chain, which turns whatever an application prints into a PDF. The scheduler keeps its state under the runtime directory, needs nothing under `/etc/cups` and no privilege, and listens on `$XDG_RUNTIME_DIR/selkies-cups/cups.sock`; the containers point the session's `CUPS_SERVER` there, and a session started any other way sets that variable for its applications the way it sets `DISPLAY`. Without a scheduler on the host there is no queue, but a PDF placed in the spool by any other means is handed over the same way.
+Selkies runs the queue itself, as the session user, from a CUPS scheduler installed on the host: `cups-daemon` with the `cups-filters` chain, which turns whatever an application prints into a PDF. The scheduler keeps its state under the runtime directory, needs nothing under `/etc/cups` and no privilege, runs as a copy of the program so the confinement a distribution gives its system scheduler, written for the system's own directories, does not apply, and listens on `$XDG_RUNTIME_DIR/selkies-cups/cups.sock`; the containers point the session's `CUPS_SERVER` there, and a session started any other way sets that variable for its applications the way it sets `DISPLAY`. Without a scheduler on the host there is no queue, but a PDF placed in the spool by any other means is handed over the same way.
 
 `--printing-enabled=false` (`SELKIES_PRINTING_ENABLED`) turns the feature off: no queue, no documents handed over. `--print-spool-path` (`SELKIES_PRINT_SPOOL_PATH`, default `~/.local/state/selkies/print`) is the directory the queue writes finished jobs into as PDFs. A document leaves the spool once the page has taken it, so the spool holds what has not reached a browser yet, and a page that connects later gets it then. Documents go to the page that holds the session; a shared viewer receives none.
 
 ## Audit Trail
 
-`--audit-webhook-url` (`SELKIES_AUDIT_WEBHOOK_URL`) POSTs one JSON object to a collector for every clipboard transfer, file upload, file download and printed document handed over, for deployments that have to produce a record of what moved. Metadata only: the content is never sent, and neither is anything identifying the client, since Selkies has no first-class user of its own. Nothing is sent without a URL. `--audit-webhook-token` adds an `Authorization: Bearer` header a proxy in front of the collector can check, and `--audit-webhook-timeout` bounds one POST; the URL is used as given, so a collector anywhere but this host wants `https://`.
+`--audit-webhook-url` (`SELKIES_AUDIT_WEBHOOK_URL`) POSTs one JSON object to a collector for every clipboard transfer, file upload, file download and printed document handed over, every page that connects and leaves, and every recording, for deployments that have to produce a record of what moved. Metadata only: the content is never sent, and neither is anything identifying the client, since Selkies has no first-class user of its own. Nothing is sent without a URL. `--audit-webhook-token` adds an `Authorization: Bearer` header a proxy in front of the collector can check, and `--audit-webhook-timeout` bounds one POST; the URL is used as given, so a collector anywhere but this host wants `https://`.
 
 | `event` | Fields | Recorded when |
 | --- | --- | --- |
@@ -70,6 +70,10 @@ Selkies runs the queue itself, as the session user, from a CUPS scheduler instal
 | `file.upload.error` | `filename`, `error` | an upload is refused or fails, `filename` as the client asked for it |
 | `file.download` | `filename`, `size_bytes`, `partial` | a file went out of the file-manager directory whole, or the range of it a client asked for (`partial`), with the bytes served; a download the client stopped early is not recorded |
 | `print.document` | `filename`, `size_bytes`, `partial` | a printed document went out of the print spool to a page, on the same terms as `file.download` |
+| `session.connect` | `transport`, `role`, `slot` | a page's connection is accepted on either transport |
+| `session.disconnect` | `transport`, `role`, `slot`, `duration_s` | that connection ends, however it ends |
+| `recording.start` | `filename` | a recording starts through the operator API |
+| `recording.stop` | `filename`, `size_bytes`, `duration_s`, `frames` | it is stopped and the file is whole |
 
 Every object also carries `ts`, an RFC 3339 UTC timestamp with milliseconds taken when the transfer happened, and both transports emit the same objects. An event costs the session an enqueue and nothing else: one task delivers the queue in order over a single keep-alive connection, so a collector that is slow or down never paces the stream. The queue holds 1024 events and drops what overflows, a POST that fails drops its event with no retry, and each outage is logged once.
 
@@ -87,6 +91,21 @@ Input authority is enforced on the server rather than in the page, so a modified
 `--enable-sharing=false` (`SELKIES_ENABLE_SHARING`) turns the feature off, and one page then holds the session: a second one takes it over instead of joining. `--enable-shared` and `--enable-player2` through `--enable-player4` drop individual links, and `--ui-sidebar-show-sharing=false` hides the section while leaving the links working.
 
 These fragments apply when the server has no master token. Under [Secure Mode](secure-mode.md) a client presents a provisioned session token that carries its own role and gamepad slot, and the sharing fragments are ignored.
+
+## Operator API
+
+Every control endpoint lives under `/api`, behind the same credentials as the rest of the API: the login or session token a page holds, or the master token for a deployment that automates the session from outside. A change to the session is refused to view-only credentials; reading is not.
+
+| Endpoint | What it does |
+| --- | --- |
+| `GET /api/sessions` | The pages connected to the active transport: `id`, `transport`, `role`, `slot`, `display`, `connected_at` and `rtt_ms`, the round trip the page's own reports carry, `null` before the first one |
+| `DELETE /api/sessions/<id>` | Closes that page's connection |
+| `GET /api/recording` | The recording under way, or the last one: `active`, `path`, `frames`, `bytes`, `duration_s`, `width`, `height`, and `error` when it failed |
+| `POST /api/recording` | Starts a recording. A JSON body may name a `path`; a relative one lands in the file-manager directory, and no body at all names a timestamped file there, where the files section then offers it for download. One recording at a time: a second start is a conflict |
+| `DELETE /api/recording` | Stops it and reports the finished file |
+| `GET /api/screenshot?display=<name>` | A PNG of that display with the cursor drawn in, the primary when unnamed. On X11 the root, which holds every display |
+
+The recording is the one pixelflux makes: an H.264 fragmented MP4 without audio, playable from the first frame. On X11 it is a capture of its own, so it follows the desktop rather than a client's link; on Wayland it taps the live stream of the output. Its frame rate, bitrate and keyframe interval come from pixelflux's `PIXELFLUX_RECORD_FPS`, `PIXELFLUX_RECORD_BITRATE` and `PIXELFLUX_RECORD_KEYFRAME_S`, thirty frames a second and a keyframe every two seconds by default. The audit trail records every connection and recording, so a webhook collector needs no polling.
 
 ## Microphone and Webcam
 

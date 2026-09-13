@@ -208,10 +208,18 @@ ErrorPolicy retry-job
             return False
         cupsd, server_bin, data_dir = found
         self._prepare(server_bin, data_dir)
-        self.process = await asyncio.create_subprocess_exec(
-            cupsd, "-f", "-c", os.path.join(self.root, "cupsd.conf"),
-            "-s", os.path.join(self.root, "cups-files.conf"),
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        # The scheduler runs as a copy of the program: a distribution confines
+        # the system scheduler, by its path, to the system's directories and
+        # backends, which a queue under the runtime directory has neither of.
+        program = os.path.join(self.root, "cupsd")
+        shutil.copy2(cupsd, program)
+        args = ["-f", "-c", os.path.join(self.root, "cupsd.conf"), "-s", os.path.join(self.root, "cups-files.conf")]
+        try:
+            self.process = await asyncio.create_subprocess_exec(
+                program, *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        except OSError:
+            self.process = await asyncio.create_subprocess_exec(
+                cupsd, *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         for _ in range(100):
             if os.path.exists(self.socket) or self.process.returncode is not None:
                 break

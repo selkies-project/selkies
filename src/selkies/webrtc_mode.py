@@ -764,6 +764,12 @@ class WebRTCService(BaseStreamingService):
         if self.rtc_app:
             self.rtc_app.send_print_document(name, size)
 
+    async def sessions(self) -> List[Dict[str, Any]]:
+        return await self.rtc_app.sessions() if self.rtc_app else []
+
+    async def disconnect_session(self, session_id: str) -> bool:
+        return bool(self.rtc_app) and await self.rtc_app.disconnect_peer(session_id)
+
     def send_current_cursor(self, channel: Optional[Any] = None) -> None:
         """Resend the current cursor (on channel open / video restart): to one
         peer's channel when given, otherwise to every connected peer.

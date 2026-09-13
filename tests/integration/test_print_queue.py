@@ -47,7 +47,11 @@ def sample_pdf() -> bytes:
 
 
 def pages(path: str) -> int:
-    return len(re.findall(rb"/Type\s*/Page\b(?!s)", open(path, "rb").read()))
+    """Pages in the PDF at `path`; none for a document that never landed."""
+    try:
+        return len(re.findall(rb"/Type\s*/Page\b(?!s)", open(path, "rb").read()))
+    except OSError:
+        return 0
 
 
 async def main() -> None:
@@ -123,8 +127,8 @@ async def main() -> None:
                   await queue.start() and "running" in run("lpstat", "-r").stdout)
     finally:
         await queue.stop()
-    if res.failed():
-        print(H.tail(os.path.join(queue.root, "error.log"), 20))
+        if res.failed():
+            print(H.tail(os.path.join(queue.root, "error.log"), 20))
     sys.exit(0 if res.summary() else 1)
 
 

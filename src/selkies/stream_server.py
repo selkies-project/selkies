@@ -203,6 +203,13 @@ def _uplink_session_state(ws: Any) -> Dict[str, Any]:
     return state
 
 
+def uplink_rtt_ms(ws: Any) -> Optional[float]:
+    """The round trip the uplink gauge last measured on `ws`, in milliseconds."""
+    state = _UPLINK_SESSIONS.get(ws)
+    rtt = state.get("rtt_us") if state else None
+    return round(rtt / 1000, 1) if rtt else None
+
+
 def note_pong(ws: Any, data: Any) -> None:
     """Resolve a received PONG frame against ``ws``'s uplink ping clock.
 
@@ -1102,6 +1109,15 @@ class BaseStreamingService(metaclass=ABCMeta):
     async def announce_print_document(self, name: str, size: int) -> None:
         """Tell the controller pages that `name` waits in the print spool."""
 
+    @abstractmethod
+    async def sessions(self) -> List[Dict[str, Any]]:
+        """The pages connected to this transport: `id`, `transport`, `role`,
+        `slot`, `display`, `connected_at` and `rtt_ms`, the same keys on both."""
+
+    @abstractmethod
+    async def disconnect_session(self, session_id: str) -> bool:
+        """Close the page `id` names; False when it is not connected here."""
+
     def uplink_session_conns(self) -> List[Tuple[Any, Optional[str], Optional[str]]]:
         """``(websocket, session token, peer ip)`` per connected client
         session, for upload uplink gauging (`UplinkGauge`).
@@ -1748,7 +1764,8 @@ class CentralizedStreamServer:
 
         Layered gates, in order: cross-site WebSocket upgrades are rejected by
         Origin; health/liveness endpoints pass without credentials; the token
-        and mode-switch control endpoints accept the Bearer master token,
+        endpoint and the control endpoints (the mode switch, a session
+        disconnect, a recording start or stop) accept the Bearer master token,
         trying `Authorization` first and the `MASTER_TOKEN_HEADER` fallback
         second for callers whose Authorization header a Basic login in front
         already owns (a
@@ -1795,9 +1812,12 @@ class CentralizedStreamServer:
                 return self._bearer_challenge()
             return await handler(request)
 
-        # The operator's own path, ahead of the Origin rule a browser is held
-        # to; a session token reaches the switch through the verdict below.
-        is_control_path = path == f"{api_prefix}/api/switch"
+        # The operator's own paths, ahead of the Origin rule a browser is held
+        # to; a session token reaches them through the verdict below.
+        is_control_path = path == f"{api_prefix}/api/switch" or (
+            request.method in ("POST", "DELETE")
+            and (path == f"{api_prefix}/api/recording"
+                 or path.startswith(f"{api_prefix}/api/sessions/")))
         if settings.master_token and is_control_path:
             if any(
                 self._check_master_token(header, settings.master_token)
@@ -1806,8 +1826,8 @@ class CentralizedStreamServer:
                 return await handler(request)
         if is_control_path and not self._is_origin_allowed(request, settings):
             logger.warning(
-                "Rejected mode switch from disallowed Origin: %r",
-                request.headers.get("Origin", ""),
+                "Rejected %s %s from disallowed Origin: %r",
+                request.method, path, request.headers.get("Origin", ""),
             )
             return web.Response(status=403, text="Forbidden origin")
 
@@ -2373,6 +2393,79 @@ class CentralizedStreamServer:
         return _AuditedFileResponse(path, name, event="print.document", remove=True,
                                     headers={"Content-Disposition": "inline"})
 
+    def _active_service(self) -> Optional[BaseStreamingService]:
+        return self.services.get(self.current_mode) if self.current_mode else None
+
+    async def handle_sessions(self, request: web.Request) -> web.Response:
+        """GET /api/sessions: the pages connected to the active transport."""
+        service = self._active_service()
+        return web.json_response({"sessions": await service.sessions() if service else []})
+
+    async def handle_session_delete(self, request: web.Request) -> web.Response:
+        """DELETE /api/sessions/<id>: close that page's connection. Refused to
+        view-only credentials, like every change to the session."""
+        if self._viewer_ceiling(request):
+            return web.Response(status=403, text="View-only credentials cannot disconnect a session")
+        service = self._active_service()
+        if service is None or not await service.disconnect_session(request.match_info["id"]):
+            return web.Response(status=404, text="No such session")
+        return web.Response(status=204)
+
+    async def handle_recording(self, request: web.Request) -> web.Response:
+        """GET, POST and DELETE /api/recording: the MP4 recording pixelflux
+        makes of the session, H.264 without audio. POST starts one into the
+        file-manager directory unless the body names a path, DELETE stops it
+        and GET reports on the current or last one. One recording at a time;
+        starting a second or stopping none is a conflict."""
+        try:
+            import pixelflux
+        except ImportError:
+            return web.Response(status=501, text="pixelflux is not installed")
+        if request.method == "GET":
+            return web.json_response(pixelflux.recording_status() or {"active": False})
+        if self._viewer_ceiling(request):
+            return web.Response(status=403, text="View-only credentials cannot record")
+        try:
+            if request.method == "POST":
+                body = await request.json() if request.can_read_body else {}
+                path = str((body or {}).get("path") or "")
+                if not path:
+                    path = "recording-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".mp4"
+                if not os.path.isabs(path):
+                    path = os.path.join(str(self.upload_dir), path)
+                status = await asyncio.to_thread(pixelflux.start_recording, path)
+                audit.emit("recording.start", filename=status.get("path", path))
+            else:
+                status = await asyncio.to_thread(pixelflux.stop_recording)
+                audit.emit("recording.stop", filename=status.get("path", ""),
+                           size_bytes=status.get("bytes", 0), duration_s=status.get("duration_s", 0.0),
+                           frames=status.get("frames", 0))
+        except json.JSONDecodeError:
+            return web.Response(status=400, text="Body is not JSON")
+        except RuntimeError as exc:
+            return web.Response(status=409, text=str(exc))
+        return web.json_response(status)
+
+    async def handle_screenshot(self, request: web.Request) -> web.Response:
+        """GET /api/screenshot?display=<name>: a PNG of that display with the
+        cursor drawn in, by pixelflux. On X11 the root, which holds every
+        display."""
+        try:
+            import pixelflux
+            screenshot = pixelflux.screenshot_png
+        except (ImportError, AttributeError):
+            return web.Response(status=501, text="pixelflux without screenshots")
+        display = request.query.get("display", "primary")
+        output = 0
+        if self.settings.wayland[0] and display != "primary":
+            from .display_utils import wayland_output_id
+            output = wayland_output_id(display)
+        try:
+            png = await asyncio.to_thread(screenshot, output)
+        except RuntimeError as exc:
+            return web.Response(status=404, text=str(exc))
+        return web.Response(body=png, content_type="image/png")
+
     def pending_print_documents(self) -> List[Tuple[str, int]]:
         """The documents no page has taken yet, for a page that connects now."""
         return printing.pending(str(self.print_spool)) if self.print_watcher else []
@@ -2684,6 +2777,12 @@ class CentralizedStreamServer:
             web.post(f"{api_prefix}/api/upload", self.handle_upload),
             web.get(f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler),
             web.get(f"{api_prefix}/api/print/{{name}}", self.handle_print_document),
+            web.get(f"{api_prefix}/api/sessions", self.handle_sessions),
+            web.delete(f"{api_prefix}/api/sessions/{{id}}", self.handle_session_delete),
+            web.get(f"{api_prefix}/api/recording", self.handle_recording),
+            web.post(f"{api_prefix}/api/recording", self.handle_recording),
+            web.delete(f"{api_prefix}/api/recording", self.handle_recording),
+            web.get(f"{api_prefix}/api/screenshot", self.handle_screenshot),
         ]
         if self.settings.enable_metrics_http[0]:
             routes.append(web.get(f"{api_prefix}/api/metrics", self.handle_metrics))

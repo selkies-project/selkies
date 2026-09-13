@@ -38,6 +38,10 @@ The static web client (`/`, its scripts and assets) is served without credential
 | `/api/switch` | session or master token (either header); viewer tokens are refused (403) |
 | `/api/upload` | session or master token; viewer tokens are refused (403) |
 | `/api/files/...` (listing and downloads) | session or master token |
+| `/api/print/<name>` (a printed document) | session or master token; viewer tokens are refused (403) |
+| `/api/sessions` and `/api/screenshot` | session or master token |
+| `DELETE /api/sessions/<id>`, `POST` and `DELETE /api/recording` | session or master token (either header); viewer tokens are refused (403) |
+| `GET /api/recording` | session or master token |
 | `/api/turn` (WebRTC ICE/TURN configuration) | session or master token |
 | `/api/metrics` (when `--enable-metrics-http`) | session or master token |
 

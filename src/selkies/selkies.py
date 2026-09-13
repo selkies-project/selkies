@@ -49,11 +49,12 @@ import logging
 import os
 import struct
 import time
+import secrets
 from collections import OrderedDict, deque
 from datetime import datetime
 from enum import Enum
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 try:
     import fcntl
@@ -61,7 +62,7 @@ except ImportError:  # no ioctl to ask a socket what it still owes the network
     fcntl = None
 
 import psutil
-from aiohttp import web, WSMsgType
+from aiohttp import web, WSMsgType, WSCloseCode
 
 from . import audio_config
 from . import gpu_stats
@@ -116,7 +117,7 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
-from .stream_server import (BaseStreamingService, TransferPacer, UplinkGauge, note_pong,
+from .stream_server import (BaseStreamingService, TransferPacer, UplinkGauge, _uplink_session_state, note_pong, uplink_rtt_ms,
                             socket_gauge)
 from .webrtc_utils import Metrics
 
@@ -2588,6 +2589,44 @@ class DataStreamingServer(BaseStreamingService):
         display_state['_measured_client_fps'] = est
         return est
 
+    @staticmethod
+    def _audit_session_end(perms: Optional[dict]) -> None:
+        """Record the end of a page's connection, for one recorded as connected."""
+        started = (perms or {}).get("connected_at")
+        if started:
+            audit.emit("session.disconnect", transport="websockets", role=perms.get("role"),
+                       slot=perms.get("slot"), duration_s=round(time.time() - started, 3))
+
+    async def sessions(self) -> List[Dict[str, Any]]:
+        """The pages on this transport, each with the round trip measured now:
+        one ping per socket through the uplink gauge's clock, answered by the
+        socket's own message loop within the moment given."""
+        sockets = list(self.clients)
+        before = {ws: _uplink_session_state(ws)["seq"] for ws in sockets}
+        for ws in sockets:
+            await socket_gauge(ws).sample()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and any(
+                _uplink_session_state(ws)["seq"] == before[ws] for ws in sockets if not ws.closed):
+            await asyncio.sleep(0.02)
+        by_socket = {c.get('ws'): did for did, c in self.display_clients.items()}
+        out = []
+        for ws in sockets:
+            perms = client_permissions.get(ws) or {}
+            out.append({"id": perms.get("id"), "transport": "websockets", "role": perms.get("role"),
+                        "slot": perms.get("slot"), "display": by_socket.get(ws, "primary"),
+                        "connected_at": audit.rfc3339(perms["connected_at"]) if perms.get("connected_at") else None,
+                        "rtt_ms": uplink_rtt_ms(ws)})
+        return out
+
+    async def disconnect_session(self, session_id: str) -> bool:
+        """Close the page `session_id` names; its handler then cleans up."""
+        for ws, perms in list(client_permissions.items()):
+            if perms.get("id") == session_id and ws in self.clients:
+                await ws.close(code=WSCloseCode.GOING_AWAY, message=b"Disconnected by the operator")
+                return True
+        return False
+
     async def announce_print_document(self, name: str, size: int) -> None:
         """Tell every controller page a printed document waits in the spool."""
         secondary = {c.get('ws') for did, c in self.display_clients.items() if did != 'primary'}
@@ -3286,6 +3325,8 @@ class DataStreamingServer(BaseStreamingService):
                 "slot": permissions.get("slot"),
                 "remote_address": remote_address,
                 "data_server": self,
+                "id": secrets.token_hex(4),
+                "connected_at": time.time(),
             }
             data_logger.info(f"Client {remote_address} authenticated with token. Role: {permissions.get('role')}, Slot: {permissions.get('slot')}")
             auth_success_payload = json.dumps({
@@ -3320,7 +3361,8 @@ class DataStreamingServer(BaseStreamingService):
                 except (ConnectionResetError, OSError, RuntimeError):
                     pass
                 return
-            client_permissions[websocket] = {"token": None, "role": role, "slot": slot, "remote_address": remote_address}
+            client_permissions[websocket] = {"token": None, "role": role, "slot": slot, "remote_address": remote_address,
+                                             "id": secrets.token_hex(4), "connected_at": time.time()}
             data_logger.info(f"Legacy client {remote_address} connected. Role: {role}, Slot: {slot}")
 
         global TARGET_FRAMERATE
@@ -3342,6 +3384,8 @@ class DataStreamingServer(BaseStreamingService):
         raddr = remote_address
         data_logger.info(f"Data WebSocket connected from {raddr}")
         self.clients.add(websocket)
+        perms = client_permissions.get(websocket) or {}
+        audit.emit("session.connect", transport="websockets", role=perms.get("role"), slot=perms.get("slot"))
         self._report_client_presence()
         self.data_ws = (
             websocket 
@@ -3355,7 +3399,7 @@ class DataStreamingServer(BaseStreamingService):
             await websocket.send_str(f"MODE {self.mode}")
         except (ConnectionResetError, OSError, RuntimeError):
             self.clients.discard(websocket)
-            client_permissions.pop(websocket, None)
+            self._audit_session_end(client_permissions.pop(websocket, None))
             if self.data_ws is websocket:
                 self.data_ws = None
             return
@@ -3392,6 +3436,7 @@ class DataStreamingServer(BaseStreamingService):
             await websocket.send_str(json.dumps(server_settings_payload))
         except (ConnectionResetError, OSError, RuntimeError):
             self.clients.discard(websocket)
+            self._audit_session_end(client_permissions.pop(websocket, None))
             if self.data_ws is websocket:
                 self.data_ws = None
             return
@@ -4229,6 +4274,7 @@ class DataStreamingServer(BaseStreamingService):
             self.video_paused_clients.discard(websocket)
             self._cancel_deferred_rejoin(websocket)
             departing_perms = client_permissions.pop(websocket, None) or {}
+            self._audit_session_end(departing_perms)
             # Dropped first: the authority and consumer verdicts below must see
             # the remaining clients only.
             self.clients.discard(websocket)
