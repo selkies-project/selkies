@@ -69,6 +69,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <linux/joystick.h>
 #include <linux/input.h>
 #include <linux/input-event-codes.h>
+#include <linux/uinput.h>
 #include <pthread.h>
 
 /* Only glibc has separate large-file entry points. musl's off_t is always 64-bit
@@ -482,6 +483,10 @@ static int make_socket_nonblocking(int sockfd) {
     return 0;
 }
 
+/* Defined with the dynamic-uinput helpers below; access() and is_interposed_path
+ * consult it to treat a live app-created node as one of ours. */
+static int udyn_path_live(const char *path);
+
 /**
  * Interposed access(): the device paths are always accessible (the real call
  * is made only for the log); everything else passes through.
@@ -502,6 +507,9 @@ int access(const char *pathname, int mode) {
                 is_our_target_device = 1;
                 break;
             }
+        }
+        if (!is_our_target_device && udyn_path_live(pathname)) {
+            is_our_target_device = 1;
         }
     }
 
@@ -543,6 +551,64 @@ static int dev_index_after(const char *path, const char *prefix) {
         index = index * 10 + (*c - '0');
     }
     return index;
+}
+
+/* App-created uinput devices (see the block before common_open_logic): an
+ * application under the preload that opens /dev/uinput and UI_DEV_CREATEs a
+ * device is given a dynamic evdev node here, backed by a socket the creating
+ * process serves and sibling processes read. The node numbers sit well above
+ * the fixed pads (event1000-1003) and any real device. */
+#define UINPUT_DEV_PATH "/dev/uinput"
+#define UDYN_EVENT_BASE 3000
+#define UDYN_MAX 16
+
+/* The socket directory shared with the fixed pads and fake-udev, derived from
+ * the first evdev slot's socket path so it follows SELKIES_JS_SOCKET_PATH. */
+static void udyn_sock_dir(char *out, size_t n) {
+    const char *path = interposers[NUM_JS_INTERPOSERS].socket_path;
+    const char *slash = strrchr(path, '/');
+    size_t len = slash ? (size_t)(slash - path) : 0;
+    if (slash && len == 0) len = 1;
+    if (len == 0) { snprintf(out, n, "."); return; }
+    if (len >= n) len = n - 1;
+    memcpy(out, path, len);
+    out[len] = '\0';
+}
+
+static void udyn_sock_path(int num, char *out, size_t n) {
+    char dir[PATH_MAX];
+    udyn_sock_dir(dir, sizeof(dir));
+    snprintf(out, n, "%s/selkies_event%d.sock", dir, num);
+}
+
+static void udyn_desc_path(int num, char *out, size_t n) {
+    char dir[PATH_MAX];
+    udyn_sock_dir(dir, sizeof(dir));
+    snprintf(out, n, "%s/selkies_event%d.desc", dir, num);
+}
+
+/* The dynamic event index a path names, or -1 when it is not a dynamic node. */
+static int udyn_index_for_path(const char *path) {
+    if (!path) return -1;
+    int num = dev_index_after(path, "/dev/input/event");
+    return (num >= UDYN_EVENT_BASE && num < UDYN_EVENT_BASE + UDYN_MAX) ? num : -1;
+}
+
+/* Whether dynamic node `num` has a bound server socket, so it is advertised and
+ * opened only while a creator is serving it. */
+static int udyn_node_live(int num) {
+    if (!real_access) return 0;
+    char sock[PATH_MAX];
+    udyn_sock_path(num, sock, sizeof(sock));
+    int saved = errno;
+    int live = real_access(sock, F_OK) == 0;
+    errno = saved;
+    return live;
+}
+
+static int udyn_path_live(const char *path) {
+    int num = udyn_index_for_path(path);
+    return num >= 0 && udyn_node_live(num);
 }
 
 /* Forged character device: SDL dedupes devices by st_rdev, and a socket would
@@ -649,7 +715,7 @@ static inline int is_interposed_path(const char *pathname) {
     for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
         if (strcmp(pathname, interposers[i].open_dev_name) == 0) return 1;
     }
-    return 0;
+    return udyn_path_live(pathname);
 }
 
 #ifdef SJI_LFS64
@@ -1290,6 +1356,480 @@ connect_fail:
     return -1;
 }
 
+/* ==== App-created uinput devices ======================================= */
+/* An application under the preload with no writable kernel /dev/uinput (an
+ * unprivileged container) still creates virtual input devices here: its
+ * open("/dev/uinput"), the UI_* setup ioctls and the event writes are served
+ * in userspace. UI_DEV_CREATE binds a socket in the shared directory and
+ * writes a descriptor file beside it; the events the creator writes fan out to
+ * every sibling process that opens the resulting /dev/input/eventN, whose
+ * EVIOCG* answers and udev identity come from that descriptor. On a host with a
+ * writable /dev/uinput this path is never taken -- the kernel node opens for
+ * real and the app's device is a true kernel device. */
+
+#define UDYN_DESC_MAGIC 0x4a444e55u
+#define UDYN_DESC_VERSION 1u
+#define UDYN_BYTES(max) (((max) / 8) + 1)
+#define UDYN_MAX_CLIENTS 16
+
+/* Device identity and capability set, shared across processes as
+ * selkies_event<N>.desc so a consumer and fake-udev answer without the creator. */
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint16_t bustype;
+    uint16_t vendor;
+    uint16_t product;
+    uint16_t version_id;
+    char name[UINPUT_MAX_NAME_SIZE];
+    uint8_t evbits[UDYN_BYTES(EV_MAX)];
+    uint8_t keybits[UDYN_BYTES(KEY_MAX)];
+    uint8_t relbits[UDYN_BYTES(REL_MAX)];
+    uint8_t absbits[UDYN_BYTES(ABS_MAX)];
+    uint8_t mscbits[UDYN_BYTES(MSC_MAX)];
+    uint8_t propbits[UDYN_BYTES(INPUT_PROP_MAX)];
+    struct input_absinfo absinfo[ABS_CNT];
+} udyn_desc_t;
+
+/* One app's open of /dev/uinput: the throwaway fd it drives, the device it
+ * builds through the setup ioctls, and (after UI_DEV_CREATE) the listening
+ * socket and the thread that fans its writes out to sibling readers. */
+typedef struct {
+    int token_fd;
+    int created;
+    int event_num;
+    int listen_fd;
+    int stop_pipe[2];
+    pthread_t thread;
+    int thread_started;
+    int clients[UDYN_MAX_CLIENTS];
+    int nclients;
+    udyn_desc_t desc;
+} udyn_creator_t;
+
+/* One sibling process's open of a dynamic node: the socket to the creator and
+ * the descriptor its EVIOCG* answers come from. */
+typedef struct {
+    int fd;
+    int event_num;
+    udyn_desc_t desc;
+    unsigned char partial[sizeof(struct input_event)];
+    size_t partial_len;
+} udyn_consumer_t;
+
+static udyn_creator_t udyn_creators[UDYN_MAX];
+static udyn_consumer_t udyn_consumers[UDYN_MAX * 4];
+static pthread_mutex_t udyn_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int udyn_inited;
+/* Nonzero once any /dev/uinput handle exists, so the read/write/ioctl/close
+ * hooks skip the table lookup entirely until an app actually creates one. */
+static volatile int udyn_active;
+
+/* Sets every slot fd to -1 once (static storage zero-inits, and 0 is a valid
+ * fd). Holds udyn_mutex. */
+static void udyn_init_locked(void) {
+    if (udyn_inited) return;
+    for (int i = 0; i < UDYN_MAX; i++) {
+        udyn_creators[i].token_fd = -1;
+        udyn_creators[i].listen_fd = -1;
+        udyn_creators[i].stop_pipe[0] = udyn_creators[i].stop_pipe[1] = -1;
+    }
+    for (size_t i = 0; i < sizeof(udyn_consumers) / sizeof(udyn_consumers[0]); i++) {
+        udyn_consumers[i].fd = -1;
+    }
+    udyn_inited = 1;
+}
+
+static void udyn_set_bit(uint8_t *arr, int bit, int max) {
+    if (bit >= 0 && bit <= max) arr[bit / 8] |= (uint8_t)(1u << (bit % 8));
+}
+
+/* Holds udyn_mutex. */
+static udyn_creator_t *udyn_creator_for_fd_locked(int fd) {
+    if (!udyn_inited) return NULL;
+    for (int i = 0; i < UDYN_MAX; i++)
+        if (udyn_creators[i].token_fd == fd) return &udyn_creators[i];
+    return NULL;
+}
+static udyn_consumer_t *udyn_consumer_for_fd_locked(int fd) {
+    if (!udyn_inited) return NULL;
+    for (size_t i = 0; i < sizeof(udyn_consumers) / sizeof(udyn_consumers[0]); i++)
+        if (udyn_consumers[i].fd == fd) return &udyn_consumers[i];
+    return NULL;
+}
+
+/* Drops client `idx` from a creator (holds udyn_mutex). */
+static void udyn_drop_client_locked(udyn_creator_t *c, int idx) {
+    real_close(c->clients[idx]);
+    c->clients[idx] = c->clients[c->nclients - 1];
+    c->nclients--;
+}
+
+/* Accept loop for one created device; exits when the stop pipe is written on
+ * UI_DEV_DESTROY or close(). */
+static void *udyn_server_thread(void *arg) {
+    udyn_creator_t *c = arg;
+    for (;;) {
+        struct pollfd pfds[2];
+        pfds[0].fd = c->listen_fd; pfds[0].events = POLLIN; pfds[0].revents = 0;
+        pfds[1].fd = c->stop_pipe[0]; pfds[1].events = POLLIN; pfds[1].revents = 0;
+        int r = poll(pfds, 2, -1);
+        if (r < 0) { if (errno == EINTR) continue; break; }
+        if (pfds[1].revents & POLLIN) break;
+        if (pfds[0].revents & POLLIN) {
+            int cfd = accept(c->listen_fd, NULL, NULL);
+            if (cfd < 0) continue;
+            pthread_mutex_lock(&udyn_mutex);
+            if (c->nclients < UDYN_MAX_CLIENTS) c->clients[c->nclients++] = cfd;
+            else real_close(cfd);
+            pthread_mutex_unlock(&udyn_mutex);
+        }
+    }
+    return NULL;
+}
+
+/* open("/dev/uinput"): a creator handle over a throwaway real fd (the app
+ * ioctls and writes it; those are served here). Returns the fd, -1 on error, or
+ * -2 to fall through when no slot machinery is available. */
+static int udyn_open_creator(void) {
+    if (!real_open) return -2;
+    int fd = real_open("/dev/null", O_RDWR | O_CLOEXEC);
+    if (fd < 0) { errno = ENODEV; return -1; }
+    pthread_mutex_lock(&udyn_mutex);
+    udyn_init_locked();
+    udyn_creator_t *c = NULL;
+    for (int i = 0; i < UDYN_MAX; i++)
+        if (udyn_creators[i].token_fd < 0) { c = &udyn_creators[i]; break; }
+    if (!c) { pthread_mutex_unlock(&udyn_mutex); real_close(fd); errno = ENFILE; return -1; }
+    memset(c, 0, sizeof(*c));
+    c->token_fd = fd;
+    c->listen_fd = -1;
+    c->stop_pipe[0] = c->stop_pipe[1] = -1;
+    c->desc.magic = UDYN_DESC_MAGIC;
+    c->desc.version = UDYN_DESC_VERSION;
+    c->desc.bustype = BUS_VIRTUAL;
+    udyn_set_bit(c->desc.evbits, EV_SYN, EV_MAX);
+    pthread_mutex_unlock(&udyn_mutex);
+    udyn_active++;
+    sji_log_info("Intercepted open(%s) as a virtual uinput device (fd %d).", UINPUT_DEV_PATH, fd);
+    return fd;
+}
+
+/* Writes the descriptor atomically (temp file then rename) so a consumer never
+ * reads a half-written one. */
+static int udyn_write_desc(int num, const udyn_desc_t *d) {
+    char path[PATH_MAX], tmp[PATH_MAX];
+    udyn_desc_path(num, path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
+    int fd = real_open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    const char *p = (const char *)d;
+    size_t left = sizeof(*d);
+    int ok = 1;
+    while (left) {
+        ssize_t w = real_write(fd, p, left);
+        if (w <= 0) { ok = 0; break; }
+        p += w; left -= (size_t)w;
+    }
+    real_close(fd);
+    if (!ok || rename(tmp, path) != 0) { unlink(tmp); return -1; }
+    return 0;
+}
+
+/* UI_DEV_CREATE: bind the first free dynamic node's socket, write its
+ * descriptor and start the accept thread. Holds udyn_mutex. */
+static int udyn_create_device_locked(udyn_creator_t *c) {
+    if (c->created) return 0;
+    int listen_fd = -1, chosen = -1;
+    for (int i = 0; i < UDYN_MAX; i++) {
+        int num = UDYN_EVENT_BASE + i;
+        char sock[PATH_MAX];
+        udyn_sock_path(num, sock, sizeof(sock));
+        int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) return -1;
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, sock, sizeof(addr.sun_path) - 1);
+        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            /* A live socket means the number is taken; a stale one from a dead
+             * creator is replaced. */
+            if (errno == EADDRINUSE && !udyn_node_live(num)) {
+                unlink(sock);
+                if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { real_close(fd); continue; }
+            } else { real_close(fd); continue; }
+        }
+        if (listen(fd, 8) < 0) { real_close(fd); unlink(sock); continue; }
+        listen_fd = fd; chosen = num; break;
+    }
+    if (listen_fd < 0) { errno = ENOSPC; return -1; }
+
+    char sock[PATH_MAX];
+    udyn_sock_path(chosen, sock, sizeof(sock));
+    if (udyn_write_desc(chosen, &c->desc) != 0) { real_close(listen_fd); unlink(sock); errno = EIO; return -1; }
+    if (pipe2(c->stop_pipe, O_CLOEXEC) != 0) {
+        char desc[PATH_MAX]; udyn_desc_path(chosen, desc, sizeof(desc));
+        real_close(listen_fd); unlink(sock); unlink(desc); errno = EIO; return -1;
+    }
+    c->listen_fd = listen_fd; c->event_num = chosen; c->created = 1;
+    if (pthread_create(&c->thread, NULL, udyn_server_thread, c) != 0) {
+        char desc[PATH_MAX]; udyn_desc_path(chosen, desc, sizeof(desc));
+        real_close(c->stop_pipe[0]); real_close(c->stop_pipe[1]);
+        c->stop_pipe[0] = c->stop_pipe[1] = -1;
+        real_close(listen_fd); c->listen_fd = -1; c->created = 0;
+        unlink(sock); unlink(desc); errno = EIO; return -1;
+    }
+    c->thread_started = 1;
+    sji_log_info("Virtual uinput device created as /dev/input/event%d ('%s').", chosen, c->desc.name);
+    return 0;
+}
+
+/* Tears the created device down and clears its created-state fields, keeping
+ * token_fd. Enter holding udyn_mutex; the join and unlinks run unlocked and the
+ * lock is held again on return. */
+static void udyn_destroy_created(udyn_creator_t *c) {
+    if (!c->created) return;
+    int num = c->event_num, listen_fd = c->listen_fd;
+    int sp0 = c->stop_pipe[0], sp1 = c->stop_pipe[1];
+    pthread_t th = c->thread;
+    int started = c->thread_started;
+    int clients[UDYN_MAX_CLIENTS];
+    int nclients = c->nclients;
+    memcpy(clients, c->clients, sizeof(int) * (size_t)nclients);
+    c->created = 0; c->listen_fd = -1; c->thread_started = 0;
+    c->stop_pipe[0] = c->stop_pipe[1] = -1; c->nclients = 0;
+    pthread_mutex_unlock(&udyn_mutex);
+
+    if (started && sp1 >= 0) { char b = 1; ssize_t w = real_write(sp1, &b, 1); (void)w; pthread_join(th, NULL); }
+    for (int i = 0; i < nclients; i++) real_close(clients[i]);
+    if (sp0 >= 0) real_close(sp0);
+    if (sp1 >= 0) real_close(sp1);
+    if (listen_fd >= 0) real_close(listen_fd);
+    char sock[PATH_MAX], desc[PATH_MAX];
+    udyn_sock_path(num, sock, sizeof(sock));
+    udyn_desc_path(num, desc, sizeof(desc));
+    unlink(sock); unlink(desc);
+    pthread_mutex_lock(&udyn_mutex);
+}
+
+/* Setup ioctls and UI_DEV_CREATE/DESTROY on a creator fd. Holds udyn_mutex. */
+static int udyn_creator_ioctl(udyn_creator_t *c, ioctl_request_t request, void *arg) {
+    int bit = (int)(intptr_t)arg;
+    switch (request) {
+        case UI_SET_EVBIT:   udyn_set_bit(c->desc.evbits, bit, EV_MAX); return 0;
+        case UI_SET_KEYBIT:  udyn_set_bit(c->desc.keybits, bit, KEY_MAX); return 0;
+        case UI_SET_RELBIT:  udyn_set_bit(c->desc.relbits, bit, REL_MAX); return 0;
+        case UI_SET_ABSBIT:  udyn_set_bit(c->desc.absbits, bit, ABS_MAX); return 0;
+        case UI_SET_MSCBIT:  udyn_set_bit(c->desc.mscbits, bit, MSC_MAX); return 0;
+        case UI_SET_PROPBIT: udyn_set_bit(c->desc.propbits, bit, INPUT_PROP_MAX); return 0;
+        case UI_DEV_CREATE:  return udyn_create_device_locked(c);
+        case UI_DEV_DESTROY: udyn_destroy_created(c); return 0;
+        default: break;
+    }
+    if (!arg) return 0;
+    if (request == UI_DEV_SETUP) {
+        const struct uinput_setup *s = arg;
+        c->desc.bustype = s->id.bustype; c->desc.vendor = s->id.vendor;
+        c->desc.product = s->id.product; c->desc.version_id = s->id.version;
+        memcpy(c->desc.name, s->name, sizeof(c->desc.name) - 1);
+        c->desc.name[sizeof(c->desc.name) - 1] = '\0';
+        return 0;
+    }
+    if (request == UI_ABS_SETUP) {
+        const struct uinput_abs_setup *s = arg;
+        if (s->code < ABS_CNT) c->desc.absinfo[s->code] = s->absinfo;
+        return 0;
+    }
+    if (_IOC_NR(request) == _IOC_NR(UI_GET_SYSNAME(0))) {
+        size_t len = _IOC_SIZE(request);
+        if (len == 0) return 0;
+        snprintf((char *)arg, len, "event%d", c->created ? c->event_num : -1);
+        return 0;
+    }
+    if (request == UI_GET_VERSION) { *(unsigned int *)arg = 5; return 0; }
+    /* UI_SET_PHYS, force-feedback upload/erase and other setup calls: accepted. */
+    return 0;
+}
+
+/* Legacy identity write (uinput_user_dev) before CREATE, else fan the event
+ * records out to every connected reader. Holds udyn_mutex. */
+static ssize_t udyn_creator_write(udyn_creator_t *c, const void *buf, size_t count) {
+    if (!c->created && count == sizeof(struct uinput_user_dev)) {
+        const struct uinput_user_dev *u = buf;
+        memcpy(c->desc.name, u->name, sizeof(c->desc.name) - 1);
+        c->desc.name[sizeof(c->desc.name) - 1] = '\0';
+        c->desc.bustype = u->id.bustype; c->desc.vendor = u->id.vendor;
+        c->desc.product = u->id.product; c->desc.version_id = u->id.version;
+        for (int a = 0; a < ABS_CNT; a++) {
+            c->desc.absinfo[a].minimum = u->absmin[a];
+            c->desc.absinfo[a].maximum = u->absmax[a];
+            c->desc.absinfo[a].fuzz = u->absfuzz[a];
+            c->desc.absinfo[a].flat = u->absflat[a];
+        }
+        return (ssize_t)count;
+    }
+    if (!c->created) { errno = EINVAL; return -1; }
+    for (int i = c->nclients - 1; i >= 0; i--) {
+        ssize_t w = send(c->clients[i], buf, count, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (w < 0 && (errno == EPIPE || errno == ECONNRESET || errno == EBADF)) udyn_drop_client_locked(c, i);
+    }
+    return (ssize_t)count;
+}
+
+/* open("/dev/input/eventN") for a live dynamic node: read its descriptor, then
+ * connect to the creator's socket. Returns the socket fd, or -2 to fall through
+ * to the real open (no such dynamic node, or its descriptor is not ready). */
+static int udyn_open_consumer(const char *path, int flags) {
+    int num = udyn_index_for_path(path);
+    if (num < 0 || !udyn_node_live(num)) return -2;
+
+    udyn_desc_t desc;
+    char dpath[PATH_MAX];
+    udyn_desc_path(num, dpath, sizeof(dpath));
+    int dfd = real_open(dpath, O_RDONLY | O_CLOEXEC);
+    if (dfd < 0) return -2;
+    char *p = (char *)&desc;
+    size_t got = 0;
+    while (got < sizeof(desc)) {
+        ssize_t r = real_read(dfd, p + got, sizeof(desc) - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    real_close(dfd);
+    if (got != sizeof(desc) || desc.magic != UDYN_DESC_MAGIC) return -2;
+
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) { errno = EIO; return -1; }
+    char sock[PATH_MAX];
+    udyn_sock_path(num, sock, sizeof(sock));
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, sock, sizeof(addr.sun_path) - 1);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { real_close(fd); return -2; }
+    if (flags & O_NONBLOCK) make_socket_nonblocking(fd);
+
+    pthread_mutex_lock(&udyn_mutex);
+    udyn_init_locked();
+    udyn_consumer_t *co = NULL;
+    for (size_t i = 0; i < sizeof(udyn_consumers) / sizeof(udyn_consumers[0]); i++)
+        if (udyn_consumers[i].fd < 0) { co = &udyn_consumers[i]; break; }
+    if (!co) { pthread_mutex_unlock(&udyn_mutex); real_close(fd); errno = ENFILE; return -1; }
+    memset(co, 0, sizeof(*co));
+    co->fd = fd; co->event_num = num; co->desc = desc;
+    pthread_mutex_unlock(&udyn_mutex);
+    udyn_active++;
+    sji_log_info("Opened virtual uinput device /dev/input/event%d ('%s') as fd %d.", num, desc.name, fd);
+    return fd;
+}
+
+/* Answers a consumer's EVIOCG* from the descriptor, mirroring a real evdev node. */
+static int udyn_consumer_ioctl(udyn_consumer_t *co, ioctl_request_t request, void *arg) {
+    const udyn_desc_t *d = &co->desc;
+    unsigned int nr = _IOC_NR(request);
+    size_t len = _IOC_SIZE(request);
+    if (_IOC_TYPE(request) != 'E') { errno = ENOTTY; return -1; }
+
+    if (nr == _IOC_NR(EVIOCGVERSION)) { if (arg && len >= sizeof(int)) { *(int *)arg = 0x010001; return 0; } errno = EFAULT; return -1; }
+    if (nr == _IOC_NR(EVIOCGID)) {
+        if (!arg || len < sizeof(struct input_id)) { errno = EFAULT; return -1; }
+        struct input_id *id = arg;
+        id->bustype = d->bustype; id->vendor = d->vendor; id->product = d->product; id->version = d->version_id;
+        return 0;
+    }
+    if (nr == _IOC_NR(EVIOCGNAME(0))) {
+        if (!arg || len == 0) { errno = EFAULT; return -1; }
+        snprintf((char *)arg, len, "%s", d->name);
+        return (int)strlen((char *)arg);
+    }
+    if (nr == _IOC_NR(EVIOCGPHYS(0))) {
+        if (!arg || len == 0) { errno = EFAULT; return -1; }
+        snprintf((char *)arg, len, "selkies/virtinput/event%d", co->event_num);
+        return (int)strlen((char *)arg);
+    }
+    if (nr == _IOC_NR(EVIOCGUNIQ(0))) {
+        if (!arg || len == 0) { errno = EFAULT; return -1; }
+        snprintf((char *)arg, len, "SUIN%04d", co->event_num);
+        return (int)strlen((char *)arg);
+    }
+    if (nr == _IOC_NR(EVIOCGPROP(0))) {
+        if (!arg || len == 0) { errno = EFAULT; return -1; }
+        size_t n = len < sizeof(d->propbits) ? len : sizeof(d->propbits);
+        memcpy(arg, d->propbits, n);
+        return (int)n;
+    }
+    if (nr >= _IOC_NR(EVIOCGBIT(0, 0)) && nr < _IOC_NR(EVIOCGBIT(EV_MAX, 0))) {
+        if (!arg || len == 0) { errno = EFAULT; return -1; }
+        unsigned int ev = nr - _IOC_NR(EVIOCGBIT(0, 0));
+        const uint8_t *src = NULL; size_t sz = 0;
+        switch (ev) {
+            case 0:      src = d->evbits;  sz = sizeof(d->evbits);  break;
+            case EV_KEY: src = d->keybits; sz = sizeof(d->keybits); break;
+            case EV_REL: src = d->relbits; sz = sizeof(d->relbits); break;
+            case EV_ABS: src = d->absbits; sz = sizeof(d->absbits); break;
+            case EV_MSC: src = d->mscbits; sz = sizeof(d->mscbits); break;
+            default: memset(arg, 0, len); return (int)len;
+        }
+        size_t n = len < sz ? len : sz;
+        memcpy(arg, src, n);
+        if (n < len) memset((char *)arg + n, 0, len - n);
+        return (int)n;
+    }
+    if (nr >= _IOC_NR(EVIOCGABS(0)) && nr < (_IOC_NR(EVIOCGABS(0)) + ABS_CNT)) {
+        if (!arg || len < sizeof(struct input_absinfo)) { errno = EFAULT; return -1; }
+        unsigned int code = nr - _IOC_NR(EVIOCGABS(0));
+        *(struct input_absinfo *)arg = d->absinfo[code];
+        return 0;
+    }
+    if (nr == _IOC_NR(EVIOCGKEY(0)) || nr == _IOC_NR(EVIOCGLED(0)) ||
+        nr == _IOC_NR(EVIOCGSW(0))) {
+        if (arg && len > 0) memset(arg, 0, len);
+        return (int)len;
+    }
+    if (nr == _IOC_NR(EVIOCGRAB) || nr == _IOC_NR(EVIOCREVOKE)) return 0;
+    errno = ENOTTY;
+    return -1;
+}
+
+/* Reads whole input_event records from a consumer socket, stashing a trailing
+ * partial. Blocking reads loop until at least one whole record or EOF/error. */
+static ssize_t udyn_consumer_read(udyn_consumer_t *co, void *buf, size_t count) {
+    const size_t esz = sizeof(struct input_event);
+    if (count < esz) { errno = EINVAL; return -1; }
+    int nonblock = 0;
+    int fl = fcntl(co->fd, F_GETFL, 0);
+    if (fl != -1) nonblock = (fl & O_NONBLOCK) != 0;
+
+    unsigned char *out = buf;
+    size_t have = 0;
+    if (co->partial_len) { memcpy(out, co->partial, co->partial_len); have = co->partial_len; co->partial_len = 0; }
+
+    for (;;) {
+        size_t whole = (have / esz) * esz;
+        if (whole > 0) {
+            size_t leftover = have - whole;
+            if (leftover) { memcpy(co->partial, out + whole, leftover); co->partial_len = leftover; }
+            return (ssize_t)whole;
+        }
+        ssize_t r = recv(co->fd, out + have, count - have, 0);
+        if (r > 0) { have += (size_t)r; continue; }
+        if (r == 0) {
+            if (have) { memcpy(co->partial, out, have); co->partial_len = have; }
+            return 0;
+        }
+        if (errno == EINTR) continue;
+        if ((errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (have) { memcpy(co->partial, out, have); co->partial_len = have; }
+            if (nonblock) return -1;
+            struct pollfd pfd = { co->fd, POLLIN, 0 };
+            if (poll(&pfd, 1, -1) < 0 && errno != EINTR) return -1;
+            if (co->partial_len) { memcpy(out, co->partial, co->partial_len); have = co->partial_len; co->partial_len = 0; }
+            continue;
+        }
+        return -1;
+    }
+}
+
 /**
  * Shared body of the open wrappers: a matched device gets its own socket
  * connection, built unlocked on a private fd (the connect can block on its
@@ -1305,6 +1845,21 @@ static int common_open_logic(const char *pathname, int flags, js_interposer_t **
 
     if (pathname == NULL) {
         return -2;
+    }
+
+    if (strcmp(pathname, UINPUT_DEV_PATH) == 0) {
+        /* A writable kernel node is opened for real; only its absence falls to
+         * the in-process emulation, so a bare-metal host is never interposed. */
+        if (real_access && real_access(UINPUT_DEV_PATH, W_OK) == 0) {
+            return -2;
+        }
+        return udyn_open_creator();
+    }
+    {
+        int ufd = udyn_open_consumer(pathname, flags);
+        if (ufd != -2) {
+            return ufd;
+        }
     }
 
     /* Unlocked: the name fields are set at static initialization and never mutated. */
@@ -1779,6 +2334,26 @@ int close(int fd) {
     }
     inotify_forget_fd(fd);
 
+    if (udyn_active) {
+        pthread_mutex_lock(&udyn_mutex);
+        udyn_creator_t *c = udyn_creator_for_fd_locked(fd);
+        if (c) {
+            udyn_destroy_created(c);
+            c->token_fd = -1;
+            pthread_mutex_unlock(&udyn_mutex);
+            udyn_active--;
+            return real_close(fd);
+        }
+        udyn_consumer_t *co = udyn_consumer_for_fd_locked(fd);
+        if (co) {
+            co->fd = -1;
+            pthread_mutex_unlock(&udyn_mutex);
+            udyn_active--;
+            return real_close(fd);
+        }
+        pthread_mutex_unlock(&udyn_mutex);
+    }
+
     pthread_mutex_lock(&interposers_mutex);
     for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
         js_interposer_t *interposer = &interposers[i];
@@ -1914,6 +2489,27 @@ static int recv_event_rest_blocking(int fd, void *buf, size_t *consumed, size_t 
  * completed by its next read(). Blocking mode follows the socket's actual
  * O_NONBLOCK flag, the handle's open() flags being the fallback.
  */
+/* Event writes to a created uinput device fan out to its readers; every other
+ * write passes straight through, and an app that never opened /dev/uinput pays
+ * nothing (udyn_active stays zero). */
+ssize_t write(int fd, const void *buf, size_t count) {
+    if (!real_write && load_real_func((void *)&real_write, "write") < 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (udyn_active) {
+        pthread_mutex_lock(&udyn_mutex);
+        udyn_creator_t *c = udyn_creator_for_fd_locked(fd);
+        if (c) {
+            ssize_t r = udyn_creator_write(c, buf, count);
+            pthread_mutex_unlock(&udyn_mutex);
+            return r;
+        }
+        pthread_mutex_unlock(&udyn_mutex);
+    }
+    return real_write(fd, buf, count);
+}
+
 ssize_t read(int fd, void *buf, size_t count) {
     if (!real_read) {
         sji_log_error("CRITICAL: real_read not loaded. Cannot proceed with read call.");
@@ -1922,6 +2518,15 @@ ssize_t read(int fd, void *buf, size_t count) {
     }
     if (inotify_fd_tracked(fd)) {
         return inotify_read(fd, buf, count);
+    }
+
+    if (udyn_active) {
+        pthread_mutex_lock(&udyn_mutex);
+        udyn_consumer_t *co = udyn_consumer_for_fd_locked(fd);
+        pthread_mutex_unlock(&udyn_mutex);
+        if (co) {
+            return udyn_consumer_read(co, buf, count);
+        }
     }
 
     js_interposer_t *interposer = NULL;
@@ -2594,6 +3199,23 @@ int ioctl(int fd, ioctl_request_t request, ...) {
     va_start(args_list, request);
     void *arg_ptr = va_arg(args_list, void *);
     va_end(args_list);
+
+    if (udyn_active) {
+        pthread_mutex_lock(&udyn_mutex);
+        udyn_creator_t *c = udyn_creator_for_fd_locked(fd);
+        if (c) {
+            errno = 0;
+            int r = udyn_creator_ioctl(c, request, arg_ptr);
+            pthread_mutex_unlock(&udyn_mutex);
+            return r;
+        }
+        udyn_consumer_t *co = udyn_consumer_for_fd_locked(fd);
+        pthread_mutex_unlock(&udyn_mutex);
+        if (co) {
+            errno = 0;
+            return udyn_consumer_ioctl(co, request, arg_ptr);
+        }
+    }
 
     js_interposer_t *interposer = NULL;
     pthread_mutex_lock(&interposers_mutex);
