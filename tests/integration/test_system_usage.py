@@ -11,7 +11,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 sys.argv = ["selkies"]
 
-from selkies.system_usage import SystemUsage  # noqa: E402
+from selkies.resource_stats import SystemUsage  # noqa: E402
 
 passed = failed = 0
 

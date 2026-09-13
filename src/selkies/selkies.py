@@ -64,7 +64,7 @@ except ImportError:  # no ioctl to ask a socket what it still owes the network
 from aiohttp import web, WSMsgType, WSCloseCode
 
 from . import audio_config
-from . import gpu_stats
+from . import resource_stats
 from .audio_control import AudioControl, ensure_capture_sink, opus_capture_settings
 from .display_utils import (
     apply_common_capture_settings,
@@ -116,7 +116,6 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
-from .system_usage import SystemUsage
 from .stream_server import (BaseStreamingService, TransferPacer, UplinkGauge, _uplink_session_state, note_pong, uplink_rtt_ms,
                             socket_gauge)
 from .webrtc_utils import Metrics
@@ -3487,7 +3486,7 @@ class DataStreamingServer(BaseStreamingService):
                     if self._gpu_available is None:
                         self._gpu_available = bool(
                             await asyncio.get_running_loop().run_in_executor(
-                                None, gpu_stats.get_gpus
+                                None, resource_stats.get_gpus
                             )
                         )
 
@@ -6019,12 +6018,12 @@ async def _collect_system_stats_ws(shared_data: dict, interval_seconds: float = 
 
     One instance serves every connection's stats sender (per-connection
     collectors would mean N polls per second). The figures are the session's
-    own cgroup's where it has one (`system_usage`).
+    own cgroup's where it limits the session, else the node's (`resource_stats.SystemUsage`).
     """
     data_logger.debug(
         f"System monitor loop (WS mode) started, interval: {interval_seconds}s"
     )
-    usage = SystemUsage()
+    usage = resource_stats.SystemUsage()
     try:
         while True:
             cpu, mem_total, mem_used = await asyncio.to_thread(usage.sample)
@@ -6072,7 +6071,7 @@ async def _collect_gpu_stats_ws(
 
     try:
         # get_gpus() may spawn or block on vendor tools.
-        gpus = await asyncio.to_thread(gpu_stats.get_gpus, dri_node)
+        gpus = await asyncio.to_thread(resource_stats.get_gpus, dri_node)
         if not gpus:
             data_logger.warning("No GPUs detected for GPU monitor (WS).")
             return
@@ -6082,7 +6081,7 @@ async def _collect_gpu_stats_ws(
 
         while True:
             try:
-                gpus = await asyncio.to_thread(gpu_stats.get_gpus, dri_node)
+                gpus = await asyncio.to_thread(resource_stats.get_gpus, dri_node)
                 gpu = _pick(gpus) if gpus else None
                 if gpu is None:
                     data_logger.error(f"GPU {gpu_id} no longer available.")

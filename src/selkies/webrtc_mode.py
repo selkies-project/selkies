@@ -412,7 +412,7 @@ class WebRTCService(BaseStreamingService):
                 getattr(settings, "scaling_dpi", "96") or 96)
 
         self.system_monitor = SystemMonitor()
-        # Always enabled: gpu_stats reports nothing without a supported GPU/tool.
+        # Always enabled: resource_stats reports nothing without a supported GPU/tool.
         # Keyed to the pipeline's render node so stats describe the encoding GPU.
         stats_gpu_id = parse_gpu_id(getattr(self.args, "gpu_id", ""))
         self.gpu_monitor = GPUMonitor(

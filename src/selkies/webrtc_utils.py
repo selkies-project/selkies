@@ -24,7 +24,6 @@ out the period.
 
 import json
 import time
-from .system_usage import SystemUsage
 import asyncio
 import inspect
 import aiohttp
@@ -48,7 +47,7 @@ from collections import OrderedDict
 from prometheus_client import REGISTRY
 from prometheus_client import Gauge, Histogram, Info
 
-from . import gpu_stats
+from . import resource_stats
 
 
 logger_rtcice = logging.getLogger("rtcice")
@@ -1553,8 +1552,8 @@ logger_gpu = logging.getLogger("gpu_monitor")
 logger_gpu.setLevel(logging.INFO)
 
 class SystemMonitor:
-    """Periodically samples CPU and memory usage, the session's own cgroup's
-    where it has one (`system_usage`).
+    """Periodically samples CPU and memory usage through `SystemUsage`: the
+    session's own cgroup's where it limits the session, else the node's.
 
     The latest sample is exposed on `cpu_percent`, `mem_total`, and
     `mem_used`; the optional async `on_timer` callback fires once per period
@@ -1570,7 +1569,7 @@ class SystemMonitor:
         self.cpu_percent: float = 0
         self.mem_total: int = 0
         self.mem_used: int = 0
-        self._usage = SystemUsage()
+        self._usage = resource_stats.SystemUsage()
 
         self.on_timer: Optional[Callable[[float], Awaitable[None]]] = None
 
@@ -1654,7 +1653,7 @@ class GPUMonitor:
             The stats tuple, or None when the GPU cannot be found or queried.
         """
         try:
-            gpus = gpu_stats.get_gpus(self.dri_node)
+            gpus = resource_stats.get_gpus(self.dri_node)
             idx = 0 if (self.dri_node and len(gpus) == 1) else self.gpu_id
             if not gpus or idx >= len(gpus):
                 return None

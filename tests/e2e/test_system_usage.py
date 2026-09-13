@@ -19,7 +19,7 @@ sys.argv = ["selkies"]
 import helpers as H  # noqa: E402
 import core_lib as C  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
-from selkies.system_usage import SystemUsage  # noqa: E402
+from selkies.resource_stats import SystemUsage  # noqa: E402
 
 STATS_JS = "() => window.system_stats ? [window.system_stats.cpu_percent, window.system_stats.mem_total, window.system_stats.mem_used] : null"
 

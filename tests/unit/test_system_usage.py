@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The figures the dashboards' CPU and memory gauges show come from the
-session's own cgroup: its usage against its limits on the unified and the
-legacy hierarchies, the host's totals where a limit is not set, and psutil's
-system-wide figures where no cgroup can be read at all.
+session's own cgroup where it limits CPU or memory: its usage against its
+limits on the unified and the legacy hierarchies, the host's total where only
+the other resource is limited; and from the node, through psutil, where the
+cgroup limits nothing or cannot be read.
 """
 import os
 import sys
@@ -12,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
 sys.argv = ["selkies"]
 
 import psutil  # noqa: E402
-from selkies.system_usage import SystemUsage  # noqa: E402
+from selkies.resource_stats import SystemUsage  # noqa: E402
 
 passed = failed = 0
 HOST_TOTAL = psutil.virtual_memory().total
@@ -70,12 +71,17 @@ with tempfile.TemporaryDirectory() as root:
     cores = len(os.sched_getaffinity(0))
     unified(root, 0, "max 100000", 500_000_000, "max", 0)
     usage = SystemUsage(root=root, proc_cgroup=os.path.join(root, "proc/cgroup"), clock=clock)
+    cpu, total, used = usage.sample()
+    check("unified without limits: the cgroup is not the environment, the node's figures stand",
+          total == HOST_TOTAL and used != 500_000_000 and 0 <= cpu <= 100, (total, used, cpu, cores))
+    unified(root, 0, "max 100000", 500_000_000, "2000000000", 0)
+    usage = SystemUsage(root=root, proc_cgroup=os.path.join(root, "proc/cgroup"), clock=clock)
     _, total, used = usage.sample()
-    unified(root, int(cores * 1_000_000), "max 100000", 500_000_000, "max", 0)
+    unified(root, int(cores * 1_000_000), "max 100000", 500_000_000, "2000000000", 0)
     clock.now += 1.0
     cpu, _, _ = usage.sample()
-    check("unified without limits: the host's memory is the total and the allowed processors are the cores",
-          total == HOST_TOTAL and used == 500_000_000 and cpu == 100.0, (total, used, cpu, cores))
+    check("unified with a memory limit alone: the cgroup counts, its CPU over the allowed processors",
+          total == 2_000_000_000 and used == 500_000_000 and cpu == 100.0, (total, used, cpu, cores))
 
 with tempfile.TemporaryDirectory() as root:
     clock = Clock()
@@ -99,7 +105,12 @@ with tempfile.TemporaryDirectory() as root:
                 "memory/memory.usage_in_bytes": "100\n", "memory/memory.limit_in_bytes": "9223372036854771712\n", "memory/memory.stat": ""})
     usage = SystemUsage(root=root, proc_cgroup=os.path.join(root, "proc/cgroup"), clock=clock)
     _, total, used = usage.sample()
-    check("legacy without a namespace: the controller mounts are the cgroup, an unset limit is the host's total",
+    check("legacy without a namespace and without limits: the node's figures stand",
+          total == HOST_TOTAL and used != 100, (total, used))
+    tree(root, {"cpu,cpuacct/cpu.cfs_quota_us": "100000\n"})
+    usage = SystemUsage(root=root, proc_cgroup=os.path.join(root, "proc/cgroup"), clock=clock)
+    _, total, used = usage.sample()
+    check("legacy with a CPU quota alone: the controller mounts are the cgroup, the memory total the host's",
           total == HOST_TOTAL and used == 100, (total, used))
 
 with tempfile.TemporaryDirectory() as root:

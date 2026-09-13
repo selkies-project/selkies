@@ -12,7 +12,7 @@ TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 
-import selkies.gpu_stats as gpu_stats  # noqa: E402
+from selkies import resource_stats  # noqa: E402
 
 passed = failed = 0
 
@@ -40,45 +40,45 @@ class FakeNvml:
         return 0
 
 
-real_pynvml = gpu_stats.pynvml
-real_ready = gpu_stats._nvml_ready
+real_pynvml = resource_stats.pynvml
+real_ready = resource_stats._nvml_ready
 try:
     fake = FakeNvml(fail=True)
-    gpu_stats.pynvml = fake
-    gpu_stats._nvml_ready = None
-    results = [gpu_stats._nvml_gpus() for _ in range(5)]
+    resource_stats.pynvml = fake
+    resource_stats._nvml_ready = None
+    results = [resource_stats._nvml_gpus() for _ in range(5)]
     check("a failed init returns no GPUs", all(r == [] for r in results), results)
     check("a failed init is attempted exactly once", fake.init_calls == 1,
           f"{fake.init_calls} attempts over 5 polls")
-    check("the failure is recorded as terminal", gpu_stats._nvml_ready is False,
-          gpu_stats._nvml_ready)
+    check("the failure is recorded as terminal", resource_stats._nvml_ready is False,
+          resource_stats._nvml_ready)
 
     fake = FakeNvml(fail=False)
-    gpu_stats.pynvml = fake
-    gpu_stats._nvml_ready = None
+    resource_stats.pynvml = fake
+    resource_stats._nvml_ready = None
     for _ in range(3):
-        gpu_stats._nvml_gpus()
+        resource_stats._nvml_gpus()
     check("a successful init is not repeated", fake.init_calls == 1,
           f"{fake.init_calls} attempts over 3 polls")
-    check("success is recorded", gpu_stats._nvml_ready is True, gpu_stats._nvml_ready)
+    check("success is recorded", resource_stats._nvml_ready is True, resource_stats._nvml_ready)
 
-    gpu_stats.pynvml = None
-    gpu_stats._nvml_ready = None
-    check("absent nvidia-ml-py stays a no-op", gpu_stats._nvml_gpus() == [])
-    check("absence never marks the probe attempted", gpu_stats._nvml_ready is None,
-          gpu_stats._nvml_ready)
+    resource_stats.pynvml = None
+    resource_stats._nvml_ready = None
+    check("absent nvidia-ml-py stays a no-op", resource_stats._nvml_gpus() == [])
+    check("absence never marks the probe attempted", resource_stats._nvml_ready is None,
+          resource_stats._nvml_ready)
 
     # The overall stats call must survive a terminally failed NVML by falling
     # through to the other sources (aitop, nvidia-smi, sysfs), whatever this
     # host provides.
-    gpu_stats.pynvml = FakeNvml(fail=True)
-    gpu_stats._nvml_ready = None
-    gpus = gpu_stats.get_gpus()
+    resource_stats.pynvml = FakeNvml(fail=True)
+    resource_stats._nvml_ready = None
+    gpus = resource_stats.get_gpus()
     check("get_gpus still answers with NVML failed", isinstance(gpus, list),
           type(gpus).__name__)
 finally:
-    gpu_stats.pynvml = real_pynvml
-    gpu_stats._nvml_ready = real_ready
+    resource_stats.pynvml = real_pynvml
+    resource_stats._nvml_ready = real_ready
 
 print(f"[nvml] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)
