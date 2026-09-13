@@ -5810,7 +5810,10 @@ class DataStreamingServer(BaseStreamingService):
                 if not isinstance(perms, dict):
                     raise ValueError(f"Token entry for {tkn!r} must be a JSON object")
         except (json.JSONDecodeError, ValueError) as e:
-            return web.Response(status=400, text=f"Bad Request: {e}")
+            # The detail names the caller's own payload, but it reaches an unauthenticated
+            # endpoint, so it stays in the log.
+            logger.warning(f"Rejected a token table update: {e}")
+            return web.Response(status=400, text="Bad Request")
 
         new_mk_owner = None
         for tkn, perms in new_token_data.items():
