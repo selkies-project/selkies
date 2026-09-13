@@ -204,6 +204,17 @@ async def route_cases(fake: FakePixelflux, pcm: FakePcmflux, root: str) -> None:
               r.status == 200 and (await r.json()) == {"active": False}, r.status)
         r = await client.post("/api/recording", headers=bearer(VIEW))
         check("a viewer may not record", r.status == 403 and fake.active is None, r.status)
+        for name, why in ((f"{root}/../outside.mp4", "an absolute path"),
+                          ("../outside.mp4", "a traversal segment"),
+                          ("nested/../../outside.mp4", "a traversal through a subdirectory")):
+            r = await client.post("/api/recording", headers=bearer(CTRL), json={"path": name})
+            check(f"{why} cannot take a recording out of the file-manager directory",
+                  r.status == 400 and fake.active is None, (r.status, name))
+        os.symlink("/tmp", os.path.join(root, "away"))
+        r = await client.post("/api/recording", headers=bearer(CTRL), json={"path": "away/outside.mp4"})
+        check("a symlink out of the file-manager directory cannot take a recording with it",
+              r.status == 400 and fake.active is None, r.status)
+        os.unlink(os.path.join(root, "away"))
         r = await client.post("/api/recording", headers=bearer(CTRL))
         body = await r.json()
         check("a recording starts into the file-manager directory under a timestamped name",
@@ -275,8 +286,10 @@ async def route_cases(fake: FakePixelflux, pcm: FakePcmflux, root: str) -> None:
               (await r.json())["path"] == os.path.join(root, "sub", "take.mp4"))
         await client.delete("/api/recording", headers=bearer(CTRL))
         r = await client.post("/api/recording", headers=bearer(MASTER), json={"path": "/tmp/elsewhere.mp4"})
-        check("an absolute path is used as given, and the master token may start one",
-              (await r.json())["path"] == "/tmp/elsewhere.mp4")
+        check("not even the master token records outside the file-manager directory",
+              r.status == 400 and fake.active is None, r.status)
+        r = await client.post("/api/recording", headers=bearer(MASTER))
+        check("the master token may start one", r.status == 200 and fake.active is not None, r.status)
         await client.delete("/api/recording", headers=bearer(MASTER))
         r = await client.post("/api/recording", headers={**bearer(CTRL), "Content-Type": "application/json"}, data=b"{")
         check("a body that is not JSON is refused", r.status == 400 and fake.active is None, r.status)

@@ -2435,8 +2435,11 @@ class CentralizedStreamServer:
                 path = str((body or {}).get("path") or "")
                 if not path:
                     path = "recording-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".mp4"
-                if not os.path.isabs(path):
-                    path = os.path.join(str(self.upload_dir), path)
+                target = self._recording_target(path)
+                if target is None:
+                    logger.warning(f"Refused a recording outside the file-manager directory: {path!r}")
+                    return web.Response(status=400, text="Recording path leaves the file-manager directory")
+                path = target
                 if (pixelflux.recording_status() or {}).get("active"):
                     raise RuntimeError("a recording is already active")
                 audio_socket = await self._start_recording_audio(pixelflux)
@@ -2459,6 +2462,20 @@ class CentralizedStreamServer:
             logger.warning(f"Recording request refused: {exc}")
             return web.Response(status=409, text="Recording request refused; the server log names the reason")
         return web.json_response(status)
+
+    def _recording_target(self, name: str) -> Optional[str]:
+        """Where a requested recording name writes, or `None` when it leaves the
+        file-manager directory. The name is a path relative to that directory:
+        an absolute path, a traversal segment and a symlinked parent pointing
+        outside are all refused, since the session token that reaches this
+        endpoint carries no authority over the rest of the filesystem."""
+        base = os.path.realpath(self.upload_dir)
+        if os.path.isabs(name):
+            return None
+        target = os.path.realpath(os.path.join(base, name))
+        if target == base or os.path.commonpath([base, target]) != base:
+            return None
+        return target
 
     async def _start_recording_audio(self, pixelflux: Any) -> str:
         """The Ogg Opus socket a recording's audio track is read from, served
