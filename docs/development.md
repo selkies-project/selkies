@@ -127,7 +127,7 @@ docker run --rm -it --shm-size=2g -p 8080:8080 \
   ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04
 ```
 
-The web client is a build product and a fresh checkout has none, so the image's own bundle is linked in at the (gitignored) path it is served from; running `scripts/ci/build-web.sh` locally builds a real one into the tree. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. The images build with BuildKit (`RUN --mount`); the legacy builder cannot build them. To run a wheel built from this tree instead of the latest PyPI release, copy it out of the `selkies-py-build` image into `addons/base/wheels/` before building.
+The web client is a build product and a fresh checkout has none, so the image's own bundle is linked in at the (gitignored) path it is served from; running `scripts/ci/build-web.sh` locally builds a real one into the tree. The base image, the streaming mode, the port, and the TURN credentials come from the environment (`DISTRIB_IMAGE`, `DISTRIB_RELEASE`, `SELKIES_MODE`, `SELKIES_PORT`, `SELKIES_TURN_*`); a `.env` file next to the Compose file is the usual place for them. The images build with BuildKit (`RUN --mount`); the legacy builder cannot build them. To run a wheel built from this tree instead of the newest GitHub release's, copy it out of the `selkies-py-build` image into `addons/base/wheels/` before building.
 
 ## Documentation
 

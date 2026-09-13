@@ -24,7 +24,6 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        PYPI_PACKAGE: selkies
         PACKAGE_VERSION: ${PACKAGE_VERSION:-0.0.0.dev0}
 
   base:
@@ -32,7 +31,8 @@ services:
     # NOTE: export DISTRIB_IMAGE and DISTRIB_RELEASE to change the base image.
     # To test an unreleased wheel, build it with the `dist` service, then copy it
     # from the `selkies-py-build` image into `addons/base/wheels/` before
-    # building this service; otherwise the latest PyPI release is installed.
+    # building this service; otherwise the wheel of the newest GitHub release
+    # is installed.
     ###
     image: selkies-base:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
     build:
@@ -43,7 +43,6 @@ services:
       args:
         DISTRIB_IMAGE: ${DISTRIB_IMAGE:-ubuntu}
         DISTRIB_RELEASE: ${DISTRIB_RELEASE:-26.04}
-        PYPI_PACKAGE: selkies
 
   desktop:
     image: selkies-desktop:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
