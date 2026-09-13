@@ -191,20 +191,21 @@ def mk_verdict_cases() -> None:
     settings singleton reads SELKIES_* at import)."""
     base_env = {k: v for k, v in os.environ.items() if not k.startswith("SELKIES_")}
     code = r"""
-import json, selkies.selkies as S
+import json
+from selkies import sessions
 out = {}
-S.user_tokens.clear()
-S.user_tokens.update({"ctrl": {"role": "controller", "slot": 1}, "view": {"role": "viewer", "slot": None}})
-S.active_mk_token = None
-out["ctrl_no_mk"] = S._mk_access_verdict(S.user_tokens["ctrl"], token="ctrl")
-out["view_no_mk"] = S._mk_access_verdict(S.user_tokens["view"], token="view")
-S.active_mk_token = "view"
-out["view_holds_mk"] = S._mk_access_verdict(S.user_tokens["view"], token="view")
-out["ctrl_outranked"] = S._mk_access_verdict(S.user_tokens["ctrl"], token="ctrl")
-out["ctrl_outranked_perms_token"] = S._mk_access_verdict({"role": "controller", "token": "ctrl"})
-out["lookup_hit"] = S._lookup_session_token("view") is S.user_tokens["view"]
-out["lookup_miss"] = S._lookup_session_token("no-such-token") is None and S._lookup_session_token("") is None
-out["lookup_none"] = S._lookup_session_token(None) is None
+sessions.user_tokens.clear()
+sessions.user_tokens.update({"ctrl": {"role": "controller", "slot": 1}, "view": {"role": "viewer", "slot": None}})
+sessions.active_mk_token = None
+out["ctrl_no_mk"] = sessions._mk_access_verdict(sessions.user_tokens["ctrl"], token="ctrl")
+out["view_no_mk"] = sessions._mk_access_verdict(sessions.user_tokens["view"], token="view")
+sessions.active_mk_token = "view"
+out["view_holds_mk"] = sessions._mk_access_verdict(sessions.user_tokens["view"], token="view")
+out["ctrl_outranked"] = sessions._mk_access_verdict(sessions.user_tokens["ctrl"], token="ctrl")
+out["ctrl_outranked_perms_token"] = sessions._mk_access_verdict({"role": "controller", "token": "ctrl"})
+out["lookup_hit"] = sessions._lookup_session_token("view") is sessions.user_tokens["view"]
+out["lookup_miss"] = sessions._lookup_session_token("no-such-token") is None and sessions._lookup_session_token("") is None
+out["lookup_none"] = sessions._lookup_session_token(None) is None
 print(json.dumps(out))
 """
     with tempfile.TemporaryDirectory(prefix="selkies-guards-") as home:

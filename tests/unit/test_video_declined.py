@@ -10,7 +10,7 @@ TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(TESTS), "src"))
 sys.argv = ["selkies"]
 
-from selkies.rtc import RTCApp  # noqa: E402
+from selkies.webrtc_engine import RTCApp  # noqa: E402
 
 passed = failed = 0
 

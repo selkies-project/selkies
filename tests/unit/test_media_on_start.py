@@ -25,8 +25,8 @@ from selkies.settings import (
     START_STATE_PIPELINES, SETTING_DEFINITIONS, AppSettings, build_client_settings_payload,
     pipeline_starts_on, settings,
 )
-from selkies.media_pipeline import MediaPipelinePixel
-from selkies.rtc import ClientType, RTCApp
+from selkies.webrtc_media_pipeline import MediaPipelinePixel
+from selkies.webrtc_engine import ClientType, RTCApp
 from selkies import webrtc_mode
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

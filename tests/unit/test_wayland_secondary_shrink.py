@@ -26,7 +26,7 @@ os.environ["SELKIES_FILE_MANAGER_PATH"] = tempfile.mkdtemp(prefix="selkies-wl-sh
 
 import helpers as H  # noqa: E402
 
-import selkies.selkies as S  # noqa: E402
+import selkies.websockets_mode as S  # noqa: E402
 import selkies.webrtc_mode as W  # noqa: E402
 
 Rect = Tuple[int, int, int, int]

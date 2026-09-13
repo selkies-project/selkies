@@ -27,7 +27,7 @@ os.environ["SELKIES_FILE_MANAGER_PATH"] = tempfile.mkdtemp(prefix="selkies-wl-re
 
 import helpers as H  # noqa: E402
 
-import selkies.selkies as S  # noqa: E402
+import selkies.websockets_mode as S  # noqa: E402
 
 
 class FakeInput:

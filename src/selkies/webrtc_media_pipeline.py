@@ -51,11 +51,10 @@ instead of the import failing.
 import asyncio
 import logging
 import time
-from enum import Enum
 from abc import ABCMeta, abstractmethod
 from typing import Any, Callable, Optional, Tuple
 
-from .settings import codec_for_encoder, encoder_for_codec, settings as app_settings
+from .settings import RateControlMode, codec_for_encoder, encoder_for_codec, settings as app_settings
 from .audio_control import AudioControl
 from .display_utils import (
     apply_common_capture_settings,
@@ -82,12 +81,6 @@ logger = logging.getLogger("media_pipeline")
 # and the stripe geometry.
 STRIPE_HEADER_LEN = 10
 logger.setLevel(logging.INFO)
-
-
-class RateControlMode(str, Enum):
-    """Video rate-control mode: constant bitrate or constant quality (CRF)."""
-    CBR = "cbr"
-    CRF = "crf"
 
 
 class MediaPipelineError(Exception):

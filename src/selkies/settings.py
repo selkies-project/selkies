@@ -39,6 +39,7 @@ Override value syntax, by setting type:
   their explicit `""`/`"none"` = disable semantics.
 """
 
+from enum import Enum
 import argparse
 import os
 import logging
@@ -2082,3 +2083,25 @@ if settings.debug[0]:
 else:
     logging.getLogger().setLevel(logging.INFO)
     logging.getLogger("websockets").setLevel(logging.WARNING)
+
+
+class RateControlMode(str, Enum):
+    """Video rate-control mode: constant bitrate or constant quality (CRF)."""
+    CBR = "cbr"
+    CRF = "crf"
+
+
+def _scaling_dpi_bounds() -> tuple:
+    """Numeric span of the declared scaling_dpi stops.
+
+    The 's,' DPI verb accepts any value in between (a client's device-pixel
+    ratio need not land on a stop), but never outside it: the DPI is applied to
+    the desktop and, when an explicit cursor size is configured, scales the
+    cursor request with it. `(96, 288)` when no stops are declared.
+    """
+    definition = next((d for d in SETTING_DEFINITIONS if d["name"] == "scaling_dpi"), None)
+    stops = [float(v) for v in (definition or {}).get("meta", {}).get("allowed", [])]
+    return (int(min(stops)), int(max(stops))) if stops else (96, 288)
+
+
+SCALING_DPI_MIN, SCALING_DPI_MAX = _scaling_dpi_bounds()

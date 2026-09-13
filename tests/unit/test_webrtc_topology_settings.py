@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(
 ))
 
 from selkies.settings import SETTING_DEFINITIONS, AppSettings, settings  # noqa: E402
-from selkies.rtc import RTCApp  # noqa: E402
+from selkies.webrtc_engine import RTCApp  # noqa: E402
 from selkies.ice import UdpMux  # noqa: E402
 from selkies.ice.ice import get_host_addresses  # noqa: E402
 from selkies.webrtc import RTCPeerConnection  # noqa: E402

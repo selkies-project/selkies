@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
 from selkies.input_handler import WebRTCInput
-from selkies.selkies import DataStreamingServer
+from selkies.websockets_mode import DataStreamingServer
 from selkies.webrtc_mode import WebRTCService
 
 LAYOUTS = {"primary": {"x": 0, "y": 0, "w": 1920, "h": 1080},

@@ -28,7 +28,7 @@ import logging
 
 from .settings import settings
 from .webrtc_mode import WebRTCService
-from .selkies import DataStreamingServer
+from .websockets_mode import DataStreamingServer
 from .stream_server import CentralizedStreamServer
 from .webcam import stop_shared_webcam
 from . import audit

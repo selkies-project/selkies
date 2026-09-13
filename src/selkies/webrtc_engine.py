@@ -90,7 +90,7 @@ from .webrtc.codecs.base import EncodedPacket
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 from .webrtc.contrib.relay import MediaRelay
 from enum import Enum
-from .media_pipeline import MediaPipeline
+from .webrtc_media_pipeline import MediaPipeline
 from .input_handler import (
     BULK_DRAIN_TIMEOUT_S,
     gamepad_slot_denied,
@@ -98,7 +98,7 @@ from .input_handler import (
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
-from .selkies import current_session_tokens
+from .sessions import current_session_tokens
 
 
 def parse_webrtc_port_range(raw: str) -> Optional[Tuple[int, int]]:

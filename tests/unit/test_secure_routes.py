@@ -35,7 +35,7 @@ os.environ["SELKIES_FILE_MANAGER_PATH"] = _SCRATCH
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
-import selkies.selkies as S  # noqa: E402
+from selkies import sessions  # noqa: E402
 from selkies.stream_server import (  # noqa: E402
     AUTH_REALM, MASTER_TOKEN_HEADER, SESSION_TOKEN_COOKIE, CentralizedStreamServer,
 )
@@ -146,13 +146,13 @@ class _App:
 
 
 def _provision() -> None:
-    S.user_tokens.clear()
-    S.user_tokens.update({
+    sessions.user_tokens.clear()
+    sessions.user_tokens.update({
         CTRL: {"role": "controller", "slot": 1},
         VIEW: {"role": "viewer", "slot": None},
         ODD: {"role": "controller", "slot": 2},
     })
-    S.active_mk_token = None
+    sessions.active_mk_token = None
 
 
 BEARER_CHALLENGE = f'Bearer realm="{AUTH_REALM}"'
@@ -278,7 +278,7 @@ async def secure_basic_off() -> None:
             "POST", "/api/switch", headers=dict(_cookie(CTRL), Origin="http://evil.example"))
         check("a cross-site switch is refused whatever it carries", status == 403, status)
 
-    S.user_tokens.clear()
+    sessions.user_tokens.clear()
     async with _App(_Settings()) as app:
         status, _, _ = await app.call("GET", "/api/files/", headers=_bearer(CTRL))
         check("a revoked token is refused", status == 401, status)

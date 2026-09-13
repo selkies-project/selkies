@@ -50,9 +50,9 @@ from aiohttp.web_ws import WebSocketResponse
 from aiohttp import web, WSMessage, WSMsgType
 from typing import Awaitable, Callable, Dict, Set, Optional, Any, Tuple, List
 
-from .webrtc_utils import _is_trusted_config_file
+from .webrtc_ice_config import _is_trusted_config_file
 from .settings import settings as app_settings
-from .selkies import _lookup_session_token
+from .sessions import _lookup_session_token
 from .stream_server import note_pong
 
 logger = logging.getLogger("signaling")

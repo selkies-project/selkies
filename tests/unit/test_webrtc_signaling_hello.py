@@ -13,7 +13,7 @@ import sys
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 
-from selkies.webrtc_signaling import WebRTCSignalingClient  # noqa: E402
+from selkies.webrtc_signaling_client import WebRTCSignalingClient  # noqa: E402
 
 
 def started(line: str) -> dict:

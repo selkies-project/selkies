@@ -28,8 +28,8 @@ os.environ["SELKIES_FILE_MANAGER_PATH"] = tempfile.mkdtemp(prefix="selkies-gp-au
 import helpers as H  # noqa: E402
 
 from selkies.input_handler import gamepad_slot_denied  # noqa: E402
-import selkies.selkies as S  # noqa: E402
-from selkies.rtc import ClientType, RTCApp  # noqa: E402
+from selkies import sessions  # noqa: E402
+from selkies.webrtc_engine import ClientType, RTCApp  # noqa: E402
 from selkies.settings import settings as app_settings  # noqa: E402
 
 CONNECT = "js,c,{},UFJPQkU=,6,17"
@@ -88,11 +88,11 @@ async def webrtc(res: H.Results) -> None:
               not any(app._gamepad_denied(BUTTON.format(i), ClientType.CONTROLLER, None, 1)
                       for i in range(4)))
 
-    tokens_before, mk_before = S.user_tokens, S.active_mk_token
+    tokens_before, mk_before = sessions.user_tokens, sessions.active_mk_token
     master_before = app_settings.master_token
     try:
         app_settings.master_token = "unit-master"
-        S.user_tokens = {"tok-p2": {"role": "viewer", "slot": 2},
+        sessions.user_tokens = {"tok-p2": {"role": "viewer", "slot": 2},
                          "tok-none": {"role": "controller", "slot": None}}
         res.check("WebRTC secure: the token's slot wins over the claim",
                   app._gamepad_denied(BUTTON.format(0), ClientType.VIEWER, "tok-p2", 1)
@@ -102,12 +102,12 @@ async def webrtc(res: H.Results) -> None:
         res.check("WebRTC secure: an unknown token drives no gamepad",
                   app._gamepad_denied(BUTTON.format(0), ClientType.VIEWER, "gone", 2))
         # Read per message, not held from connect, so a re-slot lands at once.
-        S.user_tokens["tok-p2"] = {"role": "viewer", "slot": 3}
+        sessions.user_tokens["tok-p2"] = {"role": "viewer", "slot": 3}
         res.check("WebRTC secure: a re-slotted token takes effect on the next message",
                   app._gamepad_denied(BUTTON.format(1), ClientType.VIEWER, "tok-p2", 1)
                   and not app._gamepad_denied(BUTTON.format(2), ClientType.VIEWER, "tok-p2", 1))
     finally:
-        S.user_tokens, S.active_mk_token = tokens_before, mk_before
+        sessions.user_tokens, sessions.active_mk_token = tokens_before, mk_before
         app_settings.master_token = master_before
 
 

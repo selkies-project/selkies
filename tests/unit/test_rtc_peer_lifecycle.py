@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
-from selkies.rtc import RTCApp
+from selkies.webrtc_engine import RTCApp
 
 
 class Service:

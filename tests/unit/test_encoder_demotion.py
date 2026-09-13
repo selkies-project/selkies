@@ -16,7 +16,7 @@ for key in [k for k in os.environ if k.startswith("SELKIES_")]:
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 
-from selkies.media_pipeline import MediaPipelinePixel  # noqa: E402
+from selkies.webrtc_media_pipeline import MediaPipelinePixel  # noqa: E402
 from selkies.settings import encoder_for_codec  # noqa: E402
 
 passed = failed = 0

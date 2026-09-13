@@ -1,7 +1,7 @@
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
-"""WebSockets-mode streaming server: the main Selkies application module.
+"""WebSockets streaming mode: the service that pairs pixelflux capture with WebSocket clients.
 
 Owns the data WebSocket plane for the websockets transport: per-client
 connection handling (auth/roles, input dispatch, settings), the per-display
@@ -43,7 +43,6 @@ import inspect
 import base64
 import contextlib
 import gzip
-import hmac
 import json
 import logging
 import os
@@ -52,9 +51,8 @@ import time
 import secrets
 from collections import OrderedDict, deque
 from datetime import datetime
-from enum import Enum
 from types import SimpleNamespace
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 try:
     import fcntl
@@ -103,8 +101,9 @@ from .input_handler import (
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
-from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting
+from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting
 from .settings import settings as app_settings
+from . import sessions
 from . import audit
 from .webcam import (
     MSG_WEBCAM_DISABLED,
@@ -210,24 +209,6 @@ IS_WAYLAND = bool(settings.wayland[0])
 CURSOR_SIZE: Optional[int] = settings.cursor_size if settings.cursor_size > 0 else None
 
 
-def _scaling_dpi_bounds() -> tuple[int, int]:
-    """Numeric span of the declared scaling_dpi stops.
-
-    The 's,' DPI verb accepts any value in between (a client's device-pixel
-    ratio need not land on a stop), but never outside it: the DPI is applied to
-    the desktop and, when an explicit cursor size is configured, scales the
-    cursor request with it.
-
-    Returns:
-        The `(min, max)` DPI bounds, falling back to `(96, 288)` when no stops
-        are declared.
-    """
-    definition = next((s for s in SETTING_DEFINITIONS if s['name'] == 'scaling_dpi'), None)
-    stops = [float(v) for v in (definition or {}).get('meta', {}).get('allowed', [])]
-    return (int(min(stops)), int(max(stops))) if stops else (96, 288)
-
-
-SCALING_DPI_MIN, SCALING_DPI_MAX = _scaling_dpi_bounds()
 _EXPLICIT_GPU_ID = parse_gpu_id(settings.gpu_id)
 GPU_ID_DEFAULT = _EXPLICIT_GPU_ID if _EXPLICIT_GPU_ID is not None and _EXPLICIT_GPU_ID >= 0 else 0
 
@@ -273,81 +254,7 @@ except OSError as e:
     logger.error(f"Could not create upload directory {upload_dir_path}: {e}")
     upload_dir_path = None
 
-user_tokens: dict[str, dict] = {}
 client_permissions: dict[Any, dict] = {}
-active_mk_token: Optional[str] = None
-
-
-def current_session_tokens() -> tuple[dict[str, dict], Optional[str]]:
-    """Live control-plane token view, as provisioned via /api/tokens.
-
-    Returns:
-        The `(user_tokens mapping, active mk-token)` pair. Both transports
-        authorize input against this.
-    """
-    return user_tokens, active_mk_token
-
-
-def _perms_hold_input_authority(perms: Optional[dict], token: Optional[str] = None) -> bool:
-    """Apply the single input-authority rule shared by both transports.
-
-    While an mk token is active only its holder may drive keyboard/mouse (and
-    the commands and clipboard that ride the same gate); otherwise any
-    controller-role client may.
-
-    Args:
-        perms: The client's permission entry (may be None or empty).
-        token: Covers callers holding a user_tokens entry, which carries no
-            token field of its own.
-    """
-    perms = perms or {}
-    if active_mk_token is not None:
-        return (perms.get("token") if token is None else token) == active_mk_token
-    return perms.get("role", "viewer") == "controller"
-
-
-def _mk_access_verdict(perms: Optional[dict], token: Optional[str] = None) -> bool:
-    """The MK_ACCESS verdict a tokened websockets client is told.
-
-    Input authority under the mk-token rule, with a viewer additionally held
-    to enable_collab: a read-only viewer must not attach an input context
-    whose every message the gate then drops. The same verdict WebRTC pushes
-    at data-channel open.
-
-    Args:
-        perms: The client's permission entry (may be None or empty).
-        token: Covers callers holding a user_tokens entry, which carries no
-            token field of its own.
-    """
-    perms = perms or {}
-    if perms.get("role") != "controller" and not bool(app_settings.enable_collab[0]):
-        return False
-    return _perms_hold_input_authority(perms, token=token)
-
-
-def _lookup_session_token(token: Optional[str]) -> Optional[dict]:
-    """The user_tokens entry for a session token, compared in constant time.
-
-    Every provisioned token is compared (no early exit), so the reply timing
-    does not tell a probing client how far its guess matched or which table
-    entry it resembles.
-
-    Returns:
-        The token's permission entry, or None when it is not provisioned.
-    """
-    if not token:
-        return None
-    candidate = token.encode("utf-8")
-    match = None
-    for known, perms in user_tokens.items():
-        if hmac.compare_digest(candidate, known.encode("utf-8")):
-            match = perms
-    return match
-
-
-# Set by the WebRTC service so a token update also reconciles live WebRTC peers;
-# reconcile_clients() itself only walks websockets sockets.
-webrtc_reconcile_hook: Optional[Callable[[], Awaitable[None]]] = None
 
 
 # Below this, gzip does not pay for its CPU and latency-critical small messages
@@ -797,11 +704,6 @@ class _VideoRelay:
 
 class SelkiesAppError(Exception):
     """Application-level error raised for unrecoverable streaming conditions."""
-
-class RateControlMode(str, Enum):
-    """H.264 rate-control mode: constant bitrate or constant quality (CRF)."""
-    CBR = "cbr"
-    CRF = "crf"
 
 class SelkiesStreamingApp:
     """Session-level streaming state shared across transports.
@@ -3270,7 +3172,7 @@ class DataStreamingServer(BaseStreamingService):
         entry for a socket already removed from client_permissions."""
         if perms is None:
             perms = client_permissions.get(websocket)
-        return _perms_hold_input_authority(perms)
+        return sessions._perms_hold_input_authority(perms)
 
     async def ws_handler(
         self,
@@ -3310,7 +3212,7 @@ class DataStreamingServer(BaseStreamingService):
         """
         if self.is_secure_mode:
             await self.config_gate.wait()
-            permissions = _lookup_session_token(token)
+            permissions = sessions._lookup_session_token(token)
             if permissions is None:
                 data_logger.warning(f"Rejecting connection from {remote_address}: Missing or invalid token.")
                 await websocket.close(code=4001, message=b"Invalid authentication token")
@@ -3405,7 +3307,7 @@ class DataStreamingServer(BaseStreamingService):
             # After MODE, which makes the page build the input context this verdict
             # applies to (a viewer holding the mk token attaches on 1, an outranked
             # controller detaches on 0).
-            granted = _mk_access_verdict(client_permissions.get(websocket))
+            granted = sessions._mk_access_verdict(client_permissions.get(websocket))
             try:
                 await websocket.send_str("MK_ACCESS,1" if granted else "MK_ACCESS,0")
             except (ConnectionResetError, OSError, RuntimeError):
@@ -3553,8 +3455,8 @@ class DataStreamingServer(BaseStreamingService):
                         mic_perms = client_permissions.get(websocket) or {}
                         mic_ok = mic_perms.get("role") != "viewer" or (
                             settings.enable_collab[0]
-                            and active_mk_token is not None
-                            and mic_perms.get("token") == active_mk_token
+                            and sessions.active_mk_token is not None
+                            and mic_perms.get("token") == sessions.active_mk_token
                         )
                         if not mic_ok:
                             if not mic_disabled_sent:
@@ -3648,8 +3550,8 @@ class DataStreamingServer(BaseStreamingService):
                         cam_perms = client_permissions.get(websocket) or {}
                         cam_collab = (
                             settings.enable_collab[0]
-                            and active_mk_token is not None
-                            and cam_perms.get("token") == active_mk_token
+                            and sessions.active_mk_token is not None
+                            and cam_perms.get("token") == sessions.active_mk_token
                         )
                         if not webcam_uplink_allowed(cam_perms.get("role") == "viewer", cam_collab):
                             if not webcam_disabled_sent:
@@ -3688,7 +3590,7 @@ class DataStreamingServer(BaseStreamingService):
                         # Authority lists shared with the WebRTC gate: the collab extras
                         # need enable_collab on, even for a viewer holding the mk token.
                         allowed_viewer_prefixes: tuple[str, ...] = VIEWER_ALLOWED_PREFIXES
-                        if settings.enable_collab[0] and active_mk_token and perms.get("token") == active_mk_token:
+                        if settings.enable_collab[0] and sessions.active_mk_token and perms.get("token") == sessions.active_mk_token:
                             allowed_viewer_prefixes = allowed_viewer_prefixes + VIEWER_COLLAB_EXTRA_PREFIXES
                         if not message.startswith(allowed_viewer_prefixes):
                             # A viewer's blur/visibility noise (kr would clobber the
@@ -4212,7 +4114,7 @@ class DataStreamingServer(BaseStreamingService):
                             perms = client_permissions.get(websocket) or {}
                             slot = perms.get("slot")
                             if self.is_secure_mode:
-                                live = user_tokens.get(perms.get("token")) if perms.get("token") else None
+                                live = sessions.user_tokens.get(perms.get("token")) if perms.get("token") else None
                                 slot = live.get("slot") if live else None
                             if gamepad_slot_denied(message, perms.get("role"), slot,
                                                    self.is_secure_mode):
@@ -5889,7 +5791,7 @@ class DataStreamingServer(BaseStreamingService):
     async def handle_tokens(self, request: web.Request) -> web.StreamResponse:
         """Accept a full replacement of the session's token/permission table.
 
-        Provisioning is transport-independent: user_tokens/active_mk_token
+        Provisioning is transport-independent: sessions.user_tokens/sessions.active_mk_token
         govern authority for both the websockets and WebRTC gates, so tokens
         are accepted in any active mode (unlike the data WS endpoint, which is
         mode-gated). Secure mode is read from settings.master_token, not
@@ -5900,7 +5802,6 @@ class DataStreamingServer(BaseStreamingService):
         if not settings.master_token:
             return web.json_response({"error": "Server not in secure mode"}, status=404)
 
-        global user_tokens, active_mk_token
         try:
             new_token_data = await request.json()
             if not isinstance(new_token_data, dict): raise ValueError("Payload must be a JSON object")
@@ -5916,9 +5817,9 @@ class DataStreamingServer(BaseStreamingService):
             if perms.get("mk_control", False):
                 new_mk_owner = tkn
                 break
-        user_tokens = new_token_data
-        active_mk_token = new_mk_owner
-        logger.info(f"Updated user tokens. Now tracking {len(user_tokens)} tokens.")
+        sessions.user_tokens = new_token_data
+        sessions.active_mk_token = new_mk_owner
+        logger.info(f"Updated user tokens. Now tracking {len(sessions.user_tokens)} tokens.")
         if not self.config_gate.is_set():
             self.config_gate.set()
             logger.info("Configuration gate is now open. WebSocket server will accept connections.")
@@ -6178,9 +6079,8 @@ async def reconcile_clients() -> None:
     invoking the WebRTC reconcile hook so live WebRTC peers get the same
     treatment — this function itself only walks websockets sockets.
     """
-    global user_tokens, client_permissions
     connected_websockets = list(client_permissions.keys())
-    current_tokens = user_tokens.copy()
+    current_tokens = sessions.user_tokens.copy()
     for ws in connected_websockets:
         if ws.closed:
             continue
@@ -6220,7 +6120,7 @@ async def reconcile_clients() -> None:
                 pass
             # new_perms is None for a revoked token.
             continue
-        has_mk_access = _mk_access_verdict(new_perms, token=token)
+        has_mk_access = sessions._mk_access_verdict(new_perms, token=token)
         mk_msg = "MK_ACCESS,1" if has_mk_access else "MK_ACCESS,0"
         try:
             await ws.send_str(mk_msg)
@@ -6230,8 +6130,8 @@ async def reconcile_clients() -> None:
                     await data_server.send_current_cursor(ws, remote_address)
         except (ConnectionResetError, OSError, RuntimeError):
             pass
-    if webrtc_reconcile_hook is not None:
+    if sessions.webrtc_reconcile_hook is not None:
         try:
-            await webrtc_reconcile_hook()
+            await sessions.webrtc_reconcile_hook()
         except Exception:
             data_logger.exception("WebRTC peer reconcile failed")

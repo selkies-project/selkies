@@ -26,9 +26,9 @@ sys.argv = ["selkies"]
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 from selkies import audio_control, audit  # noqa: E402
-from selkies import selkies as S  # noqa: E402
-from selkies.rtc import ClientType, RTCApp  # noqa: E402
-from selkies.selkies import DataStreamingServer, client_permissions  # noqa: E402
+from selkies import sessions  # noqa: E402
+from selkies.webrtc_engine import ClientType, RTCApp  # noqa: E402
+from selkies.websockets_mode import DataStreamingServer, client_permissions  # noqa: E402
 from selkies.stream_server import CentralizedStreamServer, _uplink_session_state  # noqa: E402
 
 MASTER, CTRL, VIEW = "unit-master-token", "unit-ctrl-token", "unit-view-token"
@@ -149,9 +149,9 @@ def bearer(token: str) -> dict:
 
 
 async def route_cases(fake: FakePixelflux, pcm: FakePcmflux, root: str) -> None:
-    S.user_tokens.clear()
-    S.user_tokens.update({CTRL: {"role": "controller", "slot": 1}, VIEW: {"role": "viewer", "slot": None}})
-    S.active_mk_token = None
+    sessions.user_tokens.clear()
+    sessions.user_tokens.update({CTRL: {"role": "controller", "slot": 1}, VIEW: {"role": "viewer", "slot": None}})
+    sessions.active_mk_token = None
     server = CentralizedStreamServer.__new__(CentralizedStreamServer)
     server.settings = settings()
     server.upload_dir = pathlib.Path(root)
@@ -304,7 +304,7 @@ async def route_cases(fake: FakePixelflux, pcm: FakePcmflux, root: str) -> None:
         audio_control.ensure_capture_sink = ensure_sink
         recorder.close()
         await client.close()
-        S.user_tokens.clear()
+        sessions.user_tokens.clear()
 
 
 class Socket:

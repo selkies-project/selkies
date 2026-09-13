@@ -1687,7 +1687,7 @@ class CentralizedStreamServer:
         """
         # Resolved per call: selkies imports this module, so the token table
         # it owns cannot be imported at module load.
-        from .selkies import _lookup_session_token
+        from .sessions import _lookup_session_token
 
         if self._check_master_token(request.headers.get("Authorization"), settings.master_token):
             return "controller", "header"

@@ -47,14 +47,14 @@ import argparse
 from aiohttp import web
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
-from .rtc import IDR_REQUEST_FLOOR_S, RTCApp, ClientType
-from . import selkies as selkies_module
-from .selkies import current_session_tokens, SCALING_DPI_MIN, SCALING_DPI_MAX
-from .media_pipeline import (MediaPipelinePixel, RateControlMode,
-                             ScreenCapture as PixelfluxScreenCapture)
+from .webrtc_engine import IDR_REQUEST_FLOOR_S, RTCApp, ClientType
+from . import sessions
+from .sessions import current_session_tokens
+from .webrtc_media_pipeline import (MediaPipelinePixel,
+                                    ScreenCapture as PixelfluxScreenCapture)
 from .webrtc.codecs import configure_multiopus
-from .webrtc_signaling import WebRTCSignalingClient
-from .signaling_server import WebRTCPeerManagement
+from .webrtc_signaling_client import WebRTCSignalingClient
+from .webrtc_signaling_server import WebRTCPeerManagement
 from .input_handler import WebRTCInput
 from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_id,
                             compute_dual_layout, apply_extended_layout, get_new_res,
@@ -63,13 +63,13 @@ from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_
                             WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id,
                             wayland_reposition_primary, wayland_shrink_output,
                             parse_resize_dims, cursor_size_for_dpi, align_dims_16)
-from .webrtc_utils import get_rtc_configuration
+from .webrtc_ice_config import get_rtc_configuration
 from .metrics import Metrics
 from . import resource_stats
-from .settings import (settings, AppSettings, SETTING_DEFINITIONS,
+from .settings import (settings, AppSettings, SETTING_DEFINITIONS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX,
                        build_client_settings_payload, sanitize_client_setting)
 from types import SimpleNamespace
-from .webrtc_utils import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
+from .webrtc_ice_config import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
 from .stream_server import BaseStreamingService, CentralizedStreamServer
 from .audio_control import AudioControl
 
@@ -634,7 +634,7 @@ class WebRTCService(BaseStreamingService):
         self.rtc_app.on_audio_consumer_active = self.handle_audio_consumer_active
         self.rtc_app.on_consumers_changed = self.handle_consumers_changed
         # /api/tokens updates must reach live WebRTC peers too.
-        selkies_module.webrtc_reconcile_hook = self.reconcile_webrtc_peers
+        sessions.webrtc_reconcile_hook = self.reconcile_webrtc_peers
 
         self.input_handler.on_scaling_ratio = self.handle_scaling
         self.input_handler.on_resize = self.on_resize_handler

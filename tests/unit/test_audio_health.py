@@ -33,7 +33,7 @@ def check(label: str, ok, detail="") -> None:
 
 PROBE = r"""
 import asyncio, json, logging, time
-import selkies.selkies as S
+import selkies.websockets_mode as S
 
 out = {}
 

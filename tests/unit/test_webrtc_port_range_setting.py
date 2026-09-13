@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The webrtc_port_range setting parser, imported through the real module.
 
-Importing `selkies.rtc` is itself the first assertion: the parser must be
+Importing `selkies.webrtc_engine` is itself the first assertion: the parser must be
 defined after the names its annotations use, or the whole server fails to
 start on interpreters that evaluate annotations at definition time.
 """
@@ -28,13 +28,13 @@ def check(label: str, ok, detail="") -> None:
 
 def main() -> int:
     try:
-        from selkies.rtc import parse_webrtc_port_range
+        from selkies.webrtc_engine import parse_webrtc_port_range
     except Exception as exc:  # noqa: BLE001 - the import IS the test
-        check("selkies.rtc imports cleanly", False, repr(exc))
+        check("selkies.webrtc_engine imports cleanly", False, repr(exc))
         print(f"[port-range-setting] {passed} passed, {failed} failed",
               flush=True)
         return 1
-    check("selkies.rtc imports cleanly", True)
+    check("selkies.webrtc_engine imports cleanly", True)
 
     check('empty keeps ephemeral', parse_webrtc_port_range("") is None)
     check('whitespace keeps ephemeral', parse_webrtc_port_range("  ") is None)

@@ -92,7 +92,7 @@ from .display_utils import (
     layout_extent,
     wayland_output_id,
 )
-from .media_pipeline import RateControlMode
+from .settings import RateControlMode
 from .settings import settings
 from . import audit
 try:

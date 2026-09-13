@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
-from selkies.media_pipeline import MediaPipelinePixel
+from selkies.webrtc_media_pipeline import MediaPipelinePixel
 
 
 class FakeModule:

@@ -24,8 +24,8 @@ sys.argv = ["selkies"]
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 from selkies import audit, printing  # noqa: E402
-from selkies.rtc import ClientType, RTCApp  # noqa: E402
-from selkies.selkies import DataStreamingServer, client_permissions  # noqa: E402
+from selkies.webrtc_engine import ClientType, RTCApp  # noqa: E402
+from selkies.websockets_mode import DataStreamingServer, client_permissions  # noqa: E402
 from selkies.stream_server import CentralizedStreamServer  # noqa: E402
 
 passed = failed = 0

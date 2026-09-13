@@ -106,12 +106,12 @@ Each is documented in full where named; read that before changing the subsystem.
 - A DPI is an output scale on the session compositor, never Xft resources; only a changed capture scale restarts a
   capture (`src/selkies/display_utils.py` module docstring).
 - Software H.264 is a property of the installed pixelflux build, never a Selkies setting
-  (`settings.software_encoders`, `canonical_encoder`; the OpenH264 profile gate in `src/selkies/rtc.py`).
+  (`settings.software_encoders`, `canonical_encoder`; the OpenH264 profile gate in `src/selkies/webrtc_engine.py`).
 - The sound-server control plane is in-process over pulsectl_asyncio under a never-cancel discipline; `pactl` is
   only the fallback when the bindings are missing (`src/selkies/audio_control.py` module docstring).
 - Bulk traffic sharing the session connection is paced by an end-to-end gauge, never by the local send
   queue alone: a proxy or a receive window in front absorbs writes, so that queue reads empty on the very
-  transfer burying the stream (`selkies._bulk_pace`, `stream_server.UplinkGauge`; WebRTC instead rides
+  transfer burying the stream (`websockets_mode._bulk_pace`, `stream_server.UplinkGauge`; WebRTC instead rides
   SCTP's own congestion control, which no such hop can hide).
 - A modifier's role comes from the keysym the client resolved for it, never from the engine's flags:
   browsers name the same physical key differently (macOS Option is `AltGraph` to Gecko, `Alt` to Blink, a
@@ -149,7 +149,7 @@ Each is documented in full where named; read that before changing the subsystem.
 - What a session starts with is one rule both transports read (`settings.pipeline_starts_on`, the
   `*_on_start` settings): the server captures only what a page receives and the page requests only what
   the policy or the user turned on, so nothing is started only to be stopped and a capture nobody receives
-  never runs (`media_pipeline` module docstring, `DataStreamingServer._video_start_state`, each core's
+  never runs (`webrtc_media_pipeline` module docstring, `DataStreamingServer._video_start_state`, each core's
   `applyStartPolicy`).
 - The WebRTC ICE topology is decided once, at startup: `RTCApp.open_ice_muxes` binds the shared UDP and
   TCP ports the settings name (failing the service on a port in use), and every peer's gatherer reads the
