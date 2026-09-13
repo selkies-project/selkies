@@ -306,6 +306,16 @@ let lastReceivedVideoFrameId = -1;
 let lastReceivedVideoFrameAt = 0;
 /** Newest id the page path acked, and when: an unchanged one repeats on the heartbeat. */
 let lastAckSentId = -1, lastAckSentAt = 0;
+/**
+ * When a decoded video frame was last presented, on any path (worker or page, striped or
+ * full-frame). The no-output watchdog reads it to tell a decoder that produces nothing from
+ * a still screen that sends nothing. `NO_OUTPUT_WATCHDOG_MS` is the grace it allows chunks to
+ * flow with no frame out before it trips the software-decode retry.
+ */
+let lastVideoOutputAt = 0;
+let lastVideoChunkAt = 0;
+let noOutputStalledSince = 0;
+const NO_OUTPUT_WATCHDOG_MS = 4000;
 let initializationComplete = false;
 let audioEnabled = true;
 /**
@@ -836,6 +846,41 @@ const retireCrashCountWhenHealthy = () => {
     console.warn('Selkies: could not clear the decoder crash count:', e);
   }
 };
+/**
+ * A hardware decoder can take its config and then neither output a frame nor raise an error,
+ * so nothing signals the fallback ladder and the screen stays black (older iOS and Intel parts
+ * do this when fed a stream the part cannot decode). When video chunks keep arriving yet no
+ * frame has been presented on any path for `NO_OUTPUT_WATCHDOG_MS`, this trips the same
+ * one-shot software-decode retry a decoder error would; its escalation carries on from there,
+ * and a real decoder error still gets there first. A still screen sends no chunks, so it never
+ * triggers, and the retry is spent once so an engine that ignores the software hint cannot loop.
+ */
+function checkVideoOutputWatchdog() {
+  if (isSharedMode || window.isFallingBack || softwareDecodeAttempted ||
+      !isVideoPipelineActive || currentEncoderMode === 'jpeg' ||
+      typeof VideoDecoder === 'undefined') {
+    noOutputStalledSince = 0;
+    return;
+  }
+  const now = performance.now();
+  // Chunks are still arriving, and the newest one is well ahead of the newest decoded frame:
+  // the decoder is ingesting without producing. A still screen sends no fresh chunk, and a
+  // healthy decoder's output keeps pace with the chunks, so neither trips this.
+  const chunksArriving = now - lastVideoChunkAt < NO_OUTPUT_WATCHDOG_MS;
+  const outputBehindChunks = lastVideoChunkAt - lastVideoOutputAt > NO_OUTPUT_WATCHDOG_MS;
+  if (!chunksArriving || !outputBehindChunks) {
+    noOutputStalledSince = 0;
+    return;
+  }
+  if (noOutputStalledSince === 0) {
+    noOutputStalledSince = now;
+    return;
+  }
+  if (now - noOutputStalledSince >= NO_OUTPUT_WATCHDOG_MS) {
+    noOutputStalledSince = 0;
+    initiateFallback(new Error('decoder produced no output while chunks arrived'), 'no_output');
+  }
+}
 
 document.title = 'Selkies';
 fetch('manifest.json')
@@ -1369,6 +1414,7 @@ const ack = () => self.postMessage({ ack: true });
 
 // Present one decoded VideoFrame on the active sink. Consumes/closes the frame.
 function present(f) {
+  presentedFrames++;
   if (mode === 'vtg' && writer && !closed) {
     // Drop on sink backpressure.
     if (writer.desiredSize !== null && writer.desiredSize <= 0) {
@@ -2093,11 +2139,13 @@ function ensureVideoWorker() {
       }
       if (m.type === 'wireStats') {
         window.videoChunksReceived += m.chunks;
+        if (m.chunks > 0) lastVideoChunkAt = performance.now();
         const stripedNow = currentEncoderMode === 'h264enc-striped' || currentEncoderMode === 'jpeg';
         // Striped fps means composites presented, exactly as on the page path;
         // full-frame rate stays a wire measure.
         if (stripedNow) frameCount += (m.presents || 0);
         else divertedWireFramesThisPeriod += m.frames;
+        if ((m.presents || 0) > 0) lastVideoOutputAt = performance.now();
         if (m.lastId >= 0) { lastReceivedVideoFrameId = m.lastId; lastReceivedVideoFrameAt = performance.now(); }
         if (m.rows) window.videoStripeRows = m.rows;
         if (isSharedMode && m.chunks > 0) lastSharedVideoChunkTime = performance.now();
@@ -3569,6 +3617,7 @@ function stripeCompositeDraw(stripe, yPos) {
  */
 function stripeCompositePresent() {
   frameCount++;
+  lastVideoOutputAt = performance.now();
   lastPresentedVideoFrameId = stripePendingFrameId;
   lastPresentedVideoFrameAt = performance.now();
   if (stripeWorkerActive && stripeWorker) {
@@ -3711,6 +3760,7 @@ function handleDecodedVncStripeFrame(yPos, frame) {
       }
       try { frame.close(); } catch (e) {}
     }
+    lastVideoOutputAt = performance.now();
     if (!streamStarted) startStream();
     return;
   }
@@ -5265,6 +5315,7 @@ function initWebsockets() {
         }
         const frame = decodedStripesQueue[lastIdx].frame;
         decodedStripesQueue.length = 0;
+        lastVideoOutputAt = performance.now();
         if (supportsWindowMSTG && presentFrameToVideo(frame)) {
           // Handed to the main-thread track generator.
         } else if (USE_OFFSCREEN_WORKER && presentFrameToWorker(frame)) {
@@ -6284,6 +6335,7 @@ class WorkerWebSocket {
     }
 
     retireCrashCountWhenHealthy();
+    checkVideoOutputWatchdog();
   };
 
   /**
@@ -6490,6 +6542,7 @@ class WorkerWebSocket {
 
       if (dataTypeByte === 0x03 || dataTypeByte === 0x04) {
         window.videoChunksReceived++;
+        lastVideoChunkAt = performance.now();
         if (startVideoWatchdogTimer !== null) {
           clearStartVideoWatchdog();
         }

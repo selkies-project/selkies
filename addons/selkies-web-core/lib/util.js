@@ -123,17 +123,24 @@ const DECODER_PROBE_TIMEOUT_MS = 10000;
  */
 async function decoderAccepts(codec, width, height) {
     if (typeof VideoDecoder === "undefined") return false;
-    try {
-        // The timer stands in for the refusal a decoder without the profile
-        // gives, so an engine that never answers reads as one.
-        const support = await Promise.race([
-            VideoDecoder.isConfigSupported({ codec, codedWidth: width, codedHeight: height }),
-            new Promise((resolve) => setTimeout(resolve, DECODER_PROBE_TIMEOUT_MS)),
-        ]);
-        return !!(support && support.supported);
-    } catch (err) {
-        return false;
+    // The runtime falls back to a software decoder where the hardware one refuses, so an
+    // encoder software can play is still offered: a refused default probe is retried on
+    // software before it counts as unsupported. The timer stands in for the refusal a decoder
+    // without the profile gives, so an engine that never answers reads as one.
+    for (const accel of [undefined, "prefer-software"]) {
+        try {
+            const config = { codec, codedWidth: width, codedHeight: height };
+            if (accel) config.hardwareAcceleration = accel;
+            const support = await Promise.race([
+                VideoDecoder.isConfigSupported(config),
+                new Promise((resolve) => setTimeout(resolve, DECODER_PROBE_TIMEOUT_MS)),
+            ]);
+            if (support && support.supported) return true;
+        } catch (err) {
+            // Fall through to the next acceleration preference.
+        }
     }
+    return false;
 }
 
 /**
