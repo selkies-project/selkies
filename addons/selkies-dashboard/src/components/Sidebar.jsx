@@ -1701,6 +1701,11 @@ function Sidebar() {
       const final = s_enable_binary_clipboard.locked ? s_enable_binary_clipboard.value : getStoredBool("enable_binary_clipboard", s_enable_binary_clipboard.value);
       setEnableBinaryClipboard(final);
     }
+    for (const [key, setValue] of [["clipboard_seamless", setClipboardSeamless],
+                                   ["keyboard_shortcuts", setKeyboardShortcuts]]) {
+      const s = serverSettings[key];
+      if (s) setValue(s.locked ? s.value : getStoredBool(key, s.value));
+    }
     const s_ui_title = serverSettings.ui_title;
     if (s_ui_title) {
         setUiTitle(s_ui_title.value);

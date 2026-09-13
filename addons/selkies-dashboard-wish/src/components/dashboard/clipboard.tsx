@@ -98,6 +98,11 @@ export function Clipboard() {
 					const final = s.locked ? s.value : (saved !== null ? saved === 'true' : s.value);
 					setEnableBinaryClipboard(final);
 				}
+				const seamless = payload?.clipboard_seamless;
+				if (seamless) {
+					setClipboardSeamless(seamless.locked ? seamless.value
+						: storedBool('clipboard_seamless', seamless.value));
+				}
 			}
 		};
 

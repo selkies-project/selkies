@@ -31,8 +31,10 @@ const shortcuts = [
 export function ShortcutsMenu() {
 	const renderableSettings: any = computeRenderableSettings(getLastServerSettings());
 	const [enabled, setEnabled] = useState(() => {
+		const server = getLastServerSettings()?.keyboard_shortcuts;
+		if (server?.locked) return !!server.value;
 		const saved = localStorage.getItem(getPrefixedKey("keyboard_shortcuts"));
-		return saved !== null ? saved === 'true' : true;
+		return saved !== null ? saved === 'true' : (server ? !!server.value : true);
 	});
 	const toggle = () => {
 		const value = !enabled;
