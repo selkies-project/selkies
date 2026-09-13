@@ -55,12 +55,15 @@ jobs:
       matrix:
         # The uinput ABI is computed in pure Python, so every interpreter the
         # package claims support for checks it against the kernel headers
-        python-version: ["3.9", "3.14"]
+        python-version: ["3.9", "3.15"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          # The newest interpreter is taken from its release candidates until
+          # its final release
+          allow-prereleases: true
       # The dashboard translation audit is JavaScript, and reports itself
       # skipped rather than passing when it cannot run
       - uses: actions/setup-node@v7

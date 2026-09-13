@@ -91,7 +91,7 @@ what runs where.
   keeping parallel copies, when you are confident there is no regression or can validate it.
 - Screen coroutine usage in Python and JavaScript and thread usage in every language so nothing hangs or lags.
   Zero-copy and latency-reducing measures are always worth preserving or adding.
-- Compatibility spans Python 3.9 to 3.14 or higher and CUDA/NVENC 11 to 13 or higher. Gate on capabilities, never
+- Compatibility spans Python 3.9 to 3.15 or higher and CUDA/NVENC 11 to 13 or higher. Gate on capabilities, never
   on interpreter versions: prefer the API that already encapsulates the difference (e.g. a library's own runner),
   else probe the feature itself (`hasattr`, a parameter's presence in `inspect.signature`, a try/except of the
   API) — never compare `sys.version_info`.

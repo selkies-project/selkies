@@ -99,14 +99,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          # The newest interpreter is taken from its release candidates until
+          # its final release
+          allow-prereleases: true
       - name: Byte-compile every module
-        # pyproject.toml claims 3.9 through 3.14; this catches syntax that only
+        # pyproject.toml claims 3.9 through 3.15; this catches syntax that only
         # the newer interpreters accept
         run: python -m compileall -q src/selkies
 
