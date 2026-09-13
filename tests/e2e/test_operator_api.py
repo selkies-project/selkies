@@ -26,6 +26,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Optional
 
@@ -34,7 +35,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "integration"))
 import helpers as H
 import core_lib as C
+from array import array
 from test_audit_webhook import Collector
+from test_microphone_audio import CAPTURE_RATE, analyse, tone_wav
 from playwright.sync_api import sync_playwright
 
 FILES_DIR = os.path.join(H.WORKDIR, "operator-files")
@@ -164,8 +167,39 @@ def png_size(data: bytes) -> Optional[tuple]:
     return struct.unpack(">II", data[16:24])
 
 
+def play_tone(seconds: int) -> Optional[subprocess.Popen]:
+    """Plays the microphone suite's tone into the session's sink, the one the
+    recorder's audio capture reads, for `seconds`."""
+    paplay, pulse = shutil.which("paplay"), H.pulse_server()
+    if not paplay or not pulse:
+        return None
+    wav = os.path.join(tempfile.mkdtemp(prefix="selkies-rec-"), "tone.wav")
+    tone_wav(wav, seconds=seconds)
+    return subprocess.Popen([paplay, "--server", pulse, "--device", "output", wav],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def audio_track(path: str) -> Optional[dict]:
+    """The file's first audio stream as ffprobe decodes it, with the tone
+    analysis of its second second as mono PCM."""
+    ffprobe, ffmpeg = shutil.which("ffprobe"), shutil.which("ffmpeg")
+    if not ffprobe or not ffmpeg:
+        return None
+    probe = subprocess.run([ffprobe, "-v", "error", "-count_frames", "-select_streams", "a:0",
+                            "-show_entries", "stream=codec_name,channels,nb_read_frames", "-of", "csv=p=0", path],
+                           capture_output=True, text=True, timeout=120).stdout.strip().split(",")
+    pcm = subprocess.run([ffmpeg, "-v", "error", "-i", path, "-vn", "-f", "s16le", "-ac", "1",
+                          "-ar", str(CAPTURE_RATE), "-"], capture_output=True, timeout=120).stdout
+    samples = array("h")
+    samples.frombytes(pcm[:len(pcm) - len(pcm) % 2])
+    return {"codec": probe[0] if probe else "", "channels": int(probe[1]) if len(probe) > 1 else 0,
+            "frames": int(probe[2]) if len(probe) > 2 and probe[2].isdigit() else 0,
+            "tone": analyse(samples[CAPTURE_RATE:2 * CAPTURE_RATE])}
+
+
 def recording_round(res: "H.Results", label: str, collector: Collector, expect_size: Optional[tuple] = None) -> None:
-    """One recording and one screenshot against the running server."""
+    """One recording, with a tone playing into the session's sink while it
+    runs, and one screenshot against the running server."""
     status, started = api("POST", "/api/recording")
     res.check(f"{label}: a recording starts into the file-manager directory",
               status == 200 and started and started["active"] and os.path.dirname(started["path"]) == FILES_DIR
@@ -173,6 +207,7 @@ def recording_round(res: "H.Results", label: str, collector: Collector, expect_s
     path = (started or {}).get("path", "")
     status, again = api("POST", "/api/recording")
     res.check(f"{label}: a second start is a conflict", status == 409, status)
+    tone = play_tone(3)
     time.sleep(4)
     status, live = api("GET", "/api/recording")
     res.check(f"{label}: the status shows the recording growing",
@@ -194,6 +229,20 @@ def recording_round(res: "H.Results", label: str, collector: Collector, expect_s
                   (probe, final["frames"]))
     else:
         res.skip(f"{label}: ffprobe decodes every frame of it as H.264", "no ffprobe on PATH")
+    audio = audio_track(path) if os.path.isfile(path) else None
+    if tone is None:
+        res.skip(f"{label}: the session's audio is in the file as an Opus track", "no paplay or sound server")
+    elif audio is None:
+        res.skip(f"{label}: the session's audio is in the file as an Opus track", "no ffprobe or ffmpeg on PATH")
+    else:
+        tone.wait(timeout=10)
+        res.check(f"{label}: the session's audio is in the file as an Opus track, every packet the status counted",
+                  audio["codec"] == "opus" and audio["channels"] == 2 and audio["frames"] == final.get("audio_frames") > 0,
+                  (audio["codec"], audio["channels"], audio["frames"], final.get("audio_frames")))
+        res.check(f"{label}: the track spans the recording at one packet per 20 ms",
+                  abs(audio["frames"] * 0.02 - final["duration_s"]) < 1.0, (audio["frames"], final["duration_s"]))
+        res.check(f"{label}: the tone played while it recorded is what the track holds",
+                  audio["tone"]["ratio"] > 0.8 and audio["tone"]["rms"] > 500, audio["tone"])
     status, _ = api("DELETE", "/api/recording")
     res.check(f"{label}: stopping nothing is a conflict", status == 409, status)
     starts, stops = wait_events(collector, "recording.start", 1), wait_events(collector, "recording.stop", 1)

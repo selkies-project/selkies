@@ -31,6 +31,7 @@ import ipaddress
 import time
 import shutil
 import base64
+import inspect
 import pathlib
 import asyncio
 import contextlib
@@ -1194,6 +1195,7 @@ class CentralizedStreamServer:
         ).resolve()
         self.print_watcher: Optional[printing.SpoolWatcher] = None
         self.print_queue: Optional[printing.PrintQueue] = None
+        self._recording_audio: Optional[Any] = None
         self._chunked_uploads: Dict[str, Dict[str, Any]] = {}
         self.web_files_ctx: Optional[tempfile.TemporaryDirectory] = None
 
@@ -2413,7 +2415,8 @@ class CentralizedStreamServer:
 
     async def handle_recording(self, request: web.Request) -> web.Response:
         """GET, POST and DELETE /api/recording: the MP4 recording pixelflux
-        makes of the session, H.264 without audio. POST starts one into the
+        makes of the session, H.264 with the session's audio as an Opus track
+        when audio is on and pcmflux is installed. POST starts one into the
         file-manager directory unless the body names a path, DELETE stops it
         and GET reports on the current or last one. One recording at a time;
         starting a second or stopping none is a conflict."""
@@ -2433,10 +2436,19 @@ class CentralizedStreamServer:
                     path = "recording-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + ".mp4"
                 if not os.path.isabs(path):
                     path = os.path.join(str(self.upload_dir), path)
-                status = await asyncio.to_thread(pixelflux.start_recording, path)
+                if (pixelflux.recording_status() or {}).get("active"):
+                    raise RuntimeError("a recording is already active")
+                audio_socket = await self._start_recording_audio(pixelflux)
+                args = (path, None, audio_socket) if audio_socket else (path,)
+                try:
+                    status = await asyncio.to_thread(pixelflux.start_recording, *args)
+                except RuntimeError:
+                    await self._stop_recording_audio()
+                    raise
                 audit.emit("recording.start", filename=status.get("path", path))
             else:
                 status = await asyncio.to_thread(pixelflux.stop_recording)
+                await self._stop_recording_audio()
                 audit.emit("recording.stop", filename=status.get("path", ""),
                            size_bytes=status.get("bytes", 0), duration_s=status.get("duration_s", 0.0),
                            frames=status.get("frames", 0))
@@ -2445,6 +2457,42 @@ class CentralizedStreamServer:
         except RuntimeError as exc:
             return web.Response(status=409, text=str(exc))
         return web.json_response(status)
+
+    async def _start_recording_audio(self, pixelflux: Any) -> str:
+        """The Ogg Opus socket a recording's audio track is read from, served
+        by a pcmflux capture of the session's sink that runs for the recorder
+        alone with no Python callback, so no frame passes through Python.
+        Empty for a video-only recording: audio off, a pixelflux or pcmflux
+        without the socket, or a capture that does not start."""
+        try:
+            if not self.settings.audio_enabled[0] or \
+                    "audio_socket" not in inspect.signature(pixelflux.start_recording).parameters:
+                return ""
+            from pcmflux import AudioCapture
+            from .audio_control import ensure_capture_sink, opus_capture_settings
+            capture_settings = opus_capture_settings(self.settings.audio_device_name, self.settings.audio_channels,
+                                                     int(self.settings.audio_bitrate), 20.0)
+            runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+            capture_settings.output_socket = os.path.join(runtime, f"selkies-record-audio-{os.getpid()}.sock")
+        except (ImportError, AttributeError, ValueError):
+            return ""
+        capture = AudioCapture()
+        try:
+            await ensure_capture_sink(self.settings.audio_device_name)
+            await asyncio.to_thread(capture.start_capture, capture_settings)
+            if capture.state == "failed" or capture.last_error:
+                raise RuntimeError(f"capture {capture.state}: {capture.last_error}")
+        except (RuntimeError, OSError) as exc:
+            logger.warning(f"Recording without audio: {exc}")
+            await asyncio.to_thread(capture.stop_capture)
+            return ""
+        self._recording_audio = capture
+        return capture_settings.output_socket
+
+    async def _stop_recording_audio(self) -> None:
+        capture, self._recording_audio = self._recording_audio, None
+        if capture is not None:
+            await asyncio.to_thread(capture.stop_capture)
 
     async def handle_screenshot(self, request: web.Request) -> web.Response:
         """GET /api/screenshot?display=<name>: a PNG of that display with the

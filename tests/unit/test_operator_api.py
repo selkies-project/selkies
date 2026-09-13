@@ -3,10 +3,12 @@
 
 `/api/sessions` lists what the active transport reports and closes one page on
 request; `/api/recording` drives pixelflux's MP4 recorder one recording at a
-time and records each start and stop for the audit; `/api/screenshot` hands
-over pixelflux's PNG of a display, the primary unnamed. A change is refused to
-view-only credentials and accepted from the master token, and the listing each
-transport builds carries the same keys.
+time, gives it the session's audio through a pcmflux capture of its own that
+serves an Ogg Opus socket and has no Python callback, and records each start
+and stop for the audit; `/api/screenshot` hands over pixelflux's PNG of a
+display, the primary unnamed. A change is refused to view-only credentials and
+accepted from the master token, and the listing each transport builds carries
+the same keys.
 """
 import asyncio
 import os
@@ -23,7 +25,7 @@ sys.argv = ["selkies"]
 
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
-from selkies import audit  # noqa: E402
+from selkies import audio_control, audit  # noqa: E402
 from selkies import selkies as S  # noqa: E402
 from selkies.rtc import ClientType, RTCApp  # noqa: E402
 from selkies.selkies import DataStreamingServer, client_permissions  # noqa: E402
@@ -48,20 +50,24 @@ class FakePixelflux:
     def __init__(self) -> None:
         self.active = self.last = None
         self.shots: list = []
+        self.audio_sockets: list = []
+        self.log: list = []
 
     def recording_status(self):
         current = self.active or self.last
         return dict(current) if current else None
 
-    def start_recording(self, path, settings=None):
+    def start_recording(self, path, settings=None, audio_socket=""):
         if self.active:
             raise RuntimeError("a recording is already active")
+        self.audio_sockets.append(audio_socket)
         self.active = {"active": True, "path": path, "frames": 0, "bytes": 0, "duration_s": 0.0}
         return dict(self.active)
 
     def stop_recording(self):
         if not self.active:
             raise RuntimeError("no recording is active")
+        self.log.append("stop_recording")
         self.last = {**self.active, "active": False, "frames": 90, "bytes": 12345, "duration_s": 3.0}
         self.active = None
         return dict(self.last)
@@ -71,6 +77,38 @@ class FakePixelflux:
         if display > 2:
             raise RuntimeError(f"Unknown display: {display}")
         return b"\x89PNG\r\n\x1a\n" + bytes([display])
+
+
+class FakePcmflux:
+    """pcmflux's capture surface: the settings bag and a capture that records
+    what it was started with and reports the state it is told to."""
+
+    class AudioCaptureSettings:
+        pass
+
+    def __init__(self, log: list) -> None:
+        self.log = log
+        self.captures: list = []
+        self.fail_next = False
+        fake = self
+
+        class AudioCapture:
+            def __init__(self) -> None:
+                self.settings = self.callback = self.last_error = None
+                self.state = "idle"
+
+            def start_capture(self, settings, callback=None) -> None:
+                self.settings, self.callback = settings, callback
+                self.state = "failed" if fake.fail_next else "running"
+                self.last_error = "no sound server" if fake.fail_next else None
+                fake.fail_next = False
+                fake.captures.append(self)
+
+            def stop_capture(self) -> None:
+                self.state = "idle"
+                fake.log.append("stop_capture")
+
+        self.AudioCapture = AudioCapture
 
 
 class Service:
@@ -100,7 +138,8 @@ class Recorder:
 def settings(**over):
     base = dict(enable_basic_auth=(False,), basic_auth_user="user", basic_auth_password="secret",
                 basic_auth_viewonly_password="", master_token=MASTER, subfolder="", allowed_origins="",
-                wayland=(False, False))
+                wayland=(False, False), audio_enabled=(True, False), audio_device_name="output.monitor",
+                audio_channels=2, audio_bitrate="96000")
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -109,7 +148,7 @@ def bearer(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def route_cases(fake: FakePixelflux, root: str) -> None:
+async def route_cases(fake: FakePixelflux, pcm: FakePcmflux, root: str) -> None:
     S.user_tokens.clear()
     S.user_tokens.update({CTRL: {"role": "controller", "slot": 1}, VIEW: {"role": "viewer", "slot": None}})
     S.active_mk_token = None
@@ -131,6 +170,12 @@ async def route_cases(fake: FakePixelflux, root: str) -> None:
     client = TestClient(TestServer(app))
     await client.start_server()
     recorder = Recorder()
+    sinks: list = []
+
+    async def fake_sink(audio_device_name, client_name="") -> bool:
+        sinks.append(audio_device_name)
+        return True
+    ensure_sink, audio_control.ensure_capture_sink = audio_control.ensure_capture_sink, fake_sink
     try:
         r = await client.get("/api/sessions")
         check("no credential is challenged", r.status == 401, r.status)
@@ -166,12 +211,26 @@ async def route_cases(fake: FakePixelflux, root: str) -> None:
               and re.fullmatch(r"recording-\d{8}T\d{6}Z\.mp4", os.path.basename(body["path"])), body)
         check("the start is recorded", recorder.events[-1] == ("recording.start", {"filename": body["path"]}),
               recorder.events[-1:])
+        capture = pcm.captures[-1] if pcm.captures else None
+        opus = capture.settings if capture else None
+        check("the recorder reads audio from a pcmflux capture's Ogg socket in the runtime directory",
+              capture is not None and fake.audio_sockets[-1] == opus.output_socket
+              and os.path.dirname(opus.output_socket) == (os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+              and os.path.basename(opus.output_socket) == f"selkies-record-audio-{os.getpid()}.sock",
+              (fake.audio_sockets[-1:], getattr(opus, "output_socket", None)))
+        check("the capture is the session's sink at the configured channels and bitrate, with no callback",
+              opus is not None and opus.device_name == b"output.monitor" and opus.channels == 2
+              and opus.opus_bitrate == 96000 and opus.sample_rate == 48000 and opus.frame_duration_ms == 20.0
+              and capture.callback is None and sinks == ["output.monitor"], (vars(opus) if opus else None, sinks))
         r = await client.post("/api/recording", headers=bearer(CTRL))
-        check("a second start is a conflict", r.status == 409, r.status)
+        check("a second start is a conflict and starts no second capture", r.status == 409 and len(pcm.captures) == 1,
+              (r.status, len(pcm.captures)))
         r = await client.get("/api/recording", headers=bearer(CTRL))
         check("the status shows it active", (await r.json())["active"] is True)
         r = await client.delete("/api/recording", headers=bearer(CTRL))
         final = await r.json()
+        check("stopping finishes the file before the capture behind its socket ends",
+              pcm.log == ["stop_recording", "stop_capture"] and server._recording_audio is None, pcm.log)
         check("stopping reports the finished file",
               r.status == 200 and final["active"] is False and final["frames"] == 90, final)
         check("the stop is recorded with the file's figures",
@@ -179,6 +238,38 @@ async def route_cases(fake: FakePixelflux, root: str) -> None:
                                                          "duration_s": 3.0, "frames": 90}), recorder.events[-1:])
         r = await client.delete("/api/recording", headers=bearer(CTRL))
         check("stopping nothing is a conflict", r.status == 409, r.status)
+        pcm.fail_next = True
+        r = await client.post("/api/recording", headers=bearer(CTRL))
+        check("a capture that fails leaves a video-only recording and is torn down",
+              r.status == 200 and fake.audio_sockets[-1] == "" and pcm.log[-1] == "stop_capture"
+              and server._recording_audio is None, (r.status, fake.audio_sockets[-1:], pcm.log[-1:]))
+        await client.delete("/api/recording", headers=bearer(CTRL))
+        server.settings.audio_enabled = (False, False)
+        captures = len(pcm.captures)
+        r = await client.post("/api/recording", headers=bearer(CTRL))
+        check("with audio off the recording is video only and no capture starts",
+              r.status == 200 and fake.audio_sockets[-1] == "" and len(pcm.captures) == captures,
+              (r.status, fake.audio_sockets[-1:]))
+        await client.delete("/api/recording", headers=bearer(CTRL))
+        server.settings.audio_enabled = (True, False)
+        sys.modules["pcmflux"] = None
+        r = await client.post("/api/recording", headers=bearer(CTRL))
+        check("without pcmflux the recording is video only", r.status == 200 and fake.audio_sockets[-1] == "",
+              (r.status, fake.audio_sockets[-1:]))
+        await client.delete("/api/recording", headers=bearer(CTRL))
+        sys.modules["pcmflux"] = pcm
+
+        def start_old(self, path, settings=None):
+            self.audio_sockets.append("old")
+            self.active = {"active": True, "path": path, "frames": 0, "bytes": 0, "duration_s": 0.0}
+            return dict(self.active)
+        start_new, FakePixelflux.start_recording = FakePixelflux.start_recording, start_old
+        r = await client.post("/api/recording", headers=bearer(CTRL))
+        check("a pixelflux whose recorder takes no audio gets a plain start and no capture",
+              r.status == 200 and fake.audio_sockets[-1] == "old" and len(pcm.captures) == captures,
+              (r.status, fake.audio_sockets[-1:]))
+        await client.delete("/api/recording", headers=bearer(CTRL))
+        FakePixelflux.start_recording = start_new
         r = await client.post("/api/recording", headers=bearer(CTRL), json={"path": "sub/take.mp4"})
         check("a relative path lands in the file-manager directory",
               (await r.json())["path"] == os.path.join(root, "sub", "take.mp4"))
@@ -210,6 +301,7 @@ async def route_cases(fake: FakePixelflux, root: str) -> None:
         r = await client.post("/api/recording", headers=bearer(CTRL))
         check("no pixelflux at all says so", r.status == 501, r.status)
     finally:
+        audio_control.ensure_capture_sink = ensure_sink
         recorder.close()
         await client.close()
         S.user_tokens.clear()
@@ -310,17 +402,20 @@ async def transport_cases() -> None:
 
 async def main() -> None:
     fake = FakePixelflux()
-    saved = sys.modules.get("pixelflux")
+    pcm = FakePcmflux(fake.log)
+    saved = {name: sys.modules.get(name) for name in ("pixelflux", "pcmflux")}
     sys.modules["pixelflux"] = fake  # type: ignore[assignment]
+    sys.modules["pcmflux"] = pcm  # type: ignore[assignment]
     root = tempfile.mkdtemp(prefix="selkies-operator-")
     try:
-        await route_cases(fake, root)
+        await route_cases(fake, pcm, root)
         await transport_cases()
     finally:
-        if saved is not None:
-            sys.modules["pixelflux"] = saved
-        else:
-            sys.modules.pop("pixelflux", None)
+        for name, module in saved.items():
+            if module is not None:
+                sys.modules[name] = module
+            else:
+                sys.modules.pop(name, None)
     print(f"[operator-api] {passed}/{passed + failed} passed", flush=True)
     sys.exit(1 if failed else 0)
 

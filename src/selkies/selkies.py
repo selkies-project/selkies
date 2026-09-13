@@ -66,7 +66,7 @@ from aiohttp import web, WSMsgType, WSCloseCode
 
 from . import audio_config
 from . import gpu_stats
-from .audio_control import AudioControl, ensure_capture_sink
+from .audio_control import AudioControl, ensure_capture_sink, opus_capture_settings
 from .display_utils import (
     apply_common_capture_settings,
     parse_gpu_id,
@@ -1881,19 +1881,9 @@ class DataStreamingServer(BaseStreamingService):
         await ensure_capture_sink(self.audio_device_name)
         data_logger.info("Starting pcmflux audio pipeline...")
         try:
-            capture_settings = AudioCaptureSettings()
-            device_name_bytes = self.audio_device_name.encode('utf-8') if self.audio_device_name else None
-            capture_settings.device_name = device_name_bytes
-            capture_settings.sample_rate = 48000
-            capture_settings.channels = self.app.audio_channels
-            capture_settings.opus_bitrate = int(self.app.audio_bitrate)
-            # The frame duration is the capture-side latency floor; PulseAudio
-            # fragments are kept no larger than one frame.
             frame_ms = float(getattr(settings, 'audio_frame_duration_ms', '20') or 20)
-            capture_settings.frame_duration_ms = frame_ms
-            capture_settings.use_vbr = True
-            capture_settings.use_silence_gate = False
-            capture_settings.latency_ms = int(min(10, frame_ms))
+            capture_settings = opus_capture_settings(self.audio_device_name, self.app.audio_channels,
+                                                     int(self.app.audio_bitrate), frame_ms)
             capture_settings.debug_logging = self.cli_args.debug[0]
             # pcmflux's native [0x01,0x00] header goes on the wire; no Python prepend/copy.
             capture_settings.omit_audio_header = False

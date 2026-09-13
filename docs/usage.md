@@ -100,12 +100,12 @@ Every control endpoint lives under `/api`, behind the same credentials as the re
 | --- | --- |
 | `GET /api/sessions` | The pages connected to the active transport: `id`, `transport`, `role`, `slot`, `display`, `connected_at` and `rtt_ms`, the round trip the page's own reports carry, `null` before the first one |
 | `DELETE /api/sessions/<id>` | Closes that page's connection |
-| `GET /api/recording` | The recording under way, or the last one: `active`, `path`, `frames`, `bytes`, `duration_s`, `width`, `height`, and `error` when it failed |
+| `GET /api/recording` | The recording under way, or the last one: `active`, `path`, `frames`, `audio_frames`, `bytes`, `duration_s`, `width`, `height`, and `error` when it failed |
 | `POST /api/recording` | Starts a recording. A JSON body may name a `path`; a relative one lands in the file-manager directory, and no body at all names a timestamped file there, where the files section then offers it for download. One recording at a time: a second start is a conflict |
 | `DELETE /api/recording` | Stops it and reports the finished file |
 | `GET /api/screenshot?display=<name>` | A PNG of that display with the cursor drawn in, the primary when unnamed. On X11 the root, which holds every display |
 
-The recording is the one pixelflux makes: an H.264 fragmented MP4 without audio, playable from the first frame. On X11 it is a capture of its own, so it follows the desktop rather than a client's link; on Wayland it taps the live stream of the output. Its frame rate, bitrate and keyframe interval come from pixelflux's `PIXELFLUX_RECORD_FPS`, `PIXELFLUX_RECORD_BITRATE` and `PIXELFLUX_RECORD_KEYFRAME_S`, thirty frames a second and a keyframe every two seconds by default. The audit trail records every connection and recording, so a webhook collector needs no polling.
+The recording is the one pixelflux makes: an H.264 fragmented MP4, playable from the first frame, with the session's audio as an Opus track when audio is on and pcmflux is installed. On X11 the video is a capture of its own, so it follows the desktop rather than a client's link; on Wayland it taps the live stream of the output. The audio is a pcmflux capture of the session's sink that runs for the recorder alone and serves its packets as an Ogg Opus stream over a Unix socket, which pixelflux muxes as they are: nothing is decoded, re-encoded or handed through Python, and a client's audio toggle does not affect it. Its frame rate, bitrate and keyframe interval come from pixelflux's `PIXELFLUX_RECORD_FPS`, `PIXELFLUX_RECORD_BITRATE` and `PIXELFLUX_RECORD_KEYFRAME_S`, thirty frames a second and a keyframe every two seconds by default. The audit trail records every connection and recording, so a webhook collector needs no polling.
 
 ## Microphone and Webcam
 
