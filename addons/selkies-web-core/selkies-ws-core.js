@@ -123,7 +123,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isMacDesktop } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isMacDesktop, displayLabel } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace,
@@ -2664,7 +2664,7 @@ function stepRefusalLadder(label, codec) {
     codecRefusalUnanswerable = true;
     console.error(`This session streams ${label}, which this browser cannot decode.`);
     if (statusDisplayElement) {
-        statusDisplayElement.textContent = 'Error: This session streams video in a format this browser cannot decode.';
+        statusDisplayElement.textContent = `Error: This session streams ${displayLabel(codec)} video, which this browser cannot decode.`;
         statusDisplayElement.classList.remove('hidden');
     }
 }

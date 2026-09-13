@@ -327,6 +327,8 @@ Video is encoded by the `pixelflux` extension.
 
 **WebSocket mode (default)** — select with the `SELKIES_ENCODER` environment variable or the `--encoder=` command-line option:
 
+The dashboards list every encoder the server allows. One this browser cannot play on the transport (no WebCodecs decoder for its codec over WebSockets, no RTP receiver for it over WebRTC) stays in the menu disabled and marked as unsupported by the browser, so a missing H.265 or AV1 reads as the browser's limit rather than a server option left out; Chrome and Firefox on Linux, for one, decode no HEVC. A stream the browser cannot play at all, from an encoder the server holds, is reported on the page on both transports.
+
 | Encoder (`--encoder=`) | Codec | Acceleration | Notes |
 |---|---|---|---|
 | `h264enc` (default) | H.264 AVC | NVIDIA NVENC / Intel & AMD VA-API, software fallback (`x264`, or OpenH264 in a GPL-free `pixelflux`) | Uses hardware encoding when a supported GPU is available; add `--use-cpu=true` to force software |

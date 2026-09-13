@@ -44,7 +44,7 @@
  * `WebRTCClient` callbacks: the settings payload, `clipboard-msg*` messages,
  * cursor and display-config updates, stats, and system actions (`reload`,
  * `mk_access,0|1`, `command_error,text`, `auth_success,{json}` /
- * `role_update,{json}`, `resolution,WxH`).
+ * `role_update,{json}`, `resolution,WxH`, `video_declined,mime`).
  *
  * The page hash selects the role: none is the controller, `#shared` a strict
  * viewer, `#playerN` a viewer with gamepad slot N, and `#display2-<position>`
@@ -85,7 +85,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeFullColor, isMacDesktop } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeFullColor, isMacDesktop, displayLabel } from './lib/util.js';
 import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
@@ -864,13 +864,16 @@ export default function webrtc() {
 		}
 	}
 
+	/** Whether the server sends this page no video for a codec its answer declined; the notice then stays over later statuses. */
+	let videoDeclined = false;
 	/**
 	 * Shows the sentence-cased status (the internal value stays lower-case for
 	 * comparisons); once connected, hides it and shows the play button if
-	 * playback still needs a gesture.
+	 * playback still needs a gesture, unless the page was told its video is
+	 * declined, whose notice stays.
 	 */
 	function updateStatusDisplay() {
-		if (statusDisplayElement) {
+		if (statusDisplayElement && !videoDeclined) {
 			statusDisplayElement.textContent = status ? status.charAt(0).toUpperCase() + status.slice(1) : status;
 			if (status == 'connected') {
 				statusDisplayElement.classList.add("hidden");
@@ -2954,6 +2957,16 @@ export default function webrtc() {
 				if (printJobs && !window.location.hash.startsWith('#display2')) printJobs.announce(doc.name, doc.size_bytes);
 			};
 			webrtc.onsystemaction = (action) => {
+				if (action.startsWith('video_declined,')) {
+					const codec = action.slice('video_declined,'.length).split('/').pop().toLowerCase();
+					videoDeclined = true;
+					console.error(`This session streams ${codec}, which this browser cannot decode.`);
+					if (statusDisplayElement) {
+						statusDisplayElement.textContent = `Error: This session streams ${displayLabel(codec)} video, which this browser cannot decode.`;
+						statusDisplayElement.classList.remove('hidden');
+					}
+					return;
+				}
 				webrtc._setStatus("Executing system action: " + action);
 				if (action === 'reload') {
 					setTimeout(() => {

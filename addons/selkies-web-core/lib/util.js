@@ -220,11 +220,6 @@ export const canDecodeEncoder = (encoder) => {
     if (typeof VideoDecoder === "undefined") return false;
     return decoderSupport === null || decoderSupport[codecOfEncoder(encoder)] !== false;
 };
-/**
- * @param {string[]} encoders Encoder wire values.
- * @returns {string[]} Those `canDecodeEncoder` accepts.
- */
-export const decodableEncoders = (encoders) => encoders.filter(canDecodeEncoder);
 
 /** RTP MIME type each WebRTC encoder streams. */
 const RTC_MIME_TYPES = {
@@ -251,10 +246,15 @@ export const canReceiveEncoder = (encoder) => {
     }
 };
 /**
- * @param {string[]} encoders Encoder wire values.
- * @returns {string[]} Those `canReceiveEncoder` accepts.
+ * Whether this engine plays an encoder on a transport: `canDecodeEncoder` on
+ * WebSockets, `canReceiveEncoder` on WebRTC. A menu lists what it cannot play
+ * disabled and marked, so a missing option reads as the browser's limit and
+ * never as the server's.
+ * @param {string} encoder An encoder wire value.
+ * @param {boolean} webrtc Whether the transport is WebRTC.
+ * @returns {boolean}
  */
-export const receivableEncoders = (encoders) => encoders.filter(canReceiveEncoder);
+export const canPlayEncoder = (encoder, webrtc) => (webrtc ? canReceiveEncoder(encoder) : canDecodeEncoder(encoder));
 
 /** Cached answers of `canDecodeFullColor`, one probe per codec. */
 const fullColorProbes = {};

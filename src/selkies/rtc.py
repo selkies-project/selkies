@@ -1539,7 +1539,8 @@ class RTCApp:
         browser that declines the codec answers with H.264. The display then
         moves to `h264enc` through `on_video_codec_declined`; a display whose
         encoder the operator holds stops sending video to this peer instead,
-        since one codec's bitstream must never be packed as another's.
+        since one codec's bitstream must never be packed as another's, and
+        tells the page so once its channel is open.
         """
         sender = peer_obj.get("video_sender")
         wanted = peer_obj.get("video_mime")
@@ -1569,6 +1570,20 @@ class RTCApp:
             logger.error(f"Peer {client_peer_id} declined {wanted} and the encoder of "
                          f"display '{display_id}' is held: its video stays off for this peer.")
             sender._enabled = False
+            peer_obj["video_declined"] = wanted
+            self._send_video_declined(peer_obj["data_channel"], client_peer_id)
+
+    def _send_video_declined(self, channel: RTCDataChannel, client_peer_id: str) -> None:
+        """Tell a page that no video comes because its answer declined the codec
+        the display's held encoder streams; nothing until its channel is open."""
+        peer_obj = self.peer_connections.get(client_peer_id)
+        mime = peer_obj.get("video_declined") if peer_obj else None
+        if not mime or channel.readyState != "open":
+            return
+        try:
+            channel.send(json.dumps({"type": "system", "data": {"action": f"video_declined,{mime}"}}))
+        except Exception:
+            logger.debug("video_declined send failed (channel closing)", exc_info=True)
 
     async def _drain_channel_queue(self, queue: asyncio.Queue,
                                    handler: Callable[[Any], Any],
@@ -2027,6 +2042,7 @@ class RTCApp:
                         self._send_collab_state(ch, ct, tok))
         data_channel.on("open", lambda ch=data_channel, ct=client_type, tok=client_token:
                         self._send_auth_success(ch, ct, tok))
+        data_channel.on("open", lambda ch=data_channel, pid=client_peer_id: self._send_video_declined(ch, pid))
         data_channel.on("close", lambda: self.on_data_close())
         data_channel.on("error", lambda e=None: self.on_data_error(e))
         input_consumer = self._serialize_channel(

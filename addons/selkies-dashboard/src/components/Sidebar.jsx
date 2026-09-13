@@ -51,7 +51,7 @@
  * @module
  */
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
-import { displayLabel, decodableEncoders, receivableEncoders, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
+import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
@@ -1524,16 +1524,13 @@ function Sidebar() {
   });
   const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
   /**
-   * Filters an encoder list to what this transport can play: on the
-   * WebSocket transport only encoders this engine can decode (JPEG alone
-   * without WebCodecs), on WebRTC those its RTP receiver takes. The static
-   * lists seed the picker; the server's own allowed list replaces them as
-   * soon as settings arrive.
+   * The encoders the menu lists: the static lists seed it and the server's
+   * own allowed list replaces them as soon as settings arrive. Every entry
+   * is listed; the ones this browser cannot play on the transport are
+   * disabled and say so (`canPlayEncoder`).
    */
-  const offeredEncoders = useCallback(
-    (list) => (isWebrtc ? receivableEncoders(list) : decodableEncoders(list)), [isWebrtc]);
   const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState(
-    () => offeredEncoders(isWebrtc ? encoderOptionsWR : encoderOptions));
+    () => (isWebrtc ? encoderOptionsWR : encoderOptions));
   // The decoder probe answers after the first render; the menu is rebuilt from
   // whatever list is current once it has.
   const serverEncoderList = serverSettings?.encoder?.allowed;
@@ -1541,10 +1538,10 @@ function Sidebar() {
     let live = true;
     decoderSupportReady.then(() => {
       if (!live) return;
-      setDynamicEncoderOptions(offeredEncoders(serverEncoderList || (isWebrtc ? encoderOptionsWR : encoderOptions)));
+      setDynamicEncoderOptions((serverEncoderList || (isWebrtc ? encoderOptionsWR : encoderOptions)).slice());
     });
     return () => { live = false; };
-  }, [serverEncoderList, isWebrtc, offeredEncoders]);
+  }, [serverEncoderList, isWebrtc]);
   /** Audio bitrate stops the slider indexes into: the server's allowed enum, else the local list. */
   const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v) => parseInt(v, 10))) || audioBitrateOptions;
 
@@ -1607,12 +1604,12 @@ function Sidebar() {
     };
     const s_encoder = serverSettings.encoder;
     if (s_encoder) {
-      const allowed = offeredEncoders(s_encoder.allowed);
+      const playable = s_encoder.allowed.filter((enc) => canPlayEncoder(enc, isWebrtc));
       const stored = localStorage.getItem(getPrefixedKey("encoder"));
-      const final = allowed.includes(stored) ? stored
-        : (allowed.includes(s_encoder.value) || allowed.length === 0) ? s_encoder.value : allowed[0];
+      const final = playable.includes(stored) ? stored
+        : (playable.includes(s_encoder.value) || playable.length === 0) ? s_encoder.value : playable[0];
       setEncoder(final);
-      setDynamicEncoderOptions(allowed);
+      setDynamicEncoderOptions(s_encoder.allowed);
     }
     const s_framerate = serverSettings.framerate;
     if (s_framerate) {
@@ -1717,7 +1714,7 @@ function Sidebar() {
     if (s_ui_show_logo) {
         setUiShowLogo(s_ui_show_logo.value);
     }
-  }, [serverSettings, debouncedPostSetting, offeredEncoders]);
+  }, [serverSettings, debouncedPostSetting, isWebrtc]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
@@ -2953,11 +2950,7 @@ function Sidebar() {
         } else if (message.type === "serverSettings") {
             const encoders = message.payload?.encoder?.allowed
             if (encoders && Array.isArray(encoders)) {
-              const newEncoderOptions = offeredEncoders(
-                Array.isArray(encoders) && encoders.length > 0
-                  ? encoders
-                  : (isWebrtc? encoderOptionsWR: encoderOptions));
-              setDynamicEncoderOptions(newEncoderOptions);
+              setDynamicEncoderOptions(encoders.length > 0 ? encoders : (isWebrtc ? encoderOptionsWR : encoderOptions));
           }
         } else if (message.type === "trackpadModeUpdate") {
           if (typeof message.enabled === 'boolean') {
@@ -2989,7 +2982,6 @@ function Sidebar() {
     dynamicEncoderOptions,
     isOpen,
     isWebrtc,
-    offeredEncoders,
     isViewerRole,
   ]);
 
@@ -3400,8 +3392,10 @@ function Sidebar() {
                       disabled={!serverSettings || dynamicEncoderOptions.length <= 1}
                     >
                       {dynamicEncoderOptions.map((enc) => (
-                        <option key={enc} value={enc}>
-                          {displayLabel(enc)}
+                        <option key={enc} value={enc} disabled={!canPlayEncoder(enc, isWebrtc)}>
+                          {canPlayEncoder(enc, isWebrtc)
+                            ? displayLabel(enc)
+                            : `${displayLabel(enc)} [${t("sections.video.encoderUnsupported")}]`}
                         </option>
                       ))}
                     </select>

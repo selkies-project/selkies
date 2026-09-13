@@ -34,7 +34,7 @@
  */
 
 import { Card, CardContent } from "@/components/ui/card";
-import { displayLabel, decodableEncoders, receivableEncoders, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, isMacDesktop } from "../../../../selkies-web-core/lib/util.js";
+import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, isMacDesktop } from "../../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders } from "../../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
@@ -278,14 +278,13 @@ export function Settings() {
     const isWebrtc = streamMode === STREAM_MODE_WEBRTC;
 
     /**
-     * On the WebSocket transport only encoders this engine can decode are
-     * offered (jpeg alone without WebCodecs), on WebRTC those its RTP
-     * receiver takes.
+     * The encoders the menu lists: the static list seeds it and the server's
+     * own allowed list replaces it as soon as settings arrive. Every entry is
+     * listed; the ones this browser cannot play on the transport are disabled
+     * and say so (`canPlayEncoder`).
      */
-    const offeredEncoders = useCallback(
-        (list: string[]): string[] => (isWebrtc ? receivableEncoders(list) : decodableEncoders(list)), [isWebrtc]);
-    const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState(
-        offeredEncoders(isWebrtc ? encoderOptionsRTC : encoderOptions)
+    const [dynamicEncoderOptions, setDynamicEncoderOptions] = useState<string[]>(
+        isWebrtc ? encoderOptionsRTC : encoderOptions
     );
     // The decoder probe answers after the first render; the menu is rebuilt from
     // whatever list is current once it has.
@@ -294,10 +293,10 @@ export function Settings() {
         let live = true;
         decoderSupportReady.then(() => {
             if (!live) return;
-            setDynamicEncoderOptions(offeredEncoders(serverEncoderList || (isWebrtc ? encoderOptionsRTC : encoderOptions)));
+            setDynamicEncoderOptions((serverEncoderList || (isWebrtc ? encoderOptionsRTC : encoderOptions)).slice());
         });
         return () => { live = false; };
-    }, [serverEncoderList, isWebrtc, offeredEncoders]);
+    }, [serverEncoderList, isWebrtc]);
 
     const [manualWidth, setManualWidth] = useState(() =>
         localStorage.getItem(getPrefixedKey("manual_width")) || ''
@@ -560,12 +559,12 @@ export function Settings() {
 
         const s_encoder = serverSettings.encoder;
         if (s_encoder) {
-            const allowed = offeredEncoders(s_encoder.allowed);
+            const playable = s_encoder.allowed.filter((enc: string) => canPlayEncoder(enc, isWebrtc));
             const stored = localStorage.getItem(getPrefixedKey("encoder"));
-            const final = stored !== null && allowed.includes(stored) ? stored
-                : (allowed.includes(s_encoder.value) || allowed.length === 0) ? s_encoder.value : allowed[0];
+            const final = stored !== null && playable.includes(stored) ? stored
+                : (playable.includes(s_encoder.value) || playable.length === 0) ? s_encoder.value : playable[0];
             setEncoder(final);
-            setDynamicEncoderOptions(allowed);
+            setDynamicEncoderOptions(s_encoder.allowed);
         }
 
         const s_framerate = serverSettings.framerate;
@@ -660,7 +659,7 @@ export function Settings() {
                 debouncedPostSetting({ scaling_dpi: derived });
             }
         }
-    }, [serverSettings, streamMode, debouncedPostSetting, offeredEncoders]);
+    }, [serverSettings, streamMode, debouncedPostSetting, isWebrtc]);
     /* eslint-enable react-hooks/set-state-in-effect */
 
     const audioDevicesRequested = React.useRef(false);
@@ -1404,9 +1403,15 @@ export function Settings() {
                                         {dynamicEncoderOptions.map(enc => (
                                             <DropdownMenuItem
                                                 key={enc}
+                                                disabled={!canPlayEncoder(enc, isWebrtc)}
                                                 onClick={() => handleEncoderChange(enc)}
                                             >
                                                 {displayLabel(enc)}
+                                                {!canPlayEncoder(enc, isWebrtc) && (
+                                                    <span className="ml-auto pl-3 text-xs text-muted-foreground">
+                                                        {tl('sections.video.encoderUnsupported')}
+                                                    </span>
+                                                )}
                                             </DropdownMenuItem>
                                         ))}
                                     </DropdownMenuContent>
