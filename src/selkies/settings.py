@@ -773,7 +773,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "wayland_host_display",
         "type": "str",
         "default": "",
-        "help": "Wayland socket of an EXTERNAL compositor (e.g. labwc started with WLR_BACKENDS=headless) that pixelflux captures and injects into as a client, instead of compositing its own. Frames arrive by screencopy into pixelflux-allocated GPU buffers (zero-copy into the encoder); input rides virtual-keyboard/pointer devices. Empty keeps the built-in compositor.",
+        "help": "Wayland socket of an EXTERNAL compositor (e.g. labwc started with WLR_BACKENDS=headless, or the GNOME/KDE session's own socket) that pixelflux captures and injects into as a client, instead of compositing its own. Frames arrive by screencopy into pixelflux-allocated GPU buffers (zero-copy into the encoder) and input rides virtual-keyboard/pointer devices where the compositor offers those protocols; a compositor without them (GNOME, KDE) is captured and driven through xdg-desktop-portal over the session bus, PipeWire frames imported in place. Empty keeps the built-in compositor.",
     },
     {
         "name": "recording_socket",

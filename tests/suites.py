@@ -227,6 +227,8 @@ SUITES: list = [
      "selectors": ["webrtc", "websockets"]},
     {"path": "e2e/test_ws_verdicts.py", "tier": "e2e", "timeout": 900,
      "selectors": ["mk-access", "no-resize"]},
+    {"path": "e2e/test_wayland_host_portal.py", "tier": "e2e", "timeout": 900,
+     "selectors": ["websockets", "webrtc", "wayland"]},
     {"path": "e2e/test_wayland_primary_shrink.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_wayland_secondary_shrink.py", "tier": "e2e", "timeout": 600,
      "selectors": ["websockets", "webrtc"]},
