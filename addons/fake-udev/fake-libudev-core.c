@@ -65,8 +65,11 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <fnmatch.h>
 #include <limits.h>
+#include <linux/input.h>
+#include <linux/uinput.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -433,6 +436,159 @@ static void initialize_virtual_gamepads_data_if_needed(void) {
     pthread_once(&g_gamepads_once, initialize_virtual_gamepads_data);
 }
 
+/* ---- App-created uinput devices (dynamic enumeration) ------------------- */
+/* The interposer serves an application-created uinput device as a socket and a
+ * descriptor in the socket directory (selkies_event<N>.sock/.desc, with N at or
+ * above UDYN_EVENT_BASE). Those are enumerated beside the fixed pads so a udev
+ * consumer -- SDL2 by default -- discovers them. Slots are append-only for the
+ * process lifetime so a definition pointer handed to a caller stays valid; a
+ * withdrawn device is simply not listed (its socket is gone). The descriptor
+ * layout MUST match the interposer's udyn_desc_t. */
+#define UDYN_EVENT_BASE 3000
+#define UDYN_MAX 16
+#define UDYN_DESC_MAGIC 0x4a444e55u
+#define UDYN_BYTES(max) (((max) / 8) + 1)
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint16_t bustype;
+    uint16_t vendor;
+    uint16_t product;
+    uint16_t version_id;
+    char name[UINPUT_MAX_NAME_SIZE];
+    uint8_t evbits[UDYN_BYTES(EV_MAX)];
+    uint8_t keybits[UDYN_BYTES(KEY_MAX)];
+    uint8_t relbits[UDYN_BYTES(REL_MAX)];
+    uint8_t absbits[UDYN_BYTES(ABS_MAX)];
+    uint8_t mscbits[UDYN_BYTES(MSC_MAX)];
+    uint8_t propbits[UDYN_BYTES(INPUT_PROP_MAX)];
+    struct input_absinfo absinfo[ABS_CNT];
+} udyn_desc_t;
+
+static virtual_gamepad_definition_t virtual_dyn[UDYN_MAX];
+static int n_virtual_dyn;
+static char dyn_name_buf[UDYN_MAX][UINPUT_MAX_NAME_SIZE];
+static char dyn_vid_buf[UDYN_MAX][16], dyn_pid_buf[UDYN_MAX][16], dyn_ver_buf[UDYN_MAX][16];
+static char dyn_phys_buf[UDYN_MAX][64], dyn_uniq_buf[UDYN_MAX][32];
+static pthread_mutex_t dyn_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int udyn_bit(const uint8_t *a, int b, int max) {
+    return (b >= 0 && b <= max) ? (a[b / 8] >> (b % 8)) & 1 : 0;
+}
+
+/* Fills definition slot `idx` for dynamic device /dev/input/event<num> from its
+ * descriptor: an event node and its input/usb parents, no joydev node, with the
+ * ID_INPUT_* class derived from the capability bits. */
+static void build_dyn_definition(int idx, int num, const udyn_desc_t *d) {
+    virtual_gamepad_definition_t *def = &virtual_dyn[idx];
+    memset(def, 0, sizeof(*def));
+    /* Event minor mirrors the fixed pads' formula: EVDEV_MINOR_BASE +
+     * VIRTUAL_EVENT_ID_BASE + id, so id carries num - VIRTUAL_EVENT_ID_BASE. */
+    def->id = num - VIRTUAL_EVENT_ID_BASE;
+
+    int is_js = udyn_bit(d->keybits, BTN_GAMEPAD, KEY_MAX) || udyn_bit(d->keybits, BTN_JOYSTICK, KEY_MAX);
+    int is_mouse = udyn_bit(d->evbits, EV_REL, EV_MAX) && udyn_bit(d->keybits, BTN_MOUSE, KEY_MAX);
+    int is_key = udyn_bit(d->evbits, EV_KEY, EV_MAX) && udyn_bit(d->keybits, KEY_A, KEY_MAX);
+
+    snprintf(dyn_name_buf[idx], sizeof(dyn_name_buf[idx]), "%.*s",
+             (int)sizeof(dyn_name_buf[idx]) - 1, d->name[0] ? d->name : "Selkies Virtual Input");
+    snprintf(dyn_vid_buf[idx], sizeof(dyn_vid_buf[idx]), "0x%04x", d->vendor);
+    snprintf(dyn_pid_buf[idx], sizeof(dyn_pid_buf[idx]), "0x%04x", d->product);
+    snprintf(dyn_ver_buf[idx], sizeof(dyn_ver_buf[idx]), "0x%04x", d->version_id);
+    snprintf(dyn_phys_buf[idx], sizeof(dyn_phys_buf[idx]), "selkies/virtinput/event%d/input0", num);
+    snprintf(dyn_uniq_buf[idx], sizeof(dyn_uniq_buf[idx]), "SUIN%04d", num);
+
+    snprintf(def->input_parent_sysname, sizeof(def->input_parent_sysname), "input%d", num);
+    snprintf(def->input_parent_syspath, sizeof(def->input_parent_syspath),
+             "/sys/devices/virtual/selkies_uinput%d/input/%s", num, def->input_parent_sysname);
+    def->input_parent_sysattrs[0] = (key_value_pair_t){"id/vendor", dyn_vid_buf[idx]};
+    def->input_parent_sysattrs[1] = (key_value_pair_t){"id/product", dyn_pid_buf[idx]};
+    def->input_parent_sysattrs[2] = (key_value_pair_t){"id/version", dyn_ver_buf[idx]};
+    def->input_parent_sysattrs[3] = (key_value_pair_t){"name", dyn_name_buf[idx]};
+    def->input_parent_sysattrs[4] = (key_value_pair_t){"phys", dyn_phys_buf[idx]};
+    def->input_parent_sysattrs[5] = (key_value_pair_t){"uniq", dyn_uniq_buf[idx]};
+    def->input_parent_sysattrs[6] = (key_value_pair_t){"id/bustype", "0006"};
+    def->input_parent_sysattrs[7] = (key_value_pair_t){NULL, NULL};
+    def->input_parent_properties[0] = (key_value_pair_t){"ID_INPUT", "1"};
+    def->input_parent_properties[1] = is_js ? (key_value_pair_t){"ID_INPUT_JOYSTICK", "1"}
+                                    : is_mouse ? (key_value_pair_t){"ID_INPUT_MOUSE", "1"}
+                                    : is_key ? (key_value_pair_t){"ID_INPUT_KEYBOARD", "1"}
+                                    : (key_value_pair_t){NULL, NULL};
+    def->input_parent_properties[2] = (key_value_pair_t){NULL, NULL};
+
+    snprintf(def->event_sysname, sizeof(def->event_sysname), "event%d", num);
+    snprintf(def->event_syspath, sizeof(def->event_syspath), "%s/%s", def->input_parent_syspath, def->event_sysname);
+    snprintf(def->event_devnode, sizeof(def->event_devnode), "/dev/input/event%d", num);
+    def->event_properties[0] = (key_value_pair_t){"DEVNAME", def->event_devnode};
+    def->event_properties[1] = (key_value_pair_t){"ID_INPUT", "1"};
+    int k = 2;
+    if (is_js) {
+        def->event_properties[k++] = (key_value_pair_t){"ID_INPUT_JOYSTICK", "1"};
+        if (udyn_bit(d->keybits, BTN_GAMEPAD, KEY_MAX))
+            def->event_properties[k++] = (key_value_pair_t){"ID_INPUT_GAMEPAD", "1"};
+    } else if (is_mouse) {
+        def->event_properties[k++] = (key_value_pair_t){"ID_INPUT_MOUSE", "1"};
+    } else if (is_key) {
+        def->event_properties[k++] = (key_value_pair_t){"ID_INPUT_KEYBOARD", "1"};
+    }
+    def->event_properties[k] = (key_value_pair_t){NULL, NULL};
+
+    /* No joydev node: the interposer serves app-created devices as evdev only. */
+    def->js_sysname[0] = '\0';
+    def->js_syspath[0] = '\0';
+    def->js_devnode[0] = '\0';
+
+    snprintf(def->usb_parent_sysname, sizeof(def->usb_parent_sysname), "selkies_uinput_usb%d", num);
+    snprintf(def->usb_parent_syspath, sizeof(def->usb_parent_syspath), "/sys/devices/virtual/usb/%s", def->usb_parent_sysname);
+    def->usb_parent_sysattrs[0] = (key_value_pair_t){"idVendor", dyn_vid_buf[idx]};
+    def->usb_parent_sysattrs[1] = (key_value_pair_t){"idProduct", dyn_pid_buf[idx]};
+    def->usb_parent_sysattrs[2] = (key_value_pair_t){"product", dyn_name_buf[idx]};
+    def->usb_parent_sysattrs[3] = (key_value_pair_t){NULL, NULL};
+}
+
+/* Reads selkies_event<N>.desc, returning true on a well-formed descriptor. */
+static bool udyn_read_desc(int num, udyn_desc_t *out) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/selkies_event%d.desc", fake_udev_socket_dir(), num);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    size_t got = 0;
+    char *p = (char *)out;
+    while (got < sizeof(*out)) {
+        ssize_t r = read(fd, p + got, sizeof(*out) - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    close(fd);
+    return got == sizeof(*out) && out->magic == UDYN_DESC_MAGIC;
+}
+
+/* The dynamic slot already holding event<num>, or -1. Holds dyn_mutex. */
+static int dyn_slot_for_num_locked(int num) {
+    for (int i = 0; i < n_virtual_dyn; i++)
+        if (virtual_dyn[i].id == num - VIRTUAL_EVENT_ID_BASE) return i;
+    return -1;
+}
+
+/* (Re)builds the dynamic definitions from the descriptors currently in the
+ * socket directory; append-only so live pointers stay valid. */
+static void refresh_virtual_dyn(void) {
+    pthread_mutex_lock(&dyn_mutex);
+    for (int num = UDYN_EVENT_BASE; num < UDYN_EVENT_BASE + UDYN_MAX; num++) {
+        char sn[32];
+        snprintf(sn, sizeof(sn), "event%d", num);
+        if (!sysname_socket_live(sn)) continue;
+        udyn_desc_t desc;
+        if (!udyn_read_desc(num, &desc)) continue;
+        if (dyn_slot_for_num_locked(num) >= 0) continue;
+        if (n_virtual_dyn >= UDYN_MAX) continue;
+        build_dyn_definition(n_virtual_dyn, num, &desc);
+        n_virtual_dyn++;
+    }
+    pthread_mutex_unlock(&dyn_mutex);
+}
+
 static const virtual_gamepad_definition_t *find_virtual_def_by_syspath(const char *syspath, virtual_device_node_type_t *node_type_out) {
     initialize_virtual_gamepads_data_if_needed();
     *node_type_out = VIRTUAL_TYPE_NONE;
@@ -446,6 +602,17 @@ static const virtual_gamepad_definition_t *find_virtual_def_by_syspath(const cha
         if (strcmp(syspath, def->input_parent_syspath) == 0) { *node_type_out = VIRTUAL_TYPE_INPUT_PARENT; return def; }
         if (strcmp(syspath, def->usb_parent_syspath) == 0) { *node_type_out = VIRTUAL_TYPE_USB_PARENT; return def; }
     }
+    refresh_virtual_dyn();
+    pthread_mutex_lock(&dyn_mutex);
+    for (int i = 0; i < n_virtual_dyn; ++i) {
+        const virtual_gamepad_definition_t *def = &virtual_dyn[i];
+        virtual_device_node_type_t t = VIRTUAL_TYPE_NONE;
+        if (strcmp(syspath, def->event_syspath) == 0) t = VIRTUAL_TYPE_EVENT;
+        else if (strcmp(syspath, def->input_parent_syspath) == 0) t = VIRTUAL_TYPE_INPUT_PARENT;
+        else if (strcmp(syspath, def->usb_parent_syspath) == 0) t = VIRTUAL_TYPE_USB_PARENT;
+        if (t != VIRTUAL_TYPE_NONE) { *node_type_out = t; pthread_mutex_unlock(&dyn_mutex); return def; }
+    }
+    pthread_mutex_unlock(&dyn_mutex);
     return NULL;
 }
 
@@ -461,6 +628,15 @@ static const virtual_gamepad_definition_t *find_virtual_node_by_sysname(const ch
         if (strcmp(sysname, def->js_sysname) == 0) { *node_type_out = VIRTUAL_TYPE_JS; return def; }
         if (strcmp(sysname, def->event_sysname) == 0) { *node_type_out = VIRTUAL_TYPE_EVENT; return def; }
     }
+    refresh_virtual_dyn();
+    pthread_mutex_lock(&dyn_mutex);
+    for (int i = 0; i < n_virtual_dyn; ++i) {
+        const virtual_gamepad_definition_t *def = &virtual_dyn[i];
+        if (def->event_sysname[0] && strcmp(sysname, def->event_sysname) == 0) {
+            *node_type_out = VIRTUAL_TYPE_EVENT; pthread_mutex_unlock(&dyn_mutex); return def;
+        }
+    }
+    pthread_mutex_unlock(&dyn_mutex);
     return NULL;
 }
 
@@ -1617,6 +1793,19 @@ static void enumerate_add_virtual(struct udev_enumerate *e, struct udev_list_ent
             list_append(head, tail, def->input_parent_syspath, NULL);
         }
     }
+    refresh_virtual_dyn();
+    pthread_mutex_lock(&dyn_mutex);
+    for (int i = 0; i < n_virtual_dyn; ++i) {
+        const virtual_gamepad_definition_t *def = &virtual_dyn[i];
+        if (!sysname_socket_live(def->event_sysname)) continue;
+        if (virtual_matches(e, def, VIRTUAL_TYPE_EVENT)) {
+            list_append(head, tail, def->event_syspath, NULL);
+        }
+        if ((e->sysname_filtered || e->parent_def) && virtual_matches(e, def, VIRTUAL_TYPE_INPUT_PARENT)) {
+            list_append(head, tail, def->input_parent_syspath, NULL);
+        }
+    }
+    pthread_mutex_unlock(&dyn_mutex);
 }
 
 /* Rebuilds the result list: the real library's results less the hidden input
