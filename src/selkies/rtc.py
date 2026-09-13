@@ -764,6 +764,21 @@ class RTCApp:
                 return
         self.__send_data_channel_message("system", {"action": action})
 
+    def send_print_document(self, name: str, size: int,
+                            channel: Optional[RTCDataChannel] = None) -> None:
+        """Tell the controller pages, or the one peer whose `channel` is
+        given, that a printed document waits in the spool."""
+        payload = {"name": name, "size_bytes": size}
+        channels = [channel] if channel is not None else [
+            obj.get("data_channel") for obj in self.peer_connections.values()
+            if obj.get("client_type") == ClientType.CONTROLLER
+            and (obj.get("display_id") or "primary") == "primary"
+            and obj.get("peer_conn") is not None
+            and obj["peer_conn"].connectionState == "connected"]
+        for open_channel in channels:
+            if open_channel is not None and open_channel.readyState == "open":
+                self.send_message_to_channel(open_channel, "print_document", payload)
+
     def send_framerate(self, framerate: int) -> None:
         """Broadcast the current framerate to all peers."""
         logger.info("sending framerate")

@@ -88,6 +88,7 @@ import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPE
 import { getRoutePrefix, getStorageAppName, canDecodeFullColor, isMacDesktop } from './lib/util.js';
 import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
+import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -648,6 +649,7 @@ export default function webrtc() {
 	}
 	/** Whether the client keeps its own chords rather than passing them on. */
 	let keyboardShortcuts = true;
+	let printJobs = null;
 	/** Applies the chord setting to the input handler. */
 	function applyKeyboardShortcuts() {
 		if (input && typeof input.setShortcutsEnabled === 'function') {
@@ -1781,6 +1783,9 @@ export default function webrtc() {
 				}
 				localClipboardSender.sendExplicit(message.text);
 				break;
+			case 'printRequest':
+				printDocument(message.url);
+				break;
 			case 'clipboardImageUpdate': {
 				// Every skip surfaces a notification: a dead click reads as a bug.
 				if (isSharedMode) {
@@ -2011,6 +2016,10 @@ export default function webrtc() {
 			keyboardShortcuts = !!settings.keyboard_shortcuts;
 			storeBool('keyboard_shortcuts', keyboardShortcuts);
 			applyKeyboardShortcuts();
+		}
+		if (settings.print_auto !== undefined && printJobs) {
+			printJobs.setAutomatic(settings.print_auto);
+			storeBool('print_auto', !!settings.print_auto);
 		}
 		if (settings.clipboard_seamless !== undefined) {
 			clipboard_seamless = !!settings.clipboard_seamless;
@@ -2549,6 +2558,7 @@ export default function webrtc() {
 			clipboard_out_enabled = getBoolParam('clipboard_out_enabled', clipboard_out_enabled);
 			clipboard_seamless = getBoolParam('clipboard_seamless', clipboard_seamless);
 			keyboardShortcuts = getBoolParam('keyboard_shortcuts', keyboardShortcuts);
+			printJobs = createPrintJobs({ automatic: getBoolParam('print_auto', true) });
 			crf = getIntParam('video_crf', crf);
 			antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 			trackpadMode = getBoolParam('trackpadMode', false);
@@ -2939,6 +2949,10 @@ export default function webrtc() {
 			 * (snapped or clamped), which manual-mode bookkeeping follows so the UI
 			 * stops re-requesting a size the server cannot produce.
 			 */
+			webrtc.onprintdocument = (doc) => {
+				// A second display page is the same browser as the primary one.
+				if (printJobs && !window.location.hash.startsWith('#display2')) printJobs.announce(doc.name, doc.size_bytes);
+			};
 			webrtc.onsystemaction = (action) => {
 				webrtc._setStatus("Executing system action: " + action);
 				if (action === 'reload') {

@@ -71,8 +71,12 @@ export function getPrefixedKey(key: string): string {
   return prefixedKey;
 }
 
+/** A document printed in the session, as the core hands it over: a blob URL. */
+export interface PrintJob { name: string; url: string }
+
 let lastServerSettings: any = null;
 let lastClipboardContent: { text: string; truncated: boolean } | null = null;
+let printJobs: PrintJob[] = [];
 let lastEffectiveCursorState: boolean | null = null;
 const lastAudioDevices: { input: string | null; output: string | null } = { input: null, output: null };
 if (typeof window !== 'undefined') {
@@ -89,8 +93,16 @@ if (typeof window !== 'undefined') {
     } else if (message.type === 'audioDeviceSelected' && message.deviceId) {
       if (message.context === 'input') lastAudioDevices.input = message.deviceId;
       else if (message.context === 'output') lastAudioDevices.output = message.deviceId;
+    } else if (message.type === 'printDocument' && typeof message.url === 'string') {
+      printJobs = [...printJobs, { name: message.name, url: message.url }];
+      window.dispatchEvent(new Event('printJobsChanged'));
     }
   });
+}
+
+/** The documents printed so far this page; `printJobsChanged` fires on each. */
+export function getPrintJobs(): PrintJob[] {
+  return printJobs;
 }
 
 /** The last `serverSettings` payload, or null before the first connection. */

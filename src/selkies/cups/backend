@@ -1,0 +1,30 @@
+#!/bin/bash
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# CUPS backend of the Selkies queue: writes each job, a PDF by the time it
+# gets here, into the print spool the device URI names (selkies:/path), under
+# the job's title. Written under a temporary name and renamed once whole, so
+# the spool watcher never sees a partial document.
+set -e
+if [ $# -eq 0 ]; then
+    echo 'direct selkies "Unknown" "Selkies printer"'
+    exit 0
+fi
+title="$3" file="${6:-}"
+dir="${DEVICE_URI#selkies:}"
+mkdir -p "${dir}"
+name="$(printf '%s' "${title}" | tr -c 'A-Za-z0-9._ -' '_' | sed -E 's/^[._ ]+//; s/[. ]+$//' | cut -c1-120)"
+name="${name%.pdf}"
+name="${name%.PDF}"
+name="${name:-document}"
+target="${dir}/${name}.pdf"
+n=2
+while [ -e "${target}" ]; do
+    target="${dir}/${name} (${n}).pdf"
+    n=$((n + 1))
+done
+tmp="${dir}/.$1.part"
+if [ -n "${file}" ]; then cat "${file}" > "${tmp}"; else cat > "${tmp}"; fi
+mv -f "${tmp}" "${target}"

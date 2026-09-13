@@ -1,0 +1,64 @@
+*PPD-Adobe: "4.3"
+*FormatVersion: "4.3"
+*FileVersion: "1.0"
+*LanguageVersion: English
+*LanguageEncoding: ISOLatin1
+*PCFileName: "SELKIES.PPD"
+*Manufacturer: "Selkies"
+*Product: "(Selkies)"
+*ModelName: "Selkies Printer"
+*ShortNickName: "Selkies Printer"
+*NickName: "Selkies Printer"
+*PSVersion: "(3010.000) 0"
+*LanguageLevel: "3"
+*ColorDevice: True
+*DefaultColorSpace: RGB
+*FileSystem: False
+*Throughput: "8"
+*LandscapeOrientation: Plus90
+*TTRasterizer: Type42
+*cupsVersion: 2.4
+*cupsFilter: "application/vnd.cups-pdf 0 -"
+*HWMargins: 0 0 0 0
+*OpenUI *PageSize/Page Size: PickOne
+*OrderDependency: 10 AnySetup *PageSize
+*DefaultPageSize: A4
+*PageSize A4/A4: "<</PageSize[595 842]>>setpagedevice"
+*PageSize A3/A3: "<</PageSize[842 1191]>>setpagedevice"
+*PageSize A5/A5: "<</PageSize[421 595]>>setpagedevice"
+*PageSize Letter/US Letter: "<</PageSize[612 792]>>setpagedevice"
+*PageSize Legal/US Legal: "<</PageSize[612 1008]>>setpagedevice"
+*PageSize Tabloid/Tabloid: "<</PageSize[792 1224]>>setpagedevice"
+*PageSize Executive/Executive: "<</PageSize[522 756]>>setpagedevice"
+*CloseUI: *PageSize
+*OpenUI *PageRegion/Page Region: PickOne
+*OrderDependency: 10 AnySetup *PageRegion
+*DefaultPageRegion: A4
+*PageRegion A4/A4: "<</PageSize[595 842]>>setpagedevice"
+*PageRegion A3/A3: "<</PageSize[842 1191]>>setpagedevice"
+*PageRegion A5/A5: "<</PageSize[421 595]>>setpagedevice"
+*PageRegion Letter/US Letter: "<</PageSize[612 792]>>setpagedevice"
+*PageRegion Legal/US Legal: "<</PageSize[612 1008]>>setpagedevice"
+*PageRegion Tabloid/Tabloid: "<</PageSize[792 1224]>>setpagedevice"
+*PageRegion Executive/Executive: "<</PageSize[522 756]>>setpagedevice"
+*CloseUI: *PageRegion
+*DefaultImageableArea: A4
+*ImageableArea A4/A4: "0 0 595 842"
+*ImageableArea A3/A3: "0 0 842 1191"
+*ImageableArea A5/A5: "0 0 421 595"
+*ImageableArea Letter/US Letter: "0 0 612 792"
+*ImageableArea Legal/US Legal: "0 0 612 1008"
+*ImageableArea Tabloid/Tabloid: "0 0 792 1224"
+*ImageableArea Executive/Executive: "0 0 522 756"
+*DefaultPaperDimension: A4
+*PaperDimension A4/A4: "595 842"
+*PaperDimension A3/A3: "842 1191"
+*PaperDimension A5/A5: "421 595"
+*PaperDimension Letter/US Letter: "612 792"
+*PaperDimension Legal/US Legal: "612 1008"
+*PaperDimension Tabloid/Tabloid: "792 1224"
+*PaperDimension Executive/Executive: "522 756"
+*DefaultFont: Courier
+*Font Courier: Standard "(002.004S)" Standard ROM
+*Font Helvetica: Standard "(001.006S)" Standard ROM
+*Font Times-Roman: Standard "(001.007S)" Standard ROM

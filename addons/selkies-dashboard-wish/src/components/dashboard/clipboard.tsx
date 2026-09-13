@@ -45,18 +45,23 @@ export function Clipboard() {
 	const [clipboardImage, setClipboardImage] = useState<File | null>(null);
 	const previewRef = useRef<HTMLCanvasElement>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
-	const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => {
-		const saved = localStorage.getItem(getPrefixedKey("enable_binary_clipboard"));
-		return saved !== null ? saved === 'true' : true;
-	});
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	const storedBool = (key: string, fallback: boolean) => {
 		const saved = localStorage.getItem(getPrefixedKey(key));
 		return saved !== null ? saved === 'true' : fallback;
 	};
+	/** A switch's starting state: a locked server value, else the stored
+	 * preference, else the server's value. The panel mounts when its menu
+	 * opens, after the server settings arrived. */
+	const startingBool = (key: string) => {
+		const server = getLastServerSettings()?.[key];
+		if (server?.locked) return !!server.value;
+		return storedBool(key, server ? !!server.value : true);
+	};
+	const [enableBinaryClipboard, setEnableBinaryClipboard] = useState(() => startingBool("enable_binary_clipboard"));
 	const [clipboardUp, setClipboardUp] = useState(() => storedBool("clipboard_in_enabled", true));
 	const [clipboardDown, setClipboardDown] = useState(() => storedBool("clipboard_out_enabled", true));
-	const [clipboardSeamless, setClipboardSeamless] = useState(() => storedBool("clipboard_seamless", true));
+	const [clipboardSeamless, setClipboardSeamless] = useState(() => startingBool("clipboard_seamless"));
 
 	/** One clipboard switch: optimistic, stored, then posted like any setting. */
 	const toggleClientSetting = (key: string, value: boolean,

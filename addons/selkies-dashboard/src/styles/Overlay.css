@@ -525,6 +525,22 @@
   margin-right: 10px;
 }
 
+/* One printed document: its name, then its print and save buttons. */
+.print-job {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.print-job-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Select elements within setting items, with a themed custom arrow. */
 .dev-setting-item select {
     width: 100%;

@@ -197,6 +197,18 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'Allowed file transfer directions (comma-separated: "upload,download"). Set to "" or "none" to disable.',
     },
     {
+        "name": "printing_enabled",
+        "type": "bool",
+        "default": True,
+        "help": "Hand the documents printed in the session to the browser: a job printed to the session's Selkies queue lands in the print spool as a PDF, and the page opens it in the browser's print dialog. Off refuses the documents and shows no printer section.",
+    },
+    {
+        "name": "print_spool_path",
+        "type": "str",
+        "default": "~/.local/state/selkies/print",
+        "help": "Directory the session's print queue writes finished jobs into as PDFs, watched for documents to hand to the browser and created at startup when missing; a document is removed once a page has taken it.",
+    },
+    {
         "name": "file_transfer_limit_mbps",
         "type": "float",
         "default": 0.0,
@@ -207,7 +219,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "audit_webhook_url",
         "type": "str",
         "default": "",
-        "help": 'URL that receives one JSON POST per clipboard transfer, file upload and file download, carrying metadata only (the event, an RFC 3339 timestamp, byte size, MIME type or file name) and never the content. Events are delivered in order over one keep-alive connection; a collector that is slow or down loses what overflows the queue rather than stalling the session. Empty (default) sends nothing.',
+        "help": 'URL that receives one JSON POST per clipboard transfer, file upload, file download and printed document handed over, carrying metadata only (the event, an RFC 3339 timestamp, byte size, MIME type or file name) and never the content. Events are delivered in order over one keep-alive connection; a collector that is slow or down loses what overflows the queue rather than stalling the session. Empty (default) sends nothing.',
     },
     {
         "name": "audit_webhook_token",
@@ -1871,7 +1883,7 @@ def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) ->
 CLIENT_PAYLOAD_EXCLUDED = [
     'port', 'addr', 'public', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',
     'audio_device_name', 'watermark_path', 'recording_socket',
-    'file_manager_path', 'run_after_connect', 'run_after_disconnect',
+    'file_manager_path', 'print_spool_path', 'run_after_connect', 'run_after_disconnect',
     'https_cert', 'rtc_config_json', 'app_ready_file', 'js_socket_path',
     'webcam_socket_path', 'webcam_device',
     'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind',

@@ -165,6 +165,13 @@ const en = {
             uploadButtonTitle: "Upload files to the remote session",
             downloadButtonTitle: "Download Files",
         },
+        printing: {
+            title: "Printing",
+            automaticLabel: "Print automatically",
+            automaticDetails: "Open the browser's print dialog for each document printed in the session",
+            printButton: "Print",
+            saveButton: "Save",
+        },
         gamepads: {
             title: "Gamepads",
             noActivity: "No physical gamepad activity detected yet...",
@@ -419,6 +426,13 @@ const es = {
              uploadButton: "Subir Archivos",
              uploadButtonTitle: "Subir archivos a la sesión remota",
              downloadButtonTitle: "Descargar Archivos",
+        },
+        printing: {
+            title: "Impresión",
+            automaticLabel: "Imprimir automáticamente",
+            automaticDetails: "Abrir el diálogo de impresión del navegador con cada documento impreso en la sesión",
+            printButton: "Imprimir",
+            saveButton: "Guardar",
         },
         gamepads: {
              title: "Mandos",
@@ -675,6 +689,13 @@ const zh = {
             uploadButtonTitle: "上传文件到远程会话",
             downloadButtonTitle: "下载文件",
         },
+        printing: {
+            title: "打印",
+            automaticLabel: "自动打印",
+            automaticDetails: "会话中每打印一份文档，就打开浏览器的打印对话框",
+            printButton: "打印",
+            saveButton: "保存",
+        },
         gamepads: {
             title: "游戏手柄",
             noActivity: "尚未检测到游戏手柄活动...",
@@ -929,6 +950,13 @@ const hi = {
             uploadButton: "फ़ाइलें अपलोड करें",
             uploadButtonTitle: "रिमोट सेशन में फ़ाइलें अपलोड करें",
             downloadButtonTitle: "फ़ाइलें डाउनलोड करें",
+        },
+        printing: {
+            title: "प्रिंटिंग",
+            automaticLabel: "स्वचालित रूप से प्रिंट करें",
+            automaticDetails: "सत्र में प्रिंट किए गए हर दस्तावेज़ के लिए ब्राउज़र का प्रिंट संवाद खोलें",
+            printButton: "प्रिंट",
+            saveButton: "सहेजें",
         },
         gamepads: {
             title: "गेमपैड",
@@ -1185,6 +1213,13 @@ const pt = {
             uploadButtonTitle: "Carregar arquivos para a sessão remota",
             downloadButtonTitle: "Baixar Arquivos",
         },
+        printing: {
+            title: "Impressão",
+            automaticLabel: "Imprimir automaticamente",
+            automaticDetails: "Abrir a caixa de impressão do navegador para cada documento impresso na sessão",
+            printButton: "Imprimir",
+            saveButton: "Salvar",
+        },
         gamepads: {
             title: "Gamepads",
             noActivity: "Nenhuma atividade de gamepad detectada ainda...",
@@ -1439,6 +1474,13 @@ const fr = {
             uploadButton: "Téléverser des fichiers",
             uploadButtonTitle: "Téléverser des fichiers vers la session distante",
             downloadButtonTitle: "Télécharger les Fichiers",
+        },
+        printing: {
+            title: "Impression",
+            automaticLabel: "Imprimer automatiquement",
+            automaticDetails: "Ouvrir la boîte de dialogue d'impression du navigateur pour chaque document imprimé dans la session",
+            printButton: "Imprimer",
+            saveButton: "Enregistrer",
         },
         gamepads: {
             title: "Manettes",
@@ -1696,6 +1738,13 @@ const ru = {
             uploadButtonTitle: "Загрузить файлы в удаленную сессию",
             downloadButtonTitle: "Скачать Файлы",
         },
+        printing: {
+            title: "Печать",
+            automaticLabel: "Печатать автоматически",
+            automaticDetails: "Открывать диалог печати браузера для каждого документа, напечатанного в сеансе",
+            printButton: "Печать",
+            saveButton: "Сохранить",
+        },
         gamepads: {
             title: "Геймпады",
             noActivity: "Активность геймпада пока не обнаружена...",
@@ -1950,6 +1999,13 @@ const de = {
             uploadButton: "Dateien hochladen",
             uploadButtonTitle: "Dateien zur Remote-Sitzung hochladen",
             downloadButtonTitle: "Dateien herunterladen",
+        },
+        printing: {
+            title: "Drucken",
+            automaticLabel: "Automatisch drucken",
+            automaticDetails: "Den Druckdialog des Browsers für jedes in der Sitzung gedruckte Dokument öffnen",
+            printButton: "Drucken",
+            saveButton: "Speichern",
         },
         gamepads: {
             title: "Gamepads",
@@ -2206,6 +2262,13 @@ const tr = {
             uploadButtonTitle: "Uzak oturuma dosya yükle",
             downloadButtonTitle: "Dosyaları İndir",
         },
+        printing: {
+            title: "Yazdırma",
+            automaticLabel: "Otomatik yazdır",
+            automaticDetails: "Oturumda yazdırılan her belge için tarayıcının yazdırma penceresini aç",
+            printButton: "Yazdır",
+            saveButton: "Kaydet",
+        },
         gamepads: {
             title: "Oyun Kumandaları",
             noActivity: "Henüz oyun kumandası etkinliği algılanmadı...",
@@ -2460,6 +2523,13 @@ const it = {
             uploadButton: "Carica File",
             uploadButtonTitle: "Carica file nella sessione remota",
             downloadButtonTitle: "Scarica File",
+        },
+        printing: {
+            title: "Stampa",
+            automaticLabel: "Stampa automaticamente",
+            automaticDetails: "Apri la finestra di stampa del browser per ogni documento stampato nella sessione",
+            printButton: "Stampa",
+            saveButton: "Salva",
         },
         gamepads: {
             title: "Gamepad",
@@ -2716,6 +2786,13 @@ const nl = {
             uploadButtonTitle: "Upload bestanden naar de externe sessie",
             downloadButtonTitle: "Bestanden Downloaden",
         },
+        printing: {
+            title: "Afdrukken",
+            automaticLabel: "Automatisch afdrukken",
+            automaticDetails: "Het afdrukvenster van de browser openen voor elk document dat in de sessie wordt afgedrukt",
+            printButton: "Afdrukken",
+            saveButton: "Opslaan",
+        },
         gamepads: {
             title: "Gamepads",
             noActivity: "Nog geen gamepad activiteit gedetecteerd...",
@@ -2970,6 +3047,13 @@ const ar = {
             uploadButton: "تحميل الملفات",
             uploadButtonTitle: "تحميل الملفات إلى الجلسة البعيدة",
             downloadButtonTitle: "تحميل الملفات",
+        },
+        printing: {
+            title: "الطباعة",
+            automaticLabel: "الطباعة تلقائيًا",
+            automaticDetails: "فتح مربع حوار الطباعة في المتصفح لكل مستند يُطبع في الجلسة",
+            printButton: "طباعة",
+            saveButton: "حفظ",
         },
         gamepads: {
             title: "لوحات الألعاب",
@@ -3226,6 +3310,13 @@ const ko = {
             uploadButtonTitle: "원격 세션에 파일 업로드",
             downloadButtonTitle: "파일 다운로드",
         },
+        printing: {
+            title: "인쇄",
+            automaticLabel: "자동으로 인쇄",
+            automaticDetails: "세션에서 인쇄된 문서마다 브라우저의 인쇄 대화 상자를 엽니다",
+            printButton: "인쇄",
+            saveButton: "저장",
+        },
         gamepads: {
             title: "게임패드",
             noActivity: "아직 게임패드 활동이 감지되지 않았습니다...",
@@ -3480,6 +3571,13 @@ const ja = {
             uploadButton: "ファイルをアップロード",
             uploadButtonTitle: "リモートセッションにファイルをアップロード",
             downloadButtonTitle: "ファイルをダウンロード",
+        },
+        printing: {
+            title: "印刷",
+            automaticLabel: "自動的に印刷",
+            automaticDetails: "セッションで印刷された文書ごとにブラウザの印刷ダイアログを開きます",
+            printButton: "印刷",
+            saveButton: "保存",
         },
         gamepads: {
             title: "ゲームパッド",
@@ -3736,6 +3834,13 @@ const vi = {
             uploadButtonTitle: "Tải tệp lên phiên làm việc từ xa",
             downloadButtonTitle: "Tải xuống Tệp",
         },
+        printing: {
+            title: "In",
+            automaticLabel: "Tự động in",
+            automaticDetails: "Mở hộp thoại in của trình duyệt cho mỗi tài liệu được in trong phiên",
+            printButton: "In",
+            saveButton: "Lưu",
+        },
         gamepads: {
             title: "Tay cầm chơi game",
             noActivity: "Chưa phát hiện hoạt động nào của tay cầm chơi game...",
@@ -3990,6 +4095,13 @@ const th = {
             uploadButton: "อัปโหลดไฟล์",
             uploadButtonTitle: "อัปโหลดไฟล์ไปยังเซสชันระยะไกล",
             downloadButtonTitle: "ดาวน์โหลดไฟล์",
+        },
+        printing: {
+            title: "การพิมพ์",
+            automaticLabel: "พิมพ์โดยอัตโนมัติ",
+            automaticDetails: "เปิดกล่องโต้ตอบการพิมพ์ของเบราว์เซอร์สำหรับเอกสารทุกฉบับที่พิมพ์ในเซสชัน",
+            printButton: "พิมพ์",
+            saveButton: "บันทึก",
         },
         gamepads: {
             title: "เกมแพด",
@@ -4246,6 +4358,13 @@ const fil = {
             uploadButtonTitle: "Mag-upload ng mga file sa remote session",
             downloadButtonTitle: "I-download ang mga File",
         },
+        printing: {
+            title: "Pag-print",
+            automaticLabel: "Awtomatikong i-print",
+            automaticDetails: "Buksan ang print dialog ng browser para sa bawat dokumentong na-print sa session",
+            printButton: "I-print",
+            saveButton: "I-save",
+        },
         gamepads: {
             title: "Mga Gamepad",
             noActivity: "Wala pang aktibidad ng gamepad na natukoy...",
@@ -4500,6 +4619,13 @@ const da = {
             uploadButton: "Upload Filer",
             uploadButtonTitle: "Upload filer til den eksterne session",
             downloadButtonTitle: "Download Filer",
+        },
+        printing: {
+            title: "Udskrivning",
+            automaticLabel: "Udskriv automatisk",
+            automaticDetails: "Åbn browserens udskriftsdialog for hvert dokument, der udskrives i sessionen",
+            printButton: "Udskriv",
+            saveButton: "Gem",
         },
         gamepads: {
             title: "Gamepads",

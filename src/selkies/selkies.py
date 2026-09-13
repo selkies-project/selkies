@@ -2588,6 +2588,21 @@ class DataStreamingServer(BaseStreamingService):
         display_state['_measured_client_fps'] = est
         return est
 
+    async def announce_print_document(self, name: str, size: int) -> None:
+        """Tell every controller page a printed document waits in the spool."""
+        secondary = {c.get('ws') for did, c in self.display_clients.items() if did != 'primary'}
+        controllers = {ws for ws in self.clients if ws not in secondary
+                       and client_permissions.get(ws, {}).get("role") != "viewer"}
+        await self._send_print_documents(controllers, [(name, size)])
+
+    async def _send_print_documents(self, sockets: set, documents: list) -> None:
+        for name, size in documents:
+            message = json.dumps({"type": "print_document", "name": name, "size_bytes": size})
+            # Bounded like every control fan-out; the set is a computed one, so
+            # the drop is mirrored into the registry.
+            for ws in await _broadcast_to_clients(sockets, message, per_client_timeout=2.0):
+                self.clients.discard(ws)
+
     async def broadcast_stream_resolution(self) -> None:
         """Send each display's realized resolution to the socket rendering that
         display, and the primary's to every remaining socket (shared viewers
@@ -3380,6 +3395,8 @@ class DataStreamingServer(BaseStreamingService):
             if self.data_ws is websocket:
                 self.data_ws = None
             return
+        if self.supervisor and client_permissions.get(websocket, {}).get("role") != "viewer":
+            await self._send_print_documents({websocket}, self.supervisor.pending_print_documents())
 
         self._last_adjustment_time = self._last_time_client_ok = time.monotonic()
         self._active_pipeline_last_sent_frame_id = 0

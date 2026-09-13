@@ -33,6 +33,7 @@ import shutil
 import base64
 import pathlib
 import asyncio
+import contextlib
 import math
 import mimetypes
 import logging
@@ -53,7 +54,7 @@ except ImportError:
     import importlib.resources as importlib_resources
 
 from abc import ABCMeta, abstractmethod
-from . import audit
+from . import audit, printing
 
 
 logger = logging.getLogger("stream_server")
@@ -145,19 +146,26 @@ TRANSFER_MIN_GAUGED_BYTES: int = 4 * 1024 * 1024
 
 
 class _AuditedFileResponse(web.FileResponse):
-    """A file served by aiohttp, recorded for the audit once it went out: the
-    whole file or the range asked for, with the bytes served. A download the
-    client stops before the end raises out of `prepare` and is not recorded."""
+    """A file served by aiohttp, recorded for the audit as `event` once it
+    went out: the whole file or the range asked for, with the bytes served. A
+    download the client stops before the end raises out of `prepare` and is
+    not recorded. With `remove`, a file that went out whole is deleted."""
 
-    def __init__(self, path: pathlib.Path, served: str, **kwargs: Any) -> None:
+    def __init__(self, path: pathlib.Path, served: str, event: str = "file.download",
+                 remove: bool = False, **kwargs: Any) -> None:
         super().__init__(path, **kwargs)
         self._served = served
+        self._event = event
+        self._remove = path if remove else None
 
     async def prepare(self, request: web.BaseRequest) -> Any:
         writer = await super().prepare(request)
         if request.method == "GET" and self.status in (200, 206):
-            audit.emit("file.download", filename=self._served,
+            audit.emit(self._event, filename=self._served,
                        size_bytes=self.content_length or 0, partial=self.status == 206)
+            if self._remove is not None and self.status == 200:
+                with contextlib.suppress(OSError):
+                    os.unlink(self._remove)
         return writer
 
 
@@ -1090,6 +1098,10 @@ class BaseStreamingService(metaclass=ABCMeta):
         """
         pass
 
+    @abstractmethod
+    async def announce_print_document(self, name: str, size: int) -> None:
+        """Tell the controller pages that `name` waits in the print spool."""
+
     def uplink_session_conns(self) -> List[Tuple[Any, Optional[str], Optional[str]]]:
         """``(websocket, session token, peer ip)`` per connected client
         session, for upload uplink gauging (`UplinkGauge`).
@@ -1161,6 +1173,11 @@ class CentralizedStreamServer:
         self.upload_dir = pathlib.Path(
             os.path.expanduser(self.settings.file_manager_path)
         ).resolve()
+        self.print_spool = pathlib.Path(
+            os.path.expanduser(self.settings.print_spool_path)
+        ).resolve()
+        self.print_watcher: Optional[printing.SpoolWatcher] = None
+        self.print_queue: Optional[printing.PrintQueue] = None
         self._chunked_uploads: Dict[str, Dict[str, Any]] = {}
         self.web_files_ctx: Optional[tempfile.TemporaryDirectory] = None
 
@@ -2341,6 +2358,30 @@ class CentralizedStreamServer:
         audit.emit("file.upload.end", filename=name, size_bytes=received)
         return web.json_response({"status": "success", "bytes": received, "complete": True})
 
+    async def handle_print_document(self, request: web.Request) -> web.StreamResponse:
+        """GET /api/print/<name>: hand a printed document to the page that
+        prints it, and take it out of the spool once it went out whole.
+        Refused to view-only credentials: printing is the session owner's act."""
+        if not self.settings.printing_enabled[0]:
+            return web.Response(status=403, text="Forbidden: printing disabled")
+        if self._viewer_ceiling(request):
+            return web.Response(status=403, text="View-only credentials cannot take printed documents")
+        name = printing.document_name(request.match_info.get("name", ""))
+        path = self.print_spool / name if name else None
+        if path is None or not path.is_file():
+            return web.Response(status=404, text="No such document")
+        return _AuditedFileResponse(path, name, event="print.document", remove=True,
+                                    headers={"Content-Disposition": "inline"})
+
+    def pending_print_documents(self) -> List[Tuple[str, int]]:
+        """The documents no page has taken yet, for a page that connects now."""
+        return printing.pending(str(self.print_spool)) if self.print_watcher else []
+
+    async def _announce_print_document(self, name: str, size: int) -> None:
+        service = self.services.get(self.current_mode) if self.current_mode else None
+        if service is not None:
+            await service.announce_print_document(name, size)
+
     async def handle_status(self, _: web.Request) -> web.Response:
         """GET /api/status: current mode, available modes, dual-mode flag."""
         status = self._get_status()
@@ -2642,6 +2683,7 @@ class CentralizedStreamServer:
             web.post(f"{api_prefix}/api/switch", self.handle_switch),
             web.post(f"{api_prefix}/api/upload", self.handle_upload),
             web.get(f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler),
+            web.get(f"{api_prefix}/api/print/{{name}}", self.handle_print_document),
         ]
         if self.settings.enable_metrics_http[0]:
             routes.append(web.get(f"{api_prefix}/api/metrics", self.handle_metrics))
@@ -2795,6 +2837,12 @@ class CentralizedStreamServer:
 
         if https:
             self.cert_watcher = asyncio.create_task(self._watch_and_reload_certs())
+        if self.settings.printing_enabled[0]:
+            self.print_watcher = printing.SpoolWatcher(
+                str(self.print_spool), asyncio.get_running_loop(), self._announce_print_document)
+            self.print_watcher.start()
+            self.print_queue = printing.PrintQueue(str(self.print_spool))
+            await self.print_queue.start()
 
     async def stop_server(self) -> None:
         """Stop the server gracefully: cert watcher, active service, listener,
@@ -2805,6 +2853,12 @@ class CentralizedStreamServer:
                 await self.cert_watcher
             except asyncio.CancelledError:
                 pass
+        if self.print_queue:
+            await self.print_queue.stop()
+            self.print_queue = None
+        if self.print_watcher:
+            self.print_watcher.stop()
+            self.print_watcher = None
 
         await self._stop_service()
 

@@ -1433,6 +1433,8 @@ function Sidebar() {
   const [clipboardDown, setClipboardDown] = useState(() => storedBool("clipboard_out_enabled", true));
   const [clipboardSeamless, setClipboardSeamless] = useState(() => storedBool("clipboard_seamless", true));
   const [keyboardShortcuts, setKeyboardShortcuts] = useState(() => storedBool("keyboard_shortcuts", true));
+  const [printAuto, setPrintAuto] = useState(() => storedBool("print_auto", true));
+  const [printJobs, setPrintJobs] = useState([]);
   const [presetValue, setPresetValue] = useState("");
   const [clientFps, setClientFps] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
@@ -1483,6 +1485,7 @@ function Sidebar() {
     // A phone lands on gamepads: the reason to open the dashboard on touch at all.
     gamepads: isMobileClient,
     files: false,
+    printing: true,
     apps: false,
     sharing: false,
     shortcuts: false,
@@ -2945,6 +2948,8 @@ function Sidebar() {
               return un;
             } else return prev;
           });
+        } else if (message.type === "printDocument") {
+          setPrintJobs((prev) => [...prev, { name: message.name, url: message.url }]);
         } else if (message.type === "serverSettings") {
             const encoders = message.payload?.encoder?.allowed
             if (encoders && Array.isArray(encoders)) {
@@ -4616,6 +4621,62 @@ function Sidebar() {
                         {t("sections.files.downloadButtonTitle", "Download Files")}
                       </button>
                     )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {printJobs.length > 0 && (
+              <div className="sidebar-section">
+                <div
+                  className="sidebar-section-header"
+                  onClick={() => toggleSection("printing")}
+                  role="button"
+                  aria-expanded={sectionsOpen.printing}
+                  aria-controls="printing-content"
+                  tabIndex="0"
+                  onKeyDown={(e) =>
+                    (e.key === "Enter" || e.key === " ") && toggleSection("printing")
+                  }
+                >
+                  <h3>{t("sections.printing.title", "Printing")}</h3>
+                  <span className="section-toggle-icon">
+                    {sectionsOpen.printing ? <CaretUpIcon /> : <CaretDownIcon />}
+                  </span>
+                </div>
+                {sectionsOpen.printing && (
+                  <div className="sidebar-section-content" id="printing-content">
+                    <div className="dev-setting-item toggle-item">
+                      <label
+                        htmlFor="printAutoToggle"
+                        title={t("sections.printing.automaticDetails")}
+                      >
+                        {t("sections.printing.automaticLabel", "Print automatically")}
+                      </label>
+                      <button
+                        id="printAutoToggle"
+                        className={`toggle-button-sidebar ${printAuto ? "active" : ""}`}
+                        onClick={() => toggleClientSetting("print_auto", !printAuto, setPrintAuto)}
+                        aria-pressed={printAuto}
+                        title={t("sections.printing.automaticLabel", "Print automatically")}
+                      >
+                        <span className="toggle-button-sidebar-knob"></span>
+                      </button>
+                    </div>
+                    {printJobs.map((job) => (
+                      <div key={job.url} className="print-job">
+                        <span className="print-job-name" title={job.name}>{job.name}</span>
+                        <button
+                          className="resolution-button"
+                          onClick={() => window.postMessage({ type: "printRequest", url: job.url }, window.location.origin)}
+                        >
+                          {t("sections.printing.printButton", "Print")}
+                        </button>
+                        <a className="resolution-button" href={job.url} download={job.name}>
+                          {t("sections.printing.saveButton", "Save")}
+                        </a>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

@@ -50,9 +50,17 @@ The side menu's files section uploads files into the session and browses the sam
 
 `--file-manager-path` (`FILE_MANAGER_PATH`, default `~/Desktop`) is the directory both directions use, created at startup when missing. Transfers in either direction are paced against the video stream so a large one does not stall the session, measured end to end so a reverse proxy in front changes nothing; `--file-transfer-limit-mbps` adds a fixed cap on top for operators who want one.
 
+## Printing
+
+The session has a printer named **Selkies**, and a document printed to it opens in the browser's own print dialog, ready for whatever printer the browser can reach. Each printed document also appears in the side menu's printing section, which opens with the first one, where it can be printed again or saved as a PDF; its **Print automatically** switch is what opens the dialog on arrival, and off it leaves the documents in the list. A browser that does not show a PDF in a frame leaves every document in the list too, where **Save** hands over the file.
+
+Selkies runs the queue itself, as the session user, from a CUPS scheduler installed on the host: `cups-daemon` with the `cups-filters` chain, which turns whatever an application prints into a PDF. The scheduler keeps its state under the runtime directory, needs nothing under `/etc/cups` and no privilege, and listens on `$XDG_RUNTIME_DIR/selkies-cups/cups.sock`; the containers point the session's `CUPS_SERVER` there, and a session started any other way sets that variable for its applications the way it sets `DISPLAY`. Without a scheduler on the host there is no queue, but a PDF placed in the spool by any other means is handed over the same way.
+
+`--printing-enabled=false` (`SELKIES_PRINTING_ENABLED`) turns the feature off: no queue, no documents handed over. `--print-spool-path` (`SELKIES_PRINT_SPOOL_PATH`, default `~/.local/state/selkies/print`) is the directory the queue writes finished jobs into as PDFs. A document leaves the spool once the page has taken it, so the spool holds what has not reached a browser yet, and a page that connects later gets it then. Documents go to the page that holds the session; a shared viewer receives none.
+
 ## Audit Trail
 
-`--audit-webhook-url` (`SELKIES_AUDIT_WEBHOOK_URL`) POSTs one JSON object to a collector for every clipboard transfer, file upload and file download, for deployments that have to produce a record of what moved. Metadata only: the content is never sent, and neither is anything identifying the client, since Selkies has no first-class user of its own. Nothing is sent without a URL. `--audit-webhook-token` adds an `Authorization: Bearer` header a proxy in front of the collector can check, and `--audit-webhook-timeout` bounds one POST; the URL is used as given, so a collector anywhere but this host wants `https://`.
+`--audit-webhook-url` (`SELKIES_AUDIT_WEBHOOK_URL`) POSTs one JSON object to a collector for every clipboard transfer, file upload, file download and printed document handed over, for deployments that have to produce a record of what moved. Metadata only: the content is never sent, and neither is anything identifying the client, since Selkies has no first-class user of its own. Nothing is sent without a URL. `--audit-webhook-token` adds an `Authorization: Bearer` header a proxy in front of the collector can check, and `--audit-webhook-timeout` bounds one POST; the URL is used as given, so a collector anywhere but this host wants `https://`.
 
 | `event` | Fields | Recorded when |
 | --- | --- | --- |
@@ -61,6 +69,7 @@ The side menu's files section uploads files into the session and browses the sam
 | `file.upload.end` | `filename`, `size_bytes` | an upload lands in the file-manager directory |
 | `file.upload.error` | `filename`, `error` | an upload is refused or fails, `filename` as the client asked for it |
 | `file.download` | `filename`, `size_bytes`, `partial` | a file went out of the file-manager directory whole, or the range of it a client asked for (`partial`), with the bytes served; a download the client stopped early is not recorded |
+| `print.document` | `filename`, `size_bytes`, `partial` | a printed document went out of the print spool to a page, on the same terms as `file.download` |
 
 Every object also carries `ts`, an RFC 3339 UTC timestamp with milliseconds taken when the transfer happened, and both transports emit the same objects. An event costs the session an enqueue and nothing else: one task delivers the queue in order over a single keep-alive connection, so a collector that is slow or down never paces the stream. The queue holds 1024 events and drops what overflows, a POST that fails drops its event with no retry, and each outage is logged once.
 

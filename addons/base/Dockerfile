@@ -400,6 +400,12 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         libx11-xcb1 \
         libxcb-dri3-0 \
         libxcb-present0 \
+        # Printing: the CUPS scheduler Selkies runs as the session user for its
+        # Selkies queue, and the filters that make a PDF of whatever an
+        # application prints
+        cups-daemon \
+        cups-client \
+        cups-filters \
         # X11 display server and utilities
         xserver-xorg-core \
         xvfb \

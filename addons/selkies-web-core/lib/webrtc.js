@@ -176,6 +176,9 @@ export class WebRTCClient {
 
 		/** @type {?function(Object): void} */
 		this.ondisplayconfig = null;
+
+		/** @type {?function(Object): void} */
+		this.onprintdocument = null;
 	}
 
 	/** Forwards a status message to `onstatus`. */
@@ -690,6 +693,10 @@ export class WebRTCClient {
 		} else if (msg.type === 'display_config_update') {
 			if (this.ondisplayconfig !== null) {
 				this.ondisplayconfig(msg.data);
+			}
+		} else if (msg.type === 'print_document') {
+			if (this.onprintdocument !== null) {
+				this.onprintdocument(msg.data);
 			}
 		} else {
 			this._setError("Unhandled message received: " + msg.type);

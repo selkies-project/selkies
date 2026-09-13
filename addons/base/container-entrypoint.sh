@@ -276,6 +276,9 @@ export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-256/48000}"
 export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR}}"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
+# The print queue Selkies runs for the session listens here; an operator
+# pointing at another scheduler leaves that queue unused
+export CUPS_SERVER="${CUPS_SERVER:-${XDG_RUNTIME_DIR}/selkies-cups/cups.sock}"
 
 # Compute the shared session environment, including embedded coTURN defaults
 ENV_FILE="${XDG_RUNTIME_DIR}/container-env"

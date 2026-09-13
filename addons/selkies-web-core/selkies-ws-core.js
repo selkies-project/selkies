@@ -132,6 +132,7 @@ import {
 import wireCodecsSource from './lib/wire-codecs.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
+import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -1165,6 +1166,7 @@ clipboard_in_enabled = getBoolParam('clipboard_in_enabled', true);
 clipboard_seamless = getBoolParam('clipboard_seamless', true);
 keyboardShortcuts = getBoolParam('keyboard_shortcuts', true);
 clipboard_out_enabled = getBoolParam('clipboard_out_enabled', true);
+const printJobs = createPrintJobs({ automatic: getBoolParam('print_auto', true) });
 force_aligned_resolution = getBoolParam('force_aligned_resolution', force_aligned_resolution);
 
 if (isSharedMode) {
@@ -4417,6 +4419,9 @@ function receiveMessage(event) {
       }
       sendExplicitClipboard(message.text);
       break;
+    case 'printRequest':
+      printDocument(message.url);
+      break;
     case 'clipboardImageUpdate': {
       if (isSharedMode) {
         console.log("Shared mode: Clipboard image write to server blocked.");
@@ -4907,6 +4912,10 @@ function handleSettingsMessage(settings, fromServer) {
   if (settings.clipboard_seamless !== undefined) {
     clipboard_seamless = !!settings.clipboard_seamless;
     storeBool('clipboard_seamless', clipboard_seamless);
+  }
+  if (settings.print_auto !== undefined) {
+    printJobs.setAutomatic(settings.print_auto);
+    storeBool('print_auto', !!settings.print_auto);
   }
   if (settings.clipboard_in_enabled !== undefined) {
     clipboard_in_enabled = !!settings.clipboard_in_enabled;
@@ -7132,6 +7141,9 @@ class WorkerWebSocket {
                 apps: obj.apps
               }, window.location.origin);
             }
+          } else if (obj.type === 'print_document') {
+            // A second display page is the same browser as the primary one.
+            if (!window.location.hash.startsWith('#display2')) printJobs.announce(obj.name, obj.size_bytes);
           } else if (obj.type === 'pipeline_status') {
             let statusChanged = false;
             if (obj.video !== undefined && obj.video !== isVideoPipelineActive) {

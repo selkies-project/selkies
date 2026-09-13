@@ -84,6 +84,7 @@ selkies-gpu-probe = "selkies.gpu_probe:main"
 # Package the static web files, and the licence of the vendored python-xlib
 # fork, as part of the distribution wheel
 [tool.setuptools.package-data]
+"selkies" = ["cups/*"]
 "selkies.selkies_web" = ["**/*"]
 "selkies.Xlib" = ["LICENSE"]
 

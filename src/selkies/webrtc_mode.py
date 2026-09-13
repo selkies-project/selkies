@@ -746,12 +746,23 @@ class WebRTCService(BaseStreamingService):
             self.rtc_app.send_message_to_channel(
                 channel, "display_config_update", self._display_config_payload()
             )
+            peer = next((obj for obj in self.rtc_app.peer_connections.values()
+                         if obj.get("data_channel") is channel), None)
+            if peer is not None and peer.get("client_type") == ClientType.CONTROLLER \
+                    and (peer.get("display_id") or "primary") == "primary":
+                for name, size in self.supervisor.pending_print_documents():
+                    self.rtc_app.send_print_document(name, size, channel)
         else:
             self.rtc_app.send_media_data_over_channel(
                 "server_settings", server_settings_payload
             )
             self._broadcast_display_config()
         self.send_current_cursor(channel)
+
+    async def announce_print_document(self, name: str, size: int) -> None:
+        """Tell every controller peer a printed document waits in the spool."""
+        if self.rtc_app:
+            self.rtc_app.send_print_document(name, size)
 
     def send_current_cursor(self, channel: Optional[Any] = None) -> None:
         """Resend the current cursor (on channel open / video restart): to one

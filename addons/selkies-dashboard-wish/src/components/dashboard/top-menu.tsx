@@ -55,18 +55,20 @@ import {
   Keyboard,
   Touchpad,
   ScreenShare,
-  Crosshair
+  Crosshair,
+  Printer
 } from "lucide-react";
 
 import { Clipboard } from "@/components/dashboard/clipboard";
 import { Files, FilesDialog } from "@/components/dashboard/files";
+import { Printing } from "@/components/dashboard/printing";
 import { Apps } from "@/components/dashboard/apps";
 import { Settings } from "@/components/dashboard/settings";
 import { SystemMonitoring } from "@/components/dashboard/system-monitoring";
 import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
-import { computeRenderableSettings, getLastServerSettings, isMobileClient, isSecondaryDisplay } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, getPrintJobs, isMobileClient, isSecondaryDisplay } from "@/utils";
 import { t } from "@/i18n";
 
 /**
@@ -124,6 +126,7 @@ export function TopMenu({
   const [activePanel, setActivePanel] = React.useState<string | null>(null);
   const [showAppsModal, setShowAppsModal] = React.useState(false);
   const [showFilesModal, setShowFilesModal] = React.useState(false);
+  const [printJobCount, setPrintJobCount] = React.useState(() => getPrintJobs().length);
   const [showDropdown, setShowDropdown] = React.useState(false);
   const [showSystemMonitoring, setShowSystemMonitoring] = React.useState(false);
   const [isDragging, setIsDragging] = React.useState(false);
@@ -178,9 +181,12 @@ export function TopMenu({
         }
       }
     };
+    const countPrintJobs = () => setPrintJobCount(getPrintJobs().length);
     window.addEventListener("message", handleMessage);
+    window.addEventListener("printJobsChanged", countPrintJobs);
     return () => {
       window.removeEventListener("message", handleMessage);
+      window.removeEventListener("printJobsChanged", countPrintJobs);
     };
   }, []);
 
@@ -786,6 +792,18 @@ export function TopMenu({
                     </MenubarSubTrigger>
                     <MenubarSubContent>
                       <Files onOpenDownloads={() => setShowFilesModal(true)} />
+                    </MenubarSubContent>
+                  </MenubarSub>
+                )}
+
+                {printJobCount > 0 && !isSecondaryDisplay && (
+                  <MenubarSub>
+                    <MenubarSubTrigger>
+                      <Printer className="h-4 w-4 mr-2" />
+                      {t('sections.printing.title')}
+                    </MenubarSubTrigger>
+                    <MenubarSubContent>
+                      <Printing />
                     </MenubarSubContent>
                   </MenubarSub>
                 )}
