@@ -132,7 +132,7 @@ try:
     from .Xlib import display
     from .Xlib import X
     from .Xlib import XK
-    from .Xlib.ext import xfixes, xtest
+    from .Xlib.ext import xfixes, xinput, xtest
     from .Xlib.protocol import event as xevent
     from .Xlib import error as xlib_error
     from .x11_xkb import open_xkb_link
@@ -2832,9 +2832,11 @@ class VirtualInputDevice:
             if not writer.is_closing():
                 writer.close()
 
-    async def open(self) -> bool:
-        """Bring the device up on whichever backend this host offers."""
-        ok = self._create_kernel() if uinput_writable() else await self._create_interposed()
+    async def open(self, kernel: bool = True) -> bool:
+        """Bring the device up on whichever backend this host offers; `kernel`
+        off keeps it on the interposer pool where the kernel's copy would be
+        read back by the display server."""
+        ok = self._create_kernel() if kernel and uinput_writable() else await self._create_interposed()
         if ok:
             logger_webrtc_input.info(
                 f"{self.name} available at {self.node} "
@@ -4488,6 +4490,26 @@ class WebRTCInput:
         if device is not None:
             device.emit(ev_type, ev_code, value)
 
+    def _display_reads_kernel_input(self) -> bool:
+        """Whether the X server reads kernel input devices itself, as a desktop
+        host's Xorg does through udev hotplug: each one it opened is listed
+        with its device node. A keyboard or pointer published to the kernel
+        there is read straight back into the session the injection already
+        reaches, and every event arrives twice. Xvfb and the images' Xorg,
+        hotplug off, list none."""
+        if self.xdisplay is None:
+            return False
+        try:
+            node = self.xdisplay.get_atom("Device Node", only_if_exists=True)
+            if not node:
+                return False
+            for device in self.xdisplay.xinput_query_device(xinput.AllDevices).devices:
+                if node in self.xdisplay.xinput_list_device_properties(device.deviceid).atoms:
+                    return True
+        except Exception as e:
+            logger_webrtc_input.debug(f"XInput device query failed: {e}")
+        return False
+
     async def _initialize_virtual_input_devices(self) -> None:
         """Adopt or publish the session's keyboard and pointer as input devices.
 
@@ -4498,10 +4520,12 @@ class WebRTCInput:
         Host capture is the exception: there the session belongs to another
         compositor, which reads the kernel's own devices, and the capture
         injects into it directly -- publishing more would deliver every event
-        to it twice.
+        to it twice. An X server that reads kernel devices is served through
+        the interposer pool for the same reason.
         """
         if (getattr(settings, "wayland_host_display", "") or "").strip():
             return
+        kernel = not self._display_reads_kernel_input()
         wanted = (
             ("keyboard", "Selkies Virtual Keyboard", 0x0001,
              [EV_KEY], list(range(1, BTN_MISC)), []),
@@ -4516,7 +4540,7 @@ class WebRTCInput:
                 continue
             device = VirtualInputDevice(name, 0x1D6B, product, evbits, keybits, relbits,
                                         sock_dir=self.js_socket_path_prefix)
-            if await device.open():
+            if await device.open(kernel=kernel):
                 _persistent_virtual_devices[key] = device
                 self.virtual_input_devices[key] = device
 
