@@ -141,7 +141,7 @@ jobs:
             xvfb x11-xserver-utils x11-utils xauth xcvt wmctrl \
             wl-clipboard libsdl2-2.0-0 openbox kwin-x11 kwin-wayland \
             pulseaudio pulseaudio-utils \
-            dbus pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-kde \
+            dbus pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-kde qtwayland5 \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
             libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
