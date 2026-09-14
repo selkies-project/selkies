@@ -65,7 +65,9 @@ from . import audio_config
 from . import resource_stats
 from .audio_control import AudioControl, ensure_capture_sink, opus_capture_settings
 from .display_utils import (
+    FIRST_FRAME_WAIT_S,
     apply_common_capture_settings,
+    no_first_frame,
     parse_gpu_id,
     format_pixelflux_cursor,
     release_pixelflux_cursor_callback,
@@ -1104,6 +1106,8 @@ class DataStreamingServer(BaseStreamingService):
         self.BACKPRESSURE_QUEUE_SIZE = getattr(settings, 'backpressure_queue_size', 120)
         self._last_client_frame_id_report_time = 0.0
         self.capture_loop = None
+        # Displays whose live capture has delivered a frame, for the first-frame check.
+        self._framed_displays: set = set()
 
         self.display_clients = {}
         self.video_relay_groups = {}
@@ -5268,6 +5272,13 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e:
             data_logger.error(f"Viewer-driven audio start failed: {e}", exc_info=True)
 
+    def _warn_if_unframed(self, display_id: str, module: Any) -> None:
+        """Say so when the capture started for `display_id` is still the live one
+        and has delivered nothing since."""
+        inst = self.capture_instances.get(display_id)
+        if inst is not None and inst.get('module') is module and display_id not in self._framed_displays:
+            data_logger.warning(no_first_frame(display_id, str(getattr(inst.get('settings'), 'codec', '?'))))
+
     async def _start_capture_for_display(self, display_id: str, width: int, height: int,
                                          x_offset: int, y_offset: int) -> bool:
         """Start (or confirm) one display's capture, serialized under _video_capture_lock.
@@ -5362,6 +5373,7 @@ class DataStreamingServer(BaseStreamingService):
                 """
                 if frame is None:
                     return
+                self._framed_displays.add(display_id)
                 try:
                     if not len(frame):
                         return
@@ -5471,6 +5483,7 @@ class DataStreamingServer(BaseStreamingService):
             # pixelflux is the cursor source on both backends.
             capture_module.set_cursor_callback(pixelflux_cursor_handler)
 
+            self._framed_displays.discard(display_id)
             await self.capture_loop.run_in_executor(
                 None,
                 capture_module.start_capture,
@@ -5483,6 +5496,8 @@ class DataStreamingServer(BaseStreamingService):
                 'callback': queue_data_for_display,
                 'settings': settings,
             }
+            self.capture_loop.call_later(
+                FIRST_FRAME_WAIT_S, self._warn_if_unframed, display_id, capture_module)
             # The X11 start already raised on failure; a Wayland start only
             # enqueues a command, so its outcome is read back here.
             live, last_error = await self._wayland_start_verdict(capture_module, display_id)

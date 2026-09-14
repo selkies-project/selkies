@@ -465,6 +465,18 @@ def _resize_on_display(
 #: and every secondary display is a screen of its own beside it.
 WAYLAND_SCREEN_OUTPUT_ID = 0
 
+#: How long a started capture may go without its first frame before the log
+#: says so. A capture emits its first frame at once, damage or none, so a
+#: silence this long means the capture never came up, and the page shows
+#: only its waiting message.
+FIRST_FRAME_WAIT_S = 5.0
+
+
+def no_first_frame(display_id: str, encoder: str) -> str:
+    """The one line a capture that never delivered a frame earns."""
+    return (f"Capture for '{display_id}' ({encoder}) has delivered no frame in "
+            f"{FIRST_FRAME_WAIT_S:.0f} s; the page is waiting for a stream that is not coming.")
+
 
 def wayland_output_id(display_id: Optional[str]) -> int:
     """Stable compositor id for a display name, shared by both transports.

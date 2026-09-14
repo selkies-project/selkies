@@ -57,7 +57,9 @@ from typing import Any, Callable, Optional, Tuple
 from .settings import RateControlMode, codec_for_encoder, encoder_for_codec, settings as app_settings
 from .audio_control import AudioControl
 from .display_utils import (
+    FIRST_FRAME_WAIT_S,
     apply_common_capture_settings,
+    no_first_frame,
     format_pixelflux_cursor,
     release_pixelflux_cursor_callback,
 )
@@ -240,6 +242,8 @@ class MediaPipelinePixel(MediaPipeline):
         self._running = False
         self.async_lock = asyncio.Lock()
         self._video_pts_anchor: Optional[float] = None
+        # Whether the live capture has delivered a frame, for the first-frame check.
+        self._framed = False
         self._last_video_pts = -1
         self._audio_capture_epoch = 0
         self._audio_cb_epoch = -1
@@ -536,6 +540,7 @@ class MediaPipelinePixel(MediaPipeline):
         `produce_data` is synchronous, so `call_soon_threadsafe` delivers it
         with no per-frame Future, matching the websockets path.
         """
+        self._framed = True
         try:
             view = memoryview(frame)
             if len(view) > STRIPE_HEADER_LEN:
@@ -598,6 +603,7 @@ class MediaPipelinePixel(MediaPipeline):
         try:
             self.capture_module = ScreenCapture()
             self.capture_module.set_cursor_callback(self._pixelflux_cursor_handler)
+            self._framed = False
             await asyncio.to_thread(
                 self.capture_module.start_capture,
                 self._screen_capture_callback,
@@ -605,6 +611,11 @@ class MediaPipelinePixel(MediaPipeline):
             )
             self._is_screen_capturing = True
             logger.info("Started screen capture module")
+            module = self.capture_module
+            asyncio.get_running_loop().call_later(
+                FIRST_FRAME_WAIT_S,
+                lambda: self._is_screen_capturing and self.capture_module is module and not self._framed
+                and logger.warning(no_first_frame(self.display_id, str(getattr(settings, 'codec', '?')))))
             self._schedule_active_codec_settle()
         except Exception as e:
             logger.error(f"Failed to start screen capture: {e}", exc_info=True)
