@@ -158,6 +158,9 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
                 else:
                     res.check(f"{tag}: the engine refuses it, so the ladder steps to h264enc",
                               settled in ("h264enc", "jpeg"), f"page encoder {settled}")
+                    # The page settles before the capture restarts behind its request;
+                    # on Wayland the compositor's restart is the slower of the two.
+                    line = wait_stream_mode("H264" if settled == "h264enc" else "JPEG")
                     res.check(f"{tag}: the server followed the fallback",
                               "Mode: H264" in line or "Mode: JPEG" in line, TENC.encoder_field(line))
                 fps = 0
