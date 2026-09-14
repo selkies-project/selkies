@@ -57,6 +57,13 @@ BLOB_JS = """
 """
 FRAMES_JS = "document.querySelectorAll('iframe[src^=\"blob:\"]').length"
 
+# Headless Chromium never closes a print dialog, so `afterprint` does not fire
+# and the frames the core opens stay, each with a PDF viewer behind it. That
+# viewer's process ends when the frame goes or when a download starts, and the
+# driver reads either as the page crashing, failing whatever call is in flight.
+DROP_FRAMES_JS = ("document.querySelectorAll('iframe[src^=\"blob:\"]')"
+                  ".forEach((f) => f.remove())")
+
 # A one-page PDF drawing one rectangle, built by hand.
 CONTENT = b"0 0 1 rg 100 100 200 300 re f"
 OBJECTS = [b"<< /Type /Catalog /Pages 2 0 R >>",
@@ -202,6 +209,16 @@ def rows(page: Any, dashboard: str) -> int:
     return page.locator('[role="menu"] button:has-text("Print")').count()
 
 
+def drop_frames(page: Any, timeout: float = 10) -> None:
+    """Drop the preview frames and wait for their viewers to go, so the
+    teardown lands between calls rather than inside the next one."""
+    page.evaluate(DROP_FRAMES_JS)
+    deadline = time.time() + timeout
+    while time.time() < deadline and page.evaluate(FRAMES_JS):
+        time.sleep(0.2)
+    time.sleep(1)
+
+
 def press(control: Any) -> None:
     """Click a control; the classic sidebar scrolls, so a section below the
     fold takes a dispatched click rather than a pointer one."""
@@ -270,6 +287,9 @@ def dashboard_round(res: "H.Results", pw: Any, mode: str, dashboard: str) -> Non
         press(row_control(page, dashboard, "Print", 1))
         time.sleep(1)
         res.check(f"{dashboard}: the print button opens it in a frame", page.evaluate(FRAMES_JS) == 2, page.evaluate(FRAMES_JS))
+        drop_frames(page)
+        # The wish panel is a menu, and printing from it closed it.
+        open_printing_ui(page, dashboard)
         with page.expect_download(timeout=15000) as dl:
             press(row_control(page, dashboard, "Save", 0))
         download = dl.value
