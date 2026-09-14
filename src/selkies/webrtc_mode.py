@@ -1325,6 +1325,14 @@ class WebRTCService(BaseStreamingService):
                 return False
         if existing is not None:
             return True
+        pw, ph = p.get("w"), p.get("h")
+        if (existing0 is not None and pw and ph
+                and (pw < existing0[3] or ph < existing0[4])):
+            # The secondary drops into the room a shrinking primary frees, and the
+            # compositor refuses an output overlapping the primary's rectangle:
+            # the primary gives that room up before the secondary is placed.
+            await asyncio.to_thread(
+                module.resize_output, WAYLAND_SCREEN_OUTPUT_ID, pw, ph, existing0[5])
         if self.input_handler:
             # The screen this display owns, grown just ahead of the output
             # that adopts its host window, then given the display's own DPI;
