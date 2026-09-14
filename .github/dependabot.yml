@@ -44,6 +44,8 @@ updates:
       - dependency-name: fumadocs-core
       - dependency-name: fumadocs-mdx
       - dependency-name: fumadocs-ui
+      # 1.0 rewrote `write`, which the Developer Reference generator calls
+      - dependency-name: fumadocs-python
       # The aliased package takes one Next major, and typedoc, which writes the
       # Web Reference, takes no TypeScript past 6
       - dependency-name: next
