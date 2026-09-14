@@ -62,7 +62,9 @@ try:
         time.sleep(3)
         press(pw, "webrtc", res, "after switch")
     log = open(SHIMLOG).read()
-    res.check("kernel device created once", log.count("DEV_CREATE") == 1, f"{log.count('DEV_CREATE')} creations")
+    pad = ih.STANDARD_XPAD_CONFIG["name"]
+    made = H.shim_created(SHIMLOG, pad)
+    res.check("kernel device created once", made == 1, f"{made} creations of {pad!r}")
     res.check("kernel device never destroyed by the switch", log.count("DEV_DESTROY") == 0)
 finally:
     H.server_stop()

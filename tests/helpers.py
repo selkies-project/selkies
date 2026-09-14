@@ -499,6 +499,26 @@ UINPUT_SHIM = os.path.join(TOOLS, "uinput_shim.so")
 PAD_INIT_JS = os.path.join(TOOLS, "pad_init.js")
 
 
+def shim_created(log: str, name: str) -> int:
+    """How many devices the /dev/uinput emulator created under `name`.
+
+    The emulator funnels every uinput file descriptor in the process into one
+    log, so a suite that counts bare `DEV_CREATE` lines also counts devices
+    other parts of the session publish. Each device names itself in its
+    `DEV_SETUP` line, which is what makes its own creations countable. A real
+    kernel gives each device its own node, so nothing shares a log there.
+
+    Args:
+        log: Path to the shim's log file.
+        name: The device name to count, as passed to `UI_DEV_SETUP`.
+
+    Returns:
+        The number of `DEV_SETUP` lines carrying that name.
+    """
+    with open(log) as fh:
+        return sum(1 for line in fh if "DEV_SETUP" in line and f"name={name}" in line)
+
+
 def uinput_shim_env(tag: str) -> tuple:
     """Environment that points the server at the /dev/uinput emulator in
     tests/tools, which records the ioctls and event writes a kernel gamepad

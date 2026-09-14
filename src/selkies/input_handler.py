@@ -2653,6 +2653,233 @@ class UInputGamepad:
 
 # Slot index -> SelkiesGamepad, process-wide (see SelkiesGamepad for why).
 _persistent_gamepads: dict = {}
+# Keyboard and pointer devices outlive a per-service handler for the same
+# reason gamepads do: applications hold their nodes open across a transport switch.
+_persistent_virtual_devices: dict = {}
+
+
+# uinput's relative-axis setup ioctl, beside the EV/KEY/ABS ones above.
+UI_SET_RELBIT = _uinput_ioc(_IOC_WRITE, 102, 4)
+
+# The Input Interposer's dynamic-device pool, served as /dev/input/event<N>: a
+# socket carrying the event stream and a descriptor file a reader answers
+# EVIOCG* from. The descriptor layout is shared with the interposer's
+# udyn_desc_t and fake-udev, which derives the device's ID_INPUT_* class from
+# the capability bits, so the three must be changed together.
+UDYN_EVENT_BASE = 3000
+UDYN_MAX = 16
+UDYN_DESC_MAGIC = 0x4A444E55
+UDYN_DESC_VERSION = 1
+UDYN_DESC_FMT = "=IIHHHH80s4s96s2s8s1s4sx384i"
+BUS_VIRTUAL = 0x06
+EV_MAX, KEY_MAX, REL_MAX, ABS_MAX, MSC_MAX, INPUT_PROP_MAX, ABS_CNT = 31, 767, 15, 63, 7, 31, 64
+KEY_A = 30
+# The first non-keyboard key code: everything below it is a keyboard key.
+BTN_MISC = 0x100
+REL_X, REL_Y, REL_HWHEEL, REL_WHEEL = 0x00, 0x01, 0x06, 0x08
+
+
+def evdev_bitmap(codes: Iterable[int], maximum: int) -> bytes:
+    """The evdev capability bitmap `codes` sets, sized as the descriptor declares it."""
+    buf = bytearray(maximum // 8 + 1)
+    for code in codes:
+        if 0 <= code <= maximum:
+            buf[code // 8] |= 1 << (code % 8)
+    return bytes(buf)
+
+
+def pack_udyn_desc(name: str, vendor: int, product: int, version: int,
+                   evbits: Iterable[int], keybits: Iterable[int] = (),
+                   relbits: Iterable[int] = (), absbits: Iterable[int] = ()) -> bytes:
+    """Serialize one dynamic device's identity and capabilities for its descriptor.
+
+    EV_SYN is always advertised: every reader expects the SYN_REPORT that
+    terminates a report.
+    """
+    return struct.pack(
+        UDYN_DESC_FMT, UDYN_DESC_MAGIC, UDYN_DESC_VERSION, BUS_VIRTUAL,
+        vendor, product, version,
+        name.encode("utf-8")[:UINPUT_MAX_NAME_SIZE - 1],
+        evdev_bitmap(list(evbits) + [EV_SYN], EV_MAX),
+        evdev_bitmap(keybits, KEY_MAX),
+        evdev_bitmap(relbits, REL_MAX),
+        evdev_bitmap(absbits, ABS_MAX),
+        evdev_bitmap((), MSC_MAX),
+        evdev_bitmap((), INPUT_PROP_MAX),
+        *([0] * (ABS_CNT * 6)),
+    )
+
+
+class VirtualInputDevice:
+    """One keyboard or pointer Selkies publishes to the session's applications.
+
+    Where /dev/uinput is writable the kernel serves the device, so every
+    application finds it without a preload; otherwise the Input Interposer's
+    dynamic pool does, and applications preloaded with it read the same evdev
+    stream from a socket beside the descriptor that carries the identity.
+    """
+
+    def __init__(self, name: str, vendor: int, product: int,
+                 evbits: Iterable[int], keybits: Iterable[int] = (),
+                 relbits: Iterable[int] = (), sock_dir: str = "/tmp") -> None:
+        self.name = name
+        self.vendor, self.product = vendor, product
+        self.evbits, self.keybits, self.relbits = list(evbits), list(keybits), list(relbits)
+        self.sock_dir = sock_dir
+        self.fd: Optional[int] = None
+        self.event_num: Optional[int] = None
+        self.server: Optional[asyncio.AbstractServer] = None
+        self.clients: dict = {}
+        self.node: Optional[str] = None
+
+    def _create_kernel(self) -> bool:
+        """Register the device with the kernel; False when uinput refuses it."""
+        try:
+            fd = os.open(UINPUT_PATH, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError:
+            return False
+        try:
+            for ev in self.evbits + [EV_SYN]:
+                fcntl.ioctl(fd, UI_SET_EVBIT, ev)
+            for code in self.keybits:
+                fcntl.ioctl(fd, UI_SET_KEYBIT, code)
+            for code in self.relbits:
+                fcntl.ioctl(fd, UI_SET_RELBIT, code)
+            fcntl.ioctl(fd, UI_DEV_SETUP, struct.pack(
+                UINPUT_SETUP_FMT, BUS_VIRTUAL, self.vendor, self.product, 1,
+                self.name.encode("utf-8")[:UINPUT_MAX_NAME_SIZE - 1], 0))
+            fcntl.ioctl(fd, UI_DEV_CREATE)
+        except OSError as e:
+            os.close(fd)
+            logger_webrtc_input.warning(f"{self.name}: kernel uinput setup failed ({e}).")
+            return False
+        self.fd = fd
+        self.node = self._kernel_node() or UINPUT_PATH
+        return True
+
+    def _kernel_node(self) -> Optional[str]:
+        """The /dev/input node the kernel registered for this device, which is
+        what an application opens; None when sysfs does not name one."""
+        buffer = bytearray(UINPUT_SYSNAME_LEN)
+        try:
+            fcntl.ioctl(self.fd, UI_GET_SYSNAME, buffer, True)
+        except OSError:
+            return None
+        sysname = bytes(buffer).split(b"\0", 1)[0].decode("utf-8", "replace")
+        if not sysname:
+            return None
+        try:
+            entries = os.listdir(os.path.join(UINPUT_SYSFS_BASE, sysname))
+        except OSError:
+            return None
+        events = sorted(e for e in entries if e.startswith("event"))
+        return os.path.join("/dev/input", events[0]) if events else None
+
+    def _stale(self, path: str) -> bool:
+        """Whether a socket file is left over from a device nobody serves."""
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(path)
+            return False
+        except OSError:
+            return True
+        finally:
+            probe.close()
+
+    async def _create_interposed(self) -> bool:
+        """Claim a dynamic node: descriptor first, so a reader that sees the
+        socket always finds the identity behind it."""
+        desc = pack_udyn_desc(self.name, self.vendor, self.product, 1,
+                              self.evbits, self.keybits, self.relbits)
+        os.makedirs(self.sock_dir, exist_ok=True)
+        for num in range(UDYN_EVENT_BASE, UDYN_EVENT_BASE + UDYN_MAX):
+            sock = os.path.join(self.sock_dir, f"selkies_event{num}.sock")
+            if os.path.exists(sock):
+                if not self._stale(sock):
+                    continue
+                try:
+                    os.unlink(sock)
+                except OSError:
+                    continue
+            desc_path = os.path.join(self.sock_dir, f"selkies_event{num}.desc")
+            tmp = f"{desc_path}.tmp.{os.getpid()}"
+            try:
+                with open(tmp, "wb") as fh:
+                    fh.write(desc)
+                os.replace(tmp, desc_path)
+                self.server = await asyncio.start_unix_server(self._serve, path=sock)
+            except OSError as e:
+                logger_webrtc_input.debug(f"{self.name}: node {num} unavailable ({e}).")
+                continue
+            self.event_num, self.node = num, f"/dev/input/event{num}"
+            return True
+        logger_webrtc_input.warning(f"{self.name}: no free interposer node.")
+        return False
+
+    async def _serve(self, reader: asyncio.StreamReader,
+                     writer: asyncio.StreamWriter) -> None:
+        """Hold one reader's connection open; the dynamic path carries events
+        alone, the descriptor having already answered for the identity."""
+        self.clients[writer] = True
+        try:
+            while self.server is not None and not writer.is_closing():
+                if not await reader.read(256):
+                    break
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            pass
+        finally:
+            self.clients.pop(writer, None)
+            if not writer.is_closing():
+                writer.close()
+
+    async def open(self) -> bool:
+        """Bring the device up on whichever backend this host offers."""
+        ok = self._create_kernel() if uinput_writable() else await self._create_interposed()
+        if ok:
+            logger_webrtc_input.info(
+                f"{self.name} available at {self.node} "
+                f"({'kernel' if self.fd is not None else 'interposer'}).")
+        return ok
+
+    def emit(self, ev_type: int, ev_code: int, value: int) -> None:
+        """Deliver one event and the SYN_REPORT that closes its report."""
+        data = get_evdev_events_packed(ev_type, ev_code, value, LOCAL_ARCH_BITS)
+        if self.fd is not None:
+            try:
+                os.write(self.fd, data)
+            except OSError as e:
+                logger_webrtc_input.debug(f"{self.name}: kernel write failed ({e}).")
+            return
+        for writer in list(self.clients):
+            try:
+                writer.write(data)
+            except (OSError, RuntimeError):
+                self.clients.pop(writer, None)
+
+    async def close(self) -> None:
+        """Retire the device and remove everything it published."""
+        if self.fd is not None:
+            try:
+                fcntl.ioctl(self.fd, UI_DEV_DESTROY)
+            except OSError:
+                pass
+            os.close(self.fd)
+            self.fd = None
+        if self.server is not None:
+            self.server.close()
+            await self.server.wait_closed()
+            self.server = None
+        for writer in list(self.clients):
+            if not writer.is_closing():
+                writer.close()
+        self.clients.clear()
+        if self.event_num is not None:
+            for suffix in (".sock", ".desc"):
+                try:
+                    os.unlink(os.path.join(self.sock_dir, f"selkies_event{self.event_num}{suffix}"))
+                except OSError:
+                    pass
+            self.event_num = None
 
 
 class SelkiesGamepad:
@@ -3731,6 +3958,7 @@ class WebRTCInput:
         self._binary_clipboard_lock = asyncio.Lock()
         self._clipboard_monitor_active = False
         self.uinput_mouse_socket_path = uinput_mouse_socket_path
+        self.virtual_input_devices: dict = {}
         self.uinput_mouse_socket = None
         self.enable_clipboard = enable_clipboard
         self.enable_binary_clipboard = enable_binary_clipboard
@@ -4218,6 +4446,7 @@ class WebRTCInput:
         self.__mouse_connect()
         
         await self._initialize_persistent_gamepads()
+        await self._initialize_virtual_input_devices()
 
         if self.is_wayland:
             self.keyboard_worker_task = asyncio.create_task(self._keyboard_worker())
@@ -4231,6 +4460,65 @@ class WebRTCInput:
             self.key_repeat_task = asyncio.create_task(self._key_repeat_loop())
         if self.xdisplay is not None and self.keymap_watch_task is None:
             self.keymap_watch_task = asyncio.create_task(self._keymap_watch_loop())
+
+    def _virtual_key(self, keysym: int, down: bool) -> None:
+        """Carry one key to the published keyboard, as the evdev code the
+        session's own keymap puts the keysym on (XKB numbers keys eight above
+        evdev). Applications reading the device see what the desktop sees."""
+        devices = getattr(self, "virtual_input_devices", None)
+        device = devices.get("keyboard") if devices else None
+        if device is None:
+            return
+        keycode = 0
+        if self.is_wayland:
+            owner = self._wl_keymap_owner
+            entry = owner._map.get(keysym) if owner is not None else None
+            keycode = entry[0] if entry else 0
+        elif self.xdisplay is not None:
+            keycode = self.xdisplay.keysym_to_keycode(keysym)
+        if keycode > 8:
+            device.emit(EV_KEY, keycode - 8, 1 if down else 0)
+
+    def _virtual_pointer(self, ev_type: int, ev_code: int, value: int) -> None:
+        """Carry one pointer event to the published device. Absolute positions
+        are left out: the device declares relative axes, which is what an
+        application reading raw evdev expects a pointer to move by."""
+        devices = getattr(self, "virtual_input_devices", None)
+        device = devices.get("pointer") if devices else None
+        if device is not None:
+            device.emit(ev_type, ev_code, value)
+
+    async def _initialize_virtual_input_devices(self) -> None:
+        """Adopt or publish the session's keyboard and pointer as input devices.
+
+        Applications that read evdev directly (fullscreen games, remappers)
+        see nothing of the X or compositor injection the session runs on, so
+        the same events are carried here as devices they can open.
+
+        Host capture is the exception: there the session belongs to another
+        compositor, which reads the kernel's own devices, and the capture
+        injects into it directly -- publishing more would deliver every event
+        to it twice.
+        """
+        if (getattr(settings, "wayland_host_display", "") or "").strip():
+            return
+        wanted = (
+            ("keyboard", "Selkies Virtual Keyboard", 0x0001,
+             [EV_KEY], list(range(1, BTN_MISC)), []),
+            ("pointer", "Selkies Virtual Pointer", 0x0002,
+             [EV_KEY, EV_REL], [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA],
+             [REL_X, REL_Y, REL_WHEEL, REL_HWHEEL]),
+        )
+        for key, name, product, evbits, keybits, relbits in wanted:
+            live = _persistent_virtual_devices.get(key)
+            if live is not None and live.node is not None:
+                self.virtual_input_devices[key] = live
+                continue
+            device = VirtualInputDevice(name, 0x1D6B, product, evbits, keybits, relbits,
+                                        sock_dir=self.js_socket_path_prefix)
+            if await device.open():
+                _persistent_virtual_devices[key] = device
+                self.virtual_input_devices[key] = device
 
     async def _initialize_persistent_gamepads(self) -> None:
         """Adopt live process-wide gamepad instances or create and start new ones.
@@ -4642,6 +4930,10 @@ class WebRTCInput:
             if self.mouse: self.mouse.position = data
         elif action == MOUSE_MOVE:
             x, y = data
+            if x:
+                self._virtual_pointer(EV_REL, REL_X, x)
+            if y:
+                self._virtual_pointer(EV_REL, REL_Y, y)
             if self.uinput_mouse_socket_path:
                 self.__mouse_emit(UINPUT_REL_X, x, syn=False)
                 self.__mouse_emit(UINPUT_REL_Y, y)
@@ -4652,22 +4944,29 @@ class WebRTCInput:
         elif action == MOUSE_SCROLL_UP:
             # MOUSE_SCROLL_* are named for the client button, not the physical
             # direction: this is wheel-down (X button 5), so REL_WHEEL is -1.
+            self._virtual_pointer(EV_REL, REL_WHEEL, -1)
             if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_WHEEL, -1)
             elif self.mouse: self.mouse.scroll(0, -1)
         elif action == MOUSE_SCROLL_DOWN:
+            self._virtual_pointer(EV_REL, REL_WHEEL, 1)
             if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_WHEEL, 1)
             elif self.mouse: self.mouse.scroll(0, 1)
         elif action == MOUSE_SCROLL_LEFT:
             # REL_HWHEEL is signed as the client names it (negative = left), like
             # X buttons 6/7, so no flip here.
+            self._virtual_pointer(EV_REL, REL_HWHEEL, -1)
             if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_HWHEEL, -1)
             elif self.mouse: self.mouse.scroll(-1, 0)
         elif action == MOUSE_SCROLL_RIGHT:
+            self._virtual_pointer(EV_REL, REL_HWHEEL, 1)
             if self.uinput_mouse_socket_path: self.__mouse_emit(UINPUT_REL_HWHEEL, 1)
             elif self.mouse: self.mouse.scroll(1, 0)
         elif action == MOUSE_BUTTON: 
             btn_map_key = "uinput" if self.uinput_mouse_socket_path else "x11"
             btn_uinput_or_x11 = MOUSE_BUTTON_MAP[data[1]][btn_map_key]
+            evdev_btn = MOUSE_BUTTON_MAP[data[1]]["uinput"]
+            self._virtual_pointer(evdev_btn[0], evdev_btn[1],
+                                  1 if data[0] == MOUSE_BUTTON_PRESS else 0)
             if data[0] == MOUSE_BUTTON_PRESS:
                 if self.uinput_mouse_socket_path: self.__mouse_emit(btn_uinput_or_x11, 1)
                 elif self.mouse: self.mouse.press(btn_uinput_or_x11)
@@ -4722,6 +5021,7 @@ class WebRTCInput:
                           and not is_function_keysym(keysym)
                           and not (self.active_modifiers & self.ACTION_MODIFIER_KEYSYMS))
         held_level_mods = frozenset(self.active_modifiers & self.LEVEL_MODIFIER_KEYSYMS)
+        self._virtual_key(keysym, down)
 
         if self.is_wayland and self.wayland_input:
             owner = await self._ensure_wayland_keymap_owner()

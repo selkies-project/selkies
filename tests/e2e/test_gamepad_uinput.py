@@ -97,7 +97,8 @@ def run(mode: str, results: "H.Results") -> None:
 
     log = open(SHIMLOG).read()
     events = decode(STREAM)
-    results.check(f"{mode}: kernel device created", log.count("DEV_CREATE") == 1)
+    results.check(f"{mode}: kernel device created",
+                  H.shim_created(SHIMLOG, ih.STANDARD_XPAD_CONFIG["name"]) == 1)
     results.check(f"{mode}: device is the standard pad",
                   "vendor=0x045e product=0x028e" in log and "Microsoft X-Box 360 pad" in log)
     for name, event in (("A press", (ih.EV_KEY, ih.BTN_A, 1)),
@@ -164,7 +165,7 @@ def run_player_slot(mode: str, results: "H.Results") -> None:
     results.check(f"{mode}: its pad reaches the kernel device",
                   (ih.EV_KEY, ih.BTN_A, 1) in events, f"{len(events)} events")
     results.check(f"{mode}: no other slot was driven",
-                  open(SHIMLOG).read().count("DEV_CREATE") == 1)
+                  H.shim_created(SHIMLOG, ih.STANDARD_XPAD_CONFIG["name"]) == 1)
 
 
 results = H.Results("uinput")
