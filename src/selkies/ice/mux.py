@@ -35,7 +35,6 @@ loss as they do on UDP.
 import asyncio
 import logging
 import os
-import socket
 import struct
 from typing import Any, Callable, Optional
 
