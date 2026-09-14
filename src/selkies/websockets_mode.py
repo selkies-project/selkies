@@ -1746,6 +1746,26 @@ class DataStreamingServer(BaseStreamingService):
         await self._stop_pcmflux_pipeline()
         await self._start_pcmflux_pipeline()
 
+    async def _apply_initial_audio_policy(self, websocket: web.WebSocketResponse,
+                                          display_id: str) -> None:
+        """Bring the audio capture in line with the session's start policy once a
+        page's first SETTINGS is in: started for a primary page that starts with
+        audio on, stopped when nobody left listens to a capture that policy
+        keeps off, and otherwise re-gated for the client set that just grew."""
+        async with self._reconfigure_guard():
+            audio_is_active = self.is_pcmflux_capturing
+            if not pipeline_starts_on('audio', display_id):
+                if audio_is_active and not self._audio_listeners(exclude=websocket):
+                    data_logger.info("Initial setup: audio starts off for this session; stopping the idle audio capture.")
+                    await self._stop_pcmflux_pipeline()
+            elif not audio_is_active and PCMFLUX_AVAILABLE and display_id == 'primary':
+                data_logger.info("Initial setup: Primary client connected, audio not active, attempting start.")
+                await self._start_pcmflux_pipeline()
+            elif not PCMFLUX_AVAILABLE and not audio_is_active:
+                data_logger.warning("Initial setup: Audio pipeline (server-to-client) cannot be started (pcmflux not available).")
+            else:
+                await self._regate_audio_redundancy()
+
     async def _start_pcmflux_pipeline(self) -> bool:
         """Start the pcmflux audio capture and the shared broadcast task.
 
@@ -1767,6 +1787,10 @@ class DataStreamingServer(BaseStreamingService):
         if self.is_pcmflux_capturing:
             data_logger.info("pcmflux audio pipeline is already capturing.")
             return True
+        if self.pcmflux_module is not None:
+            # A start cancelled between the capture's open and its bookkeeping
+            # (its page left) is retired before another module replaces it.
+            await self._stop_pcmflux_pipeline()
         if not self.app:
             data_logger.error("Cannot start pcmflux: self.app (SelkiesStreamingApp instance) is not available.")
             return False
@@ -3354,6 +3378,7 @@ class DataStreamingServer(BaseStreamingService):
         # Blocks on client_settings_received, which may never be set: cancelled
         # with the connection.
         start_audio_task_ws = None
+        initial_audio_task_ws = None
 
         mic_setup_done = False
         # Mic chunks arrive tens of times a second and each setup retry is a batch
@@ -3783,22 +3808,12 @@ class DataStreamingServer(BaseStreamingService):
                                 video_wanted = self.display_clients.get(display_id, {}).get('video_active', False)
                                 if video_wanted and display_id not in self.capture_instances:
                                     data_logger.error("FATAL: Initial reconfiguration completed, but video pipeline did not start.")
-                                async with self._reconfigure_guard():
-                                    audio_is_active = self.is_pcmflux_capturing
-                                    if not pipeline_starts_on('audio', display_id):
-                                        # Off by policy until this page's START_AUDIO; a warm
-                                        # capture nobody else listens to goes with it.
-                                        if audio_is_active and not self._audio_listeners(exclude=websocket):
-                                            data_logger.info("Initial setup: audio starts off for this session; stopping the idle audio capture.")
-                                            await self._stop_pcmflux_pipeline()
-                                    elif not audio_is_active and PCMFLUX_AVAILABLE and display_id == 'primary':
-                                        data_logger.info("Initial setup: Primary client connected, audio not active, attempting start.")
-                                        await self._start_pcmflux_pipeline()
-                                    elif not PCMFLUX_AVAILABLE and not audio_is_active:
-                                         data_logger.warning("Initial setup: Audio pipeline (server-to-client) cannot be started (pcmflux not available).")
-                                    else:
-                                        # A newly joined client may flip the shared RED gate.
-                                        await self._regate_audio_redundancy()
+                                # Its own task: the start asks the sound server for the
+                                # capture sink, and one that accepts and never answers would
+                                # otherwise hold every input frame this loop has yet to read
+                                # behind its timeouts.
+                                initial_audio_task_ws = asyncio.create_task(
+                                    self._apply_initial_audio_policy(websocket, display_id))
 
                         except json.JSONDecodeError:
                             data_logger.error(f"SETTINGS JSON decode error: {message}")
@@ -4257,6 +4272,7 @@ class DataStreamingServer(BaseStreamingService):
             monitor_tasks = [
                 stats_sender_task_ws,
                 start_audio_task_ws,
+                initial_audio_task_ws,
             ]
             for _task_to_cancel in monitor_tasks:
                 if not _task_to_cancel:
@@ -5236,14 +5252,21 @@ class DataStreamingServer(BaseStreamingService):
             # Built from session defaults: a client keyed to the departed
             # controller's encoder would otherwise drop every chunk.
             await self._broadcast_live_server_settings('primary')
-            # The audio fan-out is shared, so a lone viewer must not wait for a controller either.
+            # The audio fan-out is shared, so a lone viewer must not wait for a controller
+            # either; off the receive loop for the reason _apply_initial_audio_policy gives.
             if PCMFLUX_AVAILABLE and settings.audio_enabled[0] and not self.is_pcmflux_capturing:
-                try:
-                    async with self._reconfigure_guard():
-                        await self._start_pcmflux_pipeline()
-                except Exception as e:
-                    data_logger.error(f"Viewer-driven audio start failed: {e}", exc_info=True)
+                _spawn_background_task(self._start_audio_for_viewers(), name="viewer-audio-start")
         return started
+
+    async def _start_audio_for_viewers(self) -> None:
+        """Start the audio capture a viewer-driven primary capture is owed, unless
+        every client left while the sound server was being asked."""
+        try:
+            async with self._reconfigure_guard():
+                if self.clients:
+                    await self._start_pcmflux_pipeline()
+        except Exception as e:
+            data_logger.error(f"Viewer-driven audio start failed: {e}", exc_info=True)
 
     async def _start_capture_for_display(self, display_id: str, width: int, height: int,
                                          x_offset: int, y_offset: int) -> bool:

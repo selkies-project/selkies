@@ -139,6 +139,7 @@ SUITES: list = [
     {"path": "integration/test_print_queue.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_system_usage.py", "tier": "integration", "timeout": 120},
     {"path": "integration/test_clipboard_read_stall.py", "tier": "integration", "timeout": 300},
+    {"path": "integration/test_audio_start_stall.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_protocol.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_apps_gate.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_relative_injection.py", "tier": "integration", "timeout": 600},
