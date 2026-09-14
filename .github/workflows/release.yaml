@@ -24,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag without the leading v (e.g. 1.2.3 or 2.0.0rc0)
+        description: Release tag (e.g. 1.2.3 or 2.0.0rc0)
         type: string
         required: true
       latest:
@@ -142,7 +142,7 @@ jobs:
       packages: write
     uses: ./.github/workflows/images.yaml
     with:
-      tag_prefix: v${{ needs.validate.outputs.version }}
+      tag_prefix: ${{ needs.validate.outputs.version }}
       floating_tags: ${{ needs.validate.outputs.latest == 'true' }}
       wheel_artifact: selkies-wheel
       capture_stack_published: ${{ inputs.capture_stack == 'pypi' }}
@@ -192,8 +192,8 @@ jobs:
       - name: Create draft release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: v${{ needs.validate.outputs.version }}
-          name: v${{ needs.validate.outputs.version }}
+          tag_name: ${{ needs.validate.outputs.version }}
+          name: ${{ needs.validate.outputs.version }}
           draft: true
           prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
           make_latest: ${{ needs.validate.outputs.make_latest }}

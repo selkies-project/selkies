@@ -8,7 +8,8 @@ Selkies also ships outside a container: native packages for the common distribut
 None of these needs a Python environment: the web client, the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) extensions, and the interposers all travel inside. Every block below uses the release version, so paste this line first:
 
 ```bash
-export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/^v//')"
+export SELKIES_TAG="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name')"
+export SELKIES_VERSION="${SELKIES_TAG#v}"
 ```
 
 ## Packages
@@ -21,7 +22,7 @@ Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkie
 . /etc/os-release
 DISTRO="$([ "${ID}" = "ubuntu" ] && echo "ubuntu${VERSION_ID}" || echo "${VERSION_CODENAME}")"
 PKG="selkies_${SELKIES_VERSION}-1.${DISTRO}_$(dpkg --print-architecture).deb"
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${PKG}"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo apt-get install -y "./${PKG}"
 ```
 
@@ -29,21 +30,21 @@ sudo apt-get install -y "./${PKG}"
 # Fedora and Enterprise Linux
 . /etc/os-release
 PKG="selkies-${SELKIES_VERSION}-1.$([ "${ID}" = "fedora" ] && echo fc || echo el9).$(uname -m).rpm"
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${PKG}"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo dnf install -y "./${PKG}"
 ```
 
 ```bash
 # Alpine
 PKG="selkies-${SELKIES_VERSION}-r0-$(uname -m).apk"
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${PKG}"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo apk add --allow-untrusted "./${PKG}"
 ```
 
 ```bash
 # Arch Linux, which Arch publishes for x86_64 alone
 PKG="selkies-${SELKIES_VERSION}-1-$(uname -m).pkg.tar.zst"
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${PKG}"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo pacman -U "./${PKG}"
 ```
 
@@ -55,7 +56,7 @@ Runs from wherever you put it, on any distribution, without touching the system.
 
 ```bash
 APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/${APP}"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${APP}"
 chmod +x "./${APP}"
 "./${APP}" --public --port=8080 --basic-auth-user=user --basic-auth-password=mypasswd
 ```
@@ -149,7 +150,8 @@ While this instruction assumes that you are installing this project systemwide, 
 The steps below use the release version, so put it in the environment first:
 
 ```bash
-export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name' | sed 's/^v//')"
+export SELKIES_TAG="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name')"
+export SELKIES_VERSION="${SELKIES_TAG#v}"
 ```
 
 **2. Build the Input Interposer to process gamepad input**, if you need to use joystick/gamepad devices from your web browser client in an environment without `/dev/uinput` — typically an unprivileged container. Where `/dev/uinput` is writable, Selkies registers gamepads as [kernel devices](component.md#kernel-gamepads) instead and this step, along with the `LD_PRELOAD` exports below, is unnecessary. Otherwise applications receive gamepad input only when they are started with the interposer preloaded, and `fake-udev` is additionally required for applications that discover devices through `libudev`. Both are built and wired automatically in the [Desktop Container](component.md#desktop-container) and the desktop containers. Elsewhere, build them from source (they are small `LD_PRELOAD` libraries needing only libc; `fake-udev` passes everything but the pads through to the system `libudev` it finds at runtime):

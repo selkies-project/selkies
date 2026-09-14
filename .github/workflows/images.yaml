@@ -31,7 +31,7 @@ on:
   workflow_call:
     inputs:
       tag_prefix:
-        description: Tag prefix for the images (e.g. v1.2.3 or latest)
+        description: Tag prefix for the images (e.g. 1.2.3 or latest)
         type: string
         default: main
       floating_tags:
