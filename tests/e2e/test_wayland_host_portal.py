@@ -96,13 +96,16 @@ class KdeRig:
         deadline = time.time() + 20
         while not os.path.exists(self.socket_path):
             if time.time() > deadline:
-                return f"kwin_wayland never opened its socket: {H.tail(os.path.join(self.root, 'kwin.log'), 3)}"
+                return f"kwin_wayland never opened its socket: {H.tail(self.log('kwin'), 3)}"
             time.sleep(0.2)
         time.sleep(1.0)
         self._spawn([self.portal_kde], "portal-kde", KDE_FULL_SESSION="true")
         self._spawn([self.portal, "-r"], "portal")
         time.sleep(2.0)
         return ""
+
+    def log(self, name: str) -> str:
+        return os.path.join(self.root, f"{name}.log")
 
     def stop(self) -> None:
         for proc in reversed(self.procs):
@@ -117,6 +120,12 @@ class KdeRig:
             except OSError:
                 pass
         subprocess.run(["pkill", "-f", f"dbus-daemon.*{self.root}/bus"], capture_output=True)
+        # The stack's logs go where the suite runner keeps a suite's record.
+        for name in ("kwin", "pipewire", "wireplumber", "portal-kde", "portal"):
+            try:
+                shutil.copy2(self.log(name), os.path.join(H.WORKDIR, f"portal-{name}.log"))
+            except OSError:
+                pass
         shutil.rmtree(self.root, ignore_errors=True)
 
 
@@ -135,7 +144,7 @@ def run(mode: str) -> "H.Results":
         # The observer is the KDE session's own client: fullscreen, so every injected pointer
         # event lands on it, and it reports the seat events it receives.
         obs = H.WlObs(rig.socket_name, XDG_RUNTIME_DIR=rig.runtime, WLOBS_FILL="ff2878dc")
-        res.check("observer client maps inside KWin", obs.ready(15), H.tail(os.path.join(rig.root, "kwin.log"), 3))
+        res.check("observer client maps inside KWin", obs.ready(15), H.tail(rig.log("kwin"), 3))
         H.server_start(mode=mode, wayland=True, extra_env={
             "SELKIES_WAYLAND_HOST_DISPLAY": rig.socket_path,
             "DBUS_SESSION_BUS_ADDRESS": rig.bus,
@@ -145,7 +154,7 @@ def run(mode: str) -> "H.Results":
             browser, page, console_errors, not_found = C.launch_chrome(p, mode=mode)
             try:
                 res.check("the portal rung is taken for the frames",
-                          C.wait_log("frames come through the xdg-desktop-portal ScreenCast", 60), H.server_log(tail=5))
+                          C.wait_log("frames come through the xdg-desktop-portal ScreenCast", 60), H.tail(rig.log("portal"), 2))
                 res.check("keyboard and pointer go through the portal",
                           C.wait_log("keyboard goes through the portal by keysym", 10)
                           and C.wait_log("pointer goes through the portal", 10), H.server_log(tail=5))
