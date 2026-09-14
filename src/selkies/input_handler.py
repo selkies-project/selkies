@@ -2754,8 +2754,26 @@ class VirtualInputDevice:
             logger_webrtc_input.warning(f"{self.name}: kernel uinput setup failed ({e}).")
             return False
         self.fd = fd
-        self.node = UINPUT_PATH
+        self.node = self._kernel_node() or UINPUT_PATH
         return True
+
+    def _kernel_node(self) -> Optional[str]:
+        """The /dev/input node the kernel registered for this device, which is
+        what an application opens; None when sysfs does not name one."""
+        buffer = bytearray(UINPUT_SYSNAME_LEN)
+        try:
+            fcntl.ioctl(self.fd, UI_GET_SYSNAME, buffer, True)
+        except OSError:
+            return None
+        sysname = bytes(buffer).split(b"\0", 1)[0].decode("utf-8", "replace")
+        if not sysname:
+            return None
+        try:
+            entries = os.listdir(os.path.join(UINPUT_SYSFS_BASE, sysname))
+        except OSError:
+            return None
+        events = sorted(e for e in entries if e.startswith("event"))
+        return os.path.join("/dev/input", events[0]) if events else None
 
     def _stale(self, path: str) -> bool:
         """Whether a socket file is left over from a device nobody serves."""

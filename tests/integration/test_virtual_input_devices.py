@@ -93,12 +93,13 @@ def run(res: "H.Results", preload: str, work: str) -> None:
     try:
         nodes = pub.stdout.readline().split()
         res.check("keyboard and pointer are published",
-                  nodes == ["/dev/input/event3000", "/dev/input/event3001"], nodes)
-        res.check("descriptor and socket exist for both",
-                  all(os.path.exists(os.path.join(sock, f"selkies_event{n}{s}"))
-                      for n in (3000, 3001) for s in (".sock", ".desc")),
-                  sorted(os.listdir(sock)))
+                  len(nodes) == 2 and all(n.startswith("/dev/input/event") for n in nodes), nodes)
         interposed = all(n.startswith("/dev/input/event3") for n in nodes)
+        if interposed:
+            res.check("descriptor and socket exist for both",
+                      all(os.path.exists(os.path.join(sock, f"selkies_event{n}{s}"))
+                          for n in (3000, 3001) for s in (".sock", ".desc")),
+                      sorted(os.listdir(sock)))
         res.check("the backend matches what this host offers",
                   interposed != os.access(UINPUT_PATH, os.W_OK), nodes)
         out = subprocess.run([sys.executable, "-c", READER % tuple(nodes)],
@@ -117,9 +118,9 @@ def run(res: "H.Results", preload: str, work: str) -> None:
         if pub.poll() is None:
             pub.terminate()
             pub.wait(timeout=10)
-    res.check("both nodes are withdrawn when their publisher retires them",
-              not any(os.path.exists(os.path.join(sock, f"selkies_event{n}.sock"))
-                      for n in (3000, 3001)), sorted(os.listdir(sock)))
+    res.check("nothing the publisher served outlives it",
+              not any(f.startswith("selkies_event") for f in os.listdir(sock)),
+              sorted(os.listdir(sock)))
 
 
 def main() -> "H.Results":
