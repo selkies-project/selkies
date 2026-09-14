@@ -181,5 +181,25 @@ function check(label, ok, detail = '') {
     check('and a known one ignores it', at(1920, 1080) === 96, at(1920, 1080));
 }
 
+{
+    // A window dragged between screens of different density: the page streamed at
+    // scale 2 on a dense screen, its density then settles at 1, but the SETTINGS
+    // sent mid-move still measure the old buffer. Reconciling on the settled buffer
+    // republishes the true scale; without it the server keeps the stale 2.
+    let reported = 0;
+    const needsRepublish = (measured) => reported > 0 && Math.abs(measured - reported) > 1e-6;
+    reported = publishedScale({ stream: [3024, 1612], css: [1512, 806], realized: [3024, 1612], density: 2 });
+    check('a dense screen publishes scale 2', reported === 2, reported);
+    const stale = publishedScale({ stream: [3024, 1612], css: [1512, 806], realized: [3024, 1612], density: 1 });
+    reported = stale;
+    check('the scale sent mid-move still measures the old buffer', stale === 2, stale);
+    const settled = publishedScale({ stream: [1920, 936], css: [1920, 936], realized: [1920, 936], density: 1 });
+    check('the settled buffer measures scale 1', settled === 1, settled);
+    check('a settled scale that moved from the reported one asks for a republish',
+        needsRepublish(settled) === true, settled);
+    reported = settled;
+    check('once republished, the settled scale is stable', needsRepublish(settled) === false, reported);
+}
+
 console.log(`\n[stream-density] ${failed ? 'FAILED' : 'OK'}`);
 process.exit(failed ? 1 : 0);

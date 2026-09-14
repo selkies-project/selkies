@@ -517,6 +517,8 @@ export default function webrtc() {
 	let appliedStreamDensity = 0;
 	/** The density the last SETTINGS reported as the display scale. */
 	let reportedStreamDensity = 0;
+	/** The scale the last SETTINGS published, reconciled when the realized buffer settles. */
+	let reportedDisplayScale = 0;
 	/**
 	 * Hands the density to the input layer and, on a secondary whose density
 	 * moved (a HiDPI or UI-scaling change, or on X11 the primary's scale),
@@ -1080,6 +1082,24 @@ export default function webrtc() {
 	 * the default DPI and the dashboard's correction a second later forces a
 	 * second capture restart on every HiDPI connect.
 	 */
+	/**
+	 * This page's remote pixels per CSS pixel: its decoded buffer over the box
+	 * drawing it, the ratio a neighbour scales a cross-display drag by
+	 * (lib/stream-density.js). The requested density stands in until the
+	 * realized buffer catches up with it.
+	 */
+	function measuredDisplayScale() {
+		const box = videoElement ? videoElement.getBoundingClientRect() : null;
+		const realized = (latestDisplayLayouts || {})[storageDisplayId];
+		return publishedScale({
+			stream: videoElement && videoElement.videoWidth > 0
+				? [videoElement.videoWidth, videoElement.videoHeight] : null,
+			css: box && box.width > 0 ? [box.width, box.height] : null,
+			realized: realized ? [realized.w, realized.h] : null,
+			density: streamDensity(),
+		});
+	}
+
 	function sendClientPersistedSettings() {
 		if (isSharedMode) {
 			console.log("Skipping sending client persisted settings in shared mode.");
@@ -1142,18 +1162,7 @@ export default function webrtc() {
 			settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
 		}
 		settingsToSend['useCssScaling'] = useCssScaling;
-		// This page's remote pixels per CSS pixel, so a neighboring display can
-		// scale a cross-display drag's travel over this one and stream at this
-		// page's density (lib/stream-density.js).
-		const box = videoElement ? videoElement.getBoundingClientRect() : null;
-		const realized = (latestDisplayLayouts || {})[storageDisplayId];
-		settingsToSend['displayScale'] = publishedScale({
-			stream: videoElement && videoElement.videoWidth > 0
-				? [videoElement.videoWidth, videoElement.videoHeight] : null,
-			css: box && box.width > 0 ? [box.width, box.height] : null,
-			realized: realized ? [realized.w, realized.h] : null,
-			density: dpr,
-		});
+		settingsToSend['displayScale'] = reportedDisplayScale = measuredDisplayScale();
 
 		try {
 			const settingsJson = JSON.stringify(settingsToSend);
@@ -2506,6 +2515,14 @@ export default function webrtc() {
 				if (vw > 0 && vh > 0 && lastRequestedStreamRes) {
 					window.streamResolutionDiverged =
 						(vw !== lastRequestedStreamRes[0] || vh !== lastRequestedStreamRes[1]);
+				}
+				// The realized buffer just settled. A resize that did not change the
+				// requested density (a window dragged to a screen of another density)
+				// left the last SETTINGS a scale measured off the old buffer, so the
+				// scale it now draws at is republished once it moves.
+				if (persistentSettingsSent && !isSharedMode && reportedDisplayScale > 0
+						&& Math.abs(measuredDisplayScale() - reportedDisplayScale) > 1e-6) {
+					sendClientPersistedSettings();
 				}
 			});
 
