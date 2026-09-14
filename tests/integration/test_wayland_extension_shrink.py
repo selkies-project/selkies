@@ -23,7 +23,7 @@ import helpers as H
 RUNTIME = "/tmp/sel-wlext"
 
 
-def build_service(sc: "Any"):
+def build_service(sc):
     from selkies.webrtc_mode import WebRTCService
     svc = WebRTCService.__new__(WebRTCService)
     svc.media_pipeline = types.SimpleNamespace(capture_module=sc)
