@@ -517,7 +517,7 @@
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .dev-setting-item.toggle-item label {
