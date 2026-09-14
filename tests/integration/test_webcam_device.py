@@ -218,7 +218,11 @@ def main() -> int:
             res.check("stats report the input geometry", (st["input_width"], st["input_height"]) == (640, 480), str(st))
             if st.get("pipewire"):
                 pw_cli = shutil.which("pw-cli")
-                nodes = subprocess.run([pw_cli, "ls", "Node"], capture_output=True, text=True, timeout=20).stdout if pw_cli else ""
+                try:
+                    nodes = subprocess.run([pw_cli, "ls", "Node"], capture_output=True, text=True, timeout=20).stdout if pw_cli else ""
+                except subprocess.TimeoutExpired:
+                    # A daemon that accepts the connection and never answers reads as no node list.
+                    nodes = "pw-cli did not answer in 20 s"
                 res.check("PipeWire node is published while the daemon is reachable", "selkies-webcam" in nodes, nodes[-200:])
                 # The same frames, taken from the node instead of the backend socket.
                 nowhere = os.path.join(sock_dir, "no-socket-here")
