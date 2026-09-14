@@ -85,7 +85,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeFullColor, isMacDesktop, displayLabel } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isMacDesktop, displayLabel } from './lib/util.js';
 import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
@@ -1148,6 +1148,15 @@ export default function webrtc() {
 					settingsToSend[baseKey] = value;
 				}
 			}
+		}
+
+		// A stored encoder this stack cannot receive is one a previous WebSocket
+		// session left: asking for it again would undo the fallback the server
+		// settled when the answer declined that codec, and the page would hold a
+		// stream it paints nothing of. The value stays stored for that transport.
+		if (settingsToSend['encoder'] !== undefined && !canReceiveEncoder(settingsToSend['encoder'])) {
+			console.log(`Not asking for ${settingsToSend['encoder']}: this browser receives no such WebRTC codec.`);
+			delete settingsToSend['encoder'];
 		}
 
 		if (window.manualResolution && manualWidth != null && manualHeight != null) {
