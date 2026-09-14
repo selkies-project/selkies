@@ -4494,7 +4494,14 @@ class WebRTCInput:
         Applications that read evdev directly (fullscreen games, remappers)
         see nothing of the X or compositor injection the session runs on, so
         the same events are carried here as devices they can open.
+
+        Host capture is the exception: there the session belongs to another
+        compositor, which reads the kernel's own devices, and the capture
+        injects into it directly -- publishing more would deliver every event
+        to it twice.
         """
+        if (getattr(settings, "wayland_host_display", "") or "").strip():
+            return
         wanted = (
             ("keyboard", "Selkies Virtual Keyboard", 0x0001,
              [EV_KEY], list(range(1, BTN_MISC)), []),
