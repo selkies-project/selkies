@@ -1030,6 +1030,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": 'Register gamepads as kernel devices through /dev/uinput, which applications (Steam, Proton, in-desktop browsers) find without the Input Interposer or fake-udev: "auto" does so only where the interposer is not configured for the session and /dev/uinput is writable — typically a desktop host rather than a container — while "true" always attempts it and "false" never does.',
     },
     {
+        "name": "publish_input_devices",
+        "type": "bool",
+        "default": False,
+        "help": "Mirror the session keyboard and pointer onto input devices applications can read, for the few that enumerate evdev instead of the display server (fullscreen games, remappers). The desktop is driven by the compositor's virtual keyboard or XTEST either way, so this adds a copy of each event and never carries it; it costs a kernel device where /dev/uinput is writable, else an Input Interposer one.",
+    },
+    {
         "name": "gpu_id",
         "type": "str",
         "default": "",
@@ -1280,6 +1286,7 @@ class AppSettings:
     webrtc_pacer: tuple[bool, bool]
     uinput_mouse_socket: str
     uinput_gamepad: str
+    publish_input_devices: tuple[bool, bool]
     webcam_enabled: tuple[bool, bool]
     webcam_socket_path: str
     webcam_width: int

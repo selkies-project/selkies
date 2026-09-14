@@ -4,10 +4,10 @@ whole matrix is exercised for both device states, so the result does not depend
 on whether the machine running the tests has /dev/uinput; the device check that
 feeds it runs for real against paths standing in for what the node can do.
 
-The keyboard and pointer the session publishes stay off the kernel wherever the
-X server would read them back, which it tells by listing a hotplugged device
-with its node; that rule is checked against the device lists each server kind
-answers."""
+The keyboard and pointer a session can publish are asked for by setting, and
+stay off the kernel wherever the X server would read them back, which it tells
+by listing a hotplugged device with its node; both rules are checked here."""
+import asyncio
 import os
 import sys
 import tempfile
@@ -128,9 +128,50 @@ def readback() -> None:
                   x_server(240, {4: [120], 5: []}), False)
 
 
+def publish_case(label: str, enabled: bool, host: str, expected: list) -> None:
+    """Which devices a session publishes under the setting and capture given."""
+    opened: list = []
+
+    class Stub:
+        def __init__(self, name: str, *args: object, **kwargs: object) -> None:
+            self.name = name
+            self.node = "/dev/input/event0"
+
+        async def open(self, kernel: bool = True) -> bool:
+            opened.append(self.name)
+            return True
+
+    saved = (ih.VirtualInputDevice, ih.settings.publish_input_devices,
+             getattr(ih.settings, "wayland_host_display", ""))
+    ih.VirtualInputDevice = Stub
+    ih.settings.publish_input_devices = (enabled, False)
+    ih.settings.wayland_host_display = host
+    handler = NS(virtual_input_devices={}, js_socket_path_prefix="/tmp",
+                 _display_reads_kernel_input=lambda: False)
+    try:
+        asyncio.run(ih.WebRTCInput._initialize_virtual_input_devices(handler))
+    finally:
+        (ih.VirtualInputDevice, ih.settings.publish_input_devices,
+         ih.settings.wayland_host_display) = saved
+        ih._persistent_virtual_devices.clear()
+    ok = opened == expected
+    if not ok:
+        fails.append(label)
+    print(f"{'PASS' if ok else 'FAIL'}  {label}  -> {opened} (want {expected})")
+
+
+def published() -> None:
+    """The session publishes its keyboard and pointer only where asked to."""
+    publish_case("[publish] off by default", False, "", [])
+    publish_case("[publish] on, both devices", True, "",
+                 ["Selkies Virtual Keyboard", "Selkies Virtual Pointer"])
+    publish_case("[publish] on, but host capture owns the session", True, "wayland-0", [])
+
+
 probe()
 run(True)
 run(False)
 readback()
+published()
 print("RESULT", "all passed" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)

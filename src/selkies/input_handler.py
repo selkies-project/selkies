@@ -4511,18 +4511,23 @@ class WebRTCInput:
         return False
 
     async def _initialize_virtual_input_devices(self) -> None:
-        """Adopt or publish the session's keyboard and pointer as input devices.
+        """Mirror the session's keyboard and pointer onto devices applications
+        can open, when `settings.publish_input_devices` asks for it.
 
-        Applications that read evdev directly (fullscreen games, remappers)
-        see nothing of the X or compositor injection the session runs on, so
-        the same events are carried here as devices they can open.
+        These devices carry no input to the desktop: every key and pointer
+        event reaches it through the compositor's virtual keyboard or XTEST,
+        and is copied here afterwards, for the few applications that enumerate
+        evdev instead of the display server. Off by default, since a session
+        whose applications read the display server needs none of it.
 
-        Host capture is the exception: there the session belongs to another
-        compositor, which reads the kernel's own devices, and the capture
-        injects into it directly -- publishing more would deliver every event
-        to it twice. An X server that reads kernel devices is served through
-        the interposer pool for the same reason.
+        Host capture is a further exception: there the session belongs to
+        another compositor, which reads the kernel's own devices, and the
+        capture injects into it directly -- publishing more would deliver
+        every event to it twice. An X server that reads kernel devices is
+        served through the interposer pool for the same reason.
         """
+        if not settings.publish_input_devices[0]:
+            return
         if (getattr(settings, "wayland_host_display", "") or "").strip():
             return
         kernel = not self._display_reads_kernel_input()
