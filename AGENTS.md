@@ -64,6 +64,19 @@ A defect that predates the change you are making is still in scope: fix it, or s
 you ruled out, and what you would do next. The same applies to a failure you cannot reproduce yet — narrow it until
 it is fixed or precisely described, and never let a test that fails for an unknown reason pass unremarked.
 
+Nothing is pushed before `pre-commit run --all-files` passes on the exact tree being pushed: CI's Lint job runs the
+same hooks (`ruff-check`, `codespell`, `settings-doc`, `file-index`, and `web-lint` for the dashboards) and fails the
+run on what they find. Before a suite failure is called a regression, run it against the unchanged tree as well: the
+suites' servers come from the editable install, so a worktree needs `SELKIES_TEST_PYTHON` pointed at a wrapper that
+sets `PYTHONPATH` to its `src`. Check the sandbox's own health the same way. The sound server must answer
+`pactl info` within a few seconds, else every websockets handshake pays the control plane's bounded timeouts and
+the log-polling suites fail on their windows: point `PULSE_SERVER` at a private PulseAudio instead (the harness
+passes it on). Nothing the shell running the suites exports reaches their servers and browsers by accident: a
+compositor that needs `LD_LIBRARY_PATH` gets it from a wrapper script on `PATH`, never from the environment. A
+process is never ended by name or pattern; attribute it by `/proc/<pid>/environ` (`E2E_WORKDIR`, `XDG_RUNTIME_DIR`,
+`DISPLAY`) and end that pid or its group, since the desktop session's own compositor and sound server share the
+host.
+
 ## Landing a change
 
 A change is ready when four questions have answers, and the commit or pull request gives them to the reviewer:
