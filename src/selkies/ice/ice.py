@@ -1240,9 +1240,7 @@ class Connection:
                     continue
                 sock = transport.get_extra_info("socket")
                 if sock is not None:
-                    sock.setsockopt(
-                        socket.SOL_SOCKET, socket.SO_RCVBUF, turn.UDP_SOCKET_BUFFER_SIZE
-                    )
+                    turn.size_udp_socket(sock)
             host_protocols.append(protocol)
 
             # add host candidate

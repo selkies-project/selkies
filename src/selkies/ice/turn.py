@@ -50,7 +50,15 @@ DEFAULT_CHANNEL_REFRESH_TIME = 500
 DEFAULT_ALLOCATION_LIFETIME = 600
 TCP_TRANSPORT = 0x06000000
 UDP_TRANSPORT = 0x11000000
+# Asked for both directions, the size libwebrtc gives its own UDP sockets; the
+# kernel clamps it to its per-socket ceiling where that is lower.
 UDP_SOCKET_BUFFER_SIZE = 262144
+
+
+def size_udp_socket(sock: socket.socket) -> None:
+    """Give an ICE or relay socket its receive and send buffers."""
+    for option in (socket.SO_RCVBUF, socket.SO_SNDBUF):
+        sock.setsockopt(socket.SOL_SOCKET, option, UDP_SOCKET_BUFFER_SIZE)
 
 _ProtocolT = TypeVar("_ProtocolT", bound=asyncio.DatagramProtocol)
 
@@ -466,7 +474,7 @@ async def create_turn_endpoint(
         )
         sock = inner_transport.get_extra_info("socket")
         if sock is not None:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, UDP_SOCKET_BUFFER_SIZE)
+            size_udp_socket(sock)
 
     try:
         protocol = protocol_factory()

@@ -40,7 +40,7 @@ import struct
 from typing import Any, Callable, Optional
 
 from . import stun
-from .turn import UDP_SOCKET_BUFFER_SIZE
+from .turn import size_udp_socket
 from .utils import bind_errno
 
 logger = logging.getLogger(__name__)
@@ -280,7 +280,7 @@ class UdpMux:
             raise
         raw = transport.get_extra_info("socket")
         if raw is not None:
-            raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, UDP_SOCKET_BUFFER_SIZE)
+            size_udp_socket(raw)
         self._sockets[address] = sock
         return sock
 
