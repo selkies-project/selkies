@@ -101,7 +101,7 @@ def nested(socket: str, config: str) -> subprocess.Popen:
     """Start a decorated nested labwc spanning both screens, with XWayland."""
     startup = os.path.join(RUNTIME, "startup.sh")
     with open(startup, "w") as fh:
-        fh.write(f"#!/bin/bash\nenv | grep ^DISPLAY= > {RUNTIME}/env\nexec sleep 3600\n")
+        fh.write(f"#!/bin/bash\nenv | grep ^DISPLAY= > {RUNTIME}/env\n")
     os.chmod(startup, 0o755)
     # Two screens from the start: pre-provisioning is the one road a stock
     # labwc has, and the patched one takes a startup count the same way.

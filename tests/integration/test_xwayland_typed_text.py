@@ -49,7 +49,7 @@ def boot(runtime: str) -> tuple:
     startup = os.path.join(runtime, "startup.sh")
     dump = os.path.join(runtime, "env")
     with open(startup, "w") as fh:
-        fh.write(f"#!/bin/bash\nenv | grep ^DISPLAY= > {dump}\nexec sleep 3600\n")
+        fh.write(f"#!/bin/bash\nenv | grep ^DISPLAY= > {dump}\n")
     os.chmod(startup, 0o755)
     env = dict(os.environ, XDG_RUNTIME_DIR=runtime, WLR_BACKENDS="headless",
                WLR_LIBINPUT_NO_DEVICES="1", WLR_RENDERER="pixman",
