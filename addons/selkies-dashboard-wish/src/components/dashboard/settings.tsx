@@ -38,7 +38,7 @@ import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, 
 import { sessionAuthHeaders } from "../../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
-    USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC,
+    USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
     RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
@@ -339,14 +339,16 @@ export function Settings() {
      * below re-resolve against current values when their deps change.
      * `activeEncoder` is the one knob for both transports and reads storage
      * first: an out-of-set stored value falls to the server's own fallback and
-     * the serverSettings sync re-seats it. `softwareH264Encoder` and `useCpu`
-     * (client choice, else the server's) feed the rate-control default.
+     * the serverSettings sync re-seats it. `softwareEncoders` and `useCpu`
+     * (client choice, else the server's) feed the rate-control default;
+     * `encoderBackends` decides whether the software encoding switch is shown.
      */
     const conditionalCtx = {
         manualActive: !!readStored("manual_width") || serverSettings?.manual_resolution?.value === true,
         streamMode,
         activeEncoder: readStored("encoder") || encoder,
         softwareEncoders: serverSettings?.software_encoders?.value,
+        encoderBackends: serverSettings?.encoder_backends?.value,
         useCpu: readStored("use_cpu") !== null
             ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
         allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
@@ -1650,9 +1652,7 @@ export function Settings() {
                             </div>
                         )}
 
-                        {/* use_cpu only changes behavior for full-frame h264enc (HW vs the server's
-                            software encoder); the server forces it true for jpeg/striped in both transports. */}
-                        {activeEncoder === 'h264enc' && (renderableSettings.useCpu ?? true) && (
+                        {softwareChoiceAvailable(activeEncoder, conditionalCtx.encoderBackends) && (renderableSettings.useCpu ?? true) && (
                             <div className="flex items-center justify-between">
                                 <div className="space-y-0.5">
                                     <label className="text-sm font-medium">{t('sections.video.useCpuLabel')}</label>

@@ -55,7 +55,7 @@ import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, 
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
-  USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC,
+  USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
   RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import PlayerGamepadButton from "./PlayerGamepadButton.jsx";
@@ -1361,13 +1361,15 @@ function Sidebar() {
    * storage first: an out-of-set stored value is ignored by the server's own
    * fallback and re-seated by the `serverSettings` sync. `softwareEncoders`
    * and `useCpu` (the client's choice, else the server's) feed the
-   * rate-control default.
+   * rate-control default; `encoderBackends` decides whether the software
+   * encoding switch is shown.
    */
   const conditionalCtx = {
     manualActive: !!readStored("manual_width") || serverSettings?.manual_resolution?.value === true,
     streamMode,
     activeEncoder: readStored("encoder") || encoder,
     softwareEncoders: serverSettings?.software_encoders?.value,
+    encoderBackends: serverSettings?.encoder_backends?.value,
     useCpu: readStored("use_cpu") !== null
       ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
     allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
@@ -3626,9 +3628,7 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {/* use_cpu only matters for full-frame h264enc; the server forces it true
-                    for jpeg and striped on both transports. */}
-                {activeEncoder === 'h264enc' && (renderableSettings.use_cpu ?? true) && (
+                {softwareChoiceAvailable(activeEncoder, conditionalCtx.encoderBackends) && (renderableSettings.use_cpu ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="useCpuToggle">
                       {t("sections.video.useCpuLabel", "CPU Encoding")}

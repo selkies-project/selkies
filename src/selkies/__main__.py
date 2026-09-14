@@ -96,7 +96,9 @@ async def run() -> None:
     read `SELKIES_JS_SOCKET_PATH` and `SELKIES_WEBCAM_SOCKET_PATH`) use the
     same directories selkies does however the settings were supplied. The
     virtual webcam outlives mode switches (applications hold `/dev/videoN`
-    open across them), so it is released only when the server exits.
+    open across them), so it is released only when the server exits. The
+    encoders this host serves are resolved once here, off the loop since the
+    hardware probe opens the GPU, before either transport publishes a menu.
     """
     _install_shutdown_signal_handlers()
 
@@ -112,6 +114,7 @@ async def run() -> None:
 
     await wait_for_app_ready(settings.app_ready_file, settings.app_wait_ready[0])
 
+    await asyncio.to_thread(settings.resolve_encoder_backends)
     server = CentralizedStreamServer(settings)
 
     server.register_service("webrtc", WebRTCService(server))

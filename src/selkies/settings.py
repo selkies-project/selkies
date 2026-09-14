@@ -669,7 +669,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "enum",
         "default": "h264enc",
         "meta": {"allowed": ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "h264enc-striped", "jpeg"]},
-        "help": "The default video encoder. Every full-frame encoder runs on NVENC or VA-API where the GPU carries the codec and falls back to the software encoder pixelflux was built with: h264enc (x264, or OpenH264 in a GPL-free build), h265enc (x265, or kvazaar in a GPL-free build), vp8enc and vp9enc (libvpx), av1enc (SVT-AV1). h264enc-striped is CPU-striped H.264, jpeg is CPU-striped JPEG. A client whose browser cannot decode the codec steps through the allowed encoders it does decode, in this order (H.264 first when unrestricted), and to jpeg last. The WebRTC transport carries the full-frame encoders and a browser that declines the codec is answered with h264enc; h264enc-striped and jpeg are WebSocket-only.",
+        "help": "The default video encoder. Every full-frame encoder runs on NVENC or VA-API where the GPU carries the codec and falls back to the software encoder pixelflux was built with: h264enc (x264, or OpenH264 in a GPL-free build), h265enc (x265, or kvazaar in a GPL-free build), vp8enc and vp9enc (libvpx), av1enc (SVT-AV1). h264enc-striped is CPU-striped H.264, jpeg is CPU-striped JPEG. Clients are offered only the encoders this host serves: those whose codec the encode node's GPU encodes (probed once at startup) or the pixelflux build carries a software encoder for. A client whose browser cannot decode the codec steps through the allowed encoders it does decode, in this order (H.264 first when unrestricted), and to jpeg last. The WebRTC transport carries the full-frame encoders and a browser that declines the codec is answered with h264enc; h264enc-striped and jpeg are WebSocket-only.",
     },
     {
         "name": "jpeg_quality",
@@ -1180,6 +1180,9 @@ ENCODER_CODECS = {
 # The name each pixelflux codec goes by in logs and notices.
 CODEC_LABELS = {"jpeg": "JPEG", "h264": "H.264", "h265": "H.265", "vp8": "VP8", "vp9": "VP9", "av1": "AV1"}
 
+# Encoders with no hardware path: selecting one implies software encoding.
+CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
+
 
 def encoder_for_codec(codec: str) -> str:
     """The full-frame encoder that streams `codec`, which is what the capture's
@@ -1230,6 +1233,36 @@ def software_encoders() -> Dict[str, str]:
     except ImportError:
         return {"h264": "x264"}
     return {str(k): str(v) for k, v in dict(pixelflux.SOFTWARE_ENCODERS).items()}
+
+
+_HARDWARE_ENCODERS: Dict[int, Optional[Dict[str, str]]] = {}
+
+
+def hardware_encoders(encode_node_index: int) -> Optional[Dict[str, str]]:
+    """The hardware encoder of each codec the GPU behind a render node serves,
+    by codec name ("nvenc" or "vaapi"), as pixelflux probes it once per node and
+    remembers; a codec without an entry has no hardware path on that node. None
+    where nothing can be known: no pixelflux to ask (rendering the settings
+    reference), or one without the probe, so a caller narrows nothing on a guess.
+
+    Args:
+        encode_node_index: The DRI render-node index hardware encoders open
+            (`AppSettings.encode_node_index`).
+    """
+    node = int(encode_node_index)
+    if node not in _HARDWARE_ENCODERS:
+        served: Optional[Dict[str, str]] = None
+        try:
+            import pixelflux
+            probe = getattr(pixelflux, "hardware_encoders", None)
+            if probe is not None:
+                served = {str(k): str(v) for k, v in dict(probe(node)).items()}
+        except ImportError:
+            served = None
+        except Exception as e:
+            logging.warning("Hardware encoder probe of render node %d failed: %s", node, e)
+        _HARDWARE_ENCODERS[node] = served
+    return _HARDWARE_ENCODERS[node]
 
 
 def software_video_path(encoder: str, use_cpu: bool) -> bool:
@@ -1617,6 +1650,101 @@ class AppSettings:
         "jpeg": "crf",
     }
 
+    def encode_node_index(self) -> Optional[int]:
+        """The DRI render-node index hardware encoders open, resolved as the
+        capture settings resolve it: `encode_dri` names a node, else `gpu_id`
+        picks one, else the first. None where no session encodes on hardware:
+        `gpu_id` -1, an unusable `encode_dri`, or software encoding locked on."""
+        from .display_utils import parse_dri_node_to_index, parse_gpu_id
+        if self.use_cpu[0] and self.use_cpu[1]:
+            return None
+        node = str(getattr(self, "encode_dri", "") or "")
+        if node:
+            index = parse_dri_node_to_index(node)
+            return None if index < 0 else index
+        gid = parse_gpu_id(self.gpu_id)
+        if gid is None:
+            return 0
+        return None if gid < 0 else gid
+
+    def encoder_backends(self) -> Optional[Dict[str, Dict[str, Optional[str]]]]:
+        """The backends that serve each video codec on this host, by codec
+        name: `hardware` ("nvenc", "vaapi" or None) from the startup probe and
+        `software` (the pixelflux build's library or None). None before
+        `resolve_encoder_backends` ran or where the hardware side is unknown,
+        so no consumer hides a choice on a guess."""
+        hardware = getattr(self, "_hardware_encoders", None)
+        if hardware is None:
+            return None
+        software = software_encoders()
+        return {
+            codec: {"hardware": hardware.get(codec), "software": software.get(codec)}
+            for codec in CODEC_LABELS
+            if codec != "jpeg"
+        }
+
+    def encoder_served(self, encoder: str) -> bool:
+        """Whether a session on this encoder comes up on the codec it names
+        rather than demoting: the CPU-only encoders always, a full-frame one
+        where its codec has a software encoder in the build or a hardware one
+        on the encode node. True for every encoder while the hardware side is
+        unknown."""
+        backends = self.encoder_backends()
+        if backends is None:
+            return True
+        encoder = canonical_encoder(encoder)
+        if encoder in CPU_ONLY_ENCODERS:
+            return True
+        served = backends.get(codec_for_encoder(encoder), {})
+        return bool(served.get("software") or served.get("hardware"))
+
+    def resolve_encoder_backends(self) -> None:
+        """Learn once, at startup, which encoders this host serves, and narrow
+        the encoder menu to them.
+
+        The hardware side comes from pixelflux's per-node probe on the encode
+        node the capture settings resolve; a host that never encodes on
+        hardware (`gpu_id` -1, software encoding locked on) has none. The
+        operator's menu keeps only the encoders that come up on their codec,
+        so a client is never offered one the selection ladder would demote,
+        and the transport filter re-derives its view from the narrowed menu.
+        An operator's pick that is not served falls back to H.264 with a
+        warning, the codec every host serves; a menu narrowed to nothing
+        reverts to every served encoder rather than offering none.
+        """
+        node = self.encode_node_index()
+        self._hardware_encoders = {} if node is None else hardware_encoders(node)
+        if self._hardware_encoders is None:
+            return
+        enc_definition = next(
+            (s for s in self._setting_definitions if s["name"] == "encoder"),
+            None,
+        )
+        if enc_definition is None:
+            return
+        operator_allowed = list(getattr(self, "_operator_encoder_allowed", enc_definition["meta"]["allowed"]))
+        served = [item for item in operator_allowed if self.encoder_served(item)]
+        dropped = [item for item in operator_allowed if item not in served]
+        if not served:
+            served = [item for item in ENCODER_CODECS if self.encoder_served(item)]
+            logging.warning(
+                "No encoder of the configured menu (%s) is served on this host; offering %s.",
+                ", ".join(operator_allowed),
+                ", ".join(served),
+            )
+        elif dropped:
+            logging.info("Encoders not served on this host are left off the menu: %s", ", ".join(dropped))
+        self._operator_encoder_allowed = served
+        value = getattr(self, "_operator_encoder_value", self.encoder)
+        if value not in served:
+            fallback = "h264enc" if "h264enc" in served else served[0]
+            logging.warning("Encoder %r is not served on this host; using %r.", value, fallback)
+            self._operator_encoder_value = fallback
+            if self.encoder == value:
+                self.encoder = fallback
+        enc_definition["meta"]["allowed"] = list(served)
+        self.apply_webrtc_encoder_filter()
+
     def on_software_video_path(self) -> bool:
         """Whether the server's own defaults put a session on the software
         video path: the striped encoder, or a full-frame encoder with software
@@ -1710,7 +1838,7 @@ class AppSettings:
             if item in WEBRTC_ENCODER_CHOICES
         ]
         if not allowed:
-            allowed = list(WEBRTC_ENCODER_CHOICES)
+            allowed = [item for item in WEBRTC_ENCODER_CHOICES if self.encoder_served(item)]
         enc_definition["meta"]["allowed"] = allowed
         if self.encoder not in allowed:
             fallback = (
@@ -1837,9 +1965,6 @@ settings = AppSettings(SETTING_DEFINITIONS)
 # published as locked so a dashboard renders them read-only.
 OPERATOR_LOCKED_WHEN_OVERRIDDEN = ("scaling_dpi",)
 
-# Encoders with no hardware path: selecting one implies software encoding.
-CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
-
 # Pipelines a session starts on or off by policy, each named by a `*_on_start` setting.
 START_STATE_PIPELINES = ("video", "audio", "microphone", "webcam", "gamepad")
 
@@ -1938,9 +2063,12 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
     default; the client uses it to decide whether a conditional default (HiDPI
     off under a manual resolution, say) applies or defers to the operator.
     Adds the clipboard gate booleans derived from the single
-    `enable_clipboard` policy and the pixelflux build's `software_encoders`
+    `enable_clipboard` policy, the pixelflux build's `software_encoders`
     (the software encoder behind each codec, "x264" or "openh264" for H.264),
-    which the dashboards' rate-control default reads.
+    which the dashboards' rate-control default reads, and once the startup
+    probe has run, `encoder_backends`: the hardware and software backend of
+    each codec on this host, from which the dashboards show the software
+    encoding switch only where it switches something.
     """
     out = {}
     for setting_def in SETTING_DEFINITIONS:
@@ -1973,6 +2101,9 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
     out['clipboard_in_enabled'] = {'value': clip in ('true', 'in')}
     out['clipboard_out_enabled'] = {'value': clip in ('true', 'out')}
     out['software_encoders'] = {'value': software_encoders()}
+    backends = settings.encoder_backends()
+    if backends is not None:
+        out['encoder_backends'] = {'value': backends}
     return out
 
 

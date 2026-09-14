@@ -440,13 +440,13 @@
                         base.dataset.touchInitialClientX = e.changedTouches[0].clientX;
                         base.dataset.touchInitialClientY = e.changedTouches[0].clientY;
                         base.dataset.movedSignificant = "false";
-                        updateStick(e.changedTouches[0], base, handle, baseSizeUnscaled, handleRelSizeFactor, scale);
+                        updateStick(e.changedTouches[0], base, handle, baseSizeUnscaled, handleRelSizeFactor);
                     };
                     const onJoystickTouchMove = (e) => { 
                         e.preventDefault(); e.stopPropagation(); if (activeTouchId === null) return;
                         for (let i = 0; i < e.changedTouches.length; i++) {
                             if (e.changedTouches[i].identifier === activeTouchId) {
-                                updateStick(e.changedTouches[i], base, handle, baseSizeUnscaled, handleRelSizeFactor, scale);
+                                updateStick(e.changedTouches[i], base, handle, baseSizeUnscaled, handleRelSizeFactor);
                                 const initialX = parseFloat(base.dataset.touchInitialClientX);
                                 const initialY = parseFloat(base.dataset.touchInitialClientY);
                                 const currentX = e.changedTouches[i].clientX;
@@ -486,7 +486,7 @@
                         }
                     };
                     /** Moves the handle to the touch, clamped to the base, and sets the axes. */
-                    function updateStick(touch, stickBaseElement, handleElement, unscaledBaseSize, handleRelFactor, currentScale) { 
+                    function updateStick(touch, stickBaseElement, handleElement, unscaledBaseSize, handleRelFactor) {
                         const rect = stickBaseElement.getBoundingClientRect();
                         const touchX = touch.clientX - rect.left; const touchY = touch.clientY - rect.top;
                         const currentBaseSize = rect.width; const currentHandleSize = currentBaseSize * handleRelFactor;

@@ -78,6 +78,7 @@ SUITES: list = [
     {"path": "unit/test_https_selfsigned.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_encoder_cpu_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rate_control_defaults.py", "tier": "unit", "timeout": 180},
+    {"path": "unit/test_encoder_backends.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_codec_encoders.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rtp_packetizers.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_encoder_demotion.py", "tier": "unit", "timeout": 120},

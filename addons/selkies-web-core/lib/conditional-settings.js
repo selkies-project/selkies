@@ -21,6 +21,8 @@
  * @module
  */
 
+import { codecOfEncoder } from "./wire-codecs.js";
+
 /**
  * @typedef {object} SettingSpec
  * @property {string} id Name of the setting in the dashboards.
@@ -76,6 +78,25 @@ export const ENCODER_RC_DEFAULTS = {
 export function softwareVideoPath(encoder, useCpu) {
     if (encoder === "jpeg") return false;
     return encoder === "h264enc-striped" || !!useCpu;
+}
+
+/**
+ * Whether the software-encoding switch changes anything for an encoder: its
+ * codec has both a hardware backend on the server's encode node and a
+ * software encoder in its pixelflux build, so the switch moves the session
+ * between them. Never for the CPU-only encoders. Without a backend table (a
+ * server whose hardware side could not be probed) only H.264 is read as
+ * served both ways.
+ * @param {string} encoder Encoder wire value.
+ * @param {Object<string, {hardware: (string|null), software: (string|null)}>|undefined} encoderBackends
+ *     The server's `encoder_backends` payload entry, keyed by codec name.
+ * @returns {boolean}
+ */
+export function softwareChoiceAvailable(encoder, encoderBackends) {
+    if (encoder === "jpeg" || encoder === "h264enc-striped") return false;
+    if (!encoderBackends) return encoder === "h264enc";
+    const backends = encoderBackends[codecOfEncoder(encoder)];
+    return !!(backends && backends.hardware && backends.software);
 }
 
 /**
