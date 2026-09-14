@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from typing import Optional
 
 import pytest
@@ -32,15 +33,21 @@ CASES: list = [
 ]
 
 
-def keep_logs(case: str) -> None:
+def keep_logs(case: str, since: float) -> None:
     """Copy the logs a suite left in the work directory into a folder named after it,
-    so a run's record carries every suite's server log and not only the last one's."""
+    so a run's record carries every suite's server log and not only the last one's.
+
+    The directory is shared, so only what this suite wrote is taken: a log an
+    earlier suite left untouched reads as this one's and has been believed.
+    """
     dest = os.path.join(helpers.WORKDIR, "suite-logs", case)
     try:
         os.makedirs(dest, exist_ok=True)
         for name in os.listdir(helpers.WORKDIR):
             src = os.path.join(helpers.WORKDIR, name)
-            if name.endswith(".log") and os.path.isfile(src):
+            if not name.endswith(".log") or not os.path.isfile(src):
+                continue
+            if os.stat(src).st_mtime >= since:
                 shutil.copy2(src, dest)
     except OSError:
         pass
@@ -65,6 +72,7 @@ def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
     # A minute short of the kill, so the dump lands in the output that is kept.
     env = dict(os.environ, SELKIES_SUITE_DEADLINE=str(max(30, timeout - 60)))
     case = path[:-3].replace("/", "-") + (f"-{selector}" if selector else "")
+    started = time.time()
     try:
         proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,
                               timeout=timeout, env=env)
@@ -73,11 +81,11 @@ def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
             sys.stderr.write(proc.stderr)
             print(f"note: {case} lost a browser mid-run; running it once more",
                   flush=True)
-            keep_logs(case + "-stalled")
+            keep_logs(case + "-stalled", started)
             proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,
                                   timeout=timeout, env=env)
     except subprocess.TimeoutExpired as e:
-        keep_logs(case)
+        keep_logs(case, started)
         # The checks the suite did finish are its record of where it stuck;
         # they would otherwise die with it.
         out = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
@@ -87,7 +95,7 @@ def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
         raise AssertionError(
             f"{path} {selector or ''} ran past {timeout}s\n"
             + ("\n".join(out.splitlines()[-20:]) or err[-2000:])) from None
-    keep_logs(case)
+    keep_logs(case, started)
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
     if proc.returncode == helpers.SKIP_EXIT:
