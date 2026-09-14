@@ -23,7 +23,7 @@ import core_lib as C
 from test_dashboard_matrix import open_settings, encoder_menu_button
 from playwright.sync_api import sync_playwright
 
-UNSUPPORTED = "not supported by this browser"
+UNSUPPORTED = "Unsupported Browser"
 NOTICE = "H.265 video, which this browser cannot decode"
 H265 = "H.265"
 H264 = "H.264"
@@ -86,7 +86,8 @@ def menu_block(dashboard: str, mode: str) -> "H.Results":
             page.goto(H.BASE_URL, wait_until="load")
             res.check("video streams", wait_video(page, mode) is not None)
             entries = classic_menu(page) if dashboard == "classic" else wish_menu(page)
-            by_label = {text.replace(UNSUPPORTED, "").strip(" []"): (text, disabled) for text, disabled in (entries or [])}
+            by_label = {text.replace(UNSUPPORTED, "").strip().strip("()[]").strip(): (text, disabled)
+                        for text, disabled in (entries or [])}
             res.check("every encoder the server allows is listed",
                       entries is not None and len(entries) == (5 if mode == "webrtc" else 7), entries)
             res.check("H.265, which this browser does not play, is listed disabled and marked as unsupported here",
