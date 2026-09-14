@@ -53,12 +53,13 @@ def keep_logs(case: str, since: float) -> None:
         pass
 
 
-# What `helpers.answers_within` prints when a browser stops answering. WebKit's
-# video process wedges on a loaded runner often enough to take a suite with it,
-# and every call after that reads as absent video, so a run that says so is not
-# a result: it is repeated once, both attempts printed, and a wedge that
-# repeats fails as it did before.
-STALLED = ("did not answer within", "stopped answering earlier")
+# What `helpers.answers_within` prints when a browser stops answering, and what
+# Playwright raises when one goes away. WebKit's video process wedges on a
+# loaded runner often enough to take a suite with it, and every call after that
+# reads as absent video, so a run that says so is not a result: it is repeated
+# once, both attempts printed, and a loss that repeats fails as it did before.
+STALLED = ("did not answer within", "stopped answering earlier",
+           "Target page, context or browser has been closed")
 
 
 def stalled(text: str) -> bool:
