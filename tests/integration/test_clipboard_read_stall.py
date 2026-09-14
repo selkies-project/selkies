@@ -78,6 +78,10 @@ async def wait_root(w: int, h: int, timeout: float) -> tuple:
 async def recv_clipboard(ws: Any, timeout: float) -> tuple:
     """Collect the tagged read-back reply.
 
+    The selection monitor announces the owner the suite just installed with an
+    untagged `clipboard` frame of its own, so only the payload that follows the
+    `clipboard_reply,cr` tag is the answer.
+
     Returns:
         `(tagged, payload)` -- whether `clipboard_reply,cr` arrived and the
         bytes of the `clipboard` frame after it, both None-safe.
@@ -96,7 +100,7 @@ async def recv_clipboard(ws: Any, timeout: float) -> tuple:
             continue
         if msg == "clipboard_reply,cr":
             tagged = True
-        elif msg.startswith("clipboard,"):
+        elif tagged and msg.startswith("clipboard,"):
             payload = base64.b64decode(msg.split(",", 1)[1])
     return tagged, payload
 
