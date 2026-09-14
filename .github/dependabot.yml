@@ -29,6 +29,28 @@ updates:
       web-client:
         patterns: ["*"]
 
+  # Documentation site
+  - package-ecosystem: npm
+    directory: /website
+    schedule:
+      interval: weekly
+    groups:
+      website:
+        patterns: ["*"]
+    ignore:
+      # `fumadocs-ui` is installed under an alias the updater cannot rewrite,
+      # and the aliased package pins its peers to one exact version, so the
+      # Fumadocs packages move together by hand or the site stops resolving
+      - dependency-name: fumadocs-core
+      - dependency-name: fumadocs-mdx
+      - dependency-name: fumadocs-ui
+      # The aliased package takes one Next major, and typedoc, which writes the
+      # Web Reference, takes no TypeScript past 6
+      - dependency-name: next
+        update-types: ["version-update:semver-major"]
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+
   # Base images of the wheel builder, the devcontainer, and the published images
   - package-ecosystem: docker
     directories: ["/", "/.devcontainer", "/addons/base", "/addons/coturn", "/addons/desktop", "/addons/turn-rest"]
