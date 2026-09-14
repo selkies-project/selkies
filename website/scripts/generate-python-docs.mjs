@@ -71,18 +71,12 @@ if (!jsonPath) {
 const pkg = JSON.parse(await fs.readFile(jsonPath, 'utf8'));
 for (const name of EXCLUDED_MODULES) delete pkg.modules[name];
 
-const files = Python.convert(pkg, { baseUrl: '/reference' });
-
-// convert() links to /reference/selkies/<module> but write() strips the
-// package segment from file paths, so pages live at /reference/<module>.
-// Rewrite the links to match where the files actually land.
-for (const file of files) {
-  file.content = file.content.replaceAll('"/reference/selkies', '"/reference');
-  file.content = file.content.replaceAll('(/reference/selkies', '(/reference');
-}
+// groupBy 'none' keeps the pages at the root of the output directory, so a
+// module is published as /reference/<module> rather than under the package.
+const files = Python.convert(pkg, { baseUrl: '/reference', groupBy: 'none' });
 
 await fs.rm(outDir, { recursive: true, force: true });
-await Python.write(files, { outDir });
+await Python.write(files, outDir);
 
 // The folder's sidebar entry: the package page first, then every module in
 // the order the extractor saw them.
