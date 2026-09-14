@@ -101,7 +101,7 @@ Applications reach a Selkies gamepad in one of two ways, and only one of them is
 
 Where `/dev/uinput` is writable, Selkies registers a real kernel controller ([Kernel Gamepads](component.md#kernel-gamepads)) that every application enumerates normally. If nothing appears, check that the `uinput` module is loaded, that the account running Selkies can write `/dev/uinput`, and that your desktop user can read the `/dev/input/event*` node it creates — the server log names the node and warns when it is unreadable. Steam picks up the controller as a hot-plug, but a Steam that was already running when the pad first appeared may need a restart.
 
-In a container without `/dev/uinput` the [Input Interposer](component.md#input-interposer) is used instead. It presents the pad only to applications started with it preloaded, which is why Steam and in-desktop browsers cannot find it there. The session's keyboard and pointer are published the same way, for applications that read evdev directly rather than through the display server.
+In a container without `/dev/uinput` the [Input Interposer](component.md#input-interposer) is used instead. It presents the pad only to applications started with it preloaded, which is why Steam and in-desktop browsers cannot find it there. The session's keyboard and pointer are published the same way, for applications that read evdev directly rather than through the display server, though not under host capture, where the session's own compositor already has them.
 
 Also note that the browser Gamepad API only reports controllers in a [secure context](https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API), so open Selkies over HTTPS or `localhost` and press a button before the pad appears at all.
 
