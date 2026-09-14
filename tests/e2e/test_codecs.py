@@ -59,13 +59,19 @@ RTP_PROBE_JS = """(mime) => {
 
 
 def wait_stream_mode(mode_name: str, timeout: float = 15) -> str:
-    """The server's latest stream line once it names `mode_name`, else the last one seen."""
+    """The server's stream line naming `mode_name` once one is printed, else the
+    last one seen. A pipeline prints its line from its capture thread when the
+    encoder comes up, so a stopped pipeline's can land after its replacement's:
+    the newest line alone does not say what streams now."""
     deadline = time.time() + timeout
-    line = TENC.last_stream_line()
-    while time.time() < deadline and f"Mode: {mode_name}" not in line:
+    while True:
+        lines = [l for l in H.server_log().splitlines() if "Stream settings active" in l]
+        named = [l for l in lines if f"Mode: {mode_name}" in l]
+        if named:
+            return named[-1]
+        if time.time() >= deadline:
+            return lines[-1] if lines else ""
         time.sleep(0.5)
-        line = TENC.last_stream_line()
-    return line
 
 
 def open_engine_page(p: Any, engine: str, mode: str) -> tuple:
