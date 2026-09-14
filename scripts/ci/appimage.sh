@@ -37,10 +37,14 @@ export MAMBA_REMOTE_MAX_RETRIES="5" MAMBA_REMOTE_BACKOFF_FACTOR="3" \
 export CONDA_REMOTE_MAX_RETRIES="5" CONDA_REMOTE_BACKOFF_FACTOR="3" \
     CONDA_REMOTE_CONNECT_TIMEOUT_SECS="30" CONDA_REMOTE_READ_TIMEOUT_SECS="120"
 if ! command -v pixi >/dev/null; then
-  # fetch.sh rather than a bare curl: the installer is a GitHub release asset,
-  # and this is the same rate limit the linuxdeploy download below waits out.
-  scripts/ci/fetch.sh https://pixi.sh/install.sh "${WORK}/pixi-install.sh"
-  sh "${WORK}/pixi-install.sh"
+  # The release asset through fetch.sh rather than pixi's installer, whose own
+  # download makes one attempt: this is the same rate limit the linuxdeploy
+  # download below waits out.
+  scripts/ci/fetch.sh \
+      "https://github.com/prefix-dev/pixi/releases/latest/download/pixi-${ARCH}-unknown-linux-musl.tar.gz" \
+      "${WORK}/pixi.tar.gz"
+  mkdir -p "${HOME}/.pixi/bin"
+  tar -xzf "${WORK}/pixi.tar.gz" -C "${HOME}/.pixi/bin"
 fi
 retry pixi global install rattler-build
 rattler-build build \
