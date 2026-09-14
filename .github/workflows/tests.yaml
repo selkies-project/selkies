@@ -13,6 +13,10 @@ on:
         description: 'Marker expression, e.g. "e2e" or "integration or e2e"'
         type: string
         default: integration or e2e
+      suites:
+        description: 'Suite name expression (pytest -k), e.g. "portal or codecs"; empty runs every suite of the tiers'
+        type: string
+        default: ''
   workflow_call:
     inputs:
       tiers:
@@ -274,10 +278,13 @@ jobs:
       - name: Install the OpenH264 plugin for Firefox
         if: contains(inputs.tiers || 'integration or e2e', 'e2e')
         run: sh tests/tools/fetch-openh264.sh
+      # The suites' own output goes into the report, so the no-skip gate below
+      # can list the checks a suite recorded as unobserved.
       - name: Run the suites
         env:
           TIERS: ${{ inputs.tiers || 'integration or e2e' }}
-        run: python -m pytest tests -m "${TIERS}" -v --junitxml=suites-report.xml
+          SUITES: ${{ inputs.suites || '' }}
+        run: python -m pytest tests -m "${TIERS}" -k "${SUITES}" -v --junitxml=suites-report.xml -o junit_logging=system-out
       - name: Fail if any suite skipped
         if: ${{ !cancelled() }}
         run: python tests/tools/assert_no_skips.py suites-report.xml
