@@ -181,15 +181,21 @@ def run_block(mode: str, wayland: bool, block: str = "",
             res.check("roles: shared viewer gets video", vinfo is not None, vinfo)
             if mode == "websockets":
                 # Audio rides the primary connection, shared viewers included;
-                # the worklet's polled depth proves packets reach playback.
-                deadline = time.time() + 10
-                depth = 0
-                while time.time() < deadline:
-                    depth = vpage.evaluate("window.currentAudioBufferSize || 0") or 0
-                    if depth > 0:
-                        break
-                    time.sleep(0.5)
-                res.check("roles: shared viewer plays audio", depth > 0, depth)
+                # the worklet's polled depth proves packets reach playback. The
+                # capture sends nothing while the desktop is silent, so the
+                # viewer is given a tone to hear.
+                tone = H.pulse_sine()
+                try:
+                    deadline = time.time() + 10
+                    depth = 0
+                    while time.time() < deadline:
+                        depth = vpage.evaluate("window.currentAudioBufferSize || 0") or 0
+                        if depth > 0:
+                            break
+                        time.sleep(0.5)
+                    res.check("roles: shared viewer plays audio", depth > 0, depth)
+                finally:
+                    H.pulse_unload(tone)
             if not wayland:
                 vpage.mouse.move(400, 300)
                 time.sleep(0.5)

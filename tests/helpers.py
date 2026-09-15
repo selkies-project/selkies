@@ -307,8 +307,25 @@ def pulse_null_sink(name: str, **opts: Any) -> Optional[str]:
     return module_id if module_id.isdigit() else None
 
 
+def pulse_sine(sink: str = "output", frequency: int = 440) -> Optional[str]:
+    """Play a tone into `sink`, returning the module id to unload later.
+
+    The capture is gated on silence, so a sink nothing plays into carries no
+    audio at all: a check that audio reaches a client has to give it something
+    to hear.
+    """
+    pactl = shutil.which("pactl")
+    if not pactl:
+        return None
+    r = subprocess.run([pactl, "load-module", "module-sine",
+                        f"sink={sink}", f"frequency={frequency}"],
+                       capture_output=True, text=True, timeout=10)
+    module_id = r.stdout.strip()
+    return module_id if module_id.isdigit() else None
+
+
 def pulse_unload(module_id: Optional[str]) -> None:
-    """Unload a module pulse_null_sink() loaded; a no-op for None."""
+    """Unload a module pulse_null_sink() or pulse_sine() loaded; a no-op for None."""
     pactl = shutil.which("pactl")
     if pactl and module_id:
         subprocess.run([pactl, "unload-module", module_id],

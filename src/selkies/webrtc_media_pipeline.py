@@ -822,7 +822,10 @@ class MediaPipelinePixel(MediaPipeline):
             capture_settings.frame_duration_ms = frame_ms
             self._audio_frame_samples = max(1, int(48000 * frame_ms / 1000))
             capture_settings.use_vbr = True
-            capture_settings.use_silence_gate = False
+            # See opus_capture_settings: silence costs nothing on the wire, and the
+            # receiver's concealment counter rises across the gap without anything
+            # audible changing.
+            capture_settings.use_silence_gate = True
             capture_settings.latency_ms = int(min(10, frame_ms))
             capture_settings.debug_logging = False
             capture_settings.omit_audio_header = True

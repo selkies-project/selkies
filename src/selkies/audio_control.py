@@ -730,6 +730,11 @@ def opus_capture_settings(audio_device_name: Optional[str], channels: int, bitra
     capture.opus_bitrate = bitrate
     capture.frame_duration_ms = frame_ms
     capture.use_vbr = True
-    capture.use_silence_gate = False
+    # Digital silence is sent as nothing at all rather than as a frame per 10 ms.
+    # What a listener hears is unchanged: the gate only fires on frames that are
+    # already all zeros, so a WebRTC receiver extrapolating across the gap
+    # extrapolates silence. Its concealment counter rises for the same reason,
+    # which is why that counter says nothing about loss on a quiet desktop.
+    capture.use_silence_gate = True
     capture.latency_ms = int(min(10, frame_ms))
     return capture
