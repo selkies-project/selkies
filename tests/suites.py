@@ -100,6 +100,7 @@ SUITES: list = [
     {"path": "unit/test_stream_density.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_dpi_default_mirror.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_dpi_verb_owner.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_lxqt_density.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_session_screen_kwin.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_outputless_x_server.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_release_version.py", "tier": "unit", "timeout": 120},

@@ -7,8 +7,10 @@ not to one display's region. Two pages on screens of different densities
 therefore each ask for a different desktop, and the desktop rescales for
 whichever spoke last, which is whenever a window is restored or dragged
 between monitors. A secondary's DPI is refused instead, and it says so rather
-than moving the whole session. On Wayland each display's screen carries its
-own output scale, so the rule does not apply there.
+than moving the whole session. The desktop keeps the last density across
+sessions, so a new session's page moves it even when its density is the
+operator's default. On Wayland each display's screen carries its own output
+scale, so the rule does not apply there.
 
 Driven with raw websockets clients: what is under test is the server's rule,
 not a browser's derivation.
@@ -71,7 +73,9 @@ async def drive(res: "H.Results") -> None:
             await asyncio.wait_for(secondary.recv(), timeout=10)
             pump2 = asyncio.create_task(drain(secondary))
             await secondary.send(settings("display2", 96, (1280, 720)))
-            await asyncio.sleep(1.0)
+            # Its first settings run a reconfiguration that holds the lock the
+            # next settings wait on.
+            await saw(mark, "proceeding with backpressure loop for 'display2'", timeout=60)
             # The window is restored on a screen of another density, which is
             # what makes its page derive a new DPI and say so.
             mark = len(H.server_log())
@@ -90,6 +94,18 @@ async def drive(res: "H.Results") -> None:
             await primary.send(settings("primary", 144, (1280, 720)))
             res.check("the primary still moves it", await saw(mark, APPLIED), "")
             pump2.cancel()
+        pump.cancel()
+    # Past the reconnect grace, so this is a new session rather than the old
+    # page returning: the desktop is still at the density the last page left
+    # it, and a page whose default is the operator's has to move it back.
+    await asyncio.sleep(4.0)
+    async with websockets.connect(uri, max_size=None) as primary:
+        await asyncio.wait_for(primary.recv(), timeout=10)
+        pump = asyncio.create_task(drain(primary))
+        mark = len(H.server_log())
+        await primary.send(settings("primary", 96, (1280, 720)))
+        res.check("a new session's page brings the desktop back to its own density",
+                  await saw(mark, "DPI changed from 144 to 96"), "")
         pump.cancel()
 
 

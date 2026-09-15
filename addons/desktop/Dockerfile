@@ -185,7 +185,7 @@ RUN set -eu; \
     fi; \
     WALLPAPER="/usr/share/lxqt/themes/${THEME}/wallpaper.svg"; \
     if [ -f "${WALLPAPER}" ]; then \
-        printf '[Desktop]\nWallpaperMode=zoom\nWallpaper=%s\nBgColor=#000000\nFgColor=#f2eefb\nShadowColor=#000000\n[System]\nTerminal=%s\n' \
+        printf '[Desktop]\nWallpaperMode=zoom\nWallpaper=%s\nPerScreenWallpaper=true\nBgColor=#000000\nFgColor=#f2eefb\nShadowColor=#000000\n[System]\nTerminal=%s\n' \
             "${WALLPAPER}" "${TERMINAL}" > /etc/xdg/pcmanfm-qt/lxqt/settings.conf; \
     else \
         printf '[Desktop]\nWallpaperMode=color\nBgColor=#2e3436\nFgColor=#ffffff\n[System]\nTerminal=%s\n' \

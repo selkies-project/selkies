@@ -66,6 +66,7 @@ from . import resource_stats
 from .audio_control import AudioControl, ensure_capture_sink, opus_capture_settings
 from .display_utils import (
     FIRST_FRAME_WAIT_S,
+    applied_dpi,
     apply_common_capture_settings,
     no_first_frame,
     parse_gpu_id,
@@ -3763,10 +3764,11 @@ class DataStreamingServer(BaseStreamingService):
                                      'rate_control_mode': self.rc_mode.value,
                                      'video_bitrate': self._initial_video_bitrate,
                                      'force_aligned_resolution': self.cli_args.force_aligned_resolution[0],
-                                     # The sanitizer's normalized form (an enum, so str): a
-                                     # str-vs-int mismatch would read the first SETTINGS as
-                                     # a DPI change.
-                                     'scaling_dpi': str(int(float(getattr(app_settings, "scaling_dpi", "96") or 96))),
+                                     # The density the desktop has, which the last page of any
+                                     # session gave it, in the sanitizer's normalized form (an
+                                     # enum, so str): a str-vs-int mismatch would read the first
+                                     # SETTINGS as a DPI change.
+                                     'scaling_dpi': str(applied_dpi() or int(float(getattr(app_settings, "scaling_dpi", "96") or 96))),
                                      # Replaced below on Wayland; the X11 capture has no scale.
                                      'scale': 1.0,
                                 }
