@@ -763,9 +763,12 @@ EXPOSE 8080
 
 # s6 respawns a service that cannot start, so "running" says nothing: only the
 # port answering tells a session from a container that never served. /api/health
-# needs no credentials, and only the http-to-TLS direction fails outright.
+# needs no credentials, and only the http-to-TLS direction fails outright. The
+# route moves under the deployment prefix with every other, and the prefix is
+# spelled with or without slashes, as the server takes it.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD curl -fsS -k -o /dev/null "https://localhost:${SELKIES_PORT:-8080}/api/health" || \
-        curl -fsS -o /dev/null "http://localhost:${SELKIES_PORT:-8080}/api/health"
+    CMD p="${SELKIES_SUBFOLDER-${SUBFOLDER-}}"; p="${p#/}"; p="${p%/}"; p="${p:+/${p}}"; \
+        curl -fsS -k -o /dev/null "https://localhost:${SELKIES_PORT:-8080}${p}/api/health" || \
+        curl -fsS -o /dev/null "http://localhost:${SELKIES_PORT:-8080}${p}/api/health"
 
 ENTRYPOINT ["/etc/container-entrypoint.sh"]
