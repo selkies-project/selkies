@@ -92,7 +92,8 @@ for t in apt-get dnf apk pacman gem fpm abuild abuild-keygen makepkg useradd su 
 #!/bin/sh
 echo "$t \$*" >> "$SB/log/calls"
 case "$t" in
-  fpm) n=stub; while [ \$# -gt 0 ]; do [ "\$1" = "--name" ] && n="\$2"; shift; done; : > "$SB/out/\${n}_0.0.0.dev0_stub.deb" ;;
+  fpm) n=stub; f=deb; while [ \$# -gt 0 ]; do case "\$1" in --name) n="\$2" ;; -t) f="\$2" ;; esac; shift; done
+       case "\$f" in rpm) : > "$SB/out/\${n}-0.0.0.dev0-1.stub.x86_64.rpm" ;; *) : > "$SB/out/\${n}_0.0.0.dev0_stub.deb" ;; esac ;;
   abuild) mkdir -p "$SB/build/apkrepo/build/x86_64"; : > "$SB/build/apkrepo/build/x86_64/selkies-0.0.0-r0.apk" ;;
   abuild-keygen) mkdir -p "\$HOME/.abuild"; : > "\$HOME/.abuild/simulated.rsa.pub" ;;
   makepkg) : > "$SB/out/selkies-0.0.0.dev0-1-x86_64.pkg.tar.zst" ;;
