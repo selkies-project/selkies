@@ -158,6 +158,13 @@ Each is documented in full where named; read that before changing the subsystem.
   under a decoder mid-stream; only a locked full color goes to the refusal ladder (a report over WebRTC). Over
   WebSockets that ladder walks the server's allowed encoders in order, H.264 first when unrestricted,
   through every video codec the engine decodes, and reaches JPEG last (`nextRung` in the core).
+- A picture a client could not decode is repaired by taking it out of the encoder's references, not by a key
+  frame: the client names the frame it lost, the server asks that display's capture to forget it, and the
+  stream keeps predicting past it while the other clients see nothing. Over WebSockets the client's decode
+  gate names it (`addons/selkies-web-core/lib/decode-gate.js` module docstring, the `LOST_FRAME` verb); over
+  WebRTC a second NACK for a packet the sender still holds does (`RTCRtpSender._retransmit`, the `lost_frame`
+  event, `RTCApp.on_lost_frame`). A stream whose encoder names no reference -- a stripe, a session that cannot
+  invalidate -- gets the key frame instead, and so does a run of drops the encoder never predicts past.
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `src/selkies/webcam.py`,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).
