@@ -80,6 +80,7 @@ SUITES: list = [
     {"path": "unit/test_rate_control_defaults.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_encoder_backends.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_congestion_steer.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_pointer_sequence.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_codec_encoders.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rtp_packetizers.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_encoder_demotion.py", "tier": "unit", "timeout": 120},

@@ -85,7 +85,7 @@ import msgpack
 from PIL import Image
 import urllib.parse
 import urllib.request
-from typing import Any, Callable, Container, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Container, Dict, Iterable, List, Optional, Tuple, Union
 from .display_utils import (
     unpremultiply_rgba,
     cursor_content_handle,
@@ -3954,6 +3954,8 @@ class WebRTCInput:
         self.gamepad_instances = {}
         self.client_gamepad_associations = {}
         self.gamepad_heartbeats = {}
+        # The highest pointer message number each connection has sent.
+        self._pointer_seq: Dict[Any, int] = {}
         self.uinput_gamepads = uinput_gamepads_enabled(uinput_gamepad)
 
         self.clipboard_running = False
@@ -4358,11 +4360,12 @@ class WebRTCInput:
 
     async def release_gamepads_for_conn(self, conn_id: Any) -> None:
         """Disassociate (and neutralize, via reset_state) every gamepad slot whose
-        association was made by this transport connection. This is the ungraceful
-        path — a tab that dies mid-press never sends 'js,d', and only the transport
-        knows the connection is gone."""
+        association was made by this transport connection, and forget its pointer
+        message count. This is the ungraceful path — a tab that dies mid-press
+        never sends 'js,d', and only the transport knows the connection is gone."""
         if conn_id is None:
             return
+        self._pointer_seq.pop(conn_id, None)
         for idx, info in list(self.client_gamepad_associations.items()):
             if info.get("conn_id") == conn_id:
                 await self.__gamepad_disconnect(idx)
@@ -7988,8 +7991,20 @@ class WebRTCInput:
         elif msg_type in ["m", "m2"]:
             relative = msg_type == "m2"
             # Dropped rather than defaulted: a default would warp to the origin.
-            try: x, y, button_mask, scroll_magnitude = [int(i) for i in toks[1:]]
+            try: x, y, button_mask, scroll_magnitude = [int(i) for i in toks[1:5]]
             except (ValueError, IndexError): return
+            if len(toks) > 5:
+                # Motion may travel a channel that keeps no order, so pointer
+                # messages are numbered: an absolute position older than the
+                # last message applied for this connection is stale, not a move
+                # back; a delta still counts, in whatever order it lands.
+                try: seq = int(toks[5])
+                except ValueError: return
+                last = self._pointer_seq.get(conn_id, 0)
+                if seq <= last and not relative:
+                    return
+                if seq > last:
+                    self._pointer_seq[conn_id] = seq
             try: await self.send_x11_mouse(x, y, button_mask, scroll_magnitude, relative, display_id=display_id)
             except Exception as e: logger_webrtc_input.warning(f"Failed to set mouse cursor: {e}")
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))

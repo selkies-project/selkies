@@ -38,9 +38,11 @@
  * reserved as sendonly transceivers for the microphone and the webcam, which
  * are attached later with `replaceTrack` and no renegotiation.
  *
- * Everything else rides the one data channel the server creates: input and
- * control upstream through `sendDataChannelMessage`, JSON messages
- * downstream, routed by `type` to the `on*` callbacks (`pipeline`,
+ * Everything else rides the two data channels the server creates: input and
+ * control upstream through `sendDataChannelMessage` on the ordered `input`
+ * channel, coalesced pointer motion through `sendMotionMessage` on the
+ * unordered `pointer` channel, JSON messages downstream, routed by `type` to
+ * the `on*` callbacks (`pipeline`,
  * `gpu_stats`, `system_stats`, `cursor`, `system`, `ping`,
  * `latency_measurement`, `server_settings`, `display_config_update` and
  * `clipboard-msg*`). Either side may gzip a message once the `_gz,1`
@@ -158,6 +160,7 @@ export class WebRTCClient {
 
 		/** @type {RTCDataChannel} */
 		this._send_channel = null;
+		this._motion_channel = null;
 		/** Whether the server accepted gzip for the upstream direction. @type {boolean} */
 		this._gzTx = false;
 		/** Order-preserving chain of pending sends around asynchronous compression. @type {Promise<void>} */
@@ -523,6 +526,10 @@ export class WebRTCClient {
 	 */
 	_onPeerdDataChannel(event) {
 		this._setStatus("Peer data channel created: " + event.channel.label);
+		if (event.channel.label === 'pointer') {
+			this._motion_channel = event.channel;
+			return;
+		}
 
 		this._send_channel = event.channel;
 		this._send_channel.binaryType = 'arraybuffer';
@@ -776,6 +783,20 @@ export class WebRTCClient {
 			ch.addEventListener('bufferedamountlow', done);
 			if (ch.readyState !== 'open' || ch.bufferedAmount <= threshold) done();
 		});
+	}
+
+	/**
+	 * Sends coalesced pointer motion on the unordered `pointer` channel while it
+	 * is open, so a lost sample holds nothing behind it, else on the input channel.
+	 * @param {string} message
+	 */
+	sendMotionMessage(message) {
+		const channel = this._motion_channel;
+		if (channel !== null && channel.readyState === 'open') {
+			channel.send(message);
+			return;
+		}
+		this.sendDataChannelMessage(message);
 	}
 
 	/**

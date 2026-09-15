@@ -24,8 +24,9 @@
 Owns the server side of every WebRTC session: peer-connection lifecycle
 (offer building, SDP/ICE plumbing, teardown), per-display media graphs (a
 `MediaRelay` fanning one encoded video/audio source out to every peer of that
-display), and the ordered "input" data channel that carries input, clipboard,
-cursor, stats, and control messages.
+display), the ordered "input" data channel that carries input, clipboard,
+cursor, stats, and control messages, and the unordered "pointer" channel that
+carries coalesced pointer motion.
 
 Structural notes:
 
@@ -2048,6 +2049,14 @@ class RTCApp:
             data_channel,
             lambda msg, ch=data_channel, ct=client_type, tok=client_token, did=display_id, pid=client_peer_id, slot=client_slot: self._on_input_channel_message(msg, ch, ct, tok, did, pid, slot),
         )
+        # Coalesced pointer motion rides a channel of its own that keeps no order,
+        # so a lost sample's retransmit holds nothing behind it; the same gates
+        # read it, and the input dispatcher drops the positions it makes stale.
+        motion_channel = peer_connection.createDataChannel("pointer", ordered=False)
+        motion_consumer = self._serialize_channel(
+            motion_channel,
+            lambda msg, ch=motion_channel, ct=client_type, tok=client_token, did=display_id, pid=client_peer_id, slot=client_slot: self._on_input_channel_message(msg, ch, ct, tok, did, pid, slot),
+        )
 
         peer_connection.on("connectionstatechange", lambda cid=client_peer_id: asyncio.run_coroutine_threadsafe(self.on_connectionstatechange(cid), loop=self.async_event_loop))
 
@@ -2079,6 +2088,7 @@ class RTCApp:
             await self.on_sdp('offer', sdp, client_peer_id)
         except BaseException:
             input_consumer.cancel()
+            motion_consumer.cancel()
             try:
                 await peer_connection.close()
             except Exception:
@@ -2100,7 +2110,7 @@ class RTCApp:
             "client_slot": peer_slot,
             "connected_at": time.time(),
             "display_id": display_id,
-            "channel_consumers": [input_consumer],
+            "channel_consumers": [input_consumer, motion_consumer],
             "mic_state": mic_state,
             "webcam_state": webcam_state,
             "video_sender": rtp_video_sender,

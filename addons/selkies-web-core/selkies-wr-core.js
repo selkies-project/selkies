@@ -2662,6 +2662,10 @@ export default function webrtc() {
 				webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
+			input.sendMotion = (data) => {
+				if (isSharedMode && isStrictViewer && !collabInputGranted) return;
+				webrtc.sendMotionMessage(data);
+			};
 			input.setShortcutsEnabled(keyboardShortcuts);
 			input.setDisplayLayouts(latestDisplayLayouts, displayId);
 			/**

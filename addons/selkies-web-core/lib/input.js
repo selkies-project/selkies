@@ -1356,6 +1356,14 @@ export class Input {
     constructor(element, send, isSharedMode = false, playerIndex = 0,  useCssScaling = false, initialSlot = null) {
         this.element = element;
         this.send = send;
+        /**
+         * Sends coalesced pointer motion where the transport has a channel that
+         * keeps no order for it, so a lost sample holds nothing behind it; null
+         * sends motion through `send` like every other message.
+         * @type {((message: string) => void)|null}
+         */
+        this.sendMotion = null;
+        this._pointerSeq = 0;
         this._isSidebarOpen = false;
         this.isSharedMode = isSharedMode;
         this.controllerSlot = initialSlot;
@@ -2656,9 +2664,9 @@ export class Input {
             this._flushCoalescedMouseMove();
             if (mtype === "m2") {
                 const moved = this._relativeToServer(outX, outY);
-                this.send([ "m2", moved[0], moved[1], this.buttonMask, 0 ].join(","));
+                this._sendPointer([ "m2", moved[0], moved[1], this.buttonMask, 0 ], false);
             } else {
-                this.send([ "m", outX, outY, this.buttonMask, 0 ].join(","));
+                this._sendPointer([ "m", outX, outY, this.buttonMask, 0 ], false);
             }
         }
     }
@@ -2709,10 +2717,23 @@ export class Input {
         if (m.mtype === "m2") {
             const moved = this._relativeToServer(m.x, m.y);
             if (moved[0] === 0 && moved[1] === 0) return;
-            this.send([ m.mtype, moved[0], moved[1], m.buttonMask, 0 ].join(","));
+            this._sendPointer([ m.mtype, moved[0], moved[1], m.buttonMask, 0 ], true);
             return;
         }
-        this.send([ m.mtype, m.x, m.y, m.buttonMask, 0 ].join(","));
+        this._sendPointer([ m.mtype, m.x, m.y, m.buttonMask, 0 ], true);
+    }
+
+    /**
+     * Sends one pointer message, numbered in order of sending so the server can
+     * drop an absolute position that arrives after a later message: motion may
+     * travel a channel that keeps no order, buttons and wheel always the ordered one.
+     * @param {Array<string|number>} fields Type, x, y, button mask, wheel magnitude.
+     * @param {boolean} motion Whether the message is coalesced motion.
+     */
+    _sendPointer(fields, motion) {
+        this._pointerSeq += 1;
+        const message = fields.join(",") + "," + this._pointerSeq;
+        ((motion && this.sendMotion) || this.send)(message);
     }
 
     /** Pen pointer events feed the mouse path; other pointer types arrive as mouse events. */
@@ -2777,7 +2798,7 @@ export class Input {
                 if ((now - this._trackpadLastTapTime) < TAP_AND_HOLD_THRESHOLD) {
                     this._trackpadGestureMode = 'dragging';
                     this.buttonMask |= 1;
-                    this.send(`m2,0,0,${this.buttonMask},0`);
+                    this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
                     this._trackpadLastTapTime = 0;
                 } else {
                     this._trackpadGestureMode = 'moving';
@@ -2824,7 +2845,7 @@ export class Input {
                             changedTouch.clientX - touchData.lastX,
                             changedTouch.clientY - touchData.lastY);
                         if (moved[0] !== 0 || moved[1] !== 0) {
-                            this.send(`m2,${moved[0]},${moved[1]},${this.buttonMask},0`);
+                            this._sendPointer([ "m2", moved[0], moved[1], this.buttonMask, 0 ], true);
                         }
                         touchData.lastX = changedTouch.clientX;
                         touchData.lastY = changedTouch.clientY;
@@ -2855,16 +2876,16 @@ export class Input {
             const wasTap = !Array.from(this._trackpadTouches.values()).some(t => t.moved);
 
             if (touchCountBeforeEnd === 2 && wasTap) {
-                this.buttonMask |= (1 << 2); this.send(`m2,0,0,${this.buttonMask},0`);
-                setTimeout(() => { this.buttonMask &= ~(1 << 2); this.send(`m2,0,0,${this.buttonMask},0`); }, 50);
+                this.buttonMask |= (1 << 2); this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
+                setTimeout(() => { this.buttonMask &= ~(1 << 2); this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false); }, 50);
                 this._trackpadGestureMode = 'completed';
                 this._trackpadLastTapTime = 0;
             }
             else if (touchCountBeforeEnd === 1 && wasTap && this._trackpadGestureMode !== 'completed' && this._trackpadGestureMode !== 'dragging') {
                 this._trackpadLastTapTime = now;
                 this._trackpadTapTimeout = setTimeout(() => {
-                    this.buttonMask |= 1; this.send(`m2,0,0,${this.buttonMask},0`);
-                    setTimeout(() => { this.buttonMask &= ~1; this.send(`m2,0,0,${this.buttonMask},0`); }, 50);
+                    this.buttonMask |= 1; this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
+                    setTimeout(() => { this.buttonMask &= ~1; this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false); }, 50);
                 }, 200);
             }
 
@@ -2875,7 +2896,7 @@ export class Input {
             if (this._trackpadTouches.size === 0) {
                 if (this._trackpadGestureMode === 'dragging') {
                     this.buttonMask &= ~1;
-                    this.send(`m2,0,0,${this.buttonMask},0`);
+                    this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
                 }
                 this._trackpadGestureMode = null;
                 this._trackpadLastScrollCentroid = null;
@@ -3402,10 +3423,10 @@ export class Input {
     _sendMouseState() {
         this._flushCoalescedMouseMove();
         if (this._isStreamLocked()) {
-            this.send([ "m2", 0, 0, this.buttonMask, 0 ].join(","));
+            this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
             return;
         }
-        this.send([ "m", this.x, this.y, this.buttonMask, 0 ].join(","));
+        this._sendPointer([ "m", this.x, this.y, this.buttonMask, 0 ], false);
     }
 
     /** Switches trackpad emulation, clearing touch state and any held button. */
@@ -3775,9 +3796,9 @@ export class Input {
 
         const cleared = this.buttonMask & ~mask;
         const mtype = "m2";
-        this.send([ mtype, 0, 0, cleared, magnitude ].join(","));
-        this.send([ mtype, 0, 0, cleared | mask, magnitude ].join(","));
-        this.send([ mtype, 0, 0, this.buttonMask, magnitude ].join(","));
+        this._sendPointer([ mtype, 0, 0, cleared, magnitude ], false);
+        this._sendPointer([ mtype, 0, 0, cleared | mask, magnitude ], false);
+        this._sendPointer([ mtype, 0, 0, this.buttonMask, magnitude ], false);
     }
 
     /**
@@ -3793,8 +3814,8 @@ export class Input {
         const mask = 1 << button;
 
         const mtype = "m2";
-        this.send([ mtype, 0, 0, this.buttonMask | mask, magnitude ].join(","));
-        this.send([ mtype, 0, 0, this.buttonMask, magnitude ].join(","));
+        this._sendPointer([ mtype, 0, 0, this.buttonMask | mask, magnitude ], false);
+        this._sendPointer([ mtype, 0, 0, this.buttonMask, magnitude ], false);
     }
 
     /**
