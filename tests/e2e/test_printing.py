@@ -204,9 +204,10 @@ def open_printing_ui(page: Any, dashboard: str) -> bool:
 
 
 def rows(page: Any, dashboard: str) -> int:
+    """Documents listed: one save link each, whatever else the row offers."""
     if dashboard == "classic":
         return page.locator("#printing-content .print-job").count()
-    return page.locator('[role="menu"] button:has-text("Print")').count()
+    return page.locator('[role="menu"] a[download]').count()
 
 
 def drop_frames(page: Any, timeout: float = 10) -> None:
@@ -234,10 +235,11 @@ def click_switch(page: Any, dashboard: str) -> None:
 
 
 def row_control(page: Any, dashboard: str, label: str, index: int = 0) -> Any:
+    """A document row's icon control, named by its title ("Print" or "Save")."""
     if dashboard == "classic":
         rows_ = page.locator("#printing-content .print-job")
-        return rows_.nth(index).locator(f'button:has-text("{label}"), a:has-text("{label}")')
-    return page.locator(f'[role="menu"] :is(button, a):has-text("{label}")').nth(index)
+        return rows_.nth(index).locator(f'[title="{label}"]')
+    return page.locator(f'[role="menu"] :is(button, a)[title="{label}"]').nth(index)
 
 
 def print_preview_open(browser: Any) -> bool:
