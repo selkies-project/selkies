@@ -5,11 +5,10 @@ description: Install Selkies as a package or an AppImage and attach it to a disp
 
 Selkies also ships outside a container: native packages for the common distributions, and an AppImage that installs nothing. Neither brings a desktop, a display server or an audio server — they attach to the ones you run — so [Getting Started](start.md) is the shorter road if a container will do.
 
-None of these needs a Python environment: the web client, the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) extensions, and the interposers all travel inside. Every block below uses the release version, so paste these lines first (set `SELKIES_TAG` yourself for a release other than the latest):
+None of these needs a Python environment: the web client, the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) extensions, and the interposers all travel inside. Every block below uses the release version, which is the release's tag, so paste this line first (set `SELKIES_VERSION` yourself for a release other than the latest):
 
 ```bash
-export SELKIES_TAG="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name')"
-export SELKIES_VERSION="${SELKIES_TAG#v}"
+export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name')"
 ```
 
 ## Packages
@@ -22,7 +21,7 @@ Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkie
 . /etc/os-release
 DISTRO="$([ "${ID}" = "ubuntu" ] && echo "ubuntu${VERSION_ID}" || echo "${VERSION_CODENAME}")"
 PKG="selkies-${SELKIES_VERSION}-${DISTRO}-$(dpkg --print-architecture).deb"
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/${PKG}"
 sudo apt-get install -y "./${PKG}"
 ```
 
@@ -30,21 +29,21 @@ sudo apt-get install -y "./${PKG}"
 # Fedora and Enterprise Linux
 . /etc/os-release
 PKG="selkies-${SELKIES_VERSION}-$([ "${ID}" = "fedora" ] && echo fc || echo el9)-$(uname -m).rpm"
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/${PKG}"
 sudo dnf install -y "./${PKG}"
 ```
 
 ```bash
 # Alpine
 PKG="selkies-${SELKIES_VERSION}-$(uname -m).apk"
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/${PKG}"
 sudo apk add --allow-untrusted "./${PKG}"
 ```
 
 ```bash
 # Arch Linux, which Arch publishes for x86_64 alone
 PKG="selkies-${SELKIES_VERSION}-$(uname -m).pkg.tar.zst"
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/${PKG}"
 sudo pacman -U "./${PKG}"
 ```
 
@@ -56,7 +55,7 @@ Runs from wherever you put it, on any distribution, without touching the system.
 
 ```bash
 APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"
-curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${APP}"
+curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/${APP}"
 chmod +x "./${APP}"
 "./${APP}" --public --port=8080 --basic-auth-user=user --basic-auth-password=mypasswd
 ```
