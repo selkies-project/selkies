@@ -1,0 +1,96 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: Retag images
+
+# Moves a release's image tags to another spelling without a rebuild: each
+# manifest is re-pointed byte for byte through the registry, so the images a
+# release was tested with stay the ones it names, and the old spelling is then
+# retired. A tag is one label on a package version that may carry others, so
+# an old tag is retired by pointing it at an empty artifact of its own and
+# deleting that version; a deletion the registry refuses puts the tag back.
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_prefix:
+        description: Tag prefix the images carry now (e.g. v2.0.0rc0)
+        type: string
+        required: true
+      to_prefix:
+        description: Tag prefix they are to carry instead (e.g. 2.0.0rc0)
+        type: string
+        required: true
+      retire_old:
+        description: Retire the old tags once the new ones are in place
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Image name and tag suffix pairs: the flavored base and desktop images, and
+  # the addons, which carry the prefix alone
+  IMAGES: base:-ubuntu26.04 base:-debiantrixie desktop:-ubuntu26.04 desktop:-debiantrixie coturn: turn-rest:
+
+jobs:
+  retag:
+    name: Retag ${{ inputs.from_prefix }} as ${{ inputs.to_prefix }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Point the new tags at the manifests the old ones name
+        env:
+          FROM: ${{ inputs.from_prefix }}
+          TO: ${{ inputs.to_prefix }}
+        run: |
+          set -eu
+          for spec in ${IMAGES}; do
+            image="ghcr.io/selkies-project/selkies/${spec%%:*}"
+            suffix="${spec#*:}"
+            docker buildx imagetools create -t "${image}:${TO}${suffix}" "${image}:${FROM}${suffix}"
+            echo "${image}:${TO}${suffix} -> $(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${image}:${TO}${suffix}")"
+          done
+      - name: Retire the old tags
+        if: ${{ inputs.retire_old }}
+        env:
+          FROM: ${{ inputs.from_prefix }}
+          TO: ${{ inputs.to_prefix }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          # An empty OCI artifact: the two-byte empty blob as its config and only layer
+          empty='{}'
+          empty_digest="sha256:$(printf '%s' "${empty}" | sha256sum | cut -d' ' -f1)"
+          tombstone="{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\",\"artifactType\":\"application/vnd.selkies.retired-tag.v1\",\"config\":{\"mediaType\":\"application/vnd.oci.empty.v1+json\",\"digest\":\"${empty_digest}\",\"size\":2},\"layers\":[{\"mediaType\":\"application/vnd.oci.empty.v1+json\",\"digest\":\"${empty_digest}\",\"size\":2}]}"
+          for spec in ${IMAGES}; do
+            name="${spec%%:*}"
+            old="${FROM}${spec#*:}"
+            new="${TO}${spec#*:}"
+            repo="selkies-project/selkies/${name}"
+            old_digest="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "ghcr.io/${repo}:${old}")"
+            # The new tag names what the old one does before the old one goes
+            [ "$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "ghcr.io/${repo}:${new}")" = "${old_digest}" ]
+            token="$(curl -fsS -u "${GITHUB_ACTOR}:${GH_TOKEN}" "https://ghcr.io/token?scope=repository:${repo}:pull,push" | jq -r .token)"
+            curl -fsS -H "Authorization: Bearer ${token}" -X POST -H "Content-Type: application/octet-stream" \
+              --data-binary "${empty}" "https://ghcr.io/v2/${repo}/blobs/uploads/?digest=${empty_digest}" > /dev/null
+            curl -fsS -H "Authorization: Bearer ${token}" -X PUT -H "Content-Type: application/vnd.oci.image.manifest.v1+json" \
+              --data "${tombstone}" "https://ghcr.io/v2/${repo}/manifests/${old}" > /dev/null
+            # The old tag is now the only label of a version of its own
+            id="$(gh api --paginate "/orgs/selkies-project/packages/container/selkies%2F${name}/versions" \
+              --jq ".[] | select(.metadata.container.tags == [\"${old}\"]) | .id" | head -n 1)"
+            if [ -z "${id}" ] || ! gh api -X DELETE "/orgs/selkies-project/packages/container/selkies%2F${name}/versions/${id}"; then
+              docker buildx imagetools create -t "ghcr.io/${repo}:${old}" "ghcr.io/${repo}@${old_digest}"
+              echo "::error::could not retire ghcr.io/${repo}:${old}; the tag points at its image again"
+              exit 1
+            fi
+            echo "retired ghcr.io/${repo}:${old}"
+          done
