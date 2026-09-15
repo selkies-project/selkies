@@ -1,9 +1,10 @@
 /**
  * Builds the versioned site into out/: one static export per release tag that
- * carries the site and one for the branch this tree is on. The newest release
- * is built under the `latest` alias, which the site root redirects to, and
- * its own segment redirects there page by page rather than carrying a second
- * copy of the largest build.
+ * carries the site and one for the branch this tree is on. The release GitHub
+ * designates as the latest (the newest tag where that cannot be asked) is built
+ * under the `latest` alias, which the site root redirects to, and its own
+ * segment redirects there page by page rather than carrying a second copy of
+ * the largest build.
  *
  * Every version is rendered by this tree's site tooling over that version's
  * own pages and source, so a fix to the site reaches every version the next
@@ -189,8 +190,24 @@ async function writeRoot(staging, index) {
   await writeRedirects(staging, '', index.default);
 }
 
+/** The release GitHub designates as the latest, as a version segment, or undefined where it cannot be asked. */
+async function latestRelease() {
+  const repo = process.env.GITHUB_REPOSITORY || 'selkies-project/selkies';
+  const headers = process.env.GITHUB_TOKEN ? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {};
+  try {
+    const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, { headers });
+    return res.ok ? (await res.json()).tag_name?.replace(/^v/, '') : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const tags = releases();
-const newest = tags.at(-1);
+// The `latest` alias follows the release GitHub designates as the latest, which a
+// pre-release is not unless a maintainer says so, the way the floating image tags
+// do; the newest tag stands in where that cannot be asked or names no built version.
+const designated = await latestRelease();
+const newest = tags.find((t) => t.segment === designated) ?? tags.at(-1);
 const index = {
   default: newest ? LATEST : BRANCH,
   versions: [

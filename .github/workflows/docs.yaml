@@ -37,6 +37,10 @@ jobs:
 
       - name: Build the static site, one version per release and main
         working-directory: website
+        env:
+          # The build asks GitHub which release is the latest, authenticated so
+          # the runner's shared address never trips the unauthenticated limit
+          GITHUB_TOKEN: ${{ github.token }}
         # Lockfiles are gitignored in this repository, so `npm ci` has nothing
         # to install from
         run: |
