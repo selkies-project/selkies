@@ -541,6 +541,33 @@
   white-space: nowrap;
 }
 
+/* Icon-only print and save controls, so the file name keeps the line. */
+.print-job-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--item-border);
+  border-radius: var(--radius);
+  background-color: var(--surface-inset);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  transition: border-color 0.15s ease;
+}
+
+.print-job-button:hover {
+  border-color: var(--accent-border);
+}
+
+.print-job-button:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* Select elements within setting items, with a themed custom arrow. */
 .dev-setting-item select {
     width: 100%;
@@ -1149,6 +1176,32 @@ body {
 .notification-item.warn .notification-status-text.warn-text {
     color: var(--notification-warn-color);
     font-weight: 600;
+}
+
+/* A printed document's notice: the open link, the name, the printer mark
+   under the close button, so the box reads as one line however short the
+   name. */
+.notification-item.print .notification-header {
+    justify-content: flex-end;
+}
+
+.notification-print-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.notification-action {
+    flex: none;
+    width: auto;
+    padding: 6px 12px;
+    text-decoration: none;
+}
+
+.notification-print-icon {
+    flex: none;
+    display: flex;
+    color: var(--text-muted);
 }
 
 .notification-error-message {

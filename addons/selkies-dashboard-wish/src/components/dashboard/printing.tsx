@@ -5,10 +5,11 @@
  */
 
 import { useState, useEffect } from "react";
+import { Download, Printer } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { getPrefixedKey, getPrintJobs, PrintJob } from "@/utils";
+import { getPrefixedKey, getPrintJobs, isMobileClient, PrintJob } from "@/utils";
 import { t } from "@/i18n";
 
 /**
@@ -17,7 +18,9 @@ import { t } from "@/i18n";
  *
  * The documents are the core's `printDocument` messages, kept in utils so
  * none is missed while the panel is closed; the switch travels on the
- * `settings` message and a print on `printRequest`.
+ * `settings` message and a print on `printRequest`. A touch-first client
+ * prints only from its own PDF viewer, so there each document has the save
+ * button alone, and the notice each raises carries the link that opens it.
  * @module
  */
 
@@ -51,12 +54,18 @@ export function Printing() {
             {jobs.map((job) => (
                 <div key={job.url} className="flex items-center gap-2">
                     <span className="flex-1 truncate text-sm" title={job.name}>{job.name}</span>
-                    <Button variant="outline" size="sm"
-                        onClick={() => window.postMessage({ type: 'printRequest', url: job.url }, window.location.origin)}>
-                        {t('sections.printing.printButton')}
-                    </Button>
-                    <Button variant="outline" size="sm" asChild>
-                        <a href={job.url} download={job.name}>{t('sections.printing.saveButton')}</a>
+                    {!isMobileClient && (
+                        <Button variant="outline" size="icon" title={t('sections.printing.printButton')}
+                            aria-label={t('sections.printing.printButton')}
+                            onClick={() => window.postMessage({ type: 'printRequest', url: job.url }, window.location.origin)}>
+                            <Printer className="h-4 w-4" />
+                        </Button>
+                    )}
+                    <Button variant="outline" size="icon" asChild>
+                        <a href={job.url} download={job.name} target={isMobileClient ? '_blank' : undefined}
+                            title={t('sections.printing.saveButton')} aria-label={t('sections.printing.saveButton')}>
+                            <Download className="h-4 w-4" />
+                        </a>
                     </Button>
                 </div>
             ))}

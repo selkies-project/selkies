@@ -172,6 +172,7 @@ const en = {
             automaticDetails: "Open the browser's print dialog for each document printed in the session",
             printButton: "Print",
             saveButton: "Save",
+            openButton: "Open",
         },
         gamepads: {
             title: "Gamepads",
@@ -435,6 +436,7 @@ const es = {
             automaticDetails: "Abrir el diálogo de impresión del navegador con cada documento impreso en la sesión",
             printButton: "Imprimir",
             saveButton: "Guardar",
+            openButton: "Abrir",
         },
         gamepads: {
              title: "Mandos",
@@ -698,6 +700,7 @@ const zh = {
             automaticDetails: "会话中每打印一份文档，就打开浏览器的打印对话框",
             printButton: "打印",
             saveButton: "保存",
+            openButton: "打开",
         },
         gamepads: {
             title: "游戏手柄",
@@ -961,6 +964,7 @@ const hi = {
             automaticDetails: "सत्र में प्रिंट किए गए हर दस्तावेज़ के लिए ब्राउज़र का प्रिंट संवाद खोलें",
             printButton: "प्रिंट",
             saveButton: "सहेजें",
+            openButton: "खोलें",
         },
         gamepads: {
             title: "गेमपैड",
@@ -1224,6 +1228,7 @@ const pt = {
             automaticDetails: "Abrir a caixa de impressão do navegador para cada documento impresso na sessão",
             printButton: "Imprimir",
             saveButton: "Salvar",
+            openButton: "Abrir",
         },
         gamepads: {
             title: "Gamepads",
@@ -1487,6 +1492,7 @@ const fr = {
             automaticDetails: "Ouvrir la boîte de dialogue d'impression du navigateur pour chaque document imprimé dans la session",
             printButton: "Imprimer",
             saveButton: "Enregistrer",
+            openButton: "Ouvrir",
         },
         gamepads: {
             title: "Manettes",
@@ -1751,6 +1757,7 @@ const ru = {
             automaticDetails: "Открывать диалог печати браузера для каждого документа, напечатанного в сеансе",
             printButton: "Печать",
             saveButton: "Сохранить",
+            openButton: "Открыть",
         },
         gamepads: {
             title: "Геймпады",
@@ -2014,6 +2021,7 @@ const de = {
             automaticDetails: "Den Druckdialog des Browsers für jedes in der Sitzung gedruckte Dokument öffnen",
             printButton: "Drucken",
             saveButton: "Speichern",
+            openButton: "Öffnen",
         },
         gamepads: {
             title: "Gamepads",
@@ -2277,6 +2285,7 @@ const tr = {
             automaticDetails: "Oturumda yazdırılan her belge için tarayıcının yazdırma penceresini aç",
             printButton: "Yazdır",
             saveButton: "Kaydet",
+            openButton: "Aç",
         },
         gamepads: {
             title: "Oyun Kumandaları",
@@ -2540,6 +2549,7 @@ const it = {
             automaticDetails: "Apri la finestra di stampa del browser per ogni documento stampato nella sessione",
             printButton: "Stampa",
             saveButton: "Salva",
+            openButton: "Apri",
         },
         gamepads: {
             title: "Gamepad",
@@ -2803,6 +2813,7 @@ const nl = {
             automaticDetails: "Het afdrukvenster van de browser openen voor elk document dat in de sessie wordt afgedrukt",
             printButton: "Afdrukken",
             saveButton: "Opslaan",
+            openButton: "Openen",
         },
         gamepads: {
             title: "Gamepads",
@@ -3066,6 +3077,7 @@ const ar = {
             automaticDetails: "فتح مربع حوار الطباعة في المتصفح لكل مستند يُطبع في الجلسة",
             printButton: "طباعة",
             saveButton: "حفظ",
+            openButton: "فتح",
         },
         gamepads: {
             title: "لوحات الألعاب",
@@ -3329,6 +3341,7 @@ const ko = {
             automaticDetails: "세션에서 인쇄된 문서마다 브라우저의 인쇄 대화 상자를 엽니다",
             printButton: "인쇄",
             saveButton: "저장",
+            openButton: "열기",
         },
         gamepads: {
             title: "게임패드",
@@ -3592,6 +3605,7 @@ const ja = {
             automaticDetails: "セッションで印刷された文書ごとにブラウザの印刷ダイアログを開きます",
             printButton: "印刷",
             saveButton: "保存",
+            openButton: "開く",
         },
         gamepads: {
             title: "ゲームパッド",
@@ -3855,6 +3869,7 @@ const vi = {
             automaticDetails: "Mở hộp thoại in của trình duyệt cho mỗi tài liệu được in trong phiên",
             printButton: "In",
             saveButton: "Lưu",
+            openButton: "Mở",
         },
         gamepads: {
             title: "Tay cầm chơi game",
@@ -4118,6 +4133,7 @@ const th = {
             automaticDetails: "เปิดกล่องโต้ตอบการพิมพ์ของเบราว์เซอร์สำหรับเอกสารทุกฉบับที่พิมพ์ในเซสชัน",
             printButton: "พิมพ์",
             saveButton: "บันทึก",
+            openButton: "เปิด",
         },
         gamepads: {
             title: "เกมแพด",
@@ -4381,6 +4397,7 @@ const fil = {
             automaticDetails: "Buksan ang print dialog ng browser para sa bawat dokumentong na-print sa session",
             printButton: "I-print",
             saveButton: "I-save",
+            openButton: "Buksan",
         },
         gamepads: {
             title: "Mga Gamepad",
@@ -4644,6 +4661,7 @@ const da = {
             automaticDetails: "Åbn browserens udskriftsdialog for hvert dokument, der udskrives i sessionen",
             printButton: "Udskriv",
             saveButton: "Gem",
+            openButton: "Åbn",
         },
         gamepads: {
             title: "Gamepads",

@@ -12,17 +12,34 @@
  * as a blob URL on the `printDocument` window message, and opened in the
  * browser's print dialog when automatic printing is on. A dashboard's
  * `printRequest` message prints one again.
+ *
+ * The dialog is reached through a frame showing the PDF, which a desktop
+ * engine renders with a viewer that prints it. A phone or tablet browser
+ * has no such viewer in a frame: WebKit rasterises the first page into an
+ * image, Chrome for Android loads nothing, and neither throws, so printing
+ * there would print a blank frame or nothing at all. On a touch-first client
+ * the document is instead opened as a tab of its own, where the browser's
+ * own PDF viewer prints and saves it. A new tab needs a user gesture, which
+ * an announcement arriving over the socket has none of, so automatic printing
+ * does nothing there and the dashboards raise a notice with an open link per
+ * document, since their menus are closed while an application prints.
  * @module
  */
 import { sessionAuthHeaders } from './session-token.js';
+import { isMobileClient } from './util.js';
 
 /**
- * Opens the PDF at `url` in the browser's print dialog through a frame of no
- * size, so the document prints rather than the page around it. The frame
- * goes once the dialog closes.
+ * Prints the PDF at `url`: on a desktop through a frame of no size, so the
+ * document prints rather than the page around it, and the frame goes once
+ * the dialog closes; on a touch-first client by opening it in a new tab,
+ * which reaches the browser's own viewer only from within a user gesture.
  * @param {string} url Blob URL of the PDF.
  */
 export function printDocument(url) {
+    if (isMobileClient) {
+        window.open(url, '_blank');
+        return;
+    }
     const frame = document.createElement('iframe');
     frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0';
     frame.addEventListener('load', () => {
@@ -50,7 +67,8 @@ export function createPrintJobs({ automatic }) {
     return {
         /**
          * Fetches the document the server announced and hands it to the
-         * dashboards, printing it when automatic printing is on.
+         * dashboards, printing it when automatic printing is on and the
+         * client is not touch-first, where no gesture backs the print.
          * @param {string} name File name in the spool.
          * @param {number} sizeBytes Its size, as announced.
          */
@@ -67,7 +85,7 @@ export function createPrintJobs({ automatic }) {
             }
             const objectUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }));
             window.postMessage({ type: 'printDocument', name, size: blob.size, url: objectUrl }, window.location.origin);
-            if (auto) printDocument(objectUrl);
+            if (auto && !isMobileClient) printDocument(objectUrl);
         },
         setAutomatic(value) {
             auto = !!value;

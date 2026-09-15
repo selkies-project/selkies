@@ -364,6 +364,16 @@ const CaretUpIcon = () => (
     <path d="M7 14l5-5 5 5H7z" />
   </svg>
 );
+const PrinterIcon = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" style={{ display: "block" }}>
+    <path d="M19 8H5c-1.66 0-3 1.34-3 3v6h4v4h12v-4h4v-6c0-1.66-1.34-3-3-3zm-3 11H8v-5h8v5zm3-7c-.55 0-1-.45-1-1s.45-1 1-1 1 .45 1 1-.45 1-1 1zm-1-9H6v4h12V3z" />
+  </svg>
+);
+const SaveIcon = () => (
+  <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18" style={{ display: "block" }}>
+    <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+  </svg>
+);
 const SpinnerIcon = () => (
   <svg
     width="18"
@@ -2948,7 +2958,24 @@ function Sidebar() {
             } else return prev;
           });
         } else if (message.type === "printDocument") {
+          // A phone or tablet prints only from its own PDF viewer, so the
+          // document is also a notice with a link to a tab, kept until it
+          // is opened or closed, since the sidebar is closed while printing.
           setPrintJobs((prev) => [...prev, { name: message.name, url: message.url }]);
+          if (isMobileClient) {
+            setNotifications((prev) => [
+              ...prev,
+              {
+                id: message.url,
+                fileName: message.name,
+                status: "print",
+                url: message.url,
+                message: null,
+                timestamp: Date.now(),
+                fadingOut: false,
+              },
+            ]);
+          }
         } else if (message.type === "serverSettings") {
             const encoders = message.payload?.encoder?.allowed
             if (encoders && Array.isArray(encoders)) {
@@ -4660,14 +4687,25 @@ function Sidebar() {
                     {printJobs.map((job) => (
                       <div key={job.url} className="print-job">
                         <span className="print-job-name" title={job.name}>{job.name}</span>
-                        <button
-                          className="resolution-button"
-                          onClick={() => window.postMessage({ type: "printRequest", url: job.url }, window.location.origin)}
+                        {!isMobile && (
+                          <button
+                            className="print-job-button"
+                            title={t("sections.printing.printButton", "Print")}
+                            aria-label={t("sections.printing.printButton", "Print")}
+                            onClick={() => window.postMessage({ type: "printRequest", url: job.url }, window.location.origin)}
+                          >
+                            <PrinterIcon />
+                          </button>
+                        )}
+                        <a
+                          className="print-job-button"
+                          href={job.url}
+                          download={job.name}
+                          target={isMobile ? "_blank" : undefined}
+                          title={t("sections.printing.saveButton", "Save")}
+                          aria-label={t("sections.printing.saveButton", "Save")}
                         >
-                          {t("sections.printing.printButton", "Print")}
-                        </button>
-                        <a className="resolution-button" href={job.url} download={job.name}>
-                          {t("sections.printing.saveButton", "Save")}
+                          <SaveIcon />
                         </a>
                       </div>
                     ))}
@@ -4985,9 +5023,11 @@ function Sidebar() {
             aria-live="polite"
           >
             <div className="notification-header">
-              <span className="notification-filename" title={n.fileName}>
-                {n.fileName}
-              </span>
+              {n.status !== "print" && (
+                <span className="notification-filename" title={n.fileName}>
+                  {n.fileName}
+                </span>
+              )}
               <button
                 className="notification-close-button"
                 onClick={() => removeNotification(n.id)}
@@ -5048,6 +5088,20 @@ function Sidebar() {
                     {n.message ? n.message : t("notifications.warningPrefix")}
                   </span>{" "}
                 </>
+              )}
+              {n.status === "print" && (
+                <div className="notification-print-row">
+                  <a
+                    className="resolution-button notification-action"
+                    href={n.url}
+                    target="_blank"
+                    onClick={() => removeNotification(n.id)}
+                  >
+                    {t("sections.printing.openButton", "Open")}
+                  </a>
+                  <span className="print-job-name" title={n.fileName}>{n.fileName}</span>
+                  <span className="notification-print-icon" aria-hidden="true"><PrinterIcon /></span>
+                </div>
               )}
             </div>
           </div>
