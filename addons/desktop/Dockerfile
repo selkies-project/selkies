@@ -144,7 +144,7 @@ COPY --chown=1000:1000 addons/desktop/theme/panel.conf /etc/xdg/lxqt/panel.conf
 
 # LXQt's system defaults, which the distribution packages do not ship: without
 # them a session has no theme, so lxqt-panel finds no stylesheet, keeps the
-# invalid colours it writes as its own default, and paints nothing at all — a
+# invalid colors it writes as its own default, and paints nothing at all — a
 # panel that runs and maps a window but is invisible against the desktop. The
 # icon theme goes with it, since LXQt otherwise falls back to Oxygen, which is
 # not installed here. This is the system scope, so a user's own
@@ -155,7 +155,7 @@ COPY --chown=1000:1000 addons/desktop/theme/panel.conf /etc/xdg/lxqt/panel.conf
 # pcmanfm-qt gets its desktop background the same way, for the same reason: its
 # own default is #000000 with no wallpaper, which reads as a broken session
 # rather than a plain one. The resolved theme's wallpaper when it ships one
-# and a flat colour otherwise — never a photograph, because every full refresh
+# and a flat color otherwise — never a photograph, because every full refresh
 # re-encodes whatever the desktop shows.
 # Both names are taken from what is installed rather than asserted, so a
 # distribution that renames or drops one still produces a session that paints;
@@ -331,7 +331,7 @@ RUN printf "==============================================\n=         Selkies De
 USER 0
 # Real root for the same reason the base needs it: under the fakeroot SHELL an
 # ownership change lands only in fakeroot's database, leaving a setuid bit on a
-# file owned by uid 1000, which the kernel refuses to honour. The PolicyKit
+# file owned by uid 1000, which the kernel refuses to honor. The PolicyKit
 # agent helper and pkexec need theirs to authenticate at all, and xterm's
 # utempter its setgid to record sessions. `restore` covers everything released
 # above, which is the base's own set rather than these.

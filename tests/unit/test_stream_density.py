@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""What density a page streams at, and what scale it publishes for its neighbours.
+"""What density a page streams at, and what scale it publishes for its neighbors.
 
 Every page streams at the density of the screen it is on, so a display is one
 stream pixel per device pixel wherever it is shown, except an X11 secondary on

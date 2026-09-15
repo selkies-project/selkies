@@ -139,7 +139,7 @@ def _free_port() -> int:
         return probe.getsockname()[1]
 
 
-# Each suite process gets its own, so runs do not have to be serialised; naming
+# Each suite process gets its own, so runs do not have to be serialized; naming
 # one pins it (a proxy or firewall rule in front of the server needs that).
 PORT = int(os.environ.get("E2E_PORT") or _free_port())
 BASE_URL = f"http://localhost:{PORT}"
@@ -600,7 +600,7 @@ class Results:
 
     def skip(self, name: str, reason: Any = "") -> None:
         """Record a check the installed dependencies cannot observe. Not a
-        failure: the behaviour is unproven here rather than known broken."""
+        failure: the behavior is unproven here rather than known broken."""
         self.skipped.append((name, str(reason)[:160]))
         print(f"SKIP  [{self.block}] {name}  {str(reason)[:110]}", flush=True)
 
@@ -659,7 +659,7 @@ def private_x_server(width: int = 1280, height: int = 720, depth: int = 24,
         width: Screen width. Xvfb fixes its maximum screen size here, so a
             suite that wants a server which refuses to grow asks for a small one.
         height: Screen height.
-        depth: Colour depth.
+        depth: Color depth.
         extra_args: Further Xvfb arguments, appended.
 
     Returns:

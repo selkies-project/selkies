@@ -117,7 +117,7 @@ def open_settings(page: Any) -> bool:
 
 
 def encoder_menu_button(page: Any) -> Any:
-    """The Settings panel's encoder dropdown trigger, labelled with the active
+    """The Settings panel's encoder dropdown trigger, labeled with the active
     encoder; None when no such button is rendered."""
     for label in ENCODER_BY_LABEL:
         btn = page.locator(f'button:has-text("{label}")').first

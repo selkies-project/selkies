@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Client behaviours that must not differ by transport, driven from a dpr-2 browser.
+"""Client behaviors that must not differ by transport, driven from a dpr-2 browser.
 
 Resolution: an auto-mode HiDPI client asks for the window's physical size, a
 manual preset is requested as exact framebuffer pixels and shown, with "scale
@@ -9,7 +9,7 @@ the window-resize listener armed. HiDPI: the flag either streams physical
 pixels and scales the desktop, or leaves the desktop unscaled and divides the
 request by the UI-scaling pick for the browser to stretch back — never both. Clipboard: a server with the clipboard
 disabled must not arm the focus read (Chromium's permission prompt) or send any
-clipboard payload. Gamepad: a pad present before the channel opens honours the
+clipboard payload. Gamepad: a pad present before the channel opens honors the
 persisted gamepad toggle, and one pad's disconnect does not stop polling the
 others.
 

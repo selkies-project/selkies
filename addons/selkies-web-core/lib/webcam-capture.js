@@ -6,7 +6,7 @@
  * time; the server's virtual camera decodes them. Codecs earn their place
  * empirically: the probe ranks candidates on the camera's own frames and
  * rejects one whose output decodes to the wrong picture
- * (`PROBE_COLOUR_TOLERANCE`); after it, a frame offered to a busy encoder is
+ * (`PROBE_COLOR_TOLERANCE`); after it, a frame offered to a busy encoder is
  * dropped rather than queued, a frame the encoder sits on counts the same
  * way (`createLagGauge`), and the share behind moves the uplink down the
  * ladder (`createEncodePace`). Past the last codec, and with no WebCodecs at
@@ -95,12 +95,12 @@ export const PACE_BEHIND_RATIO = 1 / 6;
  */
 export const PACE_LAG_INTERVALS = 15;
 /**
- * Region-mean colour error between a probe frame and its own decoded output,
+ * Region-mean color error between a probe frame and its own decoded output,
  * past which the candidate encodes the wrong picture (some Firefox GPU
  * stacks hand their encoder false chroma). Honest lossy encoding stays under
  * a third of this.
  */
-export const PROBE_COLOUR_TOLERANCE = 48;
+export const PROBE_COLOR_TOLERANCE = 48;
 
 /**
  * Share of offered frames the encoder was behind for, measured on live
@@ -260,7 +260,7 @@ let CANDIDATES = ${JSON.stringify(ENCODER_CANDIDATES)};
 const PACE_MIN_SAMPLES = ${PACE_MIN_SAMPLES};
 const PACE_BEHIND_RATIO = ${PACE_BEHIND_RATIO};
 const PACE_LAG_INTERVALS = ${PACE_LAG_INTERVALS};
-const PROBE_COLOUR_TOLERANCE = ${PROBE_COLOUR_TOLERANCE};
+const PROBE_COLOR_TOLERANCE = ${PROBE_COLOR_TOLERANCE};
 const createLagGauge = ${createLagGauge.toString()};
 const KEYFRAME_INTERVAL_MS = ${KEYFRAME_INTERVAL_MS};
 const HAS_FRAME_ORIENTATION = ${HAS_FRAME_ORIENTATION};
@@ -432,7 +432,7 @@ async function measure(c, w, h, frames) {
   try { enc.close(); } catch (err) { /* already closed */ }
   if (failed) return out;
   out.rate = rate;
-  out.colErr = await colourError(frames[0], chunks, c);
+  out.colErr = await colorError(frames[0], chunks, c);
   return out;
 }
 
@@ -441,7 +441,7 @@ async function measure(c, w, h, frames) {
 // unjudged candidate passes). Drawn unscaled over a coarse grid: means converge
 // however lossily grain encodes while false chroma moves whole regions, and
 // drawImage downscaling point-samples on some engines.
-async function colourError(frame, chunks, c) {
+async function colorError(frame, chunks, c) {
   if (typeof OffscreenCanvas === 'undefined' || typeof VideoDecoder === 'undefined' || !chunks.length) return -1;
   const cells = 4;
   const regionMeans = (source, w, h) => {
@@ -569,14 +569,14 @@ async function runProbe(w, h) {
     self.postMessage({ type: 'probed', codec: CANDIDATES[0].name });
     return;
   }
-  let best = -1, bestRate = 0, wrongColour = false;
+  let best = -1, bestRate = 0, wrongColor = false;
   for (let i = 0; i < CANDIDATES.length; i++) {
     const m = await measure(CANDIDATES[i], w, h, frames);
-    // Wrong colours are out however fast; the JPEG rung draws through the
+    // Wrong colors are out however fast; the JPEG rung draws through the
     // reference's own path.
-    if (m.colErr > PROBE_COLOUR_TOLERANCE) {
-      wrongColour = true;
-      self.postMessage({ type: 'wrongcolour', codec: CANDIDATES[i].name, colErr: Math.round(m.colErr) });
+    if (m.colErr > PROBE_COLOR_TOLERANCE) {
+      wrongColor = true;
+      self.postMessage({ type: 'wrongcolor', codec: CANDIDATES[i].name, colErr: Math.round(m.colErr) });
       continue;
     }
     if (m.rate > bestRate) { best = i; bestRate = m.rate; }
@@ -587,7 +587,7 @@ async function runProbe(w, h) {
   if (!active) return;
   if (best < 0) {
     candIndex = CANDIDATES.length;
-    self.postMessage({ type: wrongColour ? 'exhausted' : 'unsupported' });
+    self.postMessage({ type: wrongColor ? 'exhausted' : 'unsupported' });
     return;
   }
   // Nothing near the asked rate: starting anyway spends a core to send a
@@ -1029,8 +1029,8 @@ export class WebcamCapture {
           this._logPath(`encode: ${m.codec} could not keep up with the camera; taking the next rung`);
           return;
         }
-        if (m.type === "wrongcolour") {
-          this._logPath(`encode: ${m.codec} decodes to the wrong colours on this engine (mean channel error ${m.colErr}); skipping it`);
+        if (m.type === "wrongcolor") {
+          this._logPath(`encode: ${m.codec} decodes to the wrong colors on this engine (mean channel error ${m.colErr}); skipping it`);
           return;
         }
         if (m.type === "exhausted") {

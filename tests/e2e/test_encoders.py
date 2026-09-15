@@ -15,7 +15,7 @@ switch:   over WebSockets the classic dashboard's encoder select moves a live
           server restarts the capture each way and the picture survives.
           Over WebRTC the same select must not offer the striped encoder.
 
-The picture is a known colour the test paints on the server: an X11 window on
+The picture is a known color the test paints on the server: an X11 window on
 the test display, or the Wayland observer surface filled solid, sampled from
 the decoded frame in the page.
 
@@ -34,12 +34,12 @@ import test_dashboards as TD
 from playwright.sync_api import sync_playwright
 
 WL_SOCKET = "wayland-1"
-# The colour painted on the server, and how far a decoded sample may stray
+# The color painted on the server, and how far a decoded sample may stray
 # from it (4:2:0 chroma, limited range and two codecs' rounding).
 PAINT = (40, 120, 220)
 PAINT_ARGB = "ff2878dc"
 TOLERANCE = 24
-# A saturated second block on X11 guards the colour matrix: a stream converted
+# A saturated second block on X11 guards the color matrix: a stream converted
 # with one matrix and painted with another lands more than twenty levels off
 # here, where the first block barely moves. Red rather than green, because
 # libyuv -- which Chromium and Firefox both convert through -- clamps the

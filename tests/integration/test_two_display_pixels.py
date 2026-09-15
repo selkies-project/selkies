@@ -3,7 +3,7 @@
 
 The layout can be right while the pixels are wrong: a secondary pinned to the
 same offset as the primary mirrors it, and a primary sized to the union spans
-both halves. This paints a different colour on each display's region and decodes
+both halves. This paints a different color on each display's region and decodes
 the JPEG stripes the server actually sends to a client bound to that display, so
 neither mistake can pass.
 
@@ -64,7 +64,7 @@ def wait_root_width(width: int, timeout: float = 30) -> Optional[tuple]:
 
 
 def paint_regions(layout: dict):
-    """Fill each display's region on the root with its own colour.
+    """Fill each display's region on the root with its own color.
 
     Returns the connection; the drawing outlives it, but keeping it open costs
     nothing and keeps the caller symmetric with the window-based helpers.
@@ -82,7 +82,7 @@ def paint_regions(layout: dict):
 
 
 def mean_rgb(stripes: list) -> Optional[tuple]:
-    """Mean colour of the most recently delivered stripe.
+    """Mean color of the most recently delivered stripe.
 
     Recency, not size: a screen change in flight produces a transitional frame
     that compresses larger than the settled one, so the biggest stripe reports a

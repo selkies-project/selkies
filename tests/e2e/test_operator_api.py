@@ -37,7 +37,7 @@ import helpers as H
 import core_lib as C
 from array import array
 from test_audit_webhook import Collector
-from test_microphone_audio import CAPTURE_RATE, analyse, tone_wav
+from test_microphone_audio import CAPTURE_RATE, analyze, tone_wav
 from playwright.sync_api import sync_playwright
 
 FILES_DIR = os.path.join(H.WORKDIR, "operator-files")
@@ -194,7 +194,7 @@ def audio_track(path: str) -> Optional[dict]:
     samples.frombytes(pcm[:len(pcm) - len(pcm) % 2])
     return {"codec": probe[0] if probe else "", "channels": int(probe[1]) if len(probe) > 1 else 0,
             "frames": int(probe[2]) if len(probe) > 2 and probe[2].isdigit() else 0,
-            "tone": analyse(samples[CAPTURE_RATE:2 * CAPTURE_RATE])}
+            "tone": analyze(samples[CAPTURE_RATE:2 * CAPTURE_RATE])}
 
 
 def recording_round(res: "H.Results", label: str, collector: Collector, expect_size: Optional[tuple] = None) -> None:

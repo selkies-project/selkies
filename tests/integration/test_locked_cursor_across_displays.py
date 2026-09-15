@@ -6,14 +6,14 @@ cursor to the server (`SET_NATIVE_CURSOR_RENDERING,1`) rather than placing an
 overlay of its own. Neither half of that is display-aware: the tunable is the
 session's, every capture composites the sprite from the pointer's root-relative
 position, and the deltas move the one remote pointer. Locking a single page
-therefore covers the whole desktop, and the cursor crosses onto the neighbour's
+therefore covers the whole desktop, and the cursor crosses onto the neighbor's
 stream on its own.
 
 Read from the JPEG stripes each display's client is sent, because that is where
 the drawing is; a page cannot read its own decode back (test_two_display_pixels
 says why). The lock is taken on the primary's connection alone, and what has to
 hold is that its deltas carry the one pointer across the seam, that the
-neighbour then draws the cursor at the position they reached without having
+neighbor then draws the cursor at the position they reached without having
 asked for anything, that the primary stops drawing it, and that unlocking hands
 the drawing back to the client -- where pointer motion damages no frame at all.
 
@@ -43,9 +43,9 @@ except ImportError:
     H.skip_suite("websockets is not installed")
 
 # A solid black square, so no theme cursor can be mistaken for it and no JPEG
-# stripe can lose it against the flat colour a display's region is painted.
+# stripe can lose it against the flat color a display's region is painted.
 SPRITE = 64
-# Distance from that colour which counts as the sprite; ringing on a flat field
+# Distance from that color which counts as the sprite; ringing on a flat field
 # stays an order of magnitude below it.
 SPRITE_TOL = 40
 START = (400, 300)
@@ -53,9 +53,9 @@ START = (400, 300)
 # half, so one display draws all of it.
 OVER = 320
 STEP = 100
-# A move within the neighbour, small enough to leave the sprite whole on it.
+# A move within the neighbor, small enough to leave the sprite whole on it.
 NUDGE = (40, 30)
-# How far a repainted band is shifted from its display's colour: enough for the
+# How far a repainted band is shifted from its display's color: enough for the
 # capture to send the band, too little to read as a sprite.
 SHADE = 12
 
@@ -121,7 +121,7 @@ def still_drawn(frames: list, bg: tuple) -> bool:
 def drawn_at(box: Optional[tuple], where: tuple, slack: int = 6) -> bool:
     """Whether a sprite box is the cursor standing at `where` on its display.
 
-    The box has to hold that point rather than centre on it, since the hotspot
+    The box has to hold that point rather than center on it, since the hotspot
     is wherever the cursor in use puts it, and be no larger than the cursor set.
     """
     if box is None:
@@ -161,10 +161,10 @@ def cursor_window(size: int):
 
 
 def dirty_band(d, rect: dict, y: int, rgb: tuple, height: int = SPRITE * 2) -> None:
-    """Repaint a band of a display's region in a shade of its own colour.
+    """Repaint a band of a display's region in a shade of its own color.
 
     A display sends only what changed, so silence cannot tell a cursor that has
-    left from one still standing there. The shade -- too near the colour to
+    left from one still standing there. The shade -- too near the color to
     read as a sprite -- makes the band arrive, and what it carries is then an
     answer rather than a silence.
     """
@@ -198,7 +198,7 @@ async def main() -> bool:
             async with websockets.connect(uri, max_size=None) as wss:
                 await asyncio.wait_for(wss.recv(), timeout=10)
                 await wss.send("SETTINGS," + json.dumps(TDP.settings_for("display2")))
-                res.check("the neighbour's capture started",
+                res.check("the neighbor's capture started",
                           C.wait_log("SUCCESS: Capture started for 'display2'", timeout=45), "")
                 layout = TDP.server_layout()
                 res.check("both displays laid out",
@@ -224,7 +224,7 @@ async def main() -> bool:
                 idle = await asyncio.gather(collect(wsp, 4.0), collect(wss, 4.0))
                 res.check("a pointer the client draws sends no frames at all",
                           not idle[0] and not idle[1],
-                          f"primary {len(idle[0])} frames, neighbour {len(idle[1])}")
+                          f"primary {len(idle[0])} frames, neighbor {len(idle[1])}")
 
                 # What a lock asks for, from the locked page's connection alone.
                 await wsp.send("SET_NATIVE_CURSOR_RENDERING,1")
@@ -252,7 +252,7 @@ async def main() -> bool:
                 await asyncio.sleep(1.0)
                 pos = C.x11_mouse_pos()
                 rect = layout["display2"]
-                res.check("the deltas carry the one pointer onto the neighbour",
+                res.check("the deltas carry the one pointer onto the neighbor",
                           rect["x"] <= pos[0] < rect["x"] + rect["w"]
                           and abs(pos[0] - (seam + OVER)) <= 2,
                           f"{pos} in {rect}")
@@ -265,7 +265,7 @@ async def main() -> bool:
                 await asyncio.sleep(0.8)
                 crossed = await asyncio.gather(collect(wsp, 4.0), collect(wss, 4.0))
                 landed = (OVER - NUDGE[0], START[1] + NUDGE[1])
-                res.check("the neighbour draws the cursor where the deltas reached it",
+                res.check("the neighbor draws the cursor where the deltas reached it",
                           drawn_at(sprite_box(crossed[1], TDP.SECONDARY_RGB), landed),
                           f"{sprite_box(crossed[1], TDP.SECONDARY_RGB)} at {landed}")
                 res.check("the display it left stops drawing it",

@@ -438,10 +438,10 @@ export function Settings() {
     }, [serverSettings]);
     const [videoFullColor, setVideoFullColor] = useConditionalSetting(
         VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
-    // Full colour is 4:4:4 H.264; where the decoder has no such profile the core
+    // Full color is 4:4:4 H.264; where the decoder has no such profile the core
     // turns it off, so offering the switch would offer nothing.
     const [fullColorDecodable, setFullColorDecodable] = useState(true);
-    /** Full colour is offered only where the codec carries it and this engine decodes it. */
+    /** Full color is offered only where the codec carries it and this engine decodes it. */
     const fullColorCodec = codecOfEncoder(encoder);
     useEffect(() => {
         let live = true;
@@ -666,7 +666,7 @@ export function Settings() {
 
     const audioDevicesRequested = React.useRef(false);
     /**
-     * Populates the audio device lists once. Enumerating labelled devices
+     * Populates the audio device lists once. Enumerating labeled devices
      * needs a getUserMedia grant, so this runs only when the Audio tab is
      * actually shown: merely opening Settings must not raise a microphone
      * permission prompt.

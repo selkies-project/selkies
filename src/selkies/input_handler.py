@@ -3393,7 +3393,7 @@ class SelkiesGamepad:
                 
                 self.events_queue.task_done()
             except asyncio.CancelledError:
-                logger_selkies_gamepad.info(f"Gamepad {self.js_sock_path}: Event processor task cancelled.")
+                logger_selkies_gamepad.info(f"Gamepad {self.js_sock_path}: Event processor task canceled.")
                 break
             except Exception as e:
                 logger_selkies_gamepad.error(f"Gamepad {self.js_sock_path}: Unhandled error in event processor: {e}", exc_info=True)
@@ -3428,7 +3428,7 @@ class SelkiesGamepad:
                 self.events_queue.put_nowait(None) 
                 await asyncio.wait_for(self._event_processor_task, timeout=2.0)
             except asyncio.TimeoutError:
-                logger_selkies_gamepad.warning("Event processor task timed out on close, cancelling.")
+                logger_selkies_gamepad.warning("Event processor task timed out on close, canceling.")
                 self._event_processor_task.cancel()
             except asyncio.CancelledError:
                 pass 
@@ -6336,7 +6336,7 @@ class WebRTCInput:
         disconnects. Removing by name means an older display's departure
         never costs a newer display its screen; the compositor's own
         output-destroy path evacuates only the removed screen's windows to
-        the primary, which is the X11 behaviour. A screen owned by no
+        the primary, which is the X11 behavior. A screen owned by no
         display is retired the same way, so a session that was also started
         with pre-provisioned screens converges on one screen per display.
         Removal follows the rung that grew: the control socket's
@@ -6578,7 +6578,7 @@ class WebRTCInput:
         return scale
 
     # Size of a held spare session screen: small enough to leave the desktop's
-    # centre on the screen that is shown, large enough for a compositor to lay out.
+    # center on the screen that is shown, large enough for a compositor to lay out.
     SPARE_SCREEN_SIZE = (320, 240)
 
     def resync_session_screens(self) -> None:
@@ -6595,7 +6595,7 @@ class WebRTCInput:
     def _schedule_spare_screen_hold(self) -> None:
         """A nested session opens the screens it was started with, whether or
         not the capture drives that many: the extra ones stretch its desktop
-        onto a screen nobody sees, which is where a client that centres itself
+        onto a screen nobody sees, which is where a client that centers itself
         then lands. Hold them small until a display arrives for them —
         pixelflux resizes one to its full size the moment it gets an output,
         and back when it loses one.
@@ -7441,7 +7441,7 @@ class WebRTCInput:
                         self._clipboard_last_bytes = curr_data_bytes
                         await self.on_clipboard_read(curr_data, curr_mime)
                 except asyncio.CancelledError:
-                    logger_webrtc_input.info("Clipboard monitor task cancelled.")
+                    logger_webrtc_input.info("Clipboard monitor task canceled.")
                     break
                 except Exception as e:
                     logger_webrtc_input.error(f"Error in clipboard monitor loop: {e}", exc_info=True)

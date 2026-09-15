@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The 4:4:4 capability a client's hello carries through SESSION_START.
 
-The signalling relay appends `fullcolor=<codec,...>` after the optional client token; the
-server's signalling client reads it into `fullcolor_codecs`, keeps the token apart from it,
+The signaling relay appends `fullcolor=<codec,...>` after the optional client token; the
+server's signaling client reads it into `fullcolor_codecs`, keeps the token apart from it,
 and leaves the field `None` for a client that said nothing, in every line length the
 protocol allows.
 """

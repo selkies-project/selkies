@@ -2246,18 +2246,18 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
             pgrep_stdout, _ = await _communicate_or_kill(pgrep_proc)
 
             if pgrep_proc.returncode == 0:
-                signalled = []
+                signaled = []
                 for line in pgrep_stdout.decode().split():
                     try:
                         os.kill(int(line), signal.SIGHUP)
-                        signalled.append(line)
+                        signaled.append(line)
                     except (OSError, ValueError) as e:
                         logger.debug(f"Failed to send SIGHUP to xsettingsd process {line}: {e}")
-                if signalled:
+                if signaled:
                     logger.info(
-                        f"Sent SIGHUP to xsettingsd to reload config ({', '.join(signalled)}).")
+                        f"Sent SIGHUP to xsettingsd to reload config ({', '.join(signaled)}).")
                 else:
-                    logger.warning("No xsettingsd process could be signalled to reload.")
+                    logger.warning("No xsettingsd process could be signaled to reload.")
             else:
                 logger.info("xsettingsd process not found. Skipping reload.")
         
@@ -2521,7 +2521,7 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
 
     # Only two desktops keep the density somewhere other than the X resource
     # database, and everything else — named or not — reads it from there, so
-    # there is nothing to gain from recognising any of them by name.
+    # there is nothing to gain from recognizing any of them by name.
     if _running_desktop("xfce", "xfce4-session"):
         logger_app_resize.info(f"XFCE session ({desktop}): applying xfconf-query for DPI {dpi_value}.")
         if await _run_xfconf(dpi_value, logger_app_resize):

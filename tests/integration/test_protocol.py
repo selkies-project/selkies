@@ -52,7 +52,7 @@ async def await_log_from(mark: int, substr: str, timeout: float = 5.0) -> bool:
 
 
 async def drain(sock) -> None:
-    """Consume and discard a socket's traffic until cancelled. A client being
+    """Consume and discard a socket's traffic until canceled. A client being
     streamed to that stops reading stops answering pings with it."""
     try:
         while True:

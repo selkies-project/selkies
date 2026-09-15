@@ -5,7 +5,7 @@
 #
 # Download a URL, waiting as long as the server asks when it rate-limits.
 #
-# curl retries 429 and 5xx by itself and honours their Retry-After, but GitHub
+# curl retries 429 and 5xx by itself and honors their Retry-After, but GitHub
 # reports a secondary rate limit as 403, which curl treats as a hard failure.
 # This loop reads Retry-After off that response and sleeps for it, falling back
 # to a widening delay when the header is absent.

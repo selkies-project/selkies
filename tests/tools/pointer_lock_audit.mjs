@@ -292,7 +292,7 @@ function reset(element) {
 // A Ctrl-Shift-Click asks the element it hit, which is the input overlay
 // wherever the overlay covers the stream and one of the sinks under it where it
 // does not: either core's video element, and the ws-core canvases. A lock the
-// guard does not recognise leaves the pointer locked while motion is still sent
+// guard does not recognize leaves the pointer locked while motion is still sent
 // as absolute position, so the guard has to know every one of them.
 function stage(ids, locked = null) {
     const made = {};

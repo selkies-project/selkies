@@ -296,7 +296,7 @@ async def run(res: "H.Results", display_name: str) -> None:
     await asyncio.sleep(h.keyboard._GROUP_LINGER_S + 0.3)
     res.check("us,ru: lock restored after the word", obs.locked_group() == 0, obs.locked_group())
 
-    # The user's own lock on the Cyrillic group is honoured and left alone.
+    # The user's own lock on the Cyrillic group is honored and left alone.
     obs.lock_group(1)
     ev = await tap(h, obs, CYRILLIC_EF)
     res.check("us,ru: Cyrillic_ef under the user's own group-2 lock", pressed(ev, CYRILLIC_EF), ev)

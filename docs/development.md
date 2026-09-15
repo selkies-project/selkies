@@ -237,7 +237,7 @@ RUN selkies-privileged-files restore
 USER 1000
 ```
 
-`restore` gives back every owner and bit `release` recorded. A setuid or setgid helper the new packages bring is in no record and needs its own `chown root:root` and `chmod` beside it, since the kernel honours neither bit on a file uid 1000 owns. Inside a running session the same work goes through `sudo-root selkies-privileged-files run apt-get install -y <packages>`: `sudo` is itself one of the files a release hands over, so one root process holds both ends and runs the command as the session user under fakeroot, the way an in-session `sudo apt-get` does.
+`restore` gives back every owner and bit `release` recorded. A setuid or setgid helper the new packages bring is in no record and needs its own `chown root:root` and `chmod` beside it, since the kernel honors neither bit on a file uid 1000 owns. Inside a running session the same work goes through `sudo-root selkies-privileged-files run apt-get install -y <packages>`: `sudo` is itself one of the files a release hands over, so one root process holds both ends and runs the command as the session user under fakeroot, the way an in-session `sudo apt-get` does.
 
 The entrypoint script of the base images launches `s6-svscan /etc/service` itself, so it does not need to be PID 1 and the image keeps working when another init or launcher is injected above it.
 

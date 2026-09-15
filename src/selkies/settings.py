@@ -1015,7 +1015,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "enum",
         "default": "auto",
         "meta": {"allowed": ["auto", "h264", "h265", "vp8", "vp9", "av1", "mjpeg"]},
-        "help": 'Codec clients encode the webcam uplink with. Over WebSockets "auto" runs the measured ladder (H.264, else VP8, then VP9, AV1 and H.265 where the engine encodes them, JPEG when none keeps up) on engines that stream camera frames through MediaStreamTrackProcessor, and JPEG on the `<video>`-element path (Firefox): its software encoders can hold the camera rate while costing a full core, which no client-side probe can price. A codec name runs that one codec on every path, trading client CPU for a fraction of the uplink bandwidth, still falling to JPEG where it cannot keep up or encodes the wrong colours; "mjpeg" pins JPEG everywhere. Over WebRTC the browser sends its camera as the named codec when the answer negotiated it, and otherwise, as for "auto" and "mjpeg", as the first codec negotiated. Clients may override per user unless the value is locked.',
+        "help": 'Codec clients encode the webcam uplink with. Over WebSockets "auto" runs the measured ladder (H.264, else VP8, then VP9, AV1 and H.265 where the engine encodes them, JPEG when none keeps up) on engines that stream camera frames through MediaStreamTrackProcessor, and JPEG on the `<video>`-element path (Firefox): its software encoders can hold the camera rate while costing a full core, which no client-side probe can price. A codec name runs that one codec on every path, trading client CPU for a fraction of the uplink bandwidth, still falling to JPEG where it cannot keep up or encodes the wrong colors; "mjpeg" pins JPEG everywhere. Over WebRTC the browser sends its camera as the named codec when the answer negotiated it, and otherwise, as for "auto" and "mjpeg", as the first codec negotiated. Clients may override per user unless the value is locked.',
     },
     {
         "name": "webcam_device",
@@ -2003,7 +2003,7 @@ def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) ->
     """Derive the software-encode flag for an encoder choice.
 
     A CPU-only encoder implies software encoding, but that is a property of the
-    encoder rather than a decision the client made: any other encoder honours the
+    encoder rather than a decision the client made: any other encoder honors the
     client's own request, falling back to the server default when it never made
     one. Deriving it this way is what lets a display return to hardware encoding
     after a spell on JPEG.

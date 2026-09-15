@@ -2,7 +2,7 @@
 """Standalone backend for exercising the Selkies V4L2 interposer.
 
 Starts a ``pixelflux.VirtualCamera`` on the interposer socket and feeds it
-synthetic MJPEG frames (a moving colour field), standing in for a browser's
+synthetic MJPEG frames (a moving color field), standing in for a browser's
 camera uplink. Run it, then run any consumer under the interposer::
 
     python3 test-server.py &

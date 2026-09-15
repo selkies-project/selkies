@@ -144,7 +144,7 @@ STALLED_CLIENT_TIMEOUT_SECONDS = 4.0
 STALLED_CLIENT_REPROBE_SECONDS = 2.0
 # Liveness bound for one send on the shared audio fan-out and the video relays:
 # backlogs are bounded upstream, so a send this slow means a dead socket, which
-# is dropped and never reused (the cancelled write tore its framing).
+# is dropped and never reused (the canceled write tore its framing).
 SHARED_STREAM_SEND_TIMEOUT_SECONDS = 1.0
 # Per-client video backlog bound as seconds of stream at the configured bitrate
 # (backlog is latency debt, so it tracks the rate), floored so low-bitrate
@@ -398,8 +398,8 @@ async def _broadcast_to_clients(
     """Broadcast concurrently to all clients, removing only on clear connection errors.
 
     When per_client_timeout is set, a client whose send stalls past the bound
-    is treated as dead: the send is cancelled and the socket is dropped and
-    closed. A cancelled send_str may have left a half-written frame on the
+    is treated as dead: the send is canceled and the socket is dropped and
+    closed. A canceled send_str may have left a half-written frame on the
     wire, so that socket must never be reused for later sends.
 
     Args:
@@ -513,7 +513,7 @@ async def _broadcast_to_clients(
         if isinstance(result, asyncio.CancelledError):
             # A BaseException the Exception branch never sees: without this the
             # client is neither delivered to nor dropped.
-            data_logger.warning("Broadcast send was cancelled; dropping the socket.")
+            data_logger.warning("Broadcast send was canceled; dropping the socket.")
             timed_out_clients.add(client)
         elif isinstance(result, Exception):
             # TimeoutError first: on 3.11+ it subclasses OSError.
@@ -594,7 +594,7 @@ class _VideoRelay:
             self._run(), name=f"VideoRelay:{self.display_id}")
 
     def stop(self) -> None:
-        """Graceful: an in-flight send completes — cancelling mid-frame would
+        """Graceful: an in-flight send completes — canceling mid-frame would
         tear the websocket framing on a socket that stays open for control."""
         self.stopped = True
         self.backlog.clear()
@@ -987,7 +987,7 @@ class DataStreamingServer(BaseStreamingService):
             video fan-out until their next START_VIDEO while capture, control,
             cursor and audio keep running.
         _persistent_capture_modules: One ScreenCapture per display id for the
-            server's lifetime, so a restart does not re-initialise the backend
+            server's lifetime, so a restart does not re-initialize the backend
             (NVENC session, CUDA context, compositor handle).
         _wayland_ctl_module: Fallback pixelflux handle for output management
             when no primary module exists yet (any handle reaches the backend).
@@ -1708,7 +1708,7 @@ class DataStreamingServer(BaseStreamingService):
 
                 self.pcmflux_audio_queue.task_done()
         except asyncio.CancelledError:
-            data_logger.info("pcmflux audio chunk broadcasting task cancelled.")
+            data_logger.info("pcmflux audio chunk broadcasting task canceled.")
         finally:
             data_logger.info("pcmflux audio chunk broadcasting task finished.")
 
@@ -1799,7 +1799,7 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.info("pcmflux audio pipeline is already capturing.")
             return True
         if self.pcmflux_module is not None:
-            # A start cancelled between the capture's open and its bookkeeping
+            # A start canceled between the capture's open and its bookkeeping
             # (its page left) is retired before another module replaces it.
             await self._stop_pcmflux_pipeline()
         if not self.app:
@@ -1943,7 +1943,7 @@ class DataStreamingServer(BaseStreamingService):
                 await task
                 task_was_running = True
             except asyncio.CancelledError:
-                data_logger.debug(f"Backpressure task for '{display_id}' cancelled successfully.")
+                data_logger.debug(f"Backpressure task for '{display_id}' canceled successfully.")
                 task_was_running = True
             except Exception as e_cancel:
                 data_logger.error(f"Error awaiting cancellation for '{display_id}' backpressure task: {e_cancel}")
@@ -2504,7 +2504,7 @@ class DataStreamingServer(BaseStreamingService):
                     self._set_backpressure_enabled(display_id, display_state, True)
 
         except asyncio.CancelledError:
-            data_logger.info(f"Backpressure logic task for '{display_id}' cancelled.")
+            data_logger.info(f"Backpressure logic task for '{display_id}' canceled.")
         finally:
             if display_state:
                 display_state['backpressure_enabled'] = True
@@ -3407,7 +3407,7 @@ class DataStreamingServer(BaseStreamingService):
         self._last_client_stable_report_time = time.monotonic()
         # Per-connection sender over the instance-wide singleton collectors.
         stats_sender_task_ws = None
-        # Blocks on client_settings_received, which may never be set: cancelled
+        # Blocks on client_settings_received, which may never be set: canceled
         # with the connection.
         start_audio_task_ws = None
         initial_audio_task_ws = None
@@ -4315,7 +4315,7 @@ class DataStreamingServer(BaseStreamingService):
                     "Last unpaused consumer of 'primary' disconnected."
                 )
 
-            # Per-connection tasks only; cancelling the singleton collectors here
+            # Per-connection tasks only; canceling the singleton collectors here
             # would break the remaining clients.
             monitor_tasks = [
                 stats_sender_task_ws,
@@ -5748,7 +5748,7 @@ class DataStreamingServer(BaseStreamingService):
         try:
             await self.shutdown_event.wait()
         except asyncio.CancelledError:
-            logger.info("Main application task was cancelled.")
+            logger.info("Main application task was canceled.")
         except Exception as e_main:
             logger.critical(f"Critical error in main execution: {e_main}", exc_info=True)
         finally:
@@ -5823,7 +5823,7 @@ class DataStreamingServer(BaseStreamingService):
         ]
 
         for task in all_tasks_for_cleanup:
-            logger.debug(f"Cancelling task: {task.get_name()}")
+            logger.debug(f"Canceling task: {task.get_name()}")
             task.cancel()
 
         if all_tasks_for_cleanup:
@@ -5990,7 +5990,7 @@ async def _collect_network_stats_ws(shared_data: dict, server_instance: DataStre
                 "latency_ms": round(latency_ms, 1),
             }
     except asyncio.CancelledError:
-        data_logger.info("Network monitor (WS) cancelled.")
+        data_logger.info("Network monitor (WS) canceled.")
     except Exception as e:
         data_logger.error(f"Network monitor (WS) error: {e}", exc_info=True)
 
@@ -6027,7 +6027,7 @@ async def _send_stats_periodically_ws(
             except Exception as e_send:
                 data_logger.error(f"Stats sender: Error sending: {e_send}")
     except asyncio.CancelledError:
-        data_logger.info("Stats sender (WS) cancelled.")
+        data_logger.info("Stats sender (WS) canceled.")
     except Exception as e:
         data_logger.error(f"Stats sender (WS) error: {e}", exc_info=True)
 

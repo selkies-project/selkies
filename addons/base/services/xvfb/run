@@ -19,7 +19,7 @@ fi
 # Zink belongs to the GL applications in the session, not to the display server:
 # this is a virtual framebuffer with no GPU output. Inheriting it makes the
 # server's GLX module bring up a Vulkan driver it never renders through, and on
-# some Mesa versions that initialisation never returns -- the server then holds
+# some Mesa versions that initialization never returns -- the server then holds
 # its listening sockets without ever accepting, so clients hang instead of
 # failing. The session keeps its own Zink settings; only this process drops them.
 unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2

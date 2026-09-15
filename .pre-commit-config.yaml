@@ -20,7 +20,7 @@ repos:
     hooks:
       # Skip list and dictionary exceptions live in .codespellrc, and they only
       # apply to paths codespell walks itself: given explicit filenames it would
-      # spell-check the translation catalogues and generated bundles too
+      # spell-check the translation catalogs and generated bundles too
       - id: codespell
         pass_filenames: false
 

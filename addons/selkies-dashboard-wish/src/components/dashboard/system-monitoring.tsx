@@ -137,15 +137,15 @@ function RadialGauge({ metric, size }: RadialGaugeProps) {
 }
 
 const STATS_READ_INTERVAL_MS = 500;
-/** A dashboard-owned analyser on the stream's audio track. */
-type AudioMeter = { ctx: AudioContext; analyser: AnalyserNode; data: Uint8Array<ArrayBuffer>; stream: MediaStream };
+/** A dashboard-owned analyzer on the stream's audio track. */
+type AudioMeter = { ctx: AudioContext; analyzer: AnalyserNode; data: Uint8Array<ArrayBuffer>; stream: MediaStream };
 /**
  * Audio level (RMS, 0 to 1) of the WebRTC stream's audio track via a
  * dashboard-owned AnalyserNode, never routed to a destination so playback is
  * unaffected. The websockets worklet path exposes `window.currentAudioLevel`
  * instead.
- * @param meterRef Holds the analyser across calls; rebuilt when the stream changes.
- * @returns The level, or null when the stream has no audio track or no analyser could be built.
+ * @param meterRef Holds the analyzer across calls; rebuilt when the stream changes.
+ * @returns The level, or null when the stream has no audio track or no analyzer could be built.
  */
 function readStreamAudioLevel(meterRef: { current: AudioMeter | null }): number | null {
 	const el = document.getElementById("stream") as HTMLVideoElement | null;
@@ -158,16 +158,16 @@ function readStreamAudioLevel(meterRef: { current: AudioMeter | null }): number 
 		try {
 			if (m && m.ctx) m.ctx.close();
 			const ctx = new AudioContext();
-			const analyser = ctx.createAnalyser();
-			analyser.fftSize = 512;
-			ctx.createMediaStreamSource(ms).connect(analyser);
-			m = { ctx, analyser, data: new Uint8Array(analyser.fftSize), stream: ms };
+			const analyzer = ctx.createAnalyser();
+			analyzer.fftSize = 512;
+			ctx.createMediaStreamSource(ms).connect(analyzer);
+			m = { ctx, analyzer, data: new Uint8Array(analyzer.fftSize), stream: ms };
 			meterRef.current = m;
 		} catch {
 			return null;
 		}
 	}
-	m.analyser.getByteTimeDomainData(m.data);
+	m.analyzer.getByteTimeDomainData(m.data);
 	let sum = 0;
 	for (let i = 0; i < m.data.length; i++) {
 		const v = (m.data[i] - 128) / 128;
@@ -217,7 +217,7 @@ function configuredFramerateMax(): number {
  *
  * The audio level is read on one scale for both transports: the websockets
  * worklet exports a final 0 to 100 level (RMS times 141, a full-scale sine
- * reading 100), and the WebRTC analyser fallback's raw RMS gets the same
+ * reading 100), and the WebRTC analyzer fallback's raw RMS gets the same
  * mapping. Only metrics with data are shown; video bitrate is omitted since
  * it duplicates the bandwidth stat.
  */

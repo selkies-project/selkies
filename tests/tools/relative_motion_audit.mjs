@@ -13,7 +13,7 @@
 // moving, which is indistinguishable from an acceleration curve, and motion
 // that should cancel out drifts instead.
 //
-// `engineCss` is the measured behaviour of Chrome and Firefox: at a device
+// `engineCss` is the measured behavior of Chrome and Firefox: at a device
 // pixel ratio of 1.25 a stream of one-device-pixel motions arrives as
 // 1,1,0,1,1, and at 1.5 as 1,0,1 -- exactly a carried division by the ratio.
 //

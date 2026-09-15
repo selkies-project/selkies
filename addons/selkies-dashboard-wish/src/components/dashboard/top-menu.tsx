@@ -132,7 +132,7 @@ export function TopMenu({
   const [isDragging, setIsDragging] = React.useState(false);
   const [isSystemMonitoringDragging, setIsSystemMonitoringDragging] = React.useState(false);
   const [position, setPosition] = React.useState(() => {
-    // Rough centering off an assumed 400px menu; the measured width recentres
+    // Rough centering off an assumed 400px menu; the measured width recenters
     // it after mount.
     const x = window.innerWidth / 2 - 200;
     return { x, y: 0 };
@@ -225,7 +225,7 @@ export function TopMenu({
     };
   }, []);
 
-  // Recentres the menu on its measured width.
+  // Recenters the menu on its measured width.
   React.useEffect(() => {
     if (dragRef.current) {
       const menuWidth = dragRef.current.offsetWidth;

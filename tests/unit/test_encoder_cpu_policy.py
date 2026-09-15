@@ -57,7 +57,7 @@ def main() -> bool:
               and effective_use_cpu("h264enc", requested, False) is True)
 
     requested = False
-    res.check("explicit hardware choice is honoured over a software default",
+    res.check("explicit hardware choice is honored over a software default",
               effective_use_cpu("h264enc", requested, True) is False)
     res.check("server default applies when the client never chose",
               effective_use_cpu("h264enc", None, True) is True)

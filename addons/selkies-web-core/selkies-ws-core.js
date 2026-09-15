@@ -793,7 +793,7 @@ try {
 }
 /**
  * Whether the one software-decode retry of this session is spent. It is spent
- * whether or not the engine honoured the hint, so an engine that ignores it
+ * whether or not the engine honored the hint, so an engine that ignores it
  * cannot loop the retry. Errors within `SOFTWARE_DECODE_SETTLE_MS` of the
  * switch describe the path just torn down (the striped modes run a decoder
  * per stripe and they fail together) and are absorbed instead of reaching
@@ -2568,15 +2568,15 @@ body {
 };
 
 /**
- * Settles whether full colour is on the table for this engine, before the
+ * Settles whether full color is on the table for this engine, before the
  * first SETTINGS payload is built.
  *
- * An engine whose decoder has no 4:4:4 profile cannot show a full-colour
+ * An engine whose decoder has no 4:4:4 profile cannot show a full-color
  * stream at all -- every stripe is refused and nothing paints -- so the
  * setting is turned off rather than asked for. It is written to storage, not
  * merely dropped from one payload: every payload is built from storage, and
  * the dashboards read the same keys, so the toggle shows what the stream is.
- * The decoder is only asked where full colour is on, since the session waits
+ * The decoder is only asked where full color is on, since the session waits
  * here to start and the answer settles nothing for a stream not asking for it.
  */
 async function settleFullColorSupport() {
@@ -2586,28 +2586,28 @@ async function settleFullColorSupport() {
     if (!codecCarriesFullColor(codec)) return;
     if (await canDecodeFullColor(codec)) return;
     if (!getBoolParam('video_fullcolor', false)) return;
-    console.warn(`[Selkies] full colour (4:4:4) is off: this browser decodes ${codec} 4:2:0 only.`);
+    console.warn(`[Selkies] full color (4:4:4) is off: this browser decodes ${codec} 4:2:0 only.`);
     video_fullcolor = false;
     setBoolParam('video_fullcolor', false);
 }
 
-/** Whether the server holds full colour: a locked `video_fullcolor`. */
+/** Whether the server holds full color: a locked `video_fullcolor`. */
 let fullColorLocked = false;
 
 /**
- * Turns a full colour the server announced off again where this engine cannot
+ * Turns a full color the server announced off again where this engine cannot
  * decode the codec's 4:4:4, so the stream comes back 4:2:0 on the same codec
  * rather than stepping to a codec it does decode. A locked setting cannot be
  * turned off and is left to the refusal ladder.
  * @param {string} reason Logged with the settings update.
- * @returns {Promise<boolean>} Whether full colour was turned off.
+ * @returns {Promise<boolean>} Whether full color was turned off.
  */
 async function declineUndecodableFullColor(reason) {
     if (!video_fullcolor || fullColorLocked || isSharedMode) return false;
     const codec = codecOfEncoder(currentEncoderMode);
     if (!codecCarriesFullColor(codec) || await canDecodeFullColor(codec)) return false;
     if (!video_fullcolor) return false;
-    console.warn(`[Selkies] full colour (4:4:4) is off: this browser decodes ${codec} 4:2:0 only.`);
+    console.warn(`[Selkies] full color (4:4:4) is off: this browser decodes ${codec} 4:2:0 only.`);
     video_fullcolor = false;
     setBoolParam('video_fullcolor', false);
     sendFullSettingsUpdateToServer(reason);
@@ -2640,7 +2640,7 @@ const LADDER_ORDER = ['h264enc', 'h264enc-striped', 'vp9enc', 'vp8enc', 'av1enc'
 /**
  * The next encoder a refusal steps to: the first of `LADDER_ORDER`, among
  * those the server allows, whose codec this engine has not refused and
- * decodes, and whose 4:4:4 it decodes where the server holds full colour on
+ * decodes, and whose 4:4:4 it decodes where the server holds full color on
  * and the codec carries it; JPEG is the last rung, and the only one when
  * nothing else is left.
  * @param {string} [refused] The codec just refused.
@@ -2684,7 +2684,7 @@ const fallbackEncoder = (pick) => nextRung(codecOfEncoder(pick)) || 'jpeg';
  */
 function answerRefusedCodec(label, codec) {
     if (codecRefusalUnanswerable || codecRefusalPending) return;
-    // A refused 4:4:4 profile is answered by turning full colour off, which
+    // A refused 4:4:4 profile is answered by turning full color off, which
     // keeps the codec, unless the server holds it: then the ladder answers.
     // Once it is off, a refusal is the 4:4:4 stream still in flight.
     if (isFullColorProfile(label) && !fullColorLocked && !isSharedMode) {
@@ -2698,7 +2698,7 @@ function answerRefusedCodec(label, codec) {
 }
 
 /**
- * The ladder step behind `answerRefusedCodec`, once full colour is not the answer.
+ * The ladder step behind `answerRefusedCodec`, once full color is not the answer.
  * @param {string} label The refused codec string or encoder.
  * @param {string} codec The refused stream's codec name.
  */
@@ -4231,7 +4231,7 @@ function postSidebarButtonUpdate() {
  * pushes, and the `getStats` and `settings` requests. See the module
  * docblock for the full vocabulary. A `setUseCssScaling` with `persist:
  * false` is server-authored and leaves the user's stored key untouched; the
- * resolution paths honour `enable_resize=false`, which pins the primary's
+ * resolution paths honor `enable_resize=false`, which pins the primary's
  * resolution server-side while a secondary stays resizable; and
  * `clipboardImageUpdate` reports every skip so a dead click never reads as a
  * bug.
@@ -7103,7 +7103,7 @@ class WorkerWebSocket {
               }
               const fcEntry = obj.settings && obj.settings.video_fullcolor;
               fullColorLocked = !!(fcEntry && fcEntry.locked);
-              if (video_fullcolor) declineUndecodableFullColor('full colour the server announced is not decoded here');
+              if (video_fullcolor) declineUndecodableFullColor('full color the server announced is not decoded here');
               if (typeof window['video_streaming_mode'] === 'boolean') {
                   video_streaming_mode = window['video_streaming_mode'];
               }
@@ -7157,7 +7157,7 @@ class WorkerWebSocket {
                   macCmdAsCtrl = cmdAsCtrl;
                   applyMacCmdAsCtrl();
               }
-              // After the gates above, so the one-time initial push honours them.
+              // After the gates above, so the one-time initial push honors them.
               maybeSendInitialClipboard();
               window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
               if (Object.keys(changes).length > 0) {

@@ -172,7 +172,7 @@ class MediaPipelinePixel(MediaPipeline):
             re-anchors `_audio_pts_offset` one frame step past `_audio_last_pts`
             when it sees a new epoch, since pcmflux re-zeros its sample clock.
         _audio_routing_task: Routing enforcement for the running capture; held
-            so it is not garbage-collected mid-flight, cancelled on stop.
+            so it is not garbage-collected mid-flight, canceled on stop.
         _audio_control: Sound-server control connection (sink provisioning,
             device resolution, pcmflux routing); opened on the first audio
             start and closed with the capture.

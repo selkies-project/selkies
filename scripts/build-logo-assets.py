@@ -88,7 +88,7 @@ PLATED = [(MARK, 192, "docs/assets/logo/icon-192x192.png"),
           (MARK, 512, "addons/selkies-dashboard-wish/public/icon-512.png")]
 PLATE_RADIUS = 0.4900
 MARK_WIDTH = 0.7400
-MARK_CENTRE = (0.5000, 0.4844)
+MARK_CENTER = (0.5000, 0.4844)
 
 # Mean per-channel difference `--check` calls stale: librsvg builds disagree on
 # edge pixels by single digits, artwork that moved on by an order of magnitude.
@@ -125,10 +125,10 @@ def plated_svg(svg: str, size: int, out: str) -> None:
     viewbox = re.search(r'viewBox="([^"]+)"', source).group(1)
     inner = source[source.index(">", source.index("<svg")) + 1:source.rindex("</svg>")]
     mx, my, mw, mh = mark_extent(os.path.join(REPO, svg))
-    # The ink, not the canvas, is MARK_WIDTH wide and centred on MARK_CENTRE.
+    # The ink, not the canvas, is MARK_WIDTH wide and centered on MARK_CENTER.
     canvas = size * MARK_WIDTH / mw
-    x = size * MARK_CENTRE[0] - (mx + mw / 2) * canvas
-    y = size * MARK_CENTRE[1] - (my + mh / 2) * canvas
+    x = size * MARK_CENTER[0] - (mx + mw / 2) * canvas
+    y = size * MARK_CENTER[1] - (my + mh / 2) * canvas
     with open(out, "w") as f:
         f.write(
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '

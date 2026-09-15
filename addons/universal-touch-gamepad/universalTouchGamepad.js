@@ -16,7 +16,7 @@
  * shows or hides it, hiding also disconnects the pad. Layouts are the
  * `profiles` table (8-bit, 16-bit, modern); the pick persists under the
  * `universalTouchGamepad_currentProfile` localStorage key. Buttons are hit
- * tested per cluster so a finger sliding between neighbours re-targets
+ * tested per cluster so a finger sliding between neighbors re-targets
  * without lifting; a short, still tap on a stick clicks L3/R3.
  * @module
  */

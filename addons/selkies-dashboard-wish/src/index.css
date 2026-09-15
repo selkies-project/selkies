@@ -58,7 +58,7 @@
    names so every component follows: layered slate surfaces (page, card,
    popover are three distinct steps), the logo's magenta as the accent, and
    borders solid enough to read as edges rather than a wash of the surface.
-   Text colours are picked against the surface they land on — a filled button's
+   Text colors are picked against the surface they land on — a filled button's
    pink is lighter than the accent, because near-black text sits on it. */
 :root {
   --radius: 0.625rem;

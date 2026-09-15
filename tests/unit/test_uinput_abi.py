@@ -93,12 +93,12 @@ def main() -> bool:
     # consumers read them as ordinary analog axes), and a hat is -1/0/1 on evdev
     # but full-scale on joydev.
     declared("stick low", ih.normalize_axis_value(-1.0, False, False), ih.ABS_MIN_VAL)
-    declared("stick centre", ih.normalize_axis_value(0.0, False, False), 0)
+    declared("stick center", ih.normalize_axis_value(0.0, False, False), 0)
     declared("stick high", ih.normalize_axis_value(1.0, False, False), ih.ABS_MAX_VAL)
     declared("trigger released", ih.normalize_axis_value(0.0, True, False), ih.ABS_MIN_VAL)
     declared("trigger pressed", ih.normalize_axis_value(1.0, True, False), ih.ABS_MAX_VAL)
     declared("hat left (evdev)", ih.normalize_axis_value(-1.0, False, True), ih.ABS_HAT_MIN_VAL)
-    declared("hat centre (evdev)", ih.normalize_axis_value(0.0, False, True), 0)
+    declared("hat center (evdev)", ih.normalize_axis_value(0.0, False, True), 0)
     declared("hat right (evdev)", ih.normalize_axis_value(1.0, False, True), ih.ABS_HAT_MAX_VAL)
     declared("hat past its end is clamped", ih.normalize_axis_value(7.0, False, True),
           ih.ABS_HAT_MAX_VAL)

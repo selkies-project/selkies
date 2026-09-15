@@ -188,7 +188,7 @@ check("the legacy Wayland toggle is judged too", env.get("SELKIES_WAYLAND") == "
 # value -- they compare against a single spelling and cannot each re-derive it.
 for spelling in ("True", "TRUE", "1", " true "):
     env, _ = run(facts(), env={"SELKIES_WAYLAND": spelling})
-    check(f"SELKIES_WAYLAND={spelling!r} is honoured and canonicalized",
+    check(f"SELKIES_WAYLAND={spelling!r} is honored and canonicalized",
           env.get("SELKIES_WAYLAND") == "true" and env.get("_probe_calls") == [""],
           env.get("SELKIES_WAYLAND"))
 for spelling in ("False", "FALSE", "0", "no"):

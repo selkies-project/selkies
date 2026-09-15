@@ -13,11 +13,11 @@
 :root,
 .theme-dark {
     /* Core tokens.
-       Text colours are picked against the surface they land on rather than
+       Text colors are picked against the surface they land on rather than
        against the page: the sidebar, the section panel and a hovered row are
        three different backgrounds, and the accent-tinted ones (an active
        toggle, an error row) are lighter again. Accent as text is therefore a
-       separate, lighter tint of the same hue — the fill colour is too dark
+       separate, lighter tint of the same hue — the fill color is too dark
        against those surfaces at label sizes. */
     --accent: #ec4899;
     --accent-strong: #f472b6;
@@ -286,7 +286,7 @@
     -webkit-text-fill-color: transparent;
 }
 
-/* Sidebar section titles. Full-strength text rather than the muted grey the
+/* Sidebar section titles. Full-strength text rather than the muted gray the
    labels under them carry: the title is what collapses the section. */
 .sidebar h3 {
     margin: 0 0 10px;
@@ -1298,7 +1298,7 @@ a.cite-link:active {
     transition: opacity 0.2s ease-in-out;
 }
 
-/* Centred over the frame's own area, which the frame still occupies while it
+/* Centered over the frame's own area, which the frame still occupies while it
    loads behind this. */
 .files-modal-loading {
     position: absolute;

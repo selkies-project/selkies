@@ -64,10 +64,10 @@ def settings(pixelflux, encoder: str, cpu: bool, wayland: bool):
 
 def repaint(stop: threading.Event) -> None:
     """A striped capture sends only what damage covers, so keep the root changing."""
-    colours = ("#3366cc", "#cc6633", "#33cc66")
+    colors = ("#3366cc", "#cc6633", "#33cc66")
     index = 0
     while not stop.wait(0.1):
-        subprocess.run(["xsetroot", "-solid", colours[index % len(colours)]],
+        subprocess.run(["xsetroot", "-solid", colors[index % len(colors)]],
                        capture_output=True)
         index += 1
 

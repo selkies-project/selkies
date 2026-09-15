@@ -12,7 +12,7 @@ up installed is the session's fact rather than the browser's, so a page that
 kept no record of the install is still told about it.
 
 Driven against a stand-in `selkies-proot` -- the runner whose presence publishes
-the panel -- and a stand-in catalogue, so nothing here reaches the network.
+the panel -- and a stand-in catalog, so nothing here reaches the network.
 
 Usage: python3 tests/e2e/test_apps_panel.py
 """
@@ -27,12 +27,12 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 APP = "e2eapp"
-# The catalogue shape the panel reads: one installable entry, its icon left to
+# The catalog shape the panel reads: one installable entry, its icon left to
 # fail (the panel hides a broken one rather than waiting for it).
-CATALOGUE = f"""include:
+CATALOG = f"""include:
   - name: {APP}
     full_name: E2E App
-    description: A stand-in catalogue entry
+    description: A stand-in catalog entry
     icon: {APP}.png
 """
 # Long enough that the panel is observed mid-command, short enough to wait out.
@@ -96,14 +96,14 @@ def run(mode: str, res: "H.Results") -> None:
         ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
         page = ctx.new_page()
         page.route("**/proot-apps/**/metadata.yml",
-                   lambda route: route.fulfill(status=200, content_type="text/yaml", body=CATALOGUE))
+                   lambda route: route.fulfill(status=200, content_type="text/yaml", body=CATALOG))
         try:
             page.goto(H.BASE_URL, wait_until="load")
             time.sleep(8.0)
             res.check(f"{mode}: the panel is published where its runner works", open_apps_modal(page))
 
             card = page.locator('.apps-modal-content:has-text("E2E App")').first
-            res.check(f"{mode}: the catalogue is listed", card.count() > 0)
+            res.check(f"{mode}: the catalog is listed", card.count() > 0)
             page.locator('text=E2E App').first.click()
             time.sleep(0.5)
             install = page.locator('.app-action-button.install').first

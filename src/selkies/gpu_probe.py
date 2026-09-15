@@ -19,7 +19,7 @@ act on, and one line saying it in words on stderr:
     SELKIES_GPU_PRESENT      whether a GPU is here at all
     SELKIES_GPU_ACCELERATED  whether the compositor's renderer came up on it
     SELKIES_GPU_GL_VENDOR    the glvnd vendor library whose EGL brings that GPU up
-    SELKIES_GPU_EGL_X11      the first glvnd vendor whose EGL initialises on an X display
+    SELKIES_GPU_EGL_X11      the first glvnd vendor whose EGL initializes on an X display
     SELKIES_GPU_MESA_DRIVER  how Mesa reaches the GPU: `native`, `zink`, or "" for software
     SELKIES_GPU_VULKAN_PRESENTS  whether the GPU's Vulkan driver gave an X window a swapchain, when Zink is Mesa's path
 

@@ -95,7 +95,7 @@ def record(source: str, seconds: float = 2.0) -> array:
     return samples
 
 
-def analyse(samples: array) -> dict:
+def analyze(samples: array) -> dict:
     """RMS of the recording and how much of it is the tone.
 
     A Goertzel filter at TONE_HZ measures the tone's amplitude; against the
@@ -183,7 +183,7 @@ def transport_block(mode: str) -> "H.Results":
                 # chunk arrives; the sound server then has to route it through the
                 # virtual source before the tone can be heard there.
                 time.sleep(2.0)
-                got = analyse(record(source))
+                got = analyze(record(source))
                 res.check("recorded PCM carries the browser's tone",
                           got["rms"] > 150 and got["ratio"] > 0.5, str(got))
             toggle(page, False)
@@ -191,7 +191,7 @@ def transport_block(mode: str) -> "H.Results":
             if source:
                 # Frames already in flight land for a moment after the stop.
                 time.sleep(1.5)
-                got = analyse(record(source))
+                got = analyze(record(source))
                 res.check("source goes quiet after disable", got["rms"] < 50, str(got))
             res.check("no page errors", not errors, "; ".join(errors)[:200])
             browser.close()

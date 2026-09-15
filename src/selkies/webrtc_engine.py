@@ -454,7 +454,7 @@ class RTCApp:
             slot in secure mode, else the one the peer claimed at HELLO — so a
             revocation or handoff on `/api/tokens` can find the affected peers
             (per-message checks read the live store); `channel_consumers`,
-            cancellable from teardown because a channel that never reached
+            cancelable from teardown because a channel that never reached
             SCTP-established emits no close; `mic_state` and `webcam_state`,
             this peer's own uplink sinks (None without the m-line), retired
             per peer; `video_sender` and `video_paused` for the per-peer tab
@@ -482,7 +482,7 @@ class RTCApp:
         on_fullcolor_declined: Async hook `(display_id)` called before a
             peer's offer when the peer's hello names no 4:4:4 for the
             display's codec while the display emits it; returns whether full
-            colour went off for the display.
+            color went off for the display.
         get_use_cpu_for_display: Whether a display forces software encoding,
             resolved at offer time like the encoder; with it decides whether a
             4:4:4 profile may be advertised.
@@ -1074,9 +1074,9 @@ class RTCApp:
         (`_munge_video_bandwidth`). Displays can run different encoders,
         chroma formats and software-encoding flags; the caller passes the ones
         this offer's display is using (defaults: the primary/global encoder and
-        the configured full-colour and software-encoding settings).
+        the configured full-color and software-encoding settings).
 
-        Full colour is a 4:4:4 bitstream, so the H.264 profile-level-id of
+        Full color is a 4:4:4 bitstream, so the H.264 profile-level-id of
         the display's own video section is rewritten to High 4:4:4 (`f4001f`)
         rather than handing the decoder a 4:2:0 baseline profile that cannot
         match what it receives; 4:2:0 keeps `42e01f`, the profile Firefox
@@ -1085,8 +1085,8 @@ class RTCApp:
         OpenH264 (the software encoder of a GPL-free pixelflux build, forced
         onto the CPU) is excluded: it always emits limited-range 4:2:0, and a
         4:4:4 profile makes decoders misread its color range (visibly darker
-        output). A full-colour VP9 display offers profile 1, the 4:4:4 profile,
-        in place of profile 0; the client asks for full colour only where its
+        output). A full-color VP9 display offers profile 1, the 4:4:4 profile,
+        in place of profile 0; the client asks for full color only where its
         receiver takes that profile.
 
         The Opus ptime advertises the real frame duration pcmflux emits
@@ -1558,10 +1558,10 @@ class RTCApp:
         """Whether the offer to a peer may describe 4:4:4.
 
         The peer's hello named the codecs it decodes at 4:4:4. When the display's
-        codec is not among them, full colour goes off for the display through
+        codec is not among them, full color goes off for the display through
         `on_fullcolor_declined` before the offer is built, so the stream is 4:2:0
         from its first frame rather than a profile the peer paints nothing of;
-        a display whose full colour the operator holds keeps it, and the peer is
+        a display whose full color the operator holds keeps it, and the peer is
         told so in the log.
 
         Args:
@@ -1585,7 +1585,7 @@ class RTCApp:
         if moved:
             logger.info(f"Peer {client_peer_id} decodes no {codec} 4:4:4: display '{display_id}' streams 4:2:0.")
             return False
-        logger.error(f"Peer {client_peer_id} decodes no {codec} 4:4:4 and the full colour of "
+        logger.error(f"Peer {client_peer_id} decodes no {codec} 4:4:4 and the full color of "
                      f"display '{display_id}' is held: it will paint nothing of this stream.")
         return True
 
@@ -1670,7 +1670,7 @@ class RTCApp:
         by a single consumer task, so dispatch stays in arrival order.
 
         The message handler only enqueues (drop+log on overflow); the consumer
-        is cancelled when the channel closes. handler is called late-bound so
+        is canceled when the channel closes. handler is called late-bound so
         reassigning the target callback still takes effect.
 
         Returns:
@@ -2433,7 +2433,7 @@ class RTCApp:
         """Cancel and await a peer's data channel queue consumers.
 
         A channel that never reached SCTP-established never emits 'close', so
-        its consumer is only reachable from here; cancelling one the 'close'
+        its consumer is only reachable from here; canceling one the 'close'
         event already stopped is a no-op.
         """
         consumers = peer_obj.get("channel_consumers") or []

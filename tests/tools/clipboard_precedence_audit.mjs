@@ -26,7 +26,7 @@ const { createLocalClipboardSender } = await import(
     '../../addons/selkies-web-core/lib/clipboard-sync.js');
 
 // The precedence window is a local in the module; pinned here so the audit
-// fails when it drifts, and bound to the behaviour by the checks below.
+// fails when it drifts, and bound to the behavior by the checks below.
 const EXPLICIT_PRECEDENCE_MS = 1000;
 
 let failed = 0;

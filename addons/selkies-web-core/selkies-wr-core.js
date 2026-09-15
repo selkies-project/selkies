@@ -1017,10 +1017,10 @@ export default function webrtc() {
 	}
 
 	/**
-	 * Turns full colour off where this engine cannot decode the codec's 4:4:4
+	 * Turns full color off where this engine cannot decode the codec's 4:4:4
 	 * profile over RTP.
 	 *
-	 * Where the decoder has no 4:4:4 profile a full-colour stream is not a
+	 * Where the decoder has no 4:4:4 profile a full-color stream is not a
 	 * heavier picture but no picture, so the setting is dropped rather than
 	 * asked for. The receiver's own capabilities answer for VP9 (profile 1);
 	 * the decoder probe answers for H.264 and H.265. Written to storage, which
@@ -1031,7 +1031,7 @@ export default function webrtc() {
 		const codec = codecOfEncoder(encoder);
 		if (!codecCarriesFullColor(codec) || await fullColorDecodable(codec)) return;
 		if (!getBoolParam('video_fullcolor', false)) return;
-		console.warn(`[Selkies] full colour (4:4:4) is off: this browser decodes ${codec} 4:2:0 only over WebRTC.`);
+		console.warn(`[Selkies] full color (4:4:4) is off: this browser decodes ${codec} 4:2:0 only over WebRTC.`);
 		setBoolParam('video_fullcolor', false);
 	}
 
@@ -1045,11 +1045,11 @@ export default function webrtc() {
 		return codec === 'vp9' ? receiverTakesVp9FullColor() : await canDecodeFullColor(codec);
 	}
 
-	/** Whether the server holds full colour: a locked `video_fullcolor`. */
+	/** Whether the server holds full color: a locked `video_fullcolor`. */
 	let fullColorLocked = false;
 
 	/**
-	 * Turns a full colour the server announced off again where this engine
+	 * Turns a full color the server announced off again where this engine
 	 * cannot decode the codec's 4:4:4 over WebRTC, so the stream comes back
 	 * 4:2:0 on the same codec instead of arriving as one this browser paints
 	 * nothing of. A locked setting cannot be turned off and is reported once.
@@ -1063,7 +1063,7 @@ export default function webrtc() {
 			console.error(`This session streams ${codec} 4:4:4, which this browser cannot decode over WebRTC.`);
 			return;
 		}
-		console.warn(`[Selkies] full colour (4:4:4) is off: this browser decodes ${codec} 4:2:0 only over WebRTC.`);
+		console.warn(`[Selkies] full color (4:4:4) is off: this browser decodes ${codec} 4:2:0 only over WebRTC.`);
 		window.video_fullcolor = false;
 		setBoolParam('video_fullcolor', false);
 		handleSettingsMessage({ video_fullcolor: false }, false);
@@ -1084,7 +1084,7 @@ export default function webrtc() {
 	 */
 	/**
 	 * This page's remote pixels per CSS pixel: its decoded buffer over the box
-	 * drawing it, the ratio a neighbour scales a cross-display drag by
+	 * drawing it, the ratio a neighbor scales a cross-display drag by
 	 * (lib/stream-density.js). The requested density stands in until the
 	 * realized buffer catches up with it.
 	 */
@@ -3088,7 +3088,7 @@ export default function webrtc() {
 						applyManualStyle(manualWidth, manualHeight, scaleLocal);
 					}
 				} else {
-					webrtc._setStatus('Server sent acknowledgement for ' + action);
+					webrtc._setStatus('Server sent acknowledgment for ' + action);
 				}
 			}
 

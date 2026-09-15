@@ -52,13 +52,13 @@ async def wait_for_app_ready(ready_file: str, app_wait_ready: bool = False) -> N
 
 def _install_shutdown_signal_handlers() -> None:
     """Make a service-manager stop (systemd, `docker stop`, `kill`) unwind the same
-    way Ctrl-C does: cancelling the main task raises CancelledError through the
+    way Ctrl-C does: canceling the main task raises CancelledError through the
     server loop, so the streaming service is stopped, the unix socket is removed and
     the disconnect hooks run. Without this SIGTERM is fatal by default, and as
     container PID 1 it is ignored outright until SIGKILL.
 
     The first signal wins: later ones are absorbed while the teardown runs, since
-    cancelling the main task again would raise CancelledError at an await inside
+    canceling the main task again would raise CancelledError at an await inside
     the cleanup path and leave the rest of it (listener shutdown, unix-socket
     removal) undone. The handlers stay installed so an impatient orchestrator's
     repeat SIGTERM cannot fall through to the default fatal disposition either.
@@ -89,7 +89,7 @@ def _install_shutdown_signal_handlers() -> None:
 
 
 async def run() -> None:
-    """Build the stream server, register its services, and run until cancelled.
+    """Build the stream server, register its services, and run until canceled.
 
     Publishes the resolved gamepad and webcam socket directories to the
     environment first, so the LD_PRELOAD interposers in app processes (which

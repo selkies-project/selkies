@@ -58,7 +58,7 @@ def build() -> None:
 
 
 # Camera content is authored in YCbCr, which is what the device carries and what
-# the samples below are checked against; a JPEG round trip leaves a flat colour
+# the samples below are checked against; a JPEG round trip leaves a flat color
 # where it started, so the published pixels and the device's are the same ones.
 GREEN = (150, 44, 21)
 BLACK = (16, 128, 128)
@@ -83,8 +83,8 @@ def encode(im: "Image.Image") -> bytes:
     return buf.getvalue()
 
 
-def flat_frames(colour=GREEN, width: int = 640, height: int = 480):
-    return [encode(Image.new("YCbCr", (width, height), colour))]
+def flat_frames(color=GREEN, width: int = 640, height: int = 480):
+    return [encode(Image.new("YCbCr", (width, height), color))]
 
 
 def split_frames(width: int = 640, height: int = 480):
@@ -230,13 +230,13 @@ def start_reader() -> subprocess.Popen:
 
 
 # The picture reaches the device through whichever codec the engine chose, so a
-# flat colour arrives a few steps off and how many depends on that choice. The
-# colours checked against each other are tens of steps apart, so a tolerance
+# flat color arrives a few steps off and how many depends on that choice. The
+# colors checked against each other are tens of steps apart, so a tolerance
 # wide enough for any of those round trips still tells them apart.
-COLOUR_TOL = 20
+COLOR_TOL = 20
 
 
-def near(got, want, tol=COLOUR_TOL) -> bool:
+def near(got, want, tol=COLOR_TOL) -> bool:
     return got is not None and all(abs(g - w) <= tol for g, w in zip(got, want))
 
 
@@ -253,7 +253,7 @@ def wait_for_picture(wants, frames: int = 30, timeout: float = 30) -> dict:
     while time.time() < deadline:
         r = probe(5, timeout_ms=3000, samples=samples)
         # Every sample, not just one: a frame caught mid-transition is a single
-        # flat colour, which one sample on its own cannot tell from the picture.
+        # flat color, which one sample on its own cannot tell from the picture.
         if r.get("rc") == 0 and all(near(r["samples"].get(point), want) for point, want in wants):
             break
         time.sleep(0.5)
@@ -342,8 +342,8 @@ def launch(p, engine: str, cam_sock: str, mode: str, init_js: Optional[str] = No
     return browser, page, errors
 
 
-def jpeg_centre(path: str):
-    """(size, centre RGB, RGB at x=20 on the centre row) of a dumped JPEG, or None."""
+def jpeg_center(path: str):
+    """(size, center RGB, RGB at x=20 on the center row) of a dumped JPEG, or None."""
     try:
         from PIL import Image
         img = Image.open(path).convert("RGB")
@@ -382,7 +382,7 @@ def nowebcodecs_block() -> "H.Results":
             res.check("device follows the JPEG uplink: MJPEG at 1280x720",
                       (r.get("format"), r.get("width"), r.get("height")) == ("MJPG", "1280", "720"), f"{r.get('format')} {r.get('width')}x{r.get('height')}")
             res.check("frames flow at camera rate", float(r.get("fps", "0") or 0) >= 12, r.get("fps"))
-            px = jpeg_centre(dump)
+            px = jpeg_center(dump)
             res.check("device frame is a 1280x720 JPEG of the green camera, pillarboxed",
                       px is not None and px[0] == (1280, 720) and px[1][1] > 200 and px[1][0] < 60 and px[1][2] < 60
                       and max(px[2]) < 40, str(px))
@@ -435,9 +435,9 @@ def transport_block(mode: str) -> "H.Results":
                 res.check(f"{engine}: frames flow at the camera's rate",
                           float(r.get("fps", "0")) >= CAMERA_FPS * RATE_FLOOR,
                           f"{r.get('fps')} of {CAMERA_FPS}")
-                # The 4:3 picture sits pillarboxed in the 16:9 device: centre green,
+                # The 4:3 picture sits pillarboxed in the 16:9 device: center green,
                 # the bar at x=20 black.
-                res.check(f"{engine}: centre is the camera's green",
+                res.check(f"{engine}: center is the camera's green",
                           near(r["samples"].get((640, 360)), GREEN), str(r["samples"]))
                 res.check(f"{engine}: pillarbox is black",
                           near(r["samples"].get((20, 20)), (16, 128, 128)), str(r["samples"]))
@@ -542,7 +542,7 @@ def fullcolor_block() -> "H.Results":
             r = wait_for_picture([((640, 360), GREEN), ((20, 20), BLACK)])
             res.check("30 frames reach /dev/video0", r.get("rc") == 0 and r.get("frames") == "30",
                       f"rc={r.get('rc')} frames={r.get('frames')} err={r.get('error', '')}")
-            res.check("centre is the camera's green", near(r["samples"].get((640, 360)), GREEN), str(r["samples"]))
+            res.check("center is the camera's green", near(r["samples"].get((640, 360)), GREEN), str(r["samples"]))
             toggle(page, False)
             res.check("webcam reports inactive", wait_status(page, False), str(page.evaluate("window.__camStatus")))
             res.check("the camera's transceiver is stopped", page.evaluate(STOP_WEBCAM_SENDER_JS) == "stopped")
@@ -589,7 +589,7 @@ def av1_block() -> "H.Results":
                       f"rc={r.get('rc')} frames={r.get('frames')} err={r.get('error', '')}")
             res.check("frames flow at the camera's rate",
                       float(r.get("fps", "0")) >= CAMERA_FPS * RATE_FLOOR, f"{r.get('fps')} of {CAMERA_FPS}")
-            res.check("centre is the camera's green", near(r["samples"].get((640, 360)), GREEN), str(r["samples"]))
+            res.check("center is the camera's green", near(r["samples"].get((640, 360)), GREEN), str(r["samples"]))
             res.check("pillarbox is black", near(r["samples"].get((20, 20)), (16, 128, 128)), str(r["samples"]))
             toggle(page, False)
             res.check("webcam reports inactive", wait_status(page, False), str(page.evaluate("window.__camStatus")))

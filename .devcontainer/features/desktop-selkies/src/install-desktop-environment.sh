@@ -20,7 +20,7 @@ apt-get clean && sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-
 
 # LXQt's system defaults, which the distribution packages do not ship: without
 # them a session has no theme, so lxqt-panel finds no stylesheet, keeps the
-# invalid colours it writes as its own default, and paints nothing at all — a
+# invalid colors it writes as its own default, and paints nothing at all — a
 # panel that runs and maps a window but is invisible against the desktop. The
 # icon theme goes with it, since LXQt otherwise falls back to Oxygen, which is
 # not installed here. This is the system scope, so a user's own
@@ -38,7 +38,7 @@ printf '[General]\nicon_theme=%s\ntheme=%s\n' "${icon_theme}" "${theme}" \
     | sudo tee /etc/xdg/lxqt/lxqt.conf > /dev/null
 # pcmanfm-qt gets its desktop background the same way, for the same reason: its
 # own default is #000000 with no wallpaper, which reads as a broken session
-# rather than a plain one. A flat colour rather than one of the shipped
+# rather than a plain one. A flat color rather than one of the shipped
 # wallpapers, because every full refresh re-encodes whatever the desktop shows
 # and a photograph costs far more of the stream than a single tone.
 printf '[Desktop]\nWallpaperMode=color\nBgColor=#2e3436\nFgColor=#ffffff\n' \

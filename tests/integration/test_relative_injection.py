@@ -14,7 +14,7 @@ edge stops at the edge and unwinds from there rather than from where the deltas
 would have carried it, and the absolute move after it lands where it says,
 whatever the tracked position made of the drag.
 A game asks for more than the deltas: it locks the pointer, and a lock the
-compositor confirms but does not honour leaves the pointer moving under the
+compositor confirms but does not honor leaves the pointer moving under the
 holder, which reads every move a second time off the absolute motion it is
 still sent. The Wayland lock block pins both halves of that.
 """

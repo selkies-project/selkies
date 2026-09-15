@@ -48,7 +48,7 @@ MOVES = ((12, 7), (-5, 9), (80, -30), (3, 0), (0, -4))
 ESCAPE_HOLD = 3.0
 # The display beside the locked one: a headless page is the whole of it here,
 # since the lock and the wire are what the two-display block reads.
-NEIGHBOUR_CSS = (1280, 720)
+NEIGHBOR_CSS = (1280, 720)
 # How far past the seam the travel lands the remote pointer, and the step it
 # travels in.
 OVER = 320
@@ -254,7 +254,7 @@ def wait_layout(page: Any, timeout: float) -> dict:
     return layout
 
 
-def neighbour_page(p: Any) -> tuple:
+def neighbor_page(p: Any) -> tuple:
     """A headless page for the display beside the locked one, so the session
     lays out two of them and the framebuffer spans both."""
     kwargs: dict = {"headless": True, "args": C.BROWSER_ARGS}
@@ -262,7 +262,7 @@ def neighbour_page(p: Any) -> tuple:
         kwargs["executable_path"] = C.CHROME_PATH
     browser = p.chromium.launch(**kwargs)
     ctx = browser.new_context(
-        viewport={"width": NEIGHBOUR_CSS[0], "height": NEIGHBOUR_CSS[1]},
+        viewport={"width": NEIGHBOR_CSS[0], "height": NEIGHBOR_CSS[1]},
         device_scale_factor=1)
     ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
     page = ctx.new_page()
@@ -272,7 +272,7 @@ def neighbour_page(p: Any) -> tuple:
 
 def crossed(res: "H.Results", p: Any, desk: Desk, page: Any, wayland: bool,
             tag: str) -> None:
-    """Gaming mode on the primary, and the remote pointer walked onto the neighbour.
+    """Gaming mode on the primary, and the remote pointer walked onto the neighbor.
 
     One lock covers the whole desktop with nothing written for it: a locked
     page has only deltas to send and sends them wherever they land, the server
@@ -285,9 +285,9 @@ def crossed(res: "H.Results", p: Any, desk: Desk, page: Any, wayland: bool,
     deltas. The crossing itself is read from the X pointer; on the Wayland
     backend, which has none to read, the seam is test_wayland_seam's.
     """
-    browser, dpage = neighbour_page(p)
+    browser, dpage = neighbor_page(p)
     try:
-        res.check(f"{tag}: the neighbour's video flows",
+        res.check(f"{tag}: the neighbor's video flows",
                   bool(C.wait_ws_video(dpage, timeout=30)), "")
         if not enter_gaming_mode(res, desk, page, tag):
             return
@@ -301,7 +301,7 @@ def crossed(res: "H.Results", p: Any, desk: Desk, page: Any, wayland: bool,
         seam = layout["ownW"]
         rect = next((r for r in rects if r["x"] == seam), None)
         if rect is None:
-            res.check(f"{tag}: the neighbour is laid out at the seam", False, layout)
+            res.check(f"{tag}: the neighbor is laid out at the seam", False, layout)
             return
 
         start = None if wayland else C.x11_mouse_pos()
@@ -326,16 +326,16 @@ def crossed(res: "H.Results", p: Any, desk: Desk, page: Any, wayland: bool,
                   f"{len(wire)}/{len(moves)} deltas summing {sum(d[0] for d in wire)} "
                   f"of {travel}, positions {positions[:2]}")
         mode = page.evaluate(MODE_JS)
-        res.check(f"{tag}: the lock holds with the pointer on the neighbour",
+        res.check(f"{tag}: the lock holds with the pointer on the neighbor",
                   mode["fullscreen"] and mode["locked"] and mode["gaming"], mode)
         if start is None:
             return
         pos = C.x11_mouse_pos()
-        res.check(f"{tag}: the deltas carry the remote pointer onto the neighbour",
+        res.check(f"{tag}: the deltas carry the remote pointer onto the neighbor",
                   rect["x"] <= pos[0] < rect["x"] + rect["w"],
-                  f"{start} -> {pos}, neighbour at {rect['x']} wide {rect['w']}")
+                  f"{start} -> {pos}, neighbor at {rect['x']} wide {rect['w']}")
         # A hand's worth of movement once it is there: relative input on the
-        # neighbour is the other half of what the lock is holding. What the
+        # neighbor is the other half of what the lock is holding. What the
         # pointer owes is the wire, injected verbatim, whatever the page's
         # scale made of the hand's own distance.
         mark = len(page.evaluate(PL.MOVES_JS))

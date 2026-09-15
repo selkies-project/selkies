@@ -606,7 +606,7 @@ async def main() -> bool:
     """Run every pacer/regime cell and require media in each.
 
     The oscillating cells are run more than once. Under an oscillating link the
-    pacer settles into one of two behaviours from run to run on identical code
+    pacer settles into one of two behaviors from run to run on identical code
     -- passing video through with few GOP resets and letting audio gap, or
     purging hard and protecting audio at the cost of later video -- and a single
     sample of that reads as a solid number while being neither. Repeats make the
@@ -652,7 +652,7 @@ async def main() -> bool:
             gaps = sorted(r["audio_gaps_over_60ms"] for r in runs)
             resets = sorted(r["server_resets"] for r in runs)
             # Which side of the trade each run landed on, so a spread that comes
-            # from the pacer switching behaviour is not read as measurement noise.
+            # from the pacer switching behavior is not read as measurement noise.
             purging = sum(1 for r in runs if r["server_resets"] > 60)
             print(f"RESULT {cell} pacer={pacer_on}: n={len(runs)} "
                   f"one-way video p50 {lat[0]:.0f}-{lat[-1]:.0f} ms, "

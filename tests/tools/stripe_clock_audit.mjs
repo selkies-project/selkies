@@ -130,7 +130,7 @@ function frame(f, id, offsets) {
 
 {
     // A backlogged socket never goes quiet, so the caller keeps its frame-id
-    // boundary behaviour instead of presenting torn frames.
+    // boundary behavior instead of presenting torn frames.
     const f = fake();
     for (let id = 1; id < 40; id++) frame(f, id, [1, 1, 1, 1]);
     check('a saturated socket never settles', !f.clock.settled(),

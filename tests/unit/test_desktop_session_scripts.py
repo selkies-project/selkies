@@ -2,7 +2,7 @@
 """The shell the repository ships stays parseable and lint-clean.
 
 These scripts run only inside the container against a live compositor and X
-server, so CI cannot exercise their behaviour. It can still guard the failure
+server, so CI cannot exercise their behavior. It can still guard the failure
 that reaches a user as a session that will not paint — or, for the Dockerfile,
 as a build that dies minutes in: a quoting or syntax slip. Every service script
 is parsed with `bash -n`, so is the shell inside each Dockerfile `RUN`, and —

@@ -881,7 +881,7 @@ FILE_INDEX_HEADER: str = """<!DOCTYPE html>
             width: 100px;
         }
         /* Masked rather than painted, so one glyph follows the theme's text
-           colour instead of needing a copy per palette. */
+           color instead of needing a copy per palette. */
         td a::before {
             display: inline-block;
             content: '';
@@ -2008,14 +2008,14 @@ class CentralizedStreamServer:
                 await asyncio.wait_for(self.active_task, timeout=15)
             except asyncio.TimeoutError:
                 logger.warning(
-                    f"Timeout while stopping '{self.current_mode}'. Cancelling task."
+                    f"Timeout while stopping '{self.current_mode}'. Canceling task."
                 )
                 self.active_task.cancel()
                 try:
                     await self.active_task
                 except asyncio.CancelledError:
                     logger.info(
-                        f"Task cancelled after timeout for '{self.current_mode}'."
+                        f"Task canceled after timeout for '{self.current_mode}'."
                     )
                 except Exception as e:
                     logger.warning(f"Service task raised during forced stop: {e!r}")
@@ -3041,7 +3041,7 @@ class CentralizedStreamServer:
             logger.info("Server cleanup complete.")
 
     async def run(self) -> None:
-        """Start the server and serve until cancelled, then clean up."""
+        """Start the server and serve until canceled, then clean up."""
         try:
             await self.start_server()
             await asyncio.Future()

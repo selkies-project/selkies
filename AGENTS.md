@@ -14,7 +14,9 @@ it. Put rationale in the docblock of the function or module it explains, and pre
 helper over a comment. An inline comment is for the line that stays surprising after that — a workaround for a
 specific bug, an ordering or value that looks wrong but is required — and says why the line is that way, not what
 it does. Comments are terse and current: no PR summaries, no issue or task numbers, no narration of what the code
-used to do. The prose under `docs/` follows the same rule: it describes what the tree does now, not what an
+used to do. Everything is written in American English -- color, behavior, center, initialize, canceled -- except a
+name something upstream owns, such as GitHub Actions' `cancelled()`, a Wayland `Cancelled` event, Python's
+`CancelledError`, the Web Audio `AnalyserNode` or an NVENC `colourMatrix` field. The prose under `docs/` follows the same rule: it describes what the tree does now, not what an
 earlier revision did or what a change replaced.
 
 Every language follows one shape: a Google-style docblock on the module, on every class, and on every function
@@ -81,12 +83,12 @@ host.
 
 A change is ready when four questions have answers, and the commit or pull request gives them to the reviewer:
 
-1. Was the defect, or the missing behaviour, reproduced on the code before the change? A failing check or a
+1. Was the defect, or the missing behavior, reproduced on the code before the change? A failing check or a
    measurement on the old tree is that answer; an argument from the source is not.
 2. Is it gone, or present, on the exact code being committed, through the path a user takes? A test that reaches the
    result only through a switch a user would never flip (a developer toggle, a debug key, a knob of the rig) has
    confirmed nothing.
-3. Can the change affect behaviour it was not aimed at, and what was run to know? Name the suites and measurements
+3. Can the change affect behavior it was not aimed at, and what was run to know? Name the suites and measurements
    that ran and the paths they did not cover.
 4. Is the change stripped to what makes it work? Every line the first two answers do not need is noise the maintainers
    have to sift; drop it, or say why it stays.
@@ -149,11 +151,11 @@ Each is documented in full where named; read that before changing the subsystem.
   window publishes exactly such boxes (`Input._noteScreenAnchor`, `Input._mapToLayout`).
 - A client asks the server only for what its own decoder will take, measured rather than assumed: engines
   differ on H.264 4:4:4 and change with every release, and one whose decoder lacks the profile shows no picture
-  at all rather than a worse one (`util.canDecodeFullColor`, `canDecodeEncoder`). A full colour the server's
+  at all rather than a worse one (`util.canDecodeFullColor`, `canDecodeEncoder`). A full color the server's
   own unlocked default announces is turned off by such a client the same way, so the stream stays on its
   codec at 4:2:0; a WebRTC client says in its hello which 4:4:4 it decodes (`fullcolor_codecs`), so the
   server settles that before the first offer (`RTCApp._settle_fullcolor`) and never switches the profile
-  under a decoder mid-stream; only a locked full colour goes to the refusal ladder (a report over WebRTC). Over
+  under a decoder mid-stream; only a locked full color goes to the refusal ladder (a report over WebRTC). Over
   WebSockets that ladder walks the server's allowed encoders in order, H.264 first when unrestricted,
   through every video codec the engine decodes, and reaches JPEG last (`nextRung` in the core).
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python

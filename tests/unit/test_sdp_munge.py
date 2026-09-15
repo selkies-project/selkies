@@ -2,13 +2,13 @@
 """The offer's codec rewrites reach the display's own video section and no other.
 
 The offer bundles the display's sendonly video with the recvonly webcam
-section the browser encodes. Full colour rewrites the H.264 profile to High
+section the browser encodes. Full color rewrites the H.264 profile to High
 4:4:4 and VP9 to profile 1, and H.264 or H.265 gets `sps-pps-idr-in-keyframe`,
 all of it describing the stream the server sends. A browser handed High 4:4:4
 for the camera it is asked to encode rejects that section and stops its
 sender, so the webcam section has to keep the profiles it offered. Driven
 against a real offer from RTCApp (a loopback peer connection with stubbed
-signalling), then through munge_sdp with each encoder and colour setting.
+signaling), then through munge_sdp with each encoder and color setting.
 """
 import asyncio
 import os
@@ -74,9 +74,9 @@ async def scenario(res: H.Results) -> None:
 
     full = app.munge_sdp(raw, "h264enc", True, False)
     out_display, out_webcam = sections(full, "video", "sendrecv")[0], sections(full, "video", "recvonly")[0]
-    res.check("h264enc full colour: the display's profiles are all High 4:4:4",
+    res.check("h264enc full color: the display's profiles are all High 4:4:4",
               set(profiles(out_display)) == {"f4001f"}, profiles(out_display))
-    res.check("h264enc full colour: the webcam keeps the profiles it offered",
+    res.check("h264enc full color: the webcam keeps the profiles it offered",
               profiles(out_webcam) == profiles(webcam[0]), profiles(out_webcam))
     res.check("h264enc: sps-pps-idr-in-keyframe is asked of the display's stream only",
               "sps-pps-idr-in-keyframe=1" in out_display and "sps-pps-idr-in-keyframe" not in out_webcam)
@@ -90,9 +90,9 @@ async def scenario(res: H.Results) -> None:
 
     vp9 = app.munge_sdp(raw, "vp9enc", True, False)
     out_display, out_webcam = sections(vp9, "video", "sendrecv")[0], sections(vp9, "video", "recvonly")[0]
-    res.check("vp9enc full colour: the display offers profile 1",
+    res.check("vp9enc full color: the display offers profile 1",
               vp9_fmtp(out_display) == ["profile-id=1"], vp9_fmtp(out_display))
-    res.check("vp9enc full colour: the webcam keeps profile 0",
+    res.check("vp9enc full color: the webcam keeps profile 0",
               vp9_fmtp(out_webcam) == ["profile-id=0"], vp9_fmtp(out_webcam))
     res.check("vp9enc: the H.264 profiles are untouched",
               profiles(out_display) == profiles(display[0]), profiles(out_display))

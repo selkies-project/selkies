@@ -1841,7 +1841,7 @@ export class Input {
 
     /**
      * Releases every held key and stops the heartbeat. The armed Windows AltGr
-     * timer is cancelled so it cannot synthesize a Control keydown after the
+     * timer is canceled so it cannot synthesize a Control keydown after the
      * reset, while the page is hidden or detached.
      */
     resetKeyboard() {
@@ -3272,7 +3272,7 @@ export class Input {
             else if (ry < 0) gy = L.ownY + ry * ky;
         }
         // Onto the nearest display's last pixel, not its exclusive edge: a
-        // neighbour shorter than this display leaves a corner belonging to
+        // neighbor shorter than this display leaves a corner belonging to
         // neither, and the edge itself is the first column of that gap.
         let cx = gx, cy = gy;
         bestD = Infinity;
@@ -4515,7 +4515,7 @@ export class Input {
      * browser. A locked keyboard delivers a short Escape to the session, so
      * holding it is what leaves this mode.
      *
-     * A lock requested before the transition would be cancelled by it, so the
+     * A lock requested before the transition would be canceled by it, so the
      * fullscreenchange handler arms both once fullscreen lands, still inside
      * the gesture's transient-activation window. A refused request takes the
      * mode back down with it: left set, the next transition from any source

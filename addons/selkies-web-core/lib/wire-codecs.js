@@ -366,9 +366,9 @@ export const codecStringFor = (codec, keyframe, width, height, fps, is444, chrom
 };
 
 /**
- * The colour space a decoder is told to assume where the bitstream does not
+ * The color space a decoder is told to assume where the bitstream does not
  * settle it: Chromium's VP9 decoder does not read the matrix from the frame
- * header, and VP8 carries no colour signalling beyond a bit that can only say
+ * header, and VP8 carries no color signaling beyond a bit that can only say
  * BT.601. Both are told the matrix the server converted with — BT.709 like
  * every other codec, except on VP8, which is held to the one its bitstream can
  * name because Firefox reads that bit and ignores this hint. The remaining

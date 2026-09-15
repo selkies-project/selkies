@@ -11,7 +11,7 @@ way. So the server renders the row itself: exactly one below the root, none
 at it, and the traversal gates in front stay as they are.
 
 The nginx mount renders the row unconditionally and leaves it to the shared
-footer script, so the script's behaviour is pinned as well, on both of its
+footer script, so the script's behavior is pinned as well, on both of its
 copies through `tests/tools/file_index_footer_audit.mjs`: the root decision
 on every mount shape, a sorted listing keeping its directories navigable,
 and the session token joining a query already there.

@@ -15,7 +15,7 @@ WebRTC the engine's own RTP receiver decides (``RTCRtpReceiver.getCapabilities``
 a codec it takes is negotiated and streamed, one it declines is answered with
 H.264 and the display moves to ``h264enc``, logged by the server.
 
-The picture is a known colour the test paints on the server, sampled from the
+The picture is a known color the test paints on the server, sampled from the
 decoded frame in the page, exactly as ``test_encoders.py`` does.
 
     python3 tests/e2e/test_codecs.py ws-x11|ws-wl|wr-x11 [chromium|firefox|webkit|all]

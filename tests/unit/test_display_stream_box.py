@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Where a page draws its stream on the desktop, relayed to its neighbours.
+"""Where a page draws its stream on the desktop, relayed to its neighbors.
 
 A drag held across two browser windows is placed through the box the page it
 crossed onto published, so a `vp` message from one display has to reach the

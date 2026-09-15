@@ -315,7 +315,7 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     { [ "$(dpkg --print-architecture)" != "amd64" ] || apt-get install --no-install-recommends -y gcc-multilib; } && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/* && \
     # Debian's locale-gen takes no locale arguments and generates only what
-    # /etc/locale.gen has uncommented, which Ubuntu's honours as well
+    # /etc/locale.gen has uncommented, which Ubuntu's honors as well
     sed -i "s/^# *\(${LOCALE} UTF-8\)/\1/" /etc/locale.gen && locale-gen && \
     ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime && echo "${TZ}" > /etc/timezone && \
     # Only use sudo-root for root-owned directory (/dev, /proc, /sys) or user/group permission operations, not for apt-get installation or file/directory operations
@@ -689,13 +689,13 @@ USER 0
 # a uid-0 process gets the LD_PRELOAD wrappers, and an ownership change lands
 # only in fakeroot's database while the chmod goes through to the filesystem —
 # so the committed layer keeps the setuid bit on a file owned by uid 1000,
-# which the kernel refuses to honour.
+# which the kernel refuses to honor.
 SHELL ["/bin/sh", "-c"]
 # Enable sudo through sudo-root with uid 0.
 # `restore` returns the owners and bits recorded when the build released them.
 # The uid-1000 fakeroot layers above install helpers of their own (polkit's
 # agent helper and pkexec, utempter) that no record covers and that really
-# belong to uid 1000, and the kernel honours neither bit on a file it does not
+# belong to uid 1000, and the kernel honors neither bit on a file it does not
 # own, so those are named here. Every image layered on this one releases what
 # it inherits the same way and names the helpers its own packages bring.
 RUN selkies-privileged-files restore && \

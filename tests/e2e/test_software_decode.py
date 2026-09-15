@@ -350,7 +350,7 @@ def block_nowebcodecs(r: "H.Results") -> None:
                 r.check("page never reloaded", navs == 1, navs)
                 opened = TD.classic_open_video(page)
                 # The menu lists every allowed encoder and disables the ones this engine cannot
-                # play, labelling them unsupported, so jpeg is the only selectable option here.
+                # play, labeling them unsupported, so jpeg is the only selectable option here.
                 options = page.evaluate(
                     "Array.from(document.querySelectorAll('#encoderSelect option'))"
                     ".map(o => ({ value: o.value, disabled: o.disabled }))") if opened else []

@@ -267,11 +267,11 @@ export const canPlayEncoder = (encoder, webrtc) => (webrtc ? canReceiveEncoder(e
 const fullColorProbes = {};
 
 /**
- * Whether this engine's `VideoDecoder` will take `codec` at full colour (4:4:4).
+ * Whether this engine's `VideoDecoder` will take `codec` at full color (4:4:4).
  *
  * Engines differ on the 4:4:4 profiles (High 4:4:4 Predictive, HEVC RExt, VP9 profile 1), and
  * one whose decoder lacks them cannot show the stream at all rather than
- * showing it worse, so full colour is asked of the decoder before it is asked
+ * showing it worse, so full color is asked of the decoder before it is asked
  * of the server. Which engines have them changes with their releases, which is
  * why this probes instead of naming them. The profile is the whole question,
  * so it is asked with the constraint bits the encoders emit, at the smallest

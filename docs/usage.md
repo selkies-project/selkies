@@ -42,7 +42,7 @@ Formatted content keeps its formatting. A copy that carries markup travels with 
 
 The side menu's clipboard section carries three switches. **Send to session** and **Receive from session** each turn one direction off for this browser, within whatever `--enable-clipboard` already allows; a direction the server refuses is not offered at all. **Seamless** is what makes the clipboard follow every copy on either side by itself. Turned off, nothing moves automatically and the clipboard box in that same section becomes the deliberate path in both directions, which suits a session whose content should not follow the user out of it by accident. `--clipboard-seamless` sets the starting position for every client and can be locked.
 
-Clipboard behaviour is controlled by the server option `SELKIES_ENABLE_CLIPBOARD`/`--enable-clipboard`, which takes `true` (both directions), `in` (paste into session only), `out` (copy from session only), or `false`, plus `SELKIES_ENABLE_BINARY_CLIPBOARD`/`--enable-binary-clipboard` for the image clipboard. The client settings `clipboard_in_enabled` and `clipboard_out_enabled` are derived from that policy and can be toggled per browser within it.
+Clipboard behavior is controlled by the server option `SELKIES_ENABLE_CLIPBOARD`/`--enable-clipboard`, which takes `true` (both directions), `in` (paste into session only), `out` (copy from session only), or `false`, plus `SELKIES_ENABLE_BINARY_CLIPBOARD`/`--enable-binary-clipboard` for the image clipboard. The client settings `clipboard_in_enabled` and `clipboard_out_enabled` are derived from that policy and can be toggled per browser within it.
 
 ## File Transfers
 

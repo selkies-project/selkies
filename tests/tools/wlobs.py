@@ -27,11 +27,11 @@ DURATION = float(os.environ.get("WLOBS_DURATION", "25"))
 # Which of the compositor's outputs, in announcement order, the observer
 # surface goes fullscreen on.
 OUTPUT = int(os.environ.get("WLOBS_OUTPUT", "0"))
-# Solid ARGB8888 colour (hex, e.g. ff2878dc) painted on the observer surface,
+# Solid ARGB8888 color (hex, e.g. ff2878dc) painted on the observer surface,
 # so a captured frame carries a known picture; unset leaves the surface
 # transparent and the compositor's own background shows through it.
 FILL = int(os.environ.get("WLOBS_FILL", "0"), 16)
-# A second colour the surface alternates with every WLOBS_BLINK_MS, so a
+# A second color the surface alternates with every WLOBS_BLINK_MS, so a
 # damage-driven capture keeps receiving frames from an otherwise static screen.
 FILL2 = int(os.environ.get("WLOBS_FILL2", "0"), 16)
 BLINK_MS = int(os.environ.get("WLOBS_BLINK_MS", "0"))

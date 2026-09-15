@@ -89,7 +89,7 @@ export function resolutionScalingDpi(width, height) {
  * Measured off that box, since a manual resolution or the pixel cap makes the
  * ratio something other than the density. Only while the box is showing the
  * stream the server realized, though: a box still holding the stream from
- * before a resize measures that one's ratio instead, and a neighbouring
+ * before a resize measures that one's ratio instead, and a neighboring
  * display would take the answer for this page's density and stream at it. The
  * density the request was built with stands in until the two agree.
  * @param {{stream: (number[]|null), css: (number[]|null),

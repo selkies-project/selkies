@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The RTP colour-space header extension the video sender declares for every video codec.
+"""The RTP color-space header extension the video sender declares for every video codec.
 
 The wire form is libwebrtc's four-byte one: primaries, transfer and matrix as their ITU-T
 H.273 codes, then the range in the high nibble of the last byte with the chroma siting left
@@ -34,7 +34,7 @@ def test_offered_for_video() -> None:
 
 
 def test_matrix_per_codec() -> None:
-    # Only the two codecs whose bitstream cannot state a colour space are told one, at BT.709
+    # Only the two codecs whose bitstream cannot state a color space are told one, at BT.709
     # primaries and transfer and limited range; the matrix is BT.709 except on VP8, which
     # converts the one its keyframe header can name. The rest declare their own signal, range
     # included, and a receiver that preferred this table to their headers would read the wrong

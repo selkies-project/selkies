@@ -156,9 +156,9 @@ export function Clipboard() {
 	useEffect(() => {
 		const canvas = previewRef.current;
 		if (!canvas || !clipboardImage) return;
-		let cancelled = false;
+		let canceled = false;
 		createImageBitmap(clipboardImage).then(bitmap => {
-			if (cancelled) {
+			if (canceled) {
 				bitmap.close();
 				return;
 			}
@@ -170,7 +170,7 @@ export function Clipboard() {
 			canvas.getContext('2d')?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
 			bitmap.close();
 		}).catch(() => {});
-		return () => { cancelled = true; };
+		return () => { canceled = true; };
 	}, [clipboardImage]);
 
 	const handleImageButtonClick = () => {

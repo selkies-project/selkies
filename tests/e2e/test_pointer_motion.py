@@ -299,12 +299,12 @@ def measure(res, browser: str, dpr: float) -> None:
                     time.sleep(gap)
             settle()
             injected = count * delta
-            travelled = LATEST.get("travelX", 0) - mark.get("travelX", 0)
+            traveled = LATEST.get("travelX", 0) - mark.get("travelX", 0)
             # Tolerance: one event swallowed around the warp, or one percent of
             # sub-pixel carry caught mid-flight; a scale error is tens of percent.
             res.check(f"{label}: a {name} move of {injected} px travels {injected} px",
-                      abs(travelled - injected) <= max(delta, injected // 100),
-                      f"{travelled}")
+                      abs(traveled - injected) <= max(delta, injected // 100),
+                      f"{traveled}")
     finally:
         proc.terminate()
         try:

@@ -35,7 +35,7 @@ on:
 # so deriving the group from it would produce ci.yaml's own group and deadlock
 # every run that calls this one. The literal name keeps standalone runs
 # deduplicated, and the event keeps the nightly browser matrix from being
-# cancelled by a push to the same ref.
+# canceled by a push to the same ref.
 concurrency:
   group: tests-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true

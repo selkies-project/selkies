@@ -135,7 +135,7 @@ class Metrics:
     def unregister(self) -> None:
         """Unregisters all metrics from the global registry and drains CSV writers.
 
-        Not-yet-started CSV futures are cancelled and the executor shut down
+        Not-yet-started CSV futures are canceled and the executor shut down
         with `wait=True` first, so no writer thread is still running (or about
         to take the lock) after teardown; draining the lock alone would leave
         that window open. Every collector built in `__init__` is then released,

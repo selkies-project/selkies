@@ -5,7 +5,7 @@
  */
 
 // The density a display page streams at and the scale it publishes for its
-// neighbours. Both are pure functions of the page's own screen, its settings
+// neighbors. Both are pure functions of the page's own screen, its settings
 // and the box it draws, so they are checked here rather than through two
 // browsers on two densities.
 //

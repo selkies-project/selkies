@@ -601,7 +601,7 @@ class WebRTCService(BaseStreamingService):
         XFixes monitor) and route through the input handler's transport
         callback, capped at its DPI-scaled cursor size. Offers resolve their
         codec and SDP munging per display, so displays can run different
-        encoders and chroma formats and a live full-colour toggle reaches
+        encoders and chroma formats and a live full-color toggle reaches
         every later offer. DPI scaling is wired independently of
         `enable_resize`, which gates only the primary's dynamic resolution
         (in `on_resize_handler`): the websockets transport applies scaling
@@ -2448,15 +2448,15 @@ class WebRTCService(BaseStreamingService):
 
     async def _fullcolor_declined(self, display_id: str) -> bool:
         """A joining WebRTC peer decodes none of the 4:4:4 the display's codec
-        carries: full colour goes off for the display, so the offer describes
-        4:2:0 from its first frame, and every client hears of it; a full colour
+        carries: full color goes off for the display, so the offer describes
+        4:2:0 from its first frame, and every client hears of it; a full color
         the operator holds stays, which leaves that peer without a picture."""
         if not self._fullcolor_for_display(display_id):
             return True
         limit = getattr(self.settings, "video_fullcolor", None)
         if isinstance(limit, (tuple, list)) and len(limit) > 1 and limit[1]:
             return False
-        logger.warning("A WebRTC peer of display %r decodes no 4:4:4 of its codec; full colour is off.",
+        logger.warning("A WebRTC peer of display %r decodes no 4:4:4 of its codec; full color is off.",
                        display_id)
         await self._apply_display_setting(display_id, "video_fullcolor", False)
         if display_id == "primary":
@@ -2862,7 +2862,7 @@ class WebRTCService(BaseStreamingService):
                 if not task.done():
                     task.cancel()
             except Exception:
-                logger.exception("Error cancelling task during shutdown")
+                logger.exception("Error canceling task during shutdown")
 
         async def _await_with_timeout(
             coro: Awaitable[Any], name: str, timeout: float = 3.0
@@ -2876,7 +2876,7 @@ class WebRTCService(BaseStreamingService):
                     f"Timeout while waiting for {name} to stop (after {timeout}s)"
                 )
             except asyncio.CancelledError:
-                logger.info(f"{name} was cancelled during shutdown")
+                logger.info(f"{name} was canceled during shutdown")
             except Exception as e:
                 logger.exception(f"Error while stopping {name}: {e}")
             return None

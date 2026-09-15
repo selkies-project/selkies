@@ -2,7 +2,7 @@
 """The primary WebRTC capture survives a controller tab reload.
 
 A page reload drops and re-adds its peer within a second or two, so the primary
-capture stop is deferred by a reconnect grace and cancelled when a consumer
+capture stop is deferred by a reconnect grace and canceled when a consumer
 reclaims the display — a reconnecting controller reuses the still-warm capture,
 and any viewers keep streaming throughout (websockets _teardown_if_unclaimed
 parity). A secondary display's stop is immediate. Driven against the service's

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full colour is asked for only where the engine can decode it.
+"""Full color is asked for only where the engine can decode it.
 
 `video_fullcolor` makes the H.264 encoders emit 4:4:4, which is High 4:4:4
 Predictive on the wire, and engines differ on whether their decoder has that
@@ -21,7 +21,7 @@ A ``-vp9`` suffix drives the same question for VP9, whose 4:4:4 is profile 1:
 ``ws-chromium-vp9`` asks the WebCodecs decoder, ``wr-chromium-vp9`` the RTP
 receiver's capabilities, which is what the WebRTC client consults.
 
-``ws-default`` and ``wr-default`` hold full colour on through the server's own
+``ws-default`` and ``wr-default`` hold full color on through the server's own
 unlocked default against an engine that refuses it: the client turns it off
 and streams 4:2:0 on the same codec.
 
@@ -39,7 +39,7 @@ import test_software_h264 as TS
 from playwright.sync_api import sync_playwright
 
 ENGINES = ("chromium", "firefox", "webkit")
-# The profile the full-colour encoders emit, at the lowest level, so what the
+# The profile the full-color encoders emit, at the lowest level, so what the
 # probe answers is about the profile and not the size of any one stream.
 FULLCOLOR_CODEC = "avc1.F4001E"
 VP9_FULLCOLOR_CODEC = "vp09.01.10.08.03"
@@ -84,7 +84,7 @@ def probe_decoder(page: Any, codec: str, timeout: float = 20.0) -> Any:
 
 
 def init_script(mode: str, encoder: Optional[str] = None) -> str:
-    """Stores the encoder and full colour before the client's first line runs."""
+    """Stores the encoder and full color before the client's first line runs."""
     return """
 window.__SELKIES_STREAMING_MODE__ = '%s';
 (() => {
@@ -137,7 +137,7 @@ def drive_stalled(res: "H.Results", p: Any, mode: str) -> None:
 
     The client asks its own decoder before it asks the server for anything, so
     an unanswered probe stands between the session and its first message: what
-    must not happen is the session waiting on it. Full colour is dropped as it
+    must not happen is the session waiting on it. Full color is dropped as it
     is for a decoder that refuses outright, since an engine that will not say
     cannot be shown a stream only its 4:4:4 profile could decode.
     """
@@ -156,7 +156,7 @@ def drive_stalled(res: "H.Results", p: Any, mode: str) -> None:
         video = (C.wait_wr_video(page, timeout=60) if mode == "webrtc"
                  else C.wait_ws_video(page, timeout=60))
         res.check("[stalled] and the stream plays", bool(video), video)
-        res.check("[stalled] full colour is dropped, as for a decoder that refuses",
+        res.check("[stalled] full color is dropped, as for a decoder that refuses",
                   page.evaluate(STORED_JS) == "false", page.evaluate(STORED_JS))
     finally:
         C.close_browser(browser)
@@ -164,7 +164,7 @@ def drive_stalled(res: "H.Results", p: Any, mode: str) -> None:
 
 def drive_openh264(res: "H.Results", p: Any, tag: str) -> None:
     """The striped encoder of an OpenH264 build cannot emit 4:4:4, so a locked
-    full colour reaches the client as 4:2:0, which every engine decodes:
+    full color reaches the client as 4:2:0, which every engine decodes:
     nothing is refused, nothing is said, and the stream plays where it is."""
     browser = C.launch_browser(p, "webkit")
     try:
@@ -176,7 +176,7 @@ def drive_openh264(res: "H.Results", p: Any, tag: str) -> None:
         page.goto(PAGE_DECODE_URL, wait_until="load")
         played = bool(C.wait_ws_video(page, timeout=45))
         encoder = page.evaluate(STORED_JS.replace("_video_fullcolor", "_encoder"))
-        res.check(f"[{tag}] OpenH264 streams 4:2:0 under a locked full colour",
+        res.check(f"[{tag}] OpenH264 streams 4:2:0 under a locked full color",
                   "Colorspace: I420" in H.server_log(), H.server_log()[-200:])
         res.check(f"[{tag}] and the stream plays where it is", played and encoder == "h264enc-striped",
                   (played, encoder))
@@ -187,11 +187,11 @@ def drive_openh264(res: "H.Results", p: Any, tag: str) -> None:
 
 
 def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
-    """The server holding full colour on, for an engine that cannot decode it.
+    """The server holding full color on, for an engine that cannot decode it.
 
     A client cannot turn a locked setting off, so it walks the refusal ladder
     instead: the next allowed video encoder whose stream it decodes at the
-    locked full colour, or whose codec carries none, and JPEG only when no
+    locked full color, or whose codec carries none, and JPEG only when no
     video codec is left. What must not happen is the stripe decoders being
     built and refused for as long as the session runs, with nothing on the
     page to say why.
@@ -236,7 +236,7 @@ def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
 
 
 def drive_pinned(res: "H.Results", p: Any) -> None:
-    """Full colour and the encoder both held by the server: nothing the client
+    """Full color and the encoder both held by the server: nothing the client
     may change reaches a stream it can decode, so it says so on the page rather
     than staying black and quiet."""
     browser = C.launch_browser(p, "webkit")
@@ -264,7 +264,7 @@ def drive_pinned(res: "H.Results", p: Any) -> None:
 
 
 def drive_default(res: "H.Results", engine: str, mode: str, p: Any) -> None:
-    """The server's own default holding full colour on, unlocked, for an engine
+    """The server's own default holding full color on, unlocked, for an engine
     whose decoder has no 4:4:4 H.264: the client turns the setting off for
     itself and the stream comes back 4:2:0 on the same codec, not on JPEG and
     not as a stream this browser paints nothing of."""
@@ -283,16 +283,16 @@ def drive_default(res: "H.Results", engine: str, mode: str, p: Any) -> None:
         res.check(f"[{tag}] the stream plays", bool(video), video)
         if mode == "webrtc":
             # The hello named no 4:4:4, so the server settled it before the offer.
-            res.check(f"[{tag}] the server turned full colour off before the offer",
+            res.check(f"[{tag}] the server turned full color off before the offer",
                       C.wait_log("streams 4:2:0", timeout=20), H.server_log()[-300:])
             res.check(f"[{tag}] and the page's toggle shows it off",
                       page.evaluate("() => window.video_fullcolor") is False,
                       page.evaluate("() => window.video_fullcolor"))
         else:
-            res.check(f"[{tag}] the client turned the server's full colour off",
+            res.check(f"[{tag}] the client turned the server's full color off",
                       page.evaluate(STORED_JS) == "false", page.evaluate(STORED_JS))
             res.check(f"[{tag}] and said so once",
-                      len([t for t in said if "full colour (4:4:4) is off" in t]) == 1, said[-3:])
+                      len([t for t in said if "full color (4:4:4) is off" in t]) == 1, said[-3:])
         res.check(f"[{tag}] the server streams 4:2:0 on the same codec",
                   C.wait_log("Colorspace: I420", timeout=20) and "Mode: H264" in H.server_log()[-4000:],
                   H.server_log()[-300:])
@@ -321,12 +321,12 @@ def drive(res: "H.Results", engine: str, mode: str, p: Any, vp9: bool = False) -
 
         video = (C.wait_wr_video(page, timeout=45) if mode == "webrtc"
                  else C.wait_ws_video(page, timeout=45))
-        res.check(f"[{tag}] the stream plays with full colour asked for",
+        res.check(f"[{tag}] the stream plays with full color asked for",
                   bool(video), video)
-        res.check(f"[{tag}] full colour survives exactly where it decodes",
+        res.check(f"[{tag}] full color survives exactly where it decodes",
                   (page.evaluate(STORED_JS) == "true") == decodable,
                   f"stored={page.evaluate(STORED_JS)} decodable={decodable}")
-        said = [w for w in warnings if "full colour (4:4:4) is off" in w]
+        said = [w for w in warnings if "full color (4:4:4) is off" in w]
         res.check(f"[{tag}] turning it off is said once, and only then",
                   (len(said) > 0) == (not decodable), said[:1] or decodable)
         refused = [w for w in warnings if "config not supported" in w]

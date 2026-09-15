@@ -20,7 +20,7 @@ desktop session runs through.
 
 The same seam between screens of different scales: the session lays its
 screens out in its logical space, where a screen at scale 2 is half its mode,
-so its neighbour has to close up to that logical edge, both when the scale
+so its neighbor has to close up to that logical edge, both when the scale
 lands and when the capture arrangement is applied again, and a drag across
 the seam has to put the session's cursor where the host pointer is on either
 screen, at that screen's own scale.
@@ -43,7 +43,7 @@ RUNTIME = os.path.join(H.WORKDIR, "wl-seam")
 #: One display's size; the two screens sit side by side, twice as wide in all.
 DISPLAY = (1920, 1080)
 SPAN = (DISPLAY[0] * 2, DISPLAY[1])
-# The colour the walked window is painted, and how much of a display it has to
+# The color the walked window is painted, and how much of a display it has to
 # cover to count as present there (a 500x400 window is ~10% of one screen).
 WIN_RGB = (240, 20, 20)
 PRESENT = 0.005
@@ -137,7 +137,7 @@ def session(socket: str) -> Tuple[str, str]:
 
 
 class Patch:
-    """A solid-coloured window on the session's X display, placed by this test.
+    """A solid-colored window on the session's X display, placed by this test.
 
     Override-redirect so its position is the test's to state rather than the
     window manager's, and drawn by the X server from the window background, so

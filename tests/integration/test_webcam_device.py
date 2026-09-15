@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The virtual webcam end to end below the transports: encoded frames pushed into
 ``pixelflux.VirtualCamera`` must come out of the V4L2 device an application sees
-through the interposer — right geometry, right pixel format, right colours —
+through the interposer — right geometry, right pixel format, right colors —
 in MMAP and read() mode, for every device format, letterboxed when the camera
 does not match the device, and through ffmpeg where it is installed. Also the
 keyframe handshake: an inter-coded stream without a keyframe asks for one; the
@@ -29,7 +29,7 @@ TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INTERPOSER = os.path.join(ADDON, "selkies_v4l2_interposer.so")
 PROBE = os.path.join(TOOLS, "v4l2probe")
 
-# Limited-range BT.601 of the solid colours the feeder paints (JPEG is full range
+# Limited-range BT.601 of the solid colors the feeder paints (JPEG is full range
 # and the camera compresses it into the range V4L2 consumers assume).
 RED = (81, 90, 240)
 BLUE = (41, 240, 110)
@@ -160,8 +160,8 @@ def near(got, want, tol=6) -> bool:
     return got is not None and all(abs(g - w) <= tol for g, w in zip(got, want))
 
 
-def jpeg_centre(path: str):
-    """(size, centre RGB) of a dumped JPEG frame, or None when it does not decode."""
+def jpeg_center(path: str):
+    """(size, center RGB) of a dumped JPEG frame, or None when it does not decode."""
     try:
         img = Image.open(path).convert("RGB")
         return img.size, img.getpixel((img.width // 2, img.height // 2))
@@ -193,12 +193,12 @@ def main() -> int:
             res.check("mmap: one format, one size, 30 fps interval", r.get("nformats") == "1" and r.get("timeperframe") == "1/30",
                       f"{r.get('nformats')} {r.get('timeperframe')}")
             res.check("mmap: frame rate keeps up", float(r.get("fps", "0")) >= 15, r.get("fps"))
-            res.check("mmap: centre is limited-range red or blue", red_or_blue(r["samples"].get((320, 240))), str(r["samples"]))
-            res.check("mmap: corners carry the same solid colour",
+            res.check("mmap: center is limited-range red or blue", red_or_blue(r["samples"].get((320, 240))), str(r["samples"]))
+            res.check("mmap: corners carry the same solid color",
                       red_or_blue(r["samples"].get((10, 10))) and red_or_blue(r["samples"].get((630, 470))), str(r["samples"]))
             r = probe(sock_dir, 10, mode="read", samples=[(320, 240)])
             res.check("read(): 10 frames delivered", r.get("rc") == 0 and r.get("frames") == "10", str(r))
-            res.check("read(): centre colour", red_or_blue(r["samples"].get((320, 240))), str(r["samples"]))
+            res.check("read(): center color", red_or_blue(r["samples"].get((320, 240))), str(r["samples"]))
             # The second consumer opens its own handle on the same ring.
             t = threading.Thread(target=lambda: probe(sock_dir, 20), daemon=True)
             t.start()
@@ -230,7 +230,7 @@ def main() -> int:
                 res.check("PipeWire source: mmap delivers 15 frames", r.get("rc") == 0 and r.get("frames") == "15", str(r))
                 res.check("PipeWire source: device geometry follows the node",
                           (r.get("format"), r.get("width"), r.get("height")) == ("YU12", "640", "480"), str(r))
-                res.check("PipeWire source: frame colour", red_or_blue(r["samples"].get((320, 240))), str(r["samples"]))
+                res.check("PipeWire source: frame color", red_or_blue(r["samples"].get((320, 240))), str(r["samples"]))
                 r = probe(nowhere, 10, mode="read", samples=[(320, 240)], source="pipewire")
                 res.check("PipeWire source: read() delivers 10 frames", r.get("rc") == 0 and r.get("frames") == "10", str(r))
                 r = probe(nowhere, 5, source="auto")
@@ -272,7 +272,7 @@ def main() -> int:
                 r = probe(sock_dir, 10, samples=[(320, 240)])
                 res.check(f"{fmt}: format/stride/size", (r.get("format"), r.get("bytesperline"), r.get("sizeimage")) == (fourcc, str(bpl), str(size)),
                           f"{r.get('format')} {r.get('bytesperline')} {r.get('sizeimage')}")
-                res.check(f"{fmt}: 10 frames with the right colour", r.get("frames") == "10" and red_or_blue(r["samples"].get((320, 240))),
+                res.check(f"{fmt}: 10 frames with the right color", r.get("frames") == "10" and red_or_blue(r["samples"].get((320, 240))),
                           str(r.get("samples")))
             cam.stop()
 
@@ -284,7 +284,7 @@ def main() -> int:
                       (r.get("format"), r.get("bytesperline"), r.get("sizeimage")) == ("MJPG", "0", str(640 * 480 * 2)),
                       f"{r.get('format')} {r.get('bytesperline')} {r.get('sizeimage')}")
             res.check("MJPEG: 10 JPEG frames", r.get("frames") == "10" and r.get("first_bytes", "").startswith("ffd8"), str(r)[:160])
-            px = jpeg_centre(dump)
+            px = jpeg_center(dump)
             res.check("MJPEG: a frame of the device size passes through as the camera's JPEG",
                       px is not None and px[0] == (640, 480) and (rgb_near(px[1], (255, 0, 0)) or rgb_near(px[1], (0, 0, 255))), str(px))
             st = cam.stats()
@@ -297,7 +297,7 @@ def main() -> int:
         # limited-range samples would land ~20 levels off.
         with Feeder(cam, 320, 240, colors=((250, 250, 250), (5, 5, 5))):
             r = probe(sock_dir, 10, dump=dump)
-            px = jpeg_centre(dump)
+            px = jpeg_center(dump)
             res.check("MJPEG: a camera of another size is re-encoded at the device size, full range",
                       r.get("frames") == "10" and px is not None and px[0] == (640, 480)
                       and (rgb_near(px[1], (250, 250, 250)) or rgb_near(px[1], (5, 5, 5))), str(px))
@@ -323,7 +323,7 @@ def main() -> int:
             r = probe(sock_dir, 10, dump=dump)
             stop_flag.set()
             t.join(2)
-            px = jpeg_centre(dump)
+            px = jpeg_center(dump)
             res.check("MJPEG: an H.264 uplink is decoded and re-encoded as JPEG",
                       r.get("frames") == "10" and r.get("format") == "MJPG" and px is not None and px[0] == (320, 240)
                       and px[1][1] > 150 and px[1][0] < 90 and px[1][2] < 90, f"{r.get('format')} {px}")
@@ -333,7 +333,7 @@ def main() -> int:
         with Feeder(cam, 640, 360):
             r = probe(sock_dir, 10, samples=[(320, 240), (320, 20), (320, 460), (5, 240)])
             s = r["samples"]
-            res.check("letterbox: centre keeps the camera colour", red_or_blue(s.get((320, 240))), str(s))
+            res.check("letterbox: center keeps the camera color", red_or_blue(s.get((320, 240))), str(s))
             res.check("letterbox: top and bottom bars are black", near(s.get((320, 20)), BLACK) and near(s.get((320, 460)), BLACK), str(s))
             res.check("letterbox: left edge is picture (not pillarboxed)", red_or_blue(s.get((5, 240))), str(s))
         cam.stop()
@@ -342,7 +342,7 @@ def main() -> int:
         with Feeder(cam, 240, 320):
             r = probe(sock_dir, 10, samples=[(320, 240), (20, 240), (620, 240)])
             s = r["samples"]
-            res.check("pillarbox: centre keeps the camera colour", red_or_blue(s.get((320, 240))), str(s))
+            res.check("pillarbox: center keeps the camera color", red_or_blue(s.get((320, 240))), str(s))
             res.check("pillarbox: side bars are black", near(s.get((20, 240)), BLACK) and near(s.get((620, 240)), BLACK), str(s))
         cam.stop()
 
@@ -350,7 +350,7 @@ def main() -> int:
                                                ("vp8", "libvpx", pixelflux.VirtualCamera.CODEC_VP8)):
             packets = encode_stream(enc_name, 320, 240, 45)
             if packets is None:
-                res.skip(f"{codec_name}: decoded colour", f"PyAV has no {enc_name} encoder")
+                res.skip(f"{codec_name}: decoded color", f"PyAV has no {enc_name} encoder")
                 continue
             cam = start_camera(sock_dir, 320, 240)
             stop_flag = threading.Event()
@@ -371,7 +371,7 @@ def main() -> int:
             st = cam.stats()
             res.check(f"{codec_name}: 20 frames decoded and delivered", r.get("rc") == 0 and r.get("frames") == "20" and st["decoded"] >= 20,
                       f"frames={r.get('frames')} stats={st}")
-            res.check(f"{codec_name}: decoded colour is the encoded green", near(r["samples"].get((160, 120)), GREEN, 10) and near(r["samples"].get((10, 10)), GREEN, 10),
+            res.check(f"{codec_name}: decoded color is the encoded green", near(r["samples"].get((160, 120)), GREEN, 10) and near(r["samples"].get((10, 10)), GREEN, 10),
                       str(r["samples"]))
             res.check(f"{codec_name}: no decode errors", st["errors"] == 0, str(st))
             cam.stop()

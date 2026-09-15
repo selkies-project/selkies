@@ -286,7 +286,7 @@ def main() -> "H.Results":
         # A churner whose commands stopped landing would spin without changing
         # anything, and every configuration would land for want of an adversary.
         # The floor is well under what the loop manages on two contended cores.
-        res.check("a configuration cancelled by a screen change is retried",
+        res.check("a configuration canceled by a screen change is retried",
                   landed == 12 and len(cycles) >= 4,
                   f"{landed}/12 landed over {len(cycles)} screen changes")
 

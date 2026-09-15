@@ -335,7 +335,7 @@ def classic_layout_check(page, res: "H.Results") -> None:
               spinner: document.querySelectorAll('.files-modal-loading').length,
               opacity: f ? getComputedStyle(f).opacity : null};
     }""")
-    res.check("opening the files modal shows a labelled spinner that the loaded frame clears",
+    res.check("opening the files modal shows a labeled spinner that the loaded frame clears",
               spun["seen"] and bool(spun["label"]) and spun["spinner"] == 0
               and spun["opacity"] == "1", spun)
     page.locator('.files-modal-close').click()
@@ -346,7 +346,7 @@ def classic_layout_check(page, res: "H.Results") -> None:
         time.sleep(0.6)
 
 
-# A 2x2 opaque red PNG: small enough to inline, and the colour is what proves
+# A 2x2 opaque red PNG: small enough to inline, and the color is what proves
 # the preview decoded and drew the picked image rather than merely sizing a box.
 CLIPBOARD_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000002000000020802000000fdd49a73"
@@ -782,7 +782,7 @@ def hidpi_default_block(dashboard: str, dist: str, mode: str = "websockets") -> 
                               "SELKIES_MANUAL_HEIGHT": "800"})
     # The core persists every `useCssScaling` it applies, so the stored value is
     # what the session is running; the built-in default is the opposite, so a
-    # stored "true" can only come from the configuration being honoured.
+    # stored "true" can only come from the configuration being honored.
     applied = """(() => {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i);
@@ -884,7 +884,7 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
     The window is opened from an async continuation, so the click's transient
     activation may be spent by then and the browser refuses it. The page is
     given a `window.open` that refuses every one, which is what a popup blocker
-    does (the headless shell honours a switch for it, a full Chrome in its
+    does (the headless shell honors a switch for it, a full Chrome in its
     new headless mode does not): clearing the arrows on a window that never opened is the button
     appearing to do nothing at all.
     """
@@ -939,7 +939,7 @@ def classic_arrow_theme_check(page, res: "H.Results") -> None:
     """The placement arrows are the theme's filled button in either theme.
 
     The overlay is a sibling of the sidebar, so it only sees the palette it
-    carries the theme class for itself; a stale colour here is the one
+    carries the theme class for itself; a stale color here is the one
     control on the page that never follows the theme.
     """
     probe = """() => {
@@ -959,10 +959,10 @@ def classic_arrow_theme_check(page, res: "H.Results") -> None:
             time.sleep(0.5)
         theme = page.evaluate(
             "document.querySelector('.sidebar').className.includes('theme-light') ? 'light' : 'dark'")
-        colours = page.evaluate(probe)
-        seen[theme] = colours["arrow"]
+        colors = page.evaluate(probe)
+        seen[theme] = colors["arrow"]
         res.check(f"placement arrows use the {theme} theme's button fill",
-                  colours["arrow"] == colours["token"], f"{colours}")
+                  colors["arrow"] == colors["token"], f"{colors}")
     res.check("the arrow fill follows a theme flip",
               len(seen) == 2 and len(set(seen.values())) == 2, f"{seen}")
 
@@ -1028,7 +1028,7 @@ def second_screen_auto_block(dashboard: str, dist: str) -> "H.Results":
 
 def open_wish_settings_tab(page, tab: str) -> bool:
     """Open the Wish Settings panel (the Settings2 icon in the control strip)
-    and switch it to the tab labelled `tab`."""
+    and switch it to the tab labeled `tab`."""
     trig = page.locator('button:has(svg.lucide-settings-2)').first
     if not trig.count():
         return False

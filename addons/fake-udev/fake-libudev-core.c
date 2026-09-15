@@ -35,7 +35,7 @@
  * every other real input device stays visible. An enumeration adds the pads
  * when it has no subsystem filter or matches "input" without excluding it; a
  * monitor delivers them when it has no subsystem filter or one for "input"
- * without a devtype. Filters the pads cannot honour (sysattr, tag,
+ * without a devtype. Filters the pads cannot honor (sysattr, tag,
  * is_initialized) are forwarded and do not restrict them.
  *
  * Each pad is a four-node tree: a usb_device parent (idVendor/idProduct,
@@ -212,7 +212,7 @@ static const char *const fake_udev_lib_dirs[] = {
 };
 
 /* Whether `path` is the file this library was loaded from, compared by
- * inode so a symlink to it is recognised. */
+ * inode so a symlink to it is recognized. */
 static bool fake_udev_is_self(const char *path) {
     Dl_info info;
     struct stat self_st, cand_st;

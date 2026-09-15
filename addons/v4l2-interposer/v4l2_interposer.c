@@ -2034,7 +2034,7 @@ static const char *fourcc_description(uint32_t fourcc) {
 /* The backend fixes every field of the format: raw formats carry their exact
  * stride and frame size, MJPEG its maximum frame size. Raw frames are
  * limited-range BT.601 like a classic webcam; JPEG carries its own
- * full-range sRGB signalling. */
+ * full-range sRGB signaling. */
 static void fill_pix_format(wc_handle_t *h, struct v4l2_pix_format *pix) {
     memset(pix, 0, sizeof(*pix));
     pix->width = h->cfg.width;

@@ -203,7 +203,7 @@ class XkbLink:
             latch_group=0, group_latch=0)
 
     def replaced_keyboard(self, event: Any) -> Optional[Tuple[int, int]]:
-        """Recognise the XkbNewKeyboardNotify a whole-keyboard replacement sends.
+        """Recognize the XkbNewKeyboardNotify a whole-keyboard replacement sends.
 
         The server emits one per device; only the core keyboard's counts, so a
         layout switch is handled once.

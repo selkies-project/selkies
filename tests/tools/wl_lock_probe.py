@@ -4,7 +4,7 @@
 Maps a fullscreen surface, takes a `zwp_locked_pointer_v1` on it once the
 pointer is inside, and prints JSONL for the lock's confirmation, every
 relative-pointer delta and every absolute pointer motion. A compositor that
-honours the lock sends the deltas alone; one that moves the pointer as well
+honors the lock sends the deltas alone; one that moves the pointer as well
 sends absolute motion too, which a toolkit turns into a second delta.
 """
 import json

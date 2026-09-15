@@ -15,9 +15,9 @@ the server connection cannot be made, and says so in one log line.
 
 Safety contract with the ctypes bindings: libpulse keeps raw function pointers
 to per-operation callback trampolines that live exactly as long as the
-awaiting coroutine frame, so cancelling a pending operation (a timeout, a peer
+awaiting coroutine frame, so canceling a pending operation (a timeout, a peer
 teardown) lets the server's late reply jump into freed memory. Every operation
-therefore runs in a task of its own that is never cancelled: a timeout
+therefore runs in a task of its own that is never canceled: a timeout
 abandons the connection instead (libpulse drops the pending operations'
 callbacks on disconnect) and the task is left to finish by itself, and every
 client is closed through `aclose` rather than garbage-collected with its state
@@ -134,7 +134,7 @@ class _PulsectlBackend:
     async def connect(self) -> None:
         """Open the connection; raises when the server cannot be reached.
 
-        The connect runs in its own task: a caller cancelled mid-handshake
+        The connect runs in its own task: a caller canceled mid-handshake
         leaves the task to finish and the client is closed the moment it does,
         so libpulse never holds the state callback of a collected object.
         """
@@ -155,11 +155,11 @@ class _PulsectlBackend:
         self._finalizer.atexit = False
 
     async def call(self, op: Callable[[Any], Awaitable[T]]) -> T:
-        """Run `op(pulse)` in an uncancellable task, bounded by the op timeout.
+        """Run `op(pulse)` in an uncancelable task, bounded by the op timeout.
 
         A timeout abandons the connection: libpulse cancels the pending
         operation's callbacks on disconnect and the task then ends on its own.
-        A cancelled caller leaves the task running; the operation completes
+        A canceled caller leaves the task running; the operation completes
         normally and the client stays usable.
 
         Raises:

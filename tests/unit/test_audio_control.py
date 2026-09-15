@@ -5,7 +5,7 @@ A scripted stand-in for pulsectl_asyncio's PulseAsync plays the server: the
 provisioning operations both transports share (capture sink, capture-source
 resolution, pcmflux routing, SelkiesVirtualMic) are checked for what they ask
 the server to do, and the never-cancel discipline is proven by the stub
-recording whether a pending operation was ever cancelled. The pactl fallback
+recording whether a pending operation was ever canceled. The pactl fallback
 runs against scripted command output. No sound server, no pulsectl.
 """
 import asyncio
@@ -41,7 +41,7 @@ class StubServer:
         self.refuse_connect = False
         self.hang = False
         self.pending: set = set()
-        self.cancelled_ops = 0
+        self.canceled_ops = 0
         self.log: List[str] = []
         self.virtual_source_appears = True
 
@@ -116,7 +116,7 @@ class StubPulse:
             try:
                 await fut
             except asyncio.CancelledError:
-                self.server.cancelled_ops += 1
+                self.server.canceled_ops += 1
                 raise
             finally:
                 self.pending.discard(fut)
@@ -297,12 +297,12 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
     caller.cancel()
     try:
         await caller
-        cancelled_seen = False
+        canceled_seen = False
     except asyncio.CancelledError:
-        cancelled_seen = True
-    res.check("cancel: the caller is cancelled", cancelled_seen, "")
-    res.check("cancel: the pending server operation is NOT cancelled",
-              server.cancelled_ops == 0 and len(client.pending) == 1, (server.cancelled_ops, len(client.pending)))
+        canceled_seen = True
+    res.check("cancel: the caller is canceled", canceled_seen, "")
+    res.check("cancel: the pending server operation is NOT canceled",
+              server.canceled_ops == 0 and len(client.pending) == 1, (server.canceled_ops, len(client.pending)))
     server.release()
     await asyncio.sleep(0.05)
     res.check("cancel: operation finished on its own, client kept",
@@ -316,8 +316,8 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
     elapsed = asyncio.get_running_loop().time() - started
     res.check("timeout: a hung server answers with the default after op_timeout",
               got == [] and 0.25 <= elapsed < 2.0, elapsed)
-    res.check("timeout: the connection was abandoned (closed), op never cancelled",
-              client.closed and server.cancelled_ops == 0, (client.closed, server.cancelled_ops))
+    res.check("timeout: the connection was abandoned (closed), op never canceled",
+              client.closed and server.canceled_ops == 0, (client.closed, server.canceled_ops))
     await asyncio.sleep(0.05)
     res.check("timeout: the abandoned operation ended through the disconnect",
               not client.pending, len(client.pending))
@@ -336,8 +336,8 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
     server.release()
     await closer
     await op
-    res.check("aclose: closes once it finished, op never cancelled",
-              live.closed and server.cancelled_ops == 0 and op.result() is not None, "")
+    res.check("aclose: closes once it finished, op never canceled",
+              live.closed and server.canceled_ops == 0 and op.result() is not None, "")
     res.check("cancel/timeout: no errors logged by the control", not log.lines(logging.ERROR),
               log.lines(logging.ERROR))
 

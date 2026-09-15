@@ -7,7 +7,7 @@ or through Zink, and whether Zink could present into a window. The measuring
 itself runs in helper processes against real drivers; what is pinned here is
 the reading of their answers, which is where a wrong fact would come from: a
 software renderer mistaken for a vendor's, a vendor listed twice, a Zink that
-initialises but cannot present reported as a working path.
+initializes but cannot present reported as a working path.
 """
 import contextlib
 import json
@@ -109,7 +109,7 @@ res.check("the window probes run on a server drawing on the node the renderer ca
           DISPLAYS[-1] == NODE, DISPLAYS)
 res.check("the vendor whose EGL renders on the node is the GL vendor",
           got["SELKIES_GPU_GL_VENDOR"] == "nvidia", got)
-res.check("a vendor that cannot initialise on X leaves EGL there to the next one",
+res.check("a vendor that cannot initialize on X leaves EGL there to the next one",
           got["SELKIES_GPU_EGL_X11"] == "mesa", got)
 res.check("Mesa answering with Zink and the driver giving a window a swapchain is the Zink path",
           got["SELKIES_GPU_MESA_DRIVER"] == "zink" and got["SELKIES_GPU_VULKAN_PRESENTS"] == "true", got)
@@ -122,9 +122,9 @@ renderer, window, _ = probes(
      "/icd/50_mesa.json": ("llvmpipe", True),
      ("/icd/50_mesa.json", "zink"): ("zink Vulkan 1.4(Tesla P100 (NVIDIA_PROPRIETARY))", True)})
 got = GP.client_facts(FOUND, renderer, window, display, vulkan(False), VENDORS)
-res.check("a Zink that initialises while the driver refuses a swapchain is reported as exactly that, whatever Zink's swap said",
+res.check("a Zink that initializes while the driver refuses a swapchain is reported as exactly that, whatever Zink's swap said",
           got["SELKIES_GPU_MESA_DRIVER"] == "zink" and got["SELKIES_GPU_VULKAN_PRESENTS"] == "false", got)
-res.check("a vendor whose EGL initialises on X is EGL's vendor there", got["SELKIES_GPU_EGL_X11"] == "nvidia", got)
+res.check("a vendor whose EGL initializes on X is EGL's vendor there", got["SELKIES_GPU_EGL_X11"] == "nvidia", got)
 
 renderer, window, _ = probes(
     {"/icd/10_nvidia.json": "", "/icd/50_mesa.json": "AMD Radeon RX 7900 XTX (radeonsi)"},

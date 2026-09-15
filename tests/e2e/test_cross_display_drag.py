@@ -568,7 +568,7 @@ def drive(res: "H.Results", mode: str, wayland: bool) -> None:
                 clamped = moved_to(page, edge + 3000, 400, wayland)
                 res.check("far overshoot clamps at the union's edge",
                           abs(clamped[0] - (union_r - 1)) <= 1, f"{clamped} union={union_r}")
-                # A neighbour shorter than this display leaves a corner that
+                # A neighbor shorter than this display leaves a corner that
                 # belongs to neither, and the desktop has no pixel there: the
                 # crossing lands on the last pixel of a display, whichever.
                 low = moved_to(page, 2000, 1000, wayland)
