@@ -323,7 +323,7 @@ external_turn_configured() {
 }
 
 export SELKIES_ENABLE_INTERNAL_TURN="false"
-if [ "${SELKIES_MODE}" = "webrtc" ] || is_true "${SELKIES_ENABLE_DUAL_MODE-false}"; then
+if [ "${SELKIES_MODE}" = "webrtc" ] || is_true "${SELKIES_ENABLE_DUAL_MODE-true}"; then
   if ! external_turn_configured; then
     export SELKIES_ENABLE_INTERNAL_TURN="true"
     TURN_RANDOM_PASSWORD="$(tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 24)"
