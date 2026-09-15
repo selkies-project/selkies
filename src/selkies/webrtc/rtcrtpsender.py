@@ -115,11 +115,31 @@ RTP_COLOR_SPACE = {
 
 class RTCEncodedFrame:
     def __init__(self, payloads: list[bytes], timestamp: int, audio_level: int,
-                 keyframe: bool = False):
+                 keyframe: bool = False, timing: Optional[tuple] = None):
         self.payloads = payloads
         self.timestamp = timestamp
         self.audio_level = audio_level
         self.keyframe = keyframe
+        self.timing = timing
+
+
+def video_timing_legs(timing: Optional[tuple], now_ns: int, arrival_delta_ms: int) -> tuple:
+    """The video-timing extension of a frame packetized at `now_ns`
+    (CLOCK_MONOTONIC): the flags byte, timer-triggered, then six millisecond
+    legs from the capture. With `timing` as the capture library stamped it
+    (capture, encode start, encode end, in the same clock) the encode legs
+    are real and the packetization leg is the frame's whole age; without it,
+    the encode legs are unknown (0) and the packetization leg is the frame's
+    time in the sender, `arrival_delta_ms`. Pacer exit repeats packetization,
+    since the stamp is taken ahead of the pacer, and the two network legs
+    stay 0, as a sender that is not a middlebox leaves them.
+    """
+    if not timing or timing[0] <= 0:
+        return (0x01, 0, 0, arrival_delta_ms, arrival_delta_ms, 0, 0)
+    capture_ns, encode_start_ns, encode_end_ns = timing
+    leg = lambda instant_ns: min(0xFFFF, max(0, (instant_ns - capture_ns) // 1_000_000))
+    packetized = leg(now_ns)
+    return (0x01, leg(encode_start_ns), leg(encode_end_ns), packetized, packetized, 0, 0)
 
 
 class RTCRtpSender(AsyncIOEventEmitter):
@@ -440,7 +460,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if not payloads:
             return None
 
-        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe)
+        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe, getattr(data, "timing", None))
 
     async def _retransmit(self, sequence_number: int) -> None:
         """
@@ -546,23 +566,17 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     color_space = RTP_COLOR_SPACE.get(codec.mimeType.lower())
                     if enc_frame.keyframe and color_space is not None:
                         packet.extensions.color_space = color_space
-                    # video-timing rides the LAST packet of a frame. The encode legs
-                    # happen in the capture library and aren't visible here (0 =
-                    # unknown). packetization-complete is real; pacer-exit repeats it
-                    # because the stamp is taken before the packet reaches the pacer,
-                    # so any pacing delay is not reflected.
+                    # video-timing rides the LAST packet of a frame, about five
+                    # times a second like libwebrtc's timer-triggered frames.
                     if (
                         packet.marker
                         and self.__kind == "video"
                         and frame_time - last_video_timing >= 0.2
                     ):
                         last_video_timing = frame_time
-                        delta_ms = min(0xFFFF, max(0, int((time.time() - frame_time) * 1000)))
-                        packet.extensions.video_timing = (
-                            # flags: triggered by timer
-                            0x01,
-                            0, 0, delta_ms, delta_ms, 0, 0,
-                        )
+                        arrival_ms = min(0xFFFF, max(0, int((time.time() - frame_time) * 1000)))
+                        packet.extensions.video_timing = video_timing_legs(
+                            enc_frame.timing, time.monotonic_ns(), arrival_ms)
                     # send packet
                     self.__log_debug("> %s", packet)
                     self.__rtp_history.add(packet, frame_time)

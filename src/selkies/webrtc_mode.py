@@ -1987,8 +1987,8 @@ class WebRTCService(BaseStreamingService):
                 # The native-cursor toggle is global across displays.
                 pipeline.capture_cursor = self.media_pipeline.capture_cursor
                 pipeline.produce_data = (
-                    lambda buf, pts, kind, keyframe=True, _did=did:
-                        self.rtc_app.consume_data(buf, pts, kind, keyframe, _did)
+                    lambda buf, pts, kind, keyframe=True, timing=None, _did=did:
+                        self.rtc_app.consume_data(buf, pts, kind, keyframe, _did, timing)
                 )
                 # pixelflux's cursor-callback slot is process-global (last registration
                 # wins), so every display must route cursors into the same sink.

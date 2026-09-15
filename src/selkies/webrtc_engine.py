@@ -1183,7 +1183,8 @@ class RTCApp:
         return "\r\n".join(out)
 
     def consume_data(self, buf: Any, pts: Optional[int], kind: str,
-                     keyframe: bool = True, display_id: str = "primary") -> None:
+                     keyframe: bool = True, display_id: str = "primary",
+                     timing: Optional[tuple] = None) -> None:
         """Feed one encoded frame from the capture side into a display's bridge.
 
         Synchronous: scheduled via `loop.call_soon_threadsafe` from the capture
@@ -1199,6 +1200,8 @@ class RTCApp:
             keyframe: Whether the sample decodes on its own; a video delta
                 frame needs the one before it.
             display_id: Display whose media graph receives the sample.
+            timing: The frame's capture and encode instants as the capture
+                library stamped them, for the video-timing extension.
         """
         graph = self.displays.get(display_id or "primary")
         if graph is None:
@@ -1207,7 +1210,7 @@ class RTCApp:
             if buf:
                 try:
                     RTP_VIDEO_CLOCK_RATE = 90000
-                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE), keyframe)
+                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE), keyframe, timing)
                     bridge = graph.get("video_bridge")
                     if bridge is not None:
                         bridge.set_data(packet, keyframe)

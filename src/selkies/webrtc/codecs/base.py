@@ -48,18 +48,22 @@ class EncodedPacket:
     they emit. Keeping the whole-frame copy out of the path both cuts latency
     and frees the GIL that a `bytes(frame)` copy would hold for the memcpy.
     `keyframe` says whether the sample decodes on its own, as the encoder
-    reported it; audio samples always do.
+    reported it; audio samples always do. `timing` is a video frame's capture,
+    encode-start and encode-end instants in CLOCK_MONOTONIC nanoseconds as the
+    capture library stamped them, or None where it did not.
     """
 
-    __slots__ = ("data", "pts", "dts", "time_base", "keyframe")
+    __slots__ = ("data", "pts", "dts", "time_base", "keyframe", "timing")
 
     def __init__(self, data: Any, pts: Optional[int] = None,
-                 time_base: Optional[Fraction] = None, keyframe: bool = True) -> None:
+                 time_base: Optional[Fraction] = None, keyframe: bool = True,
+                 timing: Optional[tuple] = None) -> None:
         self.data = data
         self.pts = pts
         self.dts = pts
         self.time_base = time_base
         self.keyframe = keyframe
+        self.timing = timing
 
     def __len__(self) -> int:
         return len(self.data)

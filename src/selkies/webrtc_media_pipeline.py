@@ -49,6 +49,7 @@ instead of the import failing.
 """
 
 import asyncio
+import functools
 import logging
 import time
 from abc import ABCMeta, abstractmethod
@@ -225,7 +226,7 @@ class MediaPipelinePixel(MediaPipeline):
         self.audio_enabled = audio_enabled
         self.audio_device_name = audio_device_name
         self.capture_cursor = False
-        self.produce_data: Callable[[bytes, int, str, bool], None] = lambda buf, pts, kind, keyframe=True: logger.warning(
+        self.produce_data: Callable[..., None] = lambda buf, pts, kind, keyframe=True, timing=None: logger.warning(
             "unhandled produce_data"
         )
         self.on_pipeline_started: Callable[[], None] = lambda: None
@@ -538,7 +539,9 @@ class MediaPipelinePixel(MediaPipeline):
         strictly increasing. Only one capture thread exists at a time (stop
         joins before a new start), so this state needs no lock; and
         `produce_data` is synchronous, so `call_soon_threadsafe` delivers it
-        with no per-frame Future, matching the websockets path.
+        with no per-frame Future, matching the websockets path. The frame's
+        capture and encode instants travel with it for the video-timing
+        extension.
         """
         self._framed = True
         try:
@@ -553,8 +556,10 @@ class MediaPipelinePixel(MediaPipeline):
                 if pts <= self._last_video_pts:
                     pts = self._last_video_pts + 1
                 self._last_video_pts = pts
+                # A pixelflux without the stamps reads as zeros, which the sender treats as unknown.
+                timing = tuple(getattr(frame, name, 0) for name in ("capture_ns", "encode_start_ns", "encode_end_ns"))
                 self.async_event_loop.call_soon_threadsafe(
-                    self.produce_data, data_bytes, pts, "video", keyframe
+                    functools.partial(self.produce_data, data_bytes, pts, "video", keyframe, timing=timing)
                 )
 
         except Exception as e:
