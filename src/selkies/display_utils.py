@@ -471,6 +471,12 @@ WAYLAND_SCREEN_OUTPUT_ID = 0
 #: only its waiting message.
 FIRST_FRAME_WAIT_S = 5.0
 
+#: How many dropped frame ids a transport remembers, so it can hold back what
+#: would predict from one. A frame predicts from one of the last few its encoder
+#: produced (pixelflux's reference window), so an older id can never be named
+#: again and nothing is lost by forgetting it.
+LOST_FRAME_MEMORY = 64
+
 
 def no_first_frame(display_id: str, encoder: str) -> str:
     """The one line a capture that never delivered a frame earns."""
@@ -2174,39 +2180,6 @@ async def _pids_of(binary: str) -> List[int]:
     return [int(p) for p in stdout.split() if p.isdigit()]
 
 
-async def _rebuild_lxqt_desktop(logger: logging.Logger) -> None:
-    """Have pcmanfm-qt build its desktop again at the density now in force.
-
-    A desktop that sizes its window and its wallpaper from the density it
-    started at keeps painting them that way: after a change it covers a
-    quarter of the screen, or a corner of the picture fills it. Nothing it
-    answers repaints them -- a wallpaper command reaches the running instance
-    but leaves the window as it was -- so it is told to drop the desktop and
-    start it over, with the command line and environment it was started with.
-    An instance that also shows file manager windows keeps them; one that had
-    only the desktop exits first and is started anew.
-    """
-    for pid in await _pids_of("pcmanfm-qt"):
-        command = wm_command(pid)
-        if "--desktop" in command:
-            break
-    else:
-        return
-    env = _process_environ(pid) or None
-    proc = await subprocess.create_subprocess_exec(
-        command[0], "--desktop-off", env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    await _communicate_or_kill(proc)
-    for _ in range(10):
-        if not os.path.exists(f"/proc/{pid}"):
-            break
-        await asyncio.sleep(0.1)
-    await subprocess.create_subprocess_exec(
-        *command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True)
-    logger.info("LXQt desktop rebuilt at the new density.")
-
-
 async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
     """Apply DPI via Xresources/xrdb and the xsettingsd config.
 
@@ -2508,9 +2481,8 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
     twice; MATE takes gsettings plus xrdb for wider application coverage.
     The LXQt font repolish runs whichever branch was taken: the session that
     owns the windows decides whether anything already drawn follows, and it
-    is the only one that can repolish them, and the LXQt desktop is rebuilt
-    around the new density, which it cannot follow on its own. On success the
-    root pane's physical size is stamped with the same density, because xdpyinfo/RandR
+    is the only one that can repolish them. On success the root pane's
+    physical size is stamped with the same density, because xdpyinfo/RandR
     consumers (Qt's fallback included) read it and would otherwise render
     unscaled against the rest of the desktop.
 
@@ -2576,7 +2548,6 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
             await asyncio.to_thread(_sync_stamp_root_dpi, dpi_value)
         except Exception as e:
             logger_app_resize.warning(f"Root mm-size retarget to {dpi_value} DPI failed: {e}")
-        await _rebuild_lxqt_desktop(logger_app_resize)
 
     return any_method_succeeded
 
