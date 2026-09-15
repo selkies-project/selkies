@@ -153,6 +153,43 @@ def get_server_settings() -> Dict[str, Any]:
     return {"settings": build_client_settings_payload()}
 
 
+class CongestionSteer:
+    """The steer of one display's CBR target over the congestion loop's one-second
+    ticks. A tick whose loss fraction passes LOSS is a strike, and only two strikes
+    in a row back the target off, by BACKOFF: one window is a few tens of packets,
+    too few for its loss to mean anything on its own. A backoff then holds the
+    target for HOLD_S, so the recovery does not climb straight back onto the loss
+    that caused it. A clean tick clears the strikes and, outside a hold, raises the
+    target by STEP, or to HEADROOM of the measured goodput where that is higher,
+    never past the ceiling.
+    """
+
+    LOSS = 0.10
+    BACKOFF = 0.7
+    HOLD_S = 2.0
+    STEP = 1.15
+    HEADROOM = 0.85
+
+    def __init__(self) -> None:
+        self.strikes = 0
+        self.hold_until = 0.0
+
+    def target(self, current: float, ceiling: float, floor: float,
+               goodput_bps: float, loss: float, now: float) -> float:
+        """The next target in kbps for a tick that measured `goodput_bps` and `loss`."""
+        if loss > self.LOSS:
+            self.strikes += 1
+            if self.strikes < 2:
+                return current
+            self.strikes = 0
+            self.hold_until = now + self.HOLD_S
+            return max(floor, min(ceiling, current * self.BACKOFF))
+        self.strikes = 0
+        if now < self.hold_until:
+            return current
+        return max(floor, min(ceiling, max(current * self.STEP, goodput_bps * self.HEADROOM / 1_000)))
+
+
 class WebRTCService(BaseStreamingService):
     """The WebRTC streaming service run under the centralized stream server.
 
@@ -196,6 +233,8 @@ class WebRTCService(BaseStreamingService):
         _host_output_capacity: Host-capture mode: outputs the host compositor
             can back displays with; None until a query answers, never set
             when self-compositing (outputs are minted on demand there).
+        _congestion_steer: Each display's `CongestionSteer`, the state its
+            CBR target is steered with.
         _wm_swap: Swaps heavy DEs, which tile poorly across the per-display
             regions, for a minimal Openbox once a secondary joins.
         _primary_stop_grace_task: The pending deferred primary-capture stop.
@@ -251,6 +290,7 @@ class WebRTCService(BaseStreamingService):
         self._host_output_capacity: Optional[int] = None
         self._last_resize_request: Optional[Tuple[int, int]] = None
         self._wm_swap = MultiMonitorWindowManager()
+        self._congestion_steer: Dict[str, CongestionSteer] = {}
         self.RECONNECT_GRACE_S = 3.0
         self._primary_stop_grace_task: Optional[asyncio.Task] = None
 
@@ -2605,9 +2645,11 @@ class WebRTCService(BaseStreamingService):
     async def _congestion_control_loop(self) -> None:
         """GCC-style bitrate adaptation from transport-wide-cc receiver feedback:
         per display, follow the slowest of ITS peers' goodput estimates with
-        headroom, back off multiplicatively on loss, and retarget that display's
-        encoder within the allowed video_bitrate range — one display's congested
-        link never steers another's stream. Only CBR mode has a target to steer.
+        headroom, back off multiplicatively on two ticks of loss in a row and
+        hold there before recovering (`CongestionSteer`), and retarget that
+        display's encoder within the allowed video_bitrate range — one display's
+        congested link never steers another's stream. Only CBR mode has a target
+        to steer.
 
         Each peer's feedback is drained per tick, so a decision is taken over a
         tick's worth of it rather than whichever window landed last: a single
@@ -2677,12 +2719,10 @@ class WebRTCService(BaseStreamingService):
                 current = float(pipeline.video_bitrate)
                 ceiling = float(self._display_setting(did, "video_bitrate") or hi_kbps)
                 ceiling = max(lo_kbps, min(hi_kbps, ceiling))
-                if worst_loss > 0.10:
-                    target = current * 0.7
-                else:
-                    # Goodput may lift the target, never drag it down (see docstring).
-                    target = min(ceiling, max(current * 1.15, min(goodputs) * 0.85 / 1_000))
-                target = round(max(lo_kbps, min(ceiling, target)))
+                # Goodput may lift the target, never drag it down (see docstring).
+                steer = self._congestion_steer.setdefault(did, CongestionSteer())
+                target = round(steer.target(
+                    current, ceiling, lo_kbps, min(goodputs), worst_loss, time.monotonic()))
                 if target != round(current):
                     logger.info(
                         f"Congestion control[{did}]: video bitrate {current:.0f} -> {target:.0f} kbps "
