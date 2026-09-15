@@ -117,26 +117,27 @@ for tag, (want_ok, want_pre) in TAGS.items():
 
 # A release takes the floating `latest` image tags and the "Latest" badge and a
 # pre-release takes neither, unless the run forces it; GitHub gives no pre-release
-# the badge whatever the run asks
+# the badge, so a designated one is marked as a release
 LATEST = {
-    ("1.2.3", ""): ("true", "true"),
-    ("1.2.3", "auto"): ("true", "true"),
-    ("2.0.0.post1", "auto"): ("true", "true"),
-    ("2.0.0rc0", ""): ("false", "false"),
-    ("2.0.0rc0", "auto"): ("false", "false"),
-    ("0.0.0.dev0", "auto"): ("false", "false"),
+    ("1.2.3", ""): ("true", "false"),
+    ("1.2.3", "auto"): ("true", "false"),
+    ("2.0.0.post1", "auto"): ("true", "false"),
+    ("2.0.0rc0", ""): ("false", "true"),
+    ("2.0.0rc0", "auto"): ("false", "true"),
+    ("2.0.0rc1", "auto"): ("false", "true"),
+    ("0.0.0.dev0", "auto"): ("false", "true"),
     ("2.0.0rc0", "always"): ("true", "false"),
-    ("1.2.3", "always"): ("true", "true"),
+    ("1.2.3", "always"): ("true", "false"),
     ("1.2.3", "never"): ("false", "false"),
-    ("2.0.0rc0", "never"): ("false", "false"),
+    ("2.0.0rc0", "never"): ("false", "true"),
 }
-for (tag, latest), (want_tags, want_badge) in LATEST.items():
+for (tag, latest), (want_latest, want_pre) in LATEST.items():
     _, out = validate(tag, latest)
     label = f"latest={latest or 'default'}"
-    check(f"{tag} with {label} {'moves' if want_tags == 'true' else 'leaves'} the latest tags",
-          out.get("latest") == want_tags, out.get("latest", "<unset>"))
-    check(f"{tag} with {label} {'takes' if want_badge == 'true' else 'leaves'} the latest badge",
-          out.get("make_latest") == want_badge, out.get("make_latest", "<unset>"))
+    check(f"{tag} with {label} {'takes' if want_latest == 'true' else 'leaves'} the latest tags and badge",
+          out.get("latest") == want_latest, out.get("latest", "<unset>"))
+    check(f"{tag} with {label} is marked as a {'pre-release' if want_pre == 'true' else 'release'}",
+          out.get("prerelease") == want_pre, out.get("prerelease", "<unset>"))
 
 # version -> what dpkg and rpm are handed, and what apk is handed
 NATIVE = {

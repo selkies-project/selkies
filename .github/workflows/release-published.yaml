@@ -2,9 +2,10 @@ name: Release published
 
 # The Release workflow assembles a draft, and GitHub decides the "Latest" badge
 # when a maintainer publishes it, from the publisher's checkbox rather than
-# from anything the draft carried. A run that held its release back from
-# `latest` left a marker in the draft's notes; this applies that mark once the
-# release is public, so the badge stays on the release it was on.
+# from anything the draft carried. The run's `latest` decision rides in the
+# draft's notes as a marker; this applies it once the release is public, then
+# rebuilds the docs site, which lists the release and aliases `latest` to the
+# release holding the badge.
 
 on:
   release:
@@ -12,13 +13,16 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   latest:
     name: Apply the release's latest designation
     runs-on: ubuntu-latest
     steps:
-      - name: Hold a release marked as not the latest off the badge
+      - name: Put the badge where the run decided
+        # A pre-release holds no badge, whatever its notes say
+        if: ${{ !github.event.release.prerelease }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
@@ -26,9 +30,14 @@ jobs:
         run: |
           set -e
           case "${BODY}" in
-            *'<!-- selkies-release: latest=false -->'*)
-              gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --latest=false
-              echo "${TAG} is held off the latest badge" ;;
-            *)
-              echo "${TAG} keeps the badge GitHub gave it" ;;
+            *'<!-- selkies-release: latest=true -->'*) latest=true ;;
+            *'<!-- selkies-release: latest=false -->'*) latest=false ;;
+            *) echo "${TAG} keeps the badge GitHub gave it"; exit 0 ;;
           esac
+          gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --latest="${latest}"
+          echo "${TAG}: latest=${latest}"
+      - name: Rebuild the docs site around the published release
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docs.yaml --repo "${GITHUB_REPOSITORY}" --ref "${{ github.event.repository.default_branch }}"

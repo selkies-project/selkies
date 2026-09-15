@@ -129,8 +129,8 @@ check("a pin no release carries is built from its tag", out.get("build") == "tru
       out.get("build", "<unset>"))
 
 # pin -> the version the step reads out of it
-SPELLINGS = {"pixelflux~=2.1.0": "2.1.0", "pixelflux==2.2.0rc1": "2.2.0rc1",
-             "pixelflux>=2.1.0": "2.1.0", "pixelflux~=2.2.0.dev1": "2.2.0.dev1"}
+SPELLINGS = {"pixelflux~=2.1.0": "2.1.0", "pixelflux==2.1.0rc1": "2.1.0rc1",
+             "pixelflux>=2.1.0": "2.1.0", "pixelflux~=2.1.0.dev1": "2.1.0.dev1"}
 for pin, version in SPELLINGS.items():
     _, out = probe(pinned=True, pins=[pin, "pcmflux~=2.1.0"])
     check(f"{pin} names {version}", out.get("pixelflux_ref") == f"refs/tags/{version}",
