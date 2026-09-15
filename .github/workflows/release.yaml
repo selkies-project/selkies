@@ -189,6 +189,9 @@ jobs:
         with:
           tag_name: ${{ needs.validate.outputs.version }}
           name: ${{ needs.validate.outputs.version }}
+          # The tag is created when the draft is published, at this commit
+          # rather than at the default branch's head by then
+          target_commitish: ${{ github.sha }}
           draft: true
           prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
           body: "<!-- selkies-release: latest=${{ needs.validate.outputs.latest }} -->"

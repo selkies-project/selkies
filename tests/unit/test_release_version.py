@@ -154,6 +154,11 @@ for version, (want_tilde, want_alpine) in NATIVE.items():
     got = native("alpine_version", version)
     check(f"apk builds {version} as {want_alpine}", got == want_alpine, got)
 
+# The draft's tag is created when a maintainer publishes it, at the commit the
+# draft names; left to GitHub, that is the default branch's head by then
+check("the draft release tags the commit the run built",
+      "target_commitish: ${{ github.sha }}" in open(WORKFLOW).read())
+
 # The point of the translation, on the one comparator a runner always has
 if shutil.which("dpkg"):
     for older, newer in (("2.0.0~rc0", "2.0.0"), ("1.9.9", "2.0.0~rc0"),
