@@ -38,7 +38,7 @@
  * section dispatches the `requestFileUpload` DOM event.
  *
  * `window` state it reads: `system_stats`, `gpu_stats`, `fps`,
- * `currentAudioLevel`, `network_stats`, `webrtcInput.gamingMode`,
+ * `network_stats`, `webrtcInput.gamingMode`,
  * `__SELKIES_STREAMING_MODE__` and `__SELKIES_DUAL_MODE__`; it sets
  * `__selkiesModeSwitching` around a transport switch.
  *
@@ -445,43 +445,6 @@ const SelkiesLogo = ({ width = 30, height = 30, className, t, ...props }) => {
  * mounted, so each open is a fresh mount, and a hit here skips the network.
  */
 let cachedAppData = null;
-
-/**
- * Audio level of the WebRTC stream's audio track through a dashboard-owned
- * AnalyserNode, never routed to a destination so playback is unaffected. The
- * websockets worklet path exposes `window.currentAudioLevel` instead.
- * @param {{current: object|null}} meterRef Ref holding the analyzer, rebuilt when the stream changes.
- * @returns {number|null} RMS in 0 to 1, or `null` without an audio track.
- */
-function readStreamAudioLevel(meterRef) {
-  const el = document.getElementById("stream");
-  const ms = el && el.srcObject;
-  if (!ms || typeof ms.getAudioTracks !== "function" || ms.getAudioTracks().length === 0) {
-    return null;
-  }
-  let m = meterRef.current;
-  if (!m || m.stream !== ms) {
-    try {
-      if (m && m.ctx) m.ctx.close();
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      const ctx = new Ctx();
-      const analyzer = ctx.createAnalyser();
-      analyzer.fftSize = 512;
-      ctx.createMediaStreamSource(ms).connect(analyzer);
-      m = { ctx, analyzer, data: new Uint8Array(analyzer.fftSize), stream: ms };
-      meterRef.current = m;
-    } catch {
-      return null;
-    }
-  }
-  m.analyzer.getByteTimeDomainData(m.data);
-  let sum = 0;
-  for (let i = 0; i < m.data.length; i++) {
-    const v = (m.data[i] - 128) / 128;
-    sum += v * v;
-  }
-  return Math.sqrt(sum / m.data.length);
-}
 
 /**
  * Catalog of proot-apps with install, remove, update and launch actions,
@@ -1449,8 +1412,6 @@ function Sidebar() {
   const [printJobs, setPrintJobs] = useState([]);
   const [presetValue, setPresetValue] = useState("");
   const [clientFps, setClientFps] = useState(0);
-  const [audioLevel, setAudioLevel] = useState(0);
-  const audioMeterRef = useRef(null);
   const [bandwidthMbps, setBandwidthMbps] = useState(0);
   const [latencyMs, setLatencyMs] = useState(0);
   const [cpuPercent, setCpuPercent] = useState(0);
@@ -2669,8 +2630,6 @@ function Sidebar() {
         }
         case "fps":
           return t("sections.stats.tooltipFps", { value: clientFps });
-        case "audio":
-          return t("sections.stats.tooltipAudioLevel", { value: audioLevel });
         case "bandwidth":
           return t("sections.stats.tooltipBandwidth", { value: bandwidthMbps.toFixed(2) }, `Bandwidth: ${bandwidthMbps.toFixed(2)} Mbps`);
         case "latency":
@@ -2689,7 +2648,6 @@ function Sidebar() {
       gpuMemUsed,
       gpuMemTotal,
       clientFps,
-      audioLevel,
       bandwidthMbps,
       latencyMs,
     ]
@@ -2760,13 +2718,6 @@ function Sidebar() {
         gu !== null && gt !== null && gt > 0 ? (gu / gt) * 100 : 0
       );
       setClientFps(window.fps ?? 0);
-      // x141 is the websockets worklet's own scale (RMS x141, a full-scale sine
-      // reads 100), applied to the WebRTC analyzer's raw RMS so both match.
-      const coreLevel = window.currentAudioLevel;
-      const level = typeof coreLevel === "number"
-        ? coreLevel
-        : (readStreamAudioLevel(audioMeterRef) ?? 0) * 141;
-      setAudioLevel(Math.min(100, Math.round(level)));
       const netStats = window.network_stats;
       setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
       setLatencyMs(netStats?.latency_ms ?? 0);
@@ -3045,11 +2996,6 @@ function Sidebar() {
   );
   const fpsOffset = calculateGaugeOffset(
     fpsPercent,
-    gaugeRadius,
-    gaugeCircumference
-  );
-  const audioLevelOffset = calculateGaugeOffset(
-    audioLevel,
     gaugeRadius,
     gaugeCircumference
   );
@@ -4313,53 +4259,6 @@ function Sidebar() {
                           {t("sections.stats.fpsLabel")}
                         </div>
                       </div>
-                      {(<div
-                        className="gauge-container"
-                        onMouseEnter={(e) => handleMouseEnter(e, "audio")}
-                        onMouseLeave={handleMouseLeave}
-                      >
-                        <svg
-                          width={gaugeSize}
-                          height={gaugeSize}
-                          viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                        >
-                          <circle
-                            stroke="var(--item-border)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter} />
-                          <circle
-                            stroke="var(--sidebar-header-color)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter}
-                            transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                            style={{
-                              strokeDasharray: gaugeCircumference,
-                              strokeDashoffset: audioLevelOffset,
-                              transition: "stroke-dashoffset 0.3s ease-in-out",
-                              strokeLinecap: "round",
-                            }} />
-                          <text
-                            x={gaugeCenter}
-                            y={gaugeCenter}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            fontSize={`${gaugeSize / 5}px`}
-                            fill="var(--sidebar-text)"
-                            fontWeight="bold"
-                          >
-                            {audioLevel}
-                          </text>
-                        </svg>
-                        <div className="gauge-label">
-                          {t("sections.stats.audioLabel")}
-                        </div>
-                      </div>)}
                       <div
                         className="gauge-container"
                         onMouseEnter={(e) => handleMouseEnter(e, "bandwidth")}
