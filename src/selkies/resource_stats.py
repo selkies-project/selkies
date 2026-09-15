@@ -556,11 +556,21 @@ class ResourceMonitor:
         self._task: Optional[asyncio.Task] = None
 
     def _gpu_sample(self) -> Optional[Dict[str, Any]]:
+        """One GPU reading, or None where there is nothing to read.
+
+        A card is listed for what it is even when it exposes no counters, so
+        the pipeline can match it by vendor or PCI address, but a reading of
+        nothing but zeros is not a reading: published every tick it would leave
+        a page showing a utilization that can never move and a memory total of
+        nothing. None instead stops the probe and leaves those off the page.
+        """
         gpus = get_gpus(self.dri_node)
         idx = 0 if (self.dri_node and len(gpus) == 1) else self.gpu_id
         if not gpus or not 0 <= idx < len(gpus):
             return None
         gpu = gpus[idx]
+        if gpu.load <= 0 and gpu.memoryTotal <= 0:
+            return None
         return {
             "type": "gpu_stats",
             "timestamp": datetime.now().isoformat(),
@@ -584,7 +594,9 @@ class ResourceMonitor:
                 logger.warning(f"GPU stats unavailable this tick: {exc}")
             if gpu is None and self.gpu is None:
                 self._probe_gpu = False
-                logger.info(f"No GPU with ID {self.gpu_id} found; GPU stats disabled.")
+                logger.info(
+                    f"No GPU with ID {self.gpu_id} reports utilization or memory; "
+                    "GPU stats disabled.")
         return system, gpu
 
     async def _loop(self) -> None:
