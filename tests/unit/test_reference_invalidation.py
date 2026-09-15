@@ -238,13 +238,20 @@ def chunk(frame_id: int, key: bool = False, size: int = 100) -> dict:
     return {"data": memoryview(head + bytes(size - 12)), "owner": None, "frame_id": frame_id}
 
 
-relay = _VideoRelay(SimpleNamespace(), "primary", SimpleNamespace(), budget=250)
-res.check("a fresh relay waits for a keyframe", relay.offer(chunk(0)) and not relay.backlog)
-res.check("the keyframe and the frames behind it queue",
-          not relay.offer(chunk(1, key=True)) and not relay.offer(chunk(2)) and len(relay.backlog) == 2)
-relay.offer(chunk(3))
-res.check("a client past its backlog budget skips ahead to the next keyframe",
-          not relay.backlog and not relay.live_rows)
-res.check("and its frames wait for that keyframe", not relay.offer(chunk(4)) and not relay.backlog)
+async def relay_skips_ahead() -> None:
+    """A relay holds an asyncio.Event, which needs a running loop to build."""
+    relay = _VideoRelay(SimpleNamespace(), "primary", SimpleNamespace(), budget=250)
+    res.check("a fresh relay waits for a keyframe", relay.offer(chunk(0)) and not relay.backlog)
+    res.check("the keyframe and the frames behind it queue",
+              not relay.offer(chunk(1, key=True)) and not relay.offer(chunk(2))
+              and len(relay.backlog) == 2)
+    relay.offer(chunk(3))
+    res.check("a client past its backlog budget skips ahead to the next keyframe",
+              not relay.backlog and not relay.live_rows)
+    res.check("and its frames wait for that keyframe",
+              not relay.offer(chunk(4)) and not relay.backlog)
+
+
+asyncio.run(relay_skips_ahead())
 
 sys.exit(0 if res.summary() else 1)
