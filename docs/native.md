@@ -5,27 +5,23 @@ description: Install Selkies as a package or an AppImage and attach it to a disp
 
 Selkies also ships outside a container: native packages for the common distributions, and an AppImage that installs nothing. Neither brings a desktop, a display server or an audio server — they attach to the ones you run — so [Getting Started](start.md) is the shorter road if a container will do.
 
-None of these needs a Python environment: the web client, the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) extensions, and the interposers all travel inside. Every block below takes its file from the release, so paste these lines first (set `SELKIES_TAG` yourself for a release other than the latest):
+None of these needs a Python environment: the web client, the `pixelflux` (screen capture with H.264/JPEG encoding) and `pcmflux` (PulseAudio capture with Opus encoding) extensions, and the interposers all travel inside. Every block below uses the release version, so paste these lines first (set `SELKIES_TAG` yourself for a release other than the latest):
 
 ```bash
 export SELKIES_TAG="$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" | jq -r '.tag_name')"
-# The release's asset whose name ends as given: each packager spells a pre-release
-# version its own way (2.0.0~rc0 for dpkg and rpm, shown as 2.0.0.rc0 on the
-# release page; 2.0.0_rc0 for apk; 2.0.0rc0 for pacman and the AppImage), so the
-# name is read from the release rather than composed from the tag
-asset() { curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/tags/${SELKIES_TAG}" | jq -r --arg end "$1" '.assets[].name | select(endswith($end))'; }
+export SELKIES_VERSION="${SELKIES_TAG#v}"
 ```
 
 ## Packages
 
-Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkies-resize` and `selkies-gpu-probe` on `PATH`, carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line:
+Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkies-resize` and `selkies-gpu-probe` on `PATH`, carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line. Every file is named with the release version; inside, a pre-release carries the version the way its packager orders it (`2.0.0~rc0` for dpkg and rpm, `2.0.0_rc0` for apk), so the final release upgrades over it:
 
 ```bash
 # Ubuntu and Debian. The suffix names the distribution the package was built in
 # (ubuntu24.04, ubuntu26.04, bookworm, trixie); this reads yours from os-release
 . /etc/os-release
 DISTRO="$([ "${ID}" = "ubuntu" ] && echo "ubuntu${VERSION_ID}" || echo "${VERSION_CODENAME}")"
-PKG="$(asset ".${DISTRO}_$(dpkg --print-architecture).deb")"
+PKG="selkies_${SELKIES_VERSION}-1.${DISTRO}_$(dpkg --print-architecture).deb"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo apt-get install -y "./${PKG}"
 ```
@@ -33,21 +29,21 @@ sudo apt-get install -y "./${PKG}"
 ```bash
 # Fedora and Enterprise Linux
 . /etc/os-release
-PKG="$(asset ".$([ "${ID}" = "fedora" ] && echo fc || echo el9).$(uname -m).rpm")"
+PKG="selkies-${SELKIES_VERSION}-1.$([ "${ID}" = "fedora" ] && echo fc || echo el9).$(uname -m).rpm"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo dnf install -y "./${PKG}"
 ```
 
 ```bash
 # Alpine
-PKG="$(asset "-$(uname -m).apk")"
+PKG="selkies-${SELKIES_VERSION}-r0-$(uname -m).apk"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo apk add --allow-untrusted "./${PKG}"
 ```
 
 ```bash
 # Arch Linux, which Arch publishes for x86_64 alone
-PKG="$(asset "-$(uname -m).pkg.tar.zst")"
+PKG="selkies-${SELKIES_VERSION}-1-$(uname -m).pkg.tar.zst"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo pacman -U "./${PKG}"
 ```
@@ -59,7 +55,7 @@ For hardware-accelerated H.264, add your GPU's driver: NVENC comes with the NVID
 Runs from wherever you put it, on any distribution, without touching the system. Every Python and native dependency is inside; it starts an `Xvfb` when the display it is pointed at is not up, and its own PulseAudio when none is listening:
 
 ```bash
-APP="$(asset "-$(uname -m).AppImage")"
+APP="selkies-${SELKIES_VERSION}-$(uname -m).AppImage"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${APP}"
 chmod +x "./${APP}"
 "./${APP}" --public --port=8080 --basic-auth-user=user --basic-auth-password=mypasswd

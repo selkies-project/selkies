@@ -67,4 +67,7 @@ fpm -s dir -t rpm \
     --depends libSM \
     --rpm-os linux \
     -C /pkg-root opt usr
+# The file takes the release version as the tag spells it; the package inside keeps
+# rpm's ordering (2.0.0~rc0), which GitHub could not show in a file name anyway.
+mv /out/selkies-*.rpm "/out/selkies-${SELKIES_VERSION:-0.0.0}-1.${DISTRO_TAG:-linux}.${RPM_ARCH}.rpm"
 ls -la /out

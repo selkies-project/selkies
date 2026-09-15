@@ -78,4 +78,7 @@ fpm -s dir -t deb \
     --depends libice6 \
     --depends libsm6 \
     -C /pkg-root opt usr
+# The file takes the release version as the tag spells it; the package inside keeps
+# dpkg's ordering (2.0.0~rc0), which GitHub could not show in a file name anyway.
+mv /out/selkies_*.deb "/out/selkies_${SELKIES_VERSION:-0.0.0}-1.${DISTRO_TAG:-linux}_${DEB_ARCH}.deb"
 ls -la /out
