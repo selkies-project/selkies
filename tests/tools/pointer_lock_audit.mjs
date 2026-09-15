@@ -72,6 +72,7 @@ function makeInput(element, gaming = true, attached = true) {
     input.inputAttached = attached;
     input.gamingMode = gaming;
     input.shortcutsEnabled = true;
+    input._pointerSeq = 0;
     return input;
 }
 

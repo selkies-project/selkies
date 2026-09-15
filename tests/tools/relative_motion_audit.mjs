@@ -67,6 +67,7 @@ function makeInput({ dpr = 1, sink = null } = {}) {
     input._relCarryY = 0;
     input._pendingMove = null;
     input._moveFlushScheduled = false;
+    input._pointerSeq = 0;
     input.m = { mouseMultiX: 1, mouseMultiY: 1, mouseOffsetX: 0, mouseOffsetY: 0,
                 elementClientX: 0, elementClientY: 0, frameW: 1920, frameH: 1080 };
     input.sent = [];
@@ -204,20 +205,21 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
 // --- a button change is not a motion --------------------------------------
 {
     // Under lock this.x/this.y hold movement deltas, so a button-state send
-    // must not replay them as a payload.
+    // must not replay them as a payload. Every pointer message ends in its
+    // send number.
     const input = makeInput({ dpr: 1 });
     input.x = 999; input.y = 777;
     input.buttonMask = 1;
     globalThis.document.pointerLockElement = input.element;
     input._sendMouseState();
     check('a locked button change sends no motion',
-          input.sent[input.sent.length - 1] === 'm2,0,0,1,0',
+          input.sent[input.sent.length - 1] === 'm2,0,0,1,0,1',
           `${input.sent[input.sent.length - 1]}`);
     globalThis.document.pointerLockElement = null;
     input.buttonMask = 0;
     input._sendMouseState();
     check('an unlocked button change sends the position',
-          input.sent[input.sent.length - 1] === 'm,999,777,0,0',
+          input.sent[input.sent.length - 1] === 'm,999,777,0,0,2',
           `${input.sent[input.sent.length - 1]}`);
 }
 {
@@ -227,7 +229,7 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     input.x = 400; input.y = 300;
     input._sendMouseState();
     check('a lock held on the canvas counts as a stream lock',
-          input.sent[input.sent.length - 1] === 'm2,0,0,0,0',
+          input.sent[input.sent.length - 1] === 'm2,0,0,0,0,1',
           `${input.sent[input.sent.length - 1]}`);
 }
 
@@ -257,10 +259,10 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     input._mouseButtonMovement({ type: 'mouseup', target: input.element,
                                  button: 0, clientX: 640, clientY: 360 });
     check('a button event after the lock ends carries its own position',
-          input.sent[input.sent.length - 1] === 'm,640,360,0,0',
+          input.sent[input.sent.length - 1] === 'm,640,360,0,0,2',
           `${input.sent[input.sent.length - 1]}`);
     check('the locked motion before it went out as a delta',
-          input.sent.includes('m2,37,-21,0,0'), `${input.sent}`);
+          input.sent.includes('m2,37,-21,0,0,1'), `${input.sent}`);
 }
 
 // --- a non-finite delta cannot latch the accumulator ----------------------
