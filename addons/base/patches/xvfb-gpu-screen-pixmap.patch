@@ -1,0 +1,282 @@
+diff --git a/hw/vfb/InitOutput.c b/hw/vfb/InitOutput.c
+index 6e21d39..ab51a5c 100644
+--- a/hw/vfb/InitOutput.c
++++ b/hw/vfb/InitOutput.c
+@@ -80,6 +80,7 @@ from The Open Group.
+ #ifdef GLAMOR
+ #include "glamor.h"
+ #include "glamor_egl.h"
++#include "glamor_priv.h"
+ 
+ #include <unistd.h>
+ #include <fcntl.h>
+@@ -129,15 +130,27 @@ typedef struct {
+ #ifdef CONFIG_MITSHM
+     int shmid;
+ #endif /* CONFIG_MITSHM */
++    /* Largest screen pixmap the RandR size range allows */
++    int maxFbWidth;
++    int maxFbHeight;
++    /* Framebuffer memory a resize allocated for the screen pixmap; the
++     * initial -shmem/-fbdir/malloc buffer stays owned by the screen info */
++    void *resizedFb;
+ #ifdef GLAMOR
+     int dri_fd;
++    Bool gpuScreen;
++    CreateScreenResourcesProcPtr createScreenResources;
+ #endif
+ } vfbScreenInfo, *vfbScreenInfoPtr;
+ 
+ static int vfbNumScreens;
+ static vfbScreenInfo *vfbScreens;
+ 
++#define VFB_MAX_FB_DIM         32767
++
+ static vfbScreenInfo defaultScreenInfo = {
++    .maxFbWidth = VFB_MAX_FB_DIM,
++    .maxFbHeight = VFB_MAX_FB_DIM,
+     .width = VFB_DEFAULT_WIDTH,
+     .height = VFB_DEFAULT_HEIGHT,
+     .depth = VFB_DEFAULT_DEPTH,
+@@ -831,11 +844,58 @@ vfbCloseScreen(ScreenPtr pScreen)
+         pvfb->dri_fd = -1;
+     }
+ #endif
++    free(pvfb->resizedFb);
++    pvfb->resizedFb = NULL;
+ 
+     return pScreen->CloseScreen(pScreen);
+ }
+ 
+ #ifdef GLAMOR
++/*
++ * Put the screen pixmap on the GPU: a texture backed glamor pixmap replaces
++ * the system memory one fbScreenInit() set up, the way Xephyr's does, so a
++ * DRI3 client's present into a window and all 2D rendering are GPU work and
++ * pixels reach the CPU only when a client asks for them (GetImage /
++ * XShmGetImage). No GBM buffer is involved, so this holds on every EGL vendor
++ * glamor itself came up on.
++ */
++static Bool
++vfbCreateScreenResources(ScreenPtr pScreen)
++{
++    vfbScreenInfoPtr pvfb = &vfbScreens[pScreen->myNum];
++    PixmapPtr old_pixmap, gpu_pixmap;
++
++    pScreen->CreateScreenResources = pvfb->createScreenResources;
++    if (!pScreen->CreateScreenResources(pScreen))
++        return FALSE;
++    pScreen->CreateScreenResources = vfbCreateScreenResources;
++
++    old_pixmap = pScreen->GetScreenPixmap(pScreen);
++
++    gpu_pixmap = pScreen->CreatePixmap(pScreen,
++                                       old_pixmap->drawable.width,
++                                       old_pixmap->drawable.height,
++                                       pScreen->rootDepth,
++                                       GLAMOR_CREATE_NO_LARGE);
++    if (!gpu_pixmap || !glamor_get_pixmap_texture(gpu_pixmap)) {
++        LogMessage(X_WARNING,
++                   "vfb: could not create a %dx%d GPU screen pixmap, "
++                   "keeping the system memory framebuffer\n",
++                   old_pixmap->drawable.width, old_pixmap->drawable.height);
++        if (gpu_pixmap)
++            dixDestroyPixmap(gpu_pixmap, 0);
++        return TRUE;
++    }
++
++    pScreen->SetScreenPixmap(gpu_pixmap);
++    dixDestroyPixmap(old_pixmap, 0);
++    pvfb->gpuScreen = TRUE;
++
++    LogMessage(X_INFO, "vfb: screen pixmap is on the GPU (%dx%d)\n",
++               gpu_pixmap->drawable.width, gpu_pixmap->drawable.height);
++    return TRUE;
++}
++
+ static Bool
+ vfbGlamorInit(ScreenPtr pScreen)
+ {
+@@ -877,6 +937,24 @@ vfbGlamorInit(ScreenPtr pScreen)
+         return FALSE;
+     }
+ 
++    /* Software renderers keep the memory framebuffer: a readback from
++     * llvmpipe is a memcpy, and the GPU path would only add overhead. */
++    if (!(flags & GLAMOR_NO_DRI3)) {
++        GLint max_tex = 0, max_rb = 0;
++
++        pvfb->createScreenResources = pScreen->CreateScreenResources;
++        pScreen->CreateScreenResources = vfbCreateScreenResources;
++
++        /* The screen pixmap is one FBO, so the GPU's limit is the RandR
++         * size range; glamor_init() left the context current. */
++        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex);
++        glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_rb);
++        if (max_tex > 0 && max_rb > 0) {
++            pvfb->maxFbWidth = min(min(max_tex, max_rb), pvfb->maxFbWidth);
++            pvfb->maxFbHeight = min(min(max_tex, max_rb), pvfb->maxFbHeight);
++        }
++    }
++
+     return TRUE;
+ }
+ #endif
+@@ -897,6 +975,134 @@ vfbRROutputValidateMode(ScreenPtr           pScreen,
+         return FALSE;
+ }
+ 
++/*
++ * Give the screen pixmap a new size, keeping the pixmap object itself: the
++ * software cursor's Damage record, Present's screen pixmap checks and every
++ * window's pixmap pointer refer to it, so only its backing store changes.
++ * Content that still fits is carried over and new area is black.
++ *
++ * On the GPU a pixmap of the new size is drawn and its FBO exchanged into
++ * the screen pixmap, the same in-place replacement the modesetting driver
++ * does on a framebuffer resize. In software the memory buffer is replaced;
++ * the initial -shmem / -fbdir buffer is left alone since nothing draws into
++ * it once the screen pixmap points elsewhere.
++ *
++ * The RandR size range is the GPU's limit, so the framebuffer follows the
++ * layout a client asks for, up or down, from whatever size the server
++ * started at.
++ */
++static Bool
++vfbResizeScreenPixmap(ScreenPtr pScreen, int width, int height)
++{
++    vfbScreenInfoPtr pvfb = &vfbScreens[pScreen->myNum];
++    PixmapPtr pixmap = pScreen->GetScreenPixmap(pScreen);
++    ChangeGCVal val;
++    xRectangle rect;
++    GCPtr gc;
++
++    if (pixmap->drawable.width == width && pixmap->drawable.height == height)
++        return TRUE;
++
++#ifdef GLAMOR
++    if (pvfb->gpuScreen) {
++        glamor_pixmap_private *priv = glamor_get_pixmap_private(pixmap);
++        PixmapPtr new_pixmap;
++        int pitch;
++
++        new_pixmap = pScreen->CreatePixmap(pScreen, width, height,
++                                           pScreen->rootDepth,
++                                           GLAMOR_CREATE_NO_LARGE);
++        /* Never fall off the GPU silently: a system memory screen would
++         * bring the per-frame readback back for every DRI3 client. */
++        if (!new_pixmap || !glamor_get_pixmap_texture(new_pixmap)) {
++            LogMessage(X_ERROR,
++                       "vfb: %dx%d screen pixmap does not fit on the GPU\n",
++                       width, height);
++            if (new_pixmap)
++                dixDestroyPixmap(new_pixmap, 0);
++            return FALSE;
++        }
++
++        gc = GetScratchGC(pScreen->rootDepth, pScreen);
++        if (!gc) {
++            dixDestroyPixmap(new_pixmap, 0);
++            return FALSE;
++        }
++        val.val = pScreen->blackPixel;
++        ChangeGC(serverClient, gc, GCForeground, &val);
++        ValidateGC(&new_pixmap->drawable, gc);
++        rect.x = 0;
++        rect.y = 0;
++        rect.width = width;
++        rect.height = height;
++        gc->ops->PolyFillRect(&new_pixmap->drawable, gc, 1, &rect);
++        gc->ops->CopyArea(&pixmap->drawable, &new_pixmap->drawable, gc,
++                          0, 0,
++                          min(width, pixmap->drawable.width),
++                          min(height, pixmap->drawable.height),
++                          0, 0);
++        FreeScratchGC(gc);
++
++        /* The screen pixmap takes the new FBO; the scratch pixmap takes the
++         * outgoing one and frees it with itself. */
++        glamor_pixmap_exchange_fbos(pixmap, new_pixmap);
++        pitch = (((width * pixmap->drawable.bitsPerPixel + 7) / 8) + 3) & ~3;
++        pScreen->ModifyPixmapHeader(pixmap, width, height, -1, -1, pitch, NULL);
++        /* What glamor records for a single-FBO pixmap at creation */
++        priv->box.x1 = 0;
++        priv->box.y1 = 0;
++        priv->box.x2 = width;
++        priv->box.y2 = height;
++        priv->block_w = width;
++        priv->block_h = height;
++        priv->block_wcnt = 1;
++        priv->block_hcnt = 1;
++        priv->box_array = &priv->box;
++        priv->fbo_array = &priv->fbo;
++        dixDestroyPixmap(new_pixmap, 0);
++        return TRUE;
++    }
++#endif
++
++    {
++        int old_width = pixmap->drawable.width;
++        int old_height = pixmap->drawable.height;
++        int old_stride = pixmap->devKind;
++        char *old_bits = pixmap->devPrivate.ptr;
++        int stride = PixmapBytePad(width, pScreen->rootDepth);
++        char *bits;
++        int y, row_bytes;
++
++        bits = calloc(height, stride);
++        if (!bits)
++            return FALSE;
++
++        pScreen->ModifyPixmapHeader(pixmap, width, height, -1, -1, stride, bits);
++
++        gc = GetScratchGC(pScreen->rootDepth, pScreen);
++        if (gc) {
++            val.val = pScreen->blackPixel;
++            ChangeGC(serverClient, gc, GCForeground, &val);
++            ValidateGC(&pixmap->drawable, gc);
++            rect.x = 0;
++            rect.y = 0;
++            rect.width = width;
++            rect.height = height;
++            gc->ops->PolyFillRect(&pixmap->drawable, gc, 1, &rect);
++            FreeScratchGC(gc);
++        }
++        row_bytes = min(old_stride, stride);
++        row_bytes = min(row_bytes, PixmapBytePad(min(width, old_width),
++                                                 pScreen->rootDepth));
++        for (y = 0; y < min(height, old_height); y++)
++            memcpy(bits + y * stride, old_bits + y * old_stride, row_bytes);
++
++        free(pvfb->resizedFb);
++        pvfb->resizedFb = bits;
++        return TRUE;
++    }
++}
++
+ static Bool
+ vfbRRScreenSetSize(ScreenPtr  pScreen,
+                    CARD16     width,
+@@ -909,6 +1115,11 @@ vfbRRScreenSetSize(ScreenPtr  pScreen,
+     // Prevent screen updates while we change things around
+     SetRootClip(pScreen, ROOT_CLIP_NONE);
+ 
++    if (!vfbResizeScreenPixmap(pScreen, width, height)) {
++        SetRootClip(pScreen, ROOT_CLIP_FULL);
++        return FALSE;
++    }
++
+     pScreen->width = width;
+     pScreen->height = height;
+     pScreen->mmWidth = mmWidth;
+@@ -987,7 +1198,9 @@ vfbRandRInit(ScreenPtr pScreen)
+     pScrPriv->rrOutputValidateMode = vfbRROutputValidateMode;
+     pScrPriv->rrModeDestroy = NULL;
+ 
+-    RRScreenSetSizeRange(pScreen, 1, 1, pScreen->width, pScreen->height);
++    RRScreenSetSizeRange(pScreen, 1, 1,
++                         max(pvfb->maxFbWidth, pScreen->width),
++                         max(pvfb->maxFbHeight, pScreen->height));
+ 
+     for (i = 0; i < pvfb->numCrtcs; i++) {
+         vfbCrtcInfoPtr pvci = &pvfb->crtcs[i];

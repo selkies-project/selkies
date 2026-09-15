@@ -41,7 +41,9 @@ ARG DISTRIB_RELEASE="26.04"
 # The X server the session runs on, built here rather than installed: the
 # distribution's Xvfb has neither glamor nor DRI3, so GL clients render in
 # software even with a GPU present. XLibre's Xvfb has both, on Mesa's GBM and
-# on NVIDIA's own EGL, and is built from its release tag.
+# on NVIDIA's own EGL, and is built from its release tag with
+# addons/base/patches/xvfb-gpu-screen-pixmap.patch, which keeps the screen
+# pixmap on the GPU and sizes the framebuffer to the RandR screen.
 ARG WLROOTS_VERSION="0.19.3"
 ARG LABWC_VERSION="0.9.7"
 ARG XLIBRE_TAG="xlibre-xserver-25.2.2"
@@ -60,6 +62,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         gcc \
         meson \
         ninja-build \
+        patch \
         pkg-config \
         # The server itself
         libaudit-dev \
@@ -87,12 +90,14 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
 # the distribution package's, so the binary drops in where that one installed
 # it; anything left at the meson default would move a keymap or a font path out
 # from under the rest of the image.
+COPY addons/base/patches/xvfb-gpu-screen-pixmap.patch /build/patches/
 RUN set -e; \
     cd /tmp; \
     curl -fsSL --retry 5 --connect-timeout 30 -o xlibre.tar.gz \
         "https://github.com/X11Libre/xserver/archive/refs/tags/${XLIBRE_TAG}.tar.gz"; \
     tar -xf xlibre.tar.gz; \
     cd "xserver-${XLIBRE_TAG}"; \
+    patch -p1 < /build/patches/xvfb-gpu-screen-pixmap.patch; \
     meson setup build \
         --prefix=/usr --sysconfdir=/etc --localstatedir=/var --buildtype=release \
         -Dxvfb=true -Dglamor=true -Dgbm=true -Ddri3=true -Dglx=true \
