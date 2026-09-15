@@ -1400,8 +1400,11 @@ let mode = null, oc = null, ctx = null, writer = null, closed = false, presented
 let dec = null, decKey = false, decNeedKey = false;
 // Consecutive backpressure drops; a stalled consumer never resumes on its own.
 let sinkDrops = 0;
-// Decode backlog (frames) above which deltas are dropped.
-const OVERLOAD_QUEUE = 24;
+// Decode backlog (frames) that, standing for OVERLOAD_HOLD_MS, marks the decoder
+// overloaded: six frames is a tenth of a second at 60 fps, and a quarter second
+// of it is a stall rather than a burst.
+const OVERLOAD_QUEUE = 6, OVERLOAD_HOLD_MS = 250;
+let overloadSince = 0;
 // Keyframe-request throttle while decode is backed up.
 let lastNeedKey = 0;
 const sendNeedKey = (reason) => {
@@ -1466,13 +1469,18 @@ function configureDecoder(codec, w, h, software, description) {
 
 function decodeChunk(key, data, timestamp) {
   if (!dec || dec.state !== 'configured') return;
-  if (key) { decKey = true; decNeedKey = false; }
+  if (key) { decKey = true; decNeedKey = false; overloadSince = 0; }
   else {
     // No usable keyframe yet.
     if (!decKey || decNeedKey) { sendNeedKey('no_key'); return; }
-    // Decode is falling behind: drop the delta (a fresh IDR cannot unclog the
-    // queue) and request a throttled resync keyframe.
-    if (dec.decodeQueueSize > OVERLOAD_QUEUE) { decNeedKey = true; sendNeedKey('overload'); return; }
+    // Decode is falling behind: once the backlog has stood past the hold, drop the
+    // delta (a fresh IDR cannot unclog the queue) and request a throttled resync
+    // keyframe.
+    if (dec.decodeQueueSize > OVERLOAD_QUEUE) {
+      const now = performance.now();
+      if (!overloadSince) overloadSince = now;
+      else if (now - overloadSince > OVERLOAD_HOLD_MS) { decNeedKey = true; sendNeedKey('overload'); return; }
+    } else overloadSince = 0;
   }
   try { dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: timestamp, data: data })); }
   catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); }
