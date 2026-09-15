@@ -16,7 +16,7 @@ WHEELS="$(ls /dist/selkies-*-py3-none-any.whl)"
 # all resolves from the index as a dependency of the selkies wheel, but one whose
 # wheels are present without a build for this interpreter is a gap in the
 # matrix, and naming that interpreter beats pip's resolver error.
-mkdir -p /tmp/picked
+rm -rf /tmp/picked; mkdir -p /tmp/picked
 for pkg in pixelflux pcmflux; do
   if ! ls "/dist/${pkg}"-*.whl > /dev/null 2>&1; then
     continue
