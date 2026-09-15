@@ -4,11 +4,13 @@ second screen.
 
 Each display is a screen of the session compositor's own. When the primary
 shrinks, the secondary moves into the room it frees, and the compositor refuses
-an output rectangle that overlaps a live one: the layout pass must shrink the
-primary's screen before it recreates the secondary at its new offset, or the
-second screen is dropped on every primary shrink. Drives the real layout method
-(WebRTCService._apply_wayland_extension) against the in-process pixelflux
-compositor -- no browser, no signaling.
+an output rectangle that overlaps a live one, as it refuses shrinking a screen
+under the view a live capture holds: the layout pass must restart the primary's
+capture at its new size, shrink its screen, and only then recreate the
+secondary at its new offset, or the second screen is dropped on every primary
+shrink. Drives the real layout method (WebRTCService._apply_wayland_extension)
+against the in-process pixelflux compositor, with the primary's capture bound
+to the view the production settings bind it to -- no browser, no signaling.
 """
 import asyncio
 import importlib.util
@@ -23,14 +25,28 @@ import helpers as H
 RUNTIME = "/tmp/sel-wlext"
 
 
-def build_service(sc):
+def build_service(sc, cs, on_frame):
+    """A service over `sc` whose primary pipeline restarts the capture with the
+    new size the way MediaPipelinePixel.update_capture_region does on Wayland."""
     from selkies.webrtc_mode import WebRTCService
+
+    class Pipeline(types.SimpleNamespace):
+        async def update_capture_region(self, x, y, w, h):
+            self.width, self.height = w, h
+            cs.capture_width, cs.capture_height = w, h
+            await asyncio.to_thread(sc.start_capture, on_frame, cs)
+
     svc = WebRTCService.__new__(WebRTCService)
-    svc.media_pipeline = types.SimpleNamespace(capture_module=sc)
+    svc.media_pipeline = Pipeline(capture_module=sc, width=cs.capture_width,
+                                  height=cs.capture_height)
     svc._wayland_ctl_module = None
     svc.input_handler = None
+    svc.rtc_app = None
     svc._display_dpis = {}
     svc._last_applied_dpi = 96
+    svc._primary_dims = None
+    svc.display_layouts = {}
+    svc.display_clients = {}
     return svc
 
 
@@ -48,9 +64,11 @@ def drive(res: "H.Results") -> None:
     cs.scale = 1.0
     cs.jpeg_quality = 40
     cs.omit_stripe_headers = False
+    cs.display_id = wayland_output_id("primary")
     pixelflux.ensure_wayland_display(1920, 1080)
     sc = pixelflux.ScreenCapture()
-    sc.start_capture(lambda f: None, cs)
+    on_frame = lambda f: None
+    sc.start_capture(on_frame, cs)
     try:
         deadline = time.time() + 15
         while time.time() < deadline and not any(
@@ -63,7 +81,10 @@ def drive(res: "H.Results") -> None:
         res.check("secondary created at the primary's right edge",
                   bool(sc.create_output(oid, 1280, 720, 1920, 0, 1.0)), "")
 
-        svc = build_service(sc)
+        res.check("the primary's capture holds its view at 1920x1080",
+                  sc.get_realized_geometry(cs.display_id)[:2] == (1920, 1080),
+                  sc.get_realized_geometry(cs.display_id))
+        svc = build_service(sc, cs, on_frame)
         layouts = {
             "primary": {"x": 0, "y": 0, "w": 1280, "h": 720},
             did: {"x": 1280, "y": 0, "w": 1280, "h": 720},
@@ -79,6 +100,9 @@ def drive(res: "H.Results") -> None:
                   and outs[WAYLAND_SCREEN_OUTPUT_ID][3] == 1280
                   and outs[WAYLAND_SCREEN_OUTPUT_ID][4] == 720,
                   outs.get(WAYLAND_SCREEN_OUTPUT_ID))
+        res.check("the primary's view follows at 1280x720",
+                  sc.get_realized_geometry(cs.display_id)[:2] == (1280, 720),
+                  sc.get_realized_geometry(cs.display_id))
     finally:
         sc.stop_capture()
 
@@ -90,6 +114,8 @@ def main() -> "H.Results":
     os.makedirs(RUNTIME, exist_ok=True)
     os.chmod(RUNTIME, 0o700)
     os.environ["XDG_RUNTIME_DIR"] = RUNTIME
+    # The layout method's realized-geometry barrier runs on a Wayland server only.
+    os.environ["SELKIES_WAYLAND"] = "true"
     drive(res)
     res.summary()
     return res

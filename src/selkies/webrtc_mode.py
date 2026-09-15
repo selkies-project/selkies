@@ -1329,10 +1329,16 @@ class WebRTCService(BaseStreamingService):
         if (existing0 is not None and pw and ph
                 and (pw < existing0[3] or ph < existing0[4])):
             # The secondary drops into the room a shrinking primary frees, and the
-            # compositor refuses an output overlapping the primary's rectangle:
-            # the primary gives that room up before the secondary is placed.
-            await asyncio.to_thread(
-                module.resize_output, WAYLAND_SCREEN_OUTPUT_ID, pw, ph, existing0[5])
+            # compositor refuses an output overlapping the primary's rectangle, as
+            # it refuses a screen too small for the live view its capture holds:
+            # the capture takes the new rectangle, then the screen gives the room
+            # up, before the secondary is placed.
+            if (self.media_pipeline.width, self.media_pipeline.height) != (pw, ph):
+                await self.media_pipeline.update_capture_region(p["x"], p["y"], pw, ph)
+                await self._push_wayland_realized_geometry("primary", self.media_pipeline)
+            if not await asyncio.to_thread(
+                    module.resize_output, WAYLAND_SCREEN_OUTPUT_ID, pw, ph, existing0[5]):
+                logger.warning(f"Wayland screen shrink to {pw}x{ph} refused.")
         if self.input_handler:
             # The screen this display owns, grown just ahead of the output
             # that adopts its host window, then given the display's own DPI;
