@@ -179,6 +179,11 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self.__rtx_sequence_number = random_sequence_number()
         self.__fec_payload_type: Optional[int] = None
         self.__fec_sequence_number = random_sequence_number()
+        # Repair packets per FlexFEC group, with interleaved masks: as many
+        # losses in a group as there are repairs are recovered. Follows the
+        # loss `steer_fec` is told about.
+        self.fec_repair_packets = 1
+        self._fec_loss = 0.0
         self.__started = False
         self.__stats = RTCStatsReport()
         self.__transport = transport
@@ -405,6 +410,14 @@ class RTCRtpSender(AsyncIOEventEmitter):
         """
         self.emit("pli")
 
+    def steer_fec(self, loss_fraction: float) -> None:
+        """Set the FlexFEC repair density from a measured loss fraction: one
+        repair per group under 2% loss, two under 8%, three above, read on a
+        smoothed loss so a single small window neither adds nor drops a
+        repair on its own."""
+        self._fec_loss += (loss_fraction - self._fec_loss) * 0.3
+        self.fec_repair_packets = 1 + (self._fec_loss > 0.02) + (self._fec_loss > 0.08)
+
     async def _next_encoded_frame(self) -> Optional[RTCEncodedFrame]:
         data = await self.__track.recv()
 
@@ -471,8 +484,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
         timestamp_origin = random32()
         # Timer-triggered video-timing diagnostics (~5 flagged frames/s, like libwebrtc).
         last_video_timing = 0.0
-        # FlexFEC group: serialized media packets awaiting one XOR repair packet
-        # (flushed per frame, or every 10 packets within a large frame).
+        # FlexFEC group: serialized media packets awaiting their XOR repair
+        # packets (flushed per frame, or every 10 packets within a large frame).
         fec_group: list[bytes] = []
         fec_first_seq = 0
         try:
@@ -570,20 +583,23 @@ class RTCRtpSender(AsyncIOEventEmitter):
                             fec_first_seq = packet.sequence_number
                         fec_group.append(packet_bytes)
                         if packet.marker or len(fec_group) == 10:
-                            fec_bytes = build_flexfec_03(
-                                fec_group,
-                                fec_first_seq,
-                                self._ssrc,
-                                self.__fec_payload_type,
-                                self.__fec_sequence_number,
-                                packet.timestamp,
-                                self._fec_ssrc,
-                            )
-                            self.__fec_sequence_number = uint16_add(
-                                self.__fec_sequence_number, 1
-                            )
+                            repairs = min(self.fec_repair_packets, len(fec_group))
+                            for repair in range(repairs):
+                                fec_bytes = build_flexfec_03(
+                                    fec_group,
+                                    fec_first_seq,
+                                    self._ssrc,
+                                    self.__fec_payload_type,
+                                    self.__fec_sequence_number,
+                                    packet.timestamp,
+                                    self._fec_ssrc,
+                                    range(repair, len(fec_group), repairs),
+                                )
+                                self.__fec_sequence_number = uint16_add(
+                                    self.__fec_sequence_number, 1
+                                )
+                                await self.transport._send_rtp(fec_bytes, rtc_class=CLASS_VIDEO)
                             fec_group = []
-                            await self.transport._send_rtp(fec_bytes, rtc_class=CLASS_VIDEO)
         except (asyncio.CancelledError, ConnectionError, MediaStreamError):
             pass
         except Exception:

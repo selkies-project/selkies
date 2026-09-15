@@ -2649,7 +2649,8 @@ class WebRTCService(BaseStreamingService):
         hold there before recovering (`CongestionSteer`), and retarget that
         display's encoder within the allowed video_bitrate range — one display's
         congested link never steers another's stream. Only CBR mode has a target
-        to steer.
+        to steer. Each peer's own loss also sets how many FlexFEC repair packets
+        its sender adds per group (`RTCRtpSender.steer_fec`).
 
         Each peer's feedback is drained per tick, so a decision is taken over a
         tick's worth of it rather than whichever window landed last: a single
@@ -2697,6 +2698,9 @@ class WebRTCService(BaseStreamingService):
                 window = transport.take_twcc_window() if transport is not None else None
                 if window is None:
                     continue
+                sender = peer.get("video_sender")
+                if sender is not None:
+                    sender.steer_fec(window["loss_fraction"])
                 bucket = per_display.setdefault(
                     did, {"goodputs": [], "worst_loss": 0.0})
                 if window["goodput_bps"]:

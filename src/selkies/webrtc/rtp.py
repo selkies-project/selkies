@@ -37,7 +37,7 @@ import struct
 from collections import deque
 from dataclasses import dataclass, field
 from struct import pack, unpack, unpack_from
-from typing import Any, Optional, Union
+from typing import Any, Iterable, Optional, Union
 
 from .rtcrtpparameters import RTCRtpParameters
 
@@ -995,11 +995,15 @@ def build_flexfec_03(
     sequence_number: int,
     timestamp: int,
     ssrc: int,
+    protected: Optional[Iterable[int]] = None,
 ) -> bytes:
     """
     Build one FlexFEC (draft-03, R=0/F=0) repair packet XOR-protecting the given
     serialized media packets, whose sequence numbers start at
     `first_sequence_number` and are consecutive (single 15-bit mask block).
+    `protected` names the offsets the repair covers, every packet by default:
+    several repairs over one group with interleaved offsets let the receiver
+    recover as many losses as there are repairs, one XOR at a time.
 
     Recovery fields follow the draft: byte 0 covers P/X/CC, byte 1 covers M/PT,
     plus 16-bit length recovery (packet length minus the fixed RTP header) and
@@ -1007,16 +1011,18 @@ def build_flexfec_03(
     fixed header, zero-padded to the longest packet.
     """
     assert media_packets and len(media_packets) <= 15
+    covered = [(offset, media_packets[offset])
+               for offset in (range(len(media_packets)) if protected is None else protected)]
     recovery = bytearray(2)
     length_recovery = 0
     ts_recovery = 0
-    longest = max(len(p) for p in media_packets) - 12
+    longest = max(len(p) for _, p in covered) - 12
     # The payloads are XORed as big integers: a shorter one is shifted up so
     # its first byte lines up with the others', which pads it with zeros at
     # the end as the draft requires.
     payload_xor = 0
     mask = 0
-    for offset, media in enumerate(media_packets):
+    for offset, media in covered:
         # Byte 0 folds in P, X and CC (the version bits stay out); byte 1,
         # M and PT.
         recovery[0] ^= media[0] & 0x3F
