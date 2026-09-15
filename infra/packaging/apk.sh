@@ -52,10 +52,11 @@ REPODEST="/build/apkrepo"
 export REPODEST
 cd /build/apk && abuild -F rootpkg
 # abuild's filename has no architecture in it, and both arch jobs land their
-# .apk in the same release directory; the file takes the release version as the
-# tag spells it, while the package inside keeps apk's (2.0.0_rc0)
+# .apk in the same release directory; every package file is
+# selkies-<version>-<architecture>.<format>, the version as the release tag spells
+# it, while apk reads its own (2.0.0_rc0-r0) from inside the archive
 # shellcheck disable=SC2046  # abuild filenames never contain spaces
 set -- $(find /build/apkrepo -name 'selkies-*.apk')
 [ "$#" -eq 1 ] || { echo "abuild produced $# .apk files, expected one" >&2; exit 1; }
-cp "$1" "/out/selkies-${SELKIES_VERSION:-0.0.0}-r0-$(uname -m).apk"
+cp "$1" "/out/selkies-${SELKIES_VERSION:-0.0.0}-$(uname -m).apk"
 ls -la /out

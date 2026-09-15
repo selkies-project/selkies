@@ -38,4 +38,7 @@ sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" /build/arch/PKGBUILD
 useradd -m builder 2>/dev/null || true
 chown -R builder:builder /build /out
 su builder -c "cd /build/arch && PKGDEST=/out makepkg -f --nodeps"
+# Every package file is selkies-<version>-<architecture>.<format>, the version as the
+# release tag spells it; pacman reads the version and pkgrel from inside the archive.
+mv /out/selkies-*.pkg.tar.zst "/out/selkies-${SELKIES_VERSION:-0.0.0}-$(uname -m).pkg.tar.zst"
 ls -la /out

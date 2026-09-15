@@ -14,14 +14,14 @@ export SELKIES_VERSION="${SELKIES_TAG#v}"
 
 ## Packages
 
-Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkies-resize` and `selkies-gpu-probe` on `PATH`, carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line. Every file is named with the release version; inside, a pre-release carries the version the way its packager orders it (`2.0.0~rc0` for dpkg and rpm, `2.0.0_rc0` for apk), so the final release upgrades over it:
+Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkies-resize` and `selkies-gpu-probe` on `PATH`, carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line. Every file is `selkies-<version>-<distribution>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-ubuntu26.04-amd64.deb`, `selkies-2.0.0-fc-x86_64.rpm`), the distribution left out where the package is not built per distribution; inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
 
 ```bash
 # Ubuntu and Debian. The suffix names the distribution the package was built in
 # (ubuntu24.04, ubuntu26.04, bookworm, trixie); this reads yours from os-release
 . /etc/os-release
 DISTRO="$([ "${ID}" = "ubuntu" ] && echo "ubuntu${VERSION_ID}" || echo "${VERSION_CODENAME}")"
-PKG="selkies_${SELKIES_VERSION}-1.${DISTRO}_$(dpkg --print-architecture).deb"
+PKG="selkies-${SELKIES_VERSION}-${DISTRO}-$(dpkg --print-architecture).deb"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo apt-get install -y "./${PKG}"
 ```
@@ -29,21 +29,21 @@ sudo apt-get install -y "./${PKG}"
 ```bash
 # Fedora and Enterprise Linux
 . /etc/os-release
-PKG="selkies-${SELKIES_VERSION}-1.$([ "${ID}" = "fedora" ] && echo fc || echo el9).$(uname -m).rpm"
+PKG="selkies-${SELKIES_VERSION}-$([ "${ID}" = "fedora" ] && echo fc || echo el9)-$(uname -m).rpm"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo dnf install -y "./${PKG}"
 ```
 
 ```bash
 # Alpine
-PKG="selkies-${SELKIES_VERSION}-r0-$(uname -m).apk"
+PKG="selkies-${SELKIES_VERSION}-$(uname -m).apk"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo apk add --allow-untrusted "./${PKG}"
 ```
 
 ```bash
 # Arch Linux, which Arch publishes for x86_64 alone
-PKG="selkies-${SELKIES_VERSION}-1-$(uname -m).pkg.tar.zst"
+PKG="selkies-${SELKIES_VERSION}-$(uname -m).pkg.tar.zst"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_TAG}/${PKG}"
 sudo pacman -U "./${PKG}"
 ```
