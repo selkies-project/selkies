@@ -65,16 +65,21 @@ function compareVersions(a, b) {
   return a.rank - b.rank || a.count - b.count;
 }
 
-/** The release tags whose tree carries the site, oldest first. */
+/**
+ * The release tags whose tree carries the site, oldest first. A version tagged
+ * both with and without the `v` prefix is one release, built from the bare tag.
+ */
 function releases() {
-  const found = [];
+  const found = new Map();
   for (const tag of git(['tag', '--list']).split('\n').filter(Boolean)) {
     const parsed = parseVersion(tag);
     if (!parsed) continue;
+    const segment = tag.replace(/^v/, '');
+    if (found.has(segment) && tag !== segment) continue;
     const probe = spawnSync('git', ['cat-file', '-e', `${tag}:${siteDir}/package.json`], { cwd: repoRoot });
-    if (probe.status === 0) found.push({ tag, segment: tag.replace(/^v/, ''), parsed });
+    if (probe.status === 0) found.set(segment, { tag, segment, parsed });
   }
-  return found.sort((a, b) => compareVersions(a.parsed, b.parsed));
+  return [...found.values()].sort((a, b) => compareVersions(a.parsed, b.parsed));
 }
 
 /** Exports `tag` under `tree` and gives it this tree's site tooling. */
