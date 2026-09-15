@@ -633,7 +633,7 @@ class _VideoRelay:
         """
         data = item['data']
         size = len(data)
-        is_video = size >= 10 and data[0] == 0x04
+        is_video = size >= 12 and data[0] == 0x04
         is_idr = is_video and (data[1] & 0x0F) == 0x01
         dropped = False
         if (not is_idr and self.backlog
@@ -1011,6 +1011,10 @@ class DataStreamingServer(BaseStreamingService):
         _last_keyframe_request: Display id to monotonic time of the last IDR
             request; `_last_keyframe_log` and `_keyframe_log_suppressed`
             throttle only the log line, never the request.
+        _last_lost_frame: Display id to monotonic time of the last frame a
+            client reported lost, which floors the invalidations a burst of
+            clients can ask of one encoder; `_invalidation_log` throttles the
+            log line to one per display per five seconds.
         _wm_swap: Swaps in a multi-monitor-capable window manager on X11.
     """
 
@@ -1120,6 +1124,8 @@ class DataStreamingServer(BaseStreamingService):
         self._last_keyframe_request = {}
         self._last_keyframe_log = {}
         self._keyframe_log_suppressed = {}
+        self._last_lost_frame = {}
+        self._invalidation_log = {}
 
         self.audio_device_name = self.cli_args.audio_device_name
         self.pcmflux_module = None
@@ -2195,6 +2201,27 @@ class DataStreamingServer(BaseStreamingService):
                 module.request_idr_frame()
             except Exception:
                 pass
+
+    def _schedule_invalidation(self, display_id: str, frame_id: int) -> None:
+        """Tell the display's encoder a client lost `frame_id`, so the frames after it stop
+        predicting from it. Non-blocking in pixelflux, like the keyframe request; logged
+        once per display per five seconds with the count of the rest."""
+        instance = self.capture_instances.get(display_id)
+        module = instance.get('module') if instance else None
+        if not module:
+            return
+        try:
+            module.invalidate_reference(frame_id & 0xFFFF)
+        except Exception:
+            return
+        now = time.monotonic()
+        last, more = self._invalidation_log.get(display_id, (0.0, 0))
+        if now - last >= 5.0:
+            suffix = f" (+{more} more in the last 5 s)" if more else ""
+            data_logger.info(f"Display '{display_id}': frame {frame_id} lost by a client; the encoder predicts past it.{suffix}")
+            self._invalidation_log[display_id] = (now, 0)
+        else:
+            self._invalidation_log[display_id] = (last, more + 1)
 
     def _second_screen_availability(self) -> tuple[bool, str]:
         """Whether this session can actually attach a second display.
@@ -4038,6 +4065,21 @@ class DataStreamingServer(BaseStreamingService):
                                 await websocket.send_str("VIDEO_STOPPED")
                             except (ConnectionResetError, OSError, RuntimeError):
                                 pass
+
+                    elif message.startswith("LOST_FRAME "):
+                        # The client's decoder dropped a frame it could not keep up with:
+                        # the encoder predicts past it, so the client resumes on the next
+                        # frame instead of waiting for a keyframe. One report per display
+                        # per few milliseconds is all a burst of clients can add.
+                        try:
+                            lost_frame_id = int(message.split(" ", 1)[1])
+                        except ValueError:
+                            continue
+                        target_display_id = client_display_id or 'primary'
+                        now = time.monotonic()
+                        if now - self._last_lost_frame.get(target_display_id, 0.0) >= 0.005:
+                            self._last_lost_frame[target_display_id] = now
+                            self._schedule_invalidation(target_display_id, lost_frame_id)
 
                     elif message == "REQUEST_KEYFRAME":
                         # Viewers get a stricter per-socket throttle: any number of them

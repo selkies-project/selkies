@@ -81,8 +81,8 @@ logger = logging.getLogger("media_pipeline")
 # pixelflux's per-stripe wire header: a video tag, a byte carrying the codec
 # in its high nibble and the picture kind the encoder produced in its low
 # nibble (a keyframe is 0x01; every JPEG picture stands alone), the frame id,
-# and the stripe geometry.
-STRIPE_HEADER_LEN = 10
+# the stripe geometry, and the id of the frame it predicts from.
+STRIPE_HEADER_LEN = 12
 logger.setLevel(logging.INFO)
 
 
@@ -226,7 +226,7 @@ class MediaPipelinePixel(MediaPipeline):
         self.audio_enabled = audio_enabled
         self.audio_device_name = audio_device_name
         self.capture_cursor = False
-        self.produce_data: Callable[..., None] = lambda buf, pts, kind, keyframe=True, timing=None: logger.warning(
+        self.produce_data: Callable[..., None] = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None: logger.warning(
             "unhandled produce_data"
         )
         self.on_pipeline_started: Callable[[], None] = lambda: None
@@ -476,6 +476,11 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.error(f"Error requesting IDR frame: {e}", exc_info=True)
 
+    def invalidate_reference(self, frame_id: int) -> None:
+        """A consumer lost `frame_id`: the frames after it stop predicting from it."""
+        if self._is_screen_capturing and self.capture_module is not None:
+            self.capture_module.invalidate_reference(frame_id & 0xFFFF)
+
     def generate_capture_settings(self) -> Any:
         """Build the pixelflux CaptureSettings snapshot for the current state.
 
@@ -530,8 +535,10 @@ class MediaPipelinePixel(MediaPipeline):
 
         The frame owns its native buffer and goes downstream as a zero-copy
         memoryview sliced past the header, with the keyframe flag read off
-        the header's picture-type byte; `produce_data` wraps it in an
-        EncodedPacket and keeps a reference so the frame stays alive. pts
+        the header's picture-type byte and, for a full frame whose encoder
+        tracks its references, the frame's id and the id it predicts from;
+        `produce_data` wraps it in an EncodedPacket and keeps a reference so
+        the frame stays alive. pts
         (90 kHz) comes from the pipeline-scoped monotonic clock rather than
         `frame.frame_id`: the u16 counter wraps, restarts at 0 on every
         capture restart, and its implied step changes on live fps raises,
@@ -556,10 +563,14 @@ class MediaPipelinePixel(MediaPipeline):
                 if pts <= self._last_video_pts:
                     pts = self._last_video_pts + 1
                 self._last_video_pts = pts
-                # A pixelflux without the stamps reads as zeros, which the sender treats as unknown.
-                timing = tuple(getattr(frame, name, 0) for name in ("capture_ns", "encode_start_ns", "encode_end_ns"))
+                timing = (frame.capture_ns, frame.encode_start_ns, frame.encode_end_ns)
+                reference = frame.reference_frame_id
+                dependency = None
+                if reference != -2 and frame.stripe_y_start == 0 and frame.stripe_height == self.height:
+                    dependency = (frame.frame_id & 0xFFFF, None if reference == -1 else reference)
                 self.async_event_loop.call_soon_threadsafe(
-                    functools.partial(self.produce_data, data_bytes, pts, "video", keyframe, timing=timing)
+                    functools.partial(self.produce_data, data_bytes, pts, "video", keyframe,
+                                      timing=timing, dependency=dependency)
                 )
 
         except Exception as e:

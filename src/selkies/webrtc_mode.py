@@ -625,6 +625,8 @@ class WebRTCService(BaseStreamingService):
         self.media_pipeline.on_pipeline_started = self.send_current_cursor
 
         self.rtc_app.request_idr_frame = self.request_idr_for_display
+        self.rtc_app.invalidate_reference = self.invalidate_reference_for_display
+        self._invalidation_log: Dict[str, tuple] = {}
         self.rtc_app.start_display_media = self.start_display_media
         self.rtc_app.stop_display_media = self.stop_display_media
         self.rtc_app.on_sdp = self.signaling_client.send_sdp
@@ -1094,6 +1096,24 @@ class WebRTCService(BaseStreamingService):
         pipeline = self.display_pipelines.get(display_id)
         if pipeline is not None:
             await pipeline.dynamic_idr_frame()
+
+    def invalidate_reference_for_display(self, display_id: str, frame_id: int) -> None:
+        """Tell the display's encoder a peer lost `frame_id`, so the frames after it stop
+        predicting from it (websockets LOST_FRAME parity). Logged once per display per
+        five seconds with the count of the rest, since loss comes in bursts."""
+        display_id = display_id or "primary"
+        pipeline = self.display_pipelines.get(display_id)
+        if pipeline is None:
+            return
+        pipeline.invalidate_reference(frame_id)
+        now = time.monotonic()
+        last, more = self._invalidation_log.get(display_id, (0.0, 0))
+        if now - last >= 5.0:
+            suffix = f" (+{more} more in the last 5 s)" if more else ""
+            logger.info(f"Display '{display_id}': frame {frame_id} lost by a peer; the encoder predicts past it.{suffix}")
+            self._invalidation_log[display_id] = (now, 0)
+        else:
+            self._invalidation_log[display_id] = (last, more + 1)
 
     async def _provision_webrtc_virtual_mic(self) -> None:
         """Bring up the SelkiesVirtualMic once for the WebRTC transport (shared
@@ -1987,8 +2007,8 @@ class WebRTCService(BaseStreamingService):
                 # The native-cursor toggle is global across displays.
                 pipeline.capture_cursor = self.media_pipeline.capture_cursor
                 pipeline.produce_data = (
-                    lambda buf, pts, kind, keyframe=True, timing=None, _did=did:
-                        self.rtc_app.consume_data(buf, pts, kind, keyframe, _did, timing)
+                    lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, _did=did:
+                        self.rtc_app.consume_data(buf, pts, kind, keyframe, _did, timing, dependency)
                 )
                 # pixelflux's cursor-callback slot is process-global (last registration
                 # wins), so every display must route cursors into the same sink.

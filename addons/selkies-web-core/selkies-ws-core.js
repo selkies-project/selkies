@@ -20,15 +20,18 @@
  * Binary messages are typed by their first byte. From the server: `0x01`
  * audio (Opus, with the RED redundancy layout documented on
  * extractOpusFrames), `0x03` a JPEG stripe (`u8 reserved`, `u16 frame id`,
- * `u16 stripe Y`, JPEG data), `0x04` an H.264 stripe or full frame (`u8
- * keyframe`, `u16 frame id`, `u16 stripe Y`, `u16 width`, `u16 height`,
- * Annex-B data), and `0x05` a gzip-wrapped control text once the client
+ * `u16 stripe Y`, JPEG data), `0x04` a video stripe or full frame (`u8`
+ * codec and frame kind, `u16 frame id`, `u16 stripe Y`, `u16 width`, `u16
+ * height`, `u16` the id of the frame it predicts from -- its own id when it
+ * predicts from nothing or the encoder does not say -- then the coded data),
+ * and `0x05` a gzip-wrapped control text once the client
  * advertised `_gz,1`. From the
  * client: `0x02` microphone Opus, `0x06` webcam frames (startWebcamCapture),
  * and `0x05` gzipped large text once the server echoed `_gz,1`. Text messages
  * are control. The client sends `SETTINGS,{json}`, `r,WxH,displayId`,
  * `START_VIDEO`, `STOP_VIDEO`, `START_AUDIO`, `STOP_AUDIO`,
- * `REQUEST_KEYFRAME`, `CLIENT_FRAME_ACK <id> <heldMs>`, `cr`, `REQUEST_CLIPBOARD`, the
+ * `REQUEST_KEYFRAME`, `LOST_FRAME <id>` (a frame the decoder dropped, which
+ * the encoder then predicts past), `CLIENT_FRAME_ACK <id> <heldMs>`, `cr`, `REQUEST_CLIPBOARD`, the
  * chunked clipboard upload of lib/clipboard-worker-bridge.js,
  * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>`,
  * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
@@ -130,6 +133,8 @@ import {
 } from './lib/wire-codecs.js';
 // The same module by source, for the video worker's own copy of it.
 import wireCodecsSource from './lib/wire-codecs.js?raw';
+// The decode gate, likewise by source, for the worker's own copy of it.
+import decodeGateSource from './lib/decode-gate.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
@@ -1392,19 +1397,16 @@ function checkWorkerSinkAlive() {
   }
 }
 const VIDEO_WORKER_SRC = `
+${decodeGateSource.replace(/^export /gm, '')}
 // Video sink and optional in-worker decoder. The sink is a worker-only
 // VideoTrackGenerator (its track transferred to the page for <video>.srcObject) or a
 // transferred OffscreenCanvas. Encoded chunks are decoded here so no decoded frame
 // crosses the thread boundary; a frame transferred in (m.frame) is the warm-up path.
 let mode = null, oc = null, ctx = null, writer = null, closed = false, presented = false;
-let dec = null, decKey = false, decNeedKey = false;
+let dec = null;
+const gate = new DecodeGate();
 // Consecutive backpressure drops; a stalled consumer never resumes on its own.
 let sinkDrops = 0;
-// Decode backlog (frames) that, standing for OVERLOAD_HOLD_MS, marks the decoder
-// overloaded: six frames is a tenth of a second at 60 fps, and a quarter second
-// of it is a stall rather than a burst.
-const OVERLOAD_QUEUE = 6, OVERLOAD_HOLD_MS = 250;
-let overloadSince = 0;
 // Keyframe-request throttle while decode is backed up.
 let lastNeedKey = 0;
 const sendNeedKey = (reason) => {
@@ -1443,7 +1445,7 @@ function present(f) {
 
 function closeDecoder() {
   if (dec) { try { if (dec.state !== 'closed') dec.close(); } catch (_) {} dec = null; }
-  decKey = false; decNeedKey = false;
+  gate.configured();
   wireCodec = null; wireW = 0; wireH = 0; wireDesc = null;
 }
 
@@ -1462,26 +1464,18 @@ function configureDecoder(codec, w, h, software, description) {
     if (colorSpace) cfg.colorSpace = colorSpace;
     dec.configure(cfg);
     // A keyframe is required after (re)configure.
-    decNeedKey = true;
+    gate.configured();
     return true;
   } catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); return false; }
 }
 
-function decodeChunk(key, data, timestamp) {
+// frameId and reference come off the wire header; a frame that names itself
+// predicts from nothing the encoder can say (DecodeGate).
+function decodeChunk(key, data, timestamp, frameId, reference) {
   if (!dec || dec.state !== 'configured') return;
-  if (key) { decKey = true; decNeedKey = false; overloadSince = 0; }
-  else {
-    // No usable keyframe yet.
-    if (!decKey || decNeedKey) { sendNeedKey('no_key'); return; }
-    // Decode is falling behind: once the backlog has stood past the hold, drop the
-    // delta (a fresh IDR cannot unclog the queue) and request a throttled resync
-    // keyframe.
-    if (dec.decodeQueueSize > OVERLOAD_QUEUE) {
-      const now = performance.now();
-      if (!overloadSince) overloadSince = now;
-      else if (now - overloadSince > OVERLOAD_HOLD_MS) { decNeedKey = true; sendNeedKey('overload'); return; }
-    } else overloadSince = 0;
-  }
+  const decision = gate.decide(key, frameId, reference, dec.decodeQueueSize);
+  if (decision === 'lost') { self.postMessage({ type: 'lostFrame', id: frameId }); return; }
+  if (decision !== 'decode') { sendNeedKey(decision); return; }
   try { dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: timestamp, data: data })); }
   catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); }
 }
@@ -1634,8 +1628,8 @@ function onStripeError(y) {
 }
 
 function onH264Stripe(buffer) {
-  if (buffer.byteLength < 11) return;
-  const head = new Uint8Array(buffer, 0, 10);
+  if (buffer.byteLength < 13) return;
+  const head = new Uint8Array(buffer, 0, 12);
   const key = wireFrameIsKey(head[1]);
   const frameId = (head[2] << 8) | head[3];
   const y = (head[4] << 8) | head[5];
@@ -1644,7 +1638,7 @@ function onH264Stripe(buffer) {
   wireChunks++;
   if (frameId !== wireLastId) { wireFrames++; wireLastId = frameId; }
   stripeClock.note(frameId);
-  const payload = buffer.slice(10);
+  const payload = buffer.slice(12);
   if (payload.byteLength === 0) return;
   let info = stripeDecs[y];
   let codec = info ? info.codec : null;
@@ -1746,16 +1740,17 @@ function onWire(buffer) {
     else if (type === 0x04) onH264Stripe(buffer);
     return;
   }
-  if (buffer.byteLength < 11) return;
-  const head = new Uint8Array(buffer, 0, 10);
+  if (buffer.byteLength < 13) return;
+  const head = new Uint8Array(buffer, 0, 12);
   if (wireExpect && wireCodecName(head[1]) !== wireExpect) return;
   const key = wireFrameIsKey(head[1]);
   const frameId = (head[2] << 8) | head[3];
   const w = (head[6] << 8) | head[7];
   const h = (head[8] << 8) | head[9];
+  const reference = (head[10] << 8) | head[11];
   wireChunks++;
   if (frameId !== wireLastId) { wireFrames++; wireLastId = frameId; }
-  const payload = buffer.slice(10);
+  const payload = buffer.slice(12);
   const bytes = new Uint8Array(payload);
   let codec = wireCodec;
   if (key) codec = codecStringFor(wireCodecName(head[1]), bytes, w, h, 0, false, wireChromium);
@@ -1771,7 +1766,7 @@ function onWire(buffer) {
     wireCodec = codec; wireW = w; wireH = h; wireDesc = desc;
     self.postMessage({ type: 'wireDims', w: w, h: h });
   }
-  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, performance.now() * 1000);
+  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, performance.now() * 1000, frameId, reference);
 }
 
 const stripedCaps = {
@@ -1796,7 +1791,7 @@ self.onmessage = (e) => {
   if (m.type === 'closeDecoder') { closeDecoder(); return; }
   if (m.type === 'chunk') {
     // Not ready yet; the page will resend a keyframe.
-    decodeChunk(m.key, m.data, m.timestamp);
+    decodeChunk(m.key, m.data, m.timestamp, m.frameId, m.reference);
     return;
   }
   if (m.type === 'wireIn') {
@@ -2134,6 +2129,10 @@ function ensureVideoWorker() {
         requestKeyframe();
         return;
       }
+      if (m.type === 'lostFrame') {
+        if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(`LOST_FRAME ${m.id}`);
+        return;
+      }
       if (m.type === 'decoderError') {
         workerDecodeFailed = true;
         workerDecoderCodec = null; workerDecoderW = 0; workerDecoderH = 0;
@@ -2383,7 +2382,7 @@ function logWorkerDecoderConfig(codec, w, h) {
  * @param {string} codec The `avc1.PPCCLL` codec string.
  * @returns {boolean} True when handled there, false to fall back to main-thread decode.
  */
-function feedWorkerDecoder(isKey, dataBuf, w, h, codec) {
+function feedWorkerDecoder(isKey, dataBuf, w, h, codec, frameId, reference) {
   if (workerDecodeFailed) return false;
   if (!ensureVideoWorker()) return false;
   if (!activateWorkerSinkDisplay()) return false;
@@ -2400,7 +2399,7 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec) {
     requestKeyframe();
   }
   const data = framed ? annexbToAvcc(new Uint8Array(dataBuf)).buffer : dataBuf;
-  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: performance.now() * 1000 }, [data]); }
+  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: performance.now() * 1000, frameId: frameId, reference: reference }, [data]); }
   catch (e) { return false; }
   return true;
 }
@@ -6627,7 +6626,7 @@ class WorkerWebSocket {
         }
 
       } else if (dataTypeByte === 0x04) {
-        const EXPECTED_HEADER_LENGTH = 10;
+        const EXPECTED_HEADER_LENGTH = 12;
         if (arrayBuffer.byteLength < EXPECTED_HEADER_LENGTH) return;
 
         const video_frame_type_byte = dataView.getUint8(1);
@@ -6645,6 +6644,7 @@ class WorkerWebSocket {
         const vncStripeYStart = dataView.getUint16(4, false);
         const stripeWidth = dataView.getUint16(6, false);
         const stripeHeight = dataView.getUint16(8, false);
+        const referenceFrameId = dataView.getUint16(10, false);
         const h264Payload = arrayBuffer.slice(EXPECTED_HEADER_LENGTH);
 
         // A shared viewer sends no SETTINGS, so the stream geometry is learned
@@ -6688,7 +6688,7 @@ class WorkerWebSocket {
                 }
             }
             const workerCodec = workerKeyframeCodec || wireCodecString(video_frame_type_byte, null, stripeWidth, stripeHeight);
-            if (feedWorkerDecoder(isKeyFrame, h264Payload, stripeWidth, stripeHeight, workerCodec)) {
+            if (feedWorkerDecoder(isKeyFrame, h264Payload, stripeWidth, stripeHeight, workerCodec, vncFrameID, referenceFrameId)) {
                 return;
             }
         }

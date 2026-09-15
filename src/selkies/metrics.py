@@ -47,7 +47,9 @@ class Metrics:
             since transport start.
         webrtc_bridge_dropped_frames: Per display, cumulative since the graph
             was built; unlike the pacer counters it is published whether or not
-            a pacer is attached.
+            a pacer is attached. `webrtc_bridge_invalidated_frames` counts the
+            share of those the encoder was told to predict past, the rest being
+            frames that predicted from one already dropped.
         prev_stats_video_header_names: Header names of the video CSV (and
             `prev_stats_audio_header_names` for audio), tracked alongside the
             lengths so a same-count field swap still triggers a remap.
@@ -84,6 +86,9 @@ class Metrics:
         self.webrtc_bridge_dropped_frames = Gauge(
             'webrtc_bridge_dropped_frames',
             'Encoded frames dropped before packetization, per display', ['display'])
+        self.webrtc_bridge_invalidated_frames = Gauge(
+            'webrtc_bridge_invalidated_frames',
+            'Dropped frames the encoder was told to predict past, per display', ['display'])
         self.stats_video_file_path: Optional[str] = None
         self.stats_audio_file_path: Optional[str] = None
         self.prev_stats_video_header_len: Optional[int]  = None
@@ -114,10 +119,12 @@ class Metrics:
                       "idr_resurrects", "timeout_resurrects", "stale_resets"):
             self.webrtc_pacer_events.labels(display, event).set(snap.get(event, 0))
 
-    def set_bridge_drops(self, drops: Dict[str, int]) -> None:
-        """Publish each display's bridge drop count (see `RTCApp.bridge_drops`)."""
-        for display, dropped in drops.items():
+    def set_bridge_drops(self, drops: Dict[str, tuple]) -> None:
+        """Publish each display's bridge drop and invalidation counts (see
+        `RTCApp.bridge_drops`)."""
+        for display, (dropped, invalidated) in drops.items():
             self.webrtc_bridge_dropped_frames.labels(display or "primary").set(dropped)
+            self.webrtc_bridge_invalidated_frames.labels(display or "primary").set(invalidated)
 
     def set_gpu_utilization(self, utilization: float) -> None:
         self.gpu_utilization.set(utilization)

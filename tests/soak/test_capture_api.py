@@ -150,7 +150,7 @@ class FrameCounter:
                 self.h264 += 1
                 if (b[1] & 0x0F) == 0x01:
                     self.idr_flag += 1
-                payload = b[10:] if len(b) > 10 else b""
+                payload = b[12:] if len(b) > 12 else b""
                 i = 0
                 while i + 4 <= len(payload):
                     if (payload[i] == 0 and payload[i+1] == 0 and payload[i+2] == 0 and payload[i+3] == 1

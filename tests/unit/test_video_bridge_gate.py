@@ -6,13 +6,17 @@ receiver sees no gap and asks for nothing, while every delta frame behind it
 references a picture that was never sent. The bridge closes a gate on the
 first drop and holds delta frames until a keyframe arrives, asks for that
 keyframe while the gate is closed, never lets a delta frame evict a queued
-keyframe, and reopens on the keyframe alone. The audio bridge is a deeper
-FIFO with no request path and keeps dropping oldest. Driven with stand-in
-frames and a manual clock; no encoder, no peer.
+keyframe, and reopens on the keyframe alone. A frame that names what it
+predicts from is dropped with a word to the encoder instead, and only the
+frames predicting from a dropped one are held back, so the stream resumes on
+the encoder's next frame with no keyframe. The audio bridge is a deeper FIFO
+with no request path and keeps dropping oldest. Driven with stand-in frames
+and a manual clock; no encoder, no peer.
 """
 import asyncio
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))), "src"))
@@ -109,9 +113,51 @@ async def scenario(res: H.Results) -> None:
               await drain(audio) == ["A2", "A3", "A4"] and audio.dropped == 2, audio.dropped)
 
 
+async def references(res: H.Results) -> None:
+    clock = Clock()
+    requests, forgotten = [], []
+    bridge = PipelineBridge(request_keyframe=lambda: requests.append(clock.now), clock=clock,
+                            invalidate_reference=forgotten.append)
+    frame = lambda fid, ref: SimpleNamespace(name=f"F{fid}", dependency=(fid, ref))
+    names = lambda items: [f.name for f in items]
+
+    bridge.set_data(frame(0, None), keyframe=True)
+    got = await drain(bridge)
+    bridge.set_data(frame(1, 0), keyframe=False)
+    res.check("a frame predicting from the delivered keyframe flows",
+              names(got + await drain(bridge)) == ["F0", "F1"] and not forgotten)
+
+    # The sender stalls with frame 2 queued: 3 evicts it, and 3 itself predicts
+    # from the evicted frame.
+    bridge.set_data(frame(2, 1), keyframe=False)
+    bridge.set_data(frame(3, 2), keyframe=False)
+    res.check("a drop tells the encoder which frame went and holds what predicts from it",
+              bridge.empty() and forgotten == [2] and bridge.dropped == 2 and not requests,
+              (forgotten, bridge.dropped, requests))
+    bridge.set_data(frame(4, 3), keyframe=False)
+    res.check("a frame predicting from a held frame is held too",
+              bridge.empty() and bridge.dropped == 3 and forgotten == [2])
+    bridge.set_data(frame(5, 1), keyframe=False)
+    res.check("the encoder's frame predicting past the drop flows, with no keyframe asked",
+              names(await drain(bridge)) == ["F5"] and not requests, requests)
+
+    bridge.set_data(frame(6, None), keyframe=True)
+    bridge.set_data(frame(7, 6), keyframe=False)
+    res.check("a frame behind a queued keyframe is dropped and named, the keyframe kept",
+              names(await drain(bridge)) == ["F6"] and forgotten == [2, 7], forgotten)
+    bridge.set_data(frame(8, 6), keyframe=False)
+    res.check("a frame predicting from the delivered keyframe flows",
+              names(await drain(bridge)) == ["F8"])
+    bridge.set_data(frame(9, 8), keyframe=False)
+    bridge.set_data(frame(10, 8), keyframe=False)
+    res.check("a frame evicted by one predicting from an earlier frame does not hold it back",
+              names(await drain(bridge)) == ["F10"] and forgotten == [2, 7, 9], forgotten)
+
+
 def main() -> int:
     res = H.Results("video-bridge-gate")
     asyncio.run(scenario(res))
+    asyncio.run(references(res))
     return 0 if res.summary() else 1
 
 

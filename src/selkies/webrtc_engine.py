@@ -50,6 +50,7 @@ Structural notes:
 import logging
 import asyncio
 import time
+from collections import deque
 import gzip
 import inspect
 import re
@@ -91,6 +92,7 @@ from .webrtc.codecs.base import EncodedPacket
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 from .webrtc.contrib.relay import MediaRelay
 from enum import Enum
+from .display_utils import LOST_FRAME_MEMORY
 from .webrtc_media_pipeline import MediaPipeline
 from .input_handler import (
     BULK_DRAIN_TIMEOUT_S,
@@ -275,14 +277,19 @@ class PipelineBridge:
     receiver sees no gap and never asks for a keyframe, while every delta
     frame behind the drop references a picture it never received. With
     `request_keyframe` bound the bridge keeps the wire decodable the way the
-    websockets relay does: a drop closes a gate that holds delta frames back,
-    a keyframe is asked for until one arrives and reopens it, and a queued
+    websockets relay does. A frame that names what it predicts from is
+    dropped with a word to the encoder (`invalidate_reference`), which then
+    predicts past it, and only the frames predicting from a dropped one are
+    held back, so the stream resumes on the next frame without a keyframe. A
+    frame that names nothing closes a gate that holds delta frames back, a
+    keyframe is asked for until one arrives and reopens it, and a queued
     keyframe is never evicted by a delta frame. A gate no keyframe answers
     within GATE_TIMEOUT_S reopens on its own.
     """
     def __init__(self, maxsize: int = 1,
                  request_keyframe: Optional[Callable[[], None]] = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 invalidate_reference: Optional[Callable[[int], None]] = None) -> None:
         """Initializes the bridge.
 
         Args:
@@ -292,6 +299,9 @@ class PipelineBridge:
                 the gate is closed. None leaves every item ungated: audio
                 samples are self-contained.
             clock: Monotonic time source.
+            invalidate_reference: Tells the display's encoder a frame id was
+                dropped, so the frames after it stop predicting from it. None
+                gates every drop behind a keyframe.
 
         Attributes:
             dropped: Items discarded since construction, evicted for a newer
@@ -299,14 +309,21 @@ class PipelineBridge:
                 sequence number, so they appear in no loss statistic on either
                 side; this counter is what separates a lagging sender from a
                 lossy link.
+            invalidated: The share of those the encoder was told to predict
+                past, the rest being frames that predicted from one already
+                dropped and so needed no word of their own.
         """
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
         self._request_keyframe = request_keyframe
+        self._invalidate = invalidate_reference
         self._clock = clock
         self._queued_keyframe = False
         self._gated_at: Optional[float] = None
         self._last_request: Optional[float] = None
+        # Frame ids dropped recently, which nothing delivered may predict from.
+        self._lost: deque = deque(maxlen=LOST_FRAME_MEMORY)
         self.dropped = 0
+        self.invalidated = 0
 
     def set_data(self, data: Any, keyframe: bool = True) -> None:
         """Enqueue an item, dropping the oldest one when the queue is full.
@@ -318,8 +335,9 @@ class PipelineBridge:
         Args:
             data: The item.
             keyframe: Whether the item decodes on its own. A delta frame needs
-                the one before it on the wire, so once one is dropped the ones
-                behind it are held back until the next keyframe.
+                the frame it predicts from on the wire: one that names it is
+                held back only while that frame was dropped here, and one that
+                does not is held back behind any drop until the next keyframe.
         """
         queue = self._queue
         if self._request_keyframe is None:
@@ -335,6 +353,26 @@ class PipelineBridge:
             queue.put_nowait(data)
             self._queued_keyframe = True
             self._gated_at = None
+            self._lost.clear()
+            return
+        dependency = data.dependency if self._invalidate is not None else None
+        if dependency is not None:
+            frame_id, reference = dependency
+            if reference in self._lost:
+                self._lost.append(frame_id)
+                self.dropped += 1
+                return
+            if queue.full():
+                if self._queued_keyframe:
+                    self._drop(data)
+                    return
+                self._drop(queue.get_nowait())
+                if reference in self._lost:
+                    self._lost.append(frame_id)
+                    self.dropped += 1
+                    return
+            queue.put_nowait(data)
+            self._queued_keyframe = False
             return
         now = self._clock()
         if self._gated_at is not None:
@@ -361,6 +399,13 @@ class PipelineBridge:
             return
         self._last_request = now
         self._request_keyframe()
+
+    def _drop(self, item: Any) -> None:
+        """Let a frame go and tell the encoder, so nothing later predicts from it."""
+        self.dropped += 1
+        self.invalidated += 1
+        self._lost.append(item.dependency[0])
+        self._invalidate(item.dependency[0])
 
     def empty(self) -> bool:
         return self._queue.empty()
@@ -454,6 +499,8 @@ class RTCApp:
         on_ice: ICE candidate to send over signaling.
         on_sdp: SDP offer to send over signaling.
         request_idr_frame: Async keyframe request for a display.
+        invalidate_reference: Tells a display's encoder a peer lost a frame,
+            so the frames after it stop predicting from it.
         on_video_consumer_active: Per-peer video pause (tab-hide STOP_VIDEO /
             START_VIDEO), display-scoped; left None the verbs fall through to
             the input dispatcher, which ignores them.
@@ -504,6 +551,7 @@ class RTCApp:
         self.on_sdp = lambda sdp_type, sdp, client_peer_id: logger.warning('unhandled sdp event')
 
         self.request_idr_frame = lambda display_id='primary': logger.warning('unhandled request_idr_frame')
+        self.invalidate_reference = lambda display_id, frame_id: logger.warning('unhandled invalidate_reference')
 
         self.on_video_consumer_active = None
         self.on_audio_consumer_active = None
@@ -1184,7 +1232,8 @@ class RTCApp:
 
     def consume_data(self, buf: Any, pts: Optional[int], kind: str,
                      keyframe: bool = True, display_id: str = "primary",
-                     timing: Optional[tuple] = None) -> None:
+                     timing: Optional[tuple] = None,
+                     dependency: Optional[tuple] = None) -> None:
         """Feed one encoded frame from the capture side into a display's bridge.
 
         Synchronous: scheduled via `loop.call_soon_threadsafe` from the capture
@@ -1202,6 +1251,9 @@ class RTCApp:
             display_id: Display whose media graph receives the sample.
             timing: The frame's capture and encode instants as the capture
                 library stamped them, for the video-timing extension.
+            dependency: The frame's id and the id of the frame it predicts
+                from, where the encoder tracks them, for the dependency
+                descriptor and the bridge's drops.
         """
         graph = self.displays.get(display_id or "primary")
         if graph is None:
@@ -1210,7 +1262,7 @@ class RTCApp:
             if buf:
                 try:
                     RTP_VIDEO_CLOCK_RATE = 90000
-                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE), keyframe, timing)
+                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE), keyframe, timing, dependency)
                     bridge = graph.get("video_bridge")
                     if bridge is not None:
                         bridge.set_data(packet, keyframe)
@@ -1226,16 +1278,18 @@ class RTCApp:
                 except Exception as e:
                     logger.error(f"error processing audio sample: {e}")
 
-    def bridge_drops(self) -> Dict[str, int]:
-        """Frames each display's video bridge has dropped, by display id.
+    def bridge_drops(self) -> Dict[str, tuple]:
+        """Frames each display's video bridge has dropped, and how many of those the
+        encoder was told to predict past, by display id.
 
         A drop happens before the sender packetizes, so no sequence number is
         spent and neither `packetsLost` nor the pacer's counters move. Rising
-        here with those flat is a lagging sender, not a lossy link; the bridge
-        holds the picture still until the keyframe it asks for arrives, so the
-        cost is frame rate rather than a smear.
+        here with those flat is a lagging sender, not a lossy link; the cost is
+        frame rate rather than a smear, since a stream whose encoder names its
+        references carries on from the next frame and one that does not holds
+        the picture still until the keyframe the bridge asks for.
         """
-        return {did: graph["video_bridge"].dropped
+        return {did: (graph["video_bridge"].dropped, graph["video_bridge"].invalidated)
                 for did, graph in self.displays.items()
                 if graph.get("video_bridge") is not None}
 
@@ -1924,6 +1978,12 @@ class RTCApp:
         display_id = peer_obj.get("display_id") or "primary"
         asyncio.run_coroutine_threadsafe(self.request_idr_frame(display_id), self.async_event_loop)
 
+    def on_lost_frame(self, client_peer_id: str, frame_id: int) -> None:
+        """A peer lost a frame past what retransmission recovered: its display's encoder
+        leaves the frame out of every later prediction."""
+        peer_obj = self.peer_connections.get(client_peer_id) or {}
+        self.invalidate_reference(peer_obj.get("display_id") or "primary", frame_id)
+
     def _keyframe_request(self, display_id: str) -> Callable[[], None]:
         """Build the keyframe request of a display's video bridge.
 
@@ -2000,7 +2060,9 @@ class RTCApp:
         graph = self.displays.get(display_id)
         if graph is None and (client_type is ClientType.CONTROLLER or display_id == "primary"):
             graph = {"relay": MediaRelay()}
-            graph["video_bridge"] = PipelineBridge(request_keyframe=self._keyframe_request(display_id))
+            graph["video_bridge"] = PipelineBridge(
+                request_keyframe=self._keyframe_request(display_id),
+                invalidate_reference=lambda frame_id, did=display_id: self.invalidate_reference(did, frame_id))
             graph["video_media"] = VideoMedia(graph["video_bridge"])
             if display_id == "primary":
                 graph["audio_bridge"] = PipelineBridge(maxsize=8)
@@ -2017,6 +2079,7 @@ class RTCApp:
 
         rtp_video_sender = peer_connection.addTrack(media_relay.subscribe(graph["video_media"]))
         rtp_video_sender.on("pli", lambda cid=client_peer_id, ct=client_type: self.on_pli(cid, ct))
+        rtp_video_sender.on("lost_frame", lambda frame_id, cid=client_peer_id: self.on_lost_frame(cid, frame_id))
         rtp_audio_sender = None
         if graph.get("audio_media") is not None:
             rtp_audio_sender = peer_connection.addTrack(media_relay.subscribe(graph["audio_media"]))

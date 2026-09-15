@@ -78,6 +78,7 @@ const IMPORTED = { createStripeClock };
 /** Module sources a worker splices in whole, by their `?raw` import name. */
 const RAW_SOURCES = {
     wireCodecsSource: () => readFileSync(join(WEB, 'lib', 'wire-codecs.js'), 'utf8').replace(/^export /gm, ''),
+    decodeGateSource: () => readFileSync(join(WEB, 'lib', 'decode-gate.js'), 'utf8').replace(/^export /gm, ''),
 };
 
 /** Resolves one `${...}` the client would have interpolated. */

@@ -50,20 +50,25 @@ class EncodedPacket:
     `keyframe` says whether the sample decodes on its own, as the encoder
     reported it; audio samples always do. `timing` is a video frame's capture,
     encode-start and encode-end instants in CLOCK_MONOTONIC nanoseconds as the
-    capture library stamped them, or None where it did not.
+    capture library stamped them, or None where it did not. `dependency` is a
+    video frame's own id and the id of the frame it predicts from (None for a
+    frame predicting from nothing), where the encoder tracks its references
+    and can be told to leave a lost frame out of them; None where it cannot.
     """
 
-    __slots__ = ("data", "pts", "dts", "time_base", "keyframe", "timing")
+    __slots__ = ("data", "pts", "dts", "time_base", "keyframe", "timing", "dependency")
 
     def __init__(self, data: Any, pts: Optional[int] = None,
                  time_base: Optional[Fraction] = None, keyframe: bool = True,
-                 timing: Optional[tuple] = None) -> None:
+                 timing: Optional[tuple] = None,
+                 dependency: Optional[tuple] = None) -> None:
         self.data = data
         self.pts = pts
         self.dts = pts
         self.time_base = time_base
         self.keyframe = keyframe
         self.timing = timing
+        self.dependency = dependency
 
     def __len__(self) -> int:
         return len(self.data)

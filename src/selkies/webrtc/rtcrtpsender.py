@@ -70,6 +70,7 @@ from .rtp import (
     RtcpSourceInfo,
     RtcpSrPacket,
     RtpPacket,
+    dependency_descriptor,
     unpack_remb_fci,
     wrap_rtx,
     build_flexfec_03,
@@ -115,12 +116,14 @@ RTP_COLOR_SPACE = {
 
 class RTCEncodedFrame:
     def __init__(self, payloads: list[bytes], timestamp: int, audio_level: int,
-                 keyframe: bool = False, timing: Optional[tuple] = None):
+                 keyframe: bool = False, timing: Optional[tuple] = None,
+                 dependency: Optional[tuple] = None):
         self.payloads = payloads
         self.timestamp = timestamp
         self.audio_level = audio_level
         self.keyframe = keyframe
         self.timing = timing
+        self.dependency = dependency
 
 
 def video_timing_legs(timing: Optional[tuple], now_ns: int, arrival_delta_ms: int) -> tuple:
@@ -192,6 +195,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self.__rtp_started = asyncio.Event()
         self.__rtp_task: Optional[asyncio.Future[None]] = None
         self.__rtp_history = RtpHistory()
+        # Frames numbered on the wire for the dependency descriptor, and the number each
+        # capture frame id took, which a frame predicting from it is measured against.
+        self.__frame_number = 0
+        self.__frame_numbers: dict[int, int] = {}
         self.__rtcp_exited = asyncio.Event()
         self.__rtcp_started = asyncio.Event()
         self.__rtcp_task: Optional[asyncio.Future[None]] = None
@@ -400,8 +407,20 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     )
                 )
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_NACK:
+            lost = None
             for seq in packet.lost:
-                await self._retransmit(seq)
+                sent, frame, times = self.__rtp_history.nacked(seq)
+                if sent is None:
+                    # Gone from the history: only a key frame brings the peer back.
+                    self._emit_pli_event()
+                    break
+                await self._retransmit(sent)
+                # A second NACK for the same packet says the retransmission did not reach
+                # the peer either: the frame is lost to it, and the encoder is told so the
+                # frames after it stop predicting from it.
+                if times > 1 and frame is not None and frame != lost:
+                    lost = frame
+                    self.emit("lost_frame", frame)
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_TWCC:
             self.transport._twcc_process_feedback(packet.fci)
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_PLI:
@@ -460,31 +479,51 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if not payloads:
             return None
 
-        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe, getattr(data, "timing", None))
+        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe, data.timing, data.dependency)
 
-    async def _retransmit(self, sequence_number: int) -> None:
+    def _describe(self, frame_id: int, reference: Optional[int], keyframe: bool) -> Optional[tuple]:
+        """Number a frame on the wire and measure how far back it predicts, for its
+        dependency descriptor: (number, frames back), the latter None for a frame that
+        predicts from nothing. None for a frame predicting from one this sender never sent
+        (a peer paused across it): undecodable here, so the caller leaves it out."""
+        if keyframe:
+            self.__frame_numbers.clear()
+        fdiff = None
+        if reference is not None:
+            known = self.__frame_numbers.get(reference)
+            if known is None:
+                return None
+            fdiff = (self.__frame_number - known) & 0xFFFF
+            if not 1 <= fdiff <= 4096:
+                return None
+        number = self.__frame_number
+        self.__frame_number = (number + 1) & 0xFFFF
+        self.__frame_numbers[frame_id] = number
+        if len(self.__frame_numbers) > 64:
+            del self.__frame_numbers[next(iter(self.__frame_numbers))]
+        return number, fdiff
+
+    async def _retransmit(self, packet: RtpPacket) -> None:
         """
         Retransmit an RTP packet which was reported as lost.
         """
-        packet = self.__rtp_history.get(sequence_number)
-        if packet is not None:
-            if self.__rtx_payload_type is not None:
-                packet = wrap_rtx(
-                    packet,
-                    payload_type=self.__rtx_payload_type,
-                    sequence_number=self.__rtx_sequence_number,
-                    ssrc=self._rtx_ssrc,
-                )
-                self.__rtx_sequence_number = uint16_add(self.__rtx_sequence_number, 1)
-
-            # A retransmission is a new packet on the wire: give it its own
-            # transport-wide sequence number.
-            packet.extensions.transport_sequence_number = self.transport._twcc_next(
-                len(packet.payload)
+        if self.__rtx_payload_type is not None:
+            packet = wrap_rtx(
+                packet,
+                payload_type=self.__rtx_payload_type,
+                sequence_number=self.__rtx_sequence_number,
+                ssrc=self._rtx_ssrc,
             )
-            self.__log_debug("> %s", packet)
-            packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
-            await self.transport._send_rtp(packet_bytes, rtc_class=CLASS_VIDEO)
+            self.__rtx_sequence_number = uint16_add(self.__rtx_sequence_number, 1)
+
+        # A retransmission is a new packet on the wire: give it its own
+        # transport-wide sequence number.
+        packet.extensions.transport_sequence_number = self.transport._twcc_next(
+            len(packet.payload)
+        )
+        self.__log_debug("> %s", packet)
+        packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
+        await self.transport._send_rtp(packet_bytes, rtc_class=CLASS_VIDEO)
 
     def _send_keyframe(self) -> None:
         """
@@ -537,6 +576,17 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     self.transport.note_video_keyframe(size, natural=natural)
 
                 timestamp = uint32_add(timestamp_origin, enc_frame.timestamp)
+                described = None
+                if enc_frame.dependency is not None and self.__rtp_header_extensions_map.has_dependency_descriptor():
+                    described = self._describe(*enc_frame.dependency, enc_frame.keyframe)
+                    if described is None:
+                        # The frame predicts from one this peer was never sent, so
+                        # nothing but a key frame decodes here.
+                        logger.info("RTCRtpSender(%s) frame %s predicts from %s, which this peer "
+                                    "was not sent; asking for a key frame",
+                                    self.__kind, *enc_frame.dependency)
+                        self._emit_pli_event()
+                        continue
 
                 for i, payload in enumerate(enc_frame.payloads):
                     packet = RtpPacket(
@@ -577,9 +627,13 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         arrival_ms = min(0xFFFF, max(0, int((time.time() - frame_time) * 1000)))
                         packet.extensions.video_timing = video_timing_legs(
                             enc_frame.timing, time.monotonic_ns(), arrival_ms)
+                    if described is not None:
+                        packet.extensions.dependency_descriptor = dependency_descriptor(
+                            i == 0, bool(packet.marker), described[0], described[1], enc_frame.keyframe)
                     # send packet
                     self.__log_debug("> %s", packet)
-                    self.__rtp_history.add(packet, frame_time)
+                    self.__rtp_history.add(
+                        packet, frame_time, enc_frame.dependency[0] if described is not None else None)
                     packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
                     await self.transport._send_rtp(
                         packet_bytes,

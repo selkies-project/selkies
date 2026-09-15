@@ -76,6 +76,13 @@ RTCP_PSFB_RPSI = 3
 RTCP_PSFB_FIR = 4
 RTCP_PSFB_APP = 15
 
+# The RTP Dependency Descriptor of the AV1 RTP specification, written on every packet of a
+# video stream whose encoder tracks its references: the frame the packet belongs to, its
+# edges, and the frame that one predicts from. A receiver reads a frame's dependency from it
+# instead of chaining every frame to its predecessor, so a frame predicting past a lost one
+# decodes as soon as it arrives.
+DEPENDENCY_DESCRIPTOR_URI = "https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension"
+
 
 @dataclass
 class HeaderExtensions:
@@ -93,6 +100,8 @@ class HeaderExtensions:
     # (primaries, transfer, matrix, range) as the ITU-T H.273 codes; range is
     # 1 limited, 2 full. Chroma siting is left unspecified.
     color_space: Any = None
+    # The packet's dependency descriptor, packed as `dependency_descriptor` builds it.
+    dependency_descriptor: Any = None
 
 
 class HeaderExtensionsMap:
@@ -126,6 +135,12 @@ class HeaderExtensionsMap:
                 self.__ids.video_timing = ext.id
             elif ext.uri == "http://www.webrtc.org/experiments/rtp-hdrext/color-space":
                 self.__ids.color_space = ext.id
+            elif ext.uri == DEPENDENCY_DESCRIPTOR_URI:
+                self.__ids.dependency_descriptor = ext.id
+
+    def has_dependency_descriptor(self) -> bool:
+        """Whether the peer negotiated the dependency descriptor."""
+        return bool(self.__ids.dependency_descriptor)
 
     def get(self, extension_profile: int, extension_value: bytes) -> HeaderExtensions:
         values = HeaderExtensions()
@@ -175,6 +190,8 @@ class HeaderExtensionsMap:
                     continue
                 primaries, transfer, matrix, siting = unpack("!BBBB", x_value[:4])
                 values.color_space = (primaries, transfer, matrix, (siting >> 4) & 0x03)
+            elif x_id == self.__ids.dependency_descriptor:
+                values.dependency_descriptor = bytes(x_value)
         return values
 
     def set(self, values: HeaderExtensions) -> tuple[int, bytes]:
@@ -251,7 +268,45 @@ class HeaderExtensionsMap:
                     pack("!BBBB", primaries, transfer, matrix, (color_range & 0x03) << 4),
                 )
             )
+        if values.dependency_descriptor is not None and self.__ids.dependency_descriptor:
+            extensions.append((self.__ids.dependency_descriptor, values.dependency_descriptor))
         return pack_header_extensions(extensions)
+
+
+# The dependency structure every stream declares, as the specification's
+# template_dependency_structure: one decode target and two frame templates, a key frame that
+# predicts from nothing and a frame predicting from the one before it, both switch points.
+# 28 bits: structure id 0, one decode target, the second template on the same layer and no
+# more templates, both templates' indications, the templates' frame diffs (none, then one),
+# no chains and no resolutions.
+DEPENDENCY_STRUCTURE = int("000000" "00000" "00" "11" "10" "10" "0" "1" "0000" "0" "0" "0", 2)
+
+
+def dependency_descriptor(first: bool, last: bool, frame_number: int,
+                          fdiff: Optional[int], keyframe: bool) -> bytes:
+    """The dependency descriptor of one packet: whether it opens and closes its frame, the
+    frame's number and how many frames back the frame predicts from -- None for a frame that
+    predicts from nothing. A frame one back rides the predicted-frame template alone and a
+    key frame the other, so most packets carry the three mandatory bytes; a frame further
+    back writes its own diff, and a key frame's first packet the structure the receiver
+    reads the stream by."""
+    bits = (first << 23) | (last << 22) | ((0 if fdiff is None else 1) << 16) | (frame_number & 0xFFFF)
+    count = 24
+    structure = keyframe and first
+    custom = fdiff is not None and fdiff != 1
+    if not structure and not custom:
+        return bits.to_bytes(3, "big")
+    bits = (bits << 5) | (structure << 4) | (custom << 1)
+    count += 5
+    if structure:
+        bits = (bits << 28) | DEPENDENCY_STRUCTURE
+        count += 28
+    if custom:
+        size = 1 if fdiff <= 16 else 2 if fdiff <= 256 else 3
+        bits = (((bits << 2) | size) << (4 * size) | (fdiff - 1)) << 2
+        count += 4 + 4 * size
+    padding = -count % 8
+    return (bits << padding).to_bytes((count + padding) // 8, "big")
 
 
 def clamp_packets_lost(count: int) -> int:
@@ -921,7 +976,8 @@ class RtpPacket:
 
 
 class RtpHistory:
-    """Packets sent on one stream, by sequence number, for retransmission.
+    """Packets sent on one stream, by sequence number, for retransmission, each with the
+    frame it carried and how many NACKs have named it.
 
     Bounded by RTP_HISTORY_S of sending and RTP_HISTORY_MAX_PACKETS; within
     those a sequence number cannot repeat, so a lookup is exact.
@@ -931,21 +987,31 @@ class RtpHistory:
 
     def __init__(self, horizon: float = RTP_HISTORY_S,
                  capacity: int = RTP_HISTORY_MAX_PACKETS) -> None:
-        self._packets: dict[int, RtpPacket] = {}
+        self._packets: dict[int, list] = {}
         self._order: deque = deque()
         self._horizon = horizon
         self._capacity = capacity
 
-    def add(self, packet: RtpPacket, now: float) -> None:
+    def add(self, packet: RtpPacket, now: float, frame: Optional[int] = None) -> None:
         """Record a sent packet and let go of those past the horizon."""
-        self._packets[packet.sequence_number] = packet
+        self._packets[packet.sequence_number] = [packet, frame, 0]
         order = self._order
         order.append((now, packet.sequence_number))
         while order and (now - order[0][0] > self._horizon or len(order) > self._capacity):
             self._packets.pop(order.popleft()[1], None)
 
     def get(self, sequence_number: int) -> Optional[RtpPacket]:
-        return self._packets.get(sequence_number)
+        entry = self._packets.get(sequence_number)
+        return entry[0] if entry else None
+
+    def nacked(self, sequence_number: int) -> tuple:
+        """The packet a NACK names, the frame it carried and how many NACKs have named it,
+        this one counted; a packet let go reads as (None, None, 0)."""
+        entry = self._packets.get(sequence_number)
+        if entry is None:
+            return None, None, 0
+        entry[2] += 1
+        return entry[0], entry[1], entry[2]
 
     def __len__(self) -> int:
         return len(self._order)
