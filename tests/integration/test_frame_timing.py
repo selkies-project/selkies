@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Every frame pixelflux delivers carries its capture and encode instants, on
 the X11 capture against the test display and on the headless Wayland
-compositor: CLOCK_MONOTONIC nanoseconds that order capture, encode start and
-encode end, land before the frame reaches Python, and put the whole host leg of
-a 720p frame well under a frame interval.
+compositor, encoded in hardware where the node has it and in software: CLOCK_MONOTONIC
+nanoseconds that order capture, encode start and encode end, land before the
+frame reaches Python, and put the whole host leg of a 720p frame well under a
+frame interval. A software session delivers a frame as stripes, each carrying
+the frame's stamps, so the collection is timed rather than counted.
 """
 import importlib.util
 import os
 import sys
-import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,20 +20,32 @@ RUNTIME = "/tmp/sel-frametiming"
 
 def collect(cs, seconds: float = 3.0) -> list:
     import pixelflux
-    frames, done = [], threading.Event()
+    frames = []
 
     def on_frame(frame):
         frames.append((frame.capture_ns, frame.encode_start_ns, frame.encode_end_ns, time.monotonic_ns()))
-        if len(frames) >= 90:
-            done.set()
 
     sc = pixelflux.ScreenCapture()
     sc.start_capture(on_frame, cs)
     try:
-        done.wait(seconds)
+        time.sleep(seconds)
     finally:
         sc.stop_capture()
     return frames
+
+
+def settings(wayland: bool, software: bool):
+    import pixelflux
+    cs = pixelflux.CaptureSettings()
+    cs.capture_width, cs.capture_height = 1280, 720
+    cs.codec = "h264"
+    cs.target_fps = 30
+    cs.video_streaming_mode = True
+    cs.use_cpu = software
+    if wayland:
+        cs.use_wayland = True
+        cs.display_id = 1
+    return cs
 
 
 def judge(res: "H.Results", label: str, frames: list) -> None:
@@ -57,26 +70,16 @@ def main() -> "H.Results":
         H.skip_suite("pixelflux is not installed")
     import pixelflux
 
-    cs = pixelflux.CaptureSettings()
-    cs.capture_width, cs.capture_height = 1280, 720
-    cs.codec = "h264"
-    cs.target_fps = 30
-    cs.video_streaming_mode = True
     os.environ["DISPLAY"] = H.require_display()
-    judge(res, "x11 h264", collect(cs))
+    judge(res, "x11 h264", collect(settings(False, False)))
+    judge(res, "x11 h264 software", collect(settings(False, True)))
 
     os.makedirs(RUNTIME, exist_ok=True)
     os.chmod(RUNTIME, 0o700)
     os.environ["XDG_RUNTIME_DIR"] = RUNTIME
-    wl = pixelflux.CaptureSettings()
-    wl.use_wayland = True
-    wl.capture_width, wl.capture_height = 1280, 720
-    wl.codec = "h264"
-    wl.target_fps = 30
-    wl.video_streaming_mode = True
-    wl.display_id = 1
     pixelflux.ensure_wayland_display(1280, 720)
-    judge(res, "wayland h264", collect(wl))
+    judge(res, "wayland h264", collect(settings(True, False)))
+    judge(res, "wayland h264 software", collect(settings(True, True)))
     res.summary()
     return res
 
