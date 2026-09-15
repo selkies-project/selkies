@@ -37,14 +37,15 @@ BASE_ENV = {k: v for k, v in os.environ.items() if not k.startswith("SELKIES_")}
 
 
 def probe(code: str, **env: str) -> str:
-    """Run `code` against a freshly imported settings module; stripped stdout."""
+    """Run `code` against a freshly imported settings module; the last line it
+    printed, since pixelflux announces a probed node on stdout ahead of it."""
     out = subprocess.run(
         [sys.executable, "-c", f"import selkies.settings as s; {code}"],
         capture_output=True, text=True, timeout=120,
         env=dict(BASE_ENV, PYTHONPATH=os.path.join(REPO, "src"), **env))
     if out.returncode != 0:
         return f"exit {out.returncode}: {out.stderr.strip().splitlines()[-1:]}"
-    return out.stdout.strip()
+    return out.stdout.strip().splitlines()[-1] if out.stdout.strip() else ""
 
 
 MENU = ("','.join(next(d for d in s.settings._setting_definitions"
@@ -55,8 +56,8 @@ SOFTWARE_ONLY_MENU = (
     " print(','.join(menu))")
 
 # The encode node the probe opens follows the capture settings' own resolution.
-check("no explicit pick encodes on the first node",
-      probe("print(s.settings.encode_node_index())") == "0")
+check("no explicit pick is left to the auto_gpu selection",
+      probe("print(s.settings.encode_node_index() == s.AUTO_ENCODE_NODE)") == "True")
 check("gpu_id picks the node", probe("print(s.settings.encode_node_index())", SELKIES_GPU_ID="1") == "1")
 check("gpu_id -1 has no node", probe("print(s.settings.encode_node_index())", SELKIES_GPU_ID="-1") == "None")
 check("encode_dri names the node",
