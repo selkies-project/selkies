@@ -277,6 +277,10 @@ def run() -> "H.Results":
                 ("a player-2 viewer cannot drive player 1", "?role=viewer&slot=2", 0, False),
                 ("a player-2 viewer drives its own slot", "?role=viewer&slot=2", 1, True),
             ):
+                # The server debounces reconnects from one address, and these
+                # viewers all come from the loopback one, so each waits out that
+                # window rather than being refused as a reconnect storm.
+                await asyncio.sleep(0.6)
                 st = loglen()
                 async with websockets.connect(uri + query, max_size=None) as viewer:
                     await asyncio.wait_for(viewer.recv(), timeout=10)
