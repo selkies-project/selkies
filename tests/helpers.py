@@ -313,6 +313,11 @@ def pulse_sine(sink: str = "output", frequency: int = 440) -> Optional[str]:
     The capture is gated on silence, so a sink nothing plays into carries no
     audio at all: a check that audio reaches a client has to give it something
     to hear.
+
+    A browser on this host plays what it receives back into the same sink, so
+    once audio is flowing it sustains itself and unloading the tone does not
+    make the desktop silent again. A check that needs real silence has to send
+    the browser's own playback elsewhere (`PULSE_SINK`).
     """
     pactl = shutil.which("pactl")
     if not pactl:
