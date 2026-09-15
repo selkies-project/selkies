@@ -32,6 +32,13 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     consume would desync the SOCK_STREAM for every later read, so partially
     drained events are stashed per handle and completed on the next call.
 
+    The hooks cover every fd in the process, so their cost and their locking
+    are kept off the fds that are not pads. Each hook reads an atomic count of
+    open handles (and of shadow inotify watches) before touching a table, and
+    goes straight to libc while it is zero. The table locks are recursive: a
+    signal handler that reads or closes runs on whichever thread the signal
+    lands on, possibly one inside a lookup, and must be able to re-enter it.
+
     Device identity (name, VID/PID, uniq) answered through the ioctls is hard
     coded to the same values the sibling fake-udev library publishes, so udev,
     joydev and evdev consumers agree on one device. stat()/fstat() families
@@ -71,6 +78,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <linux/input-event-codes.h>
 #include <linux/uinput.h>
 #include <pthread.h>
+#include <stdatomic.h>
 
 /* Only glibc has separate large-file entry points. musl's off_t is always 64-bit
  * and its headers alias the names (`#define stat64 stat`), so defining stat64()
@@ -386,7 +394,21 @@ static js_interposer_t interposers[NUM_INTERPOSERS()] = {
  * read in open() run unlocked, and open() publishes its private fd into the
  * table only once fully configured, so lookups never see a half-built handle.
  */
-static pthread_mutex_t interposers_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t interposers_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+
+/**
+ * Open handles across every slot. The fd-based hooks read it before taking
+ * interposers_mutex and go straight to libc while it is zero, which it is in
+ * every process that never opens a fake device: those hooks are then free of
+ * the lock, and a signal handler that reads or closes while another call of
+ * this thread holds the lock cannot deadlock the process. The mutex is
+ * recursive for the same case once a device is open.
+ */
+static atomic_int interposed_handles_open = 0;
+
+static inline int no_interposed_handles(void) {
+    return atomic_load_explicit(&interposed_handles_open, memory_order_acquire) == 0;
+}
 
 /**
  * The slot owning application fd `fd`, or NULL when it is not interposed.
@@ -646,6 +668,9 @@ int fstat(int fd, struct stat *buf) {
          }
     }
 
+    if (no_interposed_handles()) {
+        return real_fstat(fd, buf);
+    }
     pthread_mutex_lock(&interposers_mutex);
     js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
     if (interposer != NULL) {
@@ -751,6 +776,9 @@ int fstat64(int fd, struct stat64 *buf) {
     if (!real_fstat64) {
         if (load_real_func((void *)&real_fstat64, "fstat64") < 0) { errno = EFAULT; return -1; }
     }
+    if (no_interposed_handles()) {
+        return real_fstat64(fd, buf);
+    }
     pthread_mutex_lock(&interposers_mutex);
     js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
     if (interposer != NULL) {
@@ -802,6 +830,9 @@ int __fxstat(int ver, int fd, struct stat *buf) {
     if (!real___fxstat) {
         if (load_real_func((void *)&real___fxstat, "__fxstat") < 0) { errno = EFAULT; return -1; }
     }
+    if (no_interposed_handles()) {
+        return real___fxstat(ver, fd, buf);
+    }
     pthread_mutex_lock(&interposers_mutex);
     js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
     if (interposer != NULL) {
@@ -848,6 +879,9 @@ int __lxstat64(int ver, const char *pathname, struct stat64 *buf) {
 int __fxstat64(int ver, int fd, struct stat64 *buf) {
     if (!real___fxstat64) {
         if (load_real_func((void *)&real___fxstat64, "__fxstat64") < 0) { errno = EFAULT; return -1; }
+    }
+    if (no_interposed_handles()) {
+        return real___fxstat64(ver, fd, buf);
     }
     pthread_mutex_lock(&interposers_mutex);
     js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
@@ -1905,6 +1939,7 @@ static int common_open_logic(const char *pathname, int flags, js_interposer_t **
     interposer->handles[interposer->handle_count].fd = new_fd;
     interposer->handles[interposer->handle_count].open_flags = flags;
     interposer->handle_count++;
+    atomic_fetch_add_explicit(&interposed_handles_open, 1, memory_order_release);
     interposer->js_config = pending_config;
     int open_handles = interposer->handle_count;
     pthread_mutex_unlock(&interposers_mutex);
@@ -2135,7 +2170,11 @@ typedef struct {
 
 #define SJI_MAX_INOTIFY_WATCHES 16
 static sji_inotify_watch_t inotify_watches[SJI_MAX_INOTIFY_WATCHES];
-static pthread_mutex_t inotify_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t inotify_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+
+/* Shadow watches in use; read lock-free by the fd hooks so a process with none,
+ * which is every process not watching /dev/input, never takes inotify_mutex. */
+static atomic_int inotify_watches_used = 0;
 
 /* The directory the evdev sockets are bound in, as resolved at load time. */
 static void ev_socket_dir(char *out, size_t n) {
@@ -2166,6 +2205,9 @@ static const char *ev_node_for_socket_name(const char *name) {
 /* Whether `fd` carries a shadowed /dev/input watch. */
 static int inotify_fd_tracked(int fd) {
     int tracked = 0;
+    if (atomic_load_explicit(&inotify_watches_used, memory_order_acquire) == 0) {
+        return 0;
+    }
     pthread_mutex_lock(&inotify_mutex);
     for (int i = 0; i < SJI_MAX_INOTIFY_WATCHES; i++) {
         if (inotify_watches[i].used && inotify_watches[i].fd == fd) {
@@ -2179,9 +2221,15 @@ static int inotify_fd_tracked(int fd) {
 
 /* Drops every shadow watch of `fd`; the kernel releases the watches with the fd. */
 static void inotify_forget_fd(int fd) {
+    if (atomic_load_explicit(&inotify_watches_used, memory_order_acquire) == 0) {
+        return;
+    }
     pthread_mutex_lock(&inotify_mutex);
     for (int i = 0; i < SJI_MAX_INOTIFY_WATCHES; i++) {
-        if (inotify_watches[i].used && inotify_watches[i].fd == fd) inotify_watches[i].used = 0;
+        if (inotify_watches[i].used && inotify_watches[i].fd == fd) {
+            inotify_watches[i].used = 0;
+            atomic_fetch_sub_explicit(&inotify_watches_used, 1, memory_order_release);
+        }
     }
     pthread_mutex_unlock(&inotify_mutex);
 }
@@ -2220,6 +2268,7 @@ int inotify_add_watch(int fd, const char *pathname, uint32_t mask) {
     }
     if (free_slot) {
         free_slot->used = 1;
+        atomic_fetch_add_explicit(&inotify_watches_used, 1, memory_order_release);
         free_slot->fd = fd;
         free_slot->app_wd = wd;
         free_slot->sock_wd = sock_wd;
@@ -2244,6 +2293,7 @@ int inotify_rm_watch(int fd, int wd) {
         if (w->used && w->fd == fd && w->app_wd == wd) {
             sock_wd = w->sock_wd;
             w->used = 0;
+            atomic_fetch_sub_explicit(&inotify_watches_used, 1, memory_order_release);
         }
     }
     pthread_mutex_unlock(&inotify_mutex);
@@ -2354,6 +2404,9 @@ int close(int fd) {
         pthread_mutex_unlock(&udyn_mutex);
     }
 
+    if (no_interposed_handles()) {
+        return real_close(fd);
+    }
     pthread_mutex_lock(&interposers_mutex);
     for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
         js_interposer_t *interposer = &interposers[i];
@@ -2367,6 +2420,7 @@ int close(int fd) {
              * that could hijack a later reused fd number. */
             interposer->handles[h] = interposer->handles[interposer->handle_count - 1];
             interposer->handle_count--;
+            atomic_fetch_sub_explicit(&interposed_handles_open, 1, memory_order_release);
             if (interposer->handle_count == 0) {
                 memset(&(interposer->js_config), 0, sizeof(js_config_t));
             }
@@ -2529,6 +2583,9 @@ ssize_t read(int fd, void *buf, size_t count) {
         }
     }
 
+    if (no_interposed_handles()) {
+        return real_read(fd, buf, count);
+    }
     js_interposer_t *interposer = NULL;
     int handle_open_flags = 0;
     /* Taken under the lookup's lock so a concurrent close() can't tear the
@@ -2707,7 +2764,7 @@ ssize_t __read_chk(int fd, void *buf, size_t nbytes, size_t buflen) {
         return real___read_chk(fd, buf, nbytes, buflen);
     }
     int interposed = inotify_fd_tracked(fd);
-    if (!interposed) {
+    if (!interposed && !no_interposed_handles()) {
         pthread_mutex_lock(&interposers_mutex);
         interposed = find_interposer_for_fd_locked(fd, NULL, NULL) != NULL;
         pthread_mutex_unlock(&interposers_mutex);
@@ -2726,7 +2783,7 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
         return -1;
     }
 
-    if (op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) {
+    if ((op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) && !no_interposed_handles()) {
         pthread_mutex_lock(&interposers_mutex);
         js_interposer_t *interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
         const char *dev = NULL;
@@ -3217,6 +3274,9 @@ int ioctl(int fd, ioctl_request_t request, ...) {
         }
     }
 
+    if (no_interposed_handles()) {
+        return real_ioctl(fd, request, arg_ptr);
+    }
     js_interposer_t *interposer = NULL;
     pthread_mutex_lock(&interposers_mutex);
     interposer = find_interposer_for_fd_locked(fd, NULL, NULL);
