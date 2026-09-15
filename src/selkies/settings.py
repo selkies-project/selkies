@@ -1183,6 +1183,10 @@ CODEC_LABELS = {"jpeg": "JPEG", "h264": "H.264", "h265": "H.265", "vp8": "VP8", 
 # Encoders with no hardware path: selecting one implies software encoding.
 CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
 
+# CaptureSettings.encode_node_index where no setting names a node: pixelflux
+# resolves it through auto_gpu as the capture starts.
+AUTO_ENCODE_NODE = -2
+
 
 def encoder_for_codec(codec: str) -> str:
     """The full-frame encoder that streams `codec`, which is what the capture's
@@ -1238,7 +1242,7 @@ def software_encoders() -> Dict[str, str]:
 _HARDWARE_ENCODERS: Dict[int, Optional[Dict[str, str]]] = {}
 
 
-def hardware_encoders(encode_node_index: int) -> Optional[Dict[str, str]]:
+def hardware_encoders(encode_node_index: int, auto_gpu: str = "") -> Optional[Dict[str, str]]:
     """The hardware encoder of each codec the GPU behind a render node serves,
     by codec name ("nvenc" or "vaapi"), as pixelflux probes it once per node and
     remembers; a codec without an entry has no hardware path on that node. None
@@ -1247,7 +1251,9 @@ def hardware_encoders(encode_node_index: int) -> Optional[Dict[str, str]]:
 
     Args:
         encode_node_index: The DRI render-node index hardware encoders open
-            (`AppSettings.encode_node_index`).
+            (`AppSettings.encode_node_index`); `AUTO_ENCODE_NODE` leaves the
+            pick to pixelflux, as a capture does.
+        auto_gpu: The `auto_gpu` setting, which resolves that pick.
     """
     node = int(encode_node_index)
     if node not in _HARDWARE_ENCODERS:
@@ -1256,7 +1262,7 @@ def hardware_encoders(encode_node_index: int) -> Optional[Dict[str, str]]:
             import pixelflux
             probe = getattr(pixelflux, "hardware_encoders", None)
             if probe is not None:
-                served = {str(k): str(v) for k, v in dict(probe(node)).items()}
+                served = {str(k): str(v) for k, v in dict(probe(node, auto_gpu)).items()}
         except ImportError:
             served = None
         except Exception as e:
@@ -1653,7 +1659,8 @@ class AppSettings:
     def encode_node_index(self) -> Optional[int]:
         """The DRI render-node index hardware encoders open, resolved as the
         capture settings resolve it: `encode_dri` names a node, else `gpu_id`
-        picks one, else the first. None where no session encodes on hardware:
+        picks one, else `AUTO_ENCODE_NODE` leaves the pick to pixelflux's
+        `auto_gpu` selection. None where no session encodes on hardware:
         `gpu_id` -1, an unusable `encode_dri`, or software encoding locked on."""
         from .display_utils import parse_dri_node_to_index, parse_gpu_id
         if self.use_cpu[0] and self.use_cpu[1]:
@@ -1664,7 +1671,7 @@ class AppSettings:
             return None if index < 0 else index
         gid = parse_gpu_id(self.gpu_id)
         if gid is None:
-            return 0
+            return AUTO_ENCODE_NODE
         return None if gid < 0 else gid
 
     def encoder_backends(self) -> Optional[Dict[str, Dict[str, Optional[str]]]]:
@@ -1713,7 +1720,8 @@ class AppSettings:
         reverts to every served encoder rather than offering none.
         """
         node = self.encode_node_index()
-        self._hardware_encoders = {} if node is None else hardware_encoders(node)
+        self._hardware_encoders = ({} if node is None
+                                   else hardware_encoders(node, str(self.auto_gpu or "")))
         if self._hardware_encoders is None:
             return
         enc_definition = next(
