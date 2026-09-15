@@ -2174,41 +2174,17 @@ async def _pids_of(binary: str) -> List[int]:
     return [int(p) for p in stdout.split() if p.isdigit()]
 
 
-def _qt_major(pid: int) -> Optional[int]:
-    """The Qt generation process ``pid`` runs on, read off the Qt core library
-    it has mapped; None for a process that maps none."""
-    try:
-        with open(f"/proc/{pid}/maps") as f:
-            for line in f:
-                m = re.search(r"/libQt(\d+)Core\.", line)
-                if m:
-                    return int(m.group(1))
-    except OSError:
-        pass
-    return None
-
-
-async def _lxqt_scales_by_ratio() -> bool:
-    """Whether the LXQt session takes the density as a device pixel ratio.
-
-    Qt 6 derives the ratio from Xft.dpi and rescales every window with it when
-    the density changes, fonts included. Qt 5 keeps the ratio at 1 and takes
-    the density into its fonts alone.
-    """
-    pids = await _pids_of("lxqt-session")
-    return bool(pids) and _qt_major(pids[0]) == 6
-
-
 async def _rebuild_lxqt_desktop(logger: logging.Logger) -> None:
     """Have pcmanfm-qt build its desktop again at the density now in force.
 
-    A density change reaches a Qt 6 application as a new device pixel ratio
-    for its windows, and the desktop window keeps painting the wallpaper it
-    built at the old ratio: a quarter of the screen after a halving, the
-    middle of the picture after a doubling. It is told to drop the desktop and
-    start it over, with the command line and environment it was started with;
-    an instance that also shows file manager windows keeps them, and one that
-    had only the desktop exits first and is started anew.
+    A desktop that sizes its window and its wallpaper from the density it
+    started at keeps painting them that way: after a change it covers a
+    quarter of the screen, or a corner of the picture fills it. Nothing it
+    answers repaints them -- a wallpaper command reaches the running instance
+    but leaves the window as it was -- so it is told to drop the desktop and
+    start it over, with the command line and environment it was started with.
+    An instance that also shows file manager windows keeps them; one that had
+    only the desktop exits first and is started anew.
     """
     for pid in await _pids_of("pcmanfm-qt"):
         command = wm_command(pid)
@@ -2532,9 +2508,9 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
     twice; MATE takes gsettings plus xrdb for wider application coverage.
     The LXQt font repolish runs whichever branch was taken: the session that
     owns the windows decides whether anything already drawn follows, and it
-    is the only one that can repolish them. A session on Qt 6 rescales its
-    windows by itself and has its desktop rebuilt instead. On success the root pane's
-    physical size is stamped with the same density, because xdpyinfo/RandR
+    is the only one that can repolish them, and the LXQt desktop is rebuilt
+    around the new density, which it cannot follow on its own. On success the
+    root pane's physical size is stamped with the same density, because xdpyinfo/RandR
     consumers (Qt's fallback included) read it and would otherwise render
     unscaled against the rest of the desktop.
 
@@ -2589,9 +2565,7 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
         if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
 
-    # A font resolved to pixels would be scaled a second time by a ratio
-    by_ratio = await _lxqt_scales_by_ratio()
-    if not by_ratio and await _run_lxqt_font(dpi_value, logger_app_resize):
+    if await _run_lxqt_font(dpi_value, logger_app_resize):
         any_method_succeeded = True
 
     if not any_method_succeeded:
@@ -2602,8 +2576,7 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
             await asyncio.to_thread(_sync_stamp_root_dpi, dpi_value)
         except Exception as e:
             logger_app_resize.warning(f"Root mm-size retarget to {dpi_value} DPI failed: {e}")
-        if by_ratio:
-            await _rebuild_lxqt_desktop(logger_app_resize)
+        await _rebuild_lxqt_desktop(logger_app_resize)
 
     return any_method_succeeded
 
