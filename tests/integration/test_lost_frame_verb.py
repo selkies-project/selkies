@@ -27,10 +27,10 @@ import websockets
 TOLD = "the encoder predicts past it"
 
 
-def settings(dpi: int = 96) -> str:
+def settings(dpi: int = 96, encoder: str = "h264enc") -> str:
     return "SETTINGS," + json.dumps({
         "displayId": "primary", "initialClientWidth": 1280, "initialClientHeight": 720,
-        "manual_resolution": False, "framerate": 60, "encoder": "h264enc",
+        "manual_resolution": False, "framerate": 60, "encoder": encoder,
         "video_crf": 25, "video_bitrate": 8000, "audio_bitrate": 128000,
         "scaling_dpi": dpi,
     })
@@ -46,12 +46,41 @@ async def saw(mark: int, substr: str, timeout: float = 15) -> bool:
     return False
 
 
-async def drain(ws) -> None:
+async def drain(ws, out: list = None) -> None:
+    """Read the stream, noting each video frame's id and whether it decodes alone."""
     while True:
         try:
-            await ws.recv()
+            msg = await ws.recv()
         except Exception:
             return
+        if out is not None and isinstance(msg, (bytes, bytearray)) and len(msg) > 12 and msg[0] == 0x04:
+            out.append((int.from_bytes(msg[2:4], "big"), msg[1] & 0x0f == 0x01))
+
+
+async def key_frame_repair(res: "H.Results") -> None:
+    """A session whose encoder cannot leave the frame out is repaired with a key frame.
+
+    Only libx264 and NVENC predict past a lost frame; every codec libavcodec
+    drives names no reference, and pixelflux codes a key frame there instead.
+    No backend tracks a VP9 session, so this arm reads the same on any host.
+    """
+    uri = f"ws://localhost:{H.PORT}/api/websockets"
+    async with websockets.connect(uri, max_size=None) as ws:
+        await asyncio.wait_for(ws.recv(), timeout=10)
+        await ws.send(settings(encoder="vp9enc"))
+        seen: list = []
+        pump = asyncio.create_task(drain(ws, seen))
+        await asyncio.sleep(5.0)
+        res.check("the VP9 session streams", bool(seen), f"{len(seen)} frames")
+        if seen:
+            last = seen[-1][0]
+            seen.clear()
+            await ws.send(f"LOST_FRAME {last}")
+            await asyncio.sleep(2.0)
+            keys = sum(1 for _, key in seen if key)
+            res.check("a session that cannot predict past it is repaired with a key frame",
+                      keys > 0, f"{len(seen)} frames, {keys} key")
+        pump.cancel()
 
 
 async def drive() -> "H.Results":
@@ -88,6 +117,8 @@ async def drive() -> "H.Results":
         res.check("the session still answers, so nothing about the verb wedged it",
                   await saw(mark, "Keyframe requested by"), H.server_log()[mark:][-200:])
         pump.cancel()
+    await asyncio.sleep(1.0)
+    await key_frame_repair(res)
     res.summary()
     return res
 
