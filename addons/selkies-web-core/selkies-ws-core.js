@@ -5226,9 +5226,132 @@ function initWebsockets() {
   });
 
   /**
-   * Decodes a JPEG stripe and queues it for the paint loop: ImageDecoder
-   * (WebCodecs) where the context is secure, createImageBitmap elsewhere; both
-   * yield an image the render and cleanup paths handle alike.
+   * The ways this engine can turn a JPEG stripe into something drawable. Both yield an image
+   * the render and cleanup paths handle alike.
+   *
+   * The `<img>` route takes a blob URL. A `data:` URL is deliberately not used. It measures far the fastest
+   * on a repeated stripe -- 171 fps against 99 on Chromium, 75 against 10 on WebKit -- because
+   * a data URL is a URL and the decoded image is cached against it. Fed the unique bytes a
+   * live stream delivers it collapses to 32 and 8.5, behind both of these, so the cache was
+   * the whole of the win.
+   */
+  const JPEG_ROUTES = {
+    imagedecoder: async (data) => {
+      const d = new ImageDecoder({ data: data, type: 'image/jpeg' });
+      try { return (await d.decode()).image; } finally { try { d.close(); } catch (e) { /* ignore */ } }
+    },
+    bitmap: (data) => createImageBitmap(new Blob([data], { type: 'image/jpeg' })),
+    img: (data) => {
+      const url = URL.createObjectURL(new Blob([data], { type: 'image/jpeg' }));
+      const img = new Image();
+      img.src = url;
+      // `decode()` rather than `onload`, so the pixels are ready here instead of being
+      // decoded inside the paint loop's `drawImage` on the frame that draws them.
+      return img.decode().then(() => img, (e) => { URL.revokeObjectURL(url); throw e; })
+        .then((i) => { URL.revokeObjectURL(url); return i; });
+    },
+  };
+
+  /**
+   * A byte-unique copy of `jpeg`: a JPEG comment segment carrying `tag` is spliced in after
+   * SOI. The decode work is identical and the bytes have never been seen, so nothing the race
+   * measures can be answered from a cache -- which is not hypothetical, since sharing one
+   * sample across the routes makes a later one measure two to four times faster than it
+   * sustains, and picked the wrong route for Firefox one run in three.
+   */
+  function uniqueJpeg(jpeg, tag) {
+    const pay = new TextEncoder().encode('sel' + tag.toString(36).padStart(9, '0'));
+    const src = new Uint8Array(jpeg);
+    const out = new Uint8Array(src.length + 4 + pay.length);
+    out[0] = 0xFF; out[1] = 0xD8;
+    out[2] = 0xFF; out[3] = 0xFE;
+    const len = pay.length + 2;
+    out[4] = (len >> 8) & 0xFF; out[5] = len & 0xFF;
+    out.set(pay, 6);
+    out.set(src.subarray(2), 6 + pay.length);
+    return out;
+  }
+
+  /** The route in use, and the race that settles it; the ladder serves until it does. */
+  let jpegRoute = null;
+  let jpegRouteRace = null;
+
+  /**
+   * Race the routes this engine has and keep the fastest, on a stripe the size the session
+   * sends and at the concurrency it decodes at.
+   *
+   * Which wins is an engine's own business and moves with its releases, so it is measured
+   * rather than named: at 1080p in eight stripes, Firefox decodes 160 fps through
+   * `ImageDecoder` against 48 through `createImageBitmap`, while Chromium runs 99 through
+   * `createImageBitmap` against 62 through `ImageDecoder` -- opposite answers, and a fixed
+   * order hands one of them the slower route. WebKit carries no `ImageDecoder` at all, and an
+   * `<img>` is raced beside them because Safari is reported to decode faster through one than
+   * through `createImageBitmap` -- an engine no proxy here stands in for, and the reason the
+   * choice is raced rather than named.
+   *
+   * The race draws each decode, because `ImageDecoder` resolves before the pixels are
+   * drawable on some engines and only defers that cost into the paint loop: timing the
+   * decode alone picks `ImageDecoder` on Chromium, which the sustained rate contradicts.
+   * A small serial sample misleads the same way, measuring per-call latency rather than the
+   * throughput the paint loop spends. Falls back to the first working route if it cannot run.
+   */
+  async function settleJpegRoute() {
+    const names = Object.keys(JPEG_ROUTES).filter((n) =>
+      (n !== 'imagedecoder' || typeof ImageDecoder !== 'undefined')
+      && (n !== 'bitmap' || typeof createImageBitmap === 'function')
+      && (n !== 'img' || typeof Image !== 'undefined'));
+    if (names.length <= 1) return names[0] || null;
+    const LANES = 8, ROUNDS = 2, SW = 1920, SH = 136;
+    let samples, sink;
+    try {
+      samples = [];
+      for (let i = 0; i < LANES; i++) {
+        const c = document.createElement('canvas');
+        c.width = SW; c.height = SH;
+        const g = c.getContext('2d');
+        g.fillStyle = '#204080'; g.fillRect(0, 0, SW, SH);
+        g.lineWidth = 3; g.strokeStyle = '#c8c828';
+        for (let x = 0; x < SW; x += 40) { g.beginPath(); g.moveTo(x + i, 0); g.lineTo(x + i, SH); g.stroke(); }
+        const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.75));
+        samples.push(await blob.arrayBuffer());
+      }
+      sink = document.createElement('canvas');
+      sink.width = SW; sink.height = SH * LANES;
+    } catch (e) {
+      return names[0];
+    }
+    const sctx = sink.getContext('2d');
+    let tag = 0;
+    // Warm each route before timing any: the first raced otherwise pays one-time costs
+    // (decoder construction, thread pool spin-up) that belong to none of them.
+    for (const name of names) {
+      try {
+        const img = await JPEG_ROUTES[name](uniqueJpeg(samples[0], tag++));
+        sctx.drawImage(img, 0, 0);
+        try { img.close(); } catch (e) { /* ignore */ }
+      } catch (e) { /* the timed pass reports it */ }
+    }
+    let best = null;
+    for (const name of names) {
+      try {
+        const t0 = performance.now();
+        for (let r = 0; r < ROUNDS; r++) {
+          await Promise.all(samples.map(async (data, i) => {
+            const img = await JPEG_ROUTES[name](uniqueJpeg(data, tag++));
+            sctx.drawImage(img, 0, i * SH);
+            try { img.close(); } catch (e) { /* ignore */ }
+          }));
+        }
+        const ms = performance.now() - t0;
+        if (!best || ms < best.ms) best = { name, ms };
+      } catch (e) { /* a route that throws is not a candidate */ }
+    }
+    return best ? best.name : names[0];
+  }
+
+  /**
+   * Decodes a JPEG stripe and queues it for the paint loop, through whichever route this
+   * engine decodes fastest (see `settleJpegRoute`).
    * @param {number} startY
    * @param {ArrayBuffer} jpegData
    * @param {number} frameId
@@ -5236,18 +5359,24 @@ function initWebsockets() {
   async function decodeAndQueueJpegStripe(startY, jpegData, frameId) {
     jpegStripeDecodesPending++;
     try {
-      let image;
-      if (typeof ImageDecoder !== 'undefined') {
-        const imageDecoder = new ImageDecoder({ data: jpegData, type: 'image/jpeg' });
-        image = (await imageDecoder.decode()).image;
-        imageDecoder.close();
-      } else if (typeof createImageBitmap === 'function') {
-        image = await createImageBitmap(new Blob([jpegData], { type: 'image/jpeg' }));
-      } else {
-        console.warn('No JPEG decoder available (ImageDecoder and createImageBitmap both missing).');
-        return;
+      let route = jpegRoute;
+      if (!route) {
+        if (!jpegRouteRace) {
+          jpegRouteRace = settleJpegRoute().then((name) => {
+            jpegRoute = name;
+            if (name) console.log(`[jpeg] decoding stripes through ${name}`);
+            return name;
+          }).catch(() => null);
+        }
+        // The first stripes take whatever is there rather than waiting on the race.
+        route = typeof ImageDecoder !== 'undefined' ? 'imagedecoder'
+          : (typeof createImageBitmap === 'function' ? 'bitmap' : null);
+        if (!route) {
+          console.warn('No JPEG decoder available (ImageDecoder and createImageBitmap both missing).');
+          return;
+        }
       }
-      jpegStripeRenderQueue.push({ image, startY, frameId });
+      jpegStripeRenderQueue.push({ image: await JPEG_ROUTES[route](jpegData), startY, frameId });
     } catch (error) {
       console.error('Error decoding JPEG stripe:', error, 'startY:', startY, 'dataLength:', jpegData.byteLength);
     } finally {
