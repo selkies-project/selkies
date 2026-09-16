@@ -66,9 +66,13 @@ fi
 
 # Screen saver (-s 0) and DPMS (-dpms) are off at the server level so the
 # framebuffer can never blank: a black stream is never what a viewer wants, and
-# nothing in this image unblanks one.
+# nothing in this image unblanks one. The framebuffer is sized by the RandR
+# screen Selkies sets, so the server takes no -screen. `-verbose 1` is what
+# makes the server say which EGL vendor glamor came up on and whether the
+# screen pixmap is on the GPU; both are startup lines, and both are the first
+# thing to look at when a session renders in software.
 # shellcheck disable=SC2086  # VFB_DEVICE is an option pair or empty
-/usr/bin/Xvfb "${DISPLAY}" -screen 0 "8192x4096x24" +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem -s 0 -dpms ${VFB_DEVICE} &
+/usr/bin/Xvfb "${DISPLAY}" -verbose 1 +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem -s 0 -dpms ${VFB_DEVICE} &
 XVFB_PID=$!
 trap 'kill "${XVFB_PID}" 2>/dev/null' TERM INT
 
