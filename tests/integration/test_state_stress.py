@@ -67,7 +67,7 @@ async def drive() -> "H.Results":
                 await asyncio.sleep(1.0)
                 await ws.send("START_VIDEO")
                 await asyncio.sleep(1.2)
-                ok = wait_log_from(st, "SUCCESS: Capture started", 8)
+                ok = wait_log_from(st, "Capture started", 8)
                 if not ok:
                     res.check(f"cycle {i}: capture restarted", False, H.server_log()[st:][-200:])
                     break
@@ -79,7 +79,7 @@ async def drive() -> "H.Results":
                 st = loglen()
                 await ws.send("SETTINGS," + json.dumps(_settings_payload(encoder=enc)))
                 await asyncio.sleep(2.0)
-                ok = wait_log_from(st, "SUCCESS: Capture started", 10) or wait_log_from(st, "Capture started", 10)
+                ok = wait_log_from(st, "Capture started", 10) or wait_log_from(st, "Capture started", 10)
                 res.check(f"encoder switch to {enc}", ok, H.server_log()[st:][-160:])
                 await asyncio.sleep(1.0)
 
@@ -95,7 +95,7 @@ async def drive() -> "H.Results":
             await ws2.send("SETTINGS," + json.dumps(_settings_payload()))
             async with H.drained(ws2):
                 await asyncio.sleep(4.0)
-                ok = wait_log_from(st, "SUCCESS: Capture started", 10)
+                ok = wait_log_from(st, "Capture started", 10)
                 res.check("reconnect captures cleanly", ok, "")
                 # A binary-clipboard toggle must be accepted without complaint.
                 st = loglen()

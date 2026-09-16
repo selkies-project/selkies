@@ -138,7 +138,7 @@ async def drive(res: "H.Results") -> None:
         pump = asyncio.create_task(drain(primary))
         await primary.send("SETTINGS," + json.dumps(
             settings_for("primary", PRIMARY, "right")))
-        if not await wait_log_from(mark, "SUCCESS: Capture started for 'primary'"):
+        if not await wait_log_from(mark, "Capture started for 'primary'"):
             res.check("the primary streams", False, "no capture")
             return
         # The server debounces reconnects from one address; the second client is
@@ -151,7 +151,7 @@ async def drive(res: "H.Results") -> None:
                 mark = len(H.server_log())
                 await secondary.send("SETTINGS," + json.dumps(
                     settings_for("display2", SECONDARY, position)))
-                await wait_log_from(mark, "SUCCESS: Capture started for 'display2'", 20)
+                await wait_log_from(mark, "Capture started for 'display2'", 20)
                 await asyncio.sleep(4.0)
                 layouts = layouts_from(mark)
                 got = layouts[-1] if layouts else {}

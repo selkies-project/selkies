@@ -50,7 +50,7 @@ def wait_secondary_ready(mode: str, secondary_id: str = "display2", timeout: flo
     if mode == "webrtc":
         return C.wait_log("Secondary display '{}' pipeline started".format(secondary_id),
                           timeout=timeout)
-    return C.wait_log("SUCCESS: Capture started for '{}'".format(secondary_id), timeout=timeout)
+    return C.wait_log("Capture started for '{}'".format(secondary_id), timeout=timeout)
 
 
 def primary_size(page, mode: str, timeout: float = 20) -> Optional[dict]:

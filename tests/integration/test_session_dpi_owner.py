@@ -75,7 +75,7 @@ async def drive(res: "H.Results") -> None:
             await secondary.send(settings("display2", 96, (1280, 720)))
             # Its first settings run a reconfiguration that holds the lock the
             # next settings wait on.
-            await saw(mark, "proceeding with backpressure loop for 'display2'", timeout=60)
+            await saw(mark, "settings applied for 'display2'", timeout=60)
             # The window is restored on a screen of another density, which is
             # what makes its page derive a new DPI and say so.
             mark = len(H.server_log())

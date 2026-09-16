@@ -83,7 +83,7 @@ async def drive(res: "H.Results") -> None:
         await asyncio.wait_for(primary.recv(), timeout=10)
         mark = loglen()
         await primary.send("SETTINGS," + json.dumps(settings_for("primary", 1920, 1080)))
-        res.check("primary capture starts", await wait_log_from(mark, "SUCCESS: Capture started for 'primary'", 45), "")
+        res.check("primary capture starts", await wait_log_from(mark, "Capture started for 'primary'", 45), "")
         await drain(primary, 1.0)
 
         async with websockets.connect(uri, max_size=None) as secondary:
@@ -91,7 +91,7 @@ async def drive(res: "H.Results") -> None:
             mark = loglen()
             await secondary.send("SETTINGS," + json.dumps(settings_for("display2", 1280, 720)))
             res.check("secondary capture starts beside the primary",
-                      await wait_log_from(mark, "SUCCESS: Capture started for 'display2'", 45), "")
+                      await wait_log_from(mark, "Capture started for 'display2'", 45), "")
             layouts = layouts_from(mark)
             before = layouts[-1] if layouts else {}
             res.check("secondary laid out at the primary's right edge",
@@ -104,7 +104,7 @@ async def drive(res: "H.Results") -> None:
             res.check("the shrink recreates the secondary output at its new offset",
                       await wait_log_from(mark, "Wayland output 2 moves to +1280+0; recreating it.", 30), "")
             res.check("secondary capture comes back after the shrink",
-                      await wait_log_from(mark, "SUCCESS: Capture started for 'display2'", 45), "")
+                      await wait_log_from(mark, "Capture started for 'display2'", 45), "")
             secondary_msgs = await drain(secondary, 3.0)
             tail = H.server_log()[mark:]
             res.check("no output creation was refused",

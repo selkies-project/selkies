@@ -190,14 +190,12 @@ AUDIO_CHANNELS_DEFAULT = 2
 AUDIO_BITRATE_DEFAULT = int(float(settings.audio_bitrate))
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "h265enc", "vp8enc", "vp9enc", "av1enc"]
 
-LOGLEVEL = logging.INFO
-logging.basicConfig(level=LOGLEVEL)
-logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
-logger_app = logging.getLogger("app")
-logger_app_resize = logging.getLogger("app_resize")
-logger_input_handler = logging.getLogger("input_handler")
-logger = logging.getLogger("main")
-data_logger = logging.getLogger("data_websocket")
+logger_selkies_gamepad = logging.getLogger("gamepad")
+logger_app = logging.getLogger("websockets")
+logger_app_resize = logging.getLogger("display")
+logger_input_handler = logging.getLogger("input")
+logger = logging.getLogger("websockets")
+data_logger = logging.getLogger("websockets")
 
 X11_CAPTURE_AVAILABLE = False
 PCMFLUX_AVAILABLE = False
@@ -224,7 +222,7 @@ try:
     )
     PCMFLUX_AVAILABLE = True
     PCMFLUX_PLAYBACK_AVAILABLE = True
-    data_logger.info("pcmflux library found. Audio capture + mic playback available.")
+    data_logger.debug("pcmflux library found. Audio capture + mic playback available.")
 except (ImportError, RuntimeError) as e:
     # RuntimeError is pcmflux ABI/version skew: degrade instead of crashing at startup.
     AudioCapture = AudioCaptureSettings = None
@@ -237,7 +235,7 @@ try:
     from pixelflux import CaptureSettings, ScreenCapture
 
     X11_CAPTURE_AVAILABLE = True
-    data_logger.info("pixelflux library found. Striped encoding modes available.")
+    data_logger.debug("pixelflux library found. Striped encoding modes available.")
 except (ImportError, RuntimeError) as e:
     # RuntimeError is pixelflux ABI/version skew: degrade instead of crashing at startup.
     ScreenCapture = CaptureSettings = None
@@ -252,7 +250,7 @@ upload_dir_path: Optional[str] = os.path.expanduser(upload_path)
 
 try:
     os.makedirs(upload_dir_path, exist_ok=True)
-    logger.info(f"Upload directory ensured: {upload_dir_path}")
+    logger.debug(f"Upload directory ensured: {upload_dir_path}")
 except OSError as e:
     logger.error(f"Could not create upload directory {upload_dir_path}: {e}")
     upload_dir_path = None
@@ -829,7 +827,7 @@ class SelkiesStreamingApp:
                 else:
                     message = f"clipboard,{encoded_data}"
             else:
-                data_logger.info(f"Sending large clipboard data ({mime_type}, {total_size} bytes) via multipart.")
+                data_logger.debug(f"Sending large clipboard data ({mime_type}, {total_size} bytes) via multipart.")
                 start_message = f"clipboard_start,{mime_type},{total_size}"
 
             async def deliver(client: Any) -> None:
@@ -874,7 +872,7 @@ class SelkiesStreamingApp:
             recipients = [c for c in list(clients) if conn_id is None or id(c) == conn_id]
             await asyncio.gather(*(deliver(c) for c in recipients))
             if not small:
-                data_logger.info("Finished sending multi-part clipboard data.")
+                data_logger.debug("Finished sending multi-part clipboard data.")
         except Exception as e:
             data_logger.error(f"Failed to send clipboard data: {e}", exc_info=True)
 
@@ -936,18 +934,18 @@ class SelkiesStreamingApp:
 
     async def stop_pipeline(self) -> None:
         """Stop all pipelines by reconciling displays against current state."""
-        logger_app.info("Stopping pipelines (generic call)...")
+        logger_app.debug("Stopping pipelines (generic call)...")
         if self.data_streaming_server:
             await self.data_streaming_server.reconfigure_displays()
         self.pipeline_running = False
-        logger_app.info("Pipelines stop signal processed.")
+        logger_app.debug("Pipelines stop signal processed.")
 
     stop_ws_pipeline = stop_pipeline
 
     def set_framerate(self, framerate: Union[int, float]) -> None:
         """Store the session default framerate; applies at the next pipeline (re)start."""
         self.framerate = int(framerate)
-        logger_app.info(
+        logger_app.debug(
             f"Framerate for {self.encoder} set to {self.framerate}. Restart pipeline if active."
         )
 
@@ -1164,9 +1162,9 @@ class DataStreamingServer(BaseStreamingService):
         """
         self.is_secure_mode = bool(self.cli_args.master_token)
         if self.is_secure_mode:
-            logger.info("Secure Mode ENABLED (SELKIES_MASTER_TOKEN is set).")
+            logger.debug("Secure Mode ENABLED (SELKIES_MASTER_TOKEN is set).")
         else:
-            logger.info("Legacy Mode ENABLED (SELKIES_MASTER_TOKEN is not set).")
+            logger.debug("Legacy Mode ENABLED (SELKIES_MASTER_TOKEN is not set).")
             self.config_gate.set()
 
         global TARGET_FRAMERATE
@@ -1180,10 +1178,7 @@ class DataStreamingServer(BaseStreamingService):
 
         initial_encoder = settings.encoder
 
-        if not settings.debug[0]:
-            logging.getLogger("pulsectl_asyncio").setLevel(logging.WARNING)
-
-        logger.info(f"Initializing DataStreamingServer with encoder: {initial_encoder}, Framerate: {TARGET_FRAMERATE}")
+        logger.debug(f"Initializing DataStreamingServer with encoder: {initial_encoder}, Framerate: {TARGET_FRAMERATE}")
 
         event_loop = asyncio.get_running_loop()
         self.app = SelkiesStreamingApp(
@@ -1195,7 +1190,7 @@ class DataStreamingServer(BaseStreamingService):
         self.app.server_enable_resize = ENABLE_RESIZE
         self.app.last_resize_success = True
         self.app.data_streaming_server = self
-        logger.info(
+        logger.debug(
             f"SelkiesStreamingApp initialized: encoder={self.app.encoder}, display={self.app.display_width}x{self.app.display_height}"
         )
 
@@ -1248,7 +1243,7 @@ class DataStreamingServer(BaseStreamingService):
         else:
             # Only the resolution is frozen: a DPI sync still scales the desktop.
             self.input_handler.on_resize = lambda res_str, display_id='primary': logger.warning("Resize disabled.")
-        logger.info("DataStreamingServer initialization complete.")
+        logger.debug("DataStreamingServer initialization complete.")
 
     async def set_native_cursor_rendering(self, enabled: bool) -> None:
         """Compose the cursor into the captured video (vs the client-drawn overlay).
@@ -1258,7 +1253,7 @@ class DataStreamingServer(BaseStreamingService):
         pointer-visibility toggle ("p,N"), which map to the same tunable.
         """
         if self.capture_cursor == enabled:
-            data_logger.info(f"Native cursor rendering: value {enabled} is already set.")
+            data_logger.debug(f"Native cursor rendering: value {enabled} is already set.")
             return
         self.capture_cursor = enabled
         if len(self.capture_instances) > 0:
@@ -1333,7 +1328,7 @@ class DataStreamingServer(BaseStreamingService):
         if app_settings._overridden.get("scaling_dpi", False):
             data_logger.info("Ignoring client DPI sync: scaling_dpi is operator-overridden.")
             return
-        data_logger.info(f"Received DPI setting from client: {dpi_value}")
+        data_logger.debug(f"Received DPI setting from client: {dpi_value}")
         try:
             if not IS_WAYLAND:
                 if await set_dpi(dpi_value):
@@ -1357,9 +1352,9 @@ class DataStreamingServer(BaseStreamingService):
                         await self._apply_wayland_cursor_size(dpi_value)
                 else:
                     new_cursor_size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
-                    data_logger.info(f"Attempting to set cursor size to: {new_cursor_size} (based on DPI {dpi_value})")
+                    data_logger.debug(f"Attempting to set cursor size to: {new_cursor_size} (based on DPI {dpi_value})")
                     if await set_cursor_size(new_cursor_size):
-                        data_logger.info(f"Successfully set cursor size to {new_cursor_size}")
+                        data_logger.debug(f"Successfully set cursor size to {new_cursor_size}")
                     else:
                         data_logger.error(f"Failed to set cursor size to {new_cursor_size}")
         except Exception as e_dpi:
@@ -1375,7 +1370,7 @@ class DataStreamingServer(BaseStreamingService):
         if display_id == 'primary':
             # Only the primary controller moves the session default later displays seed from.
             self.app.set_framerate(sanitized)
-            data_logger.info(f"Session default framerate updated to {int(sanitized)} for new displays.")
+            data_logger.debug(f"Session default framerate updated to {int(sanitized)} for new displays.")
         display_state = self.display_clients.get(display_id)
         if display_state is not None:
             display_state["framerate"] = sanitized
@@ -1399,7 +1394,7 @@ class DataStreamingServer(BaseStreamingService):
             display_state["video_bitrate"] = sanitized
         if display_id == 'primary':
             self._initial_video_bitrate = sanitized
-            data_logger.info(f"Session default video_bitrate updated to {int(sanitized)} kbps for new displays.")
+            data_logger.debug(f"Session default video_bitrate updated to {int(sanitized)} kbps for new displays.")
         module = self._opcode_display_module(display_id)
         if module is not None:
             kbps = int(round(float(sanitized)))
@@ -1454,7 +1449,7 @@ class DataStreamingServer(BaseStreamingService):
         display_state["rate_control_mode"] = sanitized
         if display_id == 'primary':
             self.rc_mode = RateControlMode(sanitized)
-            data_logger.info(f"Session default rate_control_mode updated to {sanitized} for new displays.")
+            data_logger.debug(f"Session default rate_control_mode updated to {sanitized} for new displays.")
         if not display_state.get('video_active', True):
             return
         layout = self.display_layouts.get(display_id)
@@ -1568,7 +1563,7 @@ class DataStreamingServer(BaseStreamingService):
         payload = self._display_config_payload()
         message_str = f"DISPLAY_CONFIG_UPDATE,{json.dumps(payload)}"
         
-        data_logger.info(f"Broadcasting display config update: {message_str}")
+        data_logger.debug(f"Broadcasting display config update: {message_str}")
         # Bounded: callers hold _reconfigure_lock.
         await _broadcast_to_clients(self.clients, message_str, per_client_timeout=2.0)
 
@@ -1592,7 +1587,7 @@ class DataStreamingServer(BaseStreamingService):
         if not cursor_data:
             return
 
-        data_logger.info(f"Sending current cursor to client {raddr}")
+        data_logger.debug(f"Sending current cursor to client {raddr}")
         try:
             msg_str = json.dumps(cursor_data)
             await websocket.send_str(f"cursor,{msg_str}")
@@ -1674,7 +1669,7 @@ class DataStreamingServer(BaseStreamingService):
         that stays silent past the health interval is the cue to ask pcmflux
         whether the capture worker died (_check_pcmflux_health).
         """
-        data_logger.info("pcmflux audio chunk broadcasting task started.")
+        data_logger.debug("pcmflux audio chunk broadcasting task started.")
         try:
             while True:
                 try:
@@ -1708,9 +1703,9 @@ class DataStreamingServer(BaseStreamingService):
 
                 self.pcmflux_audio_queue.task_done()
         except asyncio.CancelledError:
-            data_logger.info("pcmflux audio chunk broadcasting task canceled.")
+            data_logger.debug("pcmflux audio chunk broadcasting task canceled.")
         finally:
-            data_logger.info("pcmflux audio chunk broadcasting task finished.")
+            data_logger.debug("pcmflux audio chunk broadcasting task finished.")
 
     def _compute_audio_red_distance(self) -> int:
         """RED distance for the shared audio broadcast.
@@ -1767,10 +1762,10 @@ class DataStreamingServer(BaseStreamingService):
             audio_is_active = self.is_pcmflux_capturing
             if not pipeline_starts_on('audio', display_id):
                 if audio_is_active and not self._audio_listeners(exclude=websocket):
-                    data_logger.info("Initial setup: audio starts off for this session; stopping the idle audio capture.")
+                    data_logger.debug("Initial setup: audio starts off for this session; stopping the idle audio capture.")
                     await self._stop_pcmflux_pipeline()
             elif not audio_is_active and PCMFLUX_AVAILABLE and display_id == 'primary':
-                data_logger.info("Initial setup: Primary client connected, audio not active, attempting start.")
+                data_logger.debug("Initial setup: Primary client connected, audio not active, attempting start.")
                 await self._start_pcmflux_pipeline()
             elif not PCMFLUX_AVAILABLE and not audio_is_active:
                 data_logger.warning("Initial setup: Audio pipeline (server-to-client) cannot be started (pcmflux not available).")
@@ -1790,13 +1785,13 @@ class DataStreamingServer(BaseStreamingService):
             partial start is cleaned up).
         """
         if not settings.audio_enabled[0]:
-            data_logger.info("Audio is disabled by server settings. Not starting pipeline.")
+            data_logger.debug("Audio is disabled by server settings. Not starting pipeline.")
             return False
         if not PCMFLUX_AVAILABLE:
             data_logger.error("Cannot start audio pipeline: pcmflux library not available.")
             return False
         if self.is_pcmflux_capturing:
-            data_logger.info("pcmflux audio pipeline is already capturing.")
+            data_logger.debug("pcmflux audio pipeline is already capturing.")
             return True
         if self.pcmflux_module is not None:
             # A start canceled between the capture's open and its bookkeeping
@@ -1812,7 +1807,6 @@ class DataStreamingServer(BaseStreamingService):
             return False
 
         await ensure_capture_sink(self.audio_device_name)
-        data_logger.info("Starting pcmflux audio pipeline...")
         try:
             frame_ms = float(getattr(settings, 'audio_frame_duration_ms', '20') or 20)
             capture_settings = opus_capture_settings(self.audio_device_name, self.app.audio_channels,
@@ -1825,9 +1819,9 @@ class DataStreamingServer(BaseStreamingService):
             self._active_audio_red_distance = red_distance
             self.pcmflux_settings = capture_settings
 
-            data_logger.info(f"pcmflux settings: device='{self.audio_device_name}', "
-                             f"bitrate={capture_settings.opus_bitrate}, channels={capture_settings.channels}, "
-                             f"red_distance={red_distance}")
+            data_logger.info(f"Starting pcmflux audio pipeline: device '{self.audio_device_name}', "
+                             f"{capture_settings.opus_bitrate} bps, {capture_settings.channels} ch, "
+                             f"RED distance {red_distance}.")
 
             self.pcmflux_callback = self._pcmflux_audio_callback
             self.pcmflux_module = AudioCapture()
@@ -1847,7 +1841,7 @@ class DataStreamingServer(BaseStreamingService):
             if self.pcmflux_send_task is None or self.pcmflux_send_task.done():
                 self.pcmflux_send_task = asyncio.create_task(self._pcmflux_send_audio_chunks())
 
-            data_logger.info(f"pcmflux audio capture state: {state}.")
+            data_logger.debug(f"pcmflux audio capture state: {state}.")
             return True
         except Exception as e:
             data_logger.error(f"Failed to start pcmflux audio pipeline: {e}", exc_info=True)
@@ -1887,7 +1881,7 @@ class DataStreamingServer(BaseStreamingService):
                 self.pcmflux_module = None
         
         self.pcmflux_audio_queue = None
-        data_logger.info("pcmflux audio pipeline stopped.")
+        data_logger.debug("pcmflux audio pipeline stopped.")
         return True
 
     async def shutdown_pipelines(self) -> None:
@@ -1899,7 +1893,7 @@ class DataStreamingServer(BaseStreamingService):
         disconnect/connect race could otherwise tear down audio a new client
         just started), and none of the awaited teardowns re-acquire the lock.
         """
-        logger.info("Initiating unified pipeline shutdown...")
+        logger.debug("Initiating unified pipeline shutdown...")
         await self.reconfigure_displays()
         async with self._reconfigure_guard():
             await self._stop_pcmflux_pipeline()
@@ -1915,7 +1909,7 @@ class DataStreamingServer(BaseStreamingService):
                     await self.pcmflux_send_task
                 except asyncio.CancelledError:
                     pass
-        logger.info("Unified pipeline shutdown complete.")
+        logger.debug("Unified pipeline shutdown complete.")
 
     async def _ensure_backpressure_task_is_stopped(self, display_id: str, notify: bool = True) -> bool:
         """Cancel and clean up the backpressure task for a specific display.
@@ -1952,7 +1946,7 @@ class DataStreamingServer(BaseStreamingService):
         display_state['backpressure_enabled'] = True
 
         if task_was_running and notify:
-            data_logger.info(f"Backpressure task for '{display_id}' was stopped. Resetting its frame IDs.")
+            data_logger.debug(f"Backpressure task for '{display_id}' was stopped. Resetting its frame IDs.")
             await self._reset_frame_ids_and_notify(display_id)
             return True
         return False
@@ -1974,7 +1968,7 @@ class DataStreamingServer(BaseStreamingService):
         if not display_state:
             return
 
-        data_logger.info(f"Resetting frame IDs for display '{display_id}'.")
+        data_logger.debug(f"Resetting frame IDs for display '{display_id}'.")
         display_state['last_sent_frame_id'] = 0
         display_state['has_sent_any_frame'] = False
         display_state['acknowledged_frame_id'] = -1
@@ -1992,7 +1986,7 @@ class DataStreamingServer(BaseStreamingService):
         message = f"PIPELINE_RESETTING {display_id}"
         
         if display_id == 'primary' and self.clients:
-            data_logger.info(f"Broadcasting primary pipeline reset to all {len(self.clients)} clients: {message}")
+            data_logger.debug(f"Broadcasting primary pipeline reset to all {len(self.clients)} clients: {message}")
             await _broadcast_to_clients(self.clients, message, per_client_timeout=2.0)
         else:
             websocket = display_state.get('ws')
@@ -2029,7 +2023,7 @@ class DataStreamingServer(BaseStreamingService):
         if not task or task.done():
             new_task = asyncio.create_task(self._run_frame_backpressure_logic(display_id))
             display_state['backpressure_task'] = new_task
-            data_logger.info(f"New frame backpressure task started for display '{display_id}'.")
+            data_logger.debug(f"New frame backpressure task started for display '{display_id}'.")
         else:
             data_logger.warning(f"Backpressure task for '{display_id}' was already running. Not starting a new one.")
 
@@ -2356,7 +2350,7 @@ class DataStreamingServer(BaseStreamingService):
         groups = {}
         for ws in self.clients:
             groups.setdefault(per_socket.get(ws) or primary_message, set()).add(ws)
-        data_logger.info(
+        data_logger.debug(
             f"Re-announcing live server settings after the '{display_id}' capture restart "
             f"to {len(self.clients)} client(s)."
         )
@@ -2402,12 +2396,12 @@ class DataStreamingServer(BaseStreamingService):
         resync) and the stall timer restarts from that send, which a client
         that is still gone trips again and a returned one answers.
         """
-        data_logger.info(f"Frame-based backpressure logic task started for display '{display_id}'.")
+        data_logger.debug(f"Frame-based backpressure logic task started for display '{display_id}'.")
         display_state = None
         try:
             if self.client_settings_received:
                 await self.client_settings_received.wait()
-            data_logger.info(f"Client settings received, proceeding with backpressure loop for '{display_id}'.")
+            data_logger.debug(f"Client settings received, proceeding with backpressure loop for '{display_id}'.")
 
             while True:
                 await asyncio.sleep(self.backpressure_check_interval_s)
@@ -2419,7 +2413,7 @@ class DataStreamingServer(BaseStreamingService):
                 
                 if display_id not in self.capture_instances:
                     if not display_state.get('backpressure_enabled', True):
-                        data_logger.info(f"Backpressure LIFTED for '{display_id}' (video pipeline is not active).")
+                        data_logger.debug(f"Backpressure LIFTED for '{display_id}' (video pipeline is not active).")
                     self._set_backpressure_enabled(display_id, display_state, True)
                     continue
 
@@ -2428,7 +2422,7 @@ class DataStreamingServer(BaseStreamingService):
 
                 if last_client_acked_frame_id == -1:
                     if not display_state.get('backpressure_enabled', True):
-                         data_logger.info(f"Backpressure LIFTED for '{display_id}' (client ACK is -1).")
+                         data_logger.debug(f"Backpressure LIFTED for '{display_id}' (client ACK is -1).")
                     self._set_backpressure_enabled(display_id, display_state, True)
                     display_state['unacked_since'] = None
                     display_state['stall_gated_at'] = None
@@ -2504,11 +2498,11 @@ class DataStreamingServer(BaseStreamingService):
                     self._set_backpressure_enabled(display_id, display_state, True)
 
         except asyncio.CancelledError:
-            data_logger.info(f"Backpressure logic task for '{display_id}' canceled.")
+            data_logger.debug(f"Backpressure logic task for '{display_id}' canceled.")
         finally:
             if display_state:
                 display_state['backpressure_enabled'] = True
-            data_logger.info(f"Backpressure logic task for '{display_id}' finished.")
+            data_logger.debug(f"Backpressure logic task for '{display_id}' finished.")
 
     def _estimate_client_fps(self, display_state: dict, acked_id: int,
                              configured_fps: Union[int, float], now: float) -> float:
@@ -2626,7 +2620,7 @@ class DataStreamingServer(BaseStreamingService):
             if message_str:
                 groups.setdefault(message_str, set()).add(ws)
         for message_str, sockets in groups.items():
-            data_logger.info(f"Broadcasting stream resolution to {len(sockets)} client(s): {message_str}")
+            data_logger.debug(f"Broadcasting stream resolution to {len(sockets)} client(s): {message_str}")
             # Bounded: runs under _reconfigure_lock; a frozen client is dropped, not waited on.
             dropped = await _broadcast_to_clients(sockets, message_str, per_client_timeout=2.0)
             # The fan-out ran over a computed set; mirror the drop into the registry.
@@ -2732,7 +2726,7 @@ class DataStreamingServer(BaseStreamingService):
         size = cursor_size_for_dpi(dpi, CURSOR_SIZE)
         try:
             if await asyncio.to_thread(module.set_cursor_size, size):
-                data_logger.info(f"Wayland cursor size set to {size} (DPI {dpi}).")
+                data_logger.debug(f"Wayland cursor size set to {size} (DPI {dpi}).")
             else:
                 data_logger.warning(f"Wayland compositor refused cursor size {size}.")
         except Exception as e:
@@ -2770,9 +2764,20 @@ class DataStreamingServer(BaseStreamingService):
                 updated += 1
             except Exception as e:
                 data_logger.debug(f"Live cursor cap update skipped for '{display_id}': {e}")
-        data_logger.info(
+        data_logger.debug(
             f"Cursor size cap {ih.cursor_size_cap}px for DPI {dpi} "
             f"({updated} live capture(s) updated).")
+
+    def _settings_applied_summary(self, raddr: Any, display_id: str) -> str:
+        """The line that closes a page's first SETTINGS: what its display streams as."""
+        state = self.display_clients.get(display_id) or {}
+        rc = state.get('rate_control_mode', self.rc_mode.value)
+        rate = (f"{state.get('video_bitrate')} kbps" if rc == RateControlMode.CBR.value
+                else f"crf {state.get('video_crf')}")
+        return (f"Client {raddr} settings applied for '{display_id}': "
+                f"{state.get('width')}x{state.get('height')}, {state.get('encoder')} "
+                f"{rate}, {state.get('framerate')} fps"
+                + (", software encoding" if state.get('use_cpu') else "") + ".")
 
     def _parse_settings_payload(self, payload_str: str) -> dict:
         """Parse a SETTINGS JSON payload into typed values (absent keys become None).
@@ -2881,7 +2886,7 @@ class DataStreamingServer(BaseStreamingService):
         """
         if client_role == "viewer":
             _viewer_raddr = client_permissions.get(websocket_obj, {}).get("remote_address", "unknown")
-            data_logger.info(f"Ignoring SETTINGS payload from viewer {_viewer_raddr}.")
+            data_logger.debug(f"Ignoring SETTINGS payload from viewer {_viewer_raddr}.")
             return
 
         display_id = settings.get("displayId", "primary")
@@ -2889,7 +2894,7 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.error(f"Cannot apply settings for unknown display_id '{display_id}'")
             return
         display_state = self.display_clients[display_id]
-        data_logger.info(
+        data_logger.debug(
             f"Applying and sanitizing client settings for '{display_id}' (initial={is_initial_settings})"
         )
         def sanitize_value(name, client_value):
@@ -2908,7 +2913,7 @@ class DataStreamingServer(BaseStreamingService):
                 server_is_manual, _ = self.cli_args.manual_resolution
                 client_wants_manual = sanitize_value("manual_resolution", settings.get("manual_resolution"))
                 if server_is_manual:
-                    data_logger.info(f"Server override is active. Forcing manual resolution from server configuration for display '{display_id}'.")
+                    data_logger.debug(f"Server override is active. Forcing manual resolution from server configuration for display '{display_id}'.")
                     try:
                         w_val = self.cli_args.manual_width
                         h_val = self.cli_args.manual_height
@@ -2965,7 +2970,7 @@ class DataStreamingServer(BaseStreamingService):
                 if apply_alignment:
                     aligned_w, aligned_h = align_dims_16(target_w, target_h)
                     if aligned_w != target_w or aligned_h != target_h:
-                        data_logger.info(
+                        data_logger.debug(
                             f"Aligning resolution for '{display_id}' from {target_w}x{target_h} to {aligned_w}x{aligned_h} (16-pixel alignment)."
                         )
                     target_w, target_h = aligned_w, aligned_h
@@ -3055,10 +3060,10 @@ class DataStreamingServer(BaseStreamingService):
                                 app_settings._encoder_client_set = True
                             else:
                                 setattr(self, attr, value)
-                        data_logger.info(f"Session default {key} updated to {value} for new displays.")
+                        data_logger.debug(f"Session default {key} updated to {value} for new displays.")
                     if enable_rate_control and settings.get('rate_control_mode') is not None:
                         self.rc_mode = RateControlMode(display_state['rate_control_mode'])
-                        data_logger.info(
+                        data_logger.debug(
                             f"Session default rate_control_mode updated to {self.rc_mode.value} for new displays."
                         )
 
@@ -3204,7 +3209,7 @@ class DataStreamingServer(BaseStreamingService):
                 await self.reconfigure_displays()
             raise
         if is_initial_settings or dimensional_change:
-            data_logger.info(
+            data_logger.debug(
                 f"Initial setup or dimensional change detected for '{display_id}'. "
                 "Performing full display reconfiguration."
             )
@@ -3283,7 +3288,7 @@ class DataStreamingServer(BaseStreamingService):
                 "id": secrets.token_hex(4),
                 "connected_at": time.time(),
             }
-            data_logger.info(f"Client {remote_address} authenticated with token. Role: {permissions.get('role')}, Slot: {permissions.get('slot')}")
+            data_logger.debug(f"Client {remote_address} authenticated with token. Role: {permissions.get('role')}, Slot: {permissions.get('slot')}")
             auth_success_payload = json.dumps({
                 "role": permissions.get("role"),
                 "slot": permissions.get("slot"),
@@ -3318,7 +3323,7 @@ class DataStreamingServer(BaseStreamingService):
                 return
             client_permissions[websocket] = {"token": None, "role": role, "slot": slot, "remote_address": remote_address,
                                              "id": secrets.token_hex(4), "connected_at": time.time()}
-            data_logger.info(f"Legacy client {remote_address} connected. Role: {role}, Slot: {slot}")
+            data_logger.debug(f"Legacy client {remote_address} connected. Role: {role}, Slot: {slot}")
 
         global TARGET_FRAMERATE
         current_time = time.monotonic()
@@ -3337,9 +3342,11 @@ class DataStreamingServer(BaseStreamingService):
         if len(self.last_connection_times) > self.MAX_RECENT_CLIENTS:
             self.last_connection_times.popitem(last=False)
         raddr = remote_address
-        data_logger.info(f"Data WebSocket connected from {raddr}")
         self.clients.add(websocket)
         perms = client_permissions.get(websocket) or {}
+        data_logger.info(
+            f"Client {raddr} connected ({'token' if self.is_secure_mode else 'legacy'}, "
+            f"role {perms.get('role')}, slot {perms.get('slot')}).")
         audit.emit("session.connect", transport="websockets", role=perms.get("role"), slot=perms.get("slot"))
         self._report_client_presence()
         self.data_ws = (
@@ -3463,7 +3470,7 @@ class DataStreamingServer(BaseStreamingService):
             # runtime enable must not need a reconnect, so setup still runs.
             _mic_on, _mic_locked = settings.microphone_enabled
             if not settings.audio_enabled[0] or (not _mic_on and _mic_locked):
-                data_logger.info("Audio/microphone disabled in settings. Skipping PulseAudio setup.")
+                data_logger.debug("Audio/microphone disabled in settings. Skipping PulseAudio setup.")
             else:
                 # The bounded connect keeps a missing sound server from stalling the
                 # handshake before the client can claim its display.
@@ -3547,7 +3554,7 @@ class DataStreamingServer(BaseStreamingService):
                         if not mic_setup_done:
                             if time.monotonic() < mic_setup_retry_at:
                                 continue
-                            data_logger.info(
+                            data_logger.debug(
                                 "Performing PulseAudio/PipeWire virtual microphone setup check..."
                             )
                             pa_module_index, pa_module_owned = await mic_control.ensure_virtual_microphone(
@@ -3670,7 +3677,7 @@ class DataStreamingServer(BaseStreamingService):
                             client_role = client_perms.get("role") if client_perms else "controller"
 
                             if client_role == 'viewer':
-                                data_logger.info(f"Viewer client {remote_address} sent initial SETTINGS. Syncing with current stream state.")
+                                data_logger.info(f"Viewer {remote_address} joins the 'primary' stream.")
                                 if not initial_settings_processed:
                                     initial_settings_processed = True
 
@@ -3681,7 +3688,7 @@ class DataStreamingServer(BaseStreamingService):
 
                                 # Only the joining viewer is reset; the IDR opens its keyframe
                                 # gate now, since an infinite GOP schedules none.
-                                data_logger.info("Sending PIPELINE_RESETTING to the new viewer and requesting an IDR.")
+                                data_logger.debug("Sending PIPELINE_RESETTING to the new viewer and requesting an IDR.")
                                 try:
                                     await websocket.send_str("PIPELINE_RESETTING primary")
                                 except (ConnectionResetError, OSError, RuntimeError):
@@ -3731,7 +3738,7 @@ class DataStreamingServer(BaseStreamingService):
                                         except asyncio.TimeoutError:
                                             _close_abandoned_ws(old_ws)
                                         except (ConnectionResetError, OSError, RuntimeError):
-                                            data_logger.info(f"Old client for '{display_id}' was already disconnected.")
+                                            data_logger.debug(f"Old client for '{display_id}' was already disconnected.")
                                         except Exception as e:
                                             data_logger.error(f"Error while killing old client for '{display_id}': {e}")
                             if display_id != 'primary':
@@ -3759,7 +3766,7 @@ class DataStreamingServer(BaseStreamingService):
                                             except (ConnectionResetError, OSError, RuntimeError):
                                                 pass
                             if display_id not in self.display_clients:
-                                data_logger.info(f"Registering new client for display: {display_id}")
+                                data_logger.debug(f"Registering new client for display: {display_id}")
                                 self.display_clients[display_id] = {
                                     'ws': websocket, 
                                     'width': 0, 'height': 0, 'position': 'right',
@@ -3807,7 +3814,7 @@ class DataStreamingServer(BaseStreamingService):
                                             getattr(app_settings, "scaling_dpi", "96") or 96,
                                             display_id))
                             else:
-                                data_logger.info(f"Client is taking over existing display '{display_id}'. Updating state for new connection.")
+                                data_logger.debug(f"Client is taking over existing display '{display_id}'. Updating state for new connection.")
                                 display_state = self.display_clients[display_id]
                                 display_state['ws'] = websocket
                                 # Only a page's first SETTINGS reactivates video; a later one
@@ -3837,7 +3844,7 @@ class DataStreamingServer(BaseStreamingService):
                             )
                             if not initial_settings_processed:
                                 initial_settings_processed = True
-                                data_logger.info("Initial client settings message processed by ws_handler.")
+                                data_logger.info(self._settings_applied_summary(remote_address, display_id))
                                 video_wanted = self.display_clients.get(display_id, {}).get('video_active', False)
                                 if video_wanted and display_id not in self.capture_instances:
                                     data_logger.error("FATAL: Initial reconfiguration completed, but video pipeline did not start.")
@@ -3941,7 +3948,7 @@ class DataStreamingServer(BaseStreamingService):
                         if display_entry is not None and display_entry.get('ws') is not websocket:
                             # A superseded connection (reload overlap) must not drive its
                             # successor's stream.
-                            data_logger.info(f"Ignoring START_VIDEO for '{client_display_id}' from a superseded connection.")
+                            data_logger.debug(f"Ignoring START_VIDEO for '{client_display_id}' from a superseded connection.")
                         elif display_entry is not None:
                             data_logger.info(f"Received START_VIDEO for '{client_display_id}'. Starting its stream.")
                             display_state = display_entry
@@ -3955,7 +3962,7 @@ class DataStreamingServer(BaseStreamingService):
                             display_state['video_active'] = True
                             if hasattr(self, 'display_layouts') and client_display_id in self.display_layouts:
                                 layout = self.display_layouts[client_display_id]
-                                data_logger.info(f"Found existing layout for '{client_display_id}'. Starting capture with: {layout}")
+                                data_logger.debug(f"Found existing layout for '{client_display_id}'. Starting capture with: {layout}")
                                 try:
                                     started = await self._start_capture_for_display(
                                         display_id=client_display_id,
@@ -4001,7 +4008,7 @@ class DataStreamingServer(BaseStreamingService):
                             # A shared client needs a decode entry point (its own reset plus
                             # an IDR), not a pipeline rebuild, unless nothing runs.
                             if 'primary' in self.capture_instances:
-                                data_logger.info(f"START_VIDEO from shared client ({remote_address}): sending reset + IDR.")
+                                data_logger.debug(f"START_VIDEO from shared client ({remote_address}): sending reset + IDR.")
                                 try:
                                     await websocket.send_str("PIPELINE_RESETTING primary")
                                 except (ConnectionResetError, OSError, RuntimeError):
@@ -4027,7 +4034,7 @@ class DataStreamingServer(BaseStreamingService):
                         if stop_entry is not None and stop_entry.get('ws') is not websocket:
                             # A dying page's tab-hide STOP_VIDEO can arrive after the reloaded
                             # page already owns the display.
-                            data_logger.info(f"Ignoring STOP_VIDEO for '{client_display_id}' from a superseded connection.")
+                            data_logger.debug(f"Ignoring STOP_VIDEO for '{client_display_id}' from a superseded connection.")
                             try:
                                 await websocket.send_str("VIDEO_STOPPED")
                             except (ConnectionResetError, OSError, RuntimeError):
@@ -4105,7 +4112,7 @@ class DataStreamingServer(BaseStreamingService):
                                     suffix = f" (+{suppressed} further requests suppressed)" if suppressed else ""
                                     self._keyframe_log_suppressed[target_display_id] = 0
                                     self._last_keyframe_log[target_display_id] = now
-                                    data_logger.info(f"Keyframe requested by {remote_address} for '{target_display_id}'.{suffix}")
+                                    data_logger.debug(f"Keyframe requested by {remote_address} for '{target_display_id}'.{suffix}")
                                 else:
                                     self._keyframe_log_suppressed[target_display_id] = \
                                         self._keyframe_log_suppressed.get(target_display_id, 0) + 1
@@ -4116,11 +4123,11 @@ class DataStreamingServer(BaseStreamingService):
                         async def _handle_start_audio_request():
                             await self.client_settings_received.wait()
                             async with self._reconfigure_guard():
-                                data_logger.info(
+                                data_logger.debug(
                                     "Received START_AUDIO command from client for server-to-client audio."
                                 )
                                 if not settings.audio_enabled[0]:
-                                    data_logger.info("START_AUDIO: Audio is disabled by server settings. Sending AUDIO_DISABLED.")
+                                    data_logger.debug("START_AUDIO: Audio is disabled by server settings. Sending AUDIO_DISABLED.")
                                     # Its own task: a departed requester must end it quietly.
                                     try:
                                         await websocket.send_str("AUDIO_DISABLED")
@@ -4130,11 +4137,11 @@ class DataStreamingServer(BaseStreamingService):
                                 if PCMFLUX_AVAILABLE:
                                     started = False
                                     if not self.is_pcmflux_capturing:
-                                        data_logger.info("START_AUDIO: Starting pcmflux audio pipeline.")
+                                        data_logger.debug("START_AUDIO: Starting pcmflux audio pipeline.")
                                         started = await self._start_pcmflux_pipeline()
                                     else:
                                         started = True
-                                        data_logger.info("START_AUDIO: pcmflux audio pipeline already active.")
+                                        data_logger.debug("START_AUDIO: pcmflux audio pipeline already active.")
                                     if started:
                                         await _broadcast_to_clients(self.clients, "AUDIO_STARTED", per_client_timeout=2.0)
                                 else:
@@ -4150,7 +4157,7 @@ class DataStreamingServer(BaseStreamingService):
 
                     elif message == "STOP_AUDIO":
                         async with self._reconfigure_guard():
-                            data_logger.info("Received STOP_AUDIO")
+                            data_logger.debug("Received STOP_AUDIO")
                             if self.is_pcmflux_capturing:
                                 await self._stop_pcmflux_pipeline()
                             if self.clients:
@@ -4200,7 +4207,7 @@ class DataStreamingServer(BaseStreamingService):
                             await self.input_handler.on_message(message, client_display_id, conn_id=id(websocket))
 
         except (ConnectionResetError, OSError, RuntimeError) as e:
-            data_logger.info(f"Data WS disconnected from {raddr}: {e}")
+            data_logger.info(f"Client {raddr} disconnected: {e}")
         except Exception as e_main_loop:
             data_logger.error(
                 f"Error in Data WS handler for {raddr}: {e_main_loop}", exc_info=True
@@ -4215,7 +4222,7 @@ class DataStreamingServer(BaseStreamingService):
             # Dropped first: the authority and consumer verdicts below must see
             # the remaining clients only.
             self.clients.discard(websocket)
-            data_logger.info(f"Cleaning up Data WS handler for {raddr} (Display ID: {client_display_id})...")
+            data_logger.debug(f"Cleaning up Data WS handler for {raddr} (Display ID: {client_display_id})...")
             # A tab that dies mid-press never sends 'js,d'; the button would stay
             # stuck on the virtual pad.
             if self.input_handler and hasattr(self.input_handler, "release_gamepads_for_conn"):
@@ -4309,7 +4316,7 @@ class DataStreamingServer(BaseStreamingService):
                 self._display_teardown_tasks.add(_teardown_task)
                 _teardown_task.add_done_callback(self._display_teardown_tasks.discard)
             else:
-                data_logger.info(f"Unregistered client at {raddr} disconnected. No display reconfiguration needed.")
+                data_logger.debug(f"Unregistered client at {raddr} disconnected. No display reconfiguration needed.")
                 # Nothing else stops the primary capture for a socket owning no display.
                 await self._stop_primary_if_unconsumed(
                     "Last unpaused consumer of 'primary' disconnected."
@@ -4360,20 +4367,20 @@ class DataStreamingServer(BaseStreamingService):
             if self.input_handler and departing_input_authority:
                 try:
                     await self.input_handler.reset_keyboard()
-                    data_logger.info(f"Keyboard reset completed ({raddr}) disconnect.")
+                    data_logger.debug(f"Keyboard reset completed ({raddr}) disconnect.")
                 except Exception as e_reset:
                     data_logger.warning(f"Failed to reset keyboard after client disconnect: {e_reset}")
 
             # A display-owning socket's last-client teardown ran in the grace task above.
             if disconnected_display_id is None and not self.clients:
-                 data_logger.info(f"Last client ({raddr}) disconnected. All pipelines should have been stopped by reconfigure_displays.")
+                 data_logger.info(f"Last client ({raddr}) gone; stopping the capture pipelines.")
                  await self._stop_stats_collectors()
                  self.capture_cursor = False
                  self._last_keyframe_request.clear()
                  # Self-acquires _reconfigure_lock; it must not be held here.
                  await self.shutdown_pipelines()
 
-            data_logger.info(f"Data WS handler for {raddr} finished all cleanup.")
+            data_logger.debug(f"Data WS handler for {raddr} finished all cleanup.")
 
     async def _run_detached_command(self, cmd_list: list[str], description: str) -> None:
         """Run a command detached from the server process: its own session
@@ -4806,7 +4813,7 @@ class DataStreamingServer(BaseStreamingService):
         if capture_info and not reset_sent:
             await self._reset_frame_ids_and_notify(display_id)
 
-        data_logger.info(f"Successfully stopped all streams for display '{display_id}'.")
+        data_logger.debug(f"Successfully stopped all streams for display '{display_id}'.")
  
     @contextlib.asynccontextmanager
     async def _reconfigure_guard(self):
@@ -4837,13 +4844,13 @@ class DataStreamingServer(BaseStreamingService):
         """
         if self._reconfigure_lock.locked():
             self._reconfigure_pending = True
-            data_logger.info("Reconfiguration already in progress; coalescing this request.")
+            data_logger.debug("Reconfiguration already in progress; coalescing this request.")
             return
         while True:
             async with self._reconfigure_lock:
                 self._reconfigure_pending = False
                 self._is_reconfiguring = True
-                data_logger.info("Starting display reconfiguration...")
+                data_logger.debug("Starting display reconfiguration...")
                 try:
                     await self._reconfigure_displays_locked()
                 except Exception as e:
@@ -4851,7 +4858,7 @@ class DataStreamingServer(BaseStreamingService):
                 finally:
                     self._last_display_count = len(self.display_clients)
                     self._is_reconfiguring = False
-                    data_logger.info("Reconfiguration process complete (state unlocked).")
+                    data_logger.debug("Reconfiguration process complete (state unlocked).")
             if not self._reconfigure_pending:
                 break
 
@@ -4929,7 +4936,7 @@ class DataStreamingServer(BaseStreamingService):
                 # The primary's screen persists; only the secondaries' are retired.
                 await self._apply_wayland_output_layout({}, set())
             return
-        data_logger.info("Calculating new extended desktop layout from ALL clients...")
+        data_logger.debug("Calculating new extended desktop layout from ALL clients...")
         layouts = {}
         total_width = 0
         total_height = 0
@@ -5018,7 +5025,7 @@ class DataStreamingServer(BaseStreamingService):
                     "No connected RandR output on this X server; the desktop is sized as a bare "
                     "framebuffer, and its displays are monitors carrying no output.")
             elif total_mode_str not in available_resolutions:
-                data_logger.info(f"Mode {total_mode_str} not found. Creating it.")
+                data_logger.debug(f"Mode {total_mode_str} not found. Creating it.")
                 # Native first: a mode made by per-invocation xrandr dies with its
                 # connection on some servers (Xvfb).
                 if not await ensure_mode(total_mode_str):
@@ -5064,7 +5071,7 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.warning(f"Live re-target failed for '{did}' ({e}); restarting it.")
                         keep_ids.discard(did)
                         await self._stop_capture_for_display(did)
-            data_logger.info("Swapping logical monitors to the new layout...")
+            data_logger.debug("Swapping logical monitors to the new layout...")
             # Monitors go in before the framebuffer change, at their final
             # rectangles and under a server grab: window managers re-tile on
             # every root ConfigureNotify and must never see a monitor-less
@@ -5075,7 +5082,7 @@ class DataStreamingServer(BaseStreamingService):
             # re-target that grew the framebuffer above still shrinks here.
             curr_norm = (curr_res or "").lower().replace(" ", "")
             if curr_norm == total_mode_str:
-                data_logger.info(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
+                data_logger.debug(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
             elif not await resize_display(total_mode_str):
                 # Some servers refuse runtime modes but honor a plain framebuffer
                 # grow (RRSetScreenSize); captures and pointer warps address the root.
@@ -5163,7 +5170,7 @@ class DataStreamingServer(BaseStreamingService):
                     await replace_selkies_monitors(layouts, screen_name=screen_name)
         else:
             await self._apply_wayland_output_layout(layouts, keep_ids)
-        data_logger.info("Starting separate capture instances for each ACTIVE display region...")
+        data_logger.debug("Starting separate capture instances for each ACTIVE display region...")
         # The primary first: on Wayland its capture start sizes its screen.
         for display_id in sorted(layouts, key=lambda did: did != 'primary'):
             if display_id not in layouts:
@@ -5187,7 +5194,7 @@ class DataStreamingServer(BaseStreamingService):
                             module.update_tunables(fresh)
                         data_logger.info(f"Capture '{display_id}' followed the new layout live (no restart).")
                     else:
-                        data_logger.info(f"Client '{display_id}' is active. Starting its capture.")
+                        data_logger.debug(f"Client '{display_id}' is active. Starting its capture.")
                         await self._start_capture_for_display(
                             display_id=display_id,
                             width=layout['w'], height=layout['h'],
@@ -5211,7 +5218,7 @@ class DataStreamingServer(BaseStreamingService):
                         f"This display will not stream. Error: {e}", exc_info=False
                     )
             else:
-                data_logger.info(f"Client '{display_id}' is connected but not active. Skipping video start.")
+                data_logger.debug(f"Client '{display_id}' is connected but not active. Skipping video start.")
             if IS_WAYLAND and display_id == 'primary':
                 # The primary's capture carries its rectangle now, so its screen
                 # comes down to it before a secondary is created in the room it
@@ -5258,7 +5265,7 @@ class DataStreamingServer(BaseStreamingService):
             await self._size_wayland_screen(layouts['primary']['w'], layouts['primary']['h'])
         await self.broadcast_stream_resolution()
         await self.broadcast_display_config()
-        data_logger.info("Display reconfiguration finished successfully.")
+        data_logger.debug("Display reconfiguration finished successfully.")
 
 
     async def _ensure_viewer_capture(self) -> bool:
@@ -5381,12 +5388,12 @@ class DataStreamingServer(BaseStreamingService):
                         module.request_idr_frame()
                     except Exception:
                         pass
-                data_logger.info(f"Capture instance for '{display_id}' already running; requested IDR.")
+                data_logger.debug(f"Capture instance for '{display_id}' already running; requested IDR.")
                 return True
             data_logger.warning(f"Capture instance for '{display_id}' is stale (not capturing); rebuilding.")
             await self._stop_capture_for_display_impl(display_id)
 
-        data_logger.info(
+        data_logger.debug(
             f"Preparing to start capture for display='{display_id}': "
             f"Res={width}x{height}, Offset={x_offset}x{y_offset}"
         )
@@ -5510,7 +5517,7 @@ class DataStreamingServer(BaseStreamingService):
                     data_logger.error(f"Error handling pixelflux cursor: {e}")
 
             self.video_relay_groups[display_id] = {}
-            data_logger.info(
+            data_logger.debug(
                 f"Video relays for '{display_id}': skip-ahead budget "
                 f"{relay_budget} bytes/client.")
 
@@ -5520,7 +5527,7 @@ class DataStreamingServer(BaseStreamingService):
                 capture_module = ScreenCapture()
                 self._persistent_capture_modules[display_id] = capture_module
             else:
-                data_logger.info(
+                data_logger.debug(
                     f"Reusing ScreenCapture instance for '{display_id}' (backend kept warm)."
                 )
 
@@ -5555,7 +5562,8 @@ class DataStreamingServer(BaseStreamingService):
             if last_error:
                 data_logger.warning(
                     f"Capture started for '{display_id}' with a caveat: {last_error}")
-            data_logger.info(f"SUCCESS: Capture started for '{display_id}'.")
+            data_logger.info(
+                f"Capture started for '{display_id}': {width}x{height} at +{x_offset}+{y_offset}.")
             self._schedule_active_codec_settle(display_id)
             return True
 
@@ -5715,7 +5723,7 @@ class DataStreamingServer(BaseStreamingService):
         self._shutdown_called = False
         self.initialize()
 
-        logger.info("Starting DataStreamingServer...")
+        logger.debug("Starting DataStreamingServer...")
         
         self._tasks_to_run = []
         if hasattr(self.input_handler, "connect"):
@@ -5748,11 +5756,11 @@ class DataStreamingServer(BaseStreamingService):
         try:
             await self.shutdown_event.wait()
         except asyncio.CancelledError:
-            logger.info("Main application task was canceled.")
+            logger.debug("Main application task was canceled.")
         except Exception as e_main:
             logger.critical(f"Critical error in main execution: {e_main}", exc_info=True)
         finally:
-            logger.info("Main loop ending or interrupted. Performing cleanup...")
+            logger.debug("Main loop ending or interrupted. Performing cleanup...")
             await self.shutdown()
 
     async def shutdown(self) -> None:
@@ -5773,10 +5781,10 @@ class DataStreamingServer(BaseStreamingService):
         reconnect/mode-flip loop armed, which converges the tabs.
         """
         if self._shutdown_called:
-            logger.info("Shutdown already called, skipping")
+            logger.debug("Shutdown already called, skipping")
             return
         self._shutdown_called = True
-        logger.info("DataStreamingServer shutdown initiated...")
+        logger.debug("DataStreamingServer shutdown initiated...")
 
         sockets_to_close = set(self.clients)
         for info in self.display_clients.values():
@@ -5828,10 +5836,10 @@ class DataStreamingServer(BaseStreamingService):
 
         if all_tasks_for_cleanup:
             await asyncio.gather(*all_tasks_for_cleanup, return_exceptions=True)
-            logger.info("Auxiliary tasks cancellation complete.")
+            logger.debug("Auxiliary tasks cancellation complete.")
 
         if self.input_handler:
-            logger.info("Stopping InputHandler components...")
+            logger.debug("Stopping InputHandler components...")
             if hasattr(self.input_handler, "stop_clipboard"):
                 self.input_handler.stop_clipboard()
             if hasattr(self.input_handler, "disconnect") and inspect.iscoroutinefunction(
@@ -5990,7 +5998,7 @@ async def _collect_network_stats_ws(shared_data: dict, server_instance: DataStre
                 "latency_ms": round(latency_ms, 1),
             }
     except asyncio.CancelledError:
-        data_logger.info("Network monitor (WS) canceled.")
+        data_logger.debug("Network monitor (WS) canceled.")
     except Exception as e:
         data_logger.error(f"Network monitor (WS) error: {e}", exc_info=True)
 
@@ -6013,7 +6021,7 @@ async def _send_stats_periodically_ws(
             network_stats = server_instance._shared_network_stats.get("network")
             try:
                 if not websocket:
-                    data_logger.info("Stats sender: WS closed or invalid.")
+                    data_logger.debug("Stats sender: WS closed or invalid.")
                     break
                 if system_stats:
                     await websocket.send_str(json.dumps(system_stats))
@@ -6022,12 +6030,12 @@ async def _send_stats_periodically_ws(
                 if network_stats:
                     await websocket.send_str(json.dumps(network_stats))
             except (ConnectionResetError, OSError, RuntimeError):
-                data_logger.info("Stats sender: WS connection closed.")
+                data_logger.debug("Stats sender: WS connection closed.")
                 break
             except Exception as e_send:
                 data_logger.error(f"Stats sender: Error sending: {e_send}")
     except asyncio.CancelledError:
-        data_logger.info("Stats sender (WS) canceled.")
+        data_logger.debug("Stats sender (WS) canceled.")
     except Exception as e:
         data_logger.error(f"Stats sender (WS) error: {e}", exc_info=True)
 
@@ -6059,7 +6067,7 @@ async def on_resize_handler(
             checks run.
         display_id: The display being resized.
     """
-    logger_app_resize.info(f"on_resize_handler for display '{display_id}' with resolution: {res_str}")
+    logger_app_resize.debug(f"Resize message for display '{display_id}': {res_str}")
     if (display_id == 'primary'
             and not getattr(current_app_instance, 'server_enable_resize', True)):
         logger_app_resize.warning(f"Primary resize to {res_str} ignored: dynamic resizing disabled.")
@@ -6083,13 +6091,15 @@ async def on_resize_handler(
             if client_info.get('force_aligned_resolution'):
                 aligned_w, aligned_h = align_dims_16(target_w, target_h)
                 if aligned_w != target_w or aligned_h != target_h:
-                    logger_app_resize.info(
+                    logger_app_resize.debug(
                         f"Aligning resize request for '{display_id}' from {target_w}x{target_h} to {aligned_w}x{aligned_h} (16-pixel alignment)."
                     )
                 target_w, target_h = aligned_w, aligned_h
             if client_info.get('width') == target_w and client_info.get('height') == target_h:
-                logger_app_resize.info(f"Redundant resize request for {display_id} to {target_w}x{target_h}. No action.")
+                logger_app_resize.debug(f"Redundant resize request for {display_id} to {target_w}x{target_h}. No action.")
                 return
+            logger_app_resize.info(
+                f"Resize requested for display '{display_id}' with resolution: {target_w}x{target_h}")
 
             client_info['width'] = target_w
             client_info['height'] = target_h
@@ -6102,12 +6112,12 @@ async def on_resize_handler(
                                or len(data_server_instance.display_clients) > 1):
                 # An extended layout's union arrangement changes (a primary resize
                 # moves the secondary's offset), so the full pass runs.
-                logger_app_resize.info(
+                logger_app_resize.debug(
                     f"Wayland Resize: '{display_id}' to {target_w}x{target_h} via layout reconfiguration."
                 )
                 await data_server_instance.reconfigure_displays()
             elif IS_WAYLAND:
-                logger_app_resize.info(f"Wayland Resize: Updating {display_id} to {target_w}x{target_h}.")
+                logger_app_resize.debug(f"Wayland Resize: Updating {display_id} to {target_w}x{target_h}.")
                 if display_id in data_server_instance.display_layouts:
                     data_server_instance.display_layouts[display_id]['w'] = target_w
                     data_server_instance.display_layouts[display_id]['h'] = target_h
@@ -6146,7 +6156,7 @@ async def on_resize_handler(
                         or getattr(settings, 'scaling_dpi', 96) or 96,
                         display_id, realized)
             else:
-                logger_app_resize.info(f"Display client '{display_id}' dimensions updated to {target_w}x{target_h}. Triggering reconfiguration.")
+                logger_app_resize.debug(f"Display client '{display_id}' dimensions updated to {target_w}x{target_h}. Triggering reconfiguration.")
                 await data_server_instance.reconfigure_displays()
         else:
             logger_app_resize.error(f"Cannot resize: display_id '{display_id}' not found in connected clients.")

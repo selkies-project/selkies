@@ -54,8 +54,7 @@ from .Xlib.protocol import request as x11_request
 
 import logging
 
-logger_app_resize = logging.getLogger("resize")
-logger_app_resize.setLevel(logging.INFO)
+logger_app_resize = logging.getLogger("display")
 
 def fit_res(w: int, h: int, max_w: int, max_h: int) -> Tuple[int, int]:
     """Fit WxH inside the given bounds, preserving aspect, rounded down to even."""
@@ -1743,7 +1742,7 @@ async def _get_new_res_xrandr(
             if res_match:
                 resolutions.append(res_match.group(1))
     if not screen_name:
-        logger_app_resize.info(
+        logger_app_resize.debug(
             "No connected RandR output on this X server; the root is all there is."
         )
         return curr_res, new_res, resolutions, max_res_str, screen_name
@@ -1841,7 +1840,7 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
     realized_w, realized_h = w_req, h_req
 
     if res_str not in available_resolutions:
-        logger_app_resize.info(
+        logger_app_resize.debug(
             f"Mode {res_str} not found in xrandr list. Attempting to add for screen '{screen_name}'."
         )
         try:
@@ -1876,7 +1875,7 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
                     f"Failed to create new xrandr mode with '{' '.join(cmd_new)}': {stderr_new.decode()}"
                 )
                 return None
-            logger_app_resize.info(f"Successfully ran: {' '.join(cmd_new)}")
+            logger_app_resize.debug(f"Successfully ran: {' '.join(cmd_new)}")
 
             cmd_add = ["xrandr", "--addmode", screen_name, target_mode_to_set]
             add_mode_proc = await subprocess.create_subprocess_exec(
@@ -1903,9 +1902,9 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
                 )
                 await _communicate_or_kill(rmmode_proc)
                 return None
-            logger_app_resize.info(f"Successfully ran: {' '.join(cmd_add)}")
+            logger_app_resize.debug(f"Successfully ran: {' '.join(cmd_add)}")
 
-    logger_app_resize.info(
+    logger_app_resize.debug(
         f"Applying xrandr mode '{target_mode_to_set}' for screen '{screen_name}'."
     )
     cmd_output = ["xrandr", "--output", screen_name, "--mode", target_mode_to_set,
@@ -2204,7 +2203,7 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
         await loop.run_in_executor(
             None, _write_xresources_dpi, xresources_path_str, dpi_value
         )
-        logger.info(f"Wrote 'Xft.dpi:   {dpi_value}' to {xresources_path_str}.")
+        logger.debug(f"Wrote 'Xft.dpi:   {dpi_value}' to {xresources_path_str}.")
 
         cmd_xrdb = ["xrdb", "-merge", xresources_path_str]
         process = await subprocess.create_subprocess_exec(
@@ -2216,7 +2215,7 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
         
         xrdb_success = process.returncode == 0
         if xrdb_success:
-            logger.info(f"Successfully loaded {xresources_path_str} using xrdb.")
+            logger.debug(f"Successfully loaded {xresources_path_str} using xrdb.")
         else:
             logger.warning(f"Failed to load {xresources_path_str} using xrdb. RC: {process.returncode}, Error: {stderr.decode().strip()}")
 
@@ -2234,7 +2233,7 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
         await loop.run_in_executor(
             None, _atomic_write_text, xsettingsd_config_path, config_content
         )
-        logger.info(f"Wrote font and DPI settings to {xsettingsd_config_path}.")
+        logger.debug(f"Wrote font and DPI settings to {xsettingsd_config_path}.")
 
         if not which("pgrep"):
             logger.debug("pgrep not found. Skipping xsettingsd reload.")
@@ -2254,12 +2253,12 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
                     except (OSError, ValueError) as e:
                         logger.debug(f"Failed to send SIGHUP to xsettingsd process {line}: {e}")
                 if signaled:
-                    logger.info(
+                    logger.debug(
                         f"Sent SIGHUP to xsettingsd to reload config ({', '.join(signaled)}).")
                 else:
                     logger.warning("No xsettingsd process could be signaled to reload.")
             else:
-                logger.info("xsettingsd process not found. Skipping reload.")
+                logger.debug("xsettingsd process not found. Skipping reload.")
         
         return xrdb_success
 
@@ -2301,7 +2300,7 @@ async def _run_xfconf(dpi_value: int, logger: logging.Logger) -> bool:
 
     session_env = await _get_xfce_session_env(logger)
     if session_env:
-        logger.info("Found active XFCE session environment. Commands will be executed within this context.")
+        logger.debug("Found active XFCE session environment. Commands will be executed within this context.")
     else:
         logger.warning("Could not obtain XFCE session environment. Falling back to direct execution.")
 
@@ -2315,7 +2314,7 @@ async def _run_xfconf(dpi_value: int, logger: logging.Logger) -> bool:
             )
             _stdout, stderr = await _communicate_or_kill(process)
             if process.returncode == 0:
-                logger.info(success_msg)
+                logger.debug(success_msg)
                 return True
             else:
                 logger.warning(f"{failure_msg}. RC: {process.returncode}, Error: {stderr.decode().strip()}")
@@ -2336,7 +2335,7 @@ async def _run_xfconf(dpi_value: int, logger: logging.Logger) -> bool:
         return False
 
     cursor_size = int(round(dpi_value / 96 * 32))
-    logger.info(f"Attempting to set cursor size to: {cursor_size} (based on DPI {dpi_value})")
+    logger.debug(f"Attempting to set cursor size to: {cursor_size} (based on DPI {dpi_value})")
     cmd_cursor = [
         "xfconf-query", "-c", "xsettings", "-p", "/Gtk/CursorThemeSize",
         "-s", str(cursor_size), "--create", "-t", "int"
@@ -2386,7 +2385,7 @@ async def _run_mate_gsettings(dpi_value: int, logger: logging.Logger) -> bool:
         )
         stdout_mate_window, stderr_mate_window = await _communicate_or_kill(result_mate_window_scale)
         if result_mate_window_scale.returncode == 0:
-            logger.info(f"Successfully set MATE window-scaling-factor to {mate_window_scaling_factor} (for DPI {dpi_value}) using gsettings.")
+            logger.debug(f"Successfully set MATE window-scaling-factor to {mate_window_scaling_factor} (for DPI {dpi_value}) using gsettings.")
             mate_settings_succeeded_at_least_once = True
         else:
             stderr_text = stderr_mate_window.decode().strip()
@@ -2410,7 +2409,7 @@ async def _run_mate_gsettings(dpi_value: int, logger: logging.Logger) -> bool:
         )
         stdout_mate_font, stderr_mate_font = await _communicate_or_kill(result_mate_font_dpi)
         if result_mate_font_dpi.returncode == 0:
-            logger.info(f"Successfully set MATE font-rendering DPI to {dpi_value} using gsettings.")
+            logger.debug(f"Successfully set MATE font-rendering DPI to {dpi_value} using gsettings.")
             mate_settings_succeeded_at_least_once = True
         else:
             stderr_font_text = stderr_mate_font.decode().strip()
@@ -2523,17 +2522,17 @@ async def set_dpi(dpi_setting: Union[int, str]) -> bool:
     # database, and everything else — named or not — reads it from there, so
     # there is nothing to gain from recognizing any of them by name.
     if _running_desktop("xfce", "xfce4-session"):
-        logger_app_resize.info(f"XFCE session ({desktop}): applying xfconf-query for DPI {dpi_value}.")
+        logger_app_resize.debug(f"XFCE session ({desktop}): applying xfconf-query for DPI {dpi_value}.")
         if await _run_xfconf(dpi_value, logger_app_resize):
             any_method_succeeded = True
     elif _running_desktop("mate", "mate-session"):
-        logger_app_resize.info(f"MATE session ({desktop}): applying gsettings and xrdb for DPI {dpi_value}.")
+        logger_app_resize.debug(f"MATE session ({desktop}): applying gsettings and xrdb for DPI {dpi_value}.")
         mate_gsettings_success = await _run_mate_gsettings(dpi_value, logger_app_resize)
         xrdb_for_mate_success = await _run_xrdb(dpi_value, logger_app_resize)
         if mate_gsettings_success or xrdb_for_mate_success:
             any_method_succeeded = True
     else:
-        logger_app_resize.info(f"{desktop} session: applying xrdb for DPI {dpi_value}.")
+        logger_app_resize.debug(f"{desktop} session: applying xrdb for DPI {dpi_value}.")
         if await _run_xrdb(dpi_value, logger_app_resize):
             any_method_succeeded = True
 
@@ -2628,7 +2627,7 @@ async def set_cursor_size(size: int) -> bool:
             )
             await _communicate_or_kill(process_set)
             if process_set.returncode == 0:
-                logger_app_resize.info(f"Set GNOME cursor-size to {size}")
+                logger_app_resize.debug(f"Set GNOME cursor-size to {size}")
                 return True
             logger_app_resize.warning("Failed to set GNOME cursor-size.")
         except Exception as e:
@@ -2681,7 +2680,7 @@ def parse_dri_node_to_index(node_path: str) -> int:
         invalid, malformed, or empty, which disables hardware encoding in
         the capture module.
     """
-    logger = logging.getLogger("display_utils")
+    logger = logging.getLogger("display")
     if not node_path or not node_path.startswith('/dev/dri/renderD'):
         if node_path:
             logger.warning(f"Invalid DRI node format: '{node_path}'. Expected '/dev/dri/renderD...'. VA-API will be disabled.")
@@ -2693,7 +2692,7 @@ def parse_dri_node_to_index(node_path: str) -> int:
         if index < 0:
             logger.warning(f"Parsed DRI node number {render_num} from '{node_path}' is less than 128. Invalid.")
             return -1
-        logger.info(f"Parsed DRI node '{node_path}' to index {index}.")
+        logger.debug(f"Parsed DRI node '{node_path}' to index {index}.")
         return index
     except (ValueError, IndexError) as e:
         logger.warning(f"Could not parse DRI node path '{node_path}': {e}. VA-API will be disabled.")
@@ -2776,7 +2775,7 @@ def apply_common_capture_settings(
         from .settings import CODEC_LABELS, codec_for_encoder, software_encoders
         codec = codec_for_encoder(encoder)
         library = software_encoders().get(codec, "no software encoder in this pixelflux build")
-        logging.getLogger("display_utils").info(
+        logging.getLogger("display").info(
             f"Display '{display_name}' encodes {CODEC_LABELS.get(codec, codec)} in software ({library}).")
 
     cs.use_paint_over_quality = use_paint_over_quality

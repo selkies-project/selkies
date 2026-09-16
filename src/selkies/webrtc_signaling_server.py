@@ -146,7 +146,7 @@ class WebRTCPeerManagement:
 
         self.rtc_config: Optional[Any] = getattr(options, "rtc_config", None)
         if not self.rtc_config and os.path.exists(options.rtc_config_file):
-            logger.info("parsing rtc_config_file: {}".format(options.rtc_config_file))
+            logger.debug("parsing rtc_config_file: {}".format(options.rtc_config_file))
             if _is_trusted_config_file(options.rtc_config_file):
                 self.rtc_config = self.read_file(options.rtc_config_file)
             else:
@@ -231,7 +231,7 @@ class WebRTCPeerManagement:
             del self.sessions[uid]
             peer = self.peers.get(uid)
             client_type = peer.client_type if peer else "unknown"
-            logger.info(
+            logger.debug(
                 "Cleaned up {} session, client type {!r}".format(
                     uid, client_type
                 )
@@ -244,7 +244,7 @@ class WebRTCPeerManagement:
                 if other_peer:
                     wso = other_peer.ws
                     msg: str = "SESSION_END {} {}".format(uid, peer.client_type)
-                    logger.info("{} -> {}: {}".format(uid, other_id, msg))
+                    logger.debug("{} -> {}: {}".format(uid, other_id, msg))
                     await wso.send_str(msg)
 
     async def cleanup_room(self, uid: str, room_id: str) -> None:
@@ -268,7 +268,7 @@ class WebRTCPeerManagement:
             wsp = peer.ws
 
             msg = "ROOM_PEER_LEFT {}".format(uid)
-            logger.info("room {}: {} -> {}: {}".format(room_id, uid, pid, msg))
+            logger.debug("room {}: {} -> {}: {}".format(room_id, uid, pid, msg))
             await wsp.send_str(msg)
 
     def _evict_dead_peer_locked(self, pid: str) -> List[Callable[[], Awaitable[Any]]]:
@@ -298,7 +298,7 @@ class WebRTCPeerManagement:
                 if other_peer is not None:
                     wso = other_peer.ws
                     msg = "SESSION_END {} {}".format(pid, peer.client_type)
-                    logger.info("{} -> {}: {}".format(pid, other_id, msg))
+                    logger.debug("{} -> {}: {}".format(pid, other_id, msg))
                     deferred.append(lambda ws=wso, m=msg: ws.send_str(m))
 
         peer_status = getattr(peer, "peer_status", None) if peer else None
@@ -313,7 +313,7 @@ class WebRTCPeerManagement:
                     other_peer = self.peers.get(other_pid)
                     if not other_peer:
                         continue
-                    logger.info(
+                    logger.debug(
                         "room {}: {} -> {}: {}".format(
                             peer_status, pid, other_pid, msg
                         )
@@ -470,7 +470,7 @@ class WebRTCPeerManagement:
                             )
                             continue
                         wso = other_peer.ws
-                        logger.info("{} -> {}: {}".format(uid, other_id, msg))
+                        logger.debug("{} -> {}: {}".format(uid, other_id, msg))
                         msg_string = "{} {}".format(uid, msg_string)
                         await wso.send_str(msg_string)
                     elif peer_status:
@@ -495,7 +495,7 @@ class WebRTCPeerManagement:
                                 )
                                 continue
                             msg = "ROOM_PEER_MSG {} {}".format(uid, msg)
-                            logger.info(
+                            logger.debug(
                                 "room {}: {} -> {}: {}".format(room_id, uid, other_id, msg)
                             )
                             await wso.send_str(msg)
@@ -505,7 +505,7 @@ class WebRTCPeerManagement:
                     else:
                         raise AssertionError("Unknown peer status {!r}".format(peer_status))
                 elif msg.startswith("SESSION"):
-                    logger.info("{!r} command {!r}".format(uid, msg))
+                    logger.debug("{!r} command {!r}".format(uid, msg))
                     parts = msg.split(maxsplit=1)
                     if len(parts) < 2:
                         logger.warning(f"Malformed session message from {uid}")
@@ -548,7 +548,7 @@ class WebRTCPeerManagement:
                     callee_peer.peer_status = "session"
                     self.sessions[uid] = callee_id
                 elif msg.startswith("ROOM"):
-                    logger.info("{!r} command {!r}".format(uid, msg))
+                    logger.debug("{!r} command {!r}".format(uid, msg))
                     parts = msg.split(maxsplit=1)
                     if len(parts) < 2:
                         logger.warning(f"Malformed room message from {uid}")
@@ -580,7 +580,7 @@ class WebRTCPeerManagement:
                             continue
                         wsp = peer.ws
                         msg = "ROOM_PEER_JOINED {}".format(uid)
-                        logger.info("room {}: {} -> {}: {}".format(room_id, uid, pid, msg))
+                        logger.debug("room {}: {} -> {}: {}".format(room_id, uid, pid, msg))
                         await wsp.send_str(msg)
                 else:
                     logger.info("Ignoring unknown message {!r} from {!r}".format(msg, uid))

@@ -44,7 +44,7 @@ try:
 except Exception:
     GPUMonitorFactory = None
 
-logger = logging.getLogger("resource_stats")
+logger = logging.getLogger("stats")
 
 # GPU presence is reported through this logger; aitop re-emits vendor detection
 # at INFO on every factory build, so keep its detection chatter off the stream.

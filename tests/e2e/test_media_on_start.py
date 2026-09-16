@@ -41,15 +41,15 @@ STATUS_JS = """
 """
 
 # Log lines that mark a capture starting or stopping, per transport.
-VIDEO_STARTED = {"websockets": "Preparing to start capture for display='primary'",
+VIDEO_STARTED = {"websockets": "Capture started for 'primary'",
                  "webrtc": "Started screen capture module"}
 VIDEO_STOPPED = {"websockets": "Received STOP_VIDEO for 'primary'. Stopping stream.",
                  "webrtc": "All consumers of display 'primary' are paused; capture stopped."}
-AUDIO_STARTED = "Starting pcmflux audio pipeline..."
-AUDIO_STOPPED = "Stopping pcmflux audio pipeline..."
+AUDIO_STARTED = "Starting pcmflux audio pipeline"
+AUDIO_STOPPED = "Stopping pcmflux audio pipeline"
 VIDEO_OFF_AT_START = {"websockets": "Display 'primary' starts with video off",
                       "webrtc": "Screen capture starts paused"}
-AUDIO_OFF_AT_START = {"websockets": "Initial client settings message processed by ws_handler.",
+AUDIO_OFF_AT_START = {"websockets": "settings applied for 'primary'",
                       "webrtc": "Audio capture starts paused"}
 # How long a capture that must not start is given to prove it.
 QUIET_S = 6.0

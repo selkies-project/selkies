@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 import websockets  # noqa: E402
 
-SETTINGS_PROCESSED = "Initial client settings message processed"
+SETTINGS_PROCESSED = "settings applied for 'primary'"
 ASSOCIATED = "associated with persistent virtual gamepad slot 0"
 AUDIO_ATTEMPTED = "Initial setup: Primary client connected, audio not active, attempting start."
 

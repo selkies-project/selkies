@@ -134,7 +134,7 @@ async def resize_secondary(res: "H.Results", primary, secondary, width: int, hei
         return
     # A kept capture follows the layout live; one the pass rebuilt starts again.
     followed, msgs = await wait_log_draining(
-        mark, ("Capture 'display2' followed the new layout live", "SUCCESS: Capture started for 'display2'"),
+        mark, ("Capture 'display2' followed the new layout live", "Capture started for 'display2'"),
         (primary, secondary), 45)
     res.check(f"{label}: the secondary's capture follows the new size", followed, "")
     await drain(primary, 1.0)
@@ -168,7 +168,7 @@ async def drive(res: "H.Results") -> None:
         mark = loglen()
         await primary.send("SETTINGS," + json.dumps(settings_for("primary", 1920, 1080)))
         res.check("primary capture starts",
-                  await wait_log_from(mark, "SUCCESS: Capture started for 'primary'", 45), "")
+                  await wait_log_from(mark, "Capture started for 'primary'", 45), "")
         await drain(primary, 1.0)
 
         async with websockets.connect(uri, max_size=None) as secondary:
@@ -176,7 +176,7 @@ async def drive(res: "H.Results") -> None:
             mark = loglen()
             await secondary.send("SETTINGS," + json.dumps(settings_for("display2", 1280, 720)))
             started, _ = await wait_log_draining(
-                mark, ("SUCCESS: Capture started for 'display2'",), (primary, secondary), 45)
+                mark, ("Capture started for 'display2'",), (primary, secondary), 45)
             res.check("secondary capture starts left of the primary", started, "")
             layouts = layouts_from(mark)
             before = layouts[-1] if layouts else {}

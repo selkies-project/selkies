@@ -42,7 +42,7 @@ except (ImportError, OSError):
     pulsectl_asyncio = None
     PULSE_AVAILABLE = False
 
-logger = logging.getLogger("audio_control")
+logger = logging.getLogger("audio")
 
 T = TypeVar("T")
 
@@ -577,7 +577,7 @@ class AudioControl:
         default_sink, _ = await self.default_devices()
         default_monitor = f"{default_sink}.monitor" if default_sink else None
         if default_sink:
-            logger.info(f"Default sink: '{default_sink}'")
+            logger.debug(f"Default sink: '{default_sink}'")
         else:
             logger.warning("Could not determine the default sink.")
         available = {s.name for s in await self.sources()}
@@ -671,11 +671,11 @@ class AudioControl:
         for sink_name in (VIRTUAL_MIC_SINK, output_sink):
             await self.ensure_null_sink(sink_name)
         if await self.set_default_sink(output_sink):
-            logger.info(f"Set system default sink to '{output_sink}'.")
+            logger.debug(f"Set system default sink to '{output_sink}'.")
 
         existing = next((s for s in await self.sources() if s.name in VIRTUAL_MIC_SOURCE_NAMES), None)
         if existing is not None:
-            logger.info(f"Virtual source '{existing.name}' (index {existing.index}) already exists.")
+            logger.debug(f"Virtual source '{existing.name}' (index {existing.index}) already exists.")
             master = existing.proplist.get("device.master_device")
             if master is not None and master != VIRTUAL_MIC_MASTER:
                 logger.warning(
@@ -685,7 +685,7 @@ class AudioControl:
             owns_module = False
             await self.set_default_source(existing.name)
         else:
-            logger.info(f"Virtual source '{VIRTUAL_MIC_SOURCE}' not found. Loading module...")
+            logger.debug(f"Virtual source '{VIRTUAL_MIC_SOURCE}' not found. Loading module...")
             module_index = await self.load_module(
                 "module-virtual-source",
                 f"source_name={VIRTUAL_MIC_SOURCE} master={VIRTUAL_MIC_MASTER}")
@@ -698,9 +698,9 @@ class AudioControl:
                     f"Loaded module {module_index} but source '{VIRTUAL_MIC_SOURCE}' never appeared.")
                 await self.unload_module(module_index)
                 return None, False
-            logger.info(f"Created source '{created.name}' (index {created.index}).")
+            logger.debug(f"Created source '{created.name}' (index {created.index}).")
             if await self.set_default_source(created.name):
-                logger.info(f"Set system default source to '{created.name}'.")
+                logger.debug(f"Set system default source to '{created.name}'.")
 
         if is_pcmflux_capturing:
             targets = [audio_device_name or "", PIPEWIRE_NULL_MONITOR]

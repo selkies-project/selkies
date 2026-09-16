@@ -199,7 +199,7 @@ async def main() -> bool:
                 await asyncio.wait_for(wss.recv(), timeout=10)
                 await wss.send("SETTINGS," + json.dumps(TDP.settings_for("display2")))
                 res.check("the neighbor's capture started",
-                          C.wait_log("SUCCESS: Capture started for 'display2'", timeout=45), "")
+                          C.wait_log("Capture started for 'display2'", timeout=45), "")
                 layout = TDP.server_layout()
                 res.check("both displays laid out",
                           bool(layout) and "display2" in layout, layout)
