@@ -5229,7 +5229,7 @@ function initWebsockets() {
    * The ways this engine can turn a JPEG stripe into something drawable. Both yield an image
    * the render and cleanup paths handle alike.
    *
-   * A `data:` URL into an `Image` is deliberately not among them. It measures far the fastest
+   * The `<img>` route takes a blob URL. A `data:` URL is deliberately not used. It measures far the fastest
    * on a repeated stripe -- 171 fps against 99 on Chromium, 75 against 10 on WebKit -- because
    * a data URL is a URL and the decoded image is cached against it. Fed the unique bytes a
    * live stream delivers it collapses to 32 and 8.5, behind both of these, so the cache was
@@ -5241,7 +5241,36 @@ function initWebsockets() {
       try { return (await d.decode()).image; } finally { try { d.close(); } catch (e) { /* ignore */ } }
     },
     bitmap: (data) => createImageBitmap(new Blob([data], { type: 'image/jpeg' })),
+    img: (data) => {
+      const url = URL.createObjectURL(new Blob([data], { type: 'image/jpeg' }));
+      const img = new Image();
+      img.src = url;
+      // `decode()` rather than `onload`, so the pixels are ready here instead of being
+      // decoded inside the paint loop's `drawImage` on the frame that draws them.
+      return img.decode().then(() => img, (e) => { URL.revokeObjectURL(url); throw e; })
+        .then((i) => { URL.revokeObjectURL(url); return i; });
+    },
   };
+
+  /**
+   * A byte-unique copy of `jpeg`: a JPEG comment segment carrying `tag` is spliced in after
+   * SOI. The decode work is identical and the bytes have never been seen, so nothing the race
+   * measures can be answered from a cache -- which is not hypothetical, since sharing one
+   * sample across the routes makes a later one measure two to four times faster than it
+   * sustains, and picked the wrong route for Firefox one run in three.
+   */
+  function uniqueJpeg(jpeg, tag) {
+    const pay = new TextEncoder().encode('sel' + tag.toString(36).padStart(9, '0'));
+    const src = new Uint8Array(jpeg);
+    const out = new Uint8Array(src.length + 4 + pay.length);
+    out[0] = 0xFF; out[1] = 0xD8;
+    out[2] = 0xFF; out[3] = 0xFE;
+    const len = pay.length + 2;
+    out[4] = (len >> 8) & 0xFF; out[5] = len & 0xFF;
+    out.set(pay, 6);
+    out.set(src.subarray(2), 6 + pay.length);
+    return out;
+  }
 
   /** The route in use, and the race that settles it; the ladder serves until it does. */
   let jpegRoute = null;
@@ -5255,7 +5284,10 @@ function initWebsockets() {
    * rather than named: at 1080p in eight stripes, Firefox decodes 160 fps through
    * `ImageDecoder` against 48 through `createImageBitmap`, while Chromium runs 99 through
    * `createImageBitmap` against 62 through `ImageDecoder` -- opposite answers, and a fixed
-   * order hands one of them the slower route. WebKit carries no `ImageDecoder` at all.
+   * order hands one of them the slower route. WebKit carries no `ImageDecoder` at all, and an
+   * `<img>` is raced beside them because Safari is reported to decode faster through one than
+   * through `createImageBitmap` -- an engine no proxy here stands in for, and the reason the
+   * choice is raced rather than named.
    *
    * The race draws each decode, because `ImageDecoder` resolves before the pixels are
    * drawable on some engines and only defers that cost into the paint loop: timing the
@@ -5266,7 +5298,8 @@ function initWebsockets() {
   async function settleJpegRoute() {
     const names = Object.keys(JPEG_ROUTES).filter((n) =>
       (n !== 'imagedecoder' || typeof ImageDecoder !== 'undefined')
-      && (n !== 'bitmap' || typeof createImageBitmap === 'function'));
+      && (n !== 'bitmap' || typeof createImageBitmap === 'function')
+      && (n !== 'img' || typeof Image !== 'undefined'));
     if (names.length <= 1) return names[0] || null;
     const LANES = 8, ROUNDS = 2, SW = 1920, SH = 136;
     let samples, sink;
@@ -5288,13 +5321,23 @@ function initWebsockets() {
       return names[0];
     }
     const sctx = sink.getContext('2d');
+    let tag = 0;
+    // Warm each route before timing any: the first raced otherwise pays one-time costs
+    // (decoder construction, thread pool spin-up) that belong to none of them.
+    for (const name of names) {
+      try {
+        const img = await JPEG_ROUTES[name](uniqueJpeg(samples[0], tag++));
+        sctx.drawImage(img, 0, 0);
+        try { img.close(); } catch (e) { /* ignore */ }
+      } catch (e) { /* the timed pass reports it */ }
+    }
     let best = null;
     for (const name of names) {
       try {
         const t0 = performance.now();
         for (let r = 0; r < ROUNDS; r++) {
           await Promise.all(samples.map(async (data, i) => {
-            const img = await JPEG_ROUTES[name](data);
+            const img = await JPEG_ROUTES[name](uniqueJpeg(data, tag++));
             sctx.drawImage(img, 0, i * SH);
             try { img.close(); } catch (e) { /* ignore */ }
           }));
