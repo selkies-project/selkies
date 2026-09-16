@@ -16,8 +16,8 @@ import { getLastServerSettings, getPrefixedKey } from "@/utils";
 import { t } from "@/i18n";
 
 /**
- * The stats panel: radial gauges for CPU, GPU, memory, FPS, audio level,
- * bandwidth and latency, in a compact strip or a detailed view.
+ * The stats panel: radial gauges for CPU, GPU, memory, FPS, bandwidth and
+ * latency, in a compact strip or a detailed view.
  *
  * Every figure is polled from the `window` state the streaming cores
  * publish (`system_stats`, `gpu_stats`, `network_stats`, `fps`). Gauges scale to what the
