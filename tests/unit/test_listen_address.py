@@ -144,7 +144,7 @@ async def binder_cases() -> None:
     close_all(socks)
     check("a repeated address binds once", got == ["AF_INET 127.0.0.1"], got)
 
-    log = logging.getLogger("stream_server")
+    log = logging.getLogger("server")
     sink = _Capture()
     log.addHandler(sink)
     real_getaddrinfo = socket.getaddrinfo
@@ -216,7 +216,7 @@ def settings_for(port: int, *flags: str) -> AppSettings:
 
 async def server_cases() -> None:
     lan = lan_address()
-    log = logging.getLogger("stream_server")
+    log = logging.getLogger("server")
     sink = _Capture()
     log.addHandler(sink)
     v6_status = "200" if HAS_V6 else "URLError"

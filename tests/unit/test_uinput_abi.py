@@ -21,11 +21,13 @@ TRUTH = os.path.join(TOOLS, "uinput_abi_truth")
 
 
 def kernel_truth() -> dict:
-    """Constants from `<linux/uinput.h>`, via the compiled truth tool (built
-    on demand)."""
-    if not os.path.exists(TRUTH):
-        subprocess.run(["make", "-C", TOOLS, "uinput_abi_truth"], check=True,
-                       stdout=subprocess.DEVNULL)
+    """Constants from `<linux/uinput.h>`, via the compiled truth tool.
+
+    make is asked every time, so a binary older than its source is rebuilt
+    rather than answering for a struct the source no longer describes.
+    """
+    subprocess.run(["make", "-C", TOOLS, "uinput_abi_truth"], check=True,
+                   stdout=subprocess.DEVNULL)
     out = subprocess.run([TRUTH], capture_output=True, text=True, check=True).stdout
     return {k: int(v) for k, v in (line.split() for line in out.splitlines())}
 
