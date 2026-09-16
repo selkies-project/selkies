@@ -5,7 +5,6 @@
  */
 
 import { defineConfig } from 'vite';
-import envCompatible from 'vite-plugin-env-compatible';
 import { ViteMinifyPlugin } from 'vite-plugin-minify';
 
 // Restarts the dev server when a file Vite does not track as a module changes.
@@ -40,7 +39,6 @@ export default defineConfig({
     allowedHosts: process.env.SELKIES_VITE_HOST ? true : undefined,
   },
   plugins: [
-    envCompatible(),
     ViteMinifyPlugin(),
     restartOnChange(['selkies-core.js', 'lib/**', 'selkies-version.txt']),
   ],
