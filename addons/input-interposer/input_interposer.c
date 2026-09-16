@@ -394,15 +394,15 @@ static js_interposer_t interposers[NUM_INTERPOSERS()] = {
  * read in open() run unlocked, and open() publishes its private fd into the
  * table only once fully configured, so lookups never see a half-built handle.
  */
-static pthread_mutex_t interposers_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static pthread_mutex_t interposers_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**
  * Open handles across every slot. The fd-based hooks read it before taking
  * interposers_mutex and go straight to libc while it is zero, which it is in
  * every process that never opens a fake device: those hooks are then free of
  * the lock, and a signal handler that reads or closes while another call of
- * this thread holds the lock cannot deadlock the process. The mutex is
- * recursive for the same case once a device is open.
+ * this thread holds the lock cannot deadlock the process. Once a device is
+ * open the same case is covered by the lock being recursive.
  */
 static atomic_int interposed_handles_open = 0;
 
@@ -435,9 +435,23 @@ static js_interposer_t *find_interposer_for_fd_locked(int fd, int *open_flags_ou
     return NULL;
 }
 
-/* Constructor: logging, socket directory override, real libc entry points. */
+/* Defined with the inotify shadow watches below, and made recursive with the other. */
+static pthread_mutex_t inotify_mutex;
+
+/* Constructor: logging, recursive table locks, socket directory override, real libc
+ * entry points. The locks are made recursive here rather than declared so, because only
+ * glibc has a static initializer for it; nothing can be open before this runs, so every
+ * hook is on its lock-free path until it does. */
 __attribute__((constructor)) void init_interposer() {
     sji_logging_init();
+
+    pthread_mutexattr_t recursive;
+    if (pthread_mutexattr_init(&recursive) == 0) {
+        pthread_mutexattr_settype(&recursive, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&interposers_mutex, &recursive);
+        pthread_mutex_init(&inotify_mutex, &recursive);
+        pthread_mutexattr_destroy(&recursive);
+    }
 
     /* SELKIES_JS_SOCKET_PATH relocates the sockets (basename kept) to match the backend. */
     const char *sock_dir = getenv("SELKIES_JS_SOCKET_PATH");
@@ -2170,7 +2184,7 @@ typedef struct {
 
 #define SJI_MAX_INOTIFY_WATCHES 16
 static sji_inotify_watch_t inotify_watches[SJI_MAX_INOTIFY_WATCHES];
-static pthread_mutex_t inotify_mutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static pthread_mutex_t inotify_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Shadow watches in use; read lock-free by the fd hooks so a process with none,
  * which is every process not watching /dev/input, never takes inotify_mutex. */
