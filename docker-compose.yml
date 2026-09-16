@@ -54,7 +54,7 @@ services:
     environment:
       # Streaming mode: websockets, webrtc, or both with dual mode
       SELKIES_MODE: ${SELKIES_MODE:-websockets}
-      SELKIES_ENABLE_DUAL_MODE: ${SELKIES_ENABLE_DUAL_MODE:-false}
+      SELKIES_ENABLE_DUAL_MODE: ${SELKIES_ENABLE_DUAL_MODE:-true}
       SELKIES_PORT: ${SELKIES_PORT:-8080}
       # One switch: Selkies mints a self-signed certificate when the configured
       # one is absent, so nothing else has to be prepared for it
