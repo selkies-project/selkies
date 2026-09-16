@@ -69,23 +69,24 @@ async def flip_under_a_client(res: "H.Results") -> None:
     async with websockets.connect(uri, max_size=None) as ws:
         await asyncio.wait_for(ws.recv(), timeout=10)
         await ws.send("SETTINGS," + json.dumps(SETTINGS))
-        await asyncio.sleep(5.0)
-        if not IS_WAYLAND:
-            res.check("the layout engine defined this client's monitor",
-                      bool(selkies_monitors()), f"{selkies_monitors()}")
+        async with H.drained(ws):
+            await asyncio.sleep(5.0)
+            if not IS_WAYLAND:
+                res.check("the layout engine defined this client's monitor",
+                          bool(selkies_monitors()), f"{selkies_monitors()}")
 
-        for i, target in enumerate(["webrtc", "websockets"] * 3):
-            s, body = H.curl("/api/switch", method="POST", data={"mode": target})
-            res.check(f"switch {i}->{target} returns 200", s == 200, body[:60])
-            if s == 200:
-                st = json.loads(H.curl("/api/status")[1])
-                res.check(f"switch {i}: mode={target}", st.get("current_mode") == target,
-                          st.get("current_mode"))
-            await asyncio.sleep(1.5)
-            if target == "webrtc" and not IS_WAYLAND:
-                left = selkies_monitors()
-                res.check(f"switch {i}: no monitor of the stopped transport is left",
-                          not left, f"{left}")
+            for i, target in enumerate(["webrtc", "websockets"] * 3):
+                s, body = H.curl("/api/switch", method="POST", data={"mode": target})
+                res.check(f"switch {i}->{target} returns 200", s == 200, body[:60])
+                if s == 200:
+                    st = json.loads(H.curl("/api/status")[1])
+                    res.check(f"switch {i}: mode={target}", st.get("current_mode") == target,
+                              st.get("current_mode"))
+                await asyncio.sleep(1.5)
+                if target == "webrtc" and not IS_WAYLAND:
+                    left = selkies_monitors()
+                    res.check(f"switch {i}: no monitor of the stopped transport is left",
+                              not left, f"{left}")
 
     # A shutdown whose reconfigure pass still saw display clients (the reconnect
     # grace holds them well past the switch) is one where that pass stopped

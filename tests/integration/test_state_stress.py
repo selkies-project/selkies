@@ -50,18 +50,6 @@ def wait_log_from(mark: int, substr: str, timeout: float = 10) -> bool:
     return False
 
 
-async def read_ws(ws, seconds: float) -> None:
-    """Drain incoming websocket messages for up to the given duration."""
-    end = time.time() + seconds
-    while time.time() < end:
-        try:
-            await asyncio.wait_for(ws.recv(), timeout=0.5)
-        except asyncio.TimeoutError:
-            continue
-        except Exception:
-            return
-
-
 async def drive() -> "H.Results":
     """Run the stop/start, encoder-toggle, and reconnect phases in sequence."""
     uri = f"ws://localhost:{H.PORT}/api/websockets"
@@ -69,50 +57,51 @@ async def drive() -> "H.Results":
     async with websockets.connect(uri, max_size=None) as ws:
         await asyncio.wait_for(ws.recv(), timeout=10)
         await ws.send("SETTINGS," + json.dumps(_settings_payload()))
-        await asyncio.sleep(3.0)
-        await read_ws(ws, 2)
+        async with H.drained(ws):
+            await asyncio.sleep(5.0)
 
-        # Repeated stop/start cycles must each restart the capture.
-        for i in range(10):
+            # Repeated stop/start cycles must each restart the capture.
+            for i in range(10):
+                st = loglen()
+                await ws.send("STOP_VIDEO")
+                await asyncio.sleep(1.0)
+                await ws.send("START_VIDEO")
+                await asyncio.sleep(1.2)
+                ok = wait_log_from(st, "SUCCESS: Capture started", 8)
+                if not ok:
+                    res.check(f"cycle {i}: capture restarted", False, H.server_log()[st:][-200:])
+                    break
+            else:
+                res.check("10 stop/start cycles all restart", True, "")
+
+            # Encoder toggles must each bring the capture back up.
+            for enc in ("jpeg", "h264enc", "h264enc-striped", "h264enc"):
+                st = loglen()
+                await ws.send("SETTINGS," + json.dumps(_settings_payload(encoder=enc)))
+                await asyncio.sleep(2.0)
+                ok = wait_log_from(st, "SUCCESS: Capture started", 10) or wait_log_from(st, "Capture started", 10)
+                res.check(f"encoder switch to {enc}", ok, H.server_log()[st:][-160:])
+                await asyncio.sleep(1.0)
+
+            # Disconnect and reconnect within the grace window; the fresh
+            # client's SETTINGS must still bring the capture up cleanly.
             st = loglen()
             await ws.send("STOP_VIDEO")
-            await asyncio.sleep(1.0)
-            await ws.send("START_VIDEO")
-            await asyncio.sleep(1.2)
-            ok = wait_log_from(st, "SUCCESS: Capture started", 8)
-            if not ok:
-                res.check(f"cycle {i}: capture restarted", False, H.server_log()[st:][-200:])
-                break
-        else:
-            res.check("10 stop/start cycles all restart", True, "")
-
-        # Encoder toggles must each bring the capture back up.
-        for enc in ("jpeg", "h264enc", "h264enc-striped", "h264enc"):
-            st = loglen()
-            await ws.send("SETTINGS," + json.dumps(_settings_payload(encoder=enc)))
-            await asyncio.sleep(2.0)
-            ok = wait_log_from(st, "SUCCESS: Capture started", 10) or wait_log_from(st, "Capture started", 10)
-            res.check(f"encoder switch to {enc}", ok, H.server_log()[st:][-160:])
-            await read_ws(ws, 1)
-
-        # Disconnect and reconnect within the grace window; the fresh
-        # client's SETTINGS must still bring the capture up cleanly.
-        st = loglen()
-        await ws.send("STOP_VIDEO")
-        await asyncio.sleep(0.8)
+            await asyncio.sleep(0.8)
         await ws.close()
         await asyncio.sleep(1.5)
         async with websockets.connect(uri, max_size=None) as ws2:
             await asyncio.wait_for(ws2.recv(), timeout=10)
             await ws2.send("SETTINGS," + json.dumps(_settings_payload()))
-            await asyncio.sleep(4.0)
-            ok = wait_log_from(st, "SUCCESS: Capture started", 10)
-            res.check("reconnect captures cleanly", ok, "")
-            # A binary-clipboard toggle must be accepted without complaint.
-            st = loglen()
-            await ws2.send("SETTINGS," + json.dumps(_settings_payload(enable_binary_clipboard=False)))
-            await asyncio.sleep(1.5)
-            res.check("binary clipboard toggle accepted", "enable_binary_clipboard" not in H.server_log()[st:].lower() or True, "")
+            async with H.drained(ws2):
+                await asyncio.sleep(4.0)
+                ok = wait_log_from(st, "SUCCESS: Capture started", 10)
+                res.check("reconnect captures cleanly", ok, "")
+                # A binary-clipboard toggle must be accepted without complaint.
+                st = loglen()
+                await ws2.send("SETTINGS," + json.dumps(_settings_payload(enable_binary_clipboard=False)))
+                await asyncio.sleep(1.5)
+                res.check("binary clipboard toggle accepted", "enable_binary_clipboard" not in H.server_log()[st:].lower() or True, "")
     res.summary()
     return res
 

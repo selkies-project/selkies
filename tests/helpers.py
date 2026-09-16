@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared helpers for the selkies test suites: server lifecycle, HTTP probes,
 and the X11 and Wayland observation used to prove that input arrived."""
+import asyncio
 import contextlib
 import ctypes
 import faulthandler
@@ -515,6 +516,28 @@ def server_log(log: str = LOG, tail: Optional[int] = None) -> str:
         return txt if tail is None else "\n".join(txt.splitlines()[-tail:])
     except FileNotFoundError:
         return ""
+
+
+@contextlib.asynccontextmanager
+async def drained(ws):
+    """Keep reading `ws` for the length of a phase.
+
+    The server streams video to an attached display for as long as the
+    session lives. A client that stops reading fills its own queue, stops
+    reading the socket with it, and then never sees the pong its keepalive is
+    waiting for, so the connection dies mid-phase rather than where the suite
+    is looking.
+    """
+    async def pump() -> None:
+        with contextlib.suppress(Exception):
+            while True:
+                await ws.recv()
+
+    task = asyncio.create_task(pump())
+    try:
+        yield
+    finally:
+        task.cancel()
 
 
 UINPUT_SHIM = os.path.join(TOOLS, "uinput_shim.so")
