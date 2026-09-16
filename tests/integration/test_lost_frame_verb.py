@@ -25,6 +25,8 @@ import helpers as H
 import websockets
 
 TOLD = "the encoder predicts past it"
+#: The wire id VP9 frames carry in the high nibble of their type byte.
+VP9 = 3
 
 
 def settings(dpi: int = 96, encoder: str = "h264enc") -> str:
@@ -47,14 +49,14 @@ async def saw(mark: int, substr: str, timeout: float = 15) -> bool:
 
 
 async def drain(ws, out: list = None) -> None:
-    """Read the stream, noting each video frame's id and whether it decodes alone."""
+    """Read the stream, noting each video frame's codec, id and whether it decodes alone."""
     while True:
         try:
             msg = await ws.recv()
         except Exception:
             return
         if out is not None and isinstance(msg, (bytes, bytearray)) and len(msg) > 12 and msg[0] == 0x04:
-            out.append((int.from_bytes(msg[2:4], "big"), msg[1] & 0x0f == 0x01))
+            out.append((msg[1] >> 4, int.from_bytes(msg[2:4], "big"), msg[1] & 0x0f == 0x01))
 
 
 async def key_frame_repair(res: "H.Results") -> None:
@@ -70,16 +72,23 @@ async def key_frame_repair(res: "H.Results") -> None:
         await ws.send(settings(encoder="vp9enc"))
         seen: list = []
         pump = asyncio.create_task(drain(ws, seen))
-        await asyncio.sleep(5.0)
-        res.check("the VP9 session streams", bool(seen), f"{len(seen)} frames")
-        if seen:
-            last = seen[-1][0]
+        # The switch restarts the capture, so wait for the codec that was asked
+        # for rather than measuring the stream it replaces.
+        deadline = time.time() + 25
+        while time.time() < deadline and not any(c == VP9 for c, _, _ in seen):
+            await asyncio.sleep(0.5)
+        res.check("the VP9 session streams", any(c == VP9 for c, _, _ in seen),
+                  f"{len(seen)} frames, codecs {sorted({c for c, _, _ in seen})}")
+        vp9 = [f for f in seen if f[0] == VP9]
+        if vp9:
+            last = vp9[-1][1]
             seen.clear()
             await ws.send(f"LOST_FRAME {last}")
             await asyncio.sleep(2.0)
-            keys = sum(1 for _, key in seen if key)
+            frames = [f for f in seen if f[0] == VP9]
+            keys = sum(1 for _, _, key in frames if key)
             res.check("a session that cannot predict past it is repaired with a key frame",
-                      keys > 0, f"{len(seen)} frames, {keys} key")
+                      keys > 0, f"{len(frames)} frames, {keys} key")
         pump.cancel()
 
 
