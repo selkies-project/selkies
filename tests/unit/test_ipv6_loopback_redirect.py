@@ -51,10 +51,12 @@ class _Transport:
 class _Request:
     """Only what the helper reads: the transport, the URL and the headers."""
 
-    def __init__(self, family, sockname, url, headers=None):
+    def __init__(self, family, sockname, url, headers=None, secure=False):
         self.transport = _Transport(family, sockname)
         self.url = URL(url)
         self.headers = headers or {}
+        self.secure = secure
+        self.query_string = self.url.query_string
 
 
 CASES = [
@@ -64,9 +66,12 @@ CASES = [
     ("the IPv6 literal moves too",
      socket.AF_INET6, ("::1", 8080, 0, 0), "http://[::1]:8080/", {},
      "http://127.0.0.1:8080/"),
-    ("the path and query are carried",
+    ("the route's own path is used, and the query rides along",
      socket.AF_INET6, ("::1", 8080, 0, 0), "http://localhost:8080/sub/?a=1", {},
-     "http://127.0.0.1:8080/sub/?a=1"),
+     "http://127.0.0.1:8080/?a=1"),
+    ("a path a caller invents cannot reach the target",
+     socket.AF_INET6, ("::1", 8080, 0, 0), "http://localhost:8080//evil.example/", {},
+     "http://127.0.0.1:8080/"),
     ("a proxy forwarding its own name stays",
      socket.AF_INET6, ("::1", 8080, 0, 0), "http://example.com/", {}, None),
     ("a proxy that says so stays",
@@ -90,7 +95,7 @@ def main() -> int:
     for label, family, sockname, url, headers, want in CASES:
         request = _Request(family, sockname, url, headers)
         try:
-            got = _ipv6_loopback_redirect(request)
+            got = _ipv6_loopback_redirect(request, "/")
         finally:
             request.transport.close()
         check(label, got == want, got if got != want else "")

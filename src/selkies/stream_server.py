@@ -567,7 +567,7 @@ def _carry_destination_mode(staging: str, dest: str) -> None:
         logger.debug(f"Could not carry the mode of {dest} onto the staged upload: {e}")
 
 
-def _ipv6_loopback_redirect(request: web.Request) -> Optional[str]:
+def _ipv6_loopback_redirect(request: web.Request, path: str) -> Optional[str]:
     """Where to serve a page that arrived on the IPv6 loopback from, or ``None``.
 
     A browser gathers no ICE host candidates for a page whose origin is ``::1``,
@@ -594,7 +594,12 @@ def _ipv6_loopback_redirect(request: web.Request) -> Optional[str]:
         return None
     if any(h in request.headers for h in ("X-Forwarded-For", "X-Forwarded-Host", "Forwarded")):
         return None
-    return str(request.url.with_host("127.0.0.1"))
+    # Where the browser goes is this process's to say: the literal host, the port
+    # this socket listens on, and the caller's own route. Only the query rides
+    # along, which a session's token needs and which cannot name another origin.
+    scheme = "https" if request.secure else "http"
+    query = f"?{request.query_string}" if request.query_string else ""
+    return f"{scheme}://127.0.0.1:{int(sockname[1])}{path}{query}"
 
 
 def _format_sockaddr(family: int, sockaddr: Any) -> str:
@@ -2892,7 +2897,7 @@ class CentralizedStreamServer:
         self.static_fs_path = await self._get_static_content_path()
         if self.static_fs_path:
             async def index_handler(request: web.Request) -> web.FileResponse:
-                moved = _ipv6_loopback_redirect(request)
+                moved = _ipv6_loopback_redirect(request, f"{api_prefix}/")
                 if moved:
                     raise web.HTTPFound(moved)
                 return web.FileResponse(os.path.join(self.static_fs_path, "index.html"))
