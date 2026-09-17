@@ -96,6 +96,7 @@ SUITES: list = [
     {"path": "unit/test_flexfec_repair.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_nvml_failfast.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gpu_stats_gate.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_drm_gpu_stats.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_stream_stats.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_stream_stats_client.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},

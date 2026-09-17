@@ -6,19 +6,21 @@
 universal across vendors, the session's CPU and memory (`SystemUsage`), and
 the one sampler both transports run over them (`ResourceMonitor`).
 
-Sources, best-first per vendor: NVIDIA reads NVML in-process via ``nvidia-ml-py``
-(the API behind nvitop/nvtop; exact PCI identity, no subprocess per poll) with a
-``nvidia-smi`` fallback; every other vendor (AMD, Intel, Apple) comes from the
-``aitop`` monitors (rocm-smi/amd-smi, intel_gpu_top); the amdgpu sysfs counters
-(``gpu_busy_percent`` + ``mem_info_vram_*``) backfill AMD hosts without ROCm
-tooling, and i915/xe cards without a readable counter report load/memory 0 —
-listed, and honest about what the kernel provides.
+Sources, best-first: NVIDIA reads NVML in-process via ``nvidia-ml-py`` (the API
+behind nvitop/nvtop; exact PCI identity, no subprocess per poll) with an
+``nvidia-smi`` fallback, and Tegra's integrated GPU, which has neither, reports
+its load through devfreq. Every other card is read through DRM: amdgpu counts
+utilization and VRAM device-wide in sysfs, and the rest have the engine times in
+their clients' fdinfo summed, the kernel's vendor-neutral interface that i915,
+xe, Mali, Adreno and VideoCore all write. A card whose driver writes neither --
+Apple's, on Asahi -- is listed with no utilization rather than a zero.
 
 ``get_gpus(dri_node=...)`` keys the readings to the render node the pipeline
 captures/encodes on (PCI match when the source knows its address, else a
 vendor-unique match), so the monitored GPU is always the one doing the work.
-Objects expose ``.load`` as a 0..1 fraction and ``.memoryTotal`` /
-``.memoryUsed`` in MiB, the units the stats collectors serialize.
+Objects expose ``.load`` as a 0..1 fraction, None where nothing on the host
+counts the card's utilization, and ``.memoryTotal`` / ``.memoryUsed`` in MiB,
+the units the stats collectors serialize.
 """
 
 import asyncio
@@ -27,9 +29,8 @@ import logging
 import os
 import shutil
 import subprocess
-import threading
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import psutil
 
@@ -38,17 +39,7 @@ try:
 except ImportError:
     pynvml = None
 
-try:
-    from aitop.core.gpu.factory import GPUMonitorFactory
-except Exception:
-    GPUMonitorFactory = None
-
 logger = logging.getLogger("stats")
-
-# GPU presence is reported through this logger; aitop re-emits vendor detection
-# at INFO on every factory build, so keep its detection chatter off the stream.
-if GPUMonitorFactory is not None:
-    logging.getLogger("aitop.core.gpu.factory").setLevel(logging.WARNING)
 
 # None = not yet attempted, True = initialized, False = init failed. NVML cannot
 # appear after startup, so a failure is never retried or re-logged.
@@ -58,17 +49,27 @@ _nvml_ready: Optional[bool] = None
 # pci.bus_id keys the stats to the render node the pipeline encodes on.
 _NVIDIA_SMI_QUERY: str = "utilization.gpu,memory.total,memory.used,pci.bus_id"
 
-# Overridable so tests can point at a fabricated tree.
+# Overridable so tests can point at fabricated trees.
 _SYSFS_DRM_ROOT: str = "/sys/class/drm"
+_PROC_ROOT: str = "/proc"
 
-_DRIVER_VENDORS: Dict[str, str] = {"nvidia": "nvidia", "amdgpu": "amd", "radeon": "amd", "i915": "intel", "xe": "intel"}
+_DRIVER_VENDORS: Dict[str, str] = {
+    "nvidia": "nvidia", "nvidia-drm": "nvidia", "nouveau": "nvidia",
+    "amdgpu": "amd", "radeon": "amd",
+    "i915": "intel", "xe": "intel",
+    "asahi": "apple",
+    "panfrost": "arm", "panthor": "arm", "lima": "arm",
+    "msm": "qualcomm", "v3d": "broadcom", "vc4": "broadcom",
+    "powervr": "imagination", "etnaviv": "vivante",
+}
 
 class GPUStat:
     """One GPU's live reading in the units the stats collectors serialize.
 
     Attributes:
         id: Position of this GPU in the merged detection list.
-        load: Utilization as a 0..1 fraction.
+        load: Utilization as a 0..1 fraction, or None where nothing on the
+            host counts it.
         memoryTotal: Total device memory in MiB.
         memoryUsed: Used device memory in MiB.
         pci: Normalized PCI address (lowercase, 4-hex-digit domain), or None
@@ -81,7 +82,7 @@ class GPUStat:
     def __init__(
         self,
         gpu_id: int,
-        load: float,
+        load: Optional[float],
         memory_total: float,
         memory_used: float,
         pci: Optional[str] = None,
@@ -105,14 +106,19 @@ def _normalize_pci(bus_id: str) -> Optional[str]:
     return None
 
 
-def _pci_of_node(dri_node: Optional[str], root: Optional[str] = None) -> Optional[str]:
-    """PCI address backing a /dev/dri/renderD* (or card*) node, via sysfs."""
-    root = root or _SYSFS_DRM_ROOT
+def _device_of_node(dri_node: Optional[str], root: Optional[str] = None) -> str:
+    """sysfs directory of the device a /dev/dri/card* or renderD* node belongs
+    to, the one name both of a card's nodes resolve to."""
     name = os.path.basename(str(dri_node or "").strip())
     if not name:
-        return None
-    dev = os.path.realpath(os.path.join(root, name, "device"))
-    return _normalize_pci(os.path.basename(dev))
+        return ""
+    return os.path.realpath(os.path.join(root or _SYSFS_DRM_ROOT, name, "device"))
+
+
+def _pci_of_node(dri_node: Optional[str], root: Optional[str] = None) -> Optional[str]:
+    """PCI address backing a /dev/dri/renderD* (or card*) node, via sysfs."""
+    device = _device_of_node(dri_node, root)
+    return _normalize_pci(os.path.basename(device)) if device else None
 
 
 def _vendor_of_node(dri_node: Optional[str], root: Optional[str] = None) -> Optional[str]:
@@ -205,100 +211,6 @@ def _nvidia_gpus() -> List[GPUStat]:
     return gpus
 
 
-def _aitop_vendor(monitor: Any) -> str:
-    """Vendor keyword derived from an aitop monitor's class name."""
-    return type(monitor).__name__.replace("GPUMonitor", "").replace("NPUMonitor", "").lower()
-
-
-# aitop monitor -> the CLI its readings come from. Without the tool a monitor can
-# never produce data, and the NVIDIA/AMD ones log an ERROR every poll when a
-# DRM-visible card has no userspace in the container; NPU/Apple read other sources.
-_AITOP_MONITOR_TOOLS: Dict[str, tuple] = {
-    "NvidiaGPUMonitor": ("nvidia-smi",),
-    "AMDGPUMonitor": ("rocm-smi", "amd-smi"),
-    "IntelGPUMonitor": ("intel_gpu_top",),
-}
-
-
-def _aitop_monitor_usable(monitor: Any) -> bool:
-    """Whether the monitor's backing CLI exists, logging the skip when not."""
-    tools = _AITOP_MONITOR_TOOLS.get(type(monitor).__name__)
-    if tools is None or any(shutil.which(tool) for tool in tools):
-        return True
-    logger.info(
-        "%s GPU visible but %s not installed; skipping its stats monitor",
-        _aitop_vendor(monitor),
-        "/".join(tools),
-    )
-    return False
-
-
-_aitop_monitors_cache: Optional[List[Any]] = None
-_aitop_monitors_lock = threading.Lock()
-
-
-def _aitop_monitors() -> List[Any]:
-    """aitop monitors, built once and reused.
-
-    create_monitors() re-detects vendors and appends to PATH on every call, so
-    polling it per frame grows PATH until subprocess spawns fail with E2BIG. A
-    build failure is cached as an empty list for the same reason — retrying
-    each poll would keep growing PATH; NVML/sysfs still cover the stats.
-    """
-    global _aitop_monitors_cache
-    if _aitop_monitors_cache is None:
-        with _aitop_monitors_lock:
-            if _aitop_monitors_cache is None:
-                try:
-                    _aitop_monitors_cache = [
-                        monitor
-                        for monitor in GPUMonitorFactory.create_monitors()
-                        if _aitop_monitor_usable(monitor)
-                    ]
-                except Exception as exc:
-                    logger.warning("aitop monitor detection failed: %s", exc)
-                    _aitop_monitors_cache = []
-    return _aitop_monitors_cache
-
-
-def _aitop_gpus(vendors: Optional[Set[str]] = None) -> List[GPUStat]:
-    """Multi-vendor telemetry via aitop's monitors (utilization + memory in MiB).
-
-    All-zero readings with no PCI identity are dropped as fabricated
-    placeholders (aitop's Intel monitor emits them on hosts with no Intel
-    GPU); a real but unreadable card resurfaces through the sysfs backfill
-    with a true PCI address that `dri_node` matching can use.
-
-    Args:
-        vendors: When given, only monitors for these vendor keywords are read.
-    """
-    if GPUMonitorFactory is None:
-        return []
-    gpus = []
-    try:
-        for monitor in _aitop_monitors():
-            vendor = _aitop_vendor(monitor)
-            if vendors is not None and vendor not in vendors:
-                continue
-            for info in monitor.get_gpu_info() or []:
-                if not info.utilization and not info.memory_total and not info.memory_used:
-                    continue
-                gpus.append(
-                    GPUStat(
-                        len(gpus),
-                        float(info.utilization or 0.0) / 100.0,
-                        float(info.memory_total or 0.0),
-                        float(info.memory_used or 0.0),
-                        None,
-                        vendor,
-                    )
-                )
-    except Exception as exc:
-        logger.debug("aitop query failed: %s", exc)
-        return []
-    return gpus
-
-
 def _read_sysfs_number(path: str) -> Optional[float]:
     """Float value of a sysfs counter file, or None when unreadable."""
     try:
@@ -308,42 +220,166 @@ def _read_sysfs_number(path: str) -> Optional[float]:
         return None
 
 
-def _drm_sysfs_gpus(root: Optional[str] = None) -> List[GPUStat]:
-    """AMD (and best-effort Intel) cards via /sys/class/drm/card*/device counters.
+# Utilization for a card whose driver counts nothing device-wide is summed from
+# its clients' fdinfo. Finding those clients means walking every process's
+# descriptors, which costs far more than reading the few that DRM owns, so the
+# walk runs on its own cadence and the readings keep to the list it leaves.
+_DRM_CLIENT_RESCAN_S: float = 5.0
+_DRM_CLIENT_WINDOW_S: float = 0.1
 
-    i915/xe expose no unprivileged utilization or VRAM counters, so those
-    cards are listed with zeros rather than left out.
+# NVIDIA's driver counts nothing through DRM, NVML and nvidia-smi being its
+# sources, so a host holding only its cards never pays for the walk.
+_DRM_UNCOUNTED: Tuple[str, ...] = ("nvidia", "nvidia-drm")
+
+_drm_clients: Dict[str, str] = {}
+_drm_clients_at: float = 0.0
+_drm_busy: Dict[Tuple[str, str], float] = {}
+_drm_busy_at: float = 0.0
+
+
+def _drm_client_paths(root: Optional[str] = None) -> Dict[str, str]:
+    """{fdinfo path: device directory} for every DRM descriptor open on the
+    host. Another user's descriptors are unreadable, so their work is missing
+    from the total rather than guessed at."""
+    clients: Dict[str, str] = {}
+    for pid in os.listdir(_PROC_ROOT):
+        if not pid.isdigit():
+            continue
+        try:
+            names = os.listdir(f"{_PROC_ROOT}/{pid}/fd")
+        except OSError:
+            continue
+        for name in names:
+            try:
+                target = os.readlink(f"{_PROC_ROOT}/{pid}/fd/{name}")
+            except OSError:
+                continue
+            if target.startswith("/dev/dri/"):
+                device = _device_of_node(target, root)
+                if device:
+                    clients[f"{_PROC_ROOT}/{pid}/fdinfo/{name}"] = device
+    return clients
+
+
+def _drm_engine_busy(clients: Dict[str, str]) -> Dict[Tuple[str, str], float]:
+    """Nanoseconds each device's engines have run, summed over its clients.
+
+    Clients that have exited are dropped from `clients` as they are found, so
+    the list never outgrows what is open.
+    """
+    busy: Dict[Tuple[str, str], float] = {}
+    for path, device in list(clients.items()):
+        try:
+            with open(path, "r") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            clients.pop(path, None)
+            continue
+        engines: Dict[str, float] = {}
+        capacity: Dict[str, float] = {}
+        for line in lines:
+            key, _, value = line.partition(":")
+            if key.startswith("drm-engine-capacity-"):
+                name, into = key.removeprefix("drm-engine-capacity-"), capacity
+            elif key.startswith("drm-engine-"):
+                name, into = key.removeprefix("drm-engine-"), engines
+            else:
+                continue
+            try:
+                into[name] = float(value.split()[0])
+            except (IndexError, ValueError):
+                continue
+        for engine, ns in engines.items():
+            slot = (device, engine)
+            busy[slot] = busy.get(slot, 0.0) + ns / max(1.0, capacity.get(engine, 1.0))
+    return busy
+
+
+def _drm_client_load(root: Optional[str] = None) -> Dict[str, float]:
+    """{device directory: utilization} for cards their clients report engine
+    time for, taken as the busiest engine's share of the wall time since the
+    last reading. The first reading has no predecessor, so it measures a short
+    window of its own rather than report a zero it did not observe."""
+    global _drm_clients, _drm_clients_at, _drm_busy, _drm_busy_at
+    now = time.monotonic()
+    if now - _drm_clients_at >= _DRM_CLIENT_RESCAN_S:
+        _drm_clients, _drm_clients_at = _drm_client_paths(root), now
+    busy = _drm_engine_busy(_drm_clients)
+    if busy and not _drm_busy:
+        _drm_busy, _drm_busy_at = busy, now
+        time.sleep(_DRM_CLIENT_WINDOW_S)
+        now, busy = time.monotonic(), _drm_engine_busy(_drm_clients)
+    elapsed = (now - _drm_busy_at) * 1e9
+    load = {device: 0.0 for device, _ in busy}
+    for slot, ns in busy.items():
+        ran = ns - _drm_busy.get(slot, ns)
+        if elapsed > 0:
+            load[slot[0]] = max(load[slot[0]], min(1.0, max(0.0, ran / elapsed)))
+    _drm_busy, _drm_busy_at = busy, now
+    return load
+
+
+def _drm_gpus(root: Optional[str] = None) -> List[GPUStat]:
+    """Every DRM card, read the best way its driver allows.
+
+    amdgpu counts utilization and VRAM device-wide in sysfs; the rest are read
+    from their clients' fdinfo, which is only looked for once a card is found
+    that needs it. Mali writes its engine times only while profiling is on, so
+    a card left at the driver's default reads as one nothing counts. Memory is reported only where the card has its own and the
+    driver counts it, so one drawing on system memory is listed without rather
+    than with a share invented for it. A card whose driver we know is listed
+    even when nothing counts it, so `dri_node` can still match the one the
+    pipeline captures on.
     """
     root = root or _SYSFS_DRM_ROOT
+    load: Optional[Dict[str, float]] = None
     gpus = []
     for card in sorted(glob.glob(os.path.join(root, "card[0-9]*"))):
         # Connector nodes (cardN-HDMI-A-1) are not devices.
         if "-" in os.path.basename(card):
             continue
-        device = os.path.join(card, "device")
+        node = os.path.join(card, "device")
         try:
-            driver = os.path.basename(os.readlink(os.path.join(device, "driver")))
+            driver = os.path.basename(os.readlink(os.path.join(node, "driver")))
         except OSError:
             continue
-        idx = int(os.path.basename(card)[4:])
-        pci = _normalize_pci(os.path.basename(os.path.realpath(device)))
-        if driver in ("amdgpu", "radeon"):
-            busy = _read_sysfs_number(os.path.join(device, "gpu_busy_percent"))
-            vram_total = _read_sysfs_number(os.path.join(device, "mem_info_vram_total"))
-            vram_used = _read_sysfs_number(os.path.join(device, "mem_info_vram_used"))
-            gpus.append(
-                GPUStat(
-                    idx,
-                    (busy or 0.0) / 100.0,
-                    (vram_total or 0.0) / (1024 * 1024),
-                    (vram_used or 0.0) / (1024 * 1024),
-                    pci,
-                    "amd",
-                )
-            )
-        elif driver in ("i915", "xe"):
-            gpus.append(GPUStat(idx, 0.0, 0.0, 0.0, pci, "intel"))
+        device = os.path.realpath(node)
+        vendor = _DRIVER_VENDORS.get(driver)
+        busy = _read_sysfs_number(os.path.join(node, "gpu_busy_percent"))
+        if busy is None and load is None and driver not in _DRM_UNCOUNTED:
+            load = _drm_client_load(root)
+        util = busy / 100.0 if busy is not None else (load or {}).get(device)
+        if vendor is None and util is None:
+            continue
+        total = _read_sysfs_number(os.path.join(node, "mem_info_vram_total")) or 0.0
+        used = _read_sysfs_number(os.path.join(node, "mem_info_vram_used")) or 0.0
+        gpus.append(GPUStat(int(os.path.basename(card)[4:]), util,
+                            total / (1024 * 1024), used / (1024 * 1024),
+                            _normalize_pci(os.path.basename(device)), vendor))
     return gpus
+
+
+# Tegra's integrated GPU has no DRM node of its own -- the tegra driver is the
+# display controller -- and, before JetPack 6, no NVML either; devfreq (Xavier,
+# Orin) and the legacy gpu.0 node (TX, Nano) report its load in tenths of a
+# percent.
+_TEGRA_LOAD_GLOBS: Tuple[str, ...] = tuple(
+    f"/sys/class/devfreq/*.{name}/load" for name in ("gpu", "gv11b", "gp10b", "ga10b", "gb10b")
+) + ("/sys/devices/gpu.0/load",)
+
+
+def _tegra_gpus(globs: Optional[Tuple[str, ...]] = None) -> List[GPUStat]:
+    """Tegra's integrated GPU, whose memory is the system's rather than its own.
+
+    The first pattern that answers is the card; the rest are the same GPU under
+    the names older kernels give it.
+    """
+    for pattern in globs or _TEGRA_LOAD_GLOBS:
+        loads = [v for v in map(_read_sysfs_number, sorted(glob.glob(pattern))) if v is not None]
+        if loads:
+            return [GPUStat(idx, min(1.0, load / 1000.0), 0.0, 0.0, None, "nvidia")
+                    for idx, load in enumerate(loads)]
+    return []
 
 
 def get_gpus(dri_node: Optional[str] = None) -> List[GPUStat]:
@@ -356,16 +392,13 @@ def get_gpus(dri_node: Optional[str] = None) -> List[GPUStat]:
             uses; an unresolvable node falls back to the full list.
 
     Returns:
-        GPUStat objects with sequential ids, merged best-source-first per
-        vendor and backfilled from sysfs.
+        GPUStat objects with sequential ids, one source per vendor: the best
+        that answered, in the order they are tried.
     """
-    gpus = _nvml_gpus()
-    if gpus:
-        gpus += _aitop_gpus(vendors={"amd", "intel", "apple"})
-    else:
-        gpus = _aitop_gpus() or _nvidia_gpus()
-    present = {g.vendor for g in gpus}
-    gpus += [g for g in _drm_sysfs_gpus() if g.vendor not in present]
+    gpus = _nvml_gpus() or _nvidia_gpus()
+    for source in (_tegra_gpus, _drm_gpus):
+        present = {g.vendor for g in gpus}
+        gpus += [g for g in source() if g.vendor not in present]
     for i, g in enumerate(gpus):
         g.id = i
 
@@ -563,20 +596,22 @@ class ResourceMonitor:
         """One GPU reading, or None where there is nothing to read.
 
         A card is listed for what it is even when it exposes no counters, so
-        the pipeline can match it by vendor or PCI address, but a reading of
-        nothing but zeros is not a reading: published every tick it would leave
-        a page showing a utilization that can never move and a memory total of
-        nothing. None instead stops the probe and leaves those off the page.
+        the pipeline can match it by vendor or PCI address, but a card nothing
+        counts and that reports no memory is not a reading: published every
+        tick it would leave a page showing a utilization that can never move
+        and a memory total of nothing. None instead stops the probe and leaves
+        those off the page. A card that is merely idle has a utilization, so it
+        keeps reporting.
         """
         gpus = get_gpus(self.dri_node)
         idx = 0 if (self.dri_node and len(gpus) == 1) else self.gpu_id
         if not gpus or not 0 <= idx < len(gpus):
             return None
         gpu = gpus[idx]
-        if gpu.load <= 0 and gpu.memoryTotal <= 0:
+        if gpu.load is None and gpu.memoryTotal <= 0:
             return None
         return {
-            "gpu_percent": gpu.load * 100,
+            "gpu_percent": (gpu.load or 0.0) * 100,
             "memory_total": gpu.memoryTotal * 1024 * 1024,
             "memory_used": gpu.memoryUsed * 1024 * 1024,
         }
