@@ -861,7 +861,13 @@ const retireCrashCountWhenHealthy = () => {
  * triggers, and the retry is spent once so an engine that ignores the software hint cannot loop.
  */
 function checkVideoOutputWatchdog() {
-  if (isSharedMode || window.isFallingBack || softwareDecodeAttempted ||
+  // A software retry that is also silent has to be able to trip this again, or the
+  // one shot is spent on the retry and nothing escalates: `initiateFallback` reads
+  // the second trip as the software path having failed too and steps the ladder.
+  // The settle window keeps the decoders the switch just replaced from tripping it.
+  const retrySettling = softwareDecodeAttempted &&
+    performance.now() - softwareDecodeSwitchedAt < SOFTWARE_DECODE_SETTLE_MS;
+  if (isSharedMode || window.isFallingBack || retrySettling ||
       !isVideoPipelineActive || currentEncoderMode === 'jpeg' ||
       typeof VideoDecoder === 'undefined') {
     noOutputStalledSince = 0;
