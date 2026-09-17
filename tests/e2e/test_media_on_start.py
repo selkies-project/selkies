@@ -96,7 +96,7 @@ def open_page(browser: Any, mode: str, url_hash: str = "", extra_init: Optional[
 
 def defaults_block(mode: str, wayland: bool = False) -> "H.Results":
     res = H.Results(f"start-defaults-{mode}{'-wl' if wayland else ''}")
-    H.server_start(mode=mode, wayland=wayland)
+    H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_DEBUG": "true"})
     try:
         with sync_playwright() as pw:
             browser = C.launch_browser(pw)
@@ -119,7 +119,8 @@ def defaults_block(mode: str, wayland: bool = False) -> "H.Results":
 
 def video_off_block(mode: str, wayland: bool = False) -> "H.Results":
     res = H.Results(f"video-off-{mode}{'-wl' if wayland else ''}")
-    H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_VIDEO_ON_START": "false"})
+    H.server_start(mode=mode, wayland=wayland,
+                   extra_env={"SELKIES_VIDEO_ON_START": "false", "SELKIES_DEBUG": "true"})
     try:
         with sync_playwright() as pw:
             browser = C.launch_browser(pw)
@@ -152,7 +153,8 @@ def video_off_block(mode: str, wayland: bool = False) -> "H.Results":
 
 def audio_off_block(mode: str, wayland: bool = False) -> "H.Results":
     res = H.Results(f"audio-off-{mode}{'-wl' if wayland else ''}")
-    H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_AUDIO_ON_START": "false"})
+    H.server_start(mode=mode, wayland=wayland,
+                   extra_env={"SELKIES_AUDIO_ON_START": "false", "SELKIES_DEBUG": "true"})
     try:
         with sync_playwright() as pw:
             browser = C.launch_browser(pw)
@@ -187,7 +189,7 @@ def audio_off_block(mode: str, wayland: bool = False) -> "H.Results":
 def microphone_block(mode: str) -> "H.Results":
     res = H.Results(f"microphone-on-{mode}")
     TM.unload_leftover_virtual_mic()
-    H.server_start(mode=mode, extra_env={"SELKIES_MICROPHONE_ON_START": "true"})
+    H.server_start(mode=mode, extra_env={"SELKIES_MICROPHONE_ON_START": "true", "SELKIES_DEBUG": "true"})
     try:
         with sync_playwright() as pw:
             browser, page, errors = TM.launch(pw, mode)

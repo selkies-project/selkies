@@ -176,7 +176,7 @@ def main() -> "H.Results":
     res = H.Results("display-positions")
     if importlib.util.find_spec("pixelflux") is None:
         H.skip_suite("pixelflux is not installed")
-    H.server_start(mode="websockets", wayland=True)
+    H.server_start(mode="websockets", wayland=True, extra_env={"SELKIES_DEBUG": "true"})
     try:
         asyncio.run(drive(res))
     finally:

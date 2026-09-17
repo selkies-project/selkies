@@ -108,7 +108,7 @@ def main(wayland: bool = False) -> "H.Results":
             capture teardown is the same code either way, but only one of them
             has a compositor still reporting cursors into it.
     """
-    H.server_start(mode="websockets", wayland=wayland)
+    H.server_start(mode="websockets", wayland=wayland, extra_env={"SELKIES_DEBUG": "true"})
     res = H.Results("switch-wayland" if wayland else "switch")
     try:
         asyncio.run(asyncio.wait_for(flip_under_a_client(res), 180))
