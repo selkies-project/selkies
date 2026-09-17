@@ -201,6 +201,15 @@ Each is documented in full where named; read that before changing the subsystem.
   the policy or the user turned on, so nothing is started only to be stopped and a capture nobody receives
   never runs (`webrtc_media_pipeline` module docstring, `DataStreamingServer._video_start_state`, each core's
   `applyStartPolicy`).
+- What a session runs on is reported, never inferred from settings, and what moves is sent only to a page
+  looking at it: pixelflux records each capture and encoder decision where it makes it
+  (`ScreenCapture.stream_info`), the server relays that once and on every change as `stream_info`, and every
+  periodic figure (`stream_stats`: the host's load, the encode's rate and cost, the link) is sampled and sent
+  only while a controller's dashboard has its stats on screen (the `_stats` verb; `stream_stats` module
+  docstring, `addons/selkies-web-core/lib/stream-stats.js`). A shared viewer is sent neither, and both
+  dashboards draw one reading of it (`lib/stream-stats-view.js`), where a row warns for a session that fell
+  short of what it asked for, never for a choice and never for a server exposed no GPU, which is an ordinary
+  deployment (`stream_stats.gpu_present`).
 - The WebRTC ICE topology is decided once, at startup: `RTCApp.open_ice_muxes` binds the shared UDP and
   TCP ports the settings name (failing the service on a port in use), and every peer's gatherer reads the
   muxes and the ICE-lite choice from its `RTCConfiguration`, never from the settings directly; sessions on

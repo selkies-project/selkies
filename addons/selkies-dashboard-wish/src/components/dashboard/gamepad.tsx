@@ -12,35 +12,31 @@ import { t } from "@/i18n";
 import { isMobileClient } from "@/utils";
 
 /**
- * The floating gamepad card: one visualizer per pad the core reports, and on
- * mobile a button that asks the core to show the virtual keyboard.
+ * The gamepad preview of the top menu's gamepad dropdown, one visualizer per
+ * pad the core reports, and the mobile button that asks the core to show the
+ * virtual keyboard.
  *
  * Pad state comes from the core's `gamepadButtonUpdate` and
- * `gamepadAxisUpdate` messages; `showVirtualKeyboard` is posted back. Touch
- * input on the touch-gamepad host div belongs to universalTouchGamepad's own
- * overlay, which it attaches on `TOUCH_GAMEPAD_SETUP`; DashboardOverlay drives
- * that setup and visibility messaging.
+ * `gamepadAxisUpdate` messages, heard while the dropdown is open;
+ * `showVirtualKeyboard` is posted back. Touch input on the touch-gamepad host
+ * div belongs to universalTouchGamepad's own overlay, which it attaches on
+ * `TOUCH_GAMEPAD_SETUP`; DashboardOverlay drives that setup and visibility
+ * messaging.
  * @module
  */
 
 interface GamepadProps {
-    isGamepadEnabled: boolean;
     /**
      * Owned by DashboardOverlay, one source for the menu entry, the hotkey
-     * and this card: while the touch overlay is up the physical visualizer
+     * and this preview: while the touch overlay is up the physical visualizer
      * would only mirror it, so it is hidden.
      */
     isTouchGamepadActive: boolean;
 }
 
-/**
- * Renders the visualizers, or nothing while gamepad input is off and no pad
- * has ever reported on a non-mobile client.
- */
-export function Gamepad({ isGamepadEnabled, isTouchGamepadActive }: GamepadProps) {
-    const isMobile = isMobileClient;
+/** Renders the visualizers, an idle one until a pad reports. */
+export function Gamepad({ isTouchGamepadActive }: GamepadProps) {
     const [gamepadStates, setGamepadStates] = React.useState<{ [key: string]: any }>({});
-    const [hasReceivedGamepadData, setHasReceivedGamepadData] = React.useState(false);
 
     React.useEffect(() => {
         const handleWindowMessage = (event: MessageEvent) => {
@@ -48,7 +44,6 @@ export function Gamepad({ isGamepadEnabled, isTouchGamepadActive }: GamepadProps
             const message = event.data;
             if (typeof message === 'object' && message !== null) {
                 if (message.type === 'gamepadButtonUpdate' || message.type === 'gamepadAxisUpdate') {
-                    if (!hasReceivedGamepadData) setHasReceivedGamepadData(true);
                     const gpIndex = message.gamepadIndex;
                     if (gpIndex === undefined || gpIndex === null) return;
                     setGamepadStates(prev => {
@@ -65,17 +60,10 @@ export function Gamepad({ isGamepadEnabled, isTouchGamepadActive }: GamepadProps
 
         window.addEventListener('message', handleWindowMessage);
         return () => window.removeEventListener('message', handleWindowMessage);
-    }, [hasReceivedGamepadData]);
-
-    const handleShowVirtualKeyboard = () => {
-        window.postMessage({ type: 'showVirtualKeyboard' }, window.location.origin);
-        console.log("Dashboard: Sending postMessage: { type: 'showVirtualKeyboard' }");
-    };
-
-    if (!isGamepadEnabled && !isMobile && !isTouchGamepadActive && !hasReceivedGamepadData) return null;
+    }, []);
 
     return (
-        <div className="px-3 py-2">
+        <div className="px-2 py-2">
             {isTouchGamepadActive && (
                 <p className="text-sm text-muted-foreground">
                     {t('sections.gamepads.physicalHiddenForTouch')}
@@ -103,16 +91,21 @@ export function Gamepad({ isGamepadEnabled, isTouchGamepadActive }: GamepadProps
                     )}
                 </div>
             )}
-            {isMobile && (
-                <Button
-                    variant="default"
-                    size="icon"
-                    className="fixed bottom-4 right-4 z-50"
-                    onClick={handleShowVirtualKeyboard}
-                >
-                    <Keyboard className="h-4 w-4" />
-                </Button>
-            )}
         </div>
+    );
+}
+
+/** The mobile button that asks the core to show the virtual keyboard; nothing elsewhere. */
+export function VirtualKeyboardButton() {
+    if (!isMobileClient) return null;
+    return (
+        <Button
+            variant="default"
+            size="icon"
+            className="fixed bottom-4 right-4 z-50"
+            onClick={() => window.postMessage({ type: 'showVirtualKeyboard' }, window.location.origin)}
+        >
+            <Keyboard className="h-4 w-4" />
+        </Button>
     );
 }

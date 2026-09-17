@@ -65,6 +65,7 @@ import { Printing } from "@/components/dashboard/printing";
 import { Apps } from "@/components/dashboard/apps";
 import { Settings } from "@/components/dashboard/settings";
 import { SystemMonitoring } from "@/components/dashboard/system-monitoring";
+import { Gamepad } from "@/components/dashboard/gamepad";
 import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
@@ -190,9 +191,8 @@ export function TopMenu({
     };
   }, []);
 
-  // The core reacts to panels opening and closing (input focus). Monitoring
-  // counts as open: the websockets core only recomputes window.fps while it
-  // believes the sidebar is visible, and the overlay is not an activePanel.
+  // The core reacts to panels opening and closing (input focus); the monitoring
+  // overlay is not an activePanel and counts as open too.
   React.useEffect(() => {
     window.postMessage(
       { type: 'sidebarVisibilityChanged', isOpen: !!activePanel || showSystemMonitoring },
@@ -654,6 +654,9 @@ export function TopMenu({
                       </span>
                     </MenubarItem>
                   )}
+                  {!isSecondaryDisplay && isGamepadEnabled && (renderableSettings.gamepads ?? true) && (
+                    <Gamepad isTouchGamepadActive={isTouchGamepadActive} />
+                  )}
                 </MenubarContent>
               </MenubarMenu>
             </Menubar>
@@ -1053,7 +1056,7 @@ export function TopMenu({
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="absolute z-20 w-fit"
+            className="fixed z-20 w-fit"
             style={{
               left: position.x,
               top: position.y + 48,

@@ -76,7 +76,7 @@ export function GamepadVisualizer({ gamepadState, gamepadIndex }: GamepadVisuali
   const rightStickTransform = getStickTransform(2, 3);
 
   return (
-    <Card className="fixed top-4 right-4 w-80 z-50 bg-background/95 backdrop-blur-sm">
+    <Card className="w-full bg-background/95 backdrop-blur-sm">
       <CardHeader>
         <CardTitle>{t('sections.gamepads.gamepadTitle', { index: gamepadIndex })}</CardTitle>
       </CardHeader>

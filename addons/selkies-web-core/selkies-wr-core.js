@@ -54,8 +54,8 @@
  * runs one pipeline per display, and the position rides the connect metadata.
  *
  * Contract with the dashboards. Globals published on `window`: `selkiesLogs`
- * (capped log ring buffers), `fps`, `network_stats`, `gpu_stats`,
- * `system_stats`, `currentAudioBufferSize`, `manualResolution`,
+ * (capped log ring buffers), `fps`, `stream_info`, `stream_client` and
+ * `stream_stats` (lib/stream-stats.js), `currentAudioBufferSize`, `manualResolution`,
  * `enable_resize`, `streamResolutionDiverged`, `webrtcInput`, and every server
  * setting as `window[key]`. Window messages handled (same origin):
  * `setScaleLocally`, `resetResolutionToWindow`, `setManualResolution`,
@@ -63,7 +63,7 @@
  * `gamepadControl`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `audioDeviceSelected`, `requestFullscreen`, `setSynth`,
  * `showVirtualKeyboard`, `setAntiAliasing`, `setUseBrowserCursors`, `setRawPointerMotion`,
- * `touchinput:trackpad`, `touchinput:touch`, plus the `requestFileUpload` DOM
+ * `touchinput:trackpad`, `touchinput:touch`, `statsOpen`, plus the `requestFileUpload` DOM
  * event. Window messages posted: `sidebarButtonStatusUpdate`,
  * `pipelineStatusUpdate`, `effectiveCursorState`, `scalingDpiFollowed`,
  * `serverSettings`, `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
@@ -89,6 +89,7 @@ import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncode
 import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
+import { StreamStats, webrtcDecoder } from './lib/stream-stats.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -322,6 +323,20 @@ export default function webrtc() {
 	var audioConnected = "";
 	var statWatchEnabled = false;
 	var webrtc = null;
+	/** The cumulative counters of the last stats tick, null until one ran with the stats open. */
+	let statsBaseline = null;
+	/** `MediaCapabilities` on the stream's configuration, asked once per configuration. */
+	let decodeCapable = { key: '', efficient: null };
+	const streamStats = new StreamStats({
+		transport: 'webrtc',
+		send: (message) => {
+			const channel = webrtc && webrtc._send_channel;
+			if (!channel || channel.readyState !== 'open') throw new Error('not connected');
+			webrtc.sendDataChannelMessage(message);
+		},
+		isViewer: () => isSharedMode,
+		onOpenChange: () => { statsBaseline = null; },
+	});
 	var input = null;
 	/** Interval ids, cleared on cleanup so a reconnect never double-starts a loop. */
 	let statsLoopId = null;
@@ -1621,6 +1636,9 @@ export default function webrtc() {
 		}
 		let message = event.data;
 		switch(message.type) {
+			case "statsOpen":
+				streamStats.setOpen(message.open);
+				break;
 			case "setScaleLocally":
 				if (isSharedMode) { break; }
 				if (typeof message.value === 'boolean') {
@@ -2125,8 +2143,9 @@ export default function webrtc() {
 
 	/**
 	 * Starts the once-a-second stats loop: the essentials are published on
-	 * `window` (`fps`, `network_stats`, `currentAudioBufferSize`) for the
-	 * dashboards, the full `connectionStat` stays readable here, and
+	 * `window` (`fps`, `currentAudioBufferSize`) for the dashboards, a tick
+	 * with the stats open feeds lib/stream-stats.js (`sampleStreamStats`),
+	 * the full `connectionStat` stays readable here, and
 	 * `enableWebrtcStatics` streams the raw reports to the server as
 	 * `_stats_video`.
 	 *
@@ -2142,6 +2161,103 @@ export default function webrtc() {
 	 * frame count. The audio concealment counters (NetEQ) are the RED
 	 * acceptance metric.
 	 */
+	/**
+	 * Whether the engine decodes the stream's configuration efficiently, which
+	 * stands in for the decoder's name where the engine withholds it.
+	 * @param {string} codec
+	 * @param {number} width
+	 * @param {number} height
+	 * @param {number} fps
+	 */
+	function askDecodeCapable(codec, width, height, fps) {
+		const key = `${codec}:${width}x${height}`;
+		if (key === decodeCapable.key || !codec || codec === 'NA' || !(width > 0)) return;
+		decodeCapable = { key, efficient: null };
+		if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) return;
+		navigator.mediaCapabilities.decodingInfo({
+			type: 'webrtc',
+			video: { contentType: `video/${codec}`, width, height, bitrate: 8000000, framerate: fps > 0 ? fps : 60 },
+		}).then((info) => {
+			if (decodeCapable.key === key) decodeCapable.efficient = info.supported ? !!info.powerEfficient : null;
+		}).catch(() => {});
+	}
+
+	/**
+	 * One second of this page's figures for lib/stream-stats.js, from the same
+	 * `getStats()` snapshot the stat watch took: rates are the change in a
+	 * cumulative counter since the last tick, and the repair counters read
+	 * from zero at the moment the stats opened.
+	 * @param {Object} stats `WebRTCClient.getConnectionStats`'s result.
+	 * @param {number} rtt Round trip in ms.
+	 * @param {number} mbps Received video and audio.
+	 */
+	function sampleStreamStats(stats, rtt, mbps) {
+		const video = stats.reports.videoRTP || {};
+		const audio = stats.reports.audioRTP || {};
+		const pair = stats.reports.candidatePairs[stats.reports.selectedCandidatePairId] || {};
+		const local = stats.reports.localCandidates[pair.localCandidateId] || {};
+		const now = {
+			at: performance.now(),
+			framesDecoded: video.framesDecoded || 0,
+			totalDecodeTime: video.totalDecodeTime || 0,
+			jitterBufferDelay: video.jitterBufferDelay || 0,
+			jitterBufferEmittedCount: video.jitterBufferEmittedCount || 0,
+			audioJitterBufferDelay: audio.jitterBufferDelay || 0,
+			audioJitterBufferEmittedCount: audio.jitterBufferEmittedCount || 0,
+			received: (video.packetsReceived || 0) + (audio.packetsReceived || 0),
+			lost: (video.packetsLost || 0) + (audio.packetsLost || 0),
+			micBytes: (stats.reports.outbound.audio || {}).bytesSent || 0,
+			webcamBytes: (stats.reports.outbound.video || {}).bytesSent || 0,
+		};
+		const opened = {
+			framesDropped: video.framesDropped || 0,
+			nack: video.nackCount || 0,
+			pli: video.pliCount || 0,
+			freezes: video.freezeCount || 0,
+		};
+		const last = statsBaseline;
+		statsBaseline = Object.assign({ opened: last ? last.opened : opened }, now);
+		askDecodeCapable(stats.video.codecName, stats.video.frameWidth, stats.video.frameHeight, stats.video.framesPerSecond);
+		streamStats.setClient(Object.assign({
+			codec: stats.video.codecName === 'NA' ? '' : stats.video.codecName,
+			resolution: stats.video.frameWidth > 0 ? `${stats.video.frameWidth}x${stats.video.frameHeight}` : '',
+			path: [stats.general.connectionType === 'NA' ? '' : stats.general.connectionType,
+				local.relayProtocol ? `${local.relayProtocol} relay` : (local.protocol || '')].filter(Boolean).join(' '),
+		}, webrtcDecoder({
+			implementation: video.decoderImplementation,
+			powerEfficient: video.powerEfficientDecoder,
+			capable: decodeCapable.efficient,
+		})));
+		if (!last) return;
+		const seconds = (now.at - last.at) / 1000;
+		const per = (total, count) => (count > 0 ? Math.round((1000 * total / count) * 100) / 100 : 0);
+		const share = (part, whole) => (whole > 0 ? Math.round((100 * part / whole) * 100) / 100 : 0);
+		const kbps = (bytes) => (seconds > 0 ? Math.round(bytes * 8 / 1000 / seconds) : 0);
+		const figures = {
+			fps: stats.video.framesPerSecond || 0,
+			mbps: Math.round(mbps * 100) / 100,
+			rtt_ms: Math.round(rtt * 10) / 10,
+			decode_ms: per(now.totalDecodeTime - last.totalDecodeTime, now.framesDecoded - last.framesDecoded),
+			jitter_buffer_ms: per(now.jitterBufferDelay - last.jitterBufferDelay, now.jitterBufferEmittedCount - last.jitterBufferEmittedCount),
+			audio_buffer_ms: per(now.audioJitterBufferDelay - last.audioJitterBufferDelay, now.audioJitterBufferEmittedCount - last.audioJitterBufferEmittedCount),
+			packet_loss_percent: share(now.lost - last.lost, (now.received - last.received) + (now.lost - last.lost)),
+			frames_dropped: opened.framesDropped - statsBaseline.opened.framesDropped,
+			nacks: opened.nack - statsBaseline.opened.nack,
+			keyframe_requests: opened.pli - statsBaseline.opened.pli,
+			freezes: opened.freezes - statsBaseline.opened.freezes,
+		};
+		const mic = stats.reports.outbound.audio;
+		if (mic && now.micBytes > last.micBytes) figures.mic = `Opus, ${kbps(now.micBytes - last.micBytes)} kbps`;
+		const webcam = stats.reports.outbound.video;
+		if (webcam && now.webcamBytes > last.webcamBytes) {
+			const limited = webcam.qualityLimitationReason && webcam.qualityLimitationReason !== 'none'
+				? `, limited by ${webcam.qualityLimitationReason}` : '';
+			figures.webcam = `${webcam.frameWidth || 0}x${webcam.frameHeight || 0} at ${Math.round(webcam.framesPerSecond || 0)} fps, `
+				+ `${kbps(now.webcamBytes - last.webcamBytes)} kbps${limited}`;
+		}
+		streamStats.clientSample(figures);
+	}
+
 	function enableStatWatch() {
 		if (isSharedMode) {
 			console.log("Shared mode detected, skipping stats watch setup.");
@@ -2202,10 +2318,10 @@ export default function webrtc() {
 				connectionStat.connectionLatency =  Math.max(connectionStat.connectionVideoLatency, connectionStat.connectionAudioLatency);
 
 				window.fps = connectionStat.connectionFrameRate;
-				window.network_stats = {
-					"bandwidth_mbps": (parseFloat(connectionStat.connectionVideoBitrate) || 0) + (parseFloat(connectionStat.connectionAudioBitrate) || 0) / 1000,
-					"latency_ms": connectionStat.connectionLatency,
-				};
+				if (streamStats.open) {
+					sampleStreamStats(stats, rtt, (parseFloat(connectionStat.connectionVideoBitrate) || 0)
+						+ (parseFloat(connectionStat.connectionAudioBitrate) || 0) / 1000);
+				}
 				if (enableWebrtcStatics) webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
 			} catch (e) {
 				if (webrtc !== null) console.warn("Error collecting connection stats:", e);
@@ -2773,9 +2889,8 @@ export default function webrtc() {
 				webrtc.ondebug = (message) => { pushCapped(debugEntries, applyTimestamp("[webrtc] " + message)) };
 			}
 
-			webrtc.ongpustats = (stats) => {
-				window.gpu_stats = stats;
-			}
+			webrtc.onstreaminfo = (info) => streamStats.setInfo(info);
+			webrtc.onstreamstats = (stats) => streamStats.serverSample(stats);
 
 			/**
 			 * Once the server tears the pipeline down only a fresh SDP exchange
@@ -2821,6 +2936,7 @@ export default function webrtc() {
 			 */
 			webrtc.ondatachannelopen = () => {
 				console.log("Data channel opened");
+				streamStats.subscribe();
 				try {
 					taggedClipboardFetch.armLegacyWindow(5000);
 					webrtc.sendDataChannelMessage('cr');
@@ -3094,10 +3210,6 @@ export default function webrtc() {
 
 			webrtc.onlatencymeasurement = (latency_ms) => {
 				serverLatency = latency_ms * 2.0;
-			}
-
-			webrtc.onsystemstats = (stats) => {
-				window.system_stats = stats;
 			}
 
 			/**
@@ -3384,6 +3496,8 @@ export default function webrtc() {
 			videoConnected = "";
 			audioConnected = "";
 			statWatchEnabled = false;
+			streamStats.disconnected();
+			statsBaseline = null;
 			if (statsLoopId !== null) { clearInterval(statsLoopId); statsLoopId = null; }
 			if (metricsLoopId !== null) { clearInterval(metricsLoopId); metricsLoopId = null; }
 			clearResumeWatchdog();

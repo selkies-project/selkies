@@ -66,6 +66,7 @@ except (ImportError, RuntimeError):
 
 from .settings import settings as app_settings, inflate_gz_bounded, pipeline_starts_on, software_encoders, software_video_path
 from . import audit
+from . import stream_stats
 from .ice import TcpMux, UdpMux
 from .ice.ice import get_host_addresses
 from .webcam import CODEC_BY_NAME, get_shared_webcam, webcam_locked_off, webcam_uplink_allowed
@@ -787,13 +788,43 @@ class RTCApp:
         self.__send_data_channel_message(
             "cursor", data)
 
-    def send_gpu_stats(self, load: float, memory_total: int, memory_used: int) -> None:
-        """Broadcast GPU stats (load fraction, memory in bytes) to all peers."""
-        self.__send_data_channel_message("gpu_stats", {
-            "gpu_percent": load * 100,
-            "mem_total": memory_total,
-            "mem_used": memory_used,
-        })
+    def _controller_channels(self, display_id: Optional[str] = None,
+                             subscribed: bool = False) -> Iterator[Tuple[str, RTCDataChannel]]:
+        """Yield `(display id, open data channel)` of each connected controller,
+        narrowed to one display and to the peers whose page has its stats open
+        (`stream_stats` module docstring). A viewer is never among them."""
+        for peer_obj in self.peer_connections.values():
+            if peer_obj.get("client_type") != ClientType.CONTROLLER:
+                continue
+            did = peer_obj.get("display_id") or "primary"
+            if display_id is not None and did != display_id:
+                continue
+            if subscribed and not peer_obj.get("stats"):
+                continue
+            peer_conn = peer_obj.get("peer_conn")
+            channel = peer_obj.get("data_channel")
+            if (peer_conn is not None and channel is not None
+                    and peer_conn.connectionState == "connected"
+                    and channel.readyState == "open"):
+                yield did, channel
+
+    def stats_displays(self) -> List[str]:
+        """The displays a connected controller has its stats open on."""
+        return sorted({did for did, _ in self._controller_channels(subscribed=True)})
+
+    def send_stream_info(self, display_id: str, info: Dict[str, Any],
+                         channel: Optional[RTCDataChannel] = None) -> None:
+        """Tell a display's controllers, or the one on `channel`, what its capture
+        streams and how."""
+        channels = [channel] if channel is not None else [
+            ch for _, ch in self._controller_channels(display_id)]
+        for ch in channels:
+            self.send_message_to_channel(ch, "stream_info", info)
+
+    def send_stream_stats(self, display_id: str, stats: Dict[str, Any]) -> None:
+        """Send one second's figures to the display's controllers watching them."""
+        for _, channel in self._controller_channels(display_id, subscribed=True):
+            self.send_message_to_channel(channel, "stream_stats", stats)
 
     def send_system_action(self, action: str, peer_id: Optional[str] = None) -> None:
         """Send a system action (e.g. ``command_error,<text>``) to clients.
@@ -914,31 +945,24 @@ class RTCApp:
             logger.debug("skipping remote resolution because no data channel is ready")
 
     def send_ping(self, t: float) -> None:
-        """Send a ping request to the PRIMARY controller only.
+        """Send a ping request to the PRIMARY controller only, while its page
+        has its stats open.
 
         Latency is measured against one shared ping_start, and the websockets
         transport likewise derives its reported latency from the primary
         client.
         """
         state, data_channel = self.get_data_channel()
-        if not state:
+        if not state or not (self.get_controller_instance() or {}).get("stats"):
             return
         self.send_message_to_channel(
             data_channel, "ping", {"start_time": float("%.3f" % t)})
 
     def send_latency_time(self, latency: float) -> None:
-        """Broadcast the measured latency response time in milliseconds."""
-        self.__send_data_channel_message(
-            "latency_measurement", {"latency_ms": latency})
-
-    def send_system_stats(self, cpu_percent: float, mem_total: int, mem_used: int) -> None:
-        """Broadcast CPU and memory stats to all peers."""
-        self.__send_data_channel_message(
-            "system_stats", {
-                "cpu_percent": cpu_percent,
-                "mem_total": mem_total,
-                "mem_used": mem_used,
-            })
+        """Send the measured latency in milliseconds to the controllers watching
+        their stats."""
+        for _, channel in self._controller_channels(subscribed=True):
+            self.send_message_to_channel(channel, "latency_measurement", {"latency_ms": latency})
 
     def get_data_channel(self) -> Tuple[bool, Optional[RTCDataChannel]]:
         """Return the controller's data channel and whether it is usable.
@@ -1845,7 +1869,9 @@ class RTCApp:
         In order: a gzip'd payload is inflated with a bound (the channel's
         negotiated max-message-size caps only the compressed size, websockets
         0x05 parity); the `_gz,1` handshake marks this channel for gzip'd
-        sends and is echoed; a viewer's SETTINGS snapshot is connection sync
+        sends and is echoed; a controller's `_stats` verb says whether its page
+        has its stats open (`stream_stats` module docstring) and a viewer's is
+        dropped; a viewer's SETTINGS snapshot is connection sync
         only, never applied (the websockets transport likewise ignores viewer
         payloads); a viewer may send only the allow-listed messages, and a
         read-write collaborator (mk token plus enable_collab) additionally the
@@ -1881,6 +1907,12 @@ class RTCApp:
                     channel.send("_gz,1")
                 except Exception as e:
                     logger.warning("Failed to ack compression handshake: %s", e)
+            return
+        stats_wanted = stream_stats.stats_request(msg) if isinstance(msg, str) else None
+        if stats_wanted is not None:
+            peer_obj = self.peer_connections.get(peer_id)
+            if peer_obj is not None and client_type == ClientType.CONTROLLER:
+                peer_obj["stats"] = stats_wanted
             return
         if msg in ("STOP_AUDIO", "START_AUDIO"):
             # Per peer, so ahead of the viewer gate: the websockets verb is

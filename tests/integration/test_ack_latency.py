@@ -51,10 +51,10 @@ async def _read_until(ws, deadline: float, state: dict) -> None:
                 if fid != state.get("id"):
                     state["id"] = fid
                     state["id_at"] = time.monotonic()
-        elif isinstance(m, str) and "latency_ms" in m:
+        elif isinstance(m, str) and '"stream_stats"' in m:
             try:
-                v = json.loads(m).get("latency_ms")
-            except ValueError:
+                v = json.loads(m)["stats"].get("rtt_ms")
+            except (ValueError, KeyError):
                 v = None
             if v is not None:
                 state["latency"] = v
@@ -89,6 +89,8 @@ async def drive(res: "H.Results") -> None:
     async with websockets.connect(uri, max_size=None) as ws:
         await asyncio.wait_for(ws.recv(), timeout=10)
         await ws.send("SETTINGS," + json.dumps(SETTINGS))
+        # The round trip is reported only to a page with its stats open.
+        await ws.send("_stats,1")
         state = {}
         # Prompt acks first, so the window starts on real round trips.
         end = time.monotonic() + 10
