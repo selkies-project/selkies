@@ -191,11 +191,11 @@ AUDIO_BITRATE_DEFAULT = int(float(settings.audio_bitrate))
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "h265enc", "vp8enc", "vp9enc", "av1enc"]
 
 logger_selkies_gamepad = logging.getLogger("gamepad")
-logger_app = logging.getLogger("websockets")
+logger_app = logging.getLogger("ws")
 logger_app_resize = logging.getLogger("display")
 logger_input_handler = logging.getLogger("input")
-logger = logging.getLogger("websockets")
-data_logger = logging.getLogger("websockets")
+logger = logging.getLogger("ws")
+data_logger = logging.getLogger("ws")
 
 X11_CAPTURE_AVAILABLE = False
 PCMFLUX_AVAILABLE = False

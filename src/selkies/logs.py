@@ -5,7 +5,7 @@
 """The one place the server's logging is configured.
 
 Every Selkies module logs through a short logger name that says which part
-of the server spoke (`main`, `server`, `websockets`, `webrtc`, `signaling`,
+of the server spoke (`main`, `server`, `ws`, `webrtc`, `signaling`,
 `display`, `input`, `gamepad`, `audio`, `printing`, `webcam`, `stats`,
 `audit`), rendered as `LEVEL:name:message` like pixelflux's own bracketed
 `[X11]`/`[Wayland]` lines beside them. INFO is the story of a session as
@@ -76,6 +76,8 @@ def configure_logging(debug: bool) -> None:
         debug: Open DEBUG on every Selkies logger; INFO otherwise.
     """
     logging.basicConfig(level=logging.DEBUG if debug else logging.INFO, force=True)
+    # `websockets` here is the library, not this package's transport, whose logger is
+    # `ws` for exactly that reason: one name cannot be both silenced and read.
     for name in ("websockets", "aiohttp", "PIL", "pulsectl_asyncio"):
         logging.getLogger(name).setLevel(logging.WARNING)
     if not debug:

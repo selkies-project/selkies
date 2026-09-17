@@ -56,7 +56,7 @@ startup line saying what the server came up as (`__main__._startup_summary`), wh
 and what its display streams as, the capture and encoder path each display took, and every later change or
 failure. A step of the mechanism (a reconfiguration phase, a broadcast, a task starting, a message received,
 a value re-seeded) is DEBUG; something the operator has to act on is WARNING or ERROR. Every module logs
-through a short logger name that says which part of the server spoke (`main`, `server`, `websockets`,
+through a short logger name that says which part of the server spoke (`main`, `server`, `ws`,
 `webrtc`, `signaling`, `display`, `input`, `gamepad`, `audio`, and the module's own name elsewhere), the same
 tag in both transports and on both backends, and never the root logger. A line names its display and its
 client, states values as `1920x1080`, `60 fps`, `crf 25`, and says what was decided rather than which
