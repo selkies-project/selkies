@@ -23,7 +23,7 @@
     "lucide-react": "^1.45.0",
     "next": "16.3.5",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8",
+    "react-dom": "^19.3.0",
     "rehype-raw": "^7.0.0",
     "shiki": "^4.4.3"
   },
