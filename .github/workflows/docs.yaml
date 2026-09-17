@@ -41,10 +41,8 @@ jobs:
           # The build asks GitHub which release is the latest, authenticated so
           # the runner's shared address never trips the unauthenticated limit
           GITHUB_TOKEN: ${{ github.token }}
-        # Lockfiles are gitignored in this repository, so `npm ci` has nothing
-        # to install from
         run: |
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           npm run build:versions
 
       - name: Check every link and anchor in the built site

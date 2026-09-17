@@ -55,11 +55,10 @@ come in.
 | `pylibsrtp` | BSD-3-Clause | permissive | SRTP | bundles libsrtp2 (BSD-3-Clause) |
 | `google-crc32c` | Apache-2.0 | permissive | SCTP checksums | bundles crc32c (BSD-3-Clause) |
 | `dnspython` | ISC | permissive | mDNS ICE candidates | |
-| `ifaddr` | MIT | permissive | interface enumeration for ICE | |
 | `pyee` | MIT | permissive | event emitter of the WebRTC stack | `typing_extensions` (PSF-2.0) |
 | `uvloop` | MIT OR Apache-2.0 | permissive | event loop (Linux, macOS) | bundles libuv (MIT) |
 | `msgpack` | Apache-2.0 | permissive | control-channel encoding | |
-| `psutil` | BSD-3-Clause | permissive | system and process statistics | |
+| `psutil` | BSD-3-Clause | permissive | system and process statistics, interface enumeration for ICE | |
 | `watchdog` | Apache-2.0 | permissive | file-change notifications | |
 | `Pillow` | MIT-CMU (HPND) | permissive | clipboard images, cursors, icons | bundles libjpeg-turbo (IJG/BSD-3-Clause/Zlib), libpng, libtiff, libwebp, openjpeg, libavif, freetype (FTL or GPL-2.0-or-later, dual), harfbuzz, lcms2, brotli, zstd (BSD-3-Clause or GPL-2.0, dual), xz, xcb: all usable under permissive terms |
 | `prometheus_client` | Apache-2.0 AND BSD-2-Clause | permissive | metrics endpoint | |
@@ -88,9 +87,9 @@ client; development dependencies only run at build time and ship nothing).
 
 | Addon | Runtime dependencies shipped in the build | Licenses | Build-only dependencies |
 | --- | --- | --- | --- |
-| `addons/selkies-web-core` | none: the bundle is Selkies' own MPL-2.0 code; `gendb.js` converts the SDL_GameControllerDB `gamecontrollerdb.txt` (Zlib) into the `jsdb/` mapping files at build time | MPL-2.0 (Selkies), Zlib (mappings) | vite, vite-plugin-minify, vite-plugin-env-compatible (declared under `dependencies`, used by the build only) and 47 transitive packages: MIT, BSD-2-Clause, ISC, Apache-2.0, CC0-1.0 (mdn-data), BlueOak-1.0.0 (sax), MPL-2.0 (lightningcss); no copyleft beyond MPL |
-| `addons/selkies-dashboard` | react, react-dom (MIT), js-yaml (MIT) with argparse (Python-2.0); `universalTouchGamepad.js` (MPL-2.0); the core above | MIT, Python-2.0, MPL-2.0 | 159 packages: MIT, BSD-2-Clause, Apache-2.0, ISC, BSD-3-Clause, MPL-2.0, CC0-1.0, BlueOak-1.0.0, Python-2.0, CC-BY-4.0 (caniuse-lite data) |
-| `addons/selkies-dashboard-wish` | react, react-dom, radix-ui and the `@radix-ui/*` primitives, framer-motion, recharts (with d3, ISC), lucide-react (ISC), sonner, next-themes, tailwind-merge, clsx (MIT), class-variance-authority (Apache-2.0), js-yaml (MIT) with argparse (Python-2.0), `@fontsource-variable/inter` (SIL OFL-1.1, the Inter font files are bundled into the build), tw-animate-css (MIT); `universalTouchGamepad.js` (MPL-2.0); the core above | MIT, ISC, Apache-2.0, BSD-3-Clause, BSD-2-Clause, 0BSD, OFL-1.1, Python-2.0, MPL-2.0 | 390 packages (vite, typescript, eslint, tailwindcss with lightningcss under MPL-2.0, shadcn, ...): MIT, ISC, Apache-2.0, BSD, 0BSD, BlueOak-1.0.0, CC0-1.0, CC-BY-4.0; no copyleft beyond MPL |
+| `addons/selkies-web-core` | none: the bundle is Selkies' own MPL-2.0 code; `gendb.js` converts the SDL_GameControllerDB `gamecontrollerdb.txt` (Zlib) into the `jsdb/` mapping files at build time | MPL-2.0 (Selkies), Zlib (mappings) | vite, vite-plugin-minify (declared under `dependencies`, used by the build only) and 45 transitive packages: MIT, BSD-2-Clause, BSD-3-Clause, ISC, Apache-2.0, CC0-1.0 (mdn-data), BlueOak-1.0.0 (sax), MPL-2.0 (lightningcss); no copyleft beyond MPL |
+| `addons/selkies-dashboard` | react, react-dom (MIT), js-yaml (MIT) with argparse (Python-2.0); `universalTouchGamepad.js` (MPL-2.0); the core above | MIT, Python-2.0, MPL-2.0 | 167 packages: MIT, BSD-2-Clause, Apache-2.0, ISC, BSD-3-Clause, MPL-2.0, CC0-1.0, BlueOak-1.0.0, Python-2.0, CC-BY-4.0 (caniuse-lite data) |
+| `addons/selkies-dashboard-wish` | react, react-dom, radix-ui and the `@radix-ui/*` primitives, framer-motion, recharts (with d3, ISC), lucide-react (ISC), sonner, next-themes, tailwind-merge, clsx (MIT), class-variance-authority (Apache-2.0), js-yaml (MIT) with argparse (Python-2.0), `@fontsource-variable/inter` (SIL OFL-1.1, the Inter font files are bundled into the build), tw-animate-css (MIT); `universalTouchGamepad.js` (MPL-2.0); the core above | MIT, ISC, Apache-2.0, BSD-3-Clause, BSD-2-Clause, 0BSD, OFL-1.1, Python-2.0, MPL-2.0 | 569 packages (vite, typescript, eslint, tailwindcss with lightningcss under MPL-2.0, shadcn, ...): MIT, ISC, Apache-2.0, BSD, 0BSD, BlueOak-1.0.0, CC0-1.0, CC-BY-4.0; no copyleft beyond MPL |
 
 `addons/selkies-web-core/package.json` declares `"license": "MPL-2.0"`, the
 license every file of the directory carries, and

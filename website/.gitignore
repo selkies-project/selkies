@@ -1,6 +1,5 @@
 # deps
 /node_modules
-package-lock.json
 
 # generated content
 .source
