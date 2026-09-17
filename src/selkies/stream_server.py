@@ -567,6 +567,36 @@ def _carry_destination_mode(staging: str, dest: str) -> None:
         logger.debug(f"Could not carry the mode of {dest} onto the staged upload: {e}")
 
 
+def _ipv6_loopback_redirect(request: web.Request) -> Optional[str]:
+    """Where to serve a page that arrived on the IPv6 loopback from, or ``None``.
+
+    A browser gathers no ICE host candidates for a page whose origin is ``::1``,
+    so a WebRTC session opened from one never nominates a pair and the stream
+    never starts. The IPv4 loopback reaches this same listener, so the page is
+    served from there instead. Which family ``localhost`` resolves to is the
+    browser's to choose -- Firefox picks ``::1`` since it took up Happy Eyeballs
+    v3 -- and the page cannot tell from script which one it got.
+
+    Only a browser that asked this host for itself is moved: the request has to
+    have arrived on ``::1`` and to name a loopback in ``Host``, with no proxy
+    header in front of it. A reverse proxy that forwards to ``[::1]`` carries the
+    site's own name and is left alone, since redirecting it would send the
+    browser to its own machine.
+    """
+    transport = request.transport
+    sock = transport.get_extra_info("socket") if transport else None
+    if sock is None or sock.family != socket.AF_INET6:
+        return None
+    sockname = transport.get_extra_info("sockname")
+    if not sockname or sockname[0] != "::1":
+        return None
+    if request.url.host not in ("localhost", "::1"):
+        return None
+    if any(h in request.headers for h in ("X-Forwarded-For", "X-Forwarded-Host", "Forwarded")):
+        return None
+    return str(request.url.with_host("127.0.0.1"))
+
+
 def _format_sockaddr(family: int, sockaddr: Any) -> str:
     """``host:port`` for a socket address, the host bracketed for IPv6."""
     host, port = sockaddr[0], sockaddr[1]
@@ -2861,7 +2891,10 @@ class CentralizedStreamServer:
 
         self.static_fs_path = await self._get_static_content_path()
         if self.static_fs_path:
-            async def index_handler(_: web.Request) -> web.FileResponse:
+            async def index_handler(request: web.Request) -> web.FileResponse:
+                moved = _ipv6_loopback_redirect(request)
+                if moved:
+                    raise web.HTTPFound(moved)
                 return web.FileResponse(os.path.join(self.static_fs_path, "index.html"))
 
             self.app.router.add_get(f"{api_prefix}/", index_handler)
