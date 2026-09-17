@@ -33,12 +33,12 @@
  * `clipboardUpdateFromUI`, `clipboardImageUpdate`, `requestFullscreen`,
  * `requestGamingMode`, `mode`, `setSynth`, `sidebarVisibilityChanged`, `TOUCH_GAMEPAD_SETUP`,
  * `TOUCH_GAMEPAD_VISIBILITY`, `touchinput:trackpad` and `touchinput:touch`,
- * plus whatever channel a conditional-settings spec propagates through. The
+ * plus whatever channel a conditional-settings spec propagates through; the
+ * stats section (`StreamStats.jsx`) posts `statsOpen` and reads its own. The
  * soft keys dispatch synthetic `KeyboardEvent`s on `window`, and the files
  * section dispatches the `requestFileUpload` DOM event.
  *
- * `window` state it reads: `system_stats`, `gpu_stats`, `fps`,
- * `network_stats`, `webrtcInput.gamingMode`,
+ * `window` state it reads: `webrtcInput.gamingMode`,
  * `__SELKIES_STREAMING_MODE__` and `__SELKIES_DUAL_MODE__`; it sets
  * `__selkiesModeSwitching` around a transport switch.
  *
@@ -59,6 +59,7 @@ import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import PlayerGamepadButton from "./PlayerGamepadButton.jsx";
+import StreamStats from "./StreamStats.jsx";
 import { getTranslator } from "../translations";
 import {
   APP_COMMAND_STATE_EVENT,
@@ -156,7 +157,6 @@ const BROWSER_LANG_TAG =
     (navigator.language || navigator.userLanguage)) || "en";
 const BROWSER_PRIMARY_LANG = BROWSER_LANG_TAG.split("-")[0].toLowerCase();
 
-const STATS_READ_INTERVAL_MS = 500;
 const DEFAULT_FRAMERATE = 60;
 const DEFAULT_JPEG_QUALITY = 40;
 const DEFAULT_PAINT_OVER_JPEG_QUALITY = 90;
@@ -205,43 +205,6 @@ const SUB_MBPS_BITRATE_STEPS = [100, 250, 500, 750];
  */
 const COARSE_MBPS_BITRATE_STEPS = [150000, 200000, 300000, 400000, 500000, 750000, 1000000];
 
-
-/**
- * Formats a byte count with a binary unit.
- * @param {number|null|undefined} bytes Byte count; empty or zero yields the zero label.
- * @param {number} [decimals=2] Fraction digits, clamped at zero.
- * @param {object} [rawDict] Translation table supplying `zeroBytes` and `byteUnits`.
- * @returns {string}
- */
-function formatBytes(bytes, decimals = 2, rawDict) {
-  const zeroBytesText = rawDict?.zeroBytes || "0 Bytes";
-  if (bytes === null || bytes === undefined || bytes === 0)
-    return zeroBytesText;
-  const k = 1024;
-  const dm = decimals < 0 ? 0 : decimals;
-  const sizes = rawDict?.byteUnits || [
-    "Bytes",
-    "KB",
-    "MB",
-    "GB",
-    "TB",
-    "PB",
-    "EB",
-    "ZB",
-    "YB",
-  ];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  const unitIndex = Math.min(i, sizes.length - 1);
-  return (
-    parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + " " + sizes[unitIndex]
-  );
-}
-
-/** Stroke dash offset that fills a gauge ring to `percentage` (clamped to 0 to 100). */
-const calculateGaugeOffset = (percentage, radius, circumference) => {
-  const clampedPercentage = Math.max(0, Math.min(100, percentage || 0));
-  return circumference * (1 - clampedPercentage / 100);
-};
 
 /** Parses a dimension and rounds it down to an even number; non-numbers become 0. */
 const roundDownToEven = (num) => {
@@ -1411,19 +1374,6 @@ function Sidebar() {
   const [printAuto, setPrintAuto] = useState(() => storedBool("print_auto", true));
   const [printJobs, setPrintJobs] = useState([]);
   const [presetValue, setPresetValue] = useState("");
-  const [clientFps, setClientFps] = useState(0);
-  const [bandwidthMbps, setBandwidthMbps] = useState(0);
-  const [latencyMs, setLatencyMs] = useState(0);
-  const [cpuPercent, setCpuPercent] = useState(0);
-  const [gpuPercent, setGpuPercent] = useState(0);
-  const [sysMemPercent, setSysMemPercent] = useState(0);
-  const [gpuMemPercent, setGpuMemPercent] = useState(0);
-  const [sysMemUsed, setSysMemUsed] = useState(null);
-  const [sysMemTotal, setSysMemTotal] = useState(null);
-  const [gpuMemUsed, setGpuMemUsed] = useState(null);
-  const [gpuMemTotal, setGpuMemTotal] = useState(null);
-  const [hoveredItem, setHoveredItem] = useState(null);
-  const [tooltipPosition, setTooltipPosition] = useState({ x: 0, y: 0 });
   const [isVideoActive, setIsVideoActive] = useState(true);
   const [isAudioActive, setIsAudioActive] = useState(true);
   const [isMicrophoneActive, setIsMicrophoneActive] = useState(false);
@@ -2545,12 +2495,6 @@ function Sidebar() {
         console.error("Error switching stream mode:", error);
     }
   }
-  const handleMouseEnter = (e, itemKey) => {
-    setHoveredItem(itemKey);
-    setTooltipPosition({ x: e.clientX + 10, y: e.clientY + 10 });
-  };
-  const handleMouseLeave = () => setHoveredItem(null);
-
   /** Touch gamepad toggle: `TOUCH_GAMEPAD_SETUP` on first activation, `TOUCH_GAMEPAD_VISIBILITY` afterwards. */
   const handleToggleTouchGamepad = useCallback(() => {
     const newActiveState = !isTouchGamepadActive;
@@ -2597,62 +2541,6 @@ function Sidebar() {
     window.postMessage({ type: message }, window.location.origin);
   }, [isTrackpadModeActive]);
 
-  /** Tooltip text for a stats gauge. */
-  const getTooltipContent = useCallback(
-    (itemKey) => {
-      const memNA = t("sections.stats.tooltipMemoryNA");
-      switch (itemKey) {
-        case "cpu":
-          return t("sections.stats.tooltipCpu", {
-            value: cpuPercent.toFixed(1),
-          });
-        case "gpu":
-          return t("sections.stats.tooltipGpu", {
-            value: gpuPercent.toFixed(1),
-          });
-        case "sysmem": {
-          const fu =
-            sysMemUsed !== null ? formatBytes(sysMemUsed, 2, raw) : memNA;
-          const ft =
-            sysMemTotal !== null ? formatBytes(sysMemTotal, 2, raw) : memNA;
-          return fu !== memNA && ft !== memNA
-            ? t("sections.stats.tooltipSysMem", { used: fu, total: ft })
-            : `${t("sections.stats.sysMemLabel")}: ${memNA}`;
-        }
-        case "gpumem": {
-          const gu =
-            gpuMemUsed !== null ? formatBytes(gpuMemUsed, 2, raw) : memNA;
-          const gt =
-            gpuMemTotal !== null ? formatBytes(gpuMemTotal, 2, raw) : memNA;
-          return gu !== memNA && gt !== memNA
-            ? t("sections.stats.tooltipGpuMem", { used: gu, total: gt })
-            : `${t("sections.stats.gpuMemLabel")}: ${memNA}`;
-        }
-        case "fps":
-          return t("sections.stats.tooltipFps", { value: clientFps });
-        case "bandwidth":
-          return t("sections.stats.tooltipBandwidth", { value: bandwidthMbps.toFixed(2) }, `Bandwidth: ${bandwidthMbps.toFixed(2)} Mbps`);
-        case "latency":
-          return t("sections.stats.tooltipLatency", { value: latencyMs.toFixed(1) }, `Latency: ${latencyMs.toFixed(1)} ms`);
-        default:
-          return "";
-      }
-    },
-    [
-      t,
-      raw,
-      cpuPercent,
-      gpuPercent,
-      sysMemUsed,
-      sysMemTotal,
-      gpuMemUsed,
-      gpuMemTotal,
-      clientFps,
-      bandwidthMbps,
-      latencyMs,
-    ]
-  );
-
   const removeNotification = useCallback((id) => {
     setNotifications((prev) => prev.filter((n) => n.id !== id));
     if (notificationTimeouts.current[id]) {
@@ -2684,47 +2572,6 @@ function Sidebar() {
 
   const handleUploadClick = () =>
     window.dispatchEvent(new CustomEvent("requestFileUpload"));
-
-  /**
-   * Polls the core's `window` stats into the gauges. The stats only render
-   * inside the open sidebar, so the fifteen or so setState calls, each a full
-   * Sidebar re-render, are skipped while it is closed or the tab is hidden.
-   */
-  useEffect(() => {
-    const readStats = () => {
-      if (!isOpen || document.hidden) return;
-      const cs = window.system_stats,
-        su = cs?.mem_used ?? null,
-        st = cs?.mem_total ?? null;
-      setCpuPercent(cs?.cpu_percent ?? 0);
-      setSysMemUsed(su);
-      setSysMemTotal(st);
-      setSysMemPercent(
-        su !== null && st !== null && st > 0 ? (su / st) * 100 : 0
-      );
-      const cgs = window.gpu_stats,
-        gp = cgs?.gpu_percent ?? cgs?.utilization_gpu ?? 0;
-      setGpuPercent(gp);
-      const gu =
-        cgs?.mem_used ?? cgs?.memory_used ?? cgs?.used_gpu_memory_bytes ?? null;
-      const gt =
-        cgs?.mem_total ??
-        cgs?.memory_total ??
-        cgs?.total_gpu_memory_bytes ??
-        null;
-      setGpuMemUsed(gu);
-      setGpuMemTotal(gt);
-      setGpuMemPercent(
-        gu !== null && gt !== null && gt > 0 ? (gu / gt) * 100 : 0
-      );
-      setClientFps(window.fps ?? 0);
-      const netStats = window.network_stats;
-      setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
-      setLatencyMs(netStats?.latency_ms ?? 0);
-    };
-    const intervalId = setInterval(readStats, STATS_READ_INTERVAL_MS);
-    return () => clearInterval(intervalId);
-  }, [isOpen]);
 
   /** The core message listener; the module docblock lists the message types handled. */
   useEffect(() => {
@@ -2965,58 +2812,6 @@ function Sidebar() {
     isViewerRole,
   ]);
 
-  const gaugeSize = 80,
-    gaugeStrokeWidth = 8,
-    gaugeRadius = gaugeSize / 2 - gaugeStrokeWidth / 2;
-  const gaugeCircumference = 2 * Math.PI * gaugeRadius,
-    gaugeCenter = gaugeSize / 2;
-  const cpuOffset = calculateGaugeOffset(
-    cpuPercent,
-    gaugeRadius,
-    gaugeCircumference
-  );
-  const gpuOffset = calculateGaugeOffset(
-    gpuPercent,
-    gaugeRadius,
-    gaugeCircumference
-  );
-  const sysMemOffset = calculateGaugeOffset(
-    sysMemPercent,
-    gaugeRadius,
-    gaugeCircumference
-  );
-  const gpuMemOffset = calculateGaugeOffset(
-    gpuMemPercent,
-    gaugeRadius,
-    gaugeCircumference
-  );
-  const fpsPercent = Math.min(
-    100,
-    (clientFps / (framerate || DEFAULT_FRAMERATE)) * 100
-  );
-  const fpsOffset = calculateGaugeOffset(
-    fpsPercent,
-    gaugeRadius,
-    gaugeCircumference
-  );
-  /**
-   * Full scale of the bandwidth gauge: the traffic the session is configured
-   * for (video target in kbps plus audio in bps), not an arbitrary link speed.
-   */
-  const maxBandwidthMbps = Math.max(0.1, videoBitrate / 1000 + audioBitrate / 1_000_000);
-  const MAX_LATENCY_MS = 1000;
-  const bandwidthPercent = Math.min(100, (bandwidthMbps / maxBandwidthMbps) * 100);
-  const bandwidthOffset = calculateGaugeOffset(
-    bandwidthPercent,
-    gaugeRadius,
-    gaugeCircumference
-  );
-  const latencyPercent = Math.min(100, (latencyMs / MAX_LATENCY_MS) * 100);
-  const latencyOffset = calculateGaugeOffset(
-    latencyPercent,
-    gaugeRadius,
-    gaugeCircumference
-  );
   const translatedCommonResolutions = commonResolutionValues.map(
     (value, index) => ({
       value: value,
@@ -4009,351 +3804,7 @@ function Sidebar() {
                 </div>
                 {sectionsOpen.stats && (
                   <div className="sidebar-section-content" id="stats-content">
-                    <div className="stats-gauges">
-                      <div
-                        className="gauge-container"
-                        onMouseEnter={(e) => handleMouseEnter(e, "cpu")}
-                        onMouseLeave={handleMouseLeave}
-                      >
-                        <svg
-                          width={gaugeSize}
-                          height={gaugeSize}
-                          viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                        >
-                          <circle
-                            stroke="var(--item-border)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter} />
-                          <circle
-                            stroke="var(--sidebar-header-color)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter}
-                            transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                            style={{
-                              strokeDasharray: gaugeCircumference,
-                              strokeDashoffset: cpuOffset,
-                              transition: "stroke-dashoffset 0.3s ease-in-out",
-                              strokeLinecap: "round",
-                            }} />
-                          <text
-                            x={gaugeCenter}
-                            y={gaugeCenter}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            fontSize={`${gaugeSize / 5}px`}
-                            fill="var(--sidebar-text)"
-                            fontWeight="bold"
-                          >
-                            {Math.round(
-                              Math.max(0, Math.min(100, cpuPercent || 0))
-                            )}%
-                          </text>
-                        </svg>
-                        <div className="gauge-label">
-                          {t("sections.stats.cpuLabel")}
-                        </div>
-                      </div>
-                      <div
-                        className="gauge-container"
-                        onMouseEnter={(e) => handleMouseEnter(e, "sysmem")}
-                        onMouseLeave={handleMouseLeave}
-                      >
-                        <svg
-                          width={gaugeSize}
-                          height={gaugeSize}
-                          viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                        >
-                          <circle
-                            stroke="var(--item-border)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter} />
-                          <circle
-                            stroke="var(--sidebar-header-color)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter}
-                            transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                            style={{
-                              strokeDasharray: gaugeCircumference,
-                              strokeDashoffset: sysMemOffset,
-                              transition: "stroke-dashoffset 0.3s ease-in-out",
-                              strokeLinecap: "round",
-                            }} />
-                          <text
-                            x={gaugeCenter}
-                            y={gaugeCenter}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            fontSize={`${gaugeSize / 5}px`}
-                            fill="var(--sidebar-text)"
-                            fontWeight="bold"
-                          >
-                            {Math.round(
-                              Math.max(0, Math.min(100, sysMemPercent || 0))
-                            )}
-                            %
-                          </text>
-                        </svg>
-                        <div className="gauge-label">
-                          {t("sections.stats.sysMemLabel")}
-                        </div>
-                      </div>
-                      {window.gpu_stats && (
-                        <>
-                          <div
-                            className="gauge-container"
-                            onMouseEnter={(e) => handleMouseEnter(e, "gpu")}
-                            onMouseLeave={handleMouseLeave}
-                          >
-                            <svg
-                              width={gaugeSize}
-                              height={gaugeSize}
-                              viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                            >
-                              <circle
-                                stroke="var(--item-border)"
-                                fill="transparent"
-                                strokeWidth={gaugeStrokeWidth}
-                                r={gaugeRadius}
-                                cx={gaugeCenter}
-                                cy={gaugeCenter} />
-                              <circle
-                                stroke="var(--sidebar-header-color)"
-                                fill="transparent"
-                                strokeWidth={gaugeStrokeWidth}
-                                r={gaugeRadius}
-                                cx={gaugeCenter}
-                                cy={gaugeCenter}
-                                transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                                style={{
-                                  strokeDasharray: gaugeCircumference,
-                                  strokeDashoffset: gpuOffset,
-                                  transition: "stroke-dashoffset 0.3s ease-in-out",
-                                  strokeLinecap: "round",
-                                }} />
-                              <text
-                                x={gaugeCenter}
-                                y={gaugeCenter}
-                                textAnchor="middle"
-                                dominantBaseline="central"
-                                fontSize={`${gaugeSize / 5}px`}
-                                fill="var(--sidebar-text)"
-                                fontWeight="bold"
-                              >
-                                {Math.round(
-                                  Math.max(0, Math.min(100, gpuPercent || 0))
-                                )}%
-                              </text>
-                            </svg>
-                            <div className="gauge-label">
-                              {t("sections.stats.gpuLabel")}
-                            </div>
-                          </div>
-                          <div
-                            className="gauge-container"
-                            onMouseEnter={(e) => handleMouseEnter(e, "gpumem")}
-                            onMouseLeave={handleMouseLeave}
-                          >
-                            <svg
-                              width={gaugeSize}
-                              height={gaugeSize}
-                              viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                            >
-                              <circle
-                                stroke="var(--item-border)"
-                                fill="transparent"
-                                strokeWidth={gaugeStrokeWidth}
-                                r={gaugeRadius}
-                                cx={gaugeCenter}
-                                cy={gaugeCenter} />
-                              <circle
-                                stroke="var(--sidebar-header-color)"
-                                fill="transparent"
-                                strokeWidth={gaugeStrokeWidth}
-                                r={gaugeRadius}
-                                cx={gaugeCenter}
-                                cy={gaugeCenter}
-                                transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                                style={{
-                                  strokeDasharray: gaugeCircumference,
-                                  strokeDashoffset: gpuMemOffset,
-                                  transition: "stroke-dashoffset 0.3s ease-in-out",
-                                  strokeLinecap: "round",
-                                }} />
-                              <text
-                                x={gaugeCenter}
-                                y={gaugeCenter}
-                                textAnchor="middle"
-                                dominantBaseline="central"
-                                fontSize={`${gaugeSize / 5}px`}
-                                fill="var(--sidebar-text)"
-                                fontWeight="bold"
-                              >
-                                {Math.round(
-                                  Math.max(0, Math.min(100, gpuMemPercent || 0))
-                                )}
-                                %
-                              </text>
-                            </svg>
-                            <div className="gauge-label">
-                              {t("sections.stats.gpuMemLabel")}
-                            </div>
-                          </div>
-                        </>
-                      )}
-                      <div
-                        className="gauge-container"
-                        onMouseEnter={(e) => handleMouseEnter(e, "fps")}
-                        onMouseLeave={handleMouseLeave}
-                      >
-                        <svg
-                          width={gaugeSize}
-                          height={gaugeSize}
-                          viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                        >
-                          <circle
-                            stroke="var(--item-border)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter} />
-                          <circle
-                            stroke="var(--sidebar-header-color)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter}
-                            transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                            style={{
-                              strokeDasharray: gaugeCircumference,
-                              strokeDashoffset: fpsOffset,
-                              transition: "stroke-dashoffset 0.3s ease-in-out",
-                              strokeLinecap: "round",
-                            }} />
-                          <text
-                            x={gaugeCenter}
-                            y={gaugeCenter}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            fontSize={`${gaugeSize / 5}px`}
-                            fill="var(--sidebar-text)"
-                            fontWeight="bold"
-                          >
-                            {clientFps}
-                          </text>
-                        </svg>
-                        <div className="gauge-label">
-                          {t("sections.stats.fpsLabel")}
-                        </div>
-                      </div>
-                      <div
-                        className="gauge-container"
-                        onMouseEnter={(e) => handleMouseEnter(e, "bandwidth")}
-                        onMouseLeave={handleMouseLeave}
-                      >
-                        <svg
-                          width={gaugeSize}
-                          height={gaugeSize}
-                          viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                        >
-                          <circle
-                            stroke="var(--item-border)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter} />
-                          <circle
-                            stroke="var(--sidebar-header-color)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter}
-                            transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                            style={{
-                              strokeDasharray: gaugeCircumference,
-                              strokeDashoffset: bandwidthOffset,
-                              transition: "stroke-dashoffset 0.3s ease-in-out",
-                              strokeLinecap: "round",
-                            }} />
-                          <text
-                            x={gaugeCenter}
-                            y={gaugeCenter}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            fontSize={`${gaugeSize / 5}px`}
-                            fill="var(--sidebar-text)"
-                            fontWeight="bold"
-                          >
-                            {Math.round(bandwidthMbps)}
-                          </text>
-                        </svg>
-                        <div className="gauge-label">
-                          {t("sections.stats.bandwidthLabel", "Bandwidth")}
-                        </div>
-                      </div>
-                      <div
-                        className="gauge-container"
-                        onMouseEnter={(e) => handleMouseEnter(e, "latency")}
-                        onMouseLeave={handleMouseLeave}
-                      >
-                        <svg
-                          width={gaugeSize}
-                          height={gaugeSize}
-                          viewBox={`0 0 ${gaugeSize} ${gaugeSize}`}
-                        >
-                          <circle
-                            stroke="var(--item-border)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter} />
-                          <circle
-                            stroke="var(--sidebar-header-color)"
-                            fill="transparent"
-                            strokeWidth={gaugeStrokeWidth}
-                            r={gaugeRadius}
-                            cx={gaugeCenter}
-                            cy={gaugeCenter}
-                            transform={`rotate(-90 ${gaugeCenter} ${gaugeCenter})`}
-                            style={{
-                              strokeDasharray: gaugeCircumference,
-                              strokeDashoffset: latencyOffset,
-                              transition: "stroke-dashoffset 0.3s ease-in-out",
-                              strokeLinecap: "round",
-                            }} />
-                          <text
-                            x={gaugeCenter}
-                            y={gaugeCenter}
-                            textAnchor="middle"
-                            dominantBaseline="central"
-                            fontSize={`${gaugeSize / 5}px`}
-                            fill="var(--sidebar-text)"
-                            fontWeight="bold"
-                          >
-                            {Math.round(latencyMs)}
-                          </text>
-                        </svg>
-                        <div className="gauge-label">
-                          {t("sections.stats.latencyLabel", "Latency")}
-                        </div>
-                      </div>
-                    </div>
+                    <StreamStats t={t} active={isOpen && sectionsOpen.stats} framerate={framerate} />
                   </div>
                 )}
               </div>
@@ -4898,18 +4349,6 @@ function Sidebar() {
         )}
       </div>
 
-
-      {hoveredItem && (
-        <div
-          className="gauge-tooltip"
-          style={{
-            left: `${tooltipPosition.x}px`,
-            top: `${tooltipPosition.y}px`,
-          }}
-        >
-          {getTooltipContent(hoveredItem)}
-        </div>
-      )}
 
       <div className={`notification-container theme-${theme}`}>
         {notifications.map((n) => (

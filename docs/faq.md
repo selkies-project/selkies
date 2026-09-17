@@ -41,7 +41,7 @@ Moreover, always make sure that there are minimal background network processes, 
 
 Ensure the latency to your TURN server from the server and the client is ideally under 50-75 ms. If the latency is too high, your connection might be too laggy for most interactive 3D applications.
 
-Next, the client compiles statistics for the side panel only while it is open, so keep the panel closed when comparing latency or client CPU usage.
+Next, open the stats in the side panel and read its first four rows before anything else: they say whether the server encodes on a GPU, whether the capture reaches that encoder without a copy, whether this browser decodes in hardware, and what path the connection took, each with the reason where it fell short. [What the stats rows mean](#how-do-i-tell-whether-the-gpu-is-being-used) covers them. The figures and graphs below those rows are gathered and sent only while the stats are on screen, so keep them closed when comparing latency or client CPU usage.
 
 Also note that a higher framerate will improve performance if you have sufficient bandwidth. This is because one screen refresh from a 60 fps screen takes 16.67 ms at a time, while one screen refresh from a 15 fps screen inevitably takes 66.67 ms, and therefore inherently causes a visible lag. Also try to keep the total bitrate reasonable, keeping around your service level agreement (SLA) bandwidth (which might be different from your maximum bandwidth contract).
 
@@ -52,6 +52,22 @@ If it does not, disable all power saving or efficiency features available in the
 A client whose hardware video decoder accepts the stream and then fails on it — a driver-level fault that the browser reports only once decoding has started — is switched to software decoding instead of being reloaded onto a lower-quality encoder. That costs client CPU, so the choice is remembered only for the browser build it was made on and is re-probed after a browser update; clearing the site's browser storage also resets it.
 
 However, it might be that the parameters for the transport, the video encoder (`pixelflux`), or the audio encoder (`pcmflux`) are not optimized enough. If you find that it is the case, we always welcome [contributions](development.md). If your changes show noticeably better results in the same conditions, please make a [Pull Request](https://github.com/selkies-project/selkies/pulls), or tell us about the parameters in any channel that we can reach so that we could also test.
+
+</details>
+
+## How do I tell whether the GPU is being used?
+
+<details>
+  <summary>Open Answer</summary>
+
+Open the stats in the side panel (the monitoring overlay in the wish dashboard). Nothing in the container log is needed; the first four rows are what the capture library and the browser report about this session, and a row that fell short of what the session asked for carries a warning mark and the reason underneath.
+
+- **Encoder** names what encodes the stream: `NVENC` or `VAAPI` with the GPU, its render node and kernel driver, or a software library (`x264`, `openh264`, `libvpx`, ...). Software encoding that was selected (`--use-cpu`, the striped H.264 encoder, JPEG) is shown without a warning, and so is a server that is exposed no GPU at all (no `/dev/dri/renderD*` and no `/dev/nvidiactl`), which the row states: a container that was never given the machine's GPU is an ordinary deployment, and giving it one (`--gpus`, `--device /dev/dri`) is what changes the row. Software encoding on a server that does have a GPU, in a session that asked for hardware, warns and says why the hardware session did not open. The usual causes are a render node the session user cannot open, a missing NVIDIA `video` driver capability, or a codec the GPU has no engine for.
+- **Capture** names the display backend and whether frames reach a hardware encoder without a copy: NvFBC or DRI3 on X11, the compositor's own buffers on Wayland. A readback in front of a software encoder is simply how software encoding works and carries no warning. A readback in front of a hardware encoder warns and lists what each zero-copy path was declined for, for instance an X server that does not draw on the GPU. On Wayland the second line says whether the compositor renders with GL on a render node or in software.
+- **Decoder** says whether this browser decodes in hardware, and on what evidence. Browsers do not always say: over WebSockets the verdict comes from the frames the decoder hands out and from asking the browser whether a hardware decoder exists for the stream, over WebRTC from the decoder the browser names, which some browsers name only to a page holding a camera or microphone permission. `N/A` means the browser gave nothing to go on, not that decoding is slow; the decode time under the graphs is what shows a decoder falling behind.
+- **Connection** names the transport, and over WebRTC the path: `host udp` is direct, `relay` is a TURN server in the path, and `tcp` costs latency under loss. It warns while the server is holding frames back because this client is not keeping up.
+
+The copy button beside the rows puts all of it on the clipboard as text, which is what to paste into an issue.
 
 </details>
 

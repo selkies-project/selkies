@@ -53,9 +53,10 @@ import functools
 import logging
 import time
 from abc import ABCMeta, abstractmethod
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from .settings import RateControlMode, codec_for_encoder, encoder_for_codec, settings as app_settings
+from . import stream_stats
 from .audio_control import AudioControl
 from .display_utils import (
     FIRST_FRAME_WAIT_S,
@@ -83,6 +84,10 @@ logger = logging.getLogger("webrtc")
 # nibble (a keyframe is 0x01; every JPEG picture stands alone), the frame id,
 # the stripe geometry, and the id of the frame it predicts from.
 STRIPE_HEADER_LEN = 12
+
+
+async def _discard_stream_info(display_id: str, info: Dict[str, Any]) -> None:
+    """The `on_stream_info` of a pipeline nobody listens to."""
 
 
 class MediaPipelineError(Exception):
@@ -232,6 +237,10 @@ class MediaPipelinePixel(MediaPipeline):
         # A capture that could not build its codec's encoder streams H.264 instead;
         # told the encoder it now runs, once frames flow.
         self.on_encoder_demoted: Callable[[str], None] = lambda encoder: None
+        # What the capture streams and how, published on every change (`stream_stats`).
+        self.on_stream_info: Callable[[str, Dict[str, Any]], Awaitable[None]] = _discard_stream_info
+        self.stream_watch = stream_stats.StreamWatch(
+            self.display_id, lambda did, info: self.on_stream_info(did, info))
         self.on_cursor_data: Callable[[dict], None] = lambda data: None
         self.get_cursor_size_cap: Callable[[], int] = lambda: 0
 
@@ -632,6 +641,7 @@ class MediaPipelinePixel(MediaPipeline):
                 lambda: self._is_screen_capturing and self.capture_module is module and not self._framed
                 and logger.warning(no_first_frame(self.display_id, str(getattr(settings, 'codec', '?')))))
             self._schedule_active_codec_settle()
+            self.stream_watch.follow(module, self.encoder, bool(self.use_cpu))
         except Exception as e:
             logger.error(f"Failed to start screen capture: {e}", exc_info=True)
             self.capture_module = None
@@ -689,6 +699,7 @@ class MediaPipelinePixel(MediaPipeline):
         callback even on error."""
         if not self._is_screen_capturing or self.capture_module is None:
             return
+        self.stream_watch.stop()
         release_pixelflux_cursor_callback(self.capture_module)
         try:
             await asyncio.to_thread(self.capture_module.stop_capture)

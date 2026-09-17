@@ -85,6 +85,13 @@
   --chart-3: #2b6cb0;
   --chart-4: #12703e;
   --chart-5: #7d5b00;
+  /* The stats graphs' two series and the status marks: a pair validated for
+     this surface (lightness band, chroma floor, CVD and normal-vision
+     separation, 3:1 against the card); a status color pairs with an icon. */
+  --stat-series-1: #a82a69;
+  --stat-series-2: #5b4ba3;
+  --stat-good: #0a7d0a;
+  --stat-warn: #9a6400;
   --sidebar: #ffffff;
   --sidebar-foreground: #23272f;
   --sidebar-primary: #a82a69;
@@ -119,6 +126,10 @@
   --chart-3: #8ec5f0;
   --chart-4: #5bd98a;
   --chart-5: #facc15;
+  --stat-series-1: #ec4899;
+  --stat-series-2: #9085e9;
+  --stat-good: #0ca30c;
+  --stat-warn: #fab219;
   --sidebar: #181d26;
   --sidebar-foreground: #e6ebf3;
   --sidebar-primary: #f9a8d4;

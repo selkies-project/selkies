@@ -503,7 +503,7 @@
 
 /* Tracking breaks the joins in Arabic and pulls Han and Hangul apart, and those
    glyphs carry enough strokes that 13px reads a size smaller than Latin does. */
-:is(.sidebar h3, .dev-setting-item label, .gauge-label):is(
+:is(.sidebar h3, .dev-setting-item label, .stream-row-label, .stream-graph-label, .stream-meter-label):is(
     :lang(ar), :lang(hi), :lang(ja), :lang(ko), :lang(th), :lang(zh)) {
     letter-spacing: normal;
 }
@@ -664,65 +664,223 @@
      box-shadow: 0 0 0 4px var(--accent-soft);
 }
 
-/* --- Gauge Specific Styles --- */
-.stats-gauges {
-    display: flex;
-    justify-content: space-around;
-    margin-bottom: 0px;
-    flex-wrap: wrap;
-    color: var(--sidebar-text);
-    padding: 5px 0;
-}
-.sidebar-section-content .stats-gauges {
-    background-color: transparent;
-    padding: 5px 0 0 0;
-    margin-bottom: 0;
-}
-
-/* Individual gauge container (SVG + Label). */
-.gauge-container {
+/* --- Stream stats --- */
+/* The two series colors are a validated pair for each surface (dataviz
+   validator: lightness band, chroma floor, CVD and normal-vision separation,
+   3:1 against the section panel); status colors pair with an icon shape. */
+.stream-stats {
+    --stat-series-1: #ec4899;
+    --stat-series-2: #9085e9;
+    --stat-good: #0ca30c;
+    --stat-warn: #fab219;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    margin: 5px 5px;
-    min-width: 80px;
-    text-align: center;
-    cursor: help;
-}
-
-/* SVG text inside the gauge; tabular digits keep readouts steady. */
-.gauge-container svg text {
-   fill: var(--sidebar-text);
-   font-variant-numeric: tabular-nums;
-   pointer-events: none;
-}
-
-/* Label displayed below the gauge. */
-.gauge-label {
-    margin-top: 6px;
-    font-weight: 600;
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    gap: 10px;
+    position: relative;
     color: var(--text);
-    text-align: center;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+.theme-light .stream-stats {
+    --stat-series-1: #a82a69;
+    --stat-series-2: #5b4ba3;
+    --stat-good: #0a7d0a;
+    --stat-warn: #9a6400;
+}
+
+.stream-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-right: 26px;
+}
+.stream-row {
+    display: grid;
+    grid-template-columns: 14px 1fr;
+    gap: 6px;
+    align-items: start;
+}
+.stream-status-icon {
+    margin-top: 1px;
+    fill: var(--text-muted);
+}
+.stream-status-icon.good { fill: var(--stat-good); }
+.stream-status-icon.warn { fill: var(--stat-warn); }
+.stream-row-label {
+    margin-right: 6px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 11px;
+}
+.stream-row-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.stream-row-value { font-weight: 600; }
+.stream-row-detail { color: var(--text-muted); }
+.stream-row-reason {
+    margin-top: 2px;
+    padding-left: 6px;
+    border-left: 2px solid var(--stat-warn);
+    color: var(--text-muted);
+}
+.stream-copy {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+    padding: 4px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+.stream-copy:hover,
+.stream-copy:focus-visible {
+    color: var(--accent-text);
+    border-color: var(--accent-border);
+    outline: none;
+}
+.stream-copy.done { color: var(--stat-good); }
+
+.stream-graph { position: relative; }
+.stream-graph-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 2px;
+}
+.stream-graph-label {
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 11px;
+}
+.stream-graph-values {
+    display: flex;
+    gap: 10px;
+    color: var(--text-muted);
+}
+.stream-graph-value b {
+    color: var(--text);
+    font-size: 14px;
+}
+.stream-key {
+    display: inline-block;
+    width: 10px;
+    height: 2px;
+    margin-right: 4px;
+    vertical-align: middle;
+    border-radius: 1px;
+}
+.stream-key.series-1 { background: var(--stat-series-1); }
+.stream-key.series-2 { background: var(--stat-series-2); }
+.stream-graph-plot {
+    display: block;
+    width: 100%;
+    height: 44px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-inset);
+    touch-action: pan-y;
+}
+.stream-graph-line {
+    fill: none;
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+}
+.stream-graph-line.series-1 { stroke: var(--stat-series-1); }
+.stream-graph-line.series-2 { stroke: var(--stat-series-2); }
+.stream-graph-area {
+    fill: var(--stat-series-1);
+    opacity: 0.12;
+}
+.stream-graph-grid,
+.stream-graph-cross {
+    stroke: var(--border-soft);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+}
+.stream-graph-cross { stroke: var(--text-muted); }
+.stream-graph-max {
+    position: absolute;
+    right: 4px;
+    bottom: 30px;
+    font-size: 10px;
+    color: var(--text-muted);
     pointer-events: none;
 }
 
-/* --- Tooltip Styles --- */
-.gauge-tooltip {
-    position: fixed;
-    padding: 7px 11px;
-    background-color: var(--tooltip-bg);
-    color: var(--tooltip-text);
-    border: 1px solid var(--tooltip-border);
-    border-radius: var(--radius);
-    font-size: 13px;
-    z-index: 1030;
-    pointer-events: none;
-    white-space: nowrap;
-    transform: translate(-50%, -100%);
-    box-shadow: 0 4px 16px var(--notification-shadow);
+.stream-tiles {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+}
+.stream-tile {
+    display: flex;
+    flex-direction: column;
+    padding: 5px 7px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius-sm);
+    background: var(--surface-inset);
+}
+.stream-tile b { font-size: 13px; }
+.stream-tile span {
+    color: var(--text-muted);
+    font-size: 10.5px;
+}
+
+.stream-meters {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+.stream-meter {
+    display: grid;
+    grid-template-columns: 78px 1fr 2.5rem;
+    gap: 8px;
+    align-items: center;
+}
+.stream-meter-label {
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 11px;
+}
+.stream-meter-track {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--surface-inset);
+    overflow: hidden;
+}
+.stream-meter-fill {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
+    transition: width 0.4s ease;
+}
+.stream-meter-text {
+    color: var(--text-muted);
+    text-align: right;
+}
+
+.stream-uplink {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: var(--text-muted);
+}
+.stream-uplink div {
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 
 /* --- Sidebar Toggle Handle --- */

@@ -50,9 +50,8 @@ import struct
 import time
 import secrets
 from collections import OrderedDict, deque
-from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 try:
     import fcntl
@@ -63,6 +62,7 @@ from aiohttp import web, WSMsgType, WSCloseCode
 
 from . import audio_config
 from . import resource_stats
+from . import stream_stats
 from .audio_control import AudioControl, ensure_capture_sink, opus_capture_settings
 from .display_utils import (
     FIRST_FRAME_WAIT_S,
@@ -705,7 +705,6 @@ class _VideoRelay:
                 except (ConnectionResetError, OSError, RuntimeError):
                     self.server.clients.discard(self.ws)
                     return
-                self.server._bytes_sent_in_interval += len(data)
         finally:
             group = self.server.video_relay_groups.get(self.display_id)
             if group is not None and group.get(self.ws) is self:
@@ -1010,11 +1009,14 @@ class DataStreamingServer(BaseStreamingService):
             was started with.
         _pcmflux_reported_failure: `(module id, reason)` of the failure already
             logged for the current audio run.
-        _resource_monitor: The one sampler of CPU, memory and GPU every
-            connection's stats sender reads (`resource_stats.ResourceMonitor`),
-            started with the first connection and stopped with the last.
-        _shared_network_stats: Instance-wide bandwidth/latency holder so every
-            connection reads one consistent value.
+        _resource_monitor: The one sampler of CPU, memory and GPU
+            (`resource_stats.ResourceMonitor`), started with the first
+            connection and stopped with the last; its tick sends `stream_stats`
+            and it samples only while `_stats_subscribers` is not empty.
+        _stats_subscribers: The controller sockets whose page has its stats
+            open (the `_stats` verb, `stream_stats` module docstring).
+        _stream_watches: Display id to the `stream_stats.StreamWatch` following
+            that display's capture.
         _last_keyframe_request: Display id to monotonic time of the last IDR
             request; `_last_keyframe_log` and `_keyframe_log_suppressed`
             throttle only the log line, never the request.
@@ -1090,8 +1092,9 @@ class DataStreamingServer(BaseStreamingService):
         self.video_bitrate = self._initial_video_bitrate
 
         self._resource_monitor: Optional[resource_stats.ResourceMonitor] = None
-        self._network_monitor_task_ws = None
-        self._shared_network_stats = {}
+        self._stats_subscribers: Set[web.WebSocketResponse] = set()
+        self._stats_sending: Set[web.WebSocketResponse] = set()
+        self._stream_watches: Dict[str, stream_stats.StreamWatch] = {}
         self.uinput_mouse_socket = UINPUT_MOUSE_SOCKET
         self.js_socket_path = settings.js_socket_path
         self.enable_clipboard = settings.enable_clipboard
@@ -1106,8 +1109,6 @@ class DataStreamingServer(BaseStreamingService):
         self._video_capture_lock = asyncio.Lock()
         self._is_reconfiguring = False
         self._reconfigure_pending = False
-        self._bytes_sent_in_interval = 0
-        self._last_bandwidth_calc_time = time.monotonic()
         self.last_start_video_request_times = {}
         self.last_viewer_keyframe_request_times = {}
         self.video_paused_clients = set()
@@ -1701,7 +1702,6 @@ class DataStreamingServer(BaseStreamingService):
 
                 # A zero-copy view over the AudioFrame, header included; sent as-is.
                 message_to_send = item['data']
-                self._bytes_sent_in_interval += len(message_to_send) * len(primary_viewers)
                 dropped = await _broadcast_to_clients(
                     primary_viewers, message_to_send,
                     per_client_timeout=SHARED_STREAM_SEND_TIMEOUT_SECONDS,
@@ -2096,15 +2096,68 @@ class DataStreamingServer(BaseStreamingService):
         return entry is not None and entry.get('ws') not in self.clients
 
     async def _stop_stats_collectors(self) -> None:
-        """Ends the stats collectors with the last client, nulling each ref so
-        a fast reconnect restarts them and never reads a dead one's figures."""
-        task, self._network_monitor_task_ws = self._network_monitor_task_ws, None
-        if task and not task.done():
-            task.cancel()
+        """Ends the resource monitor with the last client, nulling the ref so
+        a fast reconnect restarts it and never reads a dead one's figures."""
         monitor, self._resource_monitor = self._resource_monitor, None
         if monitor is not None:
             await monitor.stop()
-        self._shared_network_stats.clear()
+
+    def _controller_socket(self, display_id: str) -> Optional[web.WebSocketResponse]:
+        """The live socket registered for a display, unless a viewer holds it."""
+        ws = (self.display_clients.get(display_id) or {}).get('ws')
+        if ws is None or ws not in self.clients:
+            return None
+        if client_permissions.get(ws, {}).get("role") == "viewer":
+            return None
+        return ws
+
+    async def _send_stream_message(self, ws: web.WebSocketResponse, message: Dict[str, Any]) -> None:
+        """One `stream_info` or `stream_stats` message to one socket; a socket
+        still busy with the last one is skipped rather than queued behind."""
+        if ws in self._stats_sending:
+            return
+        self._stats_sending.add(ws)
+        try:
+            await asyncio.wait_for(ws.send_str(json.dumps(message)), timeout=2.0)
+        except (asyncio.TimeoutError, ConnectionResetError, OSError, RuntimeError):
+            pass
+        finally:
+            self._stats_sending.discard(ws)
+
+    async def _publish_stream_info(self, display_id: str, info: Dict[str, Any]) -> None:
+        """Tell a display's controller what its capture streams and how."""
+        ws = self._controller_socket(display_id)
+        if ws is not None:
+            await self._send_stream_message(
+                ws, {"type": "stream_info", "displayId": display_id, "info": info})
+
+    def _watch_stream(self, display_id: str, module: Any) -> None:
+        """Follow a fresh capture's description for its display's controller."""
+        watch = self._stream_watches.get(display_id)
+        if watch is None:
+            watch = self._stream_watches[display_id] = stream_stats.StreamWatch(
+                display_id, self._publish_stream_info)
+        entry = self.display_clients.get(display_id) or {}
+        watch.follow(module, entry.get('encoder') or self.app.encoder, bool(entry.get('use_cpu')))
+
+    async def _send_stream_stats(self, _now: float) -> None:
+        """Resource-monitor tick: one `stream_stats` to every subscribed controller,
+        with its own display's encode figures, round trip and throttle state."""
+        if not self._stats_subscribers:
+            return
+        host = stream_stats.host_stats(self._resource_monitor)
+        for display_id, state in list(self.display_clients.items()):
+            ws = self._controller_socket(display_id)
+            if ws is None or ws not in self._stats_subscribers:
+                continue
+            stats = dict(host)
+            watch = self._stream_watches.get(display_id)
+            if watch is not None:
+                stats.update(watch.rates())
+            stats["rtt_ms"] = round(state.get('smoothed_rtt', 0.0), 1)
+            stats["throttled"] = not state.get('backpressure_enabled', True)
+            asyncio.ensure_future(self._send_stream_message(
+                ws, {"type": "stream_stats", "displayId": display_id, "stats": stats}))
 
     async def _stop_primary_if_unconsumed(self, reason: str) -> None:
         """Stop the primary capture once nothing decodes it — the last unpaused
@@ -3422,7 +3475,6 @@ class DataStreamingServer(BaseStreamingService):
         self._previous_sent_id_for_stall_check = -1
         self._last_client_stable_report_time = time.monotonic()
         # Per-connection sender over the instance-wide singleton collectors.
-        stats_sender_task_ws = None
         # Blocks on client_settings_received, which may never be set: canceled
         # with the connection.
         start_audio_task_ws = None
@@ -3466,14 +3518,9 @@ class DataStreamingServer(BaseStreamingService):
                 self._resource_monitor = resource_stats.ResourceMonitor(
                     gpu_id=gpu_id_for_stats, dri_node=dri_node_for_stats,
                     metrics=getattr(self, 'metrics', None))
+                self._resource_monitor.watched = lambda: bool(self._stats_subscribers)
+                self._resource_monitor.on_tick = self._send_stream_stats
                 self._resource_monitor.start()
-            stats_sender_task_ws = asyncio.create_task(
-                _send_stats_periodically_ws(websocket, self._resource_monitor, self)
-            )
-            if self._network_monitor_task_ws is None or self._network_monitor_task_ws.done():
-                self._network_monitor_task_ws = asyncio.create_task(
-                    _collect_network_stats_ws(self._shared_network_stats, self)
-                )
 
             # An unlocked default-off microphone only sets the client toggle: a
             # runtime enable must not need a reconnect, so setup still runs.
@@ -3854,6 +3901,9 @@ class DataStreamingServer(BaseStreamingService):
                             if not initial_settings_processed:
                                 initial_settings_processed = True
                                 data_logger.info(self._settings_applied_summary(remote_address, display_id))
+                                settled = getattr(self._stream_watches.get(display_id), 'info', None)
+                                if settled:
+                                    await self._publish_stream_info(display_id, settled)
                                 video_wanted = self.display_clients.get(display_id, {}).get('video_active', False)
                                 if video_wanted and display_id not in self.capture_instances:
                                     data_logger.error("FATAL: Initial reconfiguration completed, but video pipeline did not start.")
@@ -3870,6 +3920,12 @@ class DataStreamingServer(BaseStreamingService):
                             data_logger.error(
                                 f"Error processing SETTINGS: {e_set}", exc_info=True
                             )
+
+                    elif stream_stats.stats_request(message) is not None:
+                        if stream_stats.stats_request(message):
+                            self._stats_subscribers.add(websocket)
+                        else:
+                            self._stats_subscribers.discard(websocket)
 
                     elif message.startswith("CLIENT_FRAME_ACK"):
                         try:
@@ -4225,6 +4281,7 @@ class DataStreamingServer(BaseStreamingService):
             self.last_start_video_request_times.pop(websocket, None)
             self.last_viewer_keyframe_request_times.pop(websocket, None)
             self.video_paused_clients.discard(websocket)
+            self._stats_subscribers.discard(websocket)
             self._cancel_deferred_rejoin(websocket)
             departing_perms = client_permissions.pop(websocket, None) or {}
             self._audit_session_end(departing_perms)
@@ -4334,7 +4391,6 @@ class DataStreamingServer(BaseStreamingService):
             # Per-connection tasks only; canceling the singleton collectors here
             # would break the remaining clients.
             monitor_tasks = [
-                stats_sender_task_ws,
                 start_audio_task_ws,
                 initial_audio_task_ws,
             ]
@@ -4814,6 +4870,9 @@ class DataStreamingServer(BaseStreamingService):
         data_logger.info(f"Stopping all streams for display '{display_id}'...")
         reset_sent = await self._ensure_backpressure_task_is_stopped(display_id)
         capture_info = self.capture_instances.pop(display_id, None)
+        watch = self._stream_watches.get(display_id)
+        if watch is not None:
+            watch.stop()
         if capture_info:
             capture_module = capture_info.get('module')
             if capture_module:
@@ -5573,6 +5632,7 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.info(
                 f"Capture started for '{display_id}': {width}x{height} at +{x_offset}+{y_offset}.")
             self._schedule_active_codec_settle(display_id)
+            self._watch_stream(display_id, capture_module)
             return True
 
         except Exception as e:
@@ -5973,79 +6033,6 @@ class DataStreamingServer(BaseStreamingService):
             conns.append((ws, perms.get("token"), addr[0] if addr else None))
         return conns
 
-
-async def _collect_network_stats_ws(shared_data: dict, server_instance: DataStreamingServer,
-                                    interval_seconds: float = 2) -> None:
-    """Singleton collector: derive sent-bandwidth and smoothed latency.
-
-    Must be the single instance-wide task: it consumes and resets the server's
-    _bytes_sent_in_interval counter, so per-connection copies would race it.
-    """
-    data_logger.debug(
-        f"Network monitor loop (WS mode) started, interval: {interval_seconds}s"
-    )
-    try:
-        while True:
-            await asyncio.sleep(interval_seconds)
-            current_time = time.monotonic()
-            elapsed_time = current_time - server_instance._last_bandwidth_calc_time
-            if elapsed_time > 0:
-                current_mbps = (server_instance._bytes_sent_in_interval * 8) / elapsed_time / 1_000_000
-            else:
-                current_mbps = 0.0
-            server_instance._bytes_sent_in_interval = 0
-            server_instance._last_bandwidth_calc_time = current_time
-            
-            primary_client = server_instance.display_clients.get('primary')
-            latency_ms = primary_client.get('smoothed_rtt', 0.0) if primary_client else 0.0
-
-            shared_data["network"] = {
-                "type": "network_stats",
-                "timestamp": datetime.now().isoformat(),
-                "bandwidth_mbps": round(current_mbps, 2),
-                "latency_ms": round(latency_ms, 1),
-            }
-    except asyncio.CancelledError:
-        data_logger.debug("Network monitor (WS) canceled.")
-    except Exception as e:
-        data_logger.error(f"Network monitor (WS) error: {e}", exc_info=True)
-
-async def _send_stats_periodically_ws(
-    websocket: web.WebSocketResponse,
-    monitor: "resource_stats.ResourceMonitor",
-    server_instance: DataStreamingServer,
-    interval_seconds: float = 5,
-) -> None:
-    """Per-connection sender: push the shared collectors' latest stats to one socket.
-
-    Reads (never pops) the monitor's and the network collector's figures, since
-    every connection's sender shares them; ends itself when the socket dies.
-    """
-    try:
-        while True:
-            await asyncio.sleep(interval_seconds)
-            system_stats = monitor.system
-            gpu_stats = monitor.gpu
-            network_stats = server_instance._shared_network_stats.get("network")
-            try:
-                if not websocket:
-                    data_logger.debug("Stats sender: WS closed or invalid.")
-                    break
-                if system_stats:
-                    await websocket.send_str(json.dumps(system_stats))
-                if gpu_stats:
-                    await websocket.send_str(json.dumps(gpu_stats))
-                if network_stats:
-                    await websocket.send_str(json.dumps(network_stats))
-            except (ConnectionResetError, OSError, RuntimeError):
-                data_logger.debug("Stats sender: WS connection closed.")
-                break
-            except Exception as e_send:
-                data_logger.error(f"Stats sender: Error sending: {e_send}")
-    except asyncio.CancelledError:
-        data_logger.debug("Stats sender (WS) canceled.")
-    except Exception as e:
-        data_logger.error(f"Stats sender (WS) error: {e}", exc_info=True)
 
 async def on_resize_handler(
     res_str: str,

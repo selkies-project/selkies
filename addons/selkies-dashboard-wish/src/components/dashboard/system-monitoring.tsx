@@ -6,52 +6,55 @@
 
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { PolarAngleAxis, RadialBar, RadialBarChart } from "recharts";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+	Check,
 	ChevronDown,
-	ChevronUp
+	ChevronUp,
+	CircleCheck,
+	Copy,
+	Dot,
+	Mic,
+	TriangleAlert,
+	Video,
 } from "lucide-react";
 import { getLastServerSettings, getPrefixedKey } from "@/utils";
 import { t } from "@/i18n";
+import type { StreamClient, StreamInfo, StreamSample } from "../../../../selkies-web-core/lib/stream-stats.js";
+import {
+	graphPath,
+	seriesOf,
+	streamMeters,
+	streamReport,
+	streamRows,
+	streamTiles,
+} from "../../../../selkies-web-core/lib/stream-stats-view.js";
 
 /**
- * The stats panel: radial gauges for CPU, GPU, memory, FPS, bandwidth and
- * latency, in a compact strip or a detailed view.
+ * The stats overlay: what the stream runs on, the graphs that grow while it
+ * stays open, the figures under them and the host's meters, as a compact strip
+ * or in full.
  *
- * Every figure is polled from the `window` state the streaming cores
- * publish (`system_stats`, `gpu_stats`, `network_stats`, `fps`). Gauges scale to what the
- * session is configured for rather than arbitrary ceilings: the FPS gauge to
- * the configured framerate and the bandwidth gauge to the configured video
- * plus audio bitrate, an explicit client choice in localStorage winning over
- * the server's value.
+ * Everything drawn comes from the core's `window.stream_info`,
+ * `window.stream_client` and `window.stream_stats`
+ * (`selkies-web-core/lib/stream-stats.js`), read once a second while the
+ * overlay is mounted and the tab is visible; what a row says and when it warns
+ * is `lib/stream-stats-view.js`, shared with the default dashboard. Being on
+ * screen is what turns the numbers on: the component posts `statsOpen` to the
+ * core, which asks the server for them, and posts `open: false` on the way out.
+ * The fps axis starts at the configured framerate, an explicit client choice in
+ * localStorage winning over the server's value.
  * @module
  */
 
-/** The stats the streaming cores publish on `window`. */
+/** The stream state the cores publish on `window`. */
 declare global {
 	interface Window {
-		system_stats?: {
-			cpu_percent?: number;
-			mem_used?: number;
-			mem_total?: number;
-		};
-		gpu_stats?: {
-			gpu_percent?: number;
-			utilization_gpu?: number;
-			mem_used?: number;
-			memory_used?: number;
-			used_gpu_memory_bytes?: number;
-			mem_total?: number;
-			memory_total?: number;
-			total_gpu_memory_bytes?: number;
-		};
+		stream_info?: StreamInfo | null;
+		stream_client?: StreamClient;
+		stream_stats?: { open: boolean; latest: StreamSample | null; history: StreamSample[] };
 		fps?: number;
 		currentAudioBufferSize?: number;
-		network_stats?: {
-			bandwidth_mbps?: number;
-			latency_ms?: number;
-		};
 		/**
 		 * Set by the dashboard around a transport switch so the active core
 		 * suppresses the expected "Server disconnected" alert from the old peer.
@@ -60,112 +63,41 @@ declare global {
 	}
 }
 
-interface RadialGaugeProps {
-	metric: {
-		name: string;
-		current: number;
-		max: number;
-		fill: string;
-	};
-	size: number;
-}
+const READ_INTERVAL_MS = 1000;
+const GRAPH_WIDTH = 240;
+const GRAPH_HEIGHT = 44;
 
-/** One gauge: a recharts radial bar with the value in its center. */
-function RadialGauge({ metric, size }: RadialGaugeProps) {
-	const percentage = (metric.current / metric.max) * 100;
-	const scaleFactor = size / 100;
-
-	return (
-		<div
-			className="flex flex-col items-center"
-			style={{
-				width: size * 0.6,
-				height: size * 0.7,
-			}}
-		>
-			<div style={{ width: size * 0.8, height: size * 0.7 }}>
-				<RadialBarChart
-					width={size * 0.8}
-					height={size * 0.7}
-					cx={(size * 0.8) / 2}
-					cy={(size * 0.7) / 2}
-					innerRadius={20 * scaleFactor}
-					outerRadius={30 * scaleFactor}
-					barSize={4 * scaleFactor}
-					data={[{ ...metric, percentage }]}
-					startAngle={180}
-					endAngle={0}
-				>
-					<PolarAngleAxis
-						type="number"
-						domain={[0, 100]}
-						angleAxisId={0}
-						tick={false}
-					/>
-					<RadialBar
-						background
-						dataKey="percentage"
-						cornerRadius={5 * scaleFactor}
-						fill={metric.fill}
-						className="stroke-transparent stroke-2"
-					/>
-					<text
-						x={(size * 0.8) / 2}
-						y={(size * 0.7) / 2}
-						textAnchor="middle"
-						dominantBaseline="middle"
-						className="fill-foreground font-bold"
-						style={{ fontSize: `${0.9 * scaleFactor}rem` }}
-					>
-						{metric.current}
-					</text>
-					<text
-						x={(size * 0.8) / 2}
-						y={(size * 0.7) / 2 + 18 * scaleFactor}
-						textAnchor="middle"
-						dominantBaseline="middle"
-						className="fill-muted-foreground font-medium"
-						style={{ fontSize: `${0.65 * scaleFactor}rem` }}
-					>
-						{metric.name}
-					</text>
-				</RadialBarChart>
-			</div>
-		</div>
-	);
-}
-
-const STATS_READ_INTERVAL_MS = 500;
-
-const MAX_LATENCY_MS = 1000;
-const DEFAULT_VIDEO_BITRATE_KBPS = 8000;
-const DEFAULT_AUDIO_BITRATE_BPS = 128000;
-
-/**
- * The traffic the session is configured to use, video target plus audio, in
- * Mbps: at 8 Mbps configured, 8 Mbps of traffic is a full bandwidth gauge.
- * An explicit client choice in localStorage wins over the server's value;
- * `video_bitrate` is kbps on the wire and in storage.
- */
-function configuredMaxBandwidthMbps(): number {
-	const settings = getLastServerSettings();
-	const storedVideo = parseFloat(localStorage.getItem(getPrefixedKey('video_bitrate')) ?? '');
-	const serverVideo = parseFloat(settings?.video_bitrate?.value);
-	const videoKbps = !isNaN(storedVideo) ? storedVideo
-		: (!isNaN(serverVideo) ? serverVideo : DEFAULT_VIDEO_BITRATE_KBPS);
-	const storedAudio = parseInt(localStorage.getItem(getPrefixedKey('audio_bitrate')) ?? '', 10);
-	const serverAudio = parseInt(settings?.audio_bitrate?.value, 10);
-	const audioBps = !isNaN(storedAudio) ? storedAudio
-		: (!isNaN(serverAudio) ? serverAudio : DEFAULT_AUDIO_BITRATE_BPS);
-	return Math.max(0.1, videoKbps / 1000 + audioBps / 1_000_000);
+/** What one read of the core's state holds. */
+interface Snapshot {
+	/** The server's description of the stream, null until it arrives. */
+	info: StreamInfo | null;
+	/** This page's description of the stream. */
+	client: StreamClient | null;
+	/** The last second's figures. */
+	latest: StreamSample | null;
+	/** Every second since the overlay opened, appended to in place. */
+	history: StreamSample[];
+	/** The history's length at the read, which is what changes between reads. */
+	length: number;
 }
 
 /**
- * The framerate the session is configured to push, the full reading of the
- * FPS gauge. An explicit client choice in localStorage wins over the server's
- * value.
+ * How many overlays are on screen. The panel and the floating overlay can both
+ * be mounted, and the core is told the stats shut only when the last one goes.
  */
-function configuredFramerateMax(): number {
+let mounted = 0;
+
+/** Counts one overlay in or out and tells the core when the count crosses zero. */
+function countOverlay(delta: 1 | -1): void {
+	const before = mounted;
+	mounted += delta;
+	if ((before === 0) !== (mounted === 0)) {
+		window.postMessage({ type: 'statsOpen', open: mounted > 0 }, window.location.origin);
+	}
+}
+
+/** The framerate the session is configured to push, the floor of the fps axis. */
+function configuredFramerate(): number {
 	const settings = getLastServerSettings();
 	const stored = parseFloat(localStorage.getItem(getPrefixedKey('framerate')) ?? '');
 	const server = parseFloat(settings?.framerate?.value);
@@ -173,318 +105,309 @@ function configuredFramerateMax(): number {
 	return fps > 0 ? fps : 60;
 }
 
+/** The top of a graph's axis: the largest value drawn with a little headroom, never under `floor`. */
+const axisTop = (floor: number, ...lists: number[][]): number =>
+	Math.max(floor, Math.ceil(Math.max(0, ...lists.flat()) * 1.1));
+
+interface StatusMarkProps {
+	/** The row's state; the icon's shape carries it as well as its color. */
+	status: 'good' | 'warn' | 'neutral';
+}
+
+/** The mark beside a row. */
+function StatusMark({ status }: StatusMarkProps) {
+	if (status === 'good') return <CircleCheck className="h-3.5 w-3.5 shrink-0 text-[var(--stat-good)]" aria-hidden />;
+	if (status === 'warn') return <TriangleAlert className="h-3.5 w-3.5 shrink-0 text-[var(--stat-warn)]" aria-hidden />;
+	return <Dot className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />;
+}
+
+interface GraphProps {
+	/** The graph's name. */
+	label: string;
+	/** The unit of its axis. */
+	unit: string;
+	/** One or two series against that one axis. */
+	series: Array<{ name: string; values: number[] }>;
+	/** The value at the top edge. */
+	max: number;
+	/** Drawn without its head, for the compact strip. */
+	bare?: boolean;
+}
+
+const SERIES_STROKES = ['var(--stat-series-1)', 'var(--stat-series-2)'];
+
+/** One graph: its name, the value under the pointer or else the newest, and its series. */
+function Graph({ label, unit, series, max, bare }: GraphProps) {
+	const [hover, setHover] = useState<number | null>(null);
+	const paths = useMemo(
+		() => series.map((s) => graphPath(s.values, GRAPH_WIDTH, GRAPH_HEIGHT, max)),
+		[series, max],
+	);
+	const count = series[0].values.length;
+	const at = hover !== null && hover < count ? hover : count - 1;
+	const onMove = (e: React.PointerEvent<SVGSVGElement>) => {
+		const box = e.currentTarget.getBoundingClientRect();
+		const xs = paths[0].xs;
+		if (!xs.length || box.width <= 0) return;
+		const x = ((e.clientX - box.left) / box.width) * GRAPH_WIDTH;
+		setHover(xs.reduce((best, px, i) => (Math.abs(px - x) < Math.abs(xs[best] - x) ? i : best), 0));
+	};
+	return (
+		<div className="relative">
+			{!bare && (
+				<div className="mb-0.5 flex items-baseline justify-between gap-2">
+					<span className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</span>
+					<span className="flex gap-2.5 text-xs text-muted-foreground">
+						{series.map((s, i) => (
+							<span key={s.name || i}>
+								{series.length > 1 && (
+									<i className="mr-1 inline-block h-0.5 w-2.5 rounded-sm align-middle" style={{ background: SERIES_STROKES[i] }} />
+								)}
+								<b className="text-sm text-foreground">{at >= 0 ? s.values[at] : 0}</b>
+								{series.length > 1 ? ` ${s.name}` : ` ${unit}`}
+							</span>
+						))}
+					</span>
+				</div>
+			)}
+			<svg
+				className={`block w-full rounded-md bg-muted/50 pointer-events-auto ${bare ? 'h-6' : 'h-11'}`}
+				viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
+				preserveAspectRatio="none"
+				onPointerMove={bare ? undefined : onMove}
+				onPointerLeave={() => setHover(null)}
+				role="img"
+				aria-label={`${label}: ${series.map((s) => `${at >= 0 ? s.values[at] : 0} ${s.name || unit}`).join(', ')}`}
+			>
+				{paths.map((p, i) => (
+					<g key={i}>
+						{i === 0 && <path d={p.area} fill={SERIES_STROKES[0]} opacity={0.12} />}
+						<path d={p.line} fill="none" stroke={SERIES_STROKES[i]} strokeWidth={2} strokeLinejoin="round"
+							strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+					</g>
+				))}
+				{hover !== null && at >= 0 && (
+					<line x1={paths[0].xs[at]} x2={paths[0].xs[at]} y1={0} y2={GRAPH_HEIGHT}
+						stroke="var(--muted-foreground)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
+				)}
+			</svg>
+			{!bare && (
+				<span className="pointer-events-none absolute bottom-7 right-1 text-[10px] text-muted-foreground">
+					{`${Math.round(max)} ${unit}`}
+				</span>
+			)}
+		</div>
+	);
+}
+
 /**
- * Renders the gauges, polling the core's `window` stats twice a second.
- *
- * Only metrics with data are shown; video bitrate is omitted since it
- * duplicates the bandwidth stat.
+ * Renders the overlay, reading the core's `window` stream state once a second
+ * and telling the core the stats are on screen for as long as it is mounted
+ * in a visible tab.
  */
 export function SystemMonitoring() {
 	const [isDetailedView, setIsDetailedView] = useState(false);
-	const [clientFps, setClientFps] = useState(0);
-	const [framerateMax, setFramerateMax] = useState(configuredFramerateMax);
-	const [cpuPercent, setCpuPercent] = useState(0);
-	const [gpuPercent, setGpuPercent] = useState(0);
-	const [sysMemPercent, setSysMemPercent] = useState(0);
-	const [gpuMemPercent, setGpuMemPercent] = useState(0);
-	const [sysMemUsed, setSysMemUsed] = useState<number | null>(null);
-	const [sysMemTotal, setSysMemTotal] = useState<number | null>(null);
-	const [gpuMemUsed, setGpuMemUsed] = useState<number | null>(null);
-	const [gpuMemTotal, setGpuMemTotal] = useState<number | null>(null);
-	const [bandwidthMbps, setBandwidthMbps] = useState(0);
-	const [maxBandwidthMbps, setMaxBandwidthMbps] = useState(configuredMaxBandwidthMbps);
-	const [latencyMs, setLatencyMs] = useState(0);
+	const [visible, setVisible] = useState(!document.hidden);
+	const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+	const [copied, setCopied] = useState(false);
+	const [framerate, setFramerate] = useState(configuredFramerate);
 
 	useEffect(() => {
-		const readStats = () => {
-			const currentSystemStats = window.system_stats;
-			const sysMemUsed = currentSystemStats?.mem_used ?? null;
-			const sysMemTotal = currentSystemStats?.mem_total ?? null;
-			setCpuPercent(currentSystemStats?.cpu_percent ?? 0);
-			setSysMemUsed(sysMemUsed);
-			setSysMemTotal(sysMemTotal);
-			setSysMemPercent((sysMemUsed !== null && sysMemTotal !== null && sysMemTotal > 0) ? (sysMemUsed / sysMemTotal) * 100 : 0);
-
-			const currentGpuStats = window.gpu_stats;
-			const gpuPercent = currentGpuStats?.gpu_percent ?? currentGpuStats?.utilization_gpu ?? 0;
-			setGpuPercent(gpuPercent);
-			const gpuMemUsed = currentGpuStats?.mem_used ?? currentGpuStats?.memory_used ?? currentGpuStats?.used_gpu_memory_bytes ?? null;
-			const gpuMemTotal = currentGpuStats?.mem_total ?? currentGpuStats?.memory_total ?? currentGpuStats?.total_gpu_memory_bytes ?? null;
-			setGpuMemUsed(gpuMemUsed);
-			setGpuMemTotal(gpuMemTotal);
-			setGpuMemPercent((gpuMemUsed !== null && gpuMemTotal !== null && gpuMemTotal > 0) ? (gpuMemUsed / gpuMemTotal) * 100 : 0);
-
-			setClientFps(window.fps ?? 0);
-			const netStats = window.network_stats;
-			setBandwidthMbps(netStats?.bandwidth_mbps ?? 0);
-			setMaxBandwidthMbps(configuredMaxBandwidthMbps());
-			setLatencyMs(netStats?.latency_ms ?? 0);
-			setFramerateMax(configuredFramerateMax());
-		};
-		const intervalId = setInterval(readStats, STATS_READ_INTERVAL_MS);
-		return () => clearInterval(intervalId);
+		const onVisibility = () => setVisible(!document.hidden);
+		document.addEventListener('visibilitychange', onVisibility);
+		return () => document.removeEventListener('visibilitychange', onVisibility);
 	}, []);
 
-	const formatMemory = (bytes: number | null): string => {
-		if (bytes === null) return t('sections.stats.tooltipMemoryNA');
-		const gb = bytes / (1024 * 1024 * 1024);
-		return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
-	};
+	useEffect(() => {
+		if (!visible) return undefined;
+		countOverlay(1);
+		const read = () => {
+			const stats = window.stream_stats || { open: false, latest: null, history: [] };
+			setSnapshot({
+				info: window.stream_info || null,
+				client: window.stream_client ? { ...window.stream_client } : null,
+				latest: stats.latest,
+				history: stats.history,
+				length: stats.history.length,
+			});
+			setFramerate(configuredFramerate());
+		};
+		read();
+		const id = setInterval(read, READ_INTERVAL_MS);
+		return () => {
+			clearInterval(id);
+			countOverlay(-1);
+		};
+	}, [visible]);
 
-	/** Status label and colors for a reading; the audio level is an activity indicator, not a pressure gauge. */
-	const getPerformanceStatus = (value: number, type: 'percentage' | 'fps' | 'latency' | 'bandwidth') => {
-		switch (type) {
-			case 'percentage':
-				if (value <= 60) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
-				if (value <= 80) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
-				return { status: 'high', color: 'text-red-500', bg: 'bg-red-500/10' };
+	const historyLength = snapshot ? snapshot.length : 0;
+	const history = snapshot ? snapshot.history : null;
+	const graphs = useMemo(() => {
+		const samples = history || [];
+		const fps = seriesOf(samples, 'fps');
+		const encoded = seriesOf(samples, 'encoded_fps');
+		const mbps = seriesOf(samples, 'mbps');
+		const rtt = seriesOf(samples, 'rtt_ms');
+		const hasEncoded = samples.some((s) => typeof s.encoded_fps === 'number');
+		return {
+			fps: {
+				series: hasEncoded
+					? [{ name: t('sections.stats.client'), values: fps }, { name: t('sections.stats.server'), values: encoded }]
+					: [{ name: '', values: fps }],
+				max: axisTop(framerate, fps, encoded),
+			},
+			mbps: { series: [{ name: '', values: mbps }], max: axisTop(1, mbps) },
+			rtt: { series: [{ name: '', values: rtt }], max: axisTop(20, rtt) },
+		};
+		// The history array is appended to in place; its length is what changes.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [history, historyLength, framerate]);
 
-			case 'fps':
-				if (value >= 50) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
-				if (value >= 30) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
-				return { status: 'low', color: 'text-red-500', bg: 'bg-red-500/10' };
+	const info = snapshot ? snapshot.info : null;
+	const client = snapshot ? snapshot.client : null;
+	const latest = snapshot ? snapshot.latest : null;
+	const rows = streamRows(info, client, latest, {
+		hardware: t('sections.stats.hardware'),
+		software: t('sections.stats.software'),
+		unknown: t('sections.stats.tooltipMemoryNA'),
+		throttled: t('sections.stats.throttled'),
+	});
+	const number = (key: string): number => (latest && typeof latest[key] === 'number' ? (latest[key] as number) : 0);
 
-			case 'latency':
-				if (value <= 50) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
-				if (value <= 100) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
-				return { status: 'high', color: 'text-red-500', bg: 'bg-red-500/10' };
+	const toggle = (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Button
+					variant="ghost"
+					size="sm"
+					className="h-7 w-7 p-0 min-w-0 pointer-events-auto"
+					onClick={() => setIsDetailedView((detailed) => !detailed)}
+				>
+					{isDetailedView ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+				</Button>
+			</TooltipTrigger>
+			<TooltipContent side="bottom">
+				<p>{isDetailedView ? t('stats.compactView') : t('stats.detailedView')}</p>
+			</TooltipContent>
+		</Tooltip>
+	);
 
-			case 'bandwidth':
-				if (value >= 50) return { status: 'excellent', color: 'text-green-500', bg: 'bg-green-500/10' };
-				if (value >= 25) return { status: 'good', color: 'text-yellow-500', bg: 'bg-yellow-500/10' };
-				return { status: 'low', color: 'text-red-500', bg: 'bg-red-500/10' };
-
-			default:
-				return { status: 'unknown', color: 'text-muted-foreground', bg: 'bg-muted/10' };
-		}
-	};
-
-	const hasCpuData = true;
-	const hasGpuData = window.gpu_stats?.gpu_percent !== undefined || window.gpu_stats?.utilization_gpu !== undefined || gpuPercent > 0;
-	const hasSysMemData = window.system_stats?.mem_used !== undefined && window.system_stats?.mem_total !== undefined && sysMemUsed !== null && sysMemTotal !== null;
-	const hasGpuMemData = window.gpu_stats?.mem_used !== undefined || window.gpu_stats?.memory_used !== undefined || window.gpu_stats?.used_gpu_memory_bytes !== undefined || gpuMemUsed !== null;
-	const hasFpsData = true;
-	const hasBandwidthData = true;
-	const hasLatencyData = true;
-
-	const allMetrics = [
-		{
-			name: t('sections.stats.cpuLabel'),
-			current: Math.round(cpuPercent),
-			max: 100,
-			fill: "hsl(250, 100%, 60%)",
-			hasData: hasCpuData
-		},
-		{
-			name: t('sections.stats.gpuLabel'),
-			current: Math.round(gpuPercent),
-			max: 100,
-			fill: "hsl(260, 100%, 50%)",
-			hasData: hasGpuData
-		},
-		{
-			name: t('sections.stats.sysMemLabel'),
-			current: Math.round(sysMemPercent),
-			max: 100,
-			fill: "hsl(240, 100%, 60%)",
-			hasData: hasSysMemData
-		},
-		{
-			name: t('sections.stats.gpuMemLabel'),
-			current: Math.round(gpuMemPercent),
-			max: 100,
-			fill: "hsl(240, 100%, 60%)",
-			hasData: hasGpuMemData
-		},
-		{
-			name: t('sections.stats.fpsLabel'),
-			current: Math.round(clientFps),
-			max: framerateMax,
-			fill: "hsl(220, 100%, 50%)",
-			hasData: hasFpsData
-		},
-		{
-			name: t('sections.stats.bandwidthLabel'),
-			current: Math.round(bandwidthMbps * 100) / 100,
-			max: maxBandwidthMbps,
-			fill: "hsl(200, 100%, 60%)",
-			hasData: hasBandwidthData
-		},
-		{
-			name: t('sections.stats.latencyLabel'),
-			current: Math.round(latencyMs * 10) / 10,
-			max: MAX_LATENCY_MS,
-			fill: "hsl(180, 100%, 60%)",
-			hasData: hasLatencyData
-		}
-	];
-
-	const metrics = allMetrics.filter(metric => metric.hasData);
-
-	if (isDetailedView) {
+	if (!isDetailedView) {
 		return (
-			<div className="p-3 rounded-lg bg-card backdrop-blur-sm border shadow-sm w-auto cursor-grab hover:cursor-grab active:cursor-grabbing border bg-background/95 backdrop-blur-sm shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300">
-				<div className="flex items-center justify-between mb-4">
-					<h3 className="text-sm font-semibold text-card-foreground pointer-events-none">{t('stats.monitorTitle')}</h3>
-					<div className="flex items-center gap-2 pointer-events-auto">
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									variant="outline"
-									size="sm"
-									className="h-8 w-8 p-0 pointer-events-auto"
-									onClick={() => setIsDetailedView(false)}
-								>
-									<ChevronUp className="h-3 w-3" />
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent side="bottom">
-								<p>{t('stats.compactView')}</p>
-							</TooltipContent>
-						</Tooltip>
-					</div>
+			<div className="flex items-center gap-3 rounded-lg border bg-card px-3 py-1.5 text-xs shadow-sm backdrop-blur-sm tabular-nums cursor-grab active:cursor-grabbing">
+				<div className="flex items-center gap-1 pointer-events-none">
+					{rows.map((row) => <StatusMark key={row.key} status={row.status} />)}
 				</div>
-
-				<div className="space-y-2 pointer-events-none">
-					{hasCpuData && (
-						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">{t('sections.stats.cpuLabel')}</span>
-							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(cpuPercent)}%</span>
-								{(() => {
-									const status = getPerformanceStatus(cpuPercent, 'percentage');
-									return (
-										<div className={`w-2 h-2 rounded-full ${status.color.replace('text-', 'bg-')}`} />
-									);
-								})()}
+				{([['fps', 'fps', graphs.fps], ['mbps', 'Mbps', graphs.mbps], ['rtt_ms', 'ms', graphs.rtt]] as const).map(
+					([key, unit, graph]) => (
+						<div key={key} className="flex items-center gap-1.5 pointer-events-none">
+							<span className="whitespace-nowrap text-muted-foreground">
+								<b className="text-sm text-foreground">{number(key)}</b> {unit}
+							</span>
+							<div className="w-16">
+								<Graph label={unit} unit={unit} series={graph.series.slice(0, 1)} max={graph.max} bare />
 							</div>
 						</div>
-					)}
-
-					{hasGpuData && (
-						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">{t('sections.stats.gpuLabel')}</span>
-							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuPercent)}%</span>
-								{(() => {
-									const status = getPerformanceStatus(gpuPercent, 'percentage');
-									return (
-										<div className={`w-2 h-2 rounded-full ${status.color.replace('text-', 'bg-')}`} />
-									);
-								})()}
-							</div>
-						</div>
-					)}
-
-					{hasSysMemData && (
-						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">{t('sections.stats.sysMemLabel')}</span>
-							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(sysMemPercent)}% ({formatMemory(sysMemUsed)}/{formatMemory(sysMemTotal)})</span>
-								{(() => {
-									const status = getPerformanceStatus(sysMemPercent, 'percentage');
-									return (
-										<div className={`w-2 h-2 rounded-full ${status.color.replace('text-', 'bg-')}`} />
-									);
-								})()}
-							</div>
-						</div>
-					)}
-
-					{hasGpuMemData && (
-						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">{t('sections.stats.gpuMemLabel')}</span>
-							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(gpuMemPercent)}% ({formatMemory(gpuMemUsed)}/{formatMemory(gpuMemTotal)})</span>
-								{(() => {
-									const status = getPerformanceStatus(gpuMemPercent, 'percentage');
-									return (
-										<div className={`w-2 h-2 rounded-full ${status.color.replace('text-', 'bg-')}`} />
-									);
-								})()}
-							</div>
-						</div>
-					)}
-
-					{hasFpsData && (
-						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">{t('sections.stats.fpsLabel')}</span>
-							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{Math.round(clientFps)}</span>
-								{(() => {
-									const status = getPerformanceStatus(clientFps, 'fps');
-									return (
-										<div className={`w-2 h-2 rounded-full ${status.color.replace('text-', 'bg-')}`} />
-									);
-								})()}
-							</div>
-						</div>
-					)}
-
-					{hasBandwidthData && (
-						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">{t('sections.stats.bandwidthLabel')}</span>
-							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{(Math.round(bandwidthMbps * 100) / 100)} Mbps</span>
-								{(() => {
-									const status = getPerformanceStatus(bandwidthMbps, 'bandwidth');
-									return (
-										<div className={`w-2 h-2 rounded-full ${status.color.replace('text-', 'bg-')}`} />
-									);
-								})()}
-							</div>
-						</div>
-					)}
-
-					{hasLatencyData && (
-						<div className="flex justify-between items-center py-1">
-							<span className="text-sm text-muted-foreground">{t('sections.stats.latencyLabel')}</span>
-							<div className="flex items-center gap-2">
-								<span className="text-sm font-medium text-card-foreground">{(Math.round(latencyMs * 10) / 10)} ms</span>
-								{(() => {
-									const status = getPerformanceStatus(latencyMs, 'latency');
-									return (
-										<div className={`w-2 h-2 rounded-full ${status.color.replace('text-', 'bg-')}`} />
-									);
-								})()}
-							</div>
-						</div>
-					)}
-				</div>
+					),
+				)}
+				{toggle}
 			</div>
 		);
 	}
 
+	const tiles = streamTiles(latest, client ? client.transport : 'websockets');
+	const meters = streamMeters(latest);
+	const meterLabels: Record<string, string> = {
+		cpu: t('sections.stats.cpuLabel'),
+		mem: t('sections.stats.sysMemLabel'),
+		gpu: t('sections.stats.gpuLabel'),
+		gpumem: t('sections.stats.gpuMemLabel'),
+	};
+	const copy = async () => {
+		try {
+			await navigator.clipboard.writeText(streamReport(info, client, latest));
+			setCopied(true);
+			setTimeout(() => setCopied(false), 1500);
+		} catch (e) {
+			console.warn('Could not copy the stats:', e);
+		}
+	};
+
 	return (
-		<div className="w-full bg-card backdrop-blur-sm border shadow-sm rounded-lg px-2 py-1 cursor-grab hover:cursor-grab active:cursor-grabbing">
+		<div className="flex w-80 flex-col gap-2.5 rounded-lg border bg-background/95 p-3 text-xs shadow-lg backdrop-blur-sm tabular-nums cursor-grab active:cursor-grabbing">
 			<div className="flex items-center justify-between">
-				<div className="grid grid-flow-col auto-cols-max gap-2 pointer-events-none">
-					{metrics.map((metric) => (
-						<RadialGauge
-							key={metric.name}
-							metric={metric}
-							size={80}
-						/>
-					))}
-				</div>
-				<div className="flex items-center gap-1 ml-2 pointer-events-auto">
+				<h3 className="text-sm font-semibold text-card-foreground pointer-events-none">{t('stats.monitorTitle')}</h3>
+				<div className="flex items-center gap-1">
 					<Tooltip>
 						<TooltipTrigger asChild>
-							<Button
-								variant="ghost"
-								size="sm"
-								className="h-8 w-6 p-0 min-w-0 pointer-events-auto"
-								onClick={() => setIsDetailedView(true)}
-							>
-								<ChevronDown className="h-3 w-3" />
+							<Button variant="ghost" size="sm" className="h-7 w-7 p-0 min-w-0 pointer-events-auto"
+								onClick={copy} aria-label={t('sections.stats.copyLabel')}>
+								{copied ? <Check className="h-3 w-3 text-[var(--stat-good)]" /> : <Copy className="h-3 w-3" />}
 							</Button>
 						</TooltipTrigger>
 						<TooltipContent side="bottom">
-							<p>{t('stats.detailedView')}</p>
+							<p>{t('sections.stats.copyLabel')}</p>
 						</TooltipContent>
 					</Tooltip>
+					{toggle}
 				</div>
 			</div>
+
+			<div className="flex flex-col gap-1.5 pointer-events-none">
+				{rows.map((row) => (
+					<div key={row.key} className="grid grid-cols-[14px_76px_1fr] items-start gap-1.5">
+						<StatusMark status={row.status} />
+						<span className="text-[11px] uppercase leading-4 tracking-wide text-muted-foreground">
+							{t(`sections.stats.${row.key}Label`)}
+						</span>
+						<span className="flex min-w-0 flex-col [overflow-wrap:anywhere]">
+							<span className="font-semibold">{row.value || t('sections.stats.tooltipMemoryNA')}</span>
+							{row.detail && <span className="text-muted-foreground">{row.detail}</span>}
+							{row.reason && (
+								<span className="mt-0.5 border-l-2 border-[var(--stat-warn)] pl-1.5 text-muted-foreground">{row.reason}</span>
+							)}
+						</span>
+					</div>
+				))}
+			</div>
+
+			<Graph label={t('sections.stats.fpsLabel')} unit="fps" {...graphs.fps} />
+			<Graph label={t('sections.stats.bandwidthLabel')} unit="Mbps" {...graphs.mbps} />
+			<Graph label={t('sections.stats.latencyLabel')} unit="ms" {...graphs.rtt} />
+
+			{(
+				<div className="grid grid-cols-2 gap-1.5 pointer-events-none">
+					{tiles.map((tile) => (
+						<div key={tile.key} className="flex flex-col rounded-md border bg-muted/40 px-1.5 py-1">
+							<b className="text-[13px]">{tile.value}</b>
+							<span className="text-[10.5px] text-muted-foreground">{tile.label}</span>
+						</div>
+					))}
+				</div>
+			)}
+
+			{meters.length > 0 && (
+				<div className="flex flex-col gap-1">
+					{meters.map((meter) => (
+						<div key={meter.key} title={meter.detail || undefined}
+							className="grid grid-cols-[76px_1fr_2.5rem] items-center gap-2">
+							<span className="text-[11px] uppercase tracking-wide text-muted-foreground">{meterLabels[meter.key]}</span>
+							<span className="h-1.5 overflow-hidden rounded-full bg-muted">
+								<span className="block h-full rounded-full bg-primary transition-[width] duration-500"
+									style={{ width: `${meter.percent}%` }} />
+							</span>
+							<span className="text-right text-muted-foreground">{meter.text}</span>
+						</div>
+					))}
+				</div>
+			)}
+
+			{latest && (latest.mic || latest.webcam) && (
+				<div className="flex flex-col gap-1 text-muted-foreground pointer-events-none">
+					{latest.mic && <div className="flex items-center gap-1.5"><Mic className="h-3.5 w-3.5" aria-label="mic" />{latest.mic}</div>}
+					{latest.webcam && <div className="flex items-center gap-1.5"><Video className="h-3.5 w-3.5" aria-label="webcam" />{latest.webcam}</div>}
+				</div>
+			)}
 		</div>
 	);
 }

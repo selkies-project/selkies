@@ -43,7 +43,7 @@
  * channel, coalesced pointer motion through `sendMotionMessage` on the
  * unordered `pointer` channel, JSON messages downstream, routed by `type` to
  * the `on*` callbacks (`pipeline`,
- * `gpu_stats`, `system_stats`, `cursor`, `system`, `ping`,
+ * `stream_info`, `stream_stats`, `cursor`, `system`, `ping`,
  * `latency_measurement`, `server_settings`, `display_config_update` and
  * `clipboard-msg*`). Either side may gzip a message once the `_gz,1`
  * handshake has been exchanged; the multipart clipboard and
@@ -61,8 +61,8 @@ import { Input } from "./input";
  * receive messages, `onconnectionstatechange` the peer connection state,
  * `ondatachannelopen` and `ondatachannelclose` nothing, `onplaystreamrequired`
  * fires when autoplay was refused and a user gesture is needed, and
- * `onclipboardcontent`, `oncursorchange`, `onsystemaction`, `ongpustats`,
- * `onsystemstats`, `onlatencymeasurement`, `onserversettings` and
+ * `onclipboardcontent`, `oncursorchange`, `onsystemaction`, `onstreaminfo`,
+ * `onstreamstats`, `onlatencymeasurement`, `onserversettings` and
  * `ondisplayconfig` receive the payload of the data channel message of the
  * same kind.
  */
@@ -129,7 +129,7 @@ export class WebRTCClient {
 		this.ondatachannelclose = null;
 
 		/** @type {?function(Object): void} */
-		this.ongpustats = null;
+		this.onstreaminfo = null;
 
 		/** @type {?function(number): void} */
 		this.onlatencymeasurement = null;
@@ -150,7 +150,7 @@ export class WebRTCClient {
 		this.cursor_cache = new Map();
 
 		/** @type {?function(Object): void} */
-		this.onsystemstats = null;
+		this.onstreamstats = null;
 
 		this.signaling.onsdp = this._onSDP.bind(this);
 		this.signaling.onice = this._onSignalingICE.bind(this);
@@ -652,9 +652,13 @@ export class WebRTCClient {
 	_routeDataChannelMessage(msg) {
 		if (msg.type === 'pipeline') {
 			this._setStatus(msg.data.status);
-		} else if (msg.type === 'gpu_stats') {
-			if (this.ongpustats !== null) {
-					this.ongpustats(msg.data);
+		} else if (msg.type === 'stream_info') {
+			if (this.onstreaminfo !== null) {
+				this.onstreaminfo(msg.data);
+			}
+		} else if (msg.type === 'stream_stats') {
+			if (this.onstreamstats !== null) {
+				this.onstreamstats(msg.data);
 			}
 		} else if (typeof msg.type === 'string' && msg.type.startsWith('clipboard-msg')) {
 			if (typeof this.onclipboardcontent === 'function') {
@@ -684,11 +688,6 @@ export class WebRTCClient {
 		} else if (msg.type === 'ping') {
 			this._setDebug("received server ping: " + JSON.stringify(msg.data));
 			this.sendDataChannelMessage("pong," + new Date().getTime() / 1000);
-		} else if (msg.type === 'system_stats') {
-			this._setDebug("received systems stats: " + JSON.stringify(msg.data));
-			if (this.onsystemstats !== null) {
-				this.onsystemstats(msg.data);
-			}
 		} else if (msg.type === 'latency_measurement') {
 			if (this.onlatencymeasurement !== null) {
 				this.onlatencymeasurement(msg.data.latency_ms);
@@ -852,7 +851,9 @@ export class WebRTCClient {
 	 * linked codec report; `video.decoder` reads `unknown` outside a capturing
 	 * media context, the only state that exposes `decoderImplementation`), and
 	 * `data` from the data-channel report; the raw
-	 * reports are attached as `reports` and `allReports`. The audio section's
+	 * reports are attached as `reports` (with the local candidates and the
+	 * outbound-rtp reports of the microphone and webcam, by kind, for
+	 * lib/stream-stats.js) and `allReports`. The audio section's
 	 * NetEQ concealment counters are the RED acceptance metric; Chrome reports
 	 * opus+red under the codec name `opus`, so RED presence is confirmed from
 	 * the SDP or the packet size, never from `codecName`.
@@ -910,6 +911,8 @@ export class WebRTCClient {
 					candidatePairs: {},
 					selectedCandidatePairId: null,
 					remoteCandidates: {},
+					localCandidates: {},
+					outbound: {},
 					codecs: {},
 					videoRTP: null,
 					videoTrack: null,
@@ -945,6 +948,10 @@ export class WebRTCClient {
 						reports.dataChannel = report;
 					} else if (report.type === "remote-candidate") {
 						reports.remoteCandidates[report.id] = report;
+					} else if (report.type === "local-candidate") {
+						reports.localCandidates[report.id] = report;
+					} else if (report.type === "outbound-rtp") {
+						reports.outbound[report.kind] = report;
 					} else if (report.type === "codec") {
 						reports.codecs[report.id] = report;
 					}

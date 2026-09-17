@@ -44,8 +44,8 @@
  * `KILL <reason>`, the clipboard family (`clipboard,`, `clipboard_binary,`,
  * `clipboard_start,`, `clipboard_data,`, `clipboard_finish`,
  * `clipboard_reply,`), and JSON objects typed `server_settings`,
- * `server_apps`, `pipeline_status`, `stream_resolution`, `system_stats`,
- * `gpu_stats` and `network_stats`.
+ * `server_apps`, `pipeline_status`, `stream_resolution`, `stream_info` and
+ * `stream_stats` (lib/stream-stats.js).
  *
  * Video is decoded with WebCodecs: a JPEG stripe through ImageDecoder, an
  * H.264 stripe through a VideoDecoder per row offset -- in the video worker
@@ -67,7 +67,7 @@
  * `settings`, `getStats`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `pipelineStatusUpdate`, `pipelineControl`, `audioDeviceSelected`,
  * `gamepadControl`, `requestFullscreen`, `command`, `touchinput:trackpad`,
- * `touchinput:touch` and `sidebarVisibilityChanged`, and posts
+ * `touchinput:touch`, `sidebarVisibilityChanged` and `statsOpen`, and posts
  * `pipelineStatusUpdate`, `sidebarButtonStatusUpdate`, `serverSettings`,
  * `systemApps`, `stats` (to the parent window), `clientRoleUpdate`,
  * `effectiveCursorState`, `scalingDpiFollowed`, `trackpadModeUpdate`,
@@ -77,8 +77,8 @@
  * publishes for the dashboards and the tests are `webrtcInput` (the Input
  * handler), `fps`, `videoChunksReceived`, `videoDivertOn`, `videoStripeRows`
  * (the row layout the video worker is decoding), `webcamCodec`,
- * `system_stats`, `gpu_stats`,
- * `network_stats`, `currentAudioBufferSize`,
+ * `stream_info`, `stream_client` and `stream_stats` (lib/stream-stats.js),
+ * `currentAudioBufferSize`,
  * `currentAudioBufferDuration`, `currentAudioLevel`,
  * `currentAudioUnderrunSamples`, `currentAudioWorkletDropped`,
  * `currentAudioDropped`, `manual_resolution`, `enable_resize`,
@@ -133,6 +133,7 @@ import {
 } from './lib/wire-codecs.js';
 // The same module by source, for the video worker's own copy of it.
 import wireCodecsSource from './lib/wire-codecs.js?raw';
+import { StreamStats, webcodecsDecoder } from './lib/stream-stats.js';
 // The decode gate, likewise by source, for the worker's own copy of it.
 import decodeGateSource from './lib/decode-gate.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
@@ -924,20 +925,82 @@ const gamepad = {
   gamepadState: 'disconnected',
   gamepadName: 'none',
 };
-const gpuStat = {
-  gpuLoad: 0,
-  gpuMemoryTotal: 0,
-  gpuMemoryUsed: 0,
-};
-const cpuStat = {
-  serverCPUUsage: 0,
-  serverMemoryTotal: 0,
-  serverMemoryUsed: 0,
-};
-const networkStat = {
-  bandwidthMbps: 0,
-  latencyMs: 0,
-};
+/** What the video worker last said of its decoder, while the stats are open. */
+let decodeStats = null;
+/**
+ * The same figures for the page's own full-frame decoder, which serves the
+ * stream where the worker does not decode; gathered only while the stats are open.
+ */
+const pageDecode = { starts: new Map(), decodeMs: 0, frames: 0, format: undefined, hardware: null, probed: '', config: null };
+
+/** Times one frame out of the page's decoder and keeps its pixel format. */
+function notePageDecoded(frame) {
+  pageDecode.format = frame.format;
+  const started = pageDecode.starts.get(frame.timestamp);
+  if (started === undefined) return;
+  pageDecode.starts.delete(frame.timestamp);
+  pageDecode.decodeMs += performance.now() - started;
+  pageDecode.frames++;
+}
+
+/** Asks, once per configuration, whether the engine has a hardware decoder for the page's stream. */
+function probePageHardware(config) {
+  const probed = `${config.codec}:${config.codedWidth}x${config.codedHeight}`;
+  if (probed === pageDecode.probed) return;
+  pageDecode.probed = probed;
+  pageDecode.hardware = null;
+  VideoDecoder.isConfigSupported({ ...config, hardwareAcceleration: 'prefer-hardware' })
+    .then((r) => { if (pageDecode.probed === probed) pageDecode.hardware = !!r.supported; })
+    .catch(() => {});
+}
+let streamStatsTimer = null;
+const streamStats = new StreamStats({
+  transport: 'websockets',
+  send: (message) => {
+    if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(message);
+    else throw new Error('not connected');
+  },
+  isViewer: () => isSharedMode || clientRole === 'viewer',
+  onOpenChange: (open) => {
+    decodeStats = null;
+    pageDecode.starts.clear();
+    pageDecode.decodeMs = 0;
+    pageDecode.frames = 0;
+    if (videoWorker) {
+      try { videoWorker.postMessage({ type: 'statsOpen', open }); } catch (e) { /* respawns fresh */ }
+    }
+    if (streamStatsTimer !== null) clearInterval(streamStatsTimer);
+    streamStatsTimer = open ? setInterval(sampleStreamStats, 1000) : null;
+  },
+});
+
+/** One second of this page's own figures, for lib/stream-stats.js. */
+function sampleStreamStats() {
+  const worker = decodeStats && (decodeStats.frames > 0 || decodeStats.bytes > 0);
+  const decode = worker ? decodeStats : { ...pageDecode };
+  decodeStats = null;
+  pageDecode.decodeMs = 0;
+  pageDecode.frames = 0;
+  if (pageDecode.starts.size > 64) pageDecode.starts.clear();
+  if (decode.bytes) streamStats.noteBytes(decode.bytes);
+  streamStats.setClient(Object.assign({
+    codec: codecOfEncoder(currentEncoderMode) || currentEncoderMode,
+    resolution: canvas && canvas.width > 0 ? `${canvas.width}x${canvas.height}` : '',
+  }, webcodecsDecoder({
+    forcedSoftware: preferSoftwareDecode,
+    hardwareSupported: decode.hardware,
+    format: currentEncoderMode === 'jpeg' ? undefined : decode.format,
+  })));
+  if (!worker && pageDecode.config) probePageHardware(pageDecode.config);
+  const figures = { fps: window.fps };
+  if (isAudioPipelineActive) figures.audio_buffer_ms = Math.round(window.currentAudioBufferDuration || 0);
+  if (isMicrophoneActive) figures.mic = 'Opus, 32 kbps';
+  if (isWebcamActive && webcamCapture) {
+    figures.webcam = `${String(webcamCapture.codec || '').toUpperCase()} ${webcamCapture.width}x${webcamCapture.height} at ${webcamCapture.fps} fps`;
+  }
+  if (decode.frames > 0) figures.decode_ms = Math.round((decode.decodeMs / decode.frames) * 100) / 100;
+  streamStats.clientSample(figures);
+}
 let debug = false;
 let streamStarted = false;
 /**
@@ -1411,6 +1474,41 @@ ${decodeGateSource.replace(/^export /gm, '')}
 let mode = null, oc = null, ctx = null, writer = null, closed = false, presented = false;
 let dec = null;
 const gate = new DecodeGate();
+// Decode figures, gathered and posted once a second only while the page has its stats open.
+let statsTimer = null, statsBytes = 0, statsDecodeMs = 0, statsFrames = 0;
+let statsFormat, statsHardware = null, statsProbed = null, statsConfig = null;
+const decodeStarts = new Map();
+function noteDecoded(f) {
+  statsFormat = f.format;
+  const started = decodeStarts.get(f.timestamp);
+  if (started === undefined) return;
+  decodeStarts.delete(f.timestamp);
+  statsDecodeMs += performance.now() - started;
+  statsFrames++;
+}
+// Whether the engine has a hardware decoder for the configured stream, asked once per configuration.
+function probeHardware(codec, w, h) {
+  const probed = codec + ':' + w + 'x' + h;
+  if (probed === statsProbed || typeof VideoDecoder === 'undefined') return;
+  statsProbed = probed;
+  statsHardware = null;
+  VideoDecoder.isConfigSupported({ codec: codec, codedWidth: w, codedHeight: h, hardwareAcceleration: 'prefer-hardware' })
+    .then((r) => { if (statsProbed === probed) statsHardware = !!r.supported; })
+    .catch(() => {});
+}
+function setStatsOpen(open) {
+  if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+  decodeStarts.clear();
+  statsBytes = 0; statsDecodeMs = 0; statsFrames = 0;
+  if (!open) return;
+  statsTimer = setInterval(() => {
+    if (statsConfig) probeHardware(statsConfig.codec, statsConfig.w, statsConfig.h);
+    self.postMessage({ type: 'decodeStats', bytes: statsBytes, decodeMs: statsDecodeMs, frames: statsFrames,
+      format: statsFormat, hardware: statsHardware });
+    statsBytes = 0; statsDecodeMs = 0; statsFrames = 0;
+    if (decodeStarts.size > 64) decodeStarts.clear();
+  }, 1000);
+}
 // Consecutive backpressure drops; a stalled consumer never resumes on its own.
 let sinkDrops = 0;
 // Keyframe-request throttle while decode is backed up.
@@ -1426,6 +1524,7 @@ const ack = () => self.postMessage({ ack: true });
 // Present one decoded VideoFrame on the active sink. Consumes/closes the frame.
 function present(f) {
   presentedFrames++;
+  if (statsTimer) noteDecoded(f);
   if (mode === 'vtg' && writer && !closed) {
     // Drop on sink backpressure.
     if (writer.desiredSize !== null && writer.desiredSize <= 0) {
@@ -1469,6 +1568,7 @@ function configureDecoder(codec, w, h, software, description) {
     const colorSpace = decoderColorSpace(codec);
     if (colorSpace) cfg.colorSpace = colorSpace;
     dec.configure(cfg);
+    statsConfig = { codec: codec, w: w, h: h };
     // A keyframe is required after (re)configure.
     gate.configured();
     return true;
@@ -1482,6 +1582,7 @@ function decodeChunk(key, data, timestamp, frameId, reference) {
   const decision = gate.decide(key, frameId, reference, dec.decodeQueueSize);
   if (decision === 'lost') { self.postMessage({ type: 'lostFrame', id: frameId }); return; }
   if (decision !== 'decode') { sendNeedKey(decision); return; }
+  if (statsTimer) decodeStarts.set(timestamp, performance.now());
   try { dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: timestamp, data: data })); }
   catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); }
 }
@@ -1740,6 +1841,7 @@ function onJpegStripe(buffer) {
 
 function onWire(buffer) {
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 1) return;
+  statsBytes += buffer.byteLength;
   if (stripedOn) {
     const type = new Uint8Array(buffer, 0, 1)[0];
     if (type === 0x03) onJpegStripe(buffer);
@@ -1795,6 +1897,7 @@ self.onmessage = (e) => {
   if (m.canvas) { oc = m.canvas; ctx = oc.getContext('2d', { desynchronized: true }); if (!mode) mode = 'canvas'; return; }
   if (m.type === 'decoderConfig') { configureDecoder(m.codec, m.codedWidth, m.codedHeight, m.software, m.description || null); return; }
   if (m.type === 'closeDecoder') { closeDecoder(); return; }
+  if (m.type === 'statsOpen') { setStatsOpen(!!m.open); return; }
   if (m.type === 'chunk') {
     // Not ready yet; the page will resend a keyframe.
     decodeChunk(m.key, m.data, m.timestamp, m.frameId, m.reference);
@@ -2117,6 +2220,7 @@ function ensureVideoWorker() {
     videoWorkerSpawnAttempts++;
     videoWorker = new Worker(workerURL);
     URL.revokeObjectURL(workerURL);
+    if (streamStats.open) videoWorker.postMessage({ type: 'statsOpen', open: true });
     videoWorkerInFlight = 0;
     wireSocketToVideoWorker();
     videoWorker.onerror = (e) => { console.warn('video worker error:', e && e.message); deactivateVideoWorker(); };
@@ -2148,6 +2252,10 @@ function ensureVideoWorker() {
         // build (or refuse) its own decoder, and a still screen would not
         // send another on its own.
         requestKeyframe();
+        return;
+      }
+      if (m.type === 'decodeStats') {
+        decodeStats = m;
         return;
       }
       if (m.type === 'wireStats') {
@@ -3755,6 +3863,7 @@ function armSharedStallWatchdog() {
  */
 function handleDecodedVncStripeFrame(yPos, frame) {
   if (isFullFrameVideo(currentEncoderMode) && yPos === 0) {
+    if (streamStats.open) notePageDecoded(frame);
     if (document.hidden || (clientMode === 'websockets' && !isSharedMode && !isVideoPipelineActive)) {
       try { frame.close(); } catch (e) {}
       return;
@@ -4275,6 +4384,9 @@ function receiveMessage(event) {
       break;
     case 'sidebarVisibilityChanged':
       // Accepted for frontends to signal; the core has nothing to throttle.
+      break;
+    case 'statsOpen':
+      streamStats.setOpen(message.open);
       break;
     case 'setScaleLocally':
       if (isSharedMode) {
@@ -5059,12 +5171,16 @@ function fetchLatestRCvalue(newMode) {
   }
 };
 
-/** Posts a `stats` snapshot (server, network, client fps, buffers, pipeline state) to the parent window. */
+/**
+ * Posts a `stats` snapshot to the parent window: the stream's description on
+ * both sides, the last second's figures where the stats are open, client fps,
+ * buffers and pipeline state.
+ */
 function sendStatsMessage() {
   const stats = {
-    gpu: gpuStat,
-    cpu: cpuStat,
-    network: networkStat,
+    info: window.stream_info,
+    client: window.stream_client,
+    latest: window.stream_stats.latest,
     clientFps: window.fps,
     audioBuffer: window.currentAudioBufferSize,
     audioUnderrunSamples: window.currentAudioUnderrunSamples,
@@ -6680,6 +6796,7 @@ class WorkerWebSocket {
       const arrayBuffer = event.data;
       const dataView = new DataView(arrayBuffer);
       if (arrayBuffer.byteLength < 1) return;
+      streamStats.noteBytes(arrayBuffer.byteLength);
       const dataTypeByte = dataView.getUint8(0);
 
       if (dataTypeByte === 0x03 || dataTypeByte === 0x04) {
@@ -6870,6 +6987,7 @@ class WorkerWebSocket {
                     ...(colorSpace ? { colorSpace } : {}),
                     ...(description ? { description } : {})
                 });
+                if (isFullFrameVideo(currentEncoderMode)) pageDecode.config = decoderConfig;
                 vncStripeDecoders[vncStripeYStart] = {
                     decoder: newStripeDecoder,
                     pendingChunks: [],
@@ -6928,6 +7046,9 @@ class WorkerWebSocket {
                 };
                 if (decoderInfo.decoder.state === "configured") {
                     const chunk = new EncodedVideoChunk(chunkData);
+                    if (streamStats.open && isFullFrameVideo(currentEncoderMode)) {
+                        pageDecode.starts.set(chunkTimestamp, performance.now());
+                    }
                     try {
                         decoderInfo.decoder.decode(chunk);
                     } catch (e) {
@@ -7172,6 +7293,7 @@ class WorkerWebSocket {
         loadingText = 'Waiting for stream...';
         updateStatusDisplay();
         initializationComplete = true;
+        streamStats.subscribe();
         if (firstFrameRecoveryTimer !== null) clearInterval(firstFrameRecoveryTimer);
         let firstFrameNudges = 0;
         firstFrameRecoveryTimer = setInterval(() => {
@@ -7194,13 +7316,8 @@ class WorkerWebSocket {
             console.error('Error parsing JSON:', e);
             return;
           }
-          if (obj.type === 'system_stats') window.system_stats = obj;
-          else if (obj.type === 'gpu_stats') window.gpu_stats = obj;
-          else if (obj.type === 'network_stats') {
-            window.network_stats = obj;
-            if (typeof obj.latency_ms === 'number') networkStat.latencyMs = obj.latency_ms;
-            if (typeof obj.bandwidth_mbps === 'number') networkStat.bandwidthMbps = obj.bandwidth_mbps;
-          }
+          if (obj.type === 'stream_info') streamStats.setInfo(obj.info);
+          else if (obj.type === 'stream_stats') streamStats.serverSample(obj.stats);
           else if (obj.type === 'server_settings') {
               if (displayId !== 'primary' && obj.settings.second_screen && obj.settings.second_screen.value === false) {
                   console.error("The server reports no second display is available. This client will not function.");
@@ -7800,6 +7917,7 @@ class WorkerWebSocket {
    */
   websocket.onclose = (event) => {
     console.log('[websockets] Connection closed', event);
+    streamStats.disconnected();
     // The auth probe reloads the page when the origin now answers 401.
     if (window.__selkiesAuthProbe) window.__selkiesAuthProbe();
     if (event.code === 4001) {

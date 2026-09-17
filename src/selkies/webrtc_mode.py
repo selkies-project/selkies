@@ -66,6 +66,7 @@ from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_
 from .webrtc_ice_config import get_rtc_configuration
 from .metrics import Metrics
 from . import resource_stats
+from . import stream_stats
 from .settings import (settings, AppSettings, SETTING_DEFINITIONS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX,
                        build_client_settings_payload, sanitize_client_setting)
 from types import SimpleNamespace
@@ -621,6 +622,7 @@ class WebRTCService(BaseStreamingService):
         self.media_pipeline.on_encoder_demoted = (
             lambda encoder: asyncio.ensure_future(self._encoder_demoted("primary", encoder))
         )
+        self.media_pipeline.on_stream_info = self._publish_stream_info
         self.media_pipeline.on_pipeline_started = self.send_current_cursor
 
         self.rtc_app.request_idr_frame = self.request_idr_for_display
@@ -682,6 +684,7 @@ class WebRTCService(BaseStreamingService):
         self.input_handler.on_session_compositor_adopted = self._resync_wayland_session_scale
 
         self.resource_monitor.on_tick = self.handle_resource_tick
+        self.resource_monitor.watched = lambda: bool(self.rtc_app and self.rtc_app.stats_displays())
 
     def _second_screen_availability(self) -> Tuple[bool, str]:
         """Whether this session can actually attach a second display, and the
@@ -791,6 +794,11 @@ class WebRTCService(BaseStreamingService):
                     and (peer.get("display_id") or "primary") == "primary":
                 for name, size in self.supervisor.pending_print_documents():
                     self.rtc_app.send_print_document(name, size, channel)
+            if peer is not None and peer.get("client_type") == ClientType.CONTROLLER:
+                did = peer.get("display_id") or "primary"
+                settled = getattr(getattr(self.display_pipelines.get(did), "stream_watch", None), "info", None)
+                if settled:
+                    self.rtc_app.send_stream_info(did, settled, channel)
         else:
             self.rtc_app.send_media_data_over_channel(
                 "server_settings", server_settings_payload
@@ -2016,6 +2024,7 @@ class WebRTCService(BaseStreamingService):
                 pipeline.on_encoder_demoted = (
                     lambda encoder, _did=did: asyncio.ensure_future(self._encoder_demoted(_did, encoder))
                 )
+                pipeline.on_stream_info = self._publish_stream_info
                 pipeline.get_cursor_size_cap = self.media_pipeline.get_cursor_size_cap
                 self.display_pipelines[did] = pipeline
                 try:
@@ -2307,23 +2316,36 @@ class WebRTCService(BaseStreamingService):
         return int(own or getattr(self, "_last_applied_dpi", None)
                    or float(getattr(settings, "scaling_dpi", 96) or 96))
 
+    async def _publish_stream_info(self, display_id: str, info: Dict[str, Any]) -> None:
+        """Tell a display's controllers what its capture streams and how."""
+        if self.rtc_app:
+            self.rtc_app.send_stream_info(display_id, info)
+
+    def _send_stream_stats(self) -> None:
+        """One `stream_stats` to the controllers with their stats open: the host's
+        figures and their display's encode. The link is the page's own to measure."""
+        host = stream_stats.host_stats(self.resource_monitor)
+        for did in self.rtc_app.stats_displays():
+            stats = dict(host)
+            pipeline = self.display_pipelines.get(did)
+            watch = getattr(pipeline, "stream_watch", None)
+            if watch is not None:
+                stats.update(watch.rates())
+            self.rtc_app.send_stream_stats(did, stats)
+
     async def handle_resource_tick(self, t: float) -> None:
-        """Resource-monitor tick: push the CPU, memory and GPU figures and a
-        ping to clients, and recover the audio capture if its worker died since
-        the last tick.
+        """Resource-monitor tick: send `stream_stats` and a ping to the
+        controllers watching their stats, and recover the audio capture if its
+        worker died since the last tick.
 
         pcmflux reports a clean start while its worker is still coming up, so a
         device that dies during bring-up (or later) only shows through
         `last_error`; polling it here cycles the audio capture. Audio lives on
         the primary pipeline; the call no-ops on the audio-less secondaries.
         """
-        monitor = self.resource_monitor
-        if self.input_handler and self.rtc_app and monitor and monitor.system:
+        if self.input_handler and self.rtc_app and self.rtc_app.stats_displays():
             self.input_handler.ping_start = t
-            system, gpu = monitor.system, monitor.gpu
-            self.rtc_app.send_system_stats(system["cpu_percent"], system["mem_total"], system["mem_used"])
-            if gpu:
-                self.rtc_app.send_gpu_stats(gpu["load"], gpu["memory_total"], gpu["memory_used"])
+            self._send_stream_stats()
             self.rtc_app.send_ping(t)
         if self.media_pipeline is not None:
             try:

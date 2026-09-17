@@ -29,7 +29,6 @@ import shutil
 import subprocess
 import threading
 import time
-from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 import psutil
@@ -535,8 +534,11 @@ class ResourceMonitor:
     `system` is always the last `SystemUsage` sample; `gpu` is the card's last
     reading, None while it cannot be read, and never polled again once the
     first probe finds no GPU, since a vendor tool may be spawned per query.
-    `on_tick` runs after each sample with the time, for whatever a transport
-    sends on the same cadence; `metrics`, when given, takes the GPU utilization.
+    `on_tick` runs every period with the time, for whatever a transport does
+    on the same cadence; `metrics`, when given, takes the GPU utilization. A
+    period is sampled only for someone: `watched`, when set, says whether a
+    page has its stats open, and without one and without `metrics` the period
+    passes unsampled and `system` and `gpu` read None rather than go stale.
     The GPU is `dri_node`'s card when that narrows the list to one, else the
     `gpu_id`th of the unfiltered list.
     """
@@ -550,8 +552,10 @@ class ResourceMonitor:
         self.system: Optional[Dict[str, Any]] = None
         self.gpu: Optional[Dict[str, Any]] = None
         self.on_tick: Optional[Callable[[float], Awaitable[None]]] = None
+        self.watched: Optional[Callable[[], bool]] = None
         self._usage = SystemUsage()
         self._probe_gpu = True
+        self._gpu_seen = False
         self._stop: Optional[asyncio.Event] = None
         self._task: Optional[asyncio.Task] = None
 
@@ -572,10 +576,6 @@ class ResourceMonitor:
         if gpu.load <= 0 and gpu.memoryTotal <= 0:
             return None
         return {
-            "type": "gpu_stats",
-            "timestamp": datetime.now().isoformat(),
-            "gpu_id": self.gpu_id,
-            "load": gpu.load,
             "gpu_percent": gpu.load * 100,
             "memory_total": gpu.memoryTotal * 1024 * 1024,
             "memory_used": gpu.memoryUsed * 1024 * 1024,
@@ -584,15 +584,16 @@ class ResourceMonitor:
     def _sample(self) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
         """One blocking sample of both, for a worker thread."""
         cpu, total, used = self._usage.sample()
-        system = {"type": "system_stats", "timestamp": datetime.now().isoformat(),
-                  "cpu_percent": cpu, "mem_total": total, "mem_used": used}
+        system = {"cpu_percent": cpu, "mem_total": total, "mem_used": used}
         gpu = None
         if self._probe_gpu:
             try:
                 gpu = self._gpu_sample()
             except Exception as exc:
                 logger.warning(f"GPU stats unavailable this tick: {exc}")
-            if gpu is None and self.gpu is None:
+            if gpu is not None:
+                self._gpu_seen = True
+            elif not self._gpu_seen:
                 self._probe_gpu = False
                 logger.info(
                     f"No GPU with ID {self.gpu_id} reports utilization or memory; "
@@ -602,7 +603,10 @@ class ResourceMonitor:
     async def _loop(self) -> None:
         try:
             while self._stop is not None and not self._stop.is_set():
-                self.system, self.gpu = await asyncio.to_thread(self._sample)
+                if self.metrics is not None or self.watched is None or self.watched():
+                    self.system, self.gpu = await asyncio.to_thread(self._sample)
+                else:
+                    self.system = self.gpu = None
                 if self.metrics is not None and self.gpu is not None:
                     self.metrics.set_gpu_utilization(self.gpu["gpu_percent"])
                 if self.on_tick is not None:

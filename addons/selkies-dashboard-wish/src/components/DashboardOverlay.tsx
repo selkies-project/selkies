@@ -7,17 +7,17 @@
 import React, { useState } from 'react';
 import ReactDOM from 'react-dom';
 import { TopMenu } from './dashboard/top-menu';
-import { Gamepad } from './dashboard/gamepad';
+import { VirtualKeyboardButton } from './dashboard/gamepad';
 import PlayerGamepadButton from './dashboard/PlayerGamepadButton';
 import { TooltipProvider } from './ui/tooltip';
 import { isSecondaryDisplay, isViewerUrlMode, getLastServerSettings } from '../utils';
 import '../styles/Overlay.css';
 
 /**
- * The dashboard chrome portaled over the stream: the top menu and the
- * floating gamepad card.
+ * The dashboard chrome portaled over the stream: the top menu, whose gamepad
+ * dropdown holds the gamepad preview, and the mobile virtual-keyboard button.
  *
- * Owns the pipeline, gamepad and touch-gamepad state the menu and the card
+ * Owns the pipeline, gamepad and touch-gamepad state the menu and the preview
  * share. State follows the core's echoes rather than local toggles: a
  * `pipelineControl` or `gamepadControl` request is posted to `window`, and
  * `pipelineStatusUpdate` / `sidebarButtonStatusUpdate` flip the state once
@@ -25,7 +25,7 @@ import '../styles/Overlay.css';
  * `clientRoleUpdate` (viewers get no control UI, only the floating
  * touch-gamepad toggle on a touch client), `serverSettings`
  * (`ui_show_sidebar` hides the whole chrome, `ui_sidebar_show_gamepads` the
- * card alone), and the core-owned hotkey messages `toggleDashboard` and
+ * gamepad preview and that button alone), and the core-owned hotkey messages `toggleDashboard` and
  * `toggleTouchGamepad`. The touch overlay is driven with
  * `TOUCH_GAMEPAD_SETUP` and `TOUCH_GAMEPAD_VISIBILITY`.
  * @module
@@ -207,10 +207,10 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
           <PlayerGamepadButton touchOnly isActive={isTouchGamepadActive} onToggle={handleToggleTouchGamepad} />
         )}
 
-        {/* Input is owned by the primary display, so the card follows the
+        {/* Input is owned by the primary display, so the button follows the
             menu's chrome gates plus its own ui_sidebar_show_gamepads. */}
         {isGamepadEnabled && !isSecondaryDisplay && showStats && !isViewer && showSidebar && showGamepadCard && (
-          <Gamepad isGamepadEnabled={isGamepadEnabled} isTouchGamepadActive={isTouchGamepadActive} />
+          <VirtualKeyboardButton />
         )}
       </div>
     </TooltipProvider>,
