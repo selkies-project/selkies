@@ -116,7 +116,8 @@ A change is ready when four questions have answers, and the commit or pull reque
 
 A change in an area a maintainer has said they are working on goes to a branch and a pull request carrying those
 answers, never straight to `main`, whatever standing permission to push `main` exists. An issue is closed by a
-maintainer, never by the change that claims to fix it. An optional path another
+maintainer, never by you. A pull request's `Closes` keyword is not you closing it; the maintainer's merge
+is. An optional path another
 component may offer (a protocol a compositor advertises, a driver feature, a device) is taken only when its presence
 is detected and never as the default: that it is exposed is not proof it works, and a reviewer has to be able to tell
 what runs where.
