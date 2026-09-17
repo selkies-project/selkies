@@ -95,7 +95,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Free disk space
         # The tool cache is kept: setup-python and setup-node resolve from it
-        uses: endersonmenezes/free-disk-space@v4
+        uses: endersonmenezes/free-disk-space@2a22f8c59cae9cddae7194b33e6b92d023b2b4b8 # v4
         with:
           remove_android: true
           remove_dotnet: true
@@ -154,8 +154,8 @@ jobs:
           # .gitignore keeps addons/base/wheels/*.whl out of git
           cp dist/*.whl addons/base/wheels/
           ls -la addons/base/wheels/
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -224,8 +224,8 @@ jobs:
         flavor: [ubuntu26.04, debiantrixie]
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -286,8 +286,8 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -324,8 +324,8 @@ jobs:
         addon: [coturn, turn-rest]
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -373,7 +373,7 @@ jobs:
     # A prune that hits a rate limit must not fail the publish
     continue-on-error: true
     steps:
-      - uses: dataaxiom/ghcr-cleanup-action@v1
+      - uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1
         with:
           packages: selkies/base,selkies/desktop,selkies/coturn,selkies/turn-rest
           delete-untagged: true

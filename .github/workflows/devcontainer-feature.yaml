@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Validate devcontainer-feature.json files
-        uses: devcontainers/action@v1
+        uses: devcontainers/action@1082abd5d2bf3a11abccba70eef98df068277772 # v1
         with:
           validate-only: "true"
           base-path-to-features: ".devcontainer/features/desktop-selkies"
@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Publish features
-        uses: devcontainers/action@v1
+        uses: devcontainers/action@1082abd5d2bf3a11abccba70eef98df068277772 # v1
         with:
           publish-features: "true"
           base-path-to-features: ".devcontainer/features/desktop-selkies"
