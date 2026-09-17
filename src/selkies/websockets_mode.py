@@ -138,6 +138,15 @@ FRAME_ID_SUSPICIOUS_GAP_THRESHOLD = (
 )
 # A frame unanswered by any ack for this long marks the client stalled.
 STALLED_CLIENT_TIMEOUT_SECONDS = 4.0
+# The capture settings that decide whether a running capture survives a
+# reconfiguration: every one of them shapes the pipeline itself, so a change to
+# any rebuilds it, and a move or a resize alone keeps it. Named here rather than
+# written into the comparison because a field that goes away takes the check
+# with it -- the comparison is guarded, so a stale name reads as "rebuild" and
+# says nothing, which is how `output_mode` outlived the field for a release.
+STRUCTURAL_CAPTURE_SETTINGS = (
+    "codec", "use_cpu", "video_fullframe", "video_fullcolor", "video_cbr_mode",
+)
 # How long a stall keeps the gate shut before it reopens on an IDR to probe the
 # client: a stalled client is sent nothing, so nothing could otherwise reach it
 # to ack, and the gate would hold until the page reloaded.
@@ -4999,8 +5008,7 @@ class DataStreamingServer(BaseStreamingService):
                         fresh = self._get_capture_settings(did, layout['w'], layout['h'], layout['x'], layout['y'])
                         structural_ok = old_cs is not None and all(
                             getattr(fresh, k) == getattr(old_cs, k)
-                            for k in ('output_mode', 'use_cpu',
-                                      'video_fullframe', 'video_fullcolor', 'video_cbr_mode')
+                            for k in STRUCTURAL_CAPTURE_SETTINGS
                         )
                         if structural_ok:
                             inst['settings'] = fresh
