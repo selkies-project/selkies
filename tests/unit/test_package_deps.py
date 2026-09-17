@@ -27,7 +27,7 @@ VERIFY_PACKAGE = os.path.join(REPO, "scripts", "ci", "verify-package.sh")
 CONDA_NAME = {"msgpack": "msgpack-python", "pillow": "pillow"}
 # No conda-forge package exists, so scripts/ci/appimage.sh pip-installs them
 # into the same prefix.
-PIP_ONLY = {"pixelflux", "pcmflux", "pulsectl-asyncio", "aitop"}
+PIP_ONLY = {"pixelflux", "pcmflux", "pulsectl-asyncio"}
 
 passed = failed = 0
 

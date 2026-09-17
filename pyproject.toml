@@ -56,7 +56,6 @@ dependencies = [
     "importlib_resources>=5.10.0; python_version < '3.10'",
     # GPU stats
     "nvidia-ml-py",
-    "aitop",
 ]
 
 [project.optional-dependencies]

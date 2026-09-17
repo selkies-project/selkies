@@ -69,8 +69,8 @@ try:
           resource_stats._nvml_ready)
 
     # The overall stats call must survive a terminally failed NVML by falling
-    # through to the other sources (aitop, nvidia-smi, sysfs), whatever this
-    # host provides.
+    # through to the other sources (nvidia-smi, DRM sysfs and fdinfo), whatever
+    # this host provides.
     resource_stats.pynvml = FakeNvml(fail=True)
     resource_stats._nvml_ready = None
     gpus = resource_stats.get_gpus()

@@ -39,7 +39,7 @@ requirements:
     # Mirrors [project.dependencies] in pyproject.toml, which
     # tests/unit/test_package_deps.py holds this list to; `pip install
     # --no-deps` above deliberately leaves resolution to conda. pixelflux,
-    # pcmflux, pulsectl-asyncio and aitop have no conda-forge packages and are
+    # pcmflux and pulsectl-asyncio have no conda-forge packages and are
     # pip-installed into the same environment by scripts/ci/appimage.sh.
     - prometheus_client
     - msgpack-python

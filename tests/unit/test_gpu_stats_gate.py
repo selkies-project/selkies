@@ -6,8 +6,10 @@ unprivileged counters, so the pipeline can match the one it captures on by
 vendor or PCI address. Publishing such a card's zeros every tick would leave a
 page showing a utilization that can never move and a memory total of nothing,
 so a sample with no counters at all is no sample, and the collector stops
-probing. A card that really is idle still has a memory total, so it keeps
-reporting.
+probing. The distinction is the card's utilization: a number, however small, is
+something the host counted, and None is nothing counting it at all. A card that
+really is idle keeps reporting, whether what it has to report is a memory total
+or a measured zero.
 
 Driven against the collector with stand-in detections; no GPU needed.
 """
@@ -39,8 +41,12 @@ def stat(load, total, used, vendor):
 
 
 res.check("a card exposing no counters is not a reading",
-          sample(stat(0.0, 0.0, 0.0, "intel")) is None)
+          sample(stat(None, 0.0, 0.0, "intel")) is None)
 res.check("nor is an empty detection", sample() is None)
+
+measured = sample(stat(0.0, 0.0, 0.0, "arm"))
+res.check("a card measured idle is a reading, so the probe stays on",
+          measured is not None and measured["gpu_percent"] == 0.0, measured)
 
 idle = sample(stat(0.0, 8192.0, 512.0, "amd"))
 res.check("an idle card with memory still reports",

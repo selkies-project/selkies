@@ -64,7 +64,6 @@ come in.
 | `prometheus_client` | Apache-2.0 AND BSD-2-Clause | permissive | metrics endpoint | |
 | `pulsectl-asyncio` | MIT | permissive | microphone routing through PulseAudio | `pulsectl` (MIT) opens the host's libpulse (LGPL-2.1-or-later) through ctypes at run time |
 | `nvidia-ml-py` | BSD-3-Clause | permissive | GPU statistics | opens the NVIDIA driver's libnvidia-ml (proprietary) through ctypes at run time when present |
-| `aitop` | MIT | permissive | GPU statistics | |
 | `importlib_resources` (Python 3.9 only) | Apache-2.0 | permissive | package data on 3.9 | |
 
 The Python interpreter itself (PSF-2.0) and, when installed, the distribution's
