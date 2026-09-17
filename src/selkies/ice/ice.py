@@ -46,7 +46,7 @@ import threading
 from collections.abc import Callable
 from typing import Optional, Union, cast
 
-import ifaddr
+import psutil
 
 from . import mdns, mux, stun, turn
 from .candidate import Candidate, candidate_foundation, candidate_priority
@@ -118,14 +118,19 @@ def candidate_pair_priority(
 def get_host_addresses(use_ipv4: bool, use_ipv6: bool) -> list[str]:
     """
     Get local IP addresses.
+
+    An IPv6 address carries a zone (``fe80::1%eth0``) exactly when its scope id is
+    non-zero, so the zone is what marks the link-local addresses to leave out.
     """
     addresses = []
-    for adapter in ifaddr.get_adapters():
-        for ip in adapter.ips:
-            if isinstance(ip.ip, str) and use_ipv4 and ip.ip != "127.0.0.1":
-                addresses.append(ip.ip)
-            elif use_ipv6 and ip.ip[0] != "::1" and ip.ip[2] == 0:
-                addresses.append(ip.ip[0])
+    for adapter in psutil.net_if_addrs().values():
+        for addr in adapter:
+            if addr.family == socket.AF_INET and use_ipv4 and addr.address != "127.0.0.1":
+                addresses.append(addr.address)
+            elif addr.family == socket.AF_INET6 and use_ipv6:
+                ip, _, zone = addr.address.partition("%")
+                if ip != "::1" and not zone:
+                    addresses.append(ip)
     return addresses
 
 

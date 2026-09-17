@@ -8,7 +8,7 @@ bind always has: the address is logged and skipped, nothing raises. Each case
 runs on the stock loop and on uvloop, which the service prefers and which
 reports a refused datagram bind as a wrapper of its own rather than the
 kernel's error. Runs against the vendored `selkies.ice` alone, so a plain
-interpreter with ifaddr and dnspython suffices.
+interpreter with psutil and dnspython suffices.
 """
 import asyncio
 import errno

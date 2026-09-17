@@ -55,11 +55,10 @@ come in.
 | `pylibsrtp` | BSD-3-Clause | permissive | SRTP | bundles libsrtp2 (BSD-3-Clause) |
 | `google-crc32c` | Apache-2.0 | permissive | SCTP checksums | bundles crc32c (BSD-3-Clause) |
 | `dnspython` | ISC | permissive | mDNS ICE candidates | |
-| `ifaddr` | MIT | permissive | interface enumeration for ICE | |
 | `pyee` | MIT | permissive | event emitter of the WebRTC stack | `typing_extensions` (PSF-2.0) |
 | `uvloop` | MIT OR Apache-2.0 | permissive | event loop (Linux, macOS) | bundles libuv (MIT) |
 | `msgpack` | Apache-2.0 | permissive | control-channel encoding | |
-| `psutil` | BSD-3-Clause | permissive | system and process statistics | |
+| `psutil` | BSD-3-Clause | permissive | system and process statistics, interface enumeration for ICE | |
 | `watchdog` | Apache-2.0 | permissive | file-change notifications | |
 | `Pillow` | MIT-CMU (HPND) | permissive | clipboard images, cursors, icons | bundles libjpeg-turbo (IJG/BSD-3-Clause/Zlib), libpng, libtiff, libwebp, openjpeg, libavif, freetype (FTL or GPL-2.0-or-later, dual), harfbuzz, lcms2, brotli, zstd (BSD-3-Clause or GPL-2.0, dual), xz, xcb: all usable under permissive terms |
 | `prometheus_client` | Apache-2.0 AND BSD-2-Clause | permissive | metrics endpoint | |

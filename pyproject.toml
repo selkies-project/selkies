@@ -39,7 +39,6 @@ dependencies = [
     "pulsectl-asyncio",
     # WebRTC
     "dnspython>=2.6.1",
-    "ifaddr>=0.2.0",
     "cffi>=1.0.0",
     "cryptography>=50.0.0",
     "google-crc32c>=1.1.0",
