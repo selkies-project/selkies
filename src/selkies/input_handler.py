@@ -1906,8 +1906,8 @@ class _XTestMouse:
         self._d.flush()
 
 
-logger_webrtc_input = logging.getLogger("webrtc_input")
-logger_selkies_gamepad = logging.getLogger("selkies_gamepad")
+logger_webrtc_input = logging.getLogger("input")
+logger_selkies_gamepad = logging.getLogger("gamepad")
 
 # Bound on one multi-part clipboard transfer; the declared size and the
 # accumulated chunks are both checked so a client cannot balloon memory.
@@ -2047,7 +2047,7 @@ KEYSYM_RIGHT_ARROW = 0xFF53
 try:
     from .server_keysym_map import X11_KEYSYM_MAP
 except ImportError:
-    logger_webrtc_input = logging.getLogger("webrtc_input_fallback_map_import")
+    logger_webrtc_input = logging.getLogger("input")
     logger_webrtc_input.warning(
         "server_keysym_map.py not found or X11_KEYSYM_MAP not defined. "
         "Keysym mapping will rely entirely on fallback."
@@ -2239,7 +2239,7 @@ class JsConfigCtypes(ctypes.Structure):
     ]
 
 EXPECTED_C_STRUCT_SIZE: int = ctypes.sizeof(JsConfigCtypes)
-logging.info(f"Expected C js_config_t size (from ctypes): {EXPECTED_C_STRUCT_SIZE} bytes")
+logger_selkies_gamepad.debug(f"Expected C js_config_t size (from ctypes): {EXPECTED_C_STRUCT_SIZE} bytes")
 
 
 ABS_MIN_VAL = -32767
@@ -2546,7 +2546,7 @@ def uinput_gamepads_enabled(mode: Optional[str]) -> bool:
     if not forced and mode != "auto":
         logger_selkies_gamepad.warning(f"Unrecognized uinput_gamepad value '{mode}'; using 'auto'.")
     if not forced and interposer_configured():
-        logger_selkies_gamepad.info(
+        logger_selkies_gamepad.debug(
             "Input Interposer is configured for this session; kernel gamepads stay off."
         )
         return False
@@ -2971,7 +2971,7 @@ class SelkiesGamepad:
         
         self.config_payload_cache = self._make_interposer_config_payload(js_idx, payload_controller_config)
         
-        logger_selkies_gamepad.info(
+        logger_selkies_gamepad.debug(
             f"Gamepad configured. JS socket: {self.js_sock_path}, EVDEV socket: {self.evdev_sock_path}. "
             f"Using fixed config: {STANDARD_XPAD_CONFIG['name']}"
         )
@@ -3035,7 +3035,7 @@ class SelkiesGamepad:
                 name_bytes_for_pack = name_bytes_utf8.ljust(CONTROLLER_NAME_MAX_LEN, b'\0')
 
             if len(name_bytes_for_pack) != CONTROLLER_NAME_MAX_LEN:
-                 logging.error(f"CRITICAL: name_bytes_for_pack is not {CONTROLLER_NAME_MAX_LEN} bytes long! Got {len(name_bytes_for_pack)}")
+                 logger_selkies_gamepad.error(f"CRITICAL: name_bytes_for_pack is not {CONTROLLER_NAME_MAX_LEN} bytes long! Got {len(name_bytes_for_pack)}")
                  return b'\0' * C_INTERPOSER_STRUCT_SIZE
 
             raw_vendor = controller_config.get("vendor_id")
@@ -3070,14 +3070,14 @@ class SelkiesGamepad:
 
             padded_btn_map_for_pack = list(buttons_evdev_codes)
             if len(padded_btn_map_for_pack) > INTERPOSER_MAX_BTNS:
-                logging.warning(f"Controller '{name_str}' has {len(padded_btn_map_for_pack)} buttons, truncating to {INTERPOSER_MAX_BTNS} for config.")
+                logger_selkies_gamepad.warning(f"Controller '{name_str}' has {len(padded_btn_map_for_pack)} buttons, truncating to {INTERPOSER_MAX_BTNS} for config.")
                 padded_btn_map_for_pack = padded_btn_map_for_pack[:INTERPOSER_MAX_BTNS]
             else:
                 padded_btn_map_for_pack.extend([0] * (INTERPOSER_MAX_BTNS - len(padded_btn_map_for_pack)))
 
             padded_axes_map_for_pack = list(axes_evdev_codes)
             if len(padded_axes_map_for_pack) > INTERPOSER_MAX_AXES:
-                logging.warning(f"Controller '{name_str}' has {len(padded_axes_map_for_pack)} axes, truncating to {INTERPOSER_MAX_AXES} for config.")
+                logger_selkies_gamepad.warning(f"Controller '{name_str}' has {len(padded_axes_map_for_pack)} axes, truncating to {INTERPOSER_MAX_AXES} for config.")
                 padded_axes_map_for_pack = padded_axes_map_for_pack[:INTERPOSER_MAX_AXES]
             else:
                 padded_axes_map_for_pack.extend([0] * (INTERPOSER_MAX_AXES - len(padded_axes_map_for_pack)))
@@ -3089,7 +3089,7 @@ class SelkiesGamepad:
             padding_needed = C_INTERPOSER_STRUCT_SIZE - size_without_explicit_end_padding
 
             if padding_needed < 0:
-                logging.error(
+                logger_selkies_gamepad.error(
                     f"CRITICAL STRUCT SIZE ERROR: Python base packed size ({size_without_explicit_end_padding}) "
                     f"is larger than C interposer expected size ({C_INTERPOSER_STRUCT_SIZE}). "
                     f"This means constants (MAX_BTNS, MAX_AXES, NAME_LEN) or field types/order "
@@ -3101,7 +3101,7 @@ class SelkiesGamepad:
             
             python_final_packed_size = struct.calcsize(struct_fmt)
             if python_final_packed_size != C_INTERPOSER_STRUCT_SIZE:
-                logging.error(
+                logger_selkies_gamepad.error(
                     f"CRITICAL FINAL PYTHON PACKED SIZE MISMATCH for js_config_t! "
                     f"C interposer expects: {C_INTERPOSER_STRUCT_SIZE}, "
                     f"Python struct.pack calculated final size: {python_final_packed_size} using format '{struct_fmt}'. "
@@ -3109,7 +3109,7 @@ class SelkiesGamepad:
                 )
                 return b'\0' * C_INTERPOSER_STRUCT_SIZE
 
-            logging.debug(f"Using final struct_fmt: '{struct_fmt}' for js_config, packing to size {python_final_packed_size}")
+            logger_selkies_gamepad.debug(f"Using final struct_fmt: '{struct_fmt}' for js_config, packing to size {python_final_packed_size}")
 
             payload_args = [
                 name_bytes_for_pack,
@@ -3125,7 +3125,7 @@ class SelkiesGamepad:
             payload = struct.pack(struct_fmt, *payload_args)
 
             log_display_name = name_bytes_for_pack.split(b'\0',1)[0].decode('utf-8', errors='replace')
-            logging.info(f"Packed js_config payload for '{name_str}' (js{js_index}): "
+            logger_selkies_gamepad.debug(f"Packed js_config payload for '{name_str}' (js{js_index}): "
                          f"len={len(payload)} bytes. "
                          f"Name='{log_display_name}', "
                          f"Vendor=0x{vendor_id:04x}, Product=0x{product_id:04x}, Version=0x{version_id:04x}, "
@@ -3133,15 +3133,15 @@ class SelkiesGamepad:
                          f"Reported Axes={num_actual_axes} (Array capacity: {INTERPOSER_MAX_AXES})")
             
             if len(payload) != C_INTERPOSER_STRUCT_SIZE:
-                logging.error(f"FINAL PAYLOAD SIZE MISMATCH AFTER PACKING! Expected {C_INTERPOSER_STRUCT_SIZE}, got {len(payload)}. This is very bad.")
+                logger_selkies_gamepad.error(f"FINAL PAYLOAD SIZE MISMATCH AFTER PACKING! Expected {C_INTERPOSER_STRUCT_SIZE}, got {len(payload)}. This is very bad.")
                 return b'\0' * C_INTERPOSER_STRUCT_SIZE
             return payload
 
         except struct.error as e:
             current_struct_fmt = struct_fmt if struct_fmt != "undefined" else base_struct_fmt
-            logging.error(f"Error packing joystick config for js{js_index} with format '{current_struct_fmt}': {e}")
+            logger_selkies_gamepad.error(f"Error packing joystick config for js{js_index} with format '{current_struct_fmt}': {e}")
             config_to_log = controller_config if 'controller_config' in locals() else {}
-            logging.error(f"Controller config was: {config_to_log}")
+            logger_selkies_gamepad.error(f"Controller config was: {config_to_log}")
             return b'\0' * C_INTERPOSER_STRUCT_SIZE
         except Exception as e:
             config_to_log = controller_config if 'controller_config' in locals() else {}
@@ -3166,13 +3166,13 @@ class SelkiesGamepad:
         clients_dict = self.evdev_clients if is_evdev_socket else self.js_clients
         sock_path = self.evdev_sock_path if is_evdev_socket else self.js_sock_path
         log_prefix = f"Gamepad {sock_path} Client {peername} ({socket_type_str}):"
-        logger_selkies_gamepad.info(f"{log_prefix} Handler started.")
+        logger_selkies_gamepad.debug(f"{log_prefix} Handler started.")
 
         try:
             if not self.config_payload_cache:
                 logger_selkies_gamepad.error(f"{log_prefix} Config payload not ready. Aborting handler.")
                 return
-            logger_selkies_gamepad.info(f"{log_prefix} Preparing to send config payload. Length: {len(self.config_payload_cache)}, Expected C size: {EXPECTED_C_STRUCT_SIZE}, First 16 bytes: {self.config_payload_cache[:16].hex()}")
+            logger_selkies_gamepad.debug(f"{log_prefix} Preparing to send config payload. Length: {len(self.config_payload_cache)}, Expected C size: {EXPECTED_C_STRUCT_SIZE}, First 16 bytes: {self.config_payload_cache[:16].hex()}")
             writer.write(self.config_payload_cache)
             await writer.drain()
             logger_selkies_gamepad.debug(f"{log_prefix} Sent config payload.")
@@ -3180,39 +3180,39 @@ class SelkiesGamepad:
             arch_byte = await reader.readexactly(1)
             client_sizeof_long = struct.unpack("=B", arch_byte)[0]
             client_arch_bits = client_sizeof_long * 8
-            logger_selkies_gamepad.info(f"{log_prefix} Received arch specifier: {client_sizeof_long} bytes ({client_arch_bits}-bit).")
+            logger_selkies_gamepad.debug(f"{log_prefix} Received arch specifier: {client_sizeof_long} bytes ({client_arch_bits}-bit).")
 
             if not is_evdev_socket:
                 writer.write(self.init_state_burst())
             clients_dict[writer] = {'arch_bits': client_arch_bits}
             await writer.drain()
-            logger_selkies_gamepad.info(f"{log_prefix} Added to active list. Total {socket_type_str} clients: {len(clients_dict)}.")
+            logger_selkies_gamepad.debug(f"{log_prefix} Added to active list. Total {socket_type_str} clients: {len(clients_dict)}.")
 
             while self.running and not writer.is_closing():
                 await asyncio.sleep(0.1) 
             
             if not self.running:
-                logger_selkies_gamepad.info(f"{log_prefix} Exiting handler normally because self.running is False.")
+                logger_selkies_gamepad.debug(f"{log_prefix} Exiting handler normally because self.running is False.")
             if writer.is_closing():
-                logger_selkies_gamepad.info(f"{log_prefix} Exiting handler normally because writer.is_closing() is True (client likely closed connection).")
+                logger_selkies_gamepad.debug(f"{log_prefix} Exiting handler normally because writer.is_closing() is True (client likely closed connection).")
 
         except (asyncio.IncompleteReadError, ConnectionResetError, BrokenPipeError) as e:
-            logger_selkies_gamepad.info(f"{log_prefix} Disconnected (expected error): {type(e).__name__} - {e}")
+            logger_selkies_gamepad.debug(f"{log_prefix} Disconnected (expected error): {type(e).__name__} - {e}")
         except Exception as e:
             logger_selkies_gamepad.error(f"{log_prefix} Unhandled error in handler: {e}", exc_info=True)
         finally:
-            logger_selkies_gamepad.info(f"{log_prefix} Entering finally block.")
+            logger_selkies_gamepad.debug(f"{log_prefix} Entering finally block.")
             if writer in clients_dict:
                 del clients_dict[writer]
-                logger_selkies_gamepad.info(f"{log_prefix} Removed from active list. Total {socket_type_str} clients now: {len(clients_dict)}.")
+                logger_selkies_gamepad.debug(f"{log_prefix} Removed from active list. Total {socket_type_str} clients now: {len(clients_dict)}.")
             else:
                 logger_selkies_gamepad.warning(f"{log_prefix} Writer not found in active list during finally block.")
 
             if not writer.is_closing():
-                logger_selkies_gamepad.info(f"{log_prefix} Explicitly closing writer in finally block.")
+                logger_selkies_gamepad.debug(f"{log_prefix} Explicitly closing writer in finally block.")
                 writer.close()
                 await writer.wait_closed()
-            logger_selkies_gamepad.info(f"{log_prefix} Handler finished.")
+            logger_selkies_gamepad.debug(f"{log_prefix} Handler finished.")
 
     async def _run_single_server(self, interposer_socket_path: str,
                                  is_evdev_socket: bool) -> Optional[asyncio.AbstractServer]:
@@ -3238,7 +3238,7 @@ class SelkiesGamepad:
                 path=interposer_socket_path
             )
             addr = server.sockets[0].getsockname() if server.sockets else interposer_socket_path
-            logger_selkies_gamepad.info(f"{'EVDEV' if is_evdev_socket else 'JS'} interposer server listening on {addr}")
+            logger_selkies_gamepad.debug(f"{'EVDEV' if is_evdev_socket else 'JS'} interposer server listening on {addr}")
             return server
         except Exception as e:
             logger_selkies_gamepad.error(f"Failed to start {'EVDEV' if is_evdev_socket else 'JS'} server on {interposer_socket_path}: {e}", exc_info=True)
@@ -3266,7 +3266,7 @@ class SelkiesGamepad:
         
         while self.running:
             await asyncio.sleep(1)
-        logger_selkies_gamepad.info("run_servers loop exited.")
+        logger_selkies_gamepad.debug("run_servers loop exited.")
 
     def send_event(self, client_event_idx: int, client_value: float,
                    is_button_event: bool) -> None:
@@ -3346,7 +3346,7 @@ class SelkiesGamepad:
         Each client drain is bounded and a stalled client is closed, so a game
         that stops reading its socket cannot freeze delivery for the others.
         """
-        logger_selkies_gamepad.info(f"Gamepad {self.js_sock_path}: Event processor started.")
+        logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: Event processor started.")
         while self.running:
             try:
                 event_package = await self.events_queue.get()
@@ -3393,28 +3393,28 @@ class SelkiesGamepad:
                 
                 self.events_queue.task_done()
             except asyncio.CancelledError:
-                logger_selkies_gamepad.info(f"Gamepad {self.js_sock_path}: Event processor task canceled.")
+                logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: Event processor task canceled.")
                 break
             except Exception as e:
                 logger_selkies_gamepad.error(f"Gamepad {self.js_sock_path}: Unhandled error in event processor: {e}", exc_info=True)
-        logger_selkies_gamepad.info(f"Gamepad {self.js_sock_path}: Event processor stopped.")
+        logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: Event processor stopped.")
 
 
     async def close(self) -> None:
         """Stop servers, drop clients, unlink socket files, destroy the kernel device."""
-        logger_selkies_gamepad.info(f"Closing gamepad services for JS:{self.js_sock_path}, EVDEV:{self.evdev_sock_path}")
+        logger_selkies_gamepad.debug(f"Closing gamepad services for JS:{self.js_sock_path}, EVDEV:{self.evdev_sock_path}")
         self.running = False
 
         if self.js_server:
             self.js_server.close()
             await self.js_server.wait_closed()
             self.js_server = None
-            logger_selkies_gamepad.info(f"JS interposer server {self.js_sock_path} closed.")
+            logger_selkies_gamepad.debug(f"JS interposer server {self.js_sock_path} closed.")
         if self.evdev_server:
             self.evdev_server.close()
             await self.evdev_server.wait_closed()
             self.evdev_server = None
-            logger_selkies_gamepad.info(f"EVDEV interposer server {self.evdev_sock_path} closed.")
+            logger_selkies_gamepad.debug(f"EVDEV interposer server {self.evdev_sock_path} closed.")
 
         for writer in list(self.js_clients.keys()):
             if not writer.is_closing(): writer.close()
@@ -3440,7 +3440,7 @@ class SelkiesGamepad:
             if sock_path and os.path.exists(sock_path):
                 try:
                     os.unlink(sock_path)
-                    logger_selkies_gamepad.info(f"Removed socket file: {sock_path}")
+                    logger_selkies_gamepad.debug(f"Removed socket file: {sock_path}")
                 except OSError as e:
                     logger_selkies_gamepad.warning(f"Could not remove socket file {sock_path} on close: {e}")
 
@@ -3448,7 +3448,7 @@ class SelkiesGamepad:
             self.uinput.destroy()
             self.uinput = None
 
-        logger_selkies_gamepad.info("Gamepad services fully closed.")
+        logger_selkies_gamepad.debug("Gamepad services fully closed.")
 
 
 # Watch tasks for client-requested commands; referenced so they cannot be
@@ -4080,7 +4080,7 @@ class WebRTCInput:
                 if ScreenCapture is None:
                     raise RuntimeError("pixelflux is not installed")
                 self.wayland_input = ScreenCapture()
-                logger_webrtc_input.info("Wayland input injection initialized.")
+                logger_webrtc_input.debug("Wayland input injection initialized.")
             except Exception as e:
                 logger_webrtc_input.error(f"Failed to initialize Wayland input: {e}")
 
@@ -4293,7 +4293,7 @@ class WebRTCInput:
                 self.key_repeat_delay = delay_ms / 1000.0
             if 1 <= rate_hz <= 100:
                 self.key_repeat_interval = 1.0 / rate_hz
-            logger_webrtc_input.info(
+            logger_webrtc_input.debug(
                 f"Server autorepeat: delay {self.key_repeat_delay:.3f}s, "
                 f"interval {self.key_repeat_interval:.3f}s."
             )
@@ -4301,7 +4301,7 @@ class WebRTCInput:
             logger_webrtc_input.debug(f"Could not read server autorepeat rate (using defaults): {e}")
     def __mouse_connect(self) -> None:
         if self.uinput_mouse_socket_path:
-            logger_webrtc_input.info(f"Connecting to uinput mouse socket: {self.uinput_mouse_socket_path}")
+            logger_webrtc_input.debug(f"Connecting to uinput mouse socket: {self.uinput_mouse_socket_path}")
             self.uinput_mouse_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         if not self.is_wayland and self.xdisplay:
             self.mouse = _XTestMouse(self.xdisplay)
@@ -4379,7 +4379,7 @@ class WebRTCInput:
         """
         if gamepad_idx is None:
             indices_to_disassociate = list(self.client_gamepad_associations.keys())
-            logger_webrtc_input.info("Disassociating all client gamepads from persistent slots.")
+            logger_webrtc_input.debug("Disassociating all client gamepads from persistent slots.")
         elif not (0 <= gamepad_idx < self.num_gamepads):
             logger_webrtc_input.error(f"Client disassociation: Gamepad index {gamepad_idx} out of range.")
             return
@@ -4437,7 +4437,7 @@ class WebRTCInput:
                     self.system_dpi = (dpi_x + dpi_y) / 2.0
                 dpi_scale_factor = self.system_dpi / 96.0
                 self.cursor_size_cap = int(self.max_cursor_size * dpi_scale_factor)
-                logger_webrtc_input.info(
+                logger_webrtc_input.debug(
                     f"System DPI detected as ~{self.system_dpi:.0f}. "
                     f"Cursor size cap set to {self.cursor_size_cap}x{self.cursor_size_cap}px."
                 )
@@ -4559,11 +4559,11 @@ class WebRTCInput:
         a service restart (transport mode switch) reuses them; rebinding would
         orphan those apps' fds.
         """
-        logger_webrtc_input.info(f"Initializing {self.num_gamepads} persistent gamepad instances...")
+        logger_webrtc_input.debug(f"Initializing {self.num_gamepads} persistent gamepad instances...")
         if not os.path.exists(self.js_socket_path_prefix):
             try:
                 os.makedirs(self.js_socket_path_prefix, exist_ok=True)
-                logger_webrtc_input.info(f"Created directory for gamepad sockets: {self.js_socket_path_prefix}")
+                logger_webrtc_input.debug(f"Created directory for gamepad sockets: {self.js_socket_path_prefix}")
             except OSError as e:
                 logger_webrtc_input.error(f"Failed to create directory {self.js_socket_path_prefix} for gamepad sockets: {e}")
                 return
@@ -4576,7 +4576,7 @@ class WebRTCInput:
             existing = _persistent_gamepads.get(i)
             if existing is not None and existing.running:
                 self.gamepad_instances[i] = existing
-                logger_webrtc_input.info(
+                logger_webrtc_input.debug(
                     f"Adopted live persistent gamepad instance for index {i} (JS: {existing.js_sock_path})."
                 )
                 continue
@@ -4598,7 +4598,11 @@ class WebRTCInput:
             self._spawn_task(gamepad.run_servers())
             _persistent_gamepads[i] = gamepad
             self.gamepad_instances[i] = gamepad
-            logger_webrtc_input.info(f"Initialized and started persistent gamepad instance for index {i} (Name: '{gamepad_name_for_interposer}', JS: {js_ip_sock_path}, EVDEV: {evdev_ip_sock_path}).")
+            logger_webrtc_input.debug(f"Initialized and started persistent gamepad instance for index {i} (Name: '{gamepad_name_for_interposer}', JS: {js_ip_sock_path}, EVDEV: {evdev_ip_sock_path}).")
+        logger_selkies_gamepad.info(
+            f"{len(self.gamepad_instances)} virtual gamepads ready "
+            f"('{STANDARD_XPAD_CONFIG.get('name', 'Selkies Virtual Gamepad')}', sockets under "
+            f"{self.js_socket_path_prefix}); kernel uinput {'on' if self.uinput_gamepads else 'off'}.")
 
     async def disconnect(self) -> None:
         """Tear down this handler's own resources; persistent gamepads stay up.
@@ -4611,7 +4615,7 @@ class WebRTCInput:
         collection happens to run — and every transport switch builds a new
         handler.
         """
-        logger_webrtc_input.info("Releasing gamepad associations (persistent instances stay up).")
+        logger_webrtc_input.debug("Releasing gamepad associations (persistent instances stay up).")
         await self.__gamepad_disconnect()
         self.gamepad_instances = {}
         self.gamepad_heartbeats.clear()
@@ -4839,7 +4843,7 @@ class WebRTCInput:
         if not self.keyboard or not self.xdisplay :
             logger_webrtc_input.warning("Cannot reset keyboard, X display or keyboard controller not available.")
             return
-        logger_webrtc_input.info("Resetting keyboard modifiers.")
+        logger_webrtc_input.debug("Resetting keyboard modifiers.")
         lctrl, lshift, lalt, altgr = 65507, 65505, 65513, 65027
         rctrl, rshift, ralt = 65508, 65506, 65514
         lmeta, rmeta, keyf, keyF, keym, keyM, escape = 65511, 65512, 102, 70, 109, 77, 65307
@@ -5374,7 +5378,7 @@ class WebRTCInput:
                     return owner
                 self._wl_keymap_owner = await loop.run_in_executor(None, _build)
                 self._wl_keymap_stale = False
-                logger_webrtc_input.info(
+                logger_webrtc_input.debug(
                     f"Wayland keymap owner ready ({len(self._wl_keymap_owner._map)} keysyms"
                     + (f", {len(previous._pressed)} held keys carried)" if previous is not None
                        else ")"))
@@ -5982,7 +5986,7 @@ class WebRTCInput:
                 if adopted:
                     self._session_env_cache[key] = adopted
                     self._session_env_empty_at.pop(key, None)
-                    logger_webrtc_input.info(
+                    logger_webrtc_input.debug(
                         f"Application launches adopt the session on {key}: "
                         f"{', '.join(sorted(adopted))}")
                 else:
@@ -6283,7 +6287,7 @@ class WebRTCInput:
                     logger_webrtc_input.debug(f"Session screen control probe failed: {e}")
                 else:
                     self._session_kde_probe = (identity, kde)
-                    logger_webrtc_input.info(
+                    logger_webrtc_input.debug(
                         "Session compositor grows screens on demand." if kde else
                         "Session compositor registers no virtual output; "
                         "a second display needs a spare screen.")
@@ -7266,11 +7270,11 @@ class WebRTCInput:
                 break
             await asyncio.sleep(0.1)
         if self._clipboard_monitor_active:
-            logger_webrtc_input.info("Clipboard monitor already running; not starting a second instance.")
+            logger_webrtc_input.debug("Clipboard monitor already running; not starting a second instance.")
             return
         self._clipboard_monitor_active = True
 
-        logger_webrtc_input.info(f"Clipboard monitor running (binary mode: {self.enable_binary_clipboard in ['true', 'out']})")
+        logger_webrtc_input.debug(f"Clipboard monitor running (binary mode: {self.enable_binary_clipboard in ['true', 'out']})")
         self.clipboard_running = True
         x11_monitor = await self._ensure_x11_clipboard_monitor_async()
         wl_native_queue = (self._arm_wayland_native_clipboard()
@@ -7437,11 +7441,11 @@ class WebRTCInput:
                         recopied = False
                     if curr_data_bytes is not None and (
                             recopied or curr_data_bytes != self._clipboard_last_bytes):
-                        logger_webrtc_input.info(f"Clipboard changed. Sending content ({curr_mime})")
+                        logger_webrtc_input.debug(f"Clipboard changed. Sending content ({curr_mime})")
                         self._clipboard_last_bytes = curr_data_bytes
                         await self.on_clipboard_read(curr_data, curr_mime)
                 except asyncio.CancelledError:
-                    logger_webrtc_input.info("Clipboard monitor task canceled.")
+                    logger_webrtc_input.debug("Clipboard monitor task canceled.")
                     break
                 except Exception as e:
                     logger_webrtc_input.error(f"Error in clipboard monitor loop: {e}", exc_info=True)
@@ -7449,7 +7453,7 @@ class WebRTCInput:
         finally:
             self.clipboard_running = False
             self._clipboard_monitor_active = False
-            logger_webrtc_input.info("Clipboard monitor stopped")
+            logger_webrtc_input.debug("Clipboard monitor stopped")
 
     def stop_clipboard(self) -> None:
         """Stop the monitor loop and release the X11 monitor's connection and
@@ -7459,7 +7463,7 @@ class WebRTCInput:
         if self._x11_clipboard_monitor is not None:
             self._x11_clipboard_monitor.close()
             self._x11_clipboard_monitor = None
-        logger_webrtc_input.info("Stopping clipboard monitor")
+        logger_webrtc_input.debug("Stopping clipboard monitor")
 
 
     def _handle_mapping_notify(self, event: Any) -> None:
@@ -7491,7 +7495,7 @@ class WebRTCInput:
         if kb.bindings_intact():
             # Our own bind, or a change that left the overlay alone.
             return
-        logger_webrtc_input.info(
+        logger_webrtc_input.debug(
             "Foreign keymap change detected (request=%d, keycodes %d+%d): "
             "invalidating XTEST overlay state.",
             event.request, event.first_keycode, event.count)
@@ -7653,7 +7657,7 @@ class WebRTCInput:
         }
 
     async def stop_gamepad_servers(self) -> None:
-        logger_webrtc_input.info("Stopping all gamepad instances.")
+        logger_webrtc_input.debug("Stopping all gamepad instances.")
         await self.__gamepad_disconnect()
 
     def _keyboard_enqueue(self, item: tuple) -> None:
@@ -8101,7 +8105,7 @@ class WebRTCInput:
                     self.multipart_clipboard_mime_type = "text/plain"
                     self.multipart_clipboard_buffer = io.BytesIO()
                     self.multipart_clipboard_in_progress = True
-                    logger_webrtc_input.info(f"Starting multi-part text clipboard receive, total size: {self.multipart_clipboard_total_size}")
+                    logger_webrtc_input.debug(f"Starting multi-part text clipboard receive, total size: {self.multipart_clipboard_total_size}")
                 except Exception as e:
                     logger_webrtc_input.error(f"Invalid cws message: {msg}, error: {e}")
             else:
@@ -8125,7 +8129,7 @@ class WebRTCInput:
                     self.multipart_clipboard_total_size = declared_size
                     self.multipart_clipboard_buffer = io.BytesIO()
                     self.multipart_clipboard_in_progress = True
-                    logger_webrtc_input.info(f"Starting multi-part binary clipboard receive ({self.multipart_clipboard_mime_type}), total size: {self.multipart_clipboard_total_size}")
+                    logger_webrtc_input.debug(f"Starting multi-part binary clipboard receive ({self.multipart_clipboard_mime_type}), total size: {self.multipart_clipboard_total_size}")
                 except Exception as e:
                     logger_webrtc_input.error(f"Invalid cbs message: {msg}, error: {e}")
             else:
@@ -8163,7 +8167,7 @@ class WebRTCInput:
                 if received_size != self.multipart_clipboard_total_size:
                     logger_webrtc_input.error(f"Multi-part clipboard size mismatch. Expected {self.multipart_clipboard_total_size}, got {received_size}. Aborting.")
                 else:
-                    logger_webrtc_input.info(f"Finished multi-part clipboard receive. Total size: {received_size}")
+                    logger_webrtc_input.debug(f"Finished multi-part clipboard receive. Total size: {received_size}")
                     data = self.multipart_clipboard_buffer.getvalue()
                     mime_type = self.multipart_clipboard_mime_type
                     flavours = None
@@ -8180,9 +8184,9 @@ class WebRTCInput:
                     if data is not None and await self.write_clipboard(data, mime_type=mime_type, flavours=flavours):
                         audit.emit("clipboard.receive", mime_type=mime_type, size_bytes=len(data), multipart=True)
                         if mime_type == "text/plain":
-                            logger_webrtc_input.info(f"Set multi-part clipboard content, length: {len(data)}")
+                            logger_webrtc_input.debug(f"Set multi-part clipboard content, length: {len(data)}")
                         else:
-                            logger_webrtc_input.info(f"Set multi-part binary clipboard content ({mime_type}), size: {len(data)} bytes")
+                            logger_webrtc_input.debug(f"Set multi-part binary clipboard content ({mime_type}), size: {len(data)} bytes")
                 self._reset_multipart_clipboard()
         elif msg_type == "cr":
             if self.enable_clipboard in ["true", "out"]:
@@ -8276,7 +8280,7 @@ class WebRTCInput:
                     # In-line so a paste keystroke right behind it pastes this content.
                     if await self.write_clipboard(data_bytes, mime_type=mime_type, flavours=flavours):
                         audit.emit("clipboard.receive", mime_type=mime_type, size_bytes=len(data_bytes), multipart=False)
-                        logger_webrtc_input.info(f"Set binary clipboard content ({mime_type}), size: {len(data_bytes)} bytes")
+                        logger_webrtc_input.debug(f"Set binary clipboard content ({mime_type}), size: {len(data_bytes)} bytes")
                 except Exception as e:
                     logger_webrtc_input.error(f"Binary clipboard write error: {e}")
             else:
@@ -8288,7 +8292,7 @@ class WebRTCInput:
                     # In-line for paste-after-copy ordering (see the cb branch).
                     if await self.write_clipboard(data):
                         audit.emit("clipboard.receive", mime_type="text/plain", size_bytes=len(data.encode()), multipart=False)
-                        logger_webrtc_input.info(f"Set clipboard content, length: {len(data)}")
+                        logger_webrtc_input.debug(f"Set clipboard content, length: {len(data)}")
                 except Exception as e:
                     logger_webrtc_input.error(f"Clipboard decode error: {e}")
                     return
@@ -8395,7 +8399,7 @@ class WebRTCInput:
                 logger_webrtc_input.error(f"Error updating CRF value: {e}")
         elif toks[0].startswith("SETTINGS"):
             settings_data = ','.join(toks[1:]) if len(toks) > 1 else ""
-            logger_webrtc_input.info(f"Received SETTINGS message: {settings_data}")
+            logger_webrtc_input.debug(f"Received SETTINGS message: {settings_data}")
             try:
                 settings_json = json.loads(settings_data)
                 # Applied to the delivering channel's display (not a spoofable
@@ -8416,15 +8420,15 @@ class WebRTCInput:
             _kf = self.on_request_keyframe(display_id)
             if asyncio.iscoroutine(_kf): await _kf
         else:
-            logger_webrtc_input.info(f"Unknown data channel message: {msg[:100]}")
+            logger_webrtc_input.warning(f"Unknown data channel message: {msg[:100]}")
 
     def initialize_upload_dir(self) -> None:
         """Resolve and create the client-upload directory, refusing unsafe roots."""
         if self.upload_dir in ["/sys", "/proc", "/dev"]:
-            logger_webrtc_input.info("Can not initialize upload directory at /sys /proc /dev locations")
+            logger_webrtc_input.warning("Can not initialize upload directory at /sys /proc /dev locations")
             return
         if not self.upload_dir:
-            logger_webrtc_input.info("Upload dir is empty")
+            logger_webrtc_input.debug("Upload dir is empty")
             return
 
         if self.upload_dir == "~/Desktop":
@@ -8434,7 +8438,7 @@ class WebRTCInput:
 
         try:
             os.makedirs(self.upload_dir_path, exist_ok=True)
-            logger_webrtc_input.info(f"Upload directory ensured: {self.upload_dir_path}")
+            logger_webrtc_input.debug(f"Upload directory ensured: {self.upload_dir_path}")
         except OSError as e:
             logger_webrtc_input.error(f"Could not create upload directory {self.upload_dir_path}: {e}")
             self.upload_dir_path = None

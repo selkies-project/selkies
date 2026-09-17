@@ -49,6 +49,25 @@ translation tables and the build helpers (`copy-*.js`, `gendb.js`, the vite and 
 
 Update the translations whenever user-facing strings change, adding entries where necessary.
 
+## Logging
+
+The log is what a remote user pastes back, so INFO tells the story of a session and nothing else: the one
+startup line saying what the server came up as (`__main__._startup_summary`), what each client connected as
+and what its display streams as, the capture and encoder path each display took, and every later change or
+failure. A step of the mechanism (a reconfiguration phase, a broadcast, a task starting, a message received,
+a value re-seeded) is DEBUG; something the operator has to act on is WARNING or ERROR. Every module logs
+through a short logger name that says which part of the server spoke (`main`, `server`, `ws`,
+`webrtc`, `signaling`, `display`, `input`, `gamepad`, `audio`, and the module's own name elsewhere), the same
+tag in both transports and on both backends, and never the root logger. A line names its display and its
+client, states values as `1920x1080`, `60 fps`, `crf 25`, and says what was decided rather than which
+function ran; the same event is one line, not a "starting" and a "done". Levels are configured in one place
+(`src/selkies/logs.py`): `--debug` opens DEBUG on every Selkies logger and reaches pixelflux as
+`debug_logging`, third-party loggers stay at WARNING, and the vendored WebRTC and ICE stacks are paced to one
+line per template per five seconds. A debug line that fires per frame, per packet or per cursor change goes
+behind that pacing or stays out. The `[X11]` and `[Wayland]` lines pixelflux prints beside these follow the
+same rule; the exact strings the suites wait on (`Capture started for`, `Stream settings active`,
+`Selkies server running on`, `Socket listening on:`) are contracts, so a change to one changes the test with it.
+
 ## Testing
 
 Validate in a sandbox, never in the session you are shown: the devcontainer, or a host set up as the Agentic

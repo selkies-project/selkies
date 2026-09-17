@@ -88,7 +88,7 @@ def make_handler(pixelflux: FakePixelflux) -> WebRTCInput:
 
 async def scenario(res: "H.Results") -> None:
     log = Log()
-    logger = logging.getLogger("webrtc_input")
+    logger = logging.getLogger("input")
     logger.addHandler(log)
     logger.setLevel(logging.DEBUG)
     try:

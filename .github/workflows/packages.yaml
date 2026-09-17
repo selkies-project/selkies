@@ -121,7 +121,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Free disk space
         # The tool cache is kept: setup-python and setup-node resolve from it
-        uses: endersonmenezes/free-disk-space@v4
+        uses: endersonmenezes/free-disk-space@2a22f8c59cae9cddae7194b33e6b92d023b2b4b8 # v4
         with:
           remove_android: true
           remove_dotnet: true
@@ -233,7 +233,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Free disk space
         # The tool cache is kept: setup-python and setup-node resolve from it
-        uses: endersonmenezes/free-disk-space@v4
+        uses: endersonmenezes/free-disk-space@2a22f8c59cae9cddae7194b33e6b92d023b2b4b8 # v4
         with:
           remove_android: true
           remove_dotnet: true

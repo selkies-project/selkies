@@ -58,7 +58,7 @@ from abc import ABCMeta, abstractmethod
 from . import audit, printing
 
 
-logger = logging.getLogger("stream_server")
+logger = logging.getLogger("server")
 
 
 # Idle chunked transfers older than this are reaped; generous relative to one
@@ -1477,7 +1477,7 @@ class CentralizedStreamServer:
         if not cert_pem:
             cert_pem, key_pem = self._make_self_signed_cert()
 
-        logger.info(
+        logger.debug(
             "Creating TLS context with certificate=%s key=%s", cert_pem, key_pem
         )
         sslctx = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
@@ -1532,12 +1532,12 @@ class CentralizedStreamServer:
         """
         reload_interval = getattr(self.settings, "cert_reload_interval", 30)
         if reload_interval <= 0:
-            logger.info("Automatic certificate reloading is disabled (interval=0)")
+            logger.debug("Automatic certificate reloading is disabled (interval=0)")
             return
 
         current_sites = self.sites
         last_mtime = await asyncio.to_thread(self._get_cert_mtime)
-        logger.info(
+        logger.debug(
             "Certificate reload watcher started (interval=%ds, initial mtime=%.0f)",
             reload_interval,
             last_mtime,
@@ -2211,7 +2211,7 @@ class CentralizedStreamServer:
                 os.remove(stale["part"])
             except OSError:
                 pass
-            logger.info(f"Expired stale chunked upload: {key}")
+            logger.debug(f"Expired stale chunked upload: {key}")
 
     async def handle_upload(self, request: web.Request) -> web.Response:
         """Stream a client file upload to the file-manager directory over HTTP.
@@ -2586,7 +2586,7 @@ class CentralizedStreamServer:
                 return web_path
             logger.warning(f"web_root directory {web_path} not found or missing index.html")
 
-        logger.info("Defaulting to packaged web files.")
+        logger.debug("Defaulting to packaged web files.")
         try:
             package_path = importlib_resources.files(self.STATIC_CONTENT_PATH)
             self.web_files_ctx = tempfile.TemporaryDirectory(prefix="selkies_web")
@@ -2594,7 +2594,7 @@ class CentralizedStreamServer:
             await asyncio.to_thread(self._copy_traversable, package_path, temp_path)
 
             if (temp_path / "index.html").exists():
-                logger.info(f"Using extracted package path from temp dir: {temp_path}")
+                logger.debug(f"Using extracted package path from temp dir: {temp_path}")
                 return str(temp_path)
             else:
                 logger.warning("Packaged web content missing index.html")
@@ -2836,7 +2836,7 @@ class CentralizedStreamServer:
 
         api_prefix = self.settings.subfolder
         if api_prefix:
-            logger.info(f"Prepending api prefix: {api_prefix!r} to router handlers")
+            logger.debug(f"Prepending api prefix: {api_prefix!r} to router handlers")
 
         routes = [
             web.get(f"{api_prefix}/api/status", self.handle_status),
@@ -3038,7 +3038,7 @@ class CentralizedStreamServer:
         self.sites = []
         if self.runner:
             await self.runner.cleanup()
-            logger.info("Server cleanup complete.")
+            logger.debug("Server cleanup complete.")
 
     async def run(self) -> None:
         """Start the server and serve until canceled, then clean up."""

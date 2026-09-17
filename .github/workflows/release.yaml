@@ -185,7 +185,7 @@ jobs:
       # The run's latest decision rides ahead of the generated notes as the
       # marker release-published.yaml reads, where it renders as nothing
       - name: Create draft release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ needs.validate.outputs.version }}
           name: ${{ needs.validate.outputs.version }}

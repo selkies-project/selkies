@@ -47,6 +47,10 @@ import re
 import zlib
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from .logs import configure_logging
+
+logger = logging.getLogger("settings")
+
 # 32 MiB: proxies and WebSocket stacks in the field degrade or reject frames
 # beyond it.
 WS_MESSAGE_SIZE_HARD_CAP = 32 * 1024 * 1024
@@ -1216,7 +1220,7 @@ def canonical_encoder(name: Any) -> str:
     key = text.lower()
     if key == "openh264enc" and key not in _ALIAS_WARNED:
         _ALIAS_WARNED.add(key)
-        logging.warning(
+        logger.warning(
             "Encoder 'openh264enc' is not a separate choice: software H.264 "
             "is the encoder pixelflux was built with (%s); using 'h264enc'.",
             software_encoders().get("h264", "none"),
@@ -1266,7 +1270,7 @@ def hardware_encoders(encode_node_index: int, auto_gpu: str = "") -> Optional[Di
         except ImportError:
             served = None
         except Exception as e:
-            logging.warning("Hardware encoder probe of render node %d failed: %s", node, e)
+            logger.warning("Hardware encoder probe of render node %d failed: %s", node, e)
         _HARDWARE_ENCODERS[node] = served
     return _HARDWARE_ENCODERS[node]
 
@@ -1362,12 +1366,13 @@ class AppSettings:
         self._setting_definitions = setting
         self._add_arguments(parser)
         args, unknown = parser.parse_known_args()
+        self._process_and_set_attributes(args)
+        configure_logging(bool(self.debug[0]))
         for token in unknown:
             if token.startswith("-"):
-                logging.warning(
+                logger.warning(
                     "Ignoring unrecognized argument %s", token.split("=", 1)[0]
                 )
-        self._process_and_set_attributes(args)
         self._post_process_settings()
 
     @staticmethod
@@ -1519,7 +1524,7 @@ class AppSettings:
                                 is_override = False
                                 overrides[name] = False
                                 if user_items:
-                                    logging.warning(
+                                    logger.warning(
                                         f"Invalid value(s) '{raw_value_str}' for {name}; "
                                         f"keeping the full allowed set with the system default."
                                     )
@@ -1550,7 +1555,7 @@ class AppSettings:
                     if hi is not None:
                         processed_value = min(hi, processed_value)
                     if processed_value != orig:
-                        logging.warning(
+                        logger.warning(
                             f"Setting '{name}' value {orig} out of range [{lo},{hi}], clamped to {processed_value}"
                         )
                 elif stype == "str":
@@ -1594,7 +1599,7 @@ class AppSettings:
                         if meta is not None and initial is not None:
                             clamped = max(lo, min(initial, hi))
                             if clamped != initial:
-                                logging.warning(
+                                logger.warning(
                                     f"Setting '{name}' initial value {initial} "
                                     f"outside span {lo}-{hi}, clamped to {clamped}"
                                 )
@@ -1604,7 +1609,7 @@ class AppSettings:
                                 lo, min(meta["default_value"], hi)
                             )
             except (ValueError, TypeError, IndexError) as e:
-                logging.error(
+                logger.error(
                     f"Could not parse setting '{name}' with value '{raw_value}'. Using default. Error: {e}"
                 )
                 processed_value = setting["default"]
@@ -1624,16 +1629,16 @@ class AppSettings:
             width_overridden or height_overridden or manual_mode_bool_is_set
         )
         if should_be_in_manual_mode:
-            logging.info(
+            logger.info(
                 "A manual resolution setting was activated; locking to manual mode."
             )
             processed["manual_resolution"] = (True, True)
             if processed.get("manual_width", 0) <= 0:
                 processed["manual_width"] = 1024
-                logging.info("Manual width not set or invalid, defaulting to 1024.")
+                logger.info("Manual width not set or invalid, defaulting to 1024.")
             if processed.get("manual_height", 0) <= 0:
                 processed["manual_height"] = 768
-                logging.info("Manual height not set or invalid, defaulting to 768.")
+                logger.info("Manual height not set or invalid, defaulting to 768.")
         for name, value in processed.items():
             setattr(self, name, value)
         self._overridden = overrides
@@ -1735,18 +1740,18 @@ class AppSettings:
         dropped = [item for item in operator_allowed if item not in served]
         if not served:
             served = [item for item in ENCODER_CODECS if self.encoder_served(item)]
-            logging.warning(
+            logger.warning(
                 "No encoder of the configured menu (%s) is served on this host; offering %s.",
                 ", ".join(operator_allowed),
                 ", ".join(served),
             )
         elif dropped:
-            logging.info("Encoders not served on this host are left off the menu: %s", ", ".join(dropped))
+            logger.info("Encoders not served on this host are left off the menu: %s", ", ".join(dropped))
         self._operator_encoder_allowed = served
         value = getattr(self, "_operator_encoder_value", self.encoder)
         if value not in served:
             fallback = "h264enc" if "h264enc" in served else served[0]
-            logging.warning("Encoder %r is not served on this host; using %r.", value, fallback)
+            logger.warning("Encoder %r is not served on this host; using %r.", value, fallback)
             self._operator_encoder_value = fallback
             if self.encoder == value:
                 self.encoder = fallback
@@ -1855,7 +1860,7 @@ class AppSettings:
                 else allowed[0]
             )
             if self.was_provided("encoder"):
-                logging.warning(
+                logger.warning(
                     "Encoder %r is not available for WebRTC (%s); using %r.",
                     self.encoder,
                     ", ".join(allowed),
@@ -1914,7 +1919,7 @@ class AppSettings:
 
         mode = str(self.mode).strip().lower()
         if mode not in ("websockets", "webrtc"):
-            logging.warning("Invalid mode value %r; using 'websockets'.", self.mode)
+            logger.warning("Invalid mode value %r; using 'websockets'.", self.mode)
             mode = "websockets"
         self.mode = mode
 
@@ -1925,7 +1930,7 @@ class AppSettings:
                 self._overridden.get("rate_control_mode")
                 and self.rate_control_mode != "crf"
             ):
-                logging.warning(
+                logger.warning(
                     "Ignoring rate_control_mode=%s: enable_rate_control is false, "
                     "so the encoder runs CRF.",
                     self.rate_control_mode,
@@ -1948,14 +1953,14 @@ class AppSettings:
 
         audio_enabled = self.audio_enabled[0]
         if not audio_enabled and self.microphone_enabled[0]:
-            logging.warning(
+            logger.warning(
                 "Microphone support requires audio to be enabled. Disabling microphone support."
             )
             self.microphone_enabled = (False, self.microphone_enabled[1])
 
         mode = str(self.enable_clipboard).split("|")[0].strip().lower()
         if mode not in ("true", "false", "in", "out"):
-            logging.warning(
+            logger.warning(
                 "Invalid enable_clipboard value %r; using 'true'.", self.enable_clipboard
             )
             mode = "true"
@@ -2217,19 +2222,6 @@ def sanitize_client_setting(name: str, client_value: Any, source: Any,
         def_val_meta = setting_def.get('meta', {}).get('default_value')
         return def_val_meta if def_val_meta is not None else setting_def.get('default')
     return client_value
-
-if settings.debug[0]:
-    logging.getLogger().setLevel(logging.DEBUG)
-    logging.getLogger("websockets").setLevel(logging.WARNING)
-    # These log per RTP packet / SCTP chunk, burying the debug run.
-    for _packet_logger in ("selkies.webrtc.rtcrtpsender",
-                           "selkies.webrtc.rtcrtpreceiver",
-                           "selkies.webrtc.rtcsctptransport"):
-        logging.getLogger(_packet_logger).setLevel(logging.INFO)
-else:
-    logging.getLogger().setLevel(logging.INFO)
-    logging.getLogger("websockets").setLevel(logging.WARNING)
-
 
 class RateControlMode(str, Enum):
     """Video rate-control mode: constant bitrate or constant quality (CRF)."""

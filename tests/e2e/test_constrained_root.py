@@ -49,7 +49,7 @@ def secondary_live(mode: str, did: str = "display2") -> bool:
     """Whether the server currently has a running capture for the secondary."""
     if mode == "webrtc":
         return C.wait_log(f"Secondary display '{did}' pipeline started", timeout=12)
-    return C.wait_log(f"SUCCESS: Capture started for '{did}'", timeout=12)
+    return C.wait_log(f"Capture started for '{did}'", timeout=12)
 
 
 def run(mode: str) -> bool:

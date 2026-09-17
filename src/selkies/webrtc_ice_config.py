@@ -31,8 +31,7 @@ import stat
 
 
 
-logger_rtcice = logging.getLogger("rtcice")
-logger_rtcice.setLevel(logging.INFO)
+logger_rtcice = logging.getLogger("webrtc")
 
 DEFAULT_RTC_CONFIG = """{
   "lifetimeDuration": "86400s",

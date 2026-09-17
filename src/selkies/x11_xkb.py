@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from .Xlib.protocol import rq
 
-logger = logging.getLogger("x11_xkb")
+logger = logging.getLogger("input")
 
 XKB_USE_CORE_KBD = 0x0100
 XKB_KEY_SYMS_MASK = 1 << 1

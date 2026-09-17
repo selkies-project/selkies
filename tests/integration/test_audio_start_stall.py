@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 import websockets  # noqa: E402
 
-SETTINGS_PROCESSED = "Initial client settings message processed"
+SETTINGS_PROCESSED = "settings applied for 'primary'"
 ASSOCIATED = "associated with persistent virtual gamepad slot 0"
 AUDIO_ATTEMPTED = "Initial setup: Primary client connected, audio not active, attempting start."
 
@@ -95,7 +95,8 @@ def run() -> "H.Results":
     os.makedirs(H.RUNTIME_DIR, exist_ok=True)
     close = silent_sound_server(os.path.join(H.RUNTIME_DIR, "pulse-silent.sock"))
     H.server_start(mode="websockets", wayland=False,
-                   extra_env={"PULSE_SERVER": f"unix:{H.RUNTIME_DIR}/pulse-silent.sock"})
+                   extra_env={"PULSE_SERVER": f"unix:{H.RUNTIME_DIR}/pulse-silent.sock",
+                              "SELKIES_DEBUG": "true"})
 
     async def announce_behind_the_audio_start() -> None:
         async with websockets.connect(f"ws://localhost:{H.PORT}/api/websockets", max_size=None) as ws:

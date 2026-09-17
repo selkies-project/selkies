@@ -22,7 +22,6 @@ from prometheus_client import REGISTRY
 from prometheus_client import Gauge, Histogram, Info
 
 logger_metrics = logging.getLogger("metrics")
-logger_metrics.setLevel(logging.INFO)
 
 FPS_HIST_BUCKETS = (0, 20, 40, 60)
 

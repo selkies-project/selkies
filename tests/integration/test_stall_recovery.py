@@ -250,7 +250,7 @@ def main(selection: str) -> H.Results:
         for encoder in encoders:
             H.server_start(mode="websockets", wayland=False, extra_env={
                 "SELKIES_USE_CPU": "true", "SELKIES_VIDEO_STREAMING_MODE": "false",
-                "SELKIES_ENCODER": encoder})
+                "SELKIES_ENCODER": encoder, "SELKIES_DEBUG": "true"})
             asyncio.run(drive(res, encoder))
     finally:
         H.server_stop()

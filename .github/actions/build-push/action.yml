@@ -41,7 +41,7 @@ runs:
   using: composite
   steps:
     - id: first
-      uses: docker/build-push-action@v7
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
       continue-on-error: true
       with:
         context: ${{ inputs.context }}
@@ -60,7 +60,7 @@ runs:
         sleep "${RETRY_DELAY}"
     - id: retry
       if: steps.first.outcome == 'failure'
-      uses: docker/build-push-action@v7
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
       with:
         context: ${{ inputs.context }}
         file: ${{ inputs.file }}

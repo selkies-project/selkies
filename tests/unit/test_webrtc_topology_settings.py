@@ -99,7 +99,7 @@ async def app_and_offers() -> None:
     app = RTCApp(async_event_loop=loop, encoder="h264enc",
                  stun_servers=["stun://stun.example.test:3478"], turn_servers=[])
     capture = Capture()
-    logging.getLogger("rtc").addHandler(capture)
+    logging.getLogger("webrtc").addHandler(capture)
     try:
         apply()
         await app.open_ice_muxes()
@@ -180,7 +180,7 @@ async def app_and_offers() -> None:
     finally:
         apply()
         await app.close_ice_muxes()
-        logging.getLogger("rtc").removeHandler(capture)
+        logging.getLogger("webrtc").removeHandler(capture)
 
 
 def main() -> int:

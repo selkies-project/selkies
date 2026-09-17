@@ -43,7 +43,7 @@ async def scenario(res: "H.Results") -> None:
     applied: list = []
     handler.on_scaling_ratio = lambda dpi, display_id="primary": applied.append(dpi)
     log = Log()
-    logger = logging.getLogger("webrtc_input")
+    logger = logging.getLogger("input")
     logger.addHandler(log)
     logger.setLevel(logging.DEBUG)
     try:

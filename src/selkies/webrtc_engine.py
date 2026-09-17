@@ -132,8 +132,7 @@ def parse_webrtc_port_range(raw: str) -> Optional[Tuple[int, int]]:
     return port_range
 
 
-logger = logging.getLogger("rtc")
-logger.setLevel(logging.INFO)
+logger = logging.getLogger("webrtc")
 
 class ConditionalExtraFormatter(logging.Formatter):
     """Log formatter that appends selected `extra` fields when present.
@@ -780,7 +779,7 @@ class RTCApp:
 
             await asyncio.gather(*(deliver(c) for c in channels), return_exceptions=True)
 
-        logger.info(f"Sent clipboard data of length {len(data_bytes)} with mime type {mime_type}")
+        logger.debug(f"Sent clipboard data of length {len(data_bytes)} with mime type {mime_type}")
 
     def send_cursor_data(self, data: Any) -> None:
         """Broadcast a cursor update, remembering it for late-joining peers."""
@@ -860,31 +859,31 @@ class RTCApp:
 
     def send_framerate(self, framerate: int) -> None:
         """Broadcast the current framerate to all peers."""
-        logger.info("sending framerate")
+        logger.debug("sending framerate")
         self.__send_data_channel_message(
             "system", {"action": "videoFramerate," + str(framerate)})
 
     def send_video_bitrate(self, bitrate: int) -> None:
         """Broadcast the current video bitrate to all peers."""
-        logger.info("sending video bitrate")
+        logger.debug("sending video bitrate")
         self.__send_data_channel_message(
             "system", {"action": "video_bitrate," + str(bitrate)})
 
     def send_audio_bitrate(self, bitrate: int) -> None:
         """Broadcast the current audio bitrate to all peers."""
-        logger.info("sending audio bitrate")
+        logger.debug("sending audio bitrate")
         self.__send_data_channel_message(
             "system", {"action": "audio_bitrate,%d" % bitrate})
 
     def send_encoder(self, encoder: str) -> None:
         """Broadcast the active encoder name to all peers."""
-        logger.info("sending encoder: " + encoder)
+        logger.debug("sending encoder: " + encoder)
         self.__send_data_channel_message(
             "system", {"action": "encoder,%s" % encoder})
 
     def send_resize_enabled(self, resize_enabled: bool) -> None:
         """Broadcast the current resize-enabled state to all peers."""
-        logger.info("sending resize enabled state")
+        logger.debug("sending resize enabled state")
         self.__send_data_channel_message(
             "system", {"action": "resize," + str(resize_enabled)})
 
@@ -895,7 +894,7 @@ class RTCApp:
         with the display id and addresses only that page, so a secondary's
         realized size must never rescale the primary page.
         """
-        logger.info("sending remote resolution of: " + res)
+        logger.debug("sending remote resolution of: " + res)
         sent = False
         for peer_obj in self.peer_connections.values():
             if (peer_obj.get("display_id") or "primary") != display_id:
@@ -912,7 +911,7 @@ class RTCApp:
                     channel, "system", {"action": "resolution," + res})
                 sent = True
         if not sent:
-            logger.info("skipping remote resolution because no data channel is ready")
+            logger.debug("skipping remote resolution because no data channel is ready")
 
     def send_ping(self, t: float) -> None:
         """Send a ping request to the PRIMARY controller only.
@@ -1007,7 +1006,7 @@ class RTCApp:
         except ValueError as e:
             logger.error("dropping oversized data channel message '%s': %s", msg_type, e)
         except InvalidStateError:
-            logger.info("skipping message because data channel closed mid-send: %s" % msg_type)
+            logger.debug("skipping message because data channel closed mid-send: %s" % msg_type)
 
     def __send_data_channel_message(self, msg_type: str, data: Any) -> None:
         """Broadcast a typed message to every connected peer.
@@ -1024,7 +1023,7 @@ class RTCApp:
             self.send_message_to_channel(channel, msg_type, data)
             sent = True
         if not sent:
-            logger.info("skipping message because no data channel is ready: %s" % msg_type)
+            logger.debug("skipping message because no data channel is ready: %s" % msg_type)
 
     def send_media_data_over_channel(self, msg_type: str, data: Any) -> None:
         """Broadcast a media-related message to all peers."""
@@ -1918,7 +1917,7 @@ class RTCApp:
         idempotent on a display whose capture is already running.
         """
         await self.start_display_media(display_id)
-        logger.info(f"Media pipeline start requested for {client_peer_id} (display '{display_id}')")
+        logger.debug(f"Media pipeline start requested for {client_peer_id} (display '{display_id}')")
 
     async def _default_start_display_media(self, display_id: str) -> None:
         """Single-display default: only the primary pipeline is started."""
@@ -1961,13 +1960,13 @@ class RTCApp:
             logger.warning("Peer connection disconnected", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         elif state == "connected":
             await self.on_peer_connection_established(client_peer_id, display_id)
-            logger.info("Peer connection established", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+            logger.info(f"Peer connection established for {client_peer_id} ({client_type}).")
         elif state == "closed":
             self.peer_connections.pop(client_peer_id, None)
             await self._reap_peer(client_peer_id, peer_obj)
-            logger.info("Peer connection closed", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+            logger.info(f"Peer connection closed for {client_peer_id} ({client_type}).")
         elif state == "connecting":
-            logger.info("Peer connection is connecting", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+            logger.debug("Peer connection is connecting", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
         else:
             logger.debug(f"Unhandled peer connection state: {state}", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
 
@@ -2068,7 +2067,7 @@ class RTCApp:
                 graph["audio_bridge"] = PipelineBridge(maxsize=8)
                 graph["audio_media"] = AudioMedia(graph["audio_bridge"])
             self.displays[display_id] = graph
-            logger.info(f"Media relay and pipeline bridges created for display '{display_id}' ({client_type.value} peer)")
+            logger.debug(f"Media relay and pipeline bridges created for display '{display_id}' ({client_type.value} peer)")
         if graph is None:
             raise RTCAppError(
                 f"Cannot create peer connection: no media graph for display '{display_id}'. Controller may be disconnected."
@@ -2591,7 +2590,7 @@ class RTCApp:
         `None` is a client that did not say, taken at its word.
         """
         try:
-            logger.info("Starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+            logger.debug("Starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._start_rtc_pipeline(client_peer_id, client_type, client_token, display_id, client_slot,
                                            fullcolor_codecs=fullcolor_codecs)
         except (aiohttp.ClientConnectionResetError, ConnectionResetError) as e:
@@ -2601,7 +2600,7 @@ class RTCApp:
             logger.error(f"Error starting RTC pipeline: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
             await self._cleanup_failed_start(client_peer_id, client_type, display_id)
         else:
-            logger.info("RTC pipeline started successfully", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+            logger.info(f"RTC pipeline started for peer {client_peer_id} ({client_type}, display '{display_id}').")
 
     async def _cleanup_failed_start(self, client_peer_id: str, client_type: str,
                                     display_id: str = "primary") -> None:
@@ -2630,12 +2629,12 @@ class RTCApp:
     async def stop_rtc_connection(self, client_peer_id: str, client_type: str) -> None:
         """Stop a specific peer connection by ID."""
         try:
-            logger.info("Stopping RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+            logger.debug("Stopping RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._stop_rtc_pipeline(client_peer_id)
         except Exception as e:
             logger.error(f"Error stopping RTC pipeline: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type}, exc_info=True)
         else:
-            logger.info("RTC pipeline stopped successfully", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+            logger.info(f"RTC pipeline stopped for peer {client_peer_id} ({client_type}).")
 
     async def stop_all_rtc_connections(self) -> None:
         """Stop all active peer connections and clean up media resources.

@@ -41,15 +41,15 @@ STATUS_JS = """
 """
 
 # Log lines that mark a capture starting or stopping, per transport.
-VIDEO_STARTED = {"websockets": "Preparing to start capture for display='primary'",
+VIDEO_STARTED = {"websockets": "Capture started for 'primary'",
                  "webrtc": "Started screen capture module"}
 VIDEO_STOPPED = {"websockets": "Received STOP_VIDEO for 'primary'. Stopping stream.",
                  "webrtc": "All consumers of display 'primary' are paused; capture stopped."}
-AUDIO_STARTED = "Starting pcmflux audio pipeline..."
-AUDIO_STOPPED = "Stopping pcmflux audio pipeline..."
+AUDIO_STARTED = "Starting pcmflux audio pipeline"
+AUDIO_STOPPED = "Stopping pcmflux audio pipeline"
 VIDEO_OFF_AT_START = {"websockets": "Display 'primary' starts with video off",
                       "webrtc": "Screen capture starts paused"}
-AUDIO_OFF_AT_START = {"websockets": "Initial client settings message processed by ws_handler.",
+AUDIO_OFF_AT_START = {"websockets": "settings applied for 'primary'",
                       "webrtc": "Audio capture starts paused"}
 # How long a capture that must not start is given to prove it.
 QUIET_S = 6.0
@@ -96,7 +96,7 @@ def open_page(browser: Any, mode: str, url_hash: str = "", extra_init: Optional[
 
 def defaults_block(mode: str, wayland: bool = False) -> "H.Results":
     res = H.Results(f"start-defaults-{mode}{'-wl' if wayland else ''}")
-    H.server_start(mode=mode, wayland=wayland)
+    H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_DEBUG": "true"})
     try:
         with sync_playwright() as pw:
             browser = C.launch_browser(pw)
@@ -119,7 +119,8 @@ def defaults_block(mode: str, wayland: bool = False) -> "H.Results":
 
 def video_off_block(mode: str, wayland: bool = False) -> "H.Results":
     res = H.Results(f"video-off-{mode}{'-wl' if wayland else ''}")
-    H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_VIDEO_ON_START": "false"})
+    H.server_start(mode=mode, wayland=wayland,
+                   extra_env={"SELKIES_VIDEO_ON_START": "false", "SELKIES_DEBUG": "true"})
     try:
         with sync_playwright() as pw:
             browser = C.launch_browser(pw)
@@ -152,7 +153,8 @@ def video_off_block(mode: str, wayland: bool = False) -> "H.Results":
 
 def audio_off_block(mode: str, wayland: bool = False) -> "H.Results":
     res = H.Results(f"audio-off-{mode}{'-wl' if wayland else ''}")
-    H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_AUDIO_ON_START": "false"})
+    H.server_start(mode=mode, wayland=wayland,
+                   extra_env={"SELKIES_AUDIO_ON_START": "false", "SELKIES_DEBUG": "true"})
     try:
         with sync_playwright() as pw:
             browser = C.launch_browser(pw)
@@ -187,7 +189,7 @@ def audio_off_block(mode: str, wayland: bool = False) -> "H.Results":
 def microphone_block(mode: str) -> "H.Results":
     res = H.Results(f"microphone-on-{mode}")
     TM.unload_leftover_virtual_mic()
-    H.server_start(mode=mode, extra_env={"SELKIES_MICROPHONE_ON_START": "true"})
+    H.server_start(mode=mode, extra_env={"SELKIES_MICROPHONE_ON_START": "true", "SELKIES_DEBUG": "true"})
     try:
         with sync_playwright() as pw:
             browser, page, errors = TM.launch(pw, mode)

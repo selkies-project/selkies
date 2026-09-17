@@ -133,7 +133,7 @@ async def drive() -> "H.Results":
 
 
 def main() -> None:
-    H.server_start(mode="websockets", wayland=False)
+    H.server_start(mode="websockets", wayland=False, extra_env={"SELKIES_DEBUG": "true"})
     r = asyncio.run(drive())
     sys.exit(0 if not r.failed() else 1)
 

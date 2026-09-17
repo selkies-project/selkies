@@ -25,6 +25,7 @@ import os
 import signal
 import asyncio
 import logging
+from importlib.metadata import PackageNotFoundError, version
 
 from .settings import settings
 from .webrtc_mode import WebRTCService
@@ -34,8 +35,45 @@ from .webcam import stop_shared_webcam
 from . import audit
 
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("main")
+
+
+def _startup_summary() -> str:
+    """The one line that says what this server came up as.
+
+    Transport, capture backend, encoder and rate, how the desktop is sized,
+    and which of audio, gamepads and access control are on: the facts a log
+    reader needs before any client line makes sense.
+    """
+    try:
+        release = version("selkies")
+    except PackageNotFoundError:
+        release = "unknown"
+    if settings.wayland[0]:
+        host = settings.wayland_host_display
+        backend = f"Wayland (host compositor '{host}')" if host else "Wayland"
+    else:
+        backend = f"X11 ({os.environ.get('DISPLAY') or 'no DISPLAY'})"
+    fps_lo, fps_hi = settings.framerate
+    fps = f"{fps_lo}" if fps_lo == fps_hi else f"{fps_lo}-{fps_hi}"
+    if settings.manual_resolution[0]:
+        size = f"fixed {int(settings.manual_width or 0)}x{int(settings.manual_height or 0)}"
+    elif settings.enable_resize[0]:
+        size = "sized by the client"
+    else:
+        size = "desktop size kept"
+    if settings.master_token:
+        access = "token"
+    elif settings.enable_basic_auth[0]:
+        access = "basic auth"
+    else:
+        access = "open"
+    return (
+        f"Selkies {release} starting: {settings.mode} transport, {backend} capture, "
+        f"encoder {settings.encoder} at {fps} fps, {size}, "
+        f"audio {'on' if settings.audio_enabled[0] else 'off'}, "
+        f"gamepads {'on' if settings.gamepad_enabled[0] else 'off'}, access {access}."
+    )
 
 
 async def wait_for_app_ready(ready_file: str, app_wait_ready: bool = False) -> None:
@@ -120,7 +158,7 @@ async def run() -> None:
     server.register_service("webrtc", WebRTCService(server))
     server.register_service("websockets", DataStreamingServer(server))
 
-    logger.info(f"Initiating server with {settings.mode} mode")
+    logger.info(_startup_summary())
     await server.switch_to_mode(settings.mode)
 
     try:

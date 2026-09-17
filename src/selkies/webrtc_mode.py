@@ -140,7 +140,6 @@ def _install_webrtc_teardown_noise_filters(loop: asyncio.AbstractEventLoop) -> N
             l.default_exception_handler(context)
 
     loop.set_exception_handler(handler)
-logger.setLevel(logging.INFO)
 
 # Cursor base size in points at 96 DPI; None is "auto" and disables every
 # cursor-size override so a DPI sync never stomps the compositor/DE choice.
@@ -522,7 +521,7 @@ class WebRTCService(BaseStreamingService):
         # the claim is this process, and the relay's fields are positional.
         peer = self.peer_manager.peers.get(session_peer_id) if self.peer_manager else None
         client_slot = getattr(peer, "client_slot", None) if peer else None
-        logger.info(
+        logger.debug(
             f"starting session for client peer id: {session_peer_id} of type: {client_type} (display '{display_id}')"
         )
         try:
@@ -546,7 +545,7 @@ class WebRTCService(BaseStreamingService):
                 fullcolor_codecs=fullcolor_codecs)
             if self.args.enable_webrtc_statistics and self.metrics:
                 await self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
-            logger.info(f"started session for client peer id {session_peer_id}")
+            logger.info(f"Session started for peer {session_peer_id} ({client_type}, display '{display_id}').")
         except Exception as e:
             logger.error(
                 f"Error starting session for client peer id {session_peer_id}: {e}",
@@ -777,7 +776,7 @@ class WebRTCService(BaseStreamingService):
         the server settings for conditional UI, the current cursor, and the
         display roster. Sent on ITS channel when given; without one, falls back
         to broadcasting."""
-        logger.info("opened peer data channel for user input to X11")
+        logger.info("Peer data channel open for input.")
         server_settings_payload = self._server_settings_payload()
         if channel is not None:
             self.rtc_app.send_message_to_channel(
@@ -909,7 +908,7 @@ class WebRTCService(BaseStreamingService):
         locked size is the server's own, beyond a client alignment toggle.
         """
         display_id = display_id or "primary"
-        logger.info(f"on_resize_handler for display '{display_id}' with resolution: {res}")
+        logger.debug(f"Resize message for display '{display_id}': {res}")
         if display_id == "primary" and not self.args.enable_resize:
             logger.warning(f"remote resizing disabled, skipping resize to {res}")
             return
@@ -1009,8 +1008,9 @@ class WebRTCService(BaseStreamingService):
                     or self._last_resize_request == (target_w, target_h)
                 )
             ):
-                logger.info(f"Redundant resize request for primary to {target_w}x{target_h}. No action.")
+                logger.debug(f"Redundant resize request for primary to {target_w}x{target_h}. No action.")
                 return
+            logger.info(f"Resize requested for display 'primary' with resolution: {target_w}x{target_h}")
 
             if IS_WAYLAND:
                 self.media_pipeline.width = target_w
@@ -1049,7 +1049,7 @@ class WebRTCService(BaseStreamingService):
                         f"resize_display realized {realized_w}x{realized_h} for request {target_w}x{target_h}"
                     )
                 else:
-                    logger.info(f"resize_display('{target_w}x{target_h}') reported success")
+                    logger.debug(f"resize_display('{target_w}x{target_h}') reported success")
                 # A zero-size region re-reads the live root now and keeps root-follow;
                 # the auto-adjust poll trails ~30 frames, leaving new bands out of frame.
                 capture_module = getattr(self.media_pipeline, "capture_module", None)
@@ -1529,7 +1529,7 @@ class WebRTCService(BaseStreamingService):
         size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
         try:
             if await asyncio.to_thread(module.set_cursor_size, size):
-                logger.info(f"Wayland cursor size set to {size} (DPI {dpi_value}).")
+                logger.debug(f"Wayland cursor size set to {size} (DPI {dpi_value}).")
             else:
                 logger.warning(f"Wayland compositor refused cursor size {size}.")
         except Exception as e:
@@ -2163,7 +2163,7 @@ class WebRTCService(BaseStreamingService):
                 updated += 1
             except Exception as e:
                 logger.debug(f"Live cursor cap update skipped for '{did}': {e}")
-        logger.info(f"Cursor size cap {ih.cursor_size_cap}px for DPI {dpi_value} "
+        logger.debug(f"Cursor size cap {ih.cursor_size_cap}px for DPI {dpi_value} "
                     f"({updated} live capture(s) updated).")
 
     async def handle_scaling(self, dpi_value: float, display_id: str = "primary") -> None:
@@ -2235,11 +2235,11 @@ class WebRTCService(BaseStreamingService):
 
         new_cursor_size = cursor_size_for_dpi(dpi_value, CURSOR_SIZE)
 
-        logger.info(
+        logger.debug(
             f"Attempting to set cursor size to: {new_cursor_size} (based on DPI {dpi_value})"
         )
         if await set_cursor_size(new_cursor_size):
-            logger.info(f"Successfully set cursor size to {new_cursor_size}")
+            logger.debug(f"Successfully set cursor size to {new_cursor_size}")
         else:
             logger.error(f"Failed to set cursor size to {new_cursor_size}")
 
@@ -2692,12 +2692,12 @@ class WebRTCService(BaseStreamingService):
         path, so one bad peer must never kill the loop.
         """
         lo_kbps, hi_kbps = settings.video_bitrate
-        logger.info(
+        logger.debug(
             f"Congestion control loop started (CBR only, range {lo_kbps}-{hi_kbps} kbps)."
         )
         # No getattr default: a misnamed setting must raise, not disable the pacer.
         pacer_on = bool(settings.webrtc_pacer[0])
-        logger.info(f"WebRTC pacer setting: {'ON' if pacer_on else 'OFF'}.")
+        logger.debug(f"WebRTC pacer setting: {'ON' if pacer_on else 'OFF'}.")
         while True:
             await asyncio.sleep(1.0)
             rtc_app = self.rtc_app
@@ -2851,10 +2851,10 @@ class WebRTCService(BaseStreamingService):
     async def shutdown(self) -> None:
         """Gracefully shutdown all components."""
         if self._shutdown_called:
-            logger.info("Shutdown already called, skipping")
+            logger.debug("Shutdown already called, skipping")
             return
         self._shutdown_called = True
-        logger.info("Starting shutdown sequence")
+        logger.debug("Starting shutdown sequence")
 
         self._cancel_primary_stop_grace()
         for task in list(self.tasks):
@@ -2876,7 +2876,7 @@ class WebRTCService(BaseStreamingService):
                     f"Timeout while waiting for {name} to stop (after {timeout}s)"
                 )
             except asyncio.CancelledError:
-                logger.info(f"{name} was canceled during shutdown")
+                logger.debug(f"{name} was canceled during shutdown")
             except Exception as e:
                 logger.exception(f"Error while stopping {name}: {e}")
             return None

@@ -136,7 +136,7 @@ async def main() -> bool:
                 await wss.send("SETTINGS," + json.dumps(settings_for("display2")))
 
                 res.check("secondary capture started",
-                          C.wait_log("SUCCESS: Capture started for 'display2'", timeout=45), "")
+                          C.wait_log("Capture started for 'display2'", timeout=45), "")
                 layout = server_layout()
                 res.check("both displays laid out",
                           bool(layout) and "display2" in layout, layout)

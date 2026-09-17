@@ -76,14 +76,13 @@ try:
 except (ImportError, RuntimeError):
     AudioCapture = AudioCaptureSettings = None
 
-logger = logging.getLogger("media_pipeline")
+logger = logging.getLogger("webrtc")
 
 # pixelflux's per-stripe wire header: a video tag, a byte carrying the codec
 # in its high nibble and the picture kind the encoder produced in its low
 # nibble (a keyframe is 0x01; every JPEG picture stands alone), the frame id,
 # the stripe geometry, and the id of the frame it predicts from.
 STRIPE_HEADER_LEN = 12
-logger.setLevel(logging.INFO)
 
 
 class MediaPipelineError(Exception):
@@ -267,7 +266,7 @@ class MediaPipelinePixel(MediaPipeline):
             return
         try:
             self.capture_module.update_tunables(self.generate_capture_settings())
-            logger.info(f"Set pointer visibility to: {visible}")
+            logger.debug(f"Set pointer visibility to: {visible}")
         except Exception as e:
             logger.error(f"Error setting pointer visibility: {e}", exc_info=True)
 
@@ -806,7 +805,6 @@ class MediaPipelinePixel(MediaPipeline):
         control = self._get_audio_control()
         await control.ensure_capture_sink(self.audio_device_name)
         await self._ensure_audio_device()
-        logger.info("Starting pcmflux audio pipeline...")
         try:
             capture_settings = AudioCaptureSettings()
             device_name_bytes = (
@@ -827,13 +825,13 @@ class MediaPipelinePixel(MediaPipeline):
             # audible changing.
             capture_settings.use_silence_gate = True
             capture_settings.latency_ms = int(min(10, frame_ms))
-            capture_settings.debug_logging = False
+            capture_settings.debug_logging = bool(app_settings.debug[0])
             capture_settings.omit_audio_header = True
             pcmflux_settings = capture_settings
 
             logger.info(
-                f"pcmflux settings: device='{self.audio_device_name}', "
-                f"bitrate={capture_settings.opus_bitrate}, channels={capture_settings.channels}"
+                f"Starting pcmflux audio pipeline: device '{self.audio_device_name}', "
+                f"{capture_settings.opus_bitrate} bps, {capture_settings.channels} ch."
             )
 
             def audio_capture_callback(frame: Any) -> None:
@@ -880,7 +878,7 @@ class MediaPipelinePixel(MediaPipeline):
                 and logger.error(f"Audio routing task failed: {t.exception()}")
             )
             state = getattr(self.pcmflux_module, "state", "running")
-            logger.info(f"pcmflux audio capture started (state: {state}).")
+            logger.debug(f"pcmflux audio capture started (state: {state}).")
         except Exception as e:
             logger.error(f"Failed to start pcmflux audio pipeline: {e}", exc_info=True)
             await self._stop_audio_pipeline()
@@ -947,7 +945,7 @@ class MediaPipelinePixel(MediaPipeline):
             finally:
                 self.pcmflux_module = None
 
-            logger.info("pcmflux audio pipeline stopped.")
+            logger.debug("pcmflux audio pipeline stopped.")
         return
 
     async def recover_audio_if_failed(self) -> bool:
@@ -996,7 +994,7 @@ class MediaPipelinePixel(MediaPipeline):
             if self._running:
                 return
 
-            logger.info("Starting media pipeline...")
+            logger.debug("Starting media pipeline...")
             try:
                 if video:
                     await self.start_screen_capture()
@@ -1004,7 +1002,7 @@ class MediaPipelinePixel(MediaPipeline):
                     logger.info("Screen capture starts paused: no consumer receives video yet.")
 
                 if not self.audio_enabled:
-                    logger.info(
+                    logger.debug(
                         "Audio pipeline is disabled, skipping audio capture startup."
                     )
                 elif audio:
@@ -1036,7 +1034,7 @@ class MediaPipelinePixel(MediaPipeline):
             if not self._running:
                 return
 
-            logger.info("Stopping media pipeline...")
+            logger.debug("Stopping media pipeline...")
             try:
                 await self.stop_screen_capture()
 

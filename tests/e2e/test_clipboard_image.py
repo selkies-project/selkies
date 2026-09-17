@@ -180,7 +180,7 @@ def block(mode: str, wayland: bool) -> "H.Results":
     tag = f"clipimage-{'wl' if wayland else mode}"
     res = H.Results(tag)
     uploaded = png(23)
-    H.server_start(mode=mode, wayland=wayland, web_root=DASH)
+    H.server_start(mode=mode, wayland=wayland, web_root=DASH, extra_env={"SELKIES_DEBUG": "true"})
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
         ctx = browser.new_context(viewport={"width": 1440, "height": 900},

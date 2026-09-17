@@ -132,9 +132,9 @@ def run() -> "H.Results":
             ok = wait_log_from(st, "deferring the restart", 8)
             res.check("A1: settings change defers restart while stopped", ok, "")
             res.check("A1: no capture restart while stopped",
-                      not wait_log_from(st, "Preparing to start capture", 1) or ok, "")
+                      not wait_log_from(st, "Capture started for", 1) or ok, "")
             res.check("A1: capture stays stopped after deferral",
-                      wait_log_from(st, "SUCCESS: Capture started", 2) is False, "")
+                      wait_log_from(st, "Capture started", 2) is False, "")
 
             await ws.send("START_VIDEO")
             res.check("protocol: START_VIDEO resumes capture",

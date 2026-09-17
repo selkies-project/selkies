@@ -38,9 +38,7 @@ import logging
 from typing import Any, Callable, Dict, Optional, Awaitable
 from aiohttp import ClientWebSocketResponse, WSMsgType
 
-logger = logging.getLogger("signaling_client")
-logger.setLevel(logging.INFO)
-logging.getLogger("aiohttp").setLevel(logging.WARNING)
+logger = logging.getLogger("signaling")
 
 
 class WebRTCSignalingError(Exception):
@@ -169,7 +167,7 @@ class WebRTCSignalingClient:
 
         while not self._stop_event.is_set():
             try:
-                logger.info("Connecting to signaling server")
+                logger.debug("Connecting to signaling server")
                 self._session = aiohttp.ClientSession()
                 self._ws = await self._session.ws_connect(
                     self.server,
@@ -232,7 +230,7 @@ class WebRTCSignalingClient:
         if self._ws is None or self._ws.closed:
             raise WebRTCSignalingError("WebSocket connection not available")
 
-        logger.info(f"sending sdp type: {sdp_type} to client_peer_id: {client_peer_id}")
+        logger.debug(f"sending sdp type: {sdp_type} to client_peer_id: {client_peer_id}")
         logger.debug("SDP:\n%s" % sdp)
 
         msg = json.dumps({"sdp": {"type": sdp_type, "sdp": sdp}})
@@ -240,7 +238,7 @@ class WebRTCSignalingClient:
 
     async def stop(self) -> None:
         """Stop the signaling client and clean up resources."""
-        logger.info("Stopping signaling client...")
+        logger.debug("Stopping signaling client...")
         self._stop_event.set()
 
         if self._task is not None and not self._task.done():
@@ -251,7 +249,7 @@ class WebRTCSignalingClient:
                 pass
 
         await self._cleanup_connection()
-        logger.info("Signaling client stopped")
+        logger.debug("Signaling client stopped")
 
     async def _listen(self) -> None:
         """Pump text frames into `_process_message` until the socket closes
@@ -294,7 +292,7 @@ class WebRTCSignalingClient:
         as a transport failure, which would tear down every peer's session.
         """
         if message == "HELLO":
-            logger.info("WebSocket connection established with signaling server")
+            logger.debug("WebSocket connection established with signaling server")
 
         elif message.startswith("SESSION_START"):
             toks = message.strip().split(" ")
@@ -348,7 +346,7 @@ class WebRTCSignalingClient:
 
             try:
                 if isinstance(data.get("sdp"), dict):
-                    logger.info(f"received SDP from client_peer_id: {client_peer_id}")
+                    logger.debug(f"received SDP from client_peer_id: {client_peer_id}")
                     logger.debug(f"SDP:\n{data['sdp']}")
                     await self.on_sdp(
                         data["sdp"].get("type", ""),
@@ -356,7 +354,7 @@ class WebRTCSignalingClient:
                         client_peer_id,
                     )
                 elif isinstance(data.get("ice"), dict):
-                    logger.info(f"received ICE from client_peer_id: {client_peer_id}")
+                    logger.debug(f"received ICE from client_peer_id: {client_peer_id}")
                     logger.debug(f"ICE:\n{data.get('ice')}")
                     await self.on_ice(data["ice"], client_peer_id)
                 else:
