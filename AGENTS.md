@@ -44,7 +44,9 @@ braces inside backticks.
 
 Vendored code keeps upstream documentation style and is excluded from the reference: the Python forks
 `src/selkies/Xlib`, `src/selkies/webrtc` and `src/selkies/ice`, and the shadcn/ui primitives under
-`addons/selkies-dashboard-wish/src/components/ui`; only Selkies-added comments there follow these rules. The
+`addons/selkies-dashboard-wish/src/components/ui`; only Selkies-added comments there follow these rules. The three
+Python forks are vendored so that they can be changed here rather than worked around, so editing them is the
+expected way to fix what they do -- a change belongs upstream as well where upstream would take it. The
 translation tables and the build helpers (`copy-*.js`, `gendb.js`, the vite and eslint configs) are excluded too.
 
 Update the translations whenever user-facing strings change, adding entries where necessary.
@@ -113,7 +115,8 @@ A change is ready when four questions have answers, and the commit or pull reque
    have to sift; drop it, or say why it stays.
 
 A change in an area a maintainer has said they are working on goes to a branch and a pull request carrying those
-answers, never straight to `main`, whatever standing permission to push `main` exists. An optional path another
+answers, never straight to `main`, whatever standing permission to push `main` exists. An issue is closed by a
+maintainer, never by the change that claims to fix it. An optional path another
 component may offer (a protocol a compositor advertises, a driver feature, a device) is taken only when its presence
 is detected and never as the default: that it is exposed is not proof it works, and a reviewer has to be able to tell
 what runs where.
@@ -123,8 +126,13 @@ what runs where.
 - Parity between X11 and Wayland, WebSockets and WebRTC, and the default and wish dashboards: anything wired up on
   one side but not the other is a bug. Prefer deduplicating code that serves the same purpose across modes over
   keeping parallel copies, when you are confident there is no regression or can validate it.
-- Screen coroutine usage in Python and JavaScript and thread usage in every language so nothing hangs or lags.
-  Zero-copy and latency-reducing measures are always worth preserving or adding.
+- Screen coroutine usage in Python and JavaScript and thread usage in every language so nothing hangs or lags,
+  holding the GIL no longer than the work needs. Zero-copy and latency-reducing measures are always worth
+  preserving or adding.
+- End-to-end latency and an unrestricted frame rate are separate goals, not two ends of one dial: neither is
+  spent to buy the other, and a change that trades one away has not improved the other.
+- A change never drops a capability or falls back to an older implementation to make itself simpler. Where one
+  seems to be in the way, say what it is rather than removing it.
 - Compatibility spans Python 3.9 to 3.15 or higher and CUDA/NVENC 11 to 13 or higher. Gate on capabilities, never
   on interpreter versions: prefer the API that already encapsulates the difference (e.g. a library's own runner),
   else probe the feature itself (`hasattr`, a parameter's presence in `inspect.signature`, a try/except of the
