@@ -83,10 +83,9 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          # Lockfiles are gitignored here, so the cache is keyed on the manifests
           cache-dependency-path: |
-            addons/selkies-dashboard/package.json
-            addons/selkies-dashboard-wish/package.json
+            addons/selkies-dashboard/package-lock.json
+            addons/selkies-dashboard-wish/package-lock.json
       - name: ESLint and TypeScript
         # Through pre-commit so the hook definition is the single source of truth
         run: |

@@ -13,11 +13,11 @@ set -eux
 test -f pyproject.toml
 
 npm_install() {
-    # `npm ci` has nothing to install from: lockfiles are gitignored here. The
-    # retry flags belong on the command because two of this script's four callers
-    # run on a bare runner with no image to configure, and npm's own two retries
-    # do not carry a dependency tree this size fetched three times over.
-    npm install --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000
+    # From the committed lockfile, so every channel installs one resolved tree.
+    # The retry flags belong on the command because two of this script's four
+    # callers run on a bare runner with no image to configure, and npm's own two
+    # retries do not carry a dependency tree this size fetched three times over.
+    npm ci --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000
 }
 
 # The core is built first: both dashboards take it, and the gamepad DB built
