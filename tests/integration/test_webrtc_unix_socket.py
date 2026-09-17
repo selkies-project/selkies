@@ -58,7 +58,7 @@ try:
         console_errors = []
         page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
         page.on("pageerror", lambda e: console_errors.append(str(e)))
-        page.goto(f"http://localhost:{PORT}", wait_until="load")
+        page.goto(f"http://127.0.0.1:{PORT}", wait_until="load")
         info = C.wait_wr_video(page, timeout=60)
         res.check("WebRTC video receives through the proxied signaling", info is not None, info)
         # the datachannel carries the mode/stream notification once media is up

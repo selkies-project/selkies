@@ -77,7 +77,7 @@ def open_page(pw: Any, engine: str, port: int, software: bool) -> Tuple[Any, Any
     if software:
         ctx.add_init_script(SOFTWARE_DECODE_JS)
     page = ctx.new_page()
-    page.goto(f"http://localhost:{port}/", wait_until="load")
+    page.goto(f"http://127.0.0.1:{port}/", wait_until="load")
     return closer, page
 
 

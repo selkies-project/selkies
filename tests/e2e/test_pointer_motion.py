@@ -138,7 +138,7 @@ def launch(browser: str, profile: str, dpr: float, query: str = "") -> subproces
     Its output is kept: a browser that dies on startup has to be reported as
     that and not as a page that never loaded.
     """
-    url = f"http://localhost:{PORT}{PAGE}{query}"
+    url = f"http://127.0.0.1:{PORT}{PAGE}{query}"
     if browser == "firefox":
         with open(os.path.join(profile, "user.js"), "w") as fh:
             fh.write(f'user_pref("layout.css.devPixelsPerPx", "{dpr}");\n')

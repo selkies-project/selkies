@@ -143,7 +143,12 @@ def _free_port() -> int:
 # Each suite process gets its own, so runs do not have to be serialized; naming
 # one pins it (a proxy or firewall rule in front of the server needs that).
 PORT = int(os.environ.get("E2E_PORT") or _free_port())
-BASE_URL = f"http://localhost:{PORT}"
+# Addressed by literal rather than by name: a page whose origin is the IPv6
+# loopback gathers no ICE host candidates, so every WebRTC check on it fails
+# with no video and no candidate pair. `localhost` resolves to `::1` first on a
+# dual-stack host, which is what Firefox picks since it took up Happy Eyeballs
+# v3 in 155; the server listens on both families either way.
+BASE_URL = f"http://127.0.0.1:{PORT}"
 
 CORE_DIST = os.path.join(REPO, "addons/selkies-web-core/dist")
 CLASSIC_DIST = os.path.join(REPO, "addons/selkies-dashboard/dist")
