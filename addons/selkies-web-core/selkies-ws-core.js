@@ -366,6 +366,8 @@ let micAudioContext = null;
 let micSourceNode = null;
 let micWorkletNode = null;
 let micEncodeWorker = null;
+/** Opus bitrate the microphone encoder is configured with, and the figure the stats report. */
+const MIC_BITRATE = 32000;
 let preferredInputDeviceId = null;
 let preferredOutputDeviceId = null;
 let metricsIntervalId = null;
@@ -1010,7 +1012,7 @@ function sampleStreamStats() {
   if (!worker && pageDecode.config) probePageHardware(pageDecode.config);
   const figures = { fps: window.fps };
   if (isAudioPipelineActive) figures.audio_buffer_ms = Math.round(window.currentAudioBufferDuration || 0);
-  if (isMicrophoneActive) figures.mic = 'Opus, 32 kbps';
+  if (isMicrophoneActive) figures.mic = `Opus, ${Math.round(MIC_BITRATE / 1000)} kbps`;
   if (isWebcamActive && webcamCapture) {
     figures.webcam = `${String(webcamCapture.codec || '').toUpperCase()} ${webcamCapture.width}x${webcamCapture.height} at ${webcamCapture.fps} fps`;
   }
@@ -8373,7 +8375,7 @@ const micEncodeWorkerCode = `
     if (m.type === 'pcmPort') { m.port.onmessage = (ev) => onPcm(ev.data); return; }
     if (m.type === 'wirePort') { wirePort = m.port; return; }
     if (m.type === 'init') {
-      const base = { codec: 'opus', sampleRate: 24000, numberOfChannels: 1, bitrate: 32000 };
+      const base = { codec: 'opus', sampleRate: 24000, numberOfChannels: 1, bitrate: ${MIC_BITRATE} };
       let cfg = { ...base, opus: { application: 'lowdelay' } };
       try { const s = await AudioEncoder.isConfigSupported(cfg); if (!s || !s.supported) cfg = base; } catch (err) { cfg = base; }
       try {
