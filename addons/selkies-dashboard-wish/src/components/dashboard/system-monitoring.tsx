@@ -247,10 +247,7 @@ export function SystemMonitoring() {
 		const fps = seriesOf(samples, 'fps');
 		const encoded = seriesOf(samples, 'encoded_fps');
 		const mbps = seriesOf(samples, 'mbps');
-		const latency = seriesOf(samples, 'latency_ms');
-		// The round trip alone where no stage of the path was measured, so the graph
-		// keeps a reading rather than flattening to zero.
-		const rtt = latency.some((value) => value > 0) ? latency : seriesOf(samples, 'rtt_ms');
+		const rtt = seriesOf(samples, 'rtt_ms');
 		const hasEncoded = samples.some((s) => typeof s.encoded_fps === 'number');
 		return {
 			fps: {

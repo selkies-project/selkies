@@ -175,10 +175,7 @@ export default function StreamStats({ t, active, framerate }) {
     const fps = seriesOf(history, "fps");
     const encoded = seriesOf(history, "encoded_fps");
     const mbps = seriesOf(history, "mbps");
-    const latency = seriesOf(history, "latency_ms");
-    // The round trip alone where no stage of the path was measured, so the graph
-    // keeps a reading rather than flattening to zero.
-    const rtt = latency.some((value) => value > 0) ? latency : seriesOf(history, "rtt_ms");
+    const rtt = seriesOf(history, "rtt_ms");
     const hasEncoded = history.some((s) => typeof s.encoded_fps === "number");
     return {
       fps: {

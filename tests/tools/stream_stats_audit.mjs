@@ -56,9 +56,8 @@ const first = window.stream_stats.latest;
 check('a sample merges the server and the page', first.cpu_percent === 12 && first.fps === 58 && first.encoded_fps === 59,
   JSON.stringify(first));
 check('bandwidth is what arrived', first.mbps > 0, String(first.mbps));
-// The latency figure is the stages that were measured, added up: here the round
-// trip's one way alone, since the sample carries no pipeline or decode.
-check('latency adds the stages that were measured', first.latency_ms === 4, String(first.latency_ms));
+check('the round trip the latency graph plots comes straight from the server', first.rtt_ms === 8,
+  String(first.rtt_ms));
 for (let i = 0; i < HISTORY_MAX + 5; i++) stats.clientSample({ fps: i });
 check('the history grows to its cap and no further', window.stream_stats.history.length === HISTORY_MAX);
 
@@ -170,8 +169,8 @@ check('and how a JPEG stripe was decoded, with where it ran',
 const latest = { encode_ms: 1.2, decode_ms: 2, encoded_kbps: 900, audio_dropped: 0, cpu_percent: 20, mem_used: 2 ** 30, mem_total: 2 ** 32, fps: 60 };
 const tiles = streamTiles(latest, 'websockets');
 check('the tiles are a fixed set that repeats no graph', tiles.map((tile) => tile.key).join() === 'encode_ms,pipeline_ms,decode_ms,audio_buffer_ms');
-check('neither the latency nor the round trip it contains is a tile, the graph carrying both',
-  !tiles.some((tile) => tile.key === 'latency_ms' || tile.key === 'rtt_ms'));
+check('the round trip is not also a tile, the latency graph being where it is read',
+  !tiles.some((tile) => tile.key === 'rtt_ms'));
 check('a figure not measured this second reads as a dash', tiles[0].value === '1.2 ms' && tiles[1].value === '\u2013');
 check('the same set stands before any sample', streamTiles(null, 'websockets').length === 4
   && streamTiles(null, 'websockets').every((tile) => tile.value === '\u2013'));

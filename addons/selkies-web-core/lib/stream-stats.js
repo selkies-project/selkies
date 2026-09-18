@@ -34,32 +34,6 @@ export const HISTORY_MAX = 600;
 export const SERVER_FRESH_MS = 3000;
 
 /**
- * The stream's latency as the stages that were measured add up: the capture and
- * encode, one way of the round trip, the jitter buffer a WebRTC page holds back,
- * and the decode. It is a sum of measurements, not a glass-to-glass reading --
- * nothing here times a key press to the pixel it changes -- and it is absent
- * until a stage has been measured, so an idle screen reads as a dash rather than
- * as zero.
- * @param {StreamSample} sample
- * @returns {number|undefined}
- */
-function latencyOf(sample) {
-  let total = 0;
-  let measured = false;
-  const add = (value) => {
-    if (typeof value === 'number' && isFinite(value)) {
-      total += value;
-      measured = true;
-    }
-  };
-  add(sample.pipeline_ms);
-  if (typeof sample.rtt_ms === 'number' && isFinite(sample.rtt_ms)) add(sample.rtt_ms / 2);
-  add(sample.jitter_buffer_ms);
-  add(sample.decode_ms);
-  return measured ? Math.round(total * 10) / 10 : undefined;
-}
-
-/**
  * @typedef {Object} StreamInfo The server's description of the stream.
  * @property {string} backend `x11` or `wayland`.
  * @property {string} capture The capture path: `NvFBC`, `DRI3`, `XShm`,
@@ -259,8 +233,6 @@ export class StreamStats {
     if (sample.mbps === undefined && elapsed > 0) {
       sample.mbps = Math.round((this._bytes * 8 / 1e6 / elapsed) * 100) / 100;
     }
-    const latency = latencyOf(sample);
-    if (latency !== undefined) sample.latency_ms = latency;
     this._bytes = 0;
     this._bytesAt = now;
     const stats = window.stream_stats;
