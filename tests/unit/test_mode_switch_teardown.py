@@ -69,6 +69,7 @@ def make_server(*display_ids: str, withdrawable: bool = True):
     srv.display_clients = {}
     srv.capture_instances = {}
     srv.video_relay_groups = {}
+    srv._stream_watches = {}
     srv._persistent_capture_modules = {}
     srv._tasks_to_run = []
     srv._video_capture_lock = asyncio.Lock()
@@ -136,6 +137,19 @@ async def scenario(res: H.Results) -> None:
     srv.clients.clear()
     await srv.shutdown()
     res.check("a capture with no display client left is stopped too",
+              modules["primary"].stopped == 1 and srv.capture_instances == {})
+
+    # The stats watch is best-effort bookkeeping over the module the stop is
+    # about to take away; failing to stop one must not leave the capture up.
+    srv, modules = make_server("primary")
+
+    class WedgedWatch:
+        def stop(self) -> None:
+            raise RuntimeError("watch wedged")
+
+    srv._stream_watches["primary"] = WedgedWatch()
+    await srv.shutdown()
+    res.check("a stats watch that fails to stop does not strand the capture",
               modules["primary"].stopped == 1 and srv.capture_instances == {})
 
     # A module that throws on stop must not strand the ones after it.
