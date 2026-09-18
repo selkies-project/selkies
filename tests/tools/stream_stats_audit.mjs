@@ -181,7 +181,12 @@ check('a memory meter reads as its amounts and carries no bar, the share going t
 check('a utilization keeps its bar and reads as a share',
   streamMeters(latest)[0].text === '20%' && streamMeters(latest)[0].detail === '' && streamMeters(latest)[0].bar === true);
 check('the GPU meters are left out without a GPU reading', streamMeters(latest).map((m) => m.key).join() === 'cpu,mem');
-check('and shown with one', streamMeters({ ...latest, gpu_percent: 5, gpu_mem_used: 1, gpu_mem_total: 2 }).length === 4);
+check('and shown with one, the utilizations grouped above the memories',
+  streamMeters({ ...latest, gpu_percent: 5, gpu_mem_used: 1, gpu_mem_total: 2 })
+    .map((meter) => meter.key).join() === 'cpu,gpu,mem,gpumem');
+check('and the bars are the utilizations, so they do not alternate with the figures',
+  streamMeters({ ...latest, gpu_percent: 5, gpu_mem_used: 1, gpu_mem_total: 2 })
+    .map((meter) => meter.bar).join() === 'true,true,false,false');
 
 const long = Array.from({ length: 500 }, (_, i) => ({ fps: i === 250 ? 144 : 60 }));
 const series = seriesOf(long, 'fps');
