@@ -678,7 +678,7 @@
     gap: 10px;
     position: relative;
     color: var(--text);
-    font-size: 12px;
+    font-size: 13px;
     font-variant-numeric: tabular-nums;
 }
 .theme-light .stream-stats {
@@ -812,7 +812,7 @@
     position: absolute;
     right: 4px;
     bottom: 30px;
-    font-size: 10px;
+    font-size: 11px;
     color: var(--text-muted);
     pointer-events: none;
 }
@@ -833,7 +833,7 @@
 .stream-tile b { font-size: 13px; }
 .stream-tile span {
     color: var(--text-muted);
-    font-size: 10.5px;
+    font-size: 11px;
 }
 
 .stream-meters {
@@ -846,6 +846,10 @@
     grid-template-columns: 78px 1fr 2.5rem;
     gap: 8px;
     align-items: center;
+}
+.stream-meter.amounts .stream-meter-text {
+    grid-column: 2 / -1;
+    text-align: left;
 }
 .stream-meter-label {
     color: var(--text-muted);
