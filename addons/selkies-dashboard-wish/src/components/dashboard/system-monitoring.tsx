@@ -192,7 +192,7 @@ function Graph({ label, unit, series, max, bare }: GraphProps) {
 				)}
 			</svg>
 			{!bare && (
-				<span className="pointer-events-none absolute bottom-7 right-1 text-[10px] text-muted-foreground">
+				<span className="pointer-events-none absolute bottom-7 right-1 rounded-sm bg-muted px-1 text-[11px] text-muted-foreground">
 					{`${Math.round(max)} ${unit}`}
 				</span>
 			)}
@@ -247,7 +247,10 @@ export function SystemMonitoring() {
 		const fps = seriesOf(samples, 'fps');
 		const encoded = seriesOf(samples, 'encoded_fps');
 		const mbps = seriesOf(samples, 'mbps');
-		const rtt = seriesOf(samples, 'rtt_ms');
+		const latency = seriesOf(samples, 'latency_ms');
+		// The round trip alone where no stage of the path was measured, so the graph
+		// keeps a reading rather than flattening to zero.
+		const rtt = latency.some((value) => value > 0) ? latency : seriesOf(samples, 'rtt_ms');
 		const hasEncoded = samples.some((s) => typeof s.encoded_fps === 'number');
 		return {
 			fps: {
