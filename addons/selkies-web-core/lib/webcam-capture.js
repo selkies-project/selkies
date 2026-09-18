@@ -714,7 +714,9 @@ export class WebcamCapture {
       return;
     }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      this._onError(new Error("getUserMedia unavailable"));
+      const unsupported = new Error("getUserMedia unavailable");
+      unsupported.name = "NotSupportedError";
+      this._onError(unsupported);
       return;
     }
     const video = {

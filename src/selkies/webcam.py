@@ -21,7 +21,8 @@ WebCodecs/WebRTC browser an I420 device. A later uplink of the other kind would
 otherwise be converted for the life of the process, so an ``auto`` device is
 re-created for it — but only while no sink reports a consumer, since an
 application holding the device is exactly what the process-wide lifetime is for
-(``VirtualWebcam.ensure``).
+(``VirtualWebcam.ensure``). Under the ``demand`` webcam policy the same sinks decide when
+a page is asked for its camera at all (``capture_demand.WebcamDemand``).
 
 The WebSocket carries one encoded frame per ``0x06`` message: opcode, codec
 id, flags, payload. Besides the keyframe bit the flags byte carries the
@@ -126,6 +127,7 @@ def _device_has_openers(path: str) -> bool:
 
     Only this process's own view of /proc is available, which in a container is every process
     that matters; a reader it cannot see is why re-creating the device asks the sinks first.
+    Descriptors are compared as the kernel resolved them, since realpath would re-resolve each.
     """
     try:
         target = os.path.realpath(path)
@@ -139,7 +141,7 @@ def _device_has_openers(path: str) -> bool:
         try:
             for fd in os.listdir(fd_dir):
                 try:
-                    if os.path.realpath(os.path.join(fd_dir, fd)) == target:
+                    if os.readlink(os.path.join(fd_dir, fd)) == target:
                         return True
                 except OSError:
                     continue
@@ -162,6 +164,9 @@ class VirtualWebcam:
         self._device_mjpeg = False
         self._reformat_blocked_logged = False
         self._reformat_next_check = 0.0
+        # The device walk's last answer and when it was taken, for callers that accept an older one.
+        self._device_opener: Optional[str] = None
+        self._device_checked_at = 0.0
 
     @property
     def camera(self) -> Optional[Any]:
@@ -189,14 +194,20 @@ class VirtualWebcam:
     def _auto_format() -> bool:
         return str(app_settings.webcam_pixel_format or "auto").strip().lower() == "auto"
 
-    def _consumers(self) -> Optional[str]:
+    def consumers(self, assume_reader: bool = True, device_recheck: float = 0.0) -> Optional[str]:
         """What is reading the camera right now, or None when nothing is.
 
         Each sink answers for its own: the interposer counts the clients on its socket,
         PipeWire reports whether a consumer is linked to its node, and a kernel device's
-        openers are found the only way a process can, through /proc. A pixelflux
-        that cannot report the node's consumers is taken to have one: a re-created
-        device would take the picture away from whoever is watching.
+        openers are found the only way a process can, through /proc.
+
+        Args:
+            assume_reader: Whether a sink that cannot say counts as one. The format decision
+                does, since a re-created device would take the picture away from whoever is
+                watching; the demand watch does not, since a camera it believed read would
+                never be released.
+            device_recheck: Seconds for which the device walk's last answer is reused; the
+                walk visits every descriptor in /proc, which a poll cannot afford every time.
         """
         cam = self._cam
         if cam is None:
@@ -204,18 +215,24 @@ class VirtualWebcam:
         try:
             stats = cam.stats()
         except Exception:
-            return "unknown"
+            return "unknown" if assume_reader else None
         if int(stats.get("clients", 0) or 0) > 0:
             return "interposer client"
         if "pipewire_streaming" in stats:
             if stats.get("pipewire_streaming"):
                 return "PipeWire consumer"
         elif stats.get("pipewire"):
-            return "a PipeWire node whose consumers this pixelflux does not report"
+            return ("a PipeWire node whose consumers this pixelflux does not report"
+                    if assume_reader else None)
         device = str(stats.get("device_path") or "")
-        if device and _device_has_openers(device):
-            return f"an application holding {device}"
-        return None
+        if not device:
+            return None
+        now = time.monotonic()
+        if now - self._device_checked_at >= device_recheck:
+            self._device_checked_at = now
+            self._device_opener = (f"an application holding {device}"
+                                   if _device_has_openers(device) else None)
+        return self._device_opener
 
     def _settings(self, codec: Optional[int]) -> Any:
         s = VirtualCameraSettings()
@@ -249,7 +266,7 @@ class VirtualWebcam:
             async with self._lock:
                 if self._cam is None or not self.needs_ensure(codec):
                     return self._cam
-                reader = await asyncio.to_thread(self._consumers)
+                reader = await asyncio.to_thread(self.consumers)
                 if reader is not None:
                     self._reformat_next_check = time.monotonic() + REFORMAT_RECHECK_SECONDS
                     if not self._reformat_blocked_logged:

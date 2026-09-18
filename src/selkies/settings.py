@@ -160,15 +160,15 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     },
     {
         "name": "microphone_on_start",
-        "type": "bool",
-        "default": False,
-        "help": "Start a session with the microphone uplink on, so the browser asks for the device as soon as the session connects; a microphone_enabled locked off leaves it off.",
+        "type": "str",
+        "default": "false",
+        "help": 'Microphone uplink policy: "true" asks the browser for the device as soon as the session connects, "false" waits for the side menu toggle, and "demand" asks only while an application in the session records from the virtual source, released ten seconds after the last one stops (an application that records in the background and mutes in software keeps it asked for). A microphone_enabled locked off leaves it off either way.',
     },
     {
         "name": "webcam_on_start",
-        "type": "bool",
-        "default": False,
-        "help": "Start a session with the webcam uplink on, so the browser asks for the camera as soon as the session connects; a webcam_enabled locked off leaves it off.",
+        "type": "str",
+        "default": "false",
+        "help": 'Webcam uplink policy: "true" asks the browser for the camera as soon as the session connects, "false" waits for the side menu toggle, and "demand" asks only while an application in the session holds the virtual device open, released two seconds after the last one closes it; the device then exists before any uplink, so a webcam_pixel_format of "auto" resolves to I420. A webcam_enabled locked off leaves it off either way.',
     },
     {
         "name": "gamepad_on_start",
@@ -1966,6 +1966,15 @@ class AppSettings:
             mode = "true"
         self.enable_clipboard = mode
 
+        for name in ("microphone_on_start", "webcam_on_start"):
+            mode = str(getattr(self, name)).split("|")[0].strip().lower()
+            # The bool spellings these settings once took are still read.
+            mode = {"1": "true", "0": "false"}.get(mode, mode)
+            if mode not in ("true", "false", "demand"):
+                logger.warning("Invalid %s value %r; using 'false'.", name, getattr(self, name))
+                mode = "false"
+            setattr(self, name, mode)
+
         if not self.turn_rest_username:
             self.turn_rest_username = "selkies"
 
@@ -1989,7 +1998,9 @@ def pipeline_starts_on(pipeline: str, display_id: str = "primary", viewer: bool 
     A shared viewer cannot switch video or audio on from its side menu and
     never captures a device, and a second display page exists to show its
     display, so those pages keep the built-in start state whatever the
-    settings say. Both transports read this, so a page and the server it
+    settings say. The microphone and webcam policies are strings, and their
+    `demand` value starts nothing at connect: what reads the device decides
+    (`capture_demand`). Both transports read this, so a page and the server it
     connects to agree on what starts.
 
     Args:
@@ -2001,7 +2012,8 @@ def pipeline_starts_on(pipeline: str, display_id: str = "primary", viewer: bool 
         raise ValueError(f"unknown pipeline '{pipeline}'")
     if viewer or display_id != "primary":
         return pipeline in ("video", "audio", "gamepad")
-    return bool(getattr(settings, f"{pipeline}_on_start")[0])
+    value = getattr(settings, f"{pipeline}_on_start")
+    return value == "true" if isinstance(value, str) else bool(value[0])
 
 
 def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) -> bool:
@@ -2076,7 +2088,8 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
     default; the client uses it to decide whether a conditional default (HiDPI
     off under a manual resolution, say) applies or defers to the operator.
     Adds the clipboard gate booleans derived from the single
-    `enable_clipboard` policy, the pixelflux build's `software_encoders`
+    `enable_clipboard` policy, the start and on-demand booleans derived from
+    the microphone and webcam policies, the pixelflux build's `software_encoders`
     (the software encoder behind each codec, "x264" or "openh264" for H.264),
     which the dashboards' rate-control default reads, and once the startup
     probe has run, `encoder_backends`: the hardware and software backend of
@@ -2113,6 +2126,10 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
     out['clipboard_enabled'] = {'value': clip != 'false'}
     out['clipboard_in_enabled'] = {'value': clip in ('true', 'in')}
     out['clipboard_out_enabled'] = {'value': clip in ('true', 'out')}
+    for pipeline in ("microphone", "webcam"):
+        mode = getattr(settings, f"{pipeline}_on_start")
+        out[f"{pipeline}_on_start"]['value'] = mode == 'true'
+        out[f"{pipeline}_on_demand"] = {'value': mode == 'demand'}
     out['software_encoders'] = {'value': software_encoders()}
     backends = settings.encoder_backends()
     if backends is not None:

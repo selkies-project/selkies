@@ -108,6 +108,7 @@ from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, RateControlMo
 from .settings import settings as app_settings
 from . import sessions
 from . import audit
+from . import capture_demand
 from .webcam import (
     MSG_WEBCAM_DISABLED,
     MSG_WEBCAM_KEYFRAME,
@@ -2653,6 +2654,25 @@ class DataStreamingServer(BaseStreamingService):
             for ws in await _broadcast_to_clients(sockets, message, per_client_timeout=2.0):
                 self.clients.discard(ws)
 
+    def capture_candidates(self) -> List[Any]:
+        """The pages that may capture a device, in connection order: controllers on the primary
+        display. A shared viewer never captures, whatever `webcam_uplink_allowed` would let a
+        collaborator feed."""
+        secondary = {c.get('ws') for did, c in self.display_clients.items() if did != 'primary'}
+        return [ws for ws, perms in client_permissions.items()
+                if ws in self.clients and ws not in secondary
+                and perms.get("role", "viewer") != "viewer"]
+
+    async def tell_capture(self, websocket: Any, subject: str, wanted: bool) -> bool:
+        """Sends one capture demand to one page; False where it could not be delivered."""
+        try:
+            await asyncio.wait_for(
+                websocket.send_str(f"{capture_demand.MSG_CAPTURE_DEMAND} {subject} {int(wanted)}"),
+                timeout=2.0)
+            return True
+        except (ConnectionResetError, OSError, RuntimeError, asyncio.TimeoutError):
+            return False
+
     async def broadcast_stream_resolution(self) -> None:
         """Send each display's realized resolution to the socket rendering that
         display, and the primary's to every remaining socket (shared viewers
@@ -3466,6 +3486,7 @@ class DataStreamingServer(BaseStreamingService):
             return
         if self.supervisor and client_permissions.get(websocket, {}).get("role") != "viewer":
             await self._send_print_documents({websocket}, self.supervisor.pending_print_documents())
+        await capture_demand.sync(self)
 
         self._last_adjustment_time = self._last_time_client_ok = time.monotonic()
         self._active_pipeline_last_sent_frame_id = 0
@@ -3862,6 +3883,8 @@ class DataStreamingServer(BaseStreamingService):
                                      # Replaced below on Wayland; the X11 capture has no scale.
                                      'scale': 1.0,
                                 }
+                                # The page stops being a capture candidate with its socket still open.
+                                await capture_demand.sync(self)
                                 if IS_WAYLAND and self.input_handler is not None:
                                     # The ladder runs from the configured DPI before any client
                                     # sync, so the first capture starts at the intended scale.
@@ -4289,6 +4312,7 @@ class DataStreamingServer(BaseStreamingService):
             # the remaining clients only.
             self.clients.discard(websocket)
             data_logger.debug(f"Cleaning up Data WS handler for {raddr} (Display ID: {client_display_id})...")
+            await capture_demand.sync(self)
             # A tab that dies mid-press never sends 'js,d'; the button would stay
             # stuck on the virtual pad.
             if self.input_handler and hasattr(self.input_handler, "release_gamepads_for_conn"):
@@ -4363,6 +4387,7 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.info(f"Display '{did}' was claimed by a new connection during the grace period; teardown skipped.")
                         return
                     del self.display_clients[did]
+                    await capture_demand.sync(self)
                     data_logger.info(f"Client for '{did}' did not return within the grace period. Removing and triggering full display reconfiguration.")
                     await self.reconfigure_displays()
                     # A viewer-started capture has no owning display client, so the
@@ -5861,6 +5886,7 @@ class DataStreamingServer(BaseStreamingService):
             return
         self._shutdown_called = True
         logger.debug("DataStreamingServer shutdown initiated...")
+        capture_demand.detach(self)
 
         sockets_to_close = set(self.clients)
         for info in self.display_clients.values():

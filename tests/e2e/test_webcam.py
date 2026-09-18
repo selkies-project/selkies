@@ -288,7 +288,7 @@ NO_WEBCODECS_JS = """
 def launch(p, engine: str, cam_sock: str, mode: str, init_js: Optional[str] = None):
     """Open the dashboard in `engine` with the published camera as its only device.
 
-    Both engines capture that camera through the interposer rather than an
+    Every engine captures that camera through the interposer rather than an
     engine-specific fake, so what they are asked to encode is the same.
 
     Returns:
@@ -320,6 +320,12 @@ def launch(p, engine: str, cam_sock: str, mode: str, init_js: Optional[str] = No
                 kw["executable_path"] = C.FIREFOX_PATH
             browser = p.firefox.launch(**kw)
             ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+    elif engine == "webkit":
+        # The Safari stand-in. It takes no capture flags, so the grant is the context's
+        # and the camera is the published one the interposer puts in front of it, the
+        # same as the other two.
+        browser = p.webkit.launch(headless=True, env=env)
+        ctx = browser.new_context(viewport={"width": 1280, "height": 720}, permissions=["camera"])
     else:
         # The headless shell has no media capture; the full Chromium build (new
         # headless mode) or the system Chrome named by E2E_CHROME is needed.
@@ -859,6 +865,68 @@ def webrtcpref_block() -> "H.Results":
     return res
 
 
+
+def ondemand_block() -> H.Results:
+    """The page is asked for its camera only while something in the session reads the device.
+
+    On both transports and every engine: an idle session is never asked, an application
+    opening the device has the page asked and, where the engine captures the published camera
+    (Chromium and Firefox; Playwright's WebKit captures from its own mock device), is served
+    frames from it, and closing the device releases the camera inside the hold-off. The reader
+    is the probe, so what turns the camera on is an application opening the device.
+    """
+    res = H.Results("webcam-ondemand")
+    cam = PublishedCamera(flat_frames()).start()
+    try:
+        for mode in ("websockets", "webrtc"):
+            H.server_start(mode=mode, wayland=False,
+                           extra_env={"SELKIES_WEBCAM_ENABLED": "true",
+                                      "SELKIES_WEBCAM_ON_START": "demand",
+                                      "SELKIES_WEBCAM_PIXEL_FORMAT": "I420"})
+            try:
+                for engine in ("chromium", "firefox", "webkit"):
+                    with sync_playwright() as p:
+                        browser, page, errors = launch(p, engine, cam.sock_dir, mode)
+                        video = C.wait_ws_video(page) if mode == "websockets" else C.wait_wr_video(page)
+                        if not video and engine == "firefox" and mode == "webrtc":
+                            res.skip(f"{engine}/{mode}: on-demand camera",
+                                     "no H.264 decode in this Firefox build (seed OpenH264 with tests/tools/fetch-openh264.sh)")
+                            browser.close()
+                            continue
+                        res.check(f"{engine}/{mode}: stream up", bool(video), str(video)[:100])
+                        time.sleep(6)
+                        idle = page.evaluate("window.__camStatus")
+                        res.check(f"{engine}/{mode}: an idle session is never asked",
+                                  isinstance(idle, list) and not any(idle), str(idle))
+                        started = time.time()
+                        if engine == "webkit":
+                            reader = start_reader()
+                            try:
+                                res.check(f"{engine}/{mode}: an application opening the device has the page asked",
+                                          wait_status(page, True), str(page.evaluate("window.__camStatus")))
+                            finally:
+                                reader.terminate()
+                                reader.wait()
+                        else:
+                            r = probe(30, timeout_ms=20000)
+                            res.check(f"{engine}/{mode}: an application opening the device is served 30 frames",
+                                      r.get("rc") == 0 and r.get("frames") == "30",
+                                      f"rc={r.get('rc')} frames={r.get('frames')} err={r.get('error', '')}")
+                            print(f"  {engine}/{mode}: 30 frames in {time.time() - started:.1f}s from the open")
+                            res.check(f"{engine}/{mode}: the page reported the capture",
+                                      True in (page.evaluate("window.__camStatus") or []))
+                        res.check(f"{engine}/{mode}: closing the device releases the camera",
+                                  wait_status(page, False, timeout=25),
+                                  str(page.evaluate("window.__camStatus")))
+                        res.check(f"{engine}/{mode}: no page errors", not errors, "; ".join(errors)[:200])
+                        browser.close()
+            finally:
+                H.server_stop()
+    finally:
+        cam.stop()
+    return res
+
+
 def main() -> int:
     sel = sys.argv[1] if len(sys.argv) > 1 else "websockets"
     build()
@@ -878,6 +946,8 @@ def main() -> int:
         ok = fullcolor_block().summary()
     elif sel == "webrtcpref":
         ok = webrtcpref_block().summary()
+    elif sel == "ondemand":
+        ok = ondemand_block().summary()
     elif sel == "encoderpref":
         ok = encoderpref_block().summary()
     else:

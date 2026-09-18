@@ -44,7 +44,8 @@
  * `WebRTCClient` callbacks: the settings payload, `clipboard-msg*` messages,
  * cursor and display-config updates, stats, and system actions (`reload`,
  * `mk_access,0|1`, `command_error,text`, `auth_success,{json}` /
- * `role_update,{json}`, `resolution,WxH`, `video_declined,mime`).
+ * `role_update,{json}`, `resolution,WxH`, `video_declined,mime`,
+ * `capture_demand,<subject>,0|1`).
  *
  * The page hash selects the role: none is the controller, `#shared` a strict
  * viewer, `#playerN` a viewer with gamepad slot N, and `#display2-<position>`
@@ -85,7 +86,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isMacDesktop, displayLabel } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel } from './lib/util.js';
 import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
@@ -366,6 +367,10 @@ export default function webrtc() {
 	let isMicrophoneActive = false;
 	let isWebcamActive = false;
 	let webcamBusy = false;
+	/** Set when a capture the server asked for was refused, so a session whose user said no is
+	 * not asked again at every demand; the user's own toggle clears it. */
+	let micDemandRefused = false;
+	let webcamDemandRefused = false;
 	let preferredWebcamDeviceId = null;
 	/** `webcam_encoder`: the codec the camera sender is set to among the negotiated ones. */
 	let webcamEncoderPreference = 'auto';
@@ -1552,13 +1557,34 @@ export default function webrtc() {
 	}
 
 	/**
+	 * Starts or stops the microphone uplink and reports the outcome to the sidebar.
+	 *
+	 * @param {boolean} on The state asked for.
+	 * @param {boolean} [askedByServer] The session asked rather than the user, so a refusal latches.
+	 */
+	function setMicrophone(on, askedByServer = false) {
+		webrtc.setMicrophone(on, preferredInputDeviceId).then(() => {
+			isMicrophoneActive = on;
+			postSidebarButtonUpdate();
+		}).catch((e) => {
+			console.error('Microphone toggle failed:', e);
+			isMicrophoneActive = false;
+			if (on && askedByServer && isCaptureRefusal(e)) micDemandRefused = true;
+			postSidebarButtonUpdate();
+		});
+	}
+
+	/**
 	 * Starts the webcam uplink: the camera track rides the sendonly video
 	 * transceiver the server reserved in the bundled SDP (the mirror of the
 	 * microphone), so the browser's own encoder produces the H.264, VP8, VP9, H.265 or AV1 the
 	 * server's virtual camera decodes, with RTP congestion control and no
 	 * data-channel framing.
+	 *
+	 * @param {boolean} [askedByServer] The session asked rather than the user, so a refusal
+	 *   latches and the next demand does not ask again.
 	 */
-	async function startWebcamCapture() {
+	async function startWebcamCapture(askedByServer = false) {
 		if (isSharedMode || !webrtc || isWebcamActive || webcamBusy) {
 			return;
 		}
@@ -1575,10 +1601,13 @@ export default function webrtc() {
 				isWebcamActive = true;
 			} else {
 				isWebcamActive = false;
+				// The only falsy return is an engine with no getUserMedia at all.
+				if (askedByServer) webcamDemandRefused = true;
 			}
 		} catch (error) {
 			console.error('Webcam capture error:', error);
 			isWebcamActive = false;
+			if (askedByServer && isCaptureRefusal(error)) webcamDemandRefused = true;
 		} finally {
 			webcamBusy = false;
 		}
@@ -1755,15 +1784,8 @@ export default function webrtc() {
 				}
 				if (message.pipeline === 'microphone' && webrtc && typeof webrtc.setMicrophone === 'function') {
 					pipelinesToggledByUser.add('microphone');
-					const micOn = !!message.enabled;
-					webrtc.setMicrophone(micOn, preferredInputDeviceId).then(() => {
-						isMicrophoneActive = micOn;
-						postSidebarButtonUpdate();
-					}).catch((e) => {
-						console.error('Microphone toggle failed:', e);
-						isMicrophoneActive = false;
-						postSidebarButtonUpdate();
-					});
+					micDemandRefused = false;
+					setMicrophone(!!message.enabled);
 				} else if (message.pipeline === 'video' && isSharedMode) {
 					console.log("Shared mode: Video pipelineControl blocked.");
 					break;
@@ -1800,6 +1822,7 @@ export default function webrtc() {
 						break;
 					}
 					pipelinesToggledByUser.add('webcam');
+					webcamDemandRefused = false;
 					if (!!message.enabled) {
 						startWebcamCapture();
 					} else {
@@ -3194,6 +3217,17 @@ export default function webrtc() {
 						}
 					}
 					window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
+				} else if (action.startsWith('capture_demand,') && !isSharedMode) {
+					// The user's own toggle outranks the session, as in applyStartPolicy.
+					const [subject, wanted] = action.slice('capture_demand,'.length).split(',');
+					if (subject === 'webcam' && !pipelinesToggledByUser.has('webcam')) {
+						if (wanted !== '1') stopWebcamCapture();
+						else if (!webcamDemandRefused) startWebcamCapture(true);
+					} else if (subject === 'microphone' && !pipelinesToggledByUser.has('microphone')
+						&& webrtc && typeof webrtc.setMicrophone === 'function') {
+						if (wanted !== '1') setMicrophone(false);
+						else if (!micDemandRefused) setMicrophone(true, true);
+					}
 				} else if (action.startsWith('resolution,')) {
 					const dims = action.slice('resolution,'.length).split('x');
 					const rw = parseInt(dims[0], 10);
@@ -3253,16 +3287,12 @@ export default function webrtc() {
 					window.postMessage({ type: 'pipelineStatusUpdate', audio: false }, window.location.origin);
 					sidebarChanged = true;
 				}
-				if (untouched('microphone') && startsOn('microphone_on_start', false) && !lockedOff('microphone_enabled') &&
-					!isMicrophoneActive && webrtc && typeof webrtc.setMicrophone === 'function') {
-					webrtc.setMicrophone(true, preferredInputDeviceId).then(() => {
-						isMicrophoneActive = true;
-						postSidebarButtonUpdate();
-					}).catch((e) => {
-						console.error('Microphone start failed:', e);
-					});
+				if (untouched('microphone') && !startsOn('microphone_on_demand', false) && startsOn('microphone_on_start', false)
+					&& !lockedOff('microphone_enabled') && !isMicrophoneActive && webrtc && typeof webrtc.setMicrophone === 'function') {
+					setMicrophone(true);
 				}
-				if (untouched('webcam') && startsOn('webcam_on_start', false) && !lockedOff('webcam_enabled')) {
+				if (untouched('webcam') && !startsOn('webcam_on_demand', false) && startsOn('webcam_on_start', false)
+					&& !lockedOff('webcam_enabled')) {
 					startWebcamCapture();
 				}
 				const gamepadStored = window.localStorage.getItem(storageKeyFor('isGamepadEnabled')) !== null;

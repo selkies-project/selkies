@@ -35,12 +35,16 @@ CORES = {
     "wr-core": os.path.join(ROOT, "addons", "selkies-web-core", "selkies-wr-core.js"),
 }
 DEFAULTS = {"video": True, "audio": True, "microphone": False, "webcam": False, "gamepad": True}
+# The microphone and webcam policies are strings, with "demand" beside "true" and "false".
+POLICIES = ("microphone", "webcam")
 
 
 def set_policy(**states: bool) -> None:
     """Point the settings singleton's start states at `states` (others default)."""
     for pipeline in START_STATE_PIPELINES:
-        setattr(settings, f"{pipeline}_on_start", (states.get(pipeline, DEFAULTS[pipeline]), False))
+        state = states.get(pipeline, DEFAULTS[pipeline])
+        setattr(settings, f"{pipeline}_on_start",
+                str(state).lower() if pipeline in POLICIES else (state, False))
 
 
 def settings_block(res: H.Results) -> None:
@@ -48,8 +52,12 @@ def settings_block(res: H.Results) -> None:
     res.check("audio_start_muted is gone", "audio_start_muted" not in by_name)
     for pipeline, default in DEFAULTS.items():
         spec = by_name.get(f"{pipeline}_on_start")
-        res.check(f"{pipeline}_on_start: bool defaulting to {default}",
-                  spec is not None and spec["type"] == "bool" and spec["default"] is default, spec)
+        if pipeline in POLICIES:
+            res.check(f"{pipeline}_on_start: policy string defaulting to {default}",
+                      spec is not None and spec["type"] == "str" and spec["default"] == str(default).lower(), spec)
+        else:
+            res.check(f"{pipeline}_on_start: bool defaulting to {default}",
+                      spec is not None and spec["type"] == "bool" and spec["default"] is default, spec)
     payload = build_client_settings_payload()
     res.check("every start state reaches the client payload with its value",
               all(isinstance(payload.get(f"{p}_on_start", {}).get("value"), bool) for p in DEFAULTS),
@@ -59,7 +67,7 @@ def settings_block(res: H.Results) -> None:
     try:
         sys.argv = ["selkies", "--audio-on-start=false", "--gamepad_on_start=false"]
         os.environ["SELKIES_MICROPHONE_ON_START"] = "true"
-        os.environ["SELKIES_WEBCAM_ON_START"] = "true|locked"
+        os.environ["SELKIES_WEBCAM_ON_START"] = "1|locked"
         parsed = AppSettings(SETTING_DEFINITIONS)
     finally:
         sys.argv = argv
@@ -67,8 +75,8 @@ def settings_block(res: H.Results) -> None:
         os.environ.update(environ)
     res.check("flags parse in both spellings", parsed.audio_on_start[0] is False and parsed.gamepad_on_start[0] is False,
               (parsed.audio_on_start, parsed.gamepad_on_start))
-    res.check("environment variables parse, locked suffix included",
-              parsed.microphone_on_start == (True, False) and parsed.webcam_on_start == (True, True),
+    res.check("environment variables parse, a policy taking the bool spelling and dropping a locked suffix",
+              parsed.microphone_on_start == "true" and parsed.webcam_on_start == "true",
               (parsed.microphone_on_start, parsed.webcam_on_start))
     res.check("video_on_start keeps its default when unset", parsed.video_on_start == (True, False), parsed.video_on_start)
 
