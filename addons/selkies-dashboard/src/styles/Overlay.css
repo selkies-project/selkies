@@ -863,7 +863,11 @@
 .stream-meter-track {
     height: 6px;
     border-radius: 3px;
-    background: var(--border-soft);
+    /* The inset surface keeps the fill's contrast, which is what reads the value;
+       the outline is what separates the track from the panel, which in the light
+       theme are the same white. */
+    background: var(--surface-inset);
+    box-shadow: inset 0 0 0 1px var(--border-soft);
     overflow: hidden;
 }
 .stream-meter-fill {
