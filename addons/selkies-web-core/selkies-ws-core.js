@@ -368,6 +368,12 @@ let micWorkletNode = null;
 let micEncodeWorker = null;
 /** Opus bitrate the microphone encoder is configured with, and the figure the stats report. */
 const MIC_BITRATE = 32000;
+/**
+ * The sink description `announceSink` last settled on, which the stats report.
+ * Each is a name followed by why it was taken, so the name alone is the part
+ * before the dash or the semicolon.
+ */
+let currentSink = '';
 let preferredInputDeviceId = null;
 let preferredOutputDeviceId = null;
 let metricsIntervalId = null;
@@ -1004,6 +1010,8 @@ function sampleStreamStats() {
   streamStats.setClient(Object.assign({
     codec: codecOfEncoder(currentEncoderMode) || currentEncoderMode,
     resolution: canvas && canvas.width > 0 ? `${canvas.width}x${canvas.height}` : '',
+    sink: currentSink.split(/ \u2014 |; /)[0].replace(/\.$/, ''),
+    decode_path: currentEncoderMode === 'jpeg' ? jpegDecodePath() : '',
   }, webcodecsDecoder({
     forcedSoftware: preferSoftwareDecode,
     hardwareSupported: decode.hardware,
@@ -2218,7 +2226,22 @@ const announcedSinks = new Set();
  * it asked for says so as plainly as one that got it.
  * @param {string} description
  */
+/**
+ * How a JPEG stripe becomes a picture on this engine: `ImageDecoder` where
+ * WebCodecs offers it, `createImageBitmap` otherwise, and neither where the
+ * engine has no path at all. Named with where it runs, since the video worker
+ * decodes for the page when it reported that it can.
+ * @returns {string}
+ */
+function jpegDecodePath() {
+  const where = videoWorkerActive && videoWorkerJpegDecode ? ' in the video worker' : ' on the page';
+  if (typeof ImageDecoder !== 'undefined') return `ImageDecoder${where}`;
+  if (typeof createImageBitmap === 'function') return `createImageBitmap${where}`;
+  return '';
+}
+
 function announceSink(description) {
+  currentSink = description;
   if (announcedSinks.has(description)) return;
   announcedSinks.add(description);
   console.info(`[Selkies] video sink: ${description}`);

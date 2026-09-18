@@ -105,7 +105,10 @@ function decoderRow(client, words) {
     key: 'decoder',
     status: decoder === 'hardware' ? 'good' : decoder === 'software' ? 'warn' : 'neutral',
     value: words[decoder] || words.unknown,
-    detail: client ? joined([client.decoder_evidence, codecName(client.codec), client.resolution]) : '',
+    detail: client
+      ? joined([client.decoder_evidence, codecName(client.codec), client.resolution,
+        client.decode_path, client.sink])
+      : '',
     reason: '',
   };
 }

@@ -2219,6 +2219,9 @@ export default function webrtc() {
 		statsBaseline = Object.assign({ opened: last ? last.opened : opened }, now);
 		askDecodeCapable(stats.video.codecName, stats.video.frameWidth, stats.video.frameHeight, stats.video.framesPerSecond);
 		streamStats.setClient(Object.assign({
+			// The engine decodes the remote track and composites the element itself;
+			// there is no sink ladder here, which is the WebSockets path's own.
+			sink: '<video> element',
 			codec: stats.video.codecName === 'NA' ? '' : stats.video.codecName,
 			resolution: stats.video.frameWidth > 0 ? `${stats.video.frameWidth}x${stats.video.frameHeight}` : '',
 			path: [stats.general.connectionType === 'NA' ? '' : stats.general.connectionType,
