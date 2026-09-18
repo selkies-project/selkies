@@ -92,6 +92,12 @@ function latencyOf(sample) {
  * @property {string} codec
  * @property {string} resolution `1920x1080`.
  * @property {string} path WebRTC only: the candidate pair, as `host udp`.
+ * @property {string} sink How decoded frames reach the screen: a track
+ *     generator feeding a `<video>`, a canvas a worker composites on, or the
+ *     page's own canvas. Which one an engine allows is probed, so this is the
+ *     one that was taken rather than the one preferred.
+ * @property {string} decode_path JPEG only: what turns a stripe into a picture,
+ *     and where it runs.
  */
 
 /**
@@ -174,7 +180,8 @@ export class StreamStats {
     this._bytes = 0;
     this._bytesAt = performance.now();
     /** @type {StreamClient} */
-    this._client = { transport, decoder: 'unknown', decoder_evidence: '', codec: '', resolution: '', path: '' };
+    this._client = { transport, decoder: 'unknown', decoder_evidence: '', codec: '', resolution: '', path: '',
+      sink: '', decode_path: '' };
     window.stream_info = null;
     window.stream_client = this._client;
     window.stream_stats = { open: false, latest: null, history: [] };

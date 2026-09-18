@@ -150,6 +150,23 @@ check('WebRTC takes the engine at its word', webrtcDecoder({ implementation: 'Ex
 check('and claims nothing where the engine withholds the decoder',
   webrtcDecoder({ implementation: 'unknown', capable: true }).decoder === 'unknown');
 
+// What presents the picture is troubleshooting data in its own right: two engines
+// decoding the same stream can differ only in the sink they allowed.
+const presented = streamRows(null, {
+  transport: 'websockets', decoder: 'hardware', decoder_evidence: 'NV12 frames', codec: 'h264',
+  resolution: '1920x1080', path: '', sink: 'VideoTrackGenerator in the video worker',
+  decode_path: '',
+}, null, { hardware: 'hardware', software: 'software', unknown: 'unknown', throttled: '' })[2];
+check('the decoder row names the sink that was taken',
+  presented.detail.includes('VideoTrackGenerator in the video worker'), presented.detail);
+const jpeg = streamRows(null, {
+  transport: 'websockets', decoder: 'unknown', decoder_evidence: '', codec: 'jpeg',
+  resolution: '1920x1080', path: '', sink: '2D canvas on the page',
+  decode_path: 'ImageDecoder in the video worker',
+}, null, { hardware: 'hardware', software: 'software', unknown: 'unknown', throttled: '' })[2];
+check('and how a JPEG stripe was decoded, with where it ran',
+  jpeg.detail.includes('ImageDecoder in the video worker'), jpeg.detail);
+
 const latest = { encode_ms: 1.2, decode_ms: 2, encoded_kbps: 900, audio_dropped: 0, cpu_percent: 20, mem_used: 2 ** 30, mem_total: 2 ** 32, fps: 60 };
 const tiles = streamTiles(latest, 'websockets');
 check('the tiles are a fixed set that repeats no graph', tiles.map((tile) => tile.key).join() === 'encode_ms,pipeline_ms,decode_ms,audio_buffer_ms');
