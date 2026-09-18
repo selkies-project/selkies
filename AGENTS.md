@@ -138,6 +138,13 @@ what runs where.
   on interpreter versions: prefer the API that already encapsulates the difference (e.g. a library's own runner),
   else probe the feature itself (`hasattr`, a parameter's presence in `inspect.signature`, a try/except of the
   API) — never compare `sys.version_info`.
+- The capture stack is pinned, not detected: every Selkies build and release names the pixelflux and pcmflux
+  build or release it goes with (`[project.dependencies]`), which CI resolves for the branch under test, so the
+  two are never mixed across versions. Backward compatibility measures against a sibling are unwanted for that
+  reason: a `hasattr` probe for a method a newer one adds, or a suite that skips because the installed wheel
+  lacks an API, hedges a combination that never ships and hides the path it was meant to measure. Call the
+  sibling API directly and land its commit first, so the run here builds against it. What a pinned build was
+  compiled with (software H.264, below) is still read, as is the host's Python and CUDA range above.
 
 ## Cross-cutting invariants
 
