@@ -815,6 +815,9 @@
     font-size: 11px;
     color: var(--text-muted);
     pointer-events: none;
+    background: var(--surface-inset);
+    padding: 0 4px;
+    border-radius: 3px;
 }
 
 .stream-tiles {
@@ -860,7 +863,7 @@
 .stream-meter-track {
     height: 6px;
     border-radius: 3px;
-    background: var(--surface-inset);
+    background: var(--border-soft);
     overflow: hidden;
 }
 .stream-meter-fill {
