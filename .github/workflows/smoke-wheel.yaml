@@ -63,12 +63,24 @@ jobs:
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
 
   smoke:
-    name: Install and run the wheel
+    name: Install and run the wheel (${{ matrix.target.arch }})
     needs: [wheel, wheels]
     if: ${{ always()
       && contains(fromJSON('["success", "skipped"]'), needs.wheel.result)
       && contains(fromJSON('["success", "skipped"]'), needs.wheels.result) }}
-    runs-on: ubuntu-latest
+    strategy:
+      # Both architectures the capture stack ships wheels for. The selkies wheel
+      # is pure Python and the same file on either; what differs is the
+      # pixelflux and pcmflux extensions it installs alongside, so an aarch64
+      # wheel that does not load is caught here rather than on a user's board.
+      fail-fast: false
+      matrix:
+        target:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.target.runner }}
     steps:
       - uses: actions/checkout@v7
       - name: Set up Python
@@ -92,7 +104,7 @@ jobs:
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
-          pattern: "*-wheels-x86_64-manylinux"
+          pattern: "*-wheels-${{ matrix.target.arch }}-manylinux"
           path: sibling-wheels
           merge-multiple: true
       - name: Check the capture-stack wheels
