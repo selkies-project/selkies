@@ -58,7 +58,7 @@ def card(name: str, driver: str, pci: str, **files: str) -> str:
     for key, value in files.items():
         with open(os.path.join(device, key), "w") as f:
             f.write(value)
-    for node in (name, name.replace("card", "renderD1")):
+    for node in (name, f"renderD{128 + int(name[4:])}"):
         node_dir = os.path.join(ROOT, "sys", "class", "drm", node)
         os.makedirs(node_dir, exist_ok=True)
         link = os.path.join(node_dir, "device")
@@ -106,7 +106,7 @@ try:
     # A card read only through its clients: Mali, through the render node.
     mali = card("card0", "panthor", "0000:03:00.0")
     engines = dict(panthor=0, render=0, video=0, video__capacity=2)
-    client(4001, 3, "renderD10", **engines)
+    client(4001, 3, "renderD128", **engines)
 
     first = RS._drm_client_load()
     res.check("a card its clients report is keyed by the device both its nodes share",
@@ -116,7 +116,7 @@ try:
 
     clock.now += 0.5
     engines["panthor"] = 250 * MS
-    client(4001, 3, "renderD10", **engines)
+    client(4001, 3, "renderD128", **engines)
     res.check("a quarter second of engine time over half a second is half the card",
               RS._drm_client_load().get(mali) == 0.5)
 
@@ -124,14 +124,14 @@ try:
     # video engines each ran would otherwise read over 100% between them.
     clock.now += 0.5
     engines["render"] = 400 * MS
-    client(4001, 3, "renderD10", **engines)
+    client(4001, 3, "renderD128", **engines)
     res.check("the busiest engine is the reading, not the engines added up",
               RS._drm_client_load().get(mali) == 0.8)
 
     # Identical engines the driver counts under one key: capacity divides.
     clock.now += 0.5
     engines["video"] = 500 * MS
-    client(4001, 3, "renderD10", **engines)
+    client(4001, 3, "renderD128", **engines)
     res.check("two engines under one key share the window between them",
               RS._drm_client_load().get(mali) == 0.5)
 
@@ -141,7 +141,7 @@ try:
     RS._drm_client_load()
     clock.now += 0.5
     engines["panthor"] = 550 * MS
-    client(4001, 3, "renderD10", **engines)
+    client(4001, 3, "renderD128", **engines)
     client(4002, 7, "card0", panthor=400 * MS)
     res.check("the clients of one card are summed, and the sum stops at full",
               RS._drm_client_load().get(mali) == 1.0)
@@ -161,7 +161,7 @@ try:
                mem_info_vram_total=str(8 * GIB), mem_info_vram_used=str(2 * GIB))
     card("card2", "nouveau", "0000:05:00.0")
     card("card3", "ast", "0000:12:00.0")
-    client(4003, 5, "renderD11", gfx=0)
+    client(4003, 5, "renderD129", gfx=0)
     RS._drm_clients_at = 0.0
     clock.now += 0.5
     gpus = {g.pci: g for g in RS._drm_gpus()}
@@ -180,6 +180,35 @@ try:
               gpus.get("0000:05:00.0"))
     res.check("a device that is not a GPU and has no engines is not a card",
               "0000:12:00.0" not in gpus, sorted(gpus))
+
+    # The long tail: every SoC GPU is read the same way, off the engine time its
+    # clients report, and a driver this table has never heard of is read too --
+    # nothing about the reading is keyed to the three desktop vendors.
+    SOC = [("panfrost", "arm"), ("panthor", "arm"), ("lima", "arm"),
+           ("msm", "qualcomm"), ("adreno", "qualcomm"),
+           ("v3d", "broadcom"), ("vc4-drm", "broadcom"),
+           ("etnaviv", "vivante"), ("powervr", "imagination"),
+           ("asahi", "apple"), ("a-driver-from-next-year", None)]
+    for offset, (driver, _) in enumerate(SOC):
+        index = 4 + offset
+        card(f"card{index}", driver, f"ffe4{index:04x}.gpu")
+        client(5000 + index, 3, f"renderD{128 + index}", gpu=0)
+    RS._drm_clients_at = 0.0
+    RS._drm_gpus()
+    clock.now += 0.5
+    for offset in range(len(SOC)):
+        client(5004 + offset, 3, f"renderD{132 + offset}", gpu=250 * MS)
+    soc = {g.id: g for g in RS._drm_gpus()}
+    read = {driver: soc.get(4 + offset) for offset, (driver, _) in enumerate(SOC)}
+    res.check("every SoC GPU is read off its clients, a quarter second in half a second",
+              all(g is not None and g.load == 0.5 for g in read.values()),
+              {name: (g and g.load) for name, g in read.items()})
+    res.check("and each is named by its vendor, the unknown driver by none",
+              [read[driver].vendor for driver, _ in SOC] == [vendor for _, vendor in SOC],
+              {name: (g and g.vendor) for name, g in read.items()})
+    res.check("none of them claims a PCI address it does not have",
+              all(g.pci is None for g in read.values()),
+              {name: (g and g.pci) for name, g in read.items()})
 
     # Tegra, whose load devfreq reports in tenths of a percent.
     tegra = os.path.join(ROOT, "sys", "class", "devfreq", "17000000.ga10b")

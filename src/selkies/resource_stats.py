@@ -53,13 +53,19 @@ _NVIDIA_SMI_QUERY: str = "utilization.gpu,memory.total,memory.used,pci.bus_id"
 _SYSFS_DRM_ROOT: str = "/sys/class/drm"
 _PROC_ROOT: str = "/proc"
 
+# Keyed by the driver sysfs names the card's device is bound to, which is the
+# platform driver's name on an SoC and need not match the DRM driver's own
+# (Broadcom's VideoCore IV binds as vc4-drm). A card whose driver is not here is
+# still read when its clients report engine time; only the vendor match
+# `dri_node` falls back to needs the keyword.
 _DRIVER_VENDORS: Dict[str, str] = {
     "nvidia": "nvidia", "nvidia-drm": "nvidia", "nouveau": "nvidia",
     "amdgpu": "amd", "radeon": "amd",
     "i915": "intel", "xe": "intel",
     "asahi": "apple",
     "panfrost": "arm", "panthor": "arm", "lima": "arm",
-    "msm": "qualcomm", "v3d": "broadcom", "vc4": "broadcom",
+    "msm": "qualcomm", "msm-kms": "qualcomm", "adreno": "qualcomm",
+    "v3d": "broadcom", "vc4": "broadcom", "vc4-drm": "broadcom",
     "powervr": "imagination", "etnaviv": "vivante",
 }
 
