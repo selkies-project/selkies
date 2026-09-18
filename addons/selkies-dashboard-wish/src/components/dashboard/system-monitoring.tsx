@@ -392,11 +392,14 @@ export function SystemMonitoring() {
 						<div key={meter.key} title={meter.detail || undefined}
 							className="grid grid-cols-[76px_1fr_2.5rem] items-center gap-2">
 							<span className="text-[11px] uppercase tracking-wide text-muted-foreground">{meterLabels[meter.key]}</span>
-							<span className="h-1.5 overflow-hidden rounded-full bg-muted">
-								<span className="block h-full rounded-full bg-primary transition-[width] duration-500"
-									style={{ width: `${meter.percent}%` }} />
-							</span>
-							<span className="text-right text-muted-foreground">{meter.text}</span>
+							{meter.bar && (
+								<span className="h-1.5 overflow-hidden rounded-full bg-muted">
+									<span className="block h-full rounded-full bg-primary transition-[width] duration-500"
+										style={{ width: `${meter.percent}%` }} />
+								</span>
+							)}
+							<span className={meter.bar ? "text-right text-muted-foreground"
+								: "col-start-2 col-end-[-1] text-muted-foreground"}>{meter.text}</span>
 						</div>
 					))}
 				</div>
