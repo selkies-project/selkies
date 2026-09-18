@@ -366,20 +366,22 @@ export const codecStringFor = (codec, keyframe, width, height, fps, is444, chrom
 };
 
 /**
- * The color space a decoder is told to assume where the bitstream does not
- * settle it: Chromium's VP9 decoder does not read the matrix from the frame
- * header, and VP8 carries no color signaling beyond a bit that can only say
- * BT.601. Both are told the matrix the server converted with — BT.709 like
- * every other codec, except on VP8, which is held to the one its bitstream can
- * name because Firefox reads that bit and ignores this hint. The remaining
- * codecs declare their matrix and are left to it.
+ * The color space a decoder is told to assume, which is every session's: no
+ * engine reads it out of an H.264 bitstream. Chromium and Firefox both report
+ * `bt709` at limited range for a stream whose VUI says otherwise, so a full
+ * range session rendered without this hint is wrong by up to eight levels a
+ * channel, and both honor the hint exactly. VP8 is held to BT.601 whatever the
+ * session converted with, the one value its bitstream can name, because Firefox
+ * reads that bit and ignores this; VP9 is told BT.709 because Chromium's
+ * decoder does not read the matrix from the frame header.
  * @param {string} codec The wire codec name or WebCodecs codec string.
- * @returns {VideoColorSpaceInit|undefined}
+ * @param {boolean} [fullRange] Whether the session converted at full range.
+ * @returns {VideoColorSpaceInit}
  */
-export const decoderColorSpace = (codec) => {
-  if (codec !== 'vp8' && codec !== 'vp9' && !codec.startsWith('vp09')) return undefined;
-  const matrix = codec === 'vp8' ? 'smpte170m' : 'bt709';
-  return { primaries: 'bt709', transfer: 'bt709', matrix, fullRange: false };
+export const decoderColorSpace = (codec, fullRange = false) => {
+  const vp8 = codec === 'vp8';
+  const matrix = vp8 ? 'smpte170m' : 'bt709';
+  return { primaries: 'bt709', transfer: 'bt709', matrix, fullRange: !vp8 && !!fullRange };
 };
 
 /**

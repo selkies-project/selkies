@@ -803,6 +803,22 @@ try {
 let softwareDecodeAttempted = preferSoftwareDecode;
 let softwareDecodeSwitchedAt = Number.NEGATIVE_INFINITY;
 const SOFTWARE_DECODE_SETTLE_MS = 3000;
+/** Whether the session converted at full range, as its own `stream_info` says. */
+let sessionFullRange = false;
+/**
+ * Take the range a session converted at from its report and hand it to every
+ * decoder: no engine reads it out of an H.264 bitstream, so one that is not
+ * told renders a full range session wrong.
+ * @param {Object} info A `stream_info` payload.
+ */
+const noteSessionRange = (info) => {
+  const full = !!(info && info.full_range);
+  if (full === sessionFullRange) return;
+  sessionFullRange = full;
+  if (videoWorker) {
+    try { videoWorker.postMessage({ type: 'wireHints', fullRange: full }); } catch (e) { /* respawns fresh */ }
+  }
+};
 /**
  * Persists or clears the software-decode preference.
  * @param {boolean} enabled
@@ -1565,8 +1581,7 @@ function configureDecoder(codec, w, h, software, description) {
     const cfg = { codec: codec, codedWidth: w, codedHeight: h, optimizeForLatency: true };
     if (software) cfg.hardwareAcceleration = 'prefer-software';
     if (description) cfg.description = description;
-    const colorSpace = decoderColorSpace(codec);
-    if (colorSpace) cfg.colorSpace = colorSpace;
+    cfg.colorSpace = decoderColorSpace(codec, wireFullRange);
     dec.configure(cfg);
     statsConfig = { codec: codec, w: w, h: h };
     // A keyframe is required after (re)configure.
@@ -1593,6 +1608,10 @@ function decodeChunk(key, data, timestamp, frameId, reference) {
 // and acceleration preference. Wire stats go up once a second for the page's
 // counters, watchdogs and fps, with the row layout this side is decoding.
 let wireCodec = null, wireW = 0, wireH = 0, wireHint = null, wireSoftware = false, wireChromium = false;
+// The range the session converted at, and the one each decoder was configured
+// with: a decoder outlives the report that names the range, so a change has to
+// reach it as a reconfigure rather than only the next configure.
+let wireFullRange = false, wireRange = false;
 // H.264 as this engine takes it: Annex B as sent, or length-prefixed NAL units
 // behind the key frame's avcC description where Annex B is refused.
 let wireAvcc = false, wireDesc = null;
@@ -1756,7 +1775,7 @@ function onH264Stripe(buffer) {
   const framed = avcFramed(codec);
   const desc = key && framed ? avcDescription(bytes) : (info ? info.desc : null);
   if (!info || info.dec.state !== 'configured' || info.w !== w || info.h !== h || info.codec !== codec
-      || (key && framed && !sameBytes(desc, info.desc))) {
+      || info.range !== wireFullRange || (key && framed && !sameBytes(desc, info.desc))) {
     // Only a keyframe may (re)configure a row: deltas against a lost state are noise.
     if (!key) { sendNeedKey('no_key'); return; }
     if (info) { try { if (info.dec.state !== 'closed') info.dec.close(); } catch (err) {} }
@@ -1773,13 +1792,15 @@ function onH264Stripe(buffer) {
       const cfg = { codec: codec, codedWidth: w, codedHeight: h, optimizeForLatency: true };
       if (wireSoftware) cfg.hardwareAcceleration = 'prefer-software';
       if (desc) cfg.description = desc;
+      cfg.colorSpace = decoderColorSpace(codec, wireFullRange);
       dec.configure(cfg);
     } catch (err) {
       try { if (dec.state !== 'closed') dec.close(); } catch (e2) {}
       onStripeError(y);
       return;
     }
-    info = stripeDecs[y] = { dec: dec, w: w, h: h, codec: codec, desc: desc, gotKey: false, meta: [] };
+    info = stripeDecs[y] = { dec: dec, w: w, h: h, codec: codec, desc: desc,
+                             range: wireFullRange, gotKey: false, meta: [] };
   }
   if (!key && !info.gotKey) { sendNeedKey('no_key'); return; }
   if (!key && info.dec.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
@@ -1867,11 +1888,11 @@ function onWire(buffer) {
   const framed = avcFramed(codec);
   const desc = key && framed ? avcDescription(bytes) : wireDesc;
   if (!dec || dec.state !== 'configured' || codec !== wireCodec || w !== wireW || h !== wireH
-      || (key && framed && !sameBytes(desc, wireDesc))) {
+      || wireRange !== wireFullRange || (key && framed && !sameBytes(desc, wireDesc))) {
     // Only a keyframe may (re)configure: deltas against a lost state are noise.
     if (!key) { sendNeedKey('no_key'); return; }
     if (!configureDecoder(codec, w, h, wireSoftware, desc)) return;
-    wireCodec = codec; wireW = w; wireH = h; wireDesc = desc;
+    wireCodec = codec; wireW = w; wireH = h; wireDesc = desc; wireRange = wireFullRange;
     self.postMessage({ type: 'wireDims', w: w, h: h });
   }
   decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, performance.now() * 1000, frameId, reference);
@@ -1908,6 +1929,7 @@ self.onmessage = (e) => {
     wireSoftware = !!m.software;
     wireChromium = !!m.chromium;
     wireAvcc = !!m.avcc;
+    wireFullRange = !!m.fullRange;
     wirePort = m.port;
     m.port.onmessage = (ev) => onWire(ev.data);
     if (!wireStatsTimer) {
@@ -1955,6 +1977,10 @@ self.onmessage = (e) => {
   if (m.type === 'wireHints') {
     if (m.codecHint) wireHint = m.codecHint;
     if (m.software !== undefined) wireSoftware = !!m.software;
+    if (m.fullRange !== undefined && !!m.fullRange !== wireFullRange) {
+      wireFullRange = !!m.fullRange;
+      if (dec || Object.keys(stripeDecs).length) sendNeedKey('color_range');
+    }
     if (m.chromium !== undefined) wireChromium = !!m.chromium;
     if (m.avcc !== undefined) wireAvcc = !!m.avcc;
     return;
@@ -2115,7 +2141,7 @@ function wireSocketToVideoWorker() {
     videoWorker.postMessage({
       type: 'wireIn', port: channel.port1,
       codecHint: workerKeyframeCodec, software: preferSoftwareDecode, chromium: isChromium,
-      avcc: h264Framing() === 'avcc',
+      avcc: h264Framing() === 'avcc', fullRange: sessionFullRange,
     }, [channel.port1]);
     // The framing probe may still be running when the worker is wired; its
     // answer is forwarded once it lands, so a stripe decoder built before it
@@ -6978,13 +7004,12 @@ class WorkerWebSocket {
                 const dynamicCodec = wireCodecString(video_frame_type_byte, h264Payload, stripeWidth, stripeHeight);
                 const framed = h264Framing() === 'avcc' && dynamicCodec.startsWith('avc1');
                 const description = framed ? avcDescription(new Uint8Array(h264Payload)) : null;
-                const colorSpace = decoderColorSpace(dynamicCodec);
                 const decoderConfig = decoderConfigFor({
                     codec: dynamicCodec,
                     codedWidth: stripeWidth,
                     codedHeight: stripeHeight,
                     optimizeForLatency: true,
-                    ...(colorSpace ? { colorSpace } : {}),
+                    colorSpace: decoderColorSpace(dynamicCodec, sessionFullRange),
                     ...(description ? { description } : {})
                 });
                 if (isFullFrameVideo(currentEncoderMode)) pageDecode.config = decoderConfig;
@@ -7316,7 +7341,10 @@ class WorkerWebSocket {
             console.error('Error parsing JSON:', e);
             return;
           }
-          if (obj.type === 'stream_info') streamStats.setInfo(obj.info);
+          if (obj.type === 'stream_info') {
+            streamStats.setInfo(obj.info);
+            noteSessionRange(obj.info);
+          }
           else if (obj.type === 'stream_stats') streamStats.serverSample(obj.stats);
           else if (obj.type === 'server_settings') {
               if (displayId !== 'primary' && obj.settings.second_screen && obj.settings.second_screen.value === false) {
