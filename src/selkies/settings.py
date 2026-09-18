@@ -1248,8 +1248,8 @@ _HARDWARE_ENCODERS: Dict[int, Optional[Dict[str, str]]] = {}
 
 def hardware_encoders(encode_node_index: int, auto_gpu: str = "") -> Optional[Dict[str, str]]:
     """The hardware encoder of each codec the GPU behind a render node serves,
-    by codec name ("nvenc" or "vaapi"), as pixelflux probes it once per node and
-    remembers; a codec without an entry has no hardware path on that node. None
+    by codec name, as the backend pixelflux named when it probed the node once and
+    remembered ("nvenc", "vaapi", "tegra" or "v4l2"); a codec without an entry has no hardware path on that node. None
     where nothing can be known: no pixelflux to ask (rendering the settings
     reference), or one without the probe, so a caller narrows nothing on a guess.
 
@@ -1681,7 +1681,7 @@ class AppSettings:
 
     def encoder_backends(self) -> Optional[Dict[str, Dict[str, Optional[str]]]]:
         """The backends that serve each video codec on this host, by codec
-        name: `hardware` ("nvenc", "vaapi" or None) from the startup probe and
+        name: `hardware` (the backend pixelflux named, or None) from the startup probe and
         `software` (the pixelflux build's library or None). None before
         `resolve_encoder_backends` ran or where the hardware side is unknown,
         so no consumer hides a choice on a guess."""
