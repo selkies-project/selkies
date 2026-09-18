@@ -74,6 +74,7 @@ SUITES: list = [
     {"path": "unit/test_env_case.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_desktop_session_scripts.py", "tier": "unit", "timeout": 600},
     {"path": "unit/test_package_deps.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_appimage_l4t_xcb.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_appimage_relocation.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_docs_tables.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_https_selfsigned.py", "tier": "unit", "timeout": 120},

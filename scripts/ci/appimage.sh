@@ -188,6 +188,24 @@ export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 export SELKIES_INTERPOSER="${HERE}/usr/lib/selkies_input_interposer.so"
 export SELKIES_WEBCAM_INTERPOSER="${HERE}/usr/lib/selkies_v4l2_interposer.so"
 
+# The first library named that exists, and only where the marker file does. The
+# NVIDIA X and EGL stack on L4T is linked against the distribution's libxcb, and
+# resolving it to the bundled copy instead takes the capture thread down with
+# SIGSEGV seconds after capture starts, on every encoder. Any other host has one
+# libxcb and is left alone.
+first_present_if() {
+    marker="${1}"
+    shift
+    [ -e "${marker}" ] || return 1
+    for candidate in "$@"; do
+        if [ -e "${candidate}" ]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # A help or version query prints and exits, so it starts no display or audio server
 for arg in "$@"; do
     case "${arg}" in
@@ -227,6 +245,15 @@ if [ ! -e "${PULSE_SERVER#unix:}" ] && [ ! -S "${PULSE_SERVER#unix:}" ]; then
     elif command -v pulseaudio >/dev/null 2>&1; then
         pulseaudio --verbose --log-target=file:/tmp/pulseaudio_selkies.log --disallow-exit --exit-idle-time="-1" &
     fi
+fi
+
+# Preloaded for selkies alone: the servers started above, and whatever the
+# session runs under them, keep resolving the libraries their own binaries name.
+system_xcb="$(first_present_if /etc/nv_tegra_release \
+    /usr/lib/aarch64-linux-gnu/libxcb.so.1 /usr/lib/libxcb.so.1)" || system_xcb=""
+if [ -n "${system_xcb}" ]; then
+    echo "L4T detected; preloading the system ${system_xcb} into selkies"
+    exec env LD_PRELOAD="${system_xcb}${LD_PRELOAD:+:${LD_PRELOAD}}" "${ENV_BIN}/selkies" "$@"
 fi
 
 exec "${ENV_BIN}/selkies" "$@"
