@@ -159,7 +159,8 @@ const TILES = {
 /** The figures each transport shows, in order. */
 const TRANSPORT_TILES = {
   websockets: ['encode_ms', 'pipeline_ms', 'decode_ms', 'audio_buffer_ms'],
-  webrtc: ['encode_ms', 'pipeline_ms', 'decode_ms', 'jitter_buffer_ms', 'audio_buffer_ms', 'packet_loss_percent',
+  webrtc: ['encode_ms', 'pipeline_ms', 'decode_ms', 'jitter_buffer_ms', 'audio_buffer_ms',
+    'packet_loss_percent',
     'frames_dropped', 'freezes', 'nacks', 'keyframe_requests'],
 };
 
@@ -183,27 +184,33 @@ export function streamTiles(latest, transport) {
 const gib = (bytes) => `${(bytes / 1073741824).toFixed(1)} GiB`;
 
 /**
- * The host meters: a share of 100, that share as the text beside the bar, and
- * for the memory pair the amounts behind it, which a dashboard shows on hover so
- * the bar keeps the row's width. The GPU pair is left out where the server reads
+ * The host meters. A utilization carries a bar, which is what a share of a whole
+ * reads well as; a memory pair carries its amounts as the figure and no bar,
+ * because how much of how much is what an operator needs and a bar leaves it to
+ * a hover no touch screen has. The GPU pair is left out where the server reads
  * no GPU.
  * @param {StreamSample|null} latest
- * @returns {Array<{key: ('cpu'|'mem'|'gpu'|'gpumem'), percent: number, text: string, detail: string}>}
+ * @returns {Array<{key: ('cpu'|'mem'|'gpu'|'gpumem'), percent: number, text: string, detail: string, bar: boolean}>}
  */
 export function streamMeters(latest) {
   if (!latest || typeof latest.cpu_percent !== 'number') return [];
   const share = (used, total) => (total > 0 ? Math.min(100, (100 * used) / total) : 0);
-  const meter = (key, percent, detail) => ({ key, percent, text: `${Math.round(percent)}%`, detail });
-  const amounts = (used, total) => `${gib(used)} / ${gib(total)}`;
+  const used = (key, percent) => ({ key, percent, text: `${Math.round(percent)}%`, detail: '', bar: true });
+  const amounts = (key, gotten, total) => ({
+    key,
+    percent: share(gotten, total),
+    text: `${gib(gotten)} / ${gib(total)}`,
+    detail: `${Math.round(share(gotten, total))}%`,
+    bar: false,
+  });
   const meters = [
-    meter('cpu', Math.min(100, latest.cpu_percent), ''),
-    meter('mem', share(latest.mem_used, latest.mem_total), amounts(latest.mem_used, latest.mem_total)),
+    used('cpu', Math.min(100, latest.cpu_percent)),
+    amounts('mem', latest.mem_used, latest.mem_total),
   ];
   if (typeof latest.gpu_percent === 'number') {
-    meters.push(meter('gpu', Math.min(100, latest.gpu_percent), ''));
+    meters.push(used('gpu', Math.min(100, latest.gpu_percent)));
     if (latest.gpu_mem_total > 0) {
-      meters.push(meter('gpumem', share(latest.gpu_mem_used, latest.gpu_mem_total),
-        amounts(latest.gpu_mem_used, latest.gpu_mem_total)));
+      meters.push(amounts('gpumem', latest.gpu_mem_used, latest.gpu_mem_total));
     }
   }
   return meters;
