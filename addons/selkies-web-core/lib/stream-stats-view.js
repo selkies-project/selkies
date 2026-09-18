@@ -187,11 +187,12 @@ export function streamTiles(latest, transport) {
 const gib = (bytes) => `${(bytes / 1073741824).toFixed(1)} GiB`;
 
 /**
- * The host meters. A utilization carries a bar, which is what a share of a whole
- * reads well as; a memory pair carries its amounts as the figure and no bar,
- * because how much of how much is what an operator needs and a bar leaves it to
- * a hover no touch screen has. The GPU pair is left out where the server reads
- * no GPU.
+ * The host meters: the utilizations first and the memories under them, so the
+ * bars read as one block rather than alternating with the figures. A utilization
+ * carries a bar, which is what a share of a whole reads well as; a memory pair
+ * carries its amounts as the figure and no bar, because how much of how much is
+ * what an operator needs and a bar leaves it to a hover no touch screen has. The
+ * GPU rows are left out where the server reads no GPU.
  * @param {StreamSample|null} latest
  * @returns {Array<{key: ('cpu'|'mem'|'gpu'|'gpumem'), percent: number, text: string, detail: string, bar: boolean}>}
  */
@@ -206,15 +207,13 @@ export function streamMeters(latest) {
     detail: `${Math.round(share(gotten, total))}%`,
     bar: false,
   });
-  const meters = [
-    used('cpu', Math.min(100, latest.cpu_percent)),
-    amounts('mem', latest.mem_used, latest.mem_total),
-  ];
+  const meters = [used('cpu', Math.min(100, latest.cpu_percent))];
   if (typeof latest.gpu_percent === 'number') {
     meters.push(used('gpu', Math.min(100, latest.gpu_percent)));
-    if (latest.gpu_mem_total > 0) {
-      meters.push(amounts('gpumem', latest.gpu_mem_used, latest.gpu_mem_total));
-    }
+  }
+  meters.push(amounts('mem', latest.mem_used, latest.mem_total));
+  if (typeof latest.gpu_percent === 'number' && latest.gpu_mem_total > 0) {
+    meters.push(amounts('gpumem', latest.gpu_mem_used, latest.gpu_mem_total));
   }
   return meters;
 }
