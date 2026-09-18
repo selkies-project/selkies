@@ -4866,13 +4866,21 @@ class DataStreamingServer(BaseStreamingService):
         sinks/decoders only on that message, including when no backpressure
         task ran (viewer-only captures, stops before the task armed) — without
         it a resumed stream plays into the stale sink and freezes silently.
+
+        The stats watch goes first, because it reads the capture module from a
+        worker thread and no read may be in flight when the module is torn
+        down; its figures are best-effort, so failing to stop one is logged and
+        the capture still goes.
         """
         data_logger.info(f"Stopping all streams for display '{display_id}'...")
         reset_sent = await self._ensure_backpressure_task_is_stopped(display_id)
         capture_info = self.capture_instances.pop(display_id, None)
-        watch = self._stream_watches.get(display_id)
-        if watch is not None:
-            watch.stop()
+        try:
+            watch = self._stream_watches.get(display_id)
+            if watch is not None:
+                watch.stop()
+        except Exception as e:
+            data_logger.warning(f"Stream stats for '{display_id}' not stopped: {e}")
         if capture_info:
             capture_module = capture_info.get('module')
             if capture_module:
