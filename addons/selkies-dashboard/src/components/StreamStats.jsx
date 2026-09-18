@@ -175,7 +175,10 @@ export default function StreamStats({ t, active, framerate }) {
     const fps = seriesOf(history, "fps");
     const encoded = seriesOf(history, "encoded_fps");
     const mbps = seriesOf(history, "mbps");
-    const rtt = seriesOf(history, "rtt_ms");
+    const latency = seriesOf(history, "latency_ms");
+    // The round trip alone where no stage of the path was measured, so the graph
+    // keeps a reading rather than flattening to zero.
+    const rtt = latency.some((value) => value > 0) ? latency : seriesOf(history, "rtt_ms");
     const hasEncoded = history.some((s) => typeof s.encoded_fps === "number");
     return {
       fps: {
@@ -256,11 +259,14 @@ export default function StreamStats({ t, active, framerate }) {
       {meters.length > 0 && (
         <div className="stream-meters">
           {meters.map((meter) => (
-            <div key={meter.key} className="stream-meter" title={meter.detail || undefined}>
+            <div key={meter.key} className={`stream-meter${meter.bar ? "" : " amounts"}`}
+              title={meter.detail || undefined}>
               <span className="stream-meter-label">{meterLabels[meter.key]}</span>
-              <span className="stream-meter-track">
-                <span className="stream-meter-fill" style={{ width: `${meter.percent}%` }} />
-              </span>
+              {meter.bar && (
+                <span className="stream-meter-track">
+                  <span className="stream-meter-fill" style={{ width: `${meter.percent}%` }} />
+                </span>
+              )}
               <span className="stream-meter-text">{meter.text}</span>
             </div>
           ))}
