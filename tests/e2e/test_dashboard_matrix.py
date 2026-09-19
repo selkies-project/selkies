@@ -20,6 +20,7 @@ gates-webrtc-x11 / gates-ws-wl / gates-webrtc-wl:
 Usage: python3 tests/e2e/test_dashboard_matrix.py [<cell>|all]
 """
 import os
+import re
 import sys
 import time
 from typing import Any, Optional
@@ -163,12 +164,12 @@ def wish_block(cell: str) -> "H.Results":
         try:
             info = wait_video(page, mode)
             res.check("video streams", info is not None, info)
-            # The chrome arrives with the page; the gamepad card follows the
-            # server settings payload.
+            # The chrome arrives with the page; the gamepad preview in its
+            # dropdown follows the server settings payload.
             deadline = time.time() + 10
             card = False
             while time.time() < deadline and not card:
-                card = page.locator('text=/^Gamepad \\d+$/').count() > 0
+                card = TD.wish_gamepad_preview(page)
                 time.sleep(0.5)
             res.check("dashboard chrome renders", page.locator('[role="menubar"]').count() > 0)
             res.check("gamepad card shown by default", card)
@@ -350,7 +351,7 @@ def gates_block(cell: str) -> "H.Results":
                         pass
                 body += menu
                 mic, cam, pad = "Microphone" in menu, "Webcam" in menu, "Gamepad Input" in menu
-                section = page.locator('text=/^Gamepad \\d+$/').count() > 0
+                section = re.search(r"^Gamepad \d+$", menu, re.M) is not None
             res.check(f"{dashboard}: ui_sidebar_show_shortcuts=false hides the Shortcuts section",
                       "Shortcuts" not in body)
             res.check(f"{dashboard}: core buttons reachable (microphone toggle present)", mic)

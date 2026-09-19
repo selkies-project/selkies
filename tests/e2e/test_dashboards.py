@@ -86,6 +86,24 @@ def wish_open_menu_item(page, label: str) -> bool:
     return False
 
 
+def wish_gamepad_preview(page) -> bool:
+    """Whether the Wish gamepad dropdown carries the gamepad preview, a visualizer
+    titled "Gamepad 0": each menubar menu is opened, read and closed again."""
+    triggers = page.locator('[role="menubar"] button')
+    for i in range(triggers.count()):
+        try:
+            triggers.nth(i).click()
+            time.sleep(0.5)
+            found = page.locator('[role="menu"]').locator('text=/^Gamepad \\d+$/').count() > 0
+            page.keyboard.press("Escape")
+            time.sleep(0.2)
+            if found:
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def wish_clipboard_seed_check(page, res: "H.Results") -> None:
     """A server clipboard change that arrives while the Wish Clipboard panel
     is closed must show in the textarea when the panel is opened: the panel
@@ -572,7 +590,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         if dashboard == "classic":
             section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
         else:
-            section = page.locator('text=/^Gamepad \\d+$/').count() > 0
+            section = wish_gamepad_preview(page)
         res.check("gamepads section shown by default", section, section)
 
         if dashboard == "wish":
@@ -758,8 +776,8 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
                 except Exception:
                     pass
             mic, cam, pad = "Microphone" in menu, "Webcam" in menu, "Gamepad Input" in menu
-            # The card renders a titled visualizer ("Gamepad 0") when shown.
-            section = page.locator('text=/^Gamepad \\d+$/').count() > 0
+            # The preview renders a titled visualizer ("Gamepad 0") in the same menu when shown.
+            section = re.search(r"^Gamepad \d+$", menu, re.M) is not None
         res.check("core buttons reachable (microphone toggle present)", mic, mic)
         res.check("ui_sidebar_show_webcam=false hides webcam toggle", not cam, cam)
         res.check("ui_sidebar_show_gamepads=false keeps the gamepad input toggle", pad, pad)
