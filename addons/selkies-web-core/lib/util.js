@@ -361,3 +361,15 @@ export const isMobileClient =
     typeof window !== 'undefined' &&
     typeof window.matchMedia === 'function' &&
     window.matchMedia('(pointer: coarse)').matches;
+
+/**
+ * Whether a capture the server asked for failed for good: permission withheld, or no
+ * getUserMedia at all. A busy camera or an unmet constraint may clear by the next demand.
+ *
+ * @param {any} error The rejection from getUserMedia, or the capture's own error.
+ * @returns {boolean} True where asking again could not succeed.
+ */
+export function isCaptureRefusal(error) {
+	const name = error && error.name;
+	return name === 'NotAllowedError' || name === 'SecurityError' || name === 'NotSupportedError';
+}

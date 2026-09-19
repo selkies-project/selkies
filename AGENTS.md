@@ -207,7 +207,9 @@ Each is documented in full where named; read that before changing the subsystem.
   `*_on_start` settings): the server captures only what a page receives and the page requests only what
   the policy or the user turned on, so nothing is started only to be stopped and a capture nobody receives
   never runs (`webrtc_media_pipeline` module docstring, `DataStreamingServer._video_start_state`, each core's
-  `applyStartPolicy`).
+  `applyStartPolicy`). A camera or microphone policy of `demand` starts nothing at connect: what reads the
+  virtual device decides, once for both transports, and only one page is ever asked (`capture_demand`
+  module docstring).
 - What a session runs on is reported, never inferred from settings, and what moves is sent only to a page
   looking at it: pixelflux records each capture and encoder decision where it makes it
   (`ScreenCapture.stream_info`), the server relays that once and on every change as `stream_info`, and every

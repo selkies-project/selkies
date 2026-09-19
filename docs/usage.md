@@ -74,6 +74,7 @@ Selkies runs the queue itself, as the session user, from a CUPS scheduler instal
 | `session.disconnect` | `transport`, `role`, `slot`, `duration_s` | that connection ends, however it ends |
 | `recording.start` | `filename` | a recording starts through the operator API |
 | `recording.stop` | `filename`, `size_bytes`, `duration_s`, `frames` | it is stopped and the file is whole |
+| `capture.demand` | `subject`, `action`, `reader` | under a `demand` webcam or microphone policy, a page is asked for (`ask`) or released from (`release`) its `webcam` or `microphone`, with what the sink named as reading the device |
 
 Every object also carries `ts`, an RFC 3339 UTC timestamp with milliseconds taken when the transfer happened, and both transports emit the same objects. An event costs the session an enqueue and nothing else: one task delivers the queue in order over a single keep-alive connection, so a collector that is slow or down never paces the stream. The queue holds 1024 events and drops what overflows, a POST that fails drops its event with no retry, and each outage is logged once.
 
@@ -117,6 +118,8 @@ Both send a local device into the session, are off by default, and need a secure
 ## What a Session Starts With
 
 A session starts with video, audio and gamepad input on, and the microphone and webcam off; each is then toggled from the side menu. The `--video-on-start`, `--audio-on-start`, `--microphone-on-start`, `--webcam-on-start` and `--gamepad-on-start` settings (`SELKIES_VIDEO_ON_START` and so on) change that start state for a session's primary page: an image that should open silent sets `--audio-on-start=false`, one that should ask for the camera at once sets `--webcam-on-start=true` alongside `--webcam-enabled=true`. Whatever starts off is not captured at all until it is turned on, on either transport: no screen or audio capture runs for a page that does not receive it, a microphone or webcam is not asked for, and gamepads are not polled. A toggle made during the session wins over the start state, a shared viewer and a second display page always start their stream, and the gamepad toggle's choice is remembered by the browser.
+
+`--webcam-on-start=demand` and `--microphone-on-start=demand` replace that start state with the session's own use of the device: the browser is asked for the camera while an application holds the virtual V4L2 device open, and for the microphone while one records from the virtual source, and released a few seconds after the last one lets go, so the light beside the user's camera follows the desktop rather than the session. A toggle made during the session still wins, a shared viewer is never asked, and only one page is asked at a time. Neither policy defaults to it because any process on the desktop can then cause a permission prompt; every ask and release is logged with the reader's name and sent to the audit webhook as `capture.demand`. What the sinks report is an open handle rather than an active stream, so an application that keeps the camera open or holds a live recording stream while muted in software keeps the device asked for.
 
 ## Command-Line Options and Environment Variables
 

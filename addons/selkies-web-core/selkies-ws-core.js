@@ -39,7 +39,8 @@
  * lib/input.js. The server sends `MODE websockets`, `AUTH_SUCCESS,{json}`,
  * `ROLE_UPDATE,{json}`, `MK_ACCESS,<0|1>`, `VIDEO_STARTED`, `VIDEO_STOPPED`,
  * `AUDIO_STARTED`, `AUDIO_STOPPED`, `AUDIO_DISABLED`, `MICROPHONE_DISABLED`,
- * `WEBCAM_DISABLED`, `WEBCAM_KEYFRAME`, `PIPELINE_RESETTING <display>`,
+ * `WEBCAM_DISABLED`, `WEBCAM_KEYFRAME`, `CAPTURE_DEMAND <subject> <0|1>`,
+ * `PIPELINE_RESETTING <display>`,
  * `DISPLAY_CONFIG_UPDATE,{json}`, `cursor,{json}`, `system,{json}`,
  * `KILL <reason>`, the clipboard family (`clipboard,`, `clipboard_binary,`,
  * `clipboard_start,`, `clipboard_data,`, `clipboard_finish`,
@@ -126,7 +127,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isMacDesktop, displayLabel } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, displayLabel } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace,
@@ -341,6 +342,10 @@ let pendingInitialAudioStart = false;
 let microphoneEnabled = true;
 let webcamEnabled = true;
 let webcamCapture = null;
+/** Set when a capture the server asked for was refused, so a session whose user said no is
+ * not asked again at every demand; the user's own toggle clears it. */
+let micDemandRefused = false;
+let webcamDemandRefused = false;
 /** Codec the webcam uplink is encoding with, or null while idle. The frames
  * themselves go worker to worker over a port, so this is the only place the
  * page can say what they are. */
@@ -4357,10 +4362,12 @@ function applyStartPolicy(serverSettings) {
     if (websocket && websocket.setAudioActive) websocket.setAudioActive(false);
     sidebarChanged = true;
   }
-  if (untouched('microphone') && startsOn('microphone_on_start', false) && microphoneEnabled && !lockedOff('microphone_enabled')) {
+  if (untouched('microphone') && !startsOn('microphone_on_demand', false) && startsOn('microphone_on_start', false)
+      && microphoneEnabled && !lockedOff('microphone_enabled')) {
     startMicrophoneCapture();
   }
-  if (untouched('webcam') && startsOn('webcam_on_start', false) && webcamEnabled && !lockedOff('webcam_enabled')) {
+  if (untouched('webcam') && !startsOn('webcam_on_demand', false) && startsOn('webcam_on_start', false)
+      && webcamEnabled && !lockedOff('webcam_enabled')) {
     startWebcamCapture();
   }
   const gamepadStored = window.localStorage.getItem(`${storageAppName}_isGamepadEnabled`) !== null;
@@ -4772,6 +4779,7 @@ function receiveMessage(event) {
           break;
         }
         pipelinesToggledByUser.add('microphone');
+        micDemandRefused = false;
         if (desiredState) {
           startMicrophoneCapture();
         } else {
@@ -4787,6 +4795,7 @@ function receiveMessage(event) {
           break;
         }
         pipelinesToggledByUser.add('webcam');
+        webcamDemandRefused = false;
         if (desiredState) {
           startWebcamCapture();
         } else {
@@ -7905,6 +7914,16 @@ class WorkerWebSocket {
         } else if (event.data === 'WEBCAM_KEYFRAME') {
           // The server's decoder lost its reference or just started.
           if (webcamCapture) webcamCapture.requestKeyframe();
+        } else if (event.data.startsWith('CAPTURE_DEMAND ') && !isSharedMode) {
+          // The user's own toggle outranks the session, as in applyStartPolicy.
+          const [subject, wanted] = event.data.slice('CAPTURE_DEMAND '.length).split(' ');
+          if (subject === 'webcam' && webcamEnabled && !pipelinesToggledByUser.has('webcam')) {
+            if (wanted !== '1') stopWebcamCapture();
+            else if (!webcamDemandRefused) startWebcamCapture(true);
+          } else if (subject === 'microphone' && microphoneEnabled && !pipelinesToggledByUser.has('microphone')) {
+            if (wanted !== '1') stopMicrophoneCapture();
+            else if (!micDemandRefused) startMicrophoneCapture(true);
+          }
         } else {
           if (window.webrtcInput && window.webrtcInput.on_message && !isSharedMode) {
             window.webrtcInput.on_message(event.data);
@@ -8428,8 +8447,11 @@ const micEncodeWorkerCode = `
  * on, the capture worklet, and the encode worker whose Opus frames go
  * straight onto the socket, so only encoded bytes cross the wire and the
  * server decodes in pcmflux. Blocked for shared viewers.
+ *
+ * @param {boolean} [askedByServer] The session asked rather than the user, so a refusal
+ *   latches instead of raising a dialog.
  */
-async function startMicrophoneCapture() {
+async function startMicrophoneCapture(askedByServer = false) {
   if (isSharedMode) {
     console.log("Shared mode: Microphone capture blocked.");
     isMicrophoneActive = false;
@@ -8516,7 +8538,8 @@ async function startMicrophoneCapture() {
     postSidebarButtonUpdate();
   } catch (error) {
     console.error('Failed to start microphone capture:', error);
-    alert(`Microphone error: ${error.name} - ${error.message}`);
+    if (!askedByServer) alert(`Microphone error: ${error.name} - ${error.message}`);
+    else if (isCaptureRefusal(error)) micDemandRefused = true;
     stopMicrophoneCapture();
   }
 }
@@ -8591,8 +8614,11 @@ let webcamLastFrameBytes = 0;
  * encoder never bakes into the bitstream. Frames are dropped rather than
  * queued while the socket is backed up (`WEBCAM_QUEUE_MS`). Blocked for
  * shared viewers.
+ *
+ * @param {boolean} [askedByServer] The session asked rather than the user, so a refusal
+ *   latches instead of raising a dialog.
  */
-function startWebcamCapture() {
+function startWebcamCapture(askedByServer = false) {
   if (isSharedMode || webcamCapture) {
     return;
   }
@@ -8624,7 +8650,8 @@ function startWebcamCapture() {
     },
     onError: (error) => {
       console.error('Webcam capture error:', error);
-      alert(`Webcam error: ${error.name || 'Error'} - ${error.message || error}`);
+      if (!askedByServer) alert(`Webcam error: ${error.name || 'Error'} - ${error.message || error}`);
+      else if (isCaptureRefusal(error)) webcamDemandRefused = true;
       stopWebcamCapture();
     },
   });

@@ -80,24 +80,24 @@ async def run_checks() -> None:
         wc.app_settings.webcam_pixel_format = "auto"
 
         cam, _ = make(wc, "MJPEG", {"clients": 2, "pipewire_streaming": False})
-        check("an interposer client holds the device", cam._consumers() == "interposer client")
+        check("an interposer client holds the device", cam.consumers() == "interposer client")
 
         cam, _ = make(wc, "MJPEG", {"clients": 0, "pipewire_streaming": True})
-        check("a linked PipeWire consumer holds the device", cam._consumers() == "PipeWire consumer")
+        check("a linked PipeWire consumer holds the device", cam.consumers() == "PipeWire consumer")
 
         cam, _ = make(wc, "MJPEG", {"clients": 0, "pipewire": True})
-        held = cam._consumers()
+        held = cam.consumers()
         check("a pixelflux that cannot report PipeWire consumers holds the device",
               held is not None and "PipeWire" in held, str(held))
 
         cam, _ = make(wc, "MJPEG", {"clients": 0, "pipewire_streaming": False, "pipewire": True})
-        check("a PipeWire node with nothing linked does not hold the device", cam._consumers() is None)
+        check("a PipeWire node with nothing linked does not hold the device", cam.consumers() is None)
 
         # A real opener in another process, which is the only thing /proc can show.
         with tempfile.NamedTemporaryFile(prefix="selkies-webcam-", suffix=".dev") as node:
             cam, _ = make(wc, "MJPEG", {"clients": 0, "pipewire_streaming": False,
                                         "device_path": node.name})
-            check("a device nothing has open does not hold it", cam._consumers() is None)
+            check("a device nothing has open does not hold it", cam.consumers() is None)
             holder = subprocess.Popen(
                 [sys.executable, "-c",
                  "import sys, time; f = open(sys.argv[1]); sys.stdout.write('x'); "
@@ -105,7 +105,7 @@ async def run_checks() -> None:
                 stdout=subprocess.PIPE)
             try:
                 holder.stdout.read(1)
-                held = cam._consumers()
+                held = cam.consumers()
                 check("an application holding the kernel device holds it",
                       held is not None and "holding" in held, str(held))
             finally:

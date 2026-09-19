@@ -49,6 +49,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 from .webrtc_engine import IDR_REQUEST_FLOOR_S, RTCApp, ClientType
 from . import sessions
+from . import capture_demand
 from .sessions import current_session_tokens
 from .webrtc_media_pipeline import (MediaPipelinePixel,
                                     ScreenCapture as PixelfluxScreenCapture)
@@ -2877,6 +2878,8 @@ class WebRTCService(BaseStreamingService):
             return
         self._shutdown_called = True
         logger.debug("Starting shutdown sequence")
+        if self.rtc_app is not None:
+            capture_demand.detach(self.rtc_app)
 
         self._cancel_primary_stop_grace()
         for task in list(self.tasks):

@@ -74,12 +74,15 @@ class PulseNode(NamedTuple):
         proplist: Property list; ``application.name`` identifies a stream's
             client, ``device.master_device`` a virtual source's master.
         source: For a source-output, the index of the source it records from.
+        corked: For a source-output, whether the stream is suspended, as one an
+            application opened but is not recording from is.
     """
     index: int
     name: str
     owner_module: Optional[int]
     proplist: Dict[str, str]
     source: Optional[int] = None
+    corked: bool = False
 
 
 def capture_sink_name(audio_device_name: Optional[str]) -> str:
@@ -228,6 +231,7 @@ class _PulsectlBackend:
             owner_module=getattr(obj, "owner_module", None),
             proplist=dict(getattr(obj, "proplist", None) or {}),
             source=getattr(obj, "source", None),
+            corked=bool(getattr(obj, "corked", False)),
         )
 
     async def sink_list(self) -> List[PulseNode]:
@@ -292,6 +296,7 @@ def _parse_pactl_list(text: str) -> List[PulseNode]:
             owner_module=int(owner) if owner and owner.isdigit() else None,
             proplist=props,
             source=int(source) if source and source.isdigit() else None,
+            corked=fields.get("Corked", "").strip().lower() == "yes",
         ))
     return nodes
 
@@ -638,6 +643,27 @@ class AudioControl:
             return target.name
 
         return await self._op("pcmflux routing", run, None)
+
+    async def recorders(self, source_names: Tuple[str, ...]) -> List[str]:
+        """The applications recording from one of `source_names` right now, by name.
+
+        Filtering by source index leaves out the virtual source's own bridge stream, which
+        records from the master, and a corked stream is left out too: an application that
+        opened the microphone without recording holds one.
+
+        Returns:
+            One name per uncorked recording stream; empty when the server cannot say.
+        """
+        async def run(b: Any) -> List[str]:
+            wanted = {n.lower() for n in source_names}
+            indices = {s.index for s in await b.source_list() if s.name.lower() in wanted}
+            if not indices:
+                return []
+            return [(o.proplist.get("application.name") or o.name or "an application")
+                    for o in await b.source_output_list()
+                    if o.source in indices and not o.corked]
+
+        return await self._op("microphone readers", run, [])
 
     async def ensure_virtual_microphone(
         self, audio_device_name: Optional[str], is_pcmflux_capturing: bool,

@@ -66,6 +66,7 @@ except (ImportError, RuntimeError):
 
 from .settings import settings as app_settings, inflate_gz_bounded, pipeline_starts_on, software_encoders, software_video_path
 from . import audit
+from . import capture_demand
 from . import stream_stats
 from .ice import TcpMux, UdpMux
 from .ice.ice import get_host_addresses
@@ -886,6 +887,23 @@ class RTCApp:
         peer_conn = obj.get("peer_conn")
         if peer_conn is not None:
             await peer_conn.close()
+        return True
+
+    def capture_candidates(self) -> List[RTCDataChannel]:
+        """The open channels of the peers that may capture a device: controllers on the primary
+        display, in connection order. A shared viewer never captures."""
+        return [peer["data_channel"] for peer in self.peer_connections.values()
+                if peer.get("display_id") == "primary"
+                and peer.get("client_type") is not ClientType.VIEWER
+                and peer.get("data_channel") is not None
+                and peer["data_channel"].readyState == "open"]
+
+    async def tell_capture(self, channel: RTCDataChannel, subject: str, wanted: bool) -> bool:
+        """Sends one capture demand to one peer; False where its channel has closed."""
+        if channel.readyState != "open":
+            return False
+        self.send_message_to_channel(
+            channel, "system", {"action": f"capture_demand,{subject},{int(wanted)}"})
         return True
 
     def send_framerate(self, framerate: int) -> None:
@@ -2140,6 +2158,7 @@ class RTCApp:
         data_channel.on("open", lambda ch=data_channel, ct=client_type, tok=client_token:
                         self._send_auth_success(ch, ct, tok))
         data_channel.on("open", lambda ch=data_channel, pid=client_peer_id: self._send_video_declined(ch, pid))
+        data_channel.on("open", lambda: asyncio.ensure_future(capture_demand.sync(self)))
         data_channel.on("close", lambda: self.on_data_close())
         data_channel.on("error", lambda e=None: self.on_data_error(e))
         input_consumer = self._serialize_channel(
@@ -2512,6 +2531,7 @@ class RTCApp:
         await self._cancel_channel_consumers(peer_obj)
         await self._stop_mic_playback_state(peer_obj.get("mic_state"))
         self._close_webcam_state(peer_obj.get("webcam_state"))
+        await capture_demand.sync(self)
         if self.on_peer_gone is not None:
             try:
                 await self.on_peer_gone(client_peer_id, peer_obj)
