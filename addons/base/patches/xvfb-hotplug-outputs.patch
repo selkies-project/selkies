@@ -8,7 +8,8 @@ display the server describes what real hardware does and nothing downstream
 needs to know it is a framebuffer.
 
 - The server starts with 4 CRTCs unless -crtcs says otherwise. The first
-  output is the screen it starts with; the rest start disconnected.
+  output is the screen it starts with, at the size -screen gave it; the rest
+  start disconnected.
 - A spare output carries a "Connected" property (INTEGER, range 0..1). A
   client sets it to 1 to plug a monitor in and to 0 to unplug it; the mode,
   the CRTC and the screen size it sets through RandR as it would for
@@ -20,10 +21,9 @@ needs to know it is a framebuffer.
 Applies after xvfb-gpu-screen-pixmap.patch (xlibre-xserver-25.2.2).
 
 diff --git a/hw/vfb/InitOutput.c b/hw/vfb/InitOutput.c
-index 63f491f..efc5be5 100644
 --- a/hw/vfb/InitOutput.c
 +++ b/hw/vfb/InitOutput.c
-@@ -76,6 +76,7 @@ from The Open Group.
+@@ -76,6 +76,7 @@
  #include "miline.h"
  #include "glx_extinit.h"
  #include "randrstr.h"
@@ -31,7 +31,7 @@ index 63f491f..efc5be5 100644
  
  #ifdef GLAMOR
  #include "glamor.h"
-@@ -92,7 +93,10 @@ from The Open Group.
+@@ -92,7 +93,10 @@
  #define VFB_DEFAULT_WHITEPIXEL    1
  #define VFB_DEFAULT_BLACKPIXEL    0
  #define VFB_DEFAULT_LINEBIAS      0
@@ -43,7 +43,7 @@ index 63f491f..efc5be5 100644
  #define XWD_WINDOW_NAME_LEN      60
  
  typedef struct {
-@@ -1136,7 +1140,17 @@ vfbRRScreenSetSize(ScreenPtr  pScreen,
+@@ -1131,7 +1135,17 @@
      RRScreenSizeNotify (pScreen);
      RRTellChanged(pScreen);
  
@@ -62,7 +62,7 @@ index 63f491f..efc5be5 100644
  }
  
  static Bool
-@@ -1161,7 +1175,42 @@ vfbRRCrtcSet(ScreenPtr pScreen,
+@@ -1156,7 +1170,42 @@
          pvci->y = y;
          pvci->numOutputs = numOutputs;
      }
@@ -106,7 +106,7 @@ index 63f491f..efc5be5 100644
  }
  
  static Bool
-@@ -1196,7 +1245,7 @@ vfbRandRInit(ScreenPtr pScreen)
+@@ -1191,7 +1240,7 @@
  #if RANDR_12_INTERFACE
      pScrPriv->rrCrtcSet = vfbRRCrtcSet;
      pScrPriv->rrScreenSetSize = vfbRRScreenSetSize;
@@ -115,7 +115,7 @@ index 63f491f..efc5be5 100644
  #if RANDR_13_INTERFACE
      pScrPriv->rrOutputGetProperty = NULL;
  #endif
-@@ -1229,10 +1278,22 @@ vfbRandRInit(ScreenPtr pScreen)
+@@ -1224,13 +1273,28 @@
              return FALSE;
          if (!RROutputSetCrtcs(output, &crtc, 1))
              return FALSE;
@@ -137,5 +137,12 @@ index 63f491f..efc5be5 100644
 +                return FALSE;
 +        }
  
-         /* Setup a Mode and notify only for CRTCs with Outputs */
+-        /* Setup a Mode and notify only for CRTCs with Outputs */
++        /* Setup a Mode and notify only for CRTCs with Outputs, at the size
++         * the screen was given: -screen is read after the CRTC sizes are. */
          if (pvci->numOutputs > 0) {
++            pvci->width = pScreen->width;
++            pvci->height = pScreen->height;
+             snprintf(name, sizeof(name), "%dx%d", pvci->width, pvci->height);
+             memset(&modeInfo, '\0', sizeof(modeInfo));
+             modeInfo.width = pvci->width;
