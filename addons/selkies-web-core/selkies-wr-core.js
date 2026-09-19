@@ -796,14 +796,15 @@ export default function webrtc() {
 	 * Watchdog tick: resends START_VIDEO while the playback clock has not moved
 	 * past `mark`, up to RESUME_WATCHDOG_MAX_ATTEMPTS, then reloads to
 	 * reconnect unless a fatal verdict or a mode switch forbids it. A tab
-	 * hidden again stands the watchdog down: the visibility path owns that
-	 * state. Each attempt also replays the element, since one the browser
+	 * hidden again stands the watchdog down, the visibility path owning that
+	 * state, and so does a stream the server declined, which no resend brings
+	 * back. Each attempt also replays the element, since one the browser
 	 * paused while the tab was away plays nothing however much RTP arrives.
 	 * @param {number} mark Playback time when the watchdog was armed.
 	 */
 	function checkResumed(mark) {
 		resumeWatchdogTimer = null;
-		if (document.hidden || !webrtc) { resumeWatchdogAttempts = 0; return; }
+		if (document.hidden || !webrtc || videoDeclined) { resumeWatchdogAttempts = 0; return; }
 		if (videoElement && videoElement.currentTime > mark) {
 			resumeWatchdogAttempts = 0;
 			return;

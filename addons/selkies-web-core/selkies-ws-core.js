@@ -889,6 +889,8 @@ const retireCrashCountWhenHealthy = () => {
  * one-shot software-decode retry a decoder error would; its escalation carries on from there,
  * and a real decoder error still gets there first. A still screen sends no chunks, so it never
  * triggers, and the retry is spent once so an engine that ignores the software hint cannot loop.
+ * A stream this engine has said it cannot decode produces no output by definition, and neither
+ * a retry nor the reset the escalation ends in changes that, so the notice stands instead.
  */
 function checkVideoOutputWatchdog() {
   // A software retry that is also silent has to be able to trip this again, or the
@@ -897,7 +899,7 @@ function checkVideoOutputWatchdog() {
   // The settle window keeps the decoders the switch just replaced from tripping it.
   const retrySettling = softwareDecodeAttempted &&
     performance.now() - softwareDecodeSwitchedAt < SOFTWARE_DECODE_SETTLE_MS;
-  if (isSharedMode || window.isFallingBack || retrySettling ||
+  if (isSharedMode || window.isFallingBack || retrySettling || codecRefusalUnanswerable ||
       !isVideoPipelineActive || currentEncoderMode === 'jpeg' ||
       typeof VideoDecoder === 'undefined') {
     noOutputStalledSince = 0;
@@ -2793,6 +2795,8 @@ const isFullColorProfile = (label) => /^(avc1\.F4|hev1\.4\.|vp09\.01)/i.test(lab
  */
 let codecRefusalPending = null;
 let codecRefusalUnanswerable = false;
+/** The encoder and full color an unanswerable refusal was reached under; the notice stands while the server announces the same. */
+let codecRefusalHeld = null;
 /** Whether the server holds the encoder: a locked setting, or a step it answered with another value. */
 let encoderLocked = false;
 /** The encoders the server allows, in its order, when it restricts them. */
@@ -2890,6 +2894,7 @@ function stepRefusalLadder(label, codec) {
         return;
     }
     codecRefusalUnanswerable = true;
+    codecRefusalHeld = { encoder: currentEncoderMode, fullcolor: video_fullcolor };
     console.error(`This session streams ${label}, which this browser cannot decode.`);
     if (statusDisplayElement) {
         statusDisplayElement.textContent = `Error: This session streams ${displayLabel(codec)} video, which this browser cannot decode.`;
@@ -2900,8 +2905,9 @@ function stepRefusalLadder(label, codec) {
 /**
  * Takes the server's word on the encoder: what it streams, whether it holds
  * the setting, and whether the ladder's pending step landed. An encoder whose
- * codec fails the decoder probe goes to the ladder; a decodable one clears
- * the notice.
+ * codec fails the decoder probe goes to the ladder; an announcement that
+ * changes what an unanswerable refusal was reached under clears the notice,
+ * one that repeats it leaves the notice standing.
  * @param {string} encoder The announced encoder.
  * @param {{locked?: boolean, allowed?: string[]}} [entry] Its settings entry.
  */
@@ -2914,7 +2920,8 @@ function settleServerEncoder(encoder, entry) {
         codecRefusalPending = null;
     }
     if (!canDecodeEncoder(encoder)) { answerRefusedCodec(encoder, codecOfEncoder(encoder)); return; }
-    if (codecRefusalUnanswerable) {
+    if (codecRefusalUnanswerable
+        && (encoder !== codecRefusalHeld.encoder || video_fullcolor !== codecRefusalHeld.fullcolor)) {
         codecRefusalUnanswerable = false;
         if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
     }
@@ -7356,7 +7363,7 @@ class WorkerWebSocket {
         if (firstFrameRecoveryTimer !== null) clearInterval(firstFrameRecoveryTimer);
         let firstFrameNudges = 0;
         firstFrameRecoveryTimer = setInterval(() => {
-          if (streamStarted || !isVideoPipelineActive || !websocket || websocket.readyState !== WebSocket.OPEN || firstFrameNudges >= 5) {
+          if (streamStarted || !isVideoPipelineActive || codecRefusalUnanswerable || !websocket || websocket.readyState !== WebSocket.OPEN || firstFrameNudges >= 5) {
             clearInterval(firstFrameRecoveryTimer);
             firstFrameRecoveryTimer = null;
             return;

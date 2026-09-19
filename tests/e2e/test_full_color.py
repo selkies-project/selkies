@@ -247,10 +247,25 @@ def drive_pinned(res: "H.Results", p: Any) -> None:
         said = []
         page.on("console", lambda m: said.append(m.text))
         page.goto(PAGE_DECODE_URL, wait_until="load")
-        page.wait_for_timeout(20000)
+        # Past the no-output watchdog, its software retry and the reload the
+        # fatal fallback ends in, none of which a stream the engine refused
+        # may reach.
+        page.wait_for_timeout(25000)
         told = [t for t in said if "which this browser cannot decode" in t]
         res.check("[pinned] the stream it cannot decode is reported once",
                   len(told) == 1, told or said[-2:])
+        starts = [t for t in said if "Streaming mode determined" in t]
+        res.check("[pinned] and the page stands rather than reloading into the same stream",
+                  len(starts) == 1, len(starts))
+        # A setting that restarts the capture has the server announce the same
+        # encoder and full color again and then send a key frame the engine
+        # refuses again; the refusal stands and is not reported a second time.
+        page.evaluate(
+            "window.postMessage({ type: 'settings', settings: { video_streaming_mode: true } }, window.location.origin)")
+        page.wait_for_timeout(8000)
+        again = [t for t in said if "which this browser cannot decode" in t]
+        res.check("[pinned] and not again when the server announces the same",
+                  len(again) == len(told), again)
         shown = page.evaluate(
             "() => { const e = document.getElementById('status-display');"
             " return e ? [e.className, e.textContent.slice(0, 60)] : null; }")
