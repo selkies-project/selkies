@@ -147,15 +147,12 @@ class Metrics:
             fut.cancel()
         self._csv_tasks.clear()
         self._csv_executor.shutdown(wait=True)
-        for collector in (self.fps, self.fps_hist, self.gpu_utilization,
-                          self.latency, self.webrtc_statistics,
-                          self.webrtc_pacer_pace_bps, self.webrtc_pacer_queue_bytes,
-                          self.webrtc_pacer_idr_floor_bytes, self.webrtc_pacer_events,
-                          self.webrtc_bridge_dropped_frames):
-            try:
-                REGISTRY.unregister(collector)
-            except KeyError:
-                pass
+        for collector in list(vars(self).values()):
+            if isinstance(collector, (Gauge, Histogram, Info)):
+                try:
+                    REGISTRY.unregister(collector)
+                except KeyError:
+                    pass
 
     async def set_webrtc_stats(self, webrtc_stat_type: str, webrtc_stats: str) -> None:
         """Publishes a client stats report to Prometheus and, optionally, CSV.
