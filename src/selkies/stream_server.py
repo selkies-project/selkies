@@ -3045,9 +3045,15 @@ class CentralizedStreamServer:
         if self.settings.printing_enabled[0]:
             self.print_watcher = printing.SpoolWatcher(
                 str(self.print_spool), asyncio.get_running_loop(), self._announce_print_document)
-            self.print_watcher.start()
-            self.print_queue = printing.PrintQueue(str(self.print_spool))
-            await self.print_queue.start()
+            try:
+                self.print_watcher.start()
+            except OSError as exc:
+                # Watching the spool is one inotify instance, which a host can run out of.
+                logger.warning("Printing is off: the spool cannot be watched (%s).", exc)
+                self.print_watcher = None
+            else:
+                self.print_queue = printing.PrintQueue(str(self.print_spool))
+                await self.print_queue.start()
 
     async def stop_server(self) -> None:
         """Stop the server gracefully: cert watcher, active service, listener,

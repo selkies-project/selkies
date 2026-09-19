@@ -74,7 +74,8 @@ class SpoolWatcher(FileSystemEventHandler):
 
     def stop(self) -> None:
         self.observer.stop()
-        self.observer.join(timeout=2)
+        if self.observer.is_alive():
+            self.observer.join(timeout=2)
 
     # The observer thread reports here; the loop does the rest.
     def on_moved(self, event: Any) -> None:
