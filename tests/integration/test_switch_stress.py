@@ -50,17 +50,20 @@ def shutdown_windows() -> list:
         at = end
 
 
-def selkies_monitors() -> list:
-    """Logical monitors this software defined on the test display; none on
-    Wayland, where the layout engine owns compositor outputs instead."""
+def layout_monitors(outputs: bool) -> list:
+    """Monitors the layout engine put on the test display beyond the server's
+    own screen: the selkies-* logical monitors, or the secondary outputs it
+    plugged in where displays are outputs; none on Wayland, where the layout
+    engine owns compositor outputs instead."""
     try:
         out = subprocess.run(["xrandr", "--listmonitors"], capture_output=True,
                              text=True, timeout=20,
                              env=dict(os.environ, DISPLAY=H.require_display())).stdout
     except (OSError, subprocess.SubprocessError):
         return []
-    return [line.split()[1].lstrip("*") for line in out.splitlines()
-            if len(line.split()) > 1 and "selkies-" in line.split()[1]]
+    names = [line.split()[1] for line in out.splitlines()
+             if len(line.split()) > 2 and line.split()[0].rstrip(":").isdigit()]
+    return [n.lstrip("+*") for n in names if "selkies-" in n or (outputs and "*" not in n)]
 
 
 async def flip_under_a_client(res: "H.Results") -> None:
@@ -71,9 +74,17 @@ async def flip_under_a_client(res: "H.Results") -> None:
         await ws.send("SETTINGS," + json.dumps(SETTINGS))
         async with H.drained(ws):
             await asyncio.sleep(5.0)
+            outputs = False
             if not IS_WAYLAND:
-                res.check("the layout engine defined this client's monitor",
-                          bool(selkies_monitors()), f"{selkies_monitors()}")
+                from selkies import display_utils as DU
+                os.environ["DISPLAY"] = H.require_display()
+                outputs = await DU.has_pluggable_outputs()
+                if outputs:
+                    res.skip("the layout engine defined this client's monitor",
+                             "displays are outputs; one display defines no monitor")
+                else:
+                    res.check("the layout engine defined this client's monitor",
+                              bool(layout_monitors(False)), f"{layout_monitors(False)}")
 
             for i, target in enumerate(["webrtc", "websockets"] * 3):
                 s, body = H.curl("/api/switch", method="POST", data={"mode": target})
@@ -84,7 +95,7 @@ async def flip_under_a_client(res: "H.Results") -> None:
                               st.get("current_mode"))
                 await asyncio.sleep(1.5)
                 if target == "webrtc" and not IS_WAYLAND:
-                    left = selkies_monitors()
+                    left = layout_monitors(outputs)
                     res.check(f"switch {i}: no monitor of the stopped transport is left",
                               not left, f"{left}")
 

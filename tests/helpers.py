@@ -696,7 +696,7 @@ def free_display(taken: Iterable[str] = ()) -> Iterable[str]:
 
 
 def private_x_server(width: int = 1280, height: int = 720, depth: int = 24,
-                     extra_args: Iterable[str] = ()) -> tuple:
+                     extra_args: Iterable[str] = (), xvfb: str = "Xvfb") -> tuple:
     """A throwaway Xvfb of this suite's own, on a display nothing else holds.
 
     GLX is off because it faults on some GPU hosts and no suite that wants a
@@ -711,6 +711,7 @@ def private_x_server(width: int = 1280, height: int = 720, depth: int = 24,
         height: Screen height.
         depth: Color depth.
         extra_args: Further Xvfb arguments, appended.
+        xvfb: The server binary, for a suite that wants a particular one.
 
     Returns:
         `(process, display)`; the caller terminates the process.
@@ -718,13 +719,13 @@ def private_x_server(width: int = 1280, height: int = 720, depth: int = 24,
     Raises:
         RuntimeError: Xvfb or xdpyinfo is missing, or no candidate came up.
     """
-    for tool in ("Xvfb", "xdpyinfo"):
+    for tool in (xvfb, "xdpyinfo"):
         if not shutil.which(tool):
             raise RuntimeError(f"{tool} is not installed; a private X server needs it")
     candidates = free_display(taken=(TEST_DISPLAY, os.environ.get("DISPLAY", "")))
     for _, display in zip(range(8), candidates):
         proc = spawn(
-            ["Xvfb", display, "-screen", "0", f"{width}x{height}x{depth}",
+            [xvfb, display, "-screen", "0", f"{width}x{height}x{depth}",
              "-extension", "GLX", "-nolisten", "tcp", "-ac", "-noreset",
              *extra_args],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

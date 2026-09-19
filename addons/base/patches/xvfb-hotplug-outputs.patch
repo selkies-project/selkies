@@ -1,0 +1,141 @@
+xvfb: spare outputs a client plugs in and out, each with its own CRTC
+
+A display added to a session is a logical monitor over the one output today,
+because the server has one CRTC, and every consumer that builds its screens
+from CRTCs (kwin_x11) or notifies only for a monitor that is its CRTC (Qt's
+xcb plugin) gets a second display wrong. With a CRTC and an output per
+display the server describes what real hardware does and nothing downstream
+needs to know it is a framebuffer.
+
+- The server starts with 4 CRTCs unless -crtcs says otherwise. The first
+  output is the screen it starts with; the rest start disconnected.
+- A spare output carries a "Connected" property (INTEGER, range 0..1). A
+  client sets it to 1 to plug a monitor in and to 0 to unplug it; the mode,
+  the CRTC and the screen size it sets through RandR as it would for
+  hardware. The property's presence is how a client detects the capability.
+- An output's physical size follows its own mode at the screen's density,
+  and the screen's physical size is given to an output only while its CRTC
+  is the whole screen.
+
+Applies after xvfb-gpu-screen-pixmap.patch (xlibre-xserver-25.2.2).
+
+diff --git a/hw/vfb/InitOutput.c b/hw/vfb/InitOutput.c
+index 63f491f..efc5be5 100644
+--- a/hw/vfb/InitOutput.c
++++ b/hw/vfb/InitOutput.c
+@@ -76,6 +76,7 @@ from The Open Group.
+ #include "miline.h"
+ #include "glx_extinit.h"
+ #include "randrstr.h"
++#include <X11/Xatom.h>
+ 
+ #ifdef GLAMOR
+ #include "glamor.h"
+@@ -92,7 +93,10 @@ from The Open Group.
+ #define VFB_DEFAULT_WHITEPIXEL    1
+ #define VFB_DEFAULT_BLACKPIXEL    0
+ #define VFB_DEFAULT_LINEBIAS      0
+-#define VFB_DEFAULT_NUM_CRTCS     1
++#define VFB_DEFAULT_NUM_CRTCS     4
++
++/* Output property a client plugs a spare output in and out with */
++#define VFB_CONNECTED_PROP        "Connected"
+ #define XWD_WINDOW_NAME_LEN      60
+ 
+ typedef struct {
+@@ -1136,7 +1140,17 @@ vfbRRScreenSetSize(ScreenPtr  pScreen,
+     RRScreenSizeNotify (pScreen);
+     RRTellChanged(pScreen);
+ 
+-    return RROutputSetPhysicalSize(pScrPriv->outputs[pScreen->myNum], mmWidth, mmHeight);
++    /* The screen's physical size is an output's only while that output's
++     * CRTC is the whole screen; beside another one it keeps the size its
++     * own mode gave it (vfbRRCrtcSet). */
++    for (int i = 0; i < pScrPriv->numCrtcs; i++) {
++        RRCrtcPtr crtc = pScrPriv->crtcs[i];
++
++        if (crtc->mode && crtc->numOutputs > 0 && crtc->x == 0 && crtc->y == 0 &&
++            crtc->mode->mode.width == width && crtc->mode->mode.height == height)
++            RROutputSetPhysicalSize(crtc->outputs[0], mmWidth, mmHeight);
++    }
++    return TRUE;
+ }
+ 
+ static Bool
+@@ -1161,7 +1175,42 @@ vfbRRCrtcSet(ScreenPtr pScreen,
+         pvci->y = y;
+         pvci->numOutputs = numOutputs;
+     }
+-    return RRCrtcNotify(crtc, mode, x, y, rotation, NULL, numOutputs, outputs);
++    if (!RRCrtcNotify(crtc, mode, x, y, rotation, NULL, numOutputs, outputs))
++        return FALSE;
++
++    /* An output is as large as its mode at the density the screen has. */
++    if (mode && pScreen->width > 0 && pScreen->height > 0 &&
++        pScreen->mmWidth > 0 && pScreen->mmHeight > 0) {
++        for (int i = 0; i < numOutputs; i++)
++            RROutputSetPhysicalSize(outputs[i],
++                                    (CARD32) mode->mode.width * pScreen->mmWidth / pScreen->width,
++                                    (CARD32) mode->mode.height * pScreen->mmHeight / pScreen->height);
++    }
++    return TRUE;
++}
++
++/*
++ * A spare output is a monitor socket: nothing is plugged in until a client
++ * sets VFB_CONNECTED_PROP on it, and unplugging is the same property back
++ * at 0. The connection state is the server's to report, so this is the one
++ * part of adding a display a client cannot do through RandR alone; the mode,
++ * the CRTC and the screen size it sets itself, as it would for hardware.
++ * The first output is the screen the server starts with and stays connected.
++ */
++static Bool
++vfbRROutputSetProperty(ScreenPtr pScreen,
++                       RROutputPtr output,
++                       Atom property,
++                       RRPropertyValuePtr value)
++{
++    if (property != MakeAtom(VFB_CONNECTED_PROP, strlen(VFB_CONNECTED_PROP), FALSE))
++        return TRUE;
++    if (value->type != XA_INTEGER || value->format != 32 || value->size != 1)
++        return FALSE;
++    if (!RROutputSetConnection(output, *(INT32 *) value->data ? RR_Connected : RR_Disconnected))
++        return FALSE;
++    RRTellChanged(pScreen);
++    return TRUE;
+ }
+ 
+ static Bool
+@@ -1196,7 +1245,7 @@ vfbRandRInit(ScreenPtr pScreen)
+ #if RANDR_12_INTERFACE
+     pScrPriv->rrCrtcSet = vfbRRCrtcSet;
+     pScrPriv->rrScreenSetSize = vfbRRScreenSetSize;
+-    pScrPriv->rrOutputSetProperty = NULL;
++    pScrPriv->rrOutputSetProperty = vfbRROutputSetProperty;
+ #if RANDR_13_INTERFACE
+     pScrPriv->rrOutputGetProperty = NULL;
+ #endif
+@@ -1229,10 +1278,22 @@ vfbRandRInit(ScreenPtr pScreen)
+             return FALSE;
+         if (!RROutputSetCrtcs(output, &crtc, 1))
+             return FALSE;
+-        if (!RROutputSetConnection(output, RR_Connected))
++        if (!RROutputSetConnection(output, i == 0 ? RR_Connected : RR_Disconnected))
+             return FALSE;
+         if (!RROutputSetPhysicalSize(output, mmWidth, mmHeight))
+             return FALSE;
++        if (i > 0) {
++            Atom connected = MakeAtom(VFB_CONNECTED_PROP, strlen(VFB_CONNECTED_PROP), TRUE);
++            INT32 range[2] = { 0, 1 };
++            INT32 unplugged = 0;
++
++            if (RRConfigureOutputProperty(output, connected, FALSE, TRUE, FALSE,
++                                          2, range) != Success ||
++                RRChangeOutputProperty(output, connected, XA_INTEGER, 32,
++                                       PropModeReplace, 1, &unplugged,
++                                       FALSE, FALSE) != Success)
++                return FALSE;
++        }
+ 
+         /* Setup a Mode and notify only for CRTCs with Outputs */
+         if (pvci->numOutputs > 0) {

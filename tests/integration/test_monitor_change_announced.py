@@ -84,8 +84,8 @@ def gtk3_interpreter():
 
 def publish(layouts):
     """Swap the live selkies-* set to ``layouts`` through the shipped path."""
-    import selkies.display_utils as D
-    D._sync_replace_selkies_monitors(layouts)
+    import selkies.display_utils_xrandr as DX
+    DX._sync_replace_selkies_monitors(layouts)
 
 
 def primary_output(display_name):
@@ -169,6 +169,7 @@ def run() -> H.Results:
     os.environ["DISPLAY"] = display_name
     try:
         import selkies.display_utils as D
+        import selkies.display_utils_xrandr as DX
 
         publish(ONE)
         events = randr_events(display_name, lambda: publish(RIGHT))
@@ -223,7 +224,7 @@ def run() -> H.Results:
         # Teardown reaches the final set over its own route, so it announces
         # for itself rather than through the grab-protected replace.
         seen = gdk_across(python, display_name,
-                          lambda: asyncio.run(D.clear_selkies_monitors()), res, "clear")
+                          lambda: asyncio.run(DX.clear_selkies_monitors()), res, "clear")
         if seen:
             res.check("clearing every display leaves the toolkit one monitor",
                       seen["before"]["n"] == 2 and seen["after"]["n"] == 1, seen)

@@ -122,23 +122,24 @@ def main() -> bool:
     os.environ["DISPLAY"] = display_name
     try:
         from selkies import display_utils as du
+        from selkies import display_utils_xrandr as dx
 
-        asyncio.run(du.apply_extended_layout({"primary": dict(PRIMARY)}, 1024, 640))
+        asyncio.run(dx.apply_monitor_layout({"primary": dict(PRIMARY)}, 1024, 640))
         state = read_monitors(display_name)
         single = state["monitors"].get("selkies-primary")
         res.check("single display: primary published with the output",
                   single and single[4] and single[5], single)
 
-        ok = asyncio.run(du.apply_extended_layout(LAYOUTS, 1024, 1280))
+        ok = asyncio.run(dx.apply_monitor_layout(LAYOUTS, 1024, 1280))
         state = read_monitors(display_name)
         res.check("extended layout applied", ok and state["root"] == (1024, 1280),
                   f"root={state['root']}")
-        shared = du._OUTPUT_SHARED
+        shared = dx._OUTPUT_SHARED
         res.check("the server's answer about sharing one output is recorded",
                   shared in (True, False), shared)
         check_shape(res, display_name, "as published", bool(shared))
 
-        asyncio.run(du.replace_selkies_monitors(LAYOUTS))
+        asyncio.run(dx.replace_selkies_monitors(LAYOUTS))
         check_shape(res, display_name, "re-published", bool(shared))
 
         # Monitors outlive the client that set them: a stale outputless set at
@@ -146,44 +147,44 @@ def main() -> bool:
         publish_outputless_secondary(display_name)
         stale = read_monitors(display_name)["monitors"].get("selkies-display2")
         res.check("stale outputless secondary is in place", stale and not stale[5], stale)
-        asyncio.run(du.replace_selkies_monitors(LAYOUTS))
+        asyncio.run(dx.replace_selkies_monitors(LAYOUTS))
         check_shape(res, display_name, "after a stale set", bool(shared))
 
         # The other kind of server: it takes the output from whoever held it,
         # so asking for it on every monitor would publish one display alone.
-        asyncio.run(du.clear_selkies_monitors())
-        du._OUTPUT_SHARED = None
+        asyncio.run(dx.clear_selkies_monitors())
+        dx._OUTPUT_SHARED = None
         real_set = exclusive_outputs(du)
         try:
-            asyncio.run(du.apply_extended_layout(LAYOUTS, 1024, 1280))
+            asyncio.run(dx.apply_monitor_layout(LAYOUTS, 1024, 1280))
             res.check("an exclusive-output server is measured as one",
-                      du._OUTPUT_SHARED is False, du._OUTPUT_SHARED)
+                      dx._OUTPUT_SHARED is False, dx._OUTPUT_SHARED)
             check_shape(res, display_name, "exclusive outputs", False)
             before = read_monitors(display_name)["monitors"]
-            asyncio.run(du.replace_selkies_monitors(LAYOUTS))
+            asyncio.run(dx.replace_selkies_monitors(LAYOUTS))
             res.check("the settled shape is a no-op to publish again",
                       read_monitors(display_name)["monitors"] == before, before)
         finally:
             du.randr.set_monitor = real_set
-            du._OUTPUT_SHARED = None
+            dx._OUTPUT_SHARED = None
 
         if shutil.which("xrandr"):
             _, _, _, _, screen_name = asyncio.run(du.get_new_res("1x1"))
-            original = du._sync_set_monitor
-            du._sync_set_monitor = lambda *a: (_ for _ in ()).throw(RuntimeError("forced"))
+            original = dx._sync_set_monitor
+            dx._sync_set_monitor = lambda *a: (_ for _ in ()).throw(RuntimeError("forced"))
             try:
-                ok = asyncio.run(du.set_logical_monitor(
+                ok = asyncio.run(dx.set_logical_monitor(
                     "selkies-fallbackprobe", 0, 0, 64, 64, screen_name=screen_name))
             finally:
-                du._sync_set_monitor = original
+                dx._sync_set_monitor = original
             probe = read_monitors(display_name)["monitors"].get("selkies-fallbackprobe")
             res.check("xrandr fallback also lists the output",
                       ok and probe and probe[5], probe)
-            asyncio.run(du.delete_logical_monitor("selkies-fallbackprobe"))
+            asyncio.run(dx.delete_logical_monitor("selkies-fallbackprobe"))
         else:
             res.skip("xrandr fallback also lists the output", "xrandr not installed")
 
-        asyncio.run(du.clear_selkies_monitors())
+        asyncio.run(dx.clear_selkies_monitors())
     finally:
         H.stop_x_server(server, display_name)
     return res.summary()

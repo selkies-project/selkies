@@ -195,6 +195,36 @@ jobs:
       # server and browser the suites start.
       - name: Verify the patched labwc
         run: labwc --version
+      # Likewise the X server: the images build XLibre's Xvfb with the Selkies
+      # patches, and the X11 layout the suites see depends on what the server
+      # offers (an output per display against logical monitors), so the suites
+      # drive that server. The pin is read from the Dockerfile as well.
+      - name: Resolve the patched Xvfb pin
+        id: xvfb
+        run: |
+          eval "$(grep -E '^ARG XLIBRE_TAG=' addons/base/Dockerfile | sed 's/^ARG //')"
+          echo "tag=${XLIBRE_TAG}" >> "$GITHUB_OUTPUT"
+      - name: Cache the patched Xvfb
+        id: xvfb-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.local/xvfb
+          key: xvfb-${{ steps.xvfb.outputs.tag }}-${{ hashFiles('addons/base/patches/xvfb-*.patch', 'addons/base/build-xvfb.sh') }}
+      - name: Build the patched Xvfb
+        if: steps.xvfb-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install --no-install-recommends -y \
+            build-essential git meson ninja-build pkg-config \
+            libaudit-dev libbsd-dev libdrm-dev libepoxy-dev libfontenc-dev libgbm-dev \
+            libglvnd-dev libpixman-1-dev libselinux1-dev libssl-dev libx11-dev libxau-dev \
+            libxcvt-dev libxdmcp-dev libxext-dev libxfont-dev libxkbfile-dev \
+            libxshmfence-dev mesa-common-dev x11proto-dev xtrans-dev
+          XLIBRE_TAG="${{ steps.xvfb.outputs.tag }}" PREFIX="$HOME/.local/xvfb" addons/base/build-xvfb.sh
+      - name: Put the patched Xvfb on the session path
+        run: echo "$HOME/.local/xvfb/bin" >> "$GITHUB_PATH"
+      - name: Verify the patched Xvfb
+        run: |
+          Xvfb -help 2>&1 | grep -q -- 'CRTCs per screen (default: 4)'
       # The suites have to exercise the pixelflux and pcmflux that the images,
       # packages and AppImages ship, which come from main HEAD rather than any
       # released version. Whichever job resolved them left them here.

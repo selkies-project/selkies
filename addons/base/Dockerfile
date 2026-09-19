@@ -43,7 +43,9 @@ ARG DISTRIB_RELEASE="26.04"
 # software even with a GPU present. XLibre's Xvfb has both, on Mesa's GBM and
 # on NVIDIA's own EGL, and is built from its release tag with
 # addons/base/patches/xvfb-gpu-screen-pixmap.patch, which keeps the screen
-# pixmap on the GPU and sizes the framebuffer to the RandR screen.
+# pixmap on the GPU and sizes the framebuffer to the RandR screen, and
+# addons/base/patches/xvfb-hotplug-outputs.patch, which gives the server spare
+# outputs with CRTCs of their own that Selkies plugs in as a display is added.
 ARG WLROOTS_VERSION="0.19.3"
 ARG LABWC_VERSION="0.9.7"
 ARG XLIBRE_TAG="xlibre-xserver-25.2.2"
@@ -86,30 +88,9 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         libepoxy-dev \
         libgbm-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
-# Only the framebuffer server is built. Its paths, extensions and defaults are
-# the distribution package's, so the binary drops in where that one installed
-# it; anything left at the meson default would move a keymap or a font path out
-# from under the rest of the image.
-COPY addons/base/patches/xvfb-gpu-screen-pixmap.patch /build/patches/
-RUN set -e; \
-    cd /tmp; \
-    curl -fsSL --retry 5 --connect-timeout 30 -o xlibre.tar.gz \
-        "https://github.com/X11Libre/xserver/archive/refs/tags/${XLIBRE_TAG}.tar.gz"; \
-    tar -xf xlibre.tar.gz; \
-    cd "xserver-${XLIBRE_TAG}"; \
-    patch -p1 < /build/patches/xvfb-gpu-screen-pixmap.patch; \
-    meson setup build \
-        --prefix=/usr --sysconfdir=/etc --localstatedir=/var --buildtype=release \
-        -Dxvfb=true -Dglamor=true -Dgbm=true -Ddri3=true -Dglx=true \
-        -Dxcsecurity=true -Dxselinux=true \
-        -Dxorg=false -Dxnest=false -Dxephyr=false -Dxwin=false -Dxquartz=false \
-        -Dudev=false -Dudev_kms=false -Dsystemd_logind=false \
-        -Dxkb_dir=/usr/share/X11/xkb -Dxkb_output_dir=/var/lib/xkb -Dxkb_bin_dir=/usr/bin \
-        -Ddefault_font_path=/usr/share/fonts/X11/misc,/usr/share/fonts/X11/cyrillic,/usr/share/fonts/X11/100dpi/:unscaled,/usr/share/fonts/X11/75dpi/:unscaled,/usr/share/fonts/X11/Type1,/usr/share/fonts/X11/100dpi,/usr/share/fonts/X11/75dpi,built-ins \
-        -Ddocs=false -Ddevel-docs=false; \
-    ninja -C build hw/vfb/Xvfb; \
-    install -Dm755 build/hw/vfb/Xvfb /build-out/usr/bin/Xvfb; \
-    /build-out/usr/bin/Xvfb -help 2>&1 | grep -q -- '-glamor'
+COPY addons/base/build-xvfb.sh /build/
+COPY addons/base/patches/xvfb-*.patch /build/patches/
+RUN XLIBRE_TAG="${XLIBRE_TAG}" DESTDIR=/build-out /build/build-xvfb.sh
 
 # NVIDIA's EGL platform library for X11 (xcb and xlib), open source and
 # independent of the driver's version, built from its release tag: through it

@@ -115,22 +115,32 @@ def start_window_manager(wayland: bool) -> Optional[subprocess.Popen]:
 
 def wm_restart_check(res: "H.Results", wm_proc: Optional[subprocess.Popen], mark: int) -> None:
     """The first extend restarts Openbox so it reads the new monitor set: the
-    server says so, the process it started with exits, and a fresh one manages."""
+    server says so, the process it started with exits, and a fresh one manages.
+    Where the displays are outputs of their own there is no set to read, and
+    the manager the session started with stays."""
     if wm_proc is None:
         res.skip("the first extend restarts the window manager", "no Openbox on the display")
         return
     from selkies import display_utils as DU
+    from selkies import display_utils_xrandr as DX
     os.environ["DISPLAY"] = H.require_display()
     DU._drop_module_display()
+    outputs = DU._sync_has_pluggable_outputs()
     deadline = time.time() + 20
     said = False
-    while time.time() < deadline and not (said and wm_proc.poll() is not None):
-        said = said or H.server_log().find("restarting openbox", mark) >= 0
+    while time.time() < deadline and not (said and (outputs or wm_proc.poll() is not None)):
+        said = said or H.server_log().find(
+            "outputs of their own" if outputs else "restarting openbox", mark) >= 0
         time.sleep(0.25)
-    new_pid = DU._sync_wm_pid()
+    new_pid = DX._sync_wm_pid()
+    if outputs:
+        res.check("the first extend leaves the window manager alone where displays are outputs",
+                  said and wm_proc.poll() is None and new_pid == wm_proc.pid,
+                  f"said={said} exit={wm_proc.poll()} started={wm_proc.pid} managing={new_pid}")
+        return
     res.check("the first extend restarts the window manager",
               said and wm_proc.poll() is not None and new_pid not in (0, wm_proc.pid)
-              and DU.wm_name_matches("openbox", DU._sync_wm_name()),
+              and DX.wm_name_matches("openbox", DX._sync_wm_name()),
               f"said={said} old={wm_proc.pid} exit={wm_proc.poll()} new={new_pid}")
     if new_pid not in (0, wm_proc.pid):
         os.kill(new_pid, 15)
