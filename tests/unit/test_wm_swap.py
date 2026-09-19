@@ -26,7 +26,16 @@ sys.path.insert(0, TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 import helpers as H  # noqa: E402
 
-from selkies import display_utils as DU  # noqa: E402
+from selkies import display_utils_xrandr as DU  # noqa: E402
+
+
+async def _no_pluggable_outputs() -> bool:
+    return False
+
+
+# The manager under test is the one a server without pluggable outputs gets,
+# whichever server this host runs.
+DU.has_pluggable_outputs = _no_pluggable_outputs
 from selkies.Xlib import X, display as xdisplay  # noqa: E402
 
 res = H.Results("wm-swap")

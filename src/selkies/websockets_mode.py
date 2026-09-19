@@ -73,14 +73,13 @@ from .display_utils import (
     format_pixelflux_cursor,
     release_pixelflux_cursor_callback,
     get_new_res,
-    generate_xrandr_gtf_modeline,
     ensure_mode,
     resize_display,
-    clear_selkies_monitors,
-    replace_selkies_monitors,
+    retire_displays,
+    apply_output_layout,
+    has_pluggable_outputs,
     reconcile_realized_layout,
     read_realized_root,
-    MultiMonitorWindowManager,
     WAYLAND_SCREEN_OUTPUT_ID,
     wayland_output_id,
     wayland_reposition_primary,
@@ -93,6 +92,11 @@ from .display_utils import (
     parse_resize_dims,
     cursor_size_for_dpi,
     align_dims_16,
+)
+from .display_utils_xrandr import (
+    MultiMonitorWindowManager,
+    generate_xrandr_gtf_modeline,
+    replace_selkies_monitors,
 )
 from .input_handler import (
     CLIPBOARD_FLAVOURS_MIME,
@@ -5014,7 +5018,8 @@ class DataStreamingServer(BaseStreamingService):
         the union layout from all display clients, decide per running capture
         whether it can follow the new layout live (structurally identical
         sessions retune in place; the rest are stopped and rebuilt), realize
-        the layout (xrandr monitors + framebuffer on X11; on Wayland a
+        the layout (on X11 an output per display, or logical monitors over the one
+        output where the server has none to plug in; on Wayland a
         compositor screen per display, the secondaries created only after the
         primary's capture start has sized its screen), clamp everything to what
         the server actually realized — dropping displays that cannot exist —
@@ -5032,7 +5037,7 @@ class DataStreamingServer(BaseStreamingService):
                 await self._stop_capture_for_display(display_id)
             data_logger.warning("No display clients connected. Video pipelines remain stopped.")
             if not IS_WAYLAND:
-                await clear_selkies_monitors()
+                await retire_displays()
             else:
                 # The primary's screen persists; only the secondaries' are retired.
                 await self._apply_wayland_output_layout({}, set())
@@ -5114,6 +5119,9 @@ class DataStreamingServer(BaseStreamingService):
         if not IS_WAYLAND:
             curr_res, _, available_resolutions, _, screen_name = await get_new_res("1x1")
             total_mode_str = f"{total_width}x{total_height}"
+            # Displays that are outputs of their own each take their own mode;
+            # only the logical-monitor layout needs one covering the framebuffer.
+            pluggable = await has_pluggable_outputs()
             if not screen_name:
                 # A server with no connected RandR output (a GPU without a
                 # display engine, a driver told to use none) has no mode to
@@ -5124,7 +5132,7 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.info(
                     "No connected RandR output on this X server; the desktop is sized as a bare "
                     "framebuffer, and its displays are monitors carrying no output.")
-            elif total_mode_str not in available_resolutions:
+            elif not pluggable and total_mode_str not in available_resolutions:
                 data_logger.debug(f"Mode {total_mode_str} not found. Creating it.")
                 # Native first: a mode made by per-invocation xrandr dies with its
                 # connection on some servers (Xvfb).
@@ -5171,25 +5179,28 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.warning(f"Live re-target failed for '{did}' ({e}); restarting it.")
                         keep_ids.discard(did)
                         await self._stop_capture_for_display(did)
-            data_logger.debug("Swapping logical monitors to the new layout...")
-            # Monitors go in before the framebuffer change, at their final
-            # rectangles and under a server grab: window managers re-tile on
-            # every root ConfigureNotify and must never see a monitor-less
-            # or partial set.
-            await replace_selkies_monitors(layouts, screen_name=screen_name)
-            # A mode change is the dominant cost of a reconfigure (CRTC reprogram,
-            # every client repaints), so a same-size reload skips it. A live
-            # re-target that grew the framebuffer above still shrinks here.
-            curr_norm = (curr_res or "").lower().replace(" ", "")
-            if curr_norm == total_mode_str:
-                data_logger.debug(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
-            elif not await resize_display(total_mode_str):
-                # Some servers refuse runtime modes but honor a plain framebuffer
-                # grow (RRSetScreenSize); captures and pointer warps address the root.
-                if await grow_framebuffer(total_width, total_height):
-                    data_logger.info(f"Mode-set for {total_mode_str} failed; grew the framebuffer instead.")
-                else:
-                    data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
+            if pluggable and await apply_output_layout(layouts, total_width, total_height):
+                data_logger.debug("Displays laid out as outputs of their own.")
+            else:
+                data_logger.debug("Swapping logical monitors to the new layout...")
+                # Monitors go in before the framebuffer change, at their final
+                # rectangles and under a server grab: window managers re-tile on
+                # every root ConfigureNotify and must never see a monitor-less
+                # or partial set.
+                await replace_selkies_monitors(layouts, screen_name=screen_name)
+                # A mode change is the dominant cost of a reconfigure (CRTC reprogram,
+                # every client repaints), so a same-size reload skips it. A live
+                # re-target that grew the framebuffer above still shrinks here.
+                curr_norm = (curr_res or "").lower().replace(" ", "")
+                if curr_norm == total_mode_str:
+                    data_logger.debug(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
+                elif not await resize_display(total_mode_str):
+                    # Some servers refuse runtime modes but honor a plain framebuffer
+                    # grow (RRSetScreenSize); captures and pointer warps address the root.
+                    if await grow_framebuffer(total_width, total_height):
+                        data_logger.info(f"Mode-set for {total_mode_str} failed; grew the framebuffer instead.")
+                    else:
+                        data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
             # The X server is the authority: a driver can refuse the size and leave
             # the root as it was, and a region outside the root grabs garbage.
             realized_w, realized_h = await read_realized_root((total_width, total_height))
@@ -5266,7 +5277,9 @@ class DataStreamingServer(BaseStreamingService):
                             await self._stop_capture_for_display(did)
                 # One atomic re-swap (RRSetMonitor cannot redefine a name in place);
                 # a root that merely came back larger needs none, since every swap re-tiles.
-                if fit.dropped or fit.reanchored or fit.clamped:
+                if (fit.dropped or fit.reanchored or fit.clamped) and not (
+                        pluggable
+                        and await apply_output_layout(layouts, realized_w, realized_h)):
                     await replace_selkies_monitors(layouts, screen_name=screen_name)
         else:
             await self._apply_wayland_output_layout(layouts, keep_ids)

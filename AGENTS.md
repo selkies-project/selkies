@@ -167,12 +167,20 @@ Each is documented in full where named; read that before changing the subsystem.
   browsers name the same physical key differently (macOS Option is `AltGraph` to Gecko, `Alt` to Blink, a
   Meta key to WebKit). That decides both text-versus-shortcut and when a held modifier is stale
   (`Input._composesText`, `Input._releaseDesyncedModifiers`).
-- Every display of an extended desktop is published as a RandR logical monitor listing the physical output,
-  because a toolkit realizes a monitor only where one is listed; whether the server lets several monitors share
-  the output is read back from the reply rather than assumed, since RandR 1.5 gives an output to one monitor and
-  servers before 21.1 enforce that (`display_utils._sync_set_selkies_layout`). A server whose driver reports no
-  display device has no output to list and no screen of its own: there the monitors are the only screens the
-  toolkits find, so they are published without one and clearing the layout leaves one covering the framebuffer.
+- A display of an extended desktop is a RandR output with a CRTC of its own wherever the X server offers
+  pluggable outputs (spare outputs carrying a `Connected` property, which the Xvfb the images build has): it is
+  plugged in, given its exact mode and position, and unplugged when its client leaves, so window managers and
+  toolkits meet what hardware would show them and none has to be taught about a framebuffer. The capability is
+  detected, never assumed, and a layout that both adds a display and moves the primary publishes the move first,
+  because a desktop takes in a new screen before a moved one (`display_utils` module docstring,
+  `_sync_apply_output_layout`, `output_layout_stage`). Everything a server without such outputs gets instead
+  lives in `display_utils_xrandr` and runs nowhere else: every display a RandR logical monitor listing the
+  physical output, because a toolkit realizes a monitor only where one is listed; whether the server lets
+  several monitors share the output read back from the reply rather than assumed, since RandR 1.5 gives an
+  output to one monitor and servers before 21.1 enforce that (`_sync_set_selkies_layout`). A server whose driver
+  reports no display device has no output to list and no screen of its own: there the monitors are the only
+  screens the toolkits find, so they are published without one and clearing the layout leaves one covering the
+  framebuffer.
 - One remote pointer is driven by an `Input` per display page, so a pointer message carries the buttons the
   event reports held, never the transitions one page happened to witness: a held drag crosses between pages,
   reaching one that never saw the press and leaving one that never sees the release

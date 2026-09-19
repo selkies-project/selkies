@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
-from selkies import display_utils as D
+from selkies import display_utils_xrandr as DX
 
 OUTPUTLESS = """Screen 0: minimum 8 x 8, current 1920 x 1080, maximum 32767 x 32767
 """
@@ -46,11 +46,11 @@ async def scenario(res: "H.Results") -> None:
     os.environ["PATH"] = bindir + os.pathsep + saved_path
     try:
         fake_xrandr(bindir, OUTPUTLESS)
-        curr, fitted, modes, _, name = await D._get_new_res_xrandr("1x1")
+        curr, fitted, modes, _, name = await DX._get_new_res_xrandr("1x1")
         res.check("a server without an output reports its root size and no output",
                   curr == "1920x1080" and name is None and modes == [], (curr, name, modes))
         fake_xrandr(bindir, WITH_OUTPUT)
-        curr, fitted, modes, _, name = await D._get_new_res_xrandr("2560x1440")
+        curr, fitted, modes, _, name = await DX._get_new_res_xrandr("2560x1440")
         res.check("one with an output reports the output, its modes and the fitted size",
                   curr == "1280x720" and name == "screen" and modes == ["1280x720", "8192x4096"]
                   and fitted == "2560x1440", (curr, name, modes, fitted))
@@ -69,7 +69,7 @@ async def scenario(res: "H.Results") -> None:
     ]
     for command, advertised, expected in cases:
         res.check(f"'{command}' {'is' if expected else 'is not'} the manager advertising '{advertised}'",
-                  D.wm_name_matches(command, advertised) is expected, None)
+                  DX.wm_name_matches(command, advertised) is expected, None)
 
 
 def main() -> "H.Results":

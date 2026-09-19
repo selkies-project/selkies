@@ -68,7 +68,10 @@ def wait_for(pred, timeout: float = 15) -> bool:
 
 
 def monitors(display: str) -> Dict[str, Tuple[int, int, int, int]]:
-    """The RandR monitors the server publishes: name -> (w, h, x, y)."""
+    """The RandR monitors the server publishes, by role: "primary" is the one
+    flagged primary and "display2" the other, whether they are the outputs the
+    displays hold or the logical monitors a server without such outputs gets;
+    each maps to (w, h, x, y)."""
     out = subprocess.run(["xrandr", "--display", display, "--listmonitors"],
                          capture_output=True, text=True).stdout
     found = {}
@@ -76,12 +79,10 @@ def monitors(display: str) -> Dict[str, Tuple[int, int, int, int]]:
         parts = line.split()
         if len(parts) < 3 or not parts[0].rstrip(":").isdigit():
             continue
-        name = parts[1].lstrip("+*")
-        geom = parts[2]  # WIDTH/mmxHEIGHT/mm+X+Y
-        size, x, y = geom.split("+")
-        w = int(size.split("x")[0].split("/")[0])
-        h = int(size.split("x")[1].split("/")[0])
-        found[name] = (w, h, int(x), int(y))
+        role = "primary" if "*" in parts[1] else "display2"
+        size, x, y = parts[2].split("+")  # WIDTH/mmxHEIGHT/mm+X+Y
+        w, h = (int(v.split("/")[0]) for v in size.split("x"))
+        found.setdefault(role, (w, h, int(x), int(y)))
     return found
 
 
@@ -148,14 +149,14 @@ def density_case(res: "H.Results", mode: str, browser: Any,
     want = (SECONDARY_CSS[0] * density, SECONDARY_CSS[1] * density)
     try:
         realized = wait_for(
-            lambda: monitors(H.TEST_DISPLAY).get("selkies-display2", (0, 0))[:2] == want, 30)
+            lambda: monitors(H.TEST_DISPLAY).get("display2", (0, 0))[:2] == want, 30)
         got = monitors(H.TEST_DISPLAY)
         res.check(f"{tag} the secondary's monitor is its CSS size at x{density}",
                   realized, f"want {want} monitors={got}")
         res.check(f"{tag} the primary's monitor keeps its own density",
-                  got.get("selkies-primary", (0,))[0] == primary_w, got)
+                  got.get("primary", (0,))[0] == primary_w, got)
         res.check(f"{tag} the secondary sits at the primary's right edge",
-                  got.get("selkies-display2", (0, 0, -1))[2] == primary_w, got)
+                  got.get("display2", (0, 0, -1))[2] == primary_w, got)
 
         # The page draws that many stream pixels into its CSS box, and maps
         # the cursor and pointer at the same density.
@@ -186,7 +187,7 @@ def density_case(res: "H.Results", mode: str, browser: Any,
         dpage.context.close()
         page.context.close()
         # The secondary's monitor is gone with its page before the next case.
-        wait_for(lambda: "selkies-display2" not in monitors(H.TEST_DISPLAY), 15)
+        wait_for(lambda: "display2" not in monitors(H.TEST_DISPLAY), 15)
 
 
 def drive(res: "H.Results", mode: str) -> None:

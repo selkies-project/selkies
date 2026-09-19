@@ -59,11 +59,11 @@ from .webrtc_signaling_server import WebRTCPeerManagement
 from .input_handler import WebRTCInput
 from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_id,
                             compute_dual_layout, apply_extended_layout, get_new_res,
-                            clear_selkies_monitors, clamp_primary_feedback,
-                            MultiMonitorWindowManager,
+                            retire_displays, clamp_primary_feedback,
                             WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id,
                             wayland_reposition_primary, wayland_shrink_output,
                             parse_resize_dims, cursor_size_for_dpi, align_dims_16)
+from .display_utils_xrandr import MultiMonitorWindowManager
 from .webrtc_ice_config import get_rtc_configuration
 from .metrics import Metrics
 from . import resource_stats
@@ -1899,7 +1899,7 @@ class WebRTCService(BaseStreamingService):
                         self._broadcast_display_config()
                         return
                     # Before the shrink, so no monitor lingers outside the framebuffer.
-                    await clear_selkies_monitors()
+                    await retire_displays()
                     realized = await resize_display(f"{p_w}x{p_h}")
                     if realized:
                         p_w, p_h = realized
@@ -2813,7 +2813,7 @@ class WebRTCService(BaseStreamingService):
             await set_cursor_size(cursor_size_for_dpi(initial_dpi, CURSOR_SIZE))
 
         if not IS_WAYLAND:
-            await clear_selkies_monitors()
+            await retire_displays()
 
         # The pacer rides the congestion loop's tick but is gated on its own flag.
         if self.args.congestion_control or bool(settings.webrtc_pacer[0]):

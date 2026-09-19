@@ -17,6 +17,7 @@ The fitting rule itself is pinned branch by branch in
 tests/unit/test_realized_layout.py.
 """
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -120,13 +121,27 @@ SELECTORS = ("websockets", "webrtc")
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     chosen = SELECTORS if which == "all" else (which,)
-    # Xvfb fixes its maximum screen size at the initial allocation, so a small
-    # private server IS a server that refuses to grow. The suite drives its own
-    # rather than the harness display, which is deliberately large.
-    xvfb, H.TEST_DISPLAY = H.private_x_server(
-        CAP_W, CAP_H, extra_args=("+extension", "COMPOSITE", "+extension", "DAMAGE",
-                                  "+extension", "RANDR", "+extension", "XFIXES",
-                                  "+extension", "XTEST", "-shmem", "-s", "0", "-dpms"))
+    # A stock Xvfb fixes its maximum screen size at the initial allocation, so
+    # a small private server IS a server that refuses to grow. The suite drives
+    # its own rather than the harness display, which is deliberately large. The
+    # Xvfb the images build sizes its framebuffer freely, so where that one is
+    # on the path the distribution's is tried next, and the suite skips on a
+    # host with no server that caps.
+    xvfb = None
+    for binary in dict.fromkeys(("Xvfb", "/usr/bin/Xvfb")):
+        if not shutil.which(binary):
+            continue
+        xvfb, H.TEST_DISPLAY = H.private_x_server(
+            CAP_W, CAP_H, xvfb=binary,
+            extra_args=("+extension", "COMPOSITE", "+extension", "DAMAGE",
+                        "+extension", "RANDR", "+extension", "XFIXES",
+                        "+extension", "XTEST", "-shmem", "-s", "0", "-dpms"))
+        if root_max(H.TEST_DISPLAY) == (CAP_W, CAP_H):
+            break
+        H.stop_x_server(xvfb, H.TEST_DISPLAY)
+        xvfb = None
+    if xvfb is None:
+        H.skip_suite("no X server on this host caps its root at its initial size")
     ok = True
     try:
         for mode in chosen:
