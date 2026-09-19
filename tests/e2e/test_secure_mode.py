@@ -55,7 +55,9 @@ def request(method: str, path: str, headers=None, body=None) -> tuple:
     Returns:
         `(status, response headers, body bytes)`; 4xx/5xx are not raised.
     """
-    conn = http.client.HTTPConnection("localhost", H.PORT, timeout=15)
+    # By literal, as H.BASE_URL is: a page asked for over the IPv6 loopback is
+    # sent to the IPv4 one, and this client is not a browser to follow it.
+    conn = http.client.HTTPConnection("127.0.0.1", H.PORT, timeout=15)
     try:
         conn.request(method, path, body=body, headers=dict(headers or {}))
         response = conn.getresponse()

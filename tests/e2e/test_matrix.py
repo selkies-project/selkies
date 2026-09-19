@@ -225,12 +225,21 @@ def run_block(mode: str, wayland: bool, block: str = "",
             dinfo = C.wait_ws_video(dpage, timeout=12) if mode == "websockets" else C.wait_wr_video(dpage, timeout=40)
             res.check("second display: video flows", dinfo is not None, dinfo)
             if mode == "webrtc":
-                # displayPosition reaches the server through SETTINGS passthrough.
+                # displayPosition reaches the server through SETTINGS passthrough;
+                # a secondary moved below the primary makes the root taller and narrower.
+                beside = H.x_root_size()
                 dpage.evaluate(
                     "window.postMessage({ type: 'settings', settings: { displayPosition: 'down' } }, window.location.origin)")
-                time.sleep(2.5)
-                res.check("A9: secondary reposition applied",
-                          C.wait_log("down", timeout=4) or C.wait_log("reconfigure", timeout=2), "log check")
+                stacked = None
+                deadline = time.time() + 8
+                while time.time() < deadline and stacked is None:
+                    size = H.x_root_size()
+                    if size[1] > beside[1] and size[0] < beside[0]:
+                        stacked = size
+                    else:
+                        time.sleep(0.5)
+                res.check("A9: secondary reposition applied", stacked is not None,
+                          f"{beside} -> {stacked or H.x_root_size()}")
             dpage.close()
             time.sleep(2.0)
 
