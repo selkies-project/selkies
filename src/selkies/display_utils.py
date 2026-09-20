@@ -1388,7 +1388,7 @@ def _rewrite_lxqt_font(path: str, dpi_value: int) -> Optional[Tuple[float, int]]
         if points <= 0:
             # A file Qt round-tripped carries pixels alone, resolved at the
             # density currently on the display.
-            points = pixels * 72.0 / max(1, _APPLIED_DPI or 96)
+            points = pixels * 72.0 / max(1, _APPLIED_DPI or desktop_dpi() or 96)
         if points <= 0:
             out.append(line)
             continue
@@ -1708,10 +1708,62 @@ def _is_wayland() -> bool:
 # The DPI the last set_dpi applied; resizes size the pane in mm from it.
 _APPLIED_DPI: Optional[int] = None
 
+_XFT_DPI = re.compile(r"^\s*Xft\.dpi\s*:\s*(\d+)", re.M)
+_XSETTINGS_DPI = re.compile(r"^\s*Xft/DPI\s+(\d+)", re.M)
+
 
 def applied_dpi() -> Optional[int]:
     """The density the last `set_dpi` gave the desktop; None before the first."""
     return _APPLIED_DPI
+
+
+def desktop_dpi() -> Optional[int]:
+    """The density the X11 desktop has before this process applies one.
+
+    The server's resource database is read first, then the resources this home
+    persists: they outlive a restart, and the session may not have merged them
+    yet. None when nothing names one. Blocking.
+    """
+    texts = []
+    with _x11_lock:
+        try:
+            d = _module_display()
+            prop = d.screen().root.get_full_property(
+                d.get_atom("RESOURCE_MANAGER"), x11_Xatom.STRING)
+            if prop is not None:
+                raw = prop.value
+                texts.append((_XFT_DPI, raw.decode("latin-1") if isinstance(raw, bytes) else str(raw)))
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+    for pattern, name in ((_XFT_DPI, "~/.Xresources"), (_XSETTINGS_DPI, "~/.xsettingsd")):
+        try:
+            with open(os.path.expanduser(name)) as f:
+                texts.append((pattern, f.read()))
+        except OSError:
+            continue
+    for pattern, text in texts:
+        found = pattern.findall(text)
+        if found:
+            return int(found[-1]) // (1024 if pattern is _XSETTINGS_DPI else 1)
+    return None
+
+
+async def restore_dpi(configured: int, locked: bool) -> int:
+    """Settle the X11 desktop's density at startup and return the one in effect.
+
+    A density persists in the home across restarts while this process starts
+    knowing none, so the desktop is read before anything is written: an
+    operator-set value is applied whenever the desktop differs from it, a
+    client-driven desktop keeps the density its last page gave it, and either
+    way the one in effect is what a page's DPI is then compared against. Unity
+    on a fresh home writes nothing.
+    """
+    current = await asyncio.to_thread(desktop_dpi)
+    target = configured if locked else (current or configured)
+    if target != 96 or current not in (None, 96):
+        await set_dpi(target)
+    return target
 
 
 def _sync_stamp_root_dpi(dpi_value: int) -> None:

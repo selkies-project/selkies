@@ -57,7 +57,7 @@ from .webrtc.codecs import configure_multiopus
 from .webrtc_signaling_client import WebRTCSignalingClient
 from .webrtc_signaling_server import WebRTCPeerManagement
 from .input_handler import WebRTCInput
-from .display_utils import (resize_display, set_dpi, set_cursor_size, parse_gpu_id,
+from .display_utils import (resize_display, restore_dpi, set_dpi, set_cursor_size, parse_gpu_id,
                             compute_dual_layout, apply_extended_layout, get_new_res,
                             retire_displays, clamp_primary_feedback,
                             WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id,
@@ -2800,17 +2800,16 @@ class WebRTCService(BaseStreamingService):
             self.tasks.append(asyncio.create_task(self.input_handler.probe_apps_runner()))
 
         startup_dpi = int(float(getattr(settings, "scaling_dpi", "96") or 96))
-        if startup_dpi != 96:
-            if IS_WAYLAND:
+        if IS_WAYLAND:
+            if startup_dpi != 96:
                 if self.input_handler is not None:
                     await self.input_handler.realize_wayland_dpi(startup_dpi)
                 self._last_applied_dpi = startup_dpi
-            elif await set_dpi(startup_dpi):
-                self._last_applied_dpi = startup_dpi
-
-        if not IS_WAYLAND and settings.cursor_size > 0:
-            initial_dpi = float(getattr(settings, "scaling_dpi", "96"))
-            await set_cursor_size(cursor_size_for_dpi(initial_dpi, CURSOR_SIZE))
+        else:
+            startup_dpi = await restore_dpi(startup_dpi, settings.was_provided("scaling_dpi"))
+            self._last_applied_dpi = startup_dpi
+            if settings.cursor_size > 0:
+                await set_cursor_size(cursor_size_for_dpi(startup_dpi, CURSOR_SIZE))
 
         if not IS_WAYLAND:
             await retire_displays()

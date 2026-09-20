@@ -75,6 +75,7 @@ from .display_utils import (
     get_new_res,
     ensure_mode,
     resize_display,
+    restore_dpi,
     retire_displays,
     apply_output_layout,
     has_pluggable_outputs,
@@ -5854,18 +5855,16 @@ class DataStreamingServer(BaseStreamingService):
                 asyncio.create_task(self.input_handler.probe_apps_runner(), name="AppsProbe")
             )
 
-        # 96 is unity: no churn when nothing diverges.
         startup_dpi = int(float(getattr(settings, "scaling_dpi", "96") or 96))
-        if startup_dpi != 96:
-            if IS_WAYLAND:
-                if self.input_handler is not None:
-                    await self.input_handler.realize_wayland_dpi(startup_dpi)
-            else:
-                await set_dpi(startup_dpi)
-
-        # The Wayland compositor gets its cursor size via CaptureSettings instead.
-        if not IS_WAYLAND and settings.cursor_size > 0:
-            await set_cursor_size(cursor_size_for_dpi(int(settings.scaling_dpi), CURSOR_SIZE))
+        if IS_WAYLAND:
+            # 96 is unity, where a compositor starts; it gets its cursor size
+            # via CaptureSettings instead.
+            if startup_dpi != 96 and self.input_handler is not None:
+                await self.input_handler.realize_wayland_dpi(startup_dpi)
+        else:
+            startup_dpi = await restore_dpi(startup_dpi, settings.was_provided("scaling_dpi"))
+            if settings.cursor_size > 0:
+                await set_cursor_size(cursor_size_for_dpi(startup_dpi, CURSOR_SIZE))
 
         try:
             await self.shutdown_event.wait()

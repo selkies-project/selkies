@@ -236,6 +236,8 @@ SUITES: list = [
      "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_gamepad_uinput.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_dpi_accuracy.py", "tier": "e2e", "timeout": 900},
+    {"path": "e2e/test_dpi_restart.py", "tier": "e2e", "timeout": 900,
+     "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_regressions.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["matrix", "switch", "clipboard", "pacer"]},
     {"path": "e2e/test_auth_refresh.py", "tier": "e2e", "timeout": 300},
