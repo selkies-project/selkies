@@ -28,6 +28,7 @@ import logging
 from importlib.metadata import PackageNotFoundError, version
 
 from .settings import settings
+from .display_utils import cursor_size_for_dpi, restore_dpi, set_cursor_size
 from .webrtc_mode import WebRTCService
 from .websockets_mode import DataStreamingServer
 from .stream_server import CentralizedStreamServer
@@ -136,7 +137,10 @@ async def run() -> None:
     virtual webcam outlives mode switches (applications hold `/dev/videoN`
     open across them), so it is released only when the server exits. The
     encoders this host serves are resolved once here, off the loop since the
-    hardware probe opens the GPU, before either transport publishes a menu.
+    hardware probe opens the GPU, before either transport publishes a menu. On
+    X11 the desktop's density is settled here as well, before either transport
+    can take a page, so the first page's DPI is compared against what the
+    desktop has rather than against unity.
     """
     _install_shutdown_signal_handlers()
 
@@ -151,6 +155,12 @@ async def run() -> None:
             logger.warning(f"Computer-Use server not started: {e}")
 
     await wait_for_app_ready(settings.app_ready_file, settings.app_wait_ready[0])
+
+    if not settings.wayland[0]:
+        startup_dpi = await restore_dpi(int(float(getattr(settings, "scaling_dpi", "96") or 96)),
+                                        settings.was_provided("scaling_dpi"))
+        if settings.cursor_size > 0:
+            await set_cursor_size(cursor_size_for_dpi(startup_dpi, settings.cursor_size))
 
     await asyncio.to_thread(settings.resolve_encoder_backends)
     server = CentralizedStreamServer(settings)

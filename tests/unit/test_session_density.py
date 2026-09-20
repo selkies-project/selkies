@@ -51,8 +51,9 @@ DU._APPLIED_DPI = None
 
 # The density a restart finds in the home, and what startup makes of it.
 home = tempfile.mkdtemp(prefix="density-home-")
-saved_env = {k: os.environ.get(k) for k in ("HOME", "DISPLAY")}
+saved_env = {k: os.environ.get(k) for k in ("HOME", "DISPLAY", "XDG_CONFIG_HOME")}
 os.environ["HOME"] = home
+os.environ["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
 os.environ.pop("DISPLAY", None)
 xserver = display = None
 try:
@@ -83,6 +84,26 @@ try:
         res.check("a pixel-only session font resolves at the density the desktop has",
                   DU._rewrite_lxqt_font(lxqt, 96) == (12.0, 16),
                   open(lxqt).read())
+
+        # An XFCE session keeps its density in xfconf, the one store set_dpi
+        # writes there, so a restart reads it before the database and the files.
+        channel = os.path.join(home, ".config", "xfce4", "xfconf", "xfce-perchannel-xml")
+        os.makedirs(channel)
+        real_declared = DU._declared_desktop
+        DU._declared_desktop = lambda: "XFCE"
+        try:
+            res.check("an XFCE session that persisted no density reads the desktop as any other",
+                      DU.desktop_dpi() == 120, DU.desktop_dpi())
+            for value, want, label in ((-1, 120, "xfconf's unset density falls through"),
+                                       (192, 192, "the density xfconf persists is read over the database and the files")):
+                with open(os.path.join(channel, "xsettings.xml"), "w") as f:
+                    f.write('<channel name="xsettings" version="1.0">\n  <property name="Xft" type="empty">\n'
+                            f'    <property name="DPI" type="int" value="{value}"/>\n  </property>\n</channel>\n')
+                res.check(label, DU.desktop_dpi() == want, DU.desktop_dpi())
+            DU._declared_desktop = lambda: "Openbox"
+            res.check("another session never reads xfconf's channel", DU.desktop_dpi() == 120, DU.desktop_dpi())
+        finally:
+            DU._declared_desktop = real_declared
 
     real_set_dpi, real_desktop_dpi = DU.set_dpi, DU.desktop_dpi
     applied = []

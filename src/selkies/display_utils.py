@@ -1710,6 +1710,9 @@ _APPLIED_DPI: Optional[int] = None
 
 _XFT_DPI = re.compile(r"^\s*Xft\.dpi\s*:\s*(\d+)", re.M)
 _XSETTINGS_DPI = re.compile(r"^\s*Xft/DPI\s+(\d+)", re.M)
+_XFCONF_DPI = re.compile(r'name="DPI"[^>]*value="(-?\d+)"')
+# Where xfconfd persists the channel set_dpi writes on XFCE.
+_XFCONF_XSETTINGS = "xfce4/xfconf/xfce-perchannel-xml/xsettings.xml"
 
 
 def applied_dpi() -> Optional[int]:
@@ -1720,11 +1723,22 @@ def applied_dpi() -> Optional[int]:
 def desktop_dpi() -> Optional[int]:
     """The density the X11 desktop has before this process applies one.
 
-    The server's resource database is read first, then the resources this home
-    persists: they outlive a restart, and the session may not have merged them
-    yet. None when nothing names one. Blocking.
+    Read from where `set_dpi` puts it: an XFCE session's xfconf channel as
+    xfconfd persists it, else the server's resource database and then the
+    resources this home persists, which outlive a restart the session may not
+    have merged yet. None when nothing names one. Blocking.
     """
+    def persisted(name: str) -> str:
+        try:
+            with open(os.path.expanduser(name)) as f:
+                return f.read()
+        except OSError:
+            return ""
+
     texts = []
+    if _running_desktop("xfce", "xfce4-session"):
+        config = os.environ.get("XDG_CONFIG_HOME") or "~/.config"
+        texts.append((_XFCONF_DPI, persisted(os.path.join(config, _XFCONF_XSETTINGS))))
     with _x11_lock:
         try:
             d = _module_display()
@@ -1736,16 +1750,11 @@ def desktop_dpi() -> Optional[int]:
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
-    for pattern, name in ((_XFT_DPI, "~/.Xresources"), (_XSETTINGS_DPI, "~/.xsettingsd")):
-        try:
-            with open(os.path.expanduser(name)) as f:
-                texts.append((pattern, f.read()))
-        except OSError:
-            continue
+    texts += [(_XFT_DPI, persisted("~/.Xresources")), (_XSETTINGS_DPI, persisted("~/.xsettingsd"))]
     for pattern, text in texts:
-        found = pattern.findall(text)
-        if found:
-            return int(found[-1]) // (1024 if pattern is _XSETTINGS_DPI else 1)
+        found = [int(v) for v in pattern.findall(text)]
+        if found and found[-1] > 0:
+            return found[-1] // (1024 if pattern is _XSETTINGS_DPI else 1)
     return None
 
 

@@ -75,7 +75,6 @@ from .display_utils import (
     get_new_res,
     ensure_mode,
     resize_display,
-    restore_dpi,
     retire_displays,
     apply_output_layout,
     has_pluggable_outputs,
@@ -5831,9 +5830,9 @@ class DataStreamingServer(BaseStreamingService):
     async def run(self) -> None:
         """Start the server's components and block until shutdown is signaled.
 
-        Spawns the input handler's connect/clipboard/cursor tasks, applies the
-        configured startup DPI and cursor size, then waits on shutdown_event;
-        cleanup always runs via shutdown() on the way out.
+        Spawns the input handler's connect/clipboard/cursor tasks, realizes the
+        configured scale on Wayland, then waits on shutdown_event; cleanup
+        always runs via shutdown() on the way out.
         """
         self._shutdown_called = False
         self.initialize()
@@ -5855,16 +5854,11 @@ class DataStreamingServer(BaseStreamingService):
                 asyncio.create_task(self.input_handler.probe_apps_runner(), name="AppsProbe")
             )
 
+        # 96 is unity, where a compositor starts; it gets its cursor size via
+        # CaptureSettings instead. X11's density was settled before the listener opened.
         startup_dpi = int(float(getattr(settings, "scaling_dpi", "96") or 96))
-        if IS_WAYLAND:
-            # 96 is unity, where a compositor starts; it gets its cursor size
-            # via CaptureSettings instead.
-            if startup_dpi != 96 and self.input_handler is not None:
-                await self.input_handler.realize_wayland_dpi(startup_dpi)
-        else:
-            startup_dpi = await restore_dpi(startup_dpi, settings.was_provided("scaling_dpi"))
-            if settings.cursor_size > 0:
-                await set_cursor_size(cursor_size_for_dpi(startup_dpi, CURSOR_SIZE))
+        if IS_WAYLAND and startup_dpi != 96 and self.input_handler is not None:
+            await self.input_handler.realize_wayland_dpi(startup_dpi)
 
         try:
             await self.shutdown_event.wait()

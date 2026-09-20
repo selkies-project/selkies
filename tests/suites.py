@@ -164,6 +164,8 @@ SUITES: list = [
     {"path": "integration/test_cursor_delivery.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_wayland_session_dpi.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_session_dpi_owner.py", "tier": "integration", "timeout": 300},
+    {"path": "integration/test_dpi_startup_order.py", "tier": "integration", "timeout": 300,
+     "selectors": ["websockets", "webrtc"]},
     {"path": "integration/test_lost_frame_verb.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_parity_checks.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_display_seed.py", "tier": "integration", "timeout": 600},

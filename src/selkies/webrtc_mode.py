@@ -57,7 +57,7 @@ from .webrtc.codecs import configure_multiopus
 from .webrtc_signaling_client import WebRTCSignalingClient
 from .webrtc_signaling_server import WebRTCPeerManagement
 from .input_handler import WebRTCInput
-from .display_utils import (resize_display, restore_dpi, set_dpi, set_cursor_size, parse_gpu_id,
+from .display_utils import (resize_display, applied_dpi, set_dpi, set_cursor_size, parse_gpu_id,
                             compute_dual_layout, apply_extended_layout, get_new_res,
                             retire_displays, clamp_primary_feedback,
                             WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id,
@@ -2778,17 +2778,17 @@ class WebRTCService(BaseStreamingService):
                     await pipeline.set_video_bitrate(target)
 
     async def start_components(self) -> None:
-        """Start the background tasks: input/clipboard/cursor workers, startup
-        DPI and cursor size, the congestion/pacer loop, the monitors, the
-        signaling client, and the configured TURN credential refreshers.
+        """Start the background tasks: input/clipboard/cursor workers, the
+        startup scale, the congestion/pacer loop, the monitors, the signaling
+        client, and the configured TURN credential refreshers.
 
-        The configured desktop DPI is applied at startup so the first session
-        sees it before any client syncs its own (96 is unity, so nothing is
-        applied then); on Wayland it becomes the session compositor's output
-        scale, and with none up yet the input handler re-applies when it
-        adopts one. An explicit cursor size goes to the X server here
-        (`handle_scaling` re-derives it on DPI changes); Wayland gets it via
-        CaptureSettings. Logical monitors describe the layout of whichever
+        On Wayland the configured DPI becomes the session compositor's output
+        scale (96 is unity, so nothing is applied then), and with none up yet
+        the input handler re-applies when it adopts one; the X11 desktop's
+        density was settled before the listener opened, so the first session
+        compares against it (`handle_scaling` re-derives the cursor size on
+        DPI changes; Wayland gets it via CaptureSettings). Logical monitors
+        describe the layout of whichever
         transport defined them, and a live switch leaves the previous one's
         behind — a desktop keeps tiling against a stale rectangle — so on X11
         they are cleared; this service defines its own
@@ -2806,10 +2806,8 @@ class WebRTCService(BaseStreamingService):
                     await self.input_handler.realize_wayland_dpi(startup_dpi)
                 self._last_applied_dpi = startup_dpi
         else:
-            startup_dpi = await restore_dpi(startup_dpi, settings.was_provided("scaling_dpi"))
-            self._last_applied_dpi = startup_dpi
-            if settings.cursor_size > 0:
-                await set_cursor_size(cursor_size_for_dpi(startup_dpi, CURSOR_SIZE))
+            # Settled before the listener opened; a page's first DPI compares against it.
+            self._last_applied_dpi = applied_dpi() or startup_dpi
 
         if not IS_WAYLAND:
             await retire_displays()

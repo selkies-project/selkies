@@ -193,7 +193,7 @@ def main() -> int:
     backends = sys.argv[2] if len(sys.argv) > 2 else "all"
     res = H.Results("dpi-restart")
     xproc = None
-    if backends != "wayland" and not H.TEST_DISPLAY:
+    if backends != "wayland":
         xproc, H.TEST_DISPLAY = H.private_x_server(width=1280, height=720)
     home = tempfile.mkdtemp(prefix="selkies-dpi-home-")
     try:
