@@ -112,7 +112,8 @@ def run() -> "H.Results":
                       and associated - processed < 5.0,
                       "never" if associated is None or processed is None
                       else f"{associated - processed:.1f}s after the settings")
-            res.check("the audio start was still attempted", AUDIO_ATTEMPTED in H.server_log())
+            res.check("the audio start was still attempted",
+                      await wait_log(AUDIO_ATTEMPTED, 20) is not None)
 
     try:
         asyncio.run(announce_behind_the_audio_start())
