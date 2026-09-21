@@ -435,14 +435,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         libxfixes3 \
         libxtst6 \
         libxext6 \
-        # x264 for pixelflux's striped software H.264 encoder (optional GPL
-        # feature of prebuilt wheels; the package pulls the matching runtime)
-        x264 \
-        # ffmpeg sidecars pixelflux links (hardware VA-API and PPM sinks); the
-        # metapackage resolves the ABI-versioned libavutil/libavfilter/libavcodec
-        # per release, whose suffixes move every LTS. opus-tools covers pcmflux's
-        # audio encoder
-        ffmpeg \
+        # opus-tools covers pcmflux's audio encoder
         opus-tools \
         # Wayland backend: pixelflux opens libwayland-server for the capture
         # compositor, and XWayland serves the X11-only applications running
@@ -516,8 +509,10 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         aspell-en \
         hunspell \
         enchant-2 \
-        # The codecs the distribution's default ffmpeg build leaves out, which
-        # a player or a browser falls back to for anything it cannot decode
+        # The distribution's ffmpeg, with the codecs its default build leaves
+        # out, for the desktop's players and browsers, which fall back to it
+        # for anything they cannot decode themselves
+        ffmpeg \
         libavcodec-extra \
         # Fonts: DejaVu/Liberation for Latin, Noto for worldwide script and emoji coverage
         fonts-dejavu-core \
