@@ -942,11 +942,15 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         from the feedback's reference time, each later one the gap from the
         arrival before, so the interval the bytes were delivered over runs from
         the earliest arrival to the latest, and the earliest packet's bytes were
-        not delivered inside it. A silence of TWCC_IDLE_US or more between two
-        arrivals is left out of that interval, with the packet ending it: it is
-        an outage or an idle sender, and a rate measured across it would say
-        the wire carries almost nothing. A feedback whose chunks or deltas run
-        short is dropped whole, so a malformed one consumes no history."""
+        not delivered inside it. Only arrivals still in the send history take
+        part: a receiver that moved its window back over a late packet reports
+        packets it already reported, which would stretch the interval and add
+        nothing to it. A silence of TWCC_IDLE_US or more between two arrivals
+        is left out of that interval, with the packet ending it: it is an
+        outage or an idle sender, and a rate measured across it would say the
+        wire carries almost nothing. A feedback whose chunks or deltas run
+        short, or that carries the reserved status symbol, is dropped whole,
+        so a malformed one consumes no history."""
         if len(fci) < 8:
             return
         base_seq, status_count = struct.unpack("!HH", fci[0:4])
@@ -965,9 +969,9 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             else:
                 for i in range(7):
                     statuses.append((chunk >> (12 - 2 * i)) & 0x3)
-        if len(statuses) < status_count:
-            return
         statuses = statuses[:status_count]
+        if len(statuses) < status_count or 3 in statuses:
+            return
 
         arrivals: list[tuple[int, float]] = []
         missing: list[int] = []
@@ -1002,25 +1006,24 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             if previous is None or (seq - previous) & 0xFFFF != 1:
                 runs += 1
             previous = seq
-        # The delivery interval is the time between arrivals, less any silence
-        # long enough to be an outage or an idle sender rather than a rate; the
-        # packet opening each stretch was not delivered inside it.
-        by_time = sorted(arrivals, key=lambda a: a[1])
-        opening = {by_time[0][0]} if by_time else set()
-        span_us = 0.0
-        for (_s0, t0), (s1, t1) in zip(by_time, by_time[1:]):
-            if t1 - t0 > TWCC_IDLE_US:
-                opening.add(s1)
-            else:
-                span_us += t1 - t0
-        span_s = span_us / 1e6
+        # The delivery interval is the time between arrivals of packets in the
+        # history, less any silence long enough to be an outage or an idle
+        # sender rather than a rate; the packet opening each stretch was not
+        # delivered inside it.
         bytes_acked = spanned = 0
-        for seq, _at in arrivals:
+        matched: list[tuple[float, int]] = []
+        for seq, at in arrivals:
             sent = self._twcc_history.pop(seq, None)
             if sent is not None:
                 bytes_acked += sent[0]
-                if seq not in opening:
-                    spanned += sent[0]
+                matched.append((at, sent[0]))
+        matched.sort(key=lambda m: m[0])
+        span_us = 0.0
+        for (t0, _size), (t1, size) in zip(matched, matched[1:]):
+            if t1 - t0 <= TWCC_IDLE_US:
+                span_us += t1 - t0
+                spanned += size
+        span_s = span_us / 1e6
         goodput = int(spanned * 8 / span_s) if span_s > 0 else 0
         self.twcc_estimate = {
             "received": received,

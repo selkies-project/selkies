@@ -51,8 +51,6 @@ class Recorder:
         video_pkts: `(monotonic_time, rtp_timestamp, sequence_number,
             repaired_sequence_or_None, payload_head, ssrc)` per video packet.
         ssrc_kind: SSRC to media-kind cache for tap classification.
-        twcc_arrivals: twcc_seq to `(recv_monotonic, wire_size)` for the
-            pending feedback window.
         pings: `(recv_time, start_time)` per data-channel ping.
         ow_video: One-way video latency samples in seconds (abs_send_time).
         ow_audio: One-way audio latency samples in seconds (abs_send_time).
@@ -68,9 +66,6 @@ class Recorder:
         self.n_audio = 0
         self.n_video = 0
         self.ssrc_kind = {}
-        self.twcc_arrivals = {}
-        self.twcc_fb_count = 0
-        self.twcc_emitted = 0
         self.pings = []
         self.ow_video = []
         self.ow_audio = []
@@ -114,76 +109,9 @@ async def _wrapped_handle_rtp(self, packet, arrival_time_ms):
                 REC.ow_audio.append(ow)
             elif kind == "video":
                 REC.ow_video.append(ow)
-    seq = getattr(packet.extensions, "transport_sequence_number", None)
-    if seq is not None:
-        REC.twcc_arrivals[seq] = (time.monotonic(), len(packet.payload) + 60)
     return await _orig_handle_rtp(self, packet, arrival_time_ms)
 
 rrx_mod.RTCRtpReceiver._handle_rtp_packet = _wrapped_handle_rtp
-
-
-def _build_twcc_fci(arrivals: dict, fb_count: int) -> Optional[bytes]:
-    """Encode a transport-cc FCI block from an arrival window.
-
-    Args:
-        arrivals: `{seq: (t_mono, size)}` for the feedback window.
-        fb_count: Running feedback packet counter (mod 256 on the wire).
-
-    Returns:
-        The FCI bytes as RLE chunks plus 250us receive deltas matching RFC
-        transport-cc (smallest truthful encoding), or None when the window is
-        empty or too wide to report.
-    """
-    seqs = sorted(arrivals)
-    if not seqs:
-        return None
-    base = seqs[0]
-    statuses = []
-    deltas = b""
-    end = seqs[-1]
-    ref_t = arrivals[base][0]
-    n = ((end - base) & 0xFFFF) + 1
-    prev_t = ref_t
-    import struct as _st
-    for i in range(n):
-        s = (base + i) & 0xFFFF
-        if s not in arrivals:
-            statuses.append(0)
-            continue
-        t = arrivals[s][0]
-        # The RFC encodes per-packet incremental deltas, not offsets from ref.
-        dt = t - prev_t
-        prev_t = t
-        if 0 <= dt < 0.06375:
-            statuses.append(1)
-            deltas += bytes([min(255, int(dt * 1_000_000 / 250))])
-        else:
-            statuses.append(2)
-            deltas += _st.pack("!h", max(-32768, min(32767, int(dt * 1_000_000 / 250))))
-    # Cap the window at 200 statuses to keep feedback messages small.
-    if len(statuses) > 200:
-        return None
-    chunks = b""
-    import struct as _st
-    i = 0
-    while i < len(statuses):
-        sym = statuses[i]
-        run = 1
-        while i + run < len(statuses) and statuses[i + run] == sym and run < 8191:
-            run += 1
-        chunks += _st.pack("!H", (sym << 13) | run)
-        i += run
-    ref64ms = int(ref_t * 1000 / 64) & 0xFFFFFF
-    fci = _st.pack("!HH3sB", base, len(statuses),
-                   ref64ms.to_bytes(3, "big"), fb_count % 256) + chunks + deltas
-    if TWCC_DEBUG:
-        runs = [arrivals[s][0] for s in sorted(arrivals)]
-        LOG.warning("twcc fci: fb=%d statuses=%d window_span_ms=%.0f",
-                    fb_count, len(statuses), (max(runs) - min(runs)) * 1000)
-    return fci
-
-
-TWCC_DEBUG = os.environ.get("TWCC_DEBUG", "0") == "1"
 
 
 class Shaper:
@@ -401,38 +329,7 @@ async def run_client(ws_url: str, measure_s: float, warmup_s: float,
                         ic.sdpMLineIndex = obj["ice"].get("sdpMLineIndex", 0)
                         await pc.addIceCandidate(ic)
 
-    async def twcc_loop():
-        """Emit TWCC feedback the way Chrome/Firefox receivers do, so the server's
-        pacer and GCC loop get real goodput feedback over the shaped link."""
-        receiver = None
-        while True:
-            if receiver is None:
-                trx = pc.getTransceivers() or []
-                at = [t for t in trx if getattr(t, "kind", "") == "audio"]
-                if at:
-                    receiver = at[0].receiver
-            fci = None
-            if REC.twcc_arrivals:
-                arrivals = REC.twcc_arrivals
-                REC.twcc_arrivals = {}
-                fci = _build_twcc_fci(arrivals, REC.twcc_fb_count)
-                REC.twcc_fb_count += 1
-            if fci is not None and receiver is not None:
-                try:
-                    # RtcpRtpfbPacket.__bytes__ drops fci (NACK-only), so build the
-                    # RTCP packet bytes directly: RTPFB(205)/fmt=15.
-                    import struct as _st
-                    from selkies.webrtc.rtp import pack_rtcp_packet, RTCP_RTPFB, RTCP_RTPFB_TWCC
-                    payload = _st.pack("!LL", 0, 0) + fci
-                    raw = pack_rtcp_packet(RTCP_RTPFB, RTCP_RTPFB_TWCC, payload)
-                    REC.twcc_emitted += 1
-                    await receiver.transport._send_rtp(raw)
-                except Exception:
-                    LOG.debug("twcc emit failed", exc_info=True)
-            await asyncio.sleep(0.1)
-
     rx_task = asyncio.create_task(rx_loop())
-    tw_task = asyncio.create_task(twcc_loop())
     window = {}
     try:
         t0 = time.monotonic()
@@ -451,13 +348,8 @@ async def run_client(ws_url: str, measure_s: float, warmup_s: float,
         window["audio_saw"] = REC.n_audio
     finally:
         rx_task.cancel()
-        tw_task.cancel()
         try:
             await rx_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        try:
-            await tw_task
         except (asyncio.CancelledError, Exception):
             pass
         try:

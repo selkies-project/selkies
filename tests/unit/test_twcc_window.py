@@ -173,6 +173,35 @@ def main() -> int:
     tr._twcc_process_feedback(fci)
     res.check("the whole feedback then consumes exactly the packets it acknowledges",
               len(tr._twcc_history) == 0 and tr.twcc_estimate["received"] == 20, len(tr._twcc_history))
+    tr = transport()
+    for i in range(20):
+        tr._twcc_history[i] = (PACKET_BYTES, 0.0)
+    header = struct.pack("!HH", 0, 20) + bytes(4)
+    tr._twcc_process_feedback(header + struct.pack("!H", (3 << 13) | 20))
+    tr._twcc_process_feedback(header + struct.pack("!HH", 0xC000 | (3 << 12) | 0x555, (1 << 13) | 13) + bytes(19))
+    res.check("the reserved status symbol, in a run or a vector chunk, is malformed feedback the same way",
+              len(tr._twcc_history) == 20 and tr.twcc_estimate is None and tr.take_twcc_window() is None,
+              (len(tr._twcc_history), tr.twcc_estimate))
+
+    # A packet the receiver has no history for was reported before, and stretched
+    # the interval its bytes never counted in.
+    tr = transport()
+    tr._twcc_history = {1: (PACKET_BYTES, 0.0), 2: (PACKET_BYTES, 0.0)}
+    tr._twcc_process_feedback(pack_twcc_fci(0, [6400.0, 6405.0, 6406.0], 0))
+    res.check("an arrival with no send history lies outside the interval",
+              round(tr.twcc_estimate["recv_span_s"], 6) == 0.001 and tr.twcc_estimate["goodput_bps"] == 9_600_000,
+              tr.twcc_estimate)
+    # A browser that sees a late packet moves its window back over it and
+    # reports the packets behind it again, arrival times and all.
+    tr = transport()
+    for i in range(30):
+        tr._twcc_history[i] = (PACKET_BYTES, 0.0)
+    tr._twcc_process_feedback(pack_twcc_fci(0, [100.0 + i if i != 15 else None for i in range(20)], 0))
+    tr._twcc_process_feedback(pack_twcc_fci(15, [121.0] + [116.0 + i for i in range(14)], 1))
+    res.check("a window moved back over a late packet measures only the packets reported for the first time",
+              round(tr.twcc_estimate["recv_span_s"], 6) == 0.009 and tr.twcc_estimate["goodput_bps"] == 9_600_000
+              and tr.twcc_estimate["bytes_acked"] == 10 * PACKET_BYTES and tr.twcc_estimate["lost"] == 0
+              and len(tr._twcc_history) == 0, tr.twcc_estimate)
 
     return 0 if res.summary() else 1
 
