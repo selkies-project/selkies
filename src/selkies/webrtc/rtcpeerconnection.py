@@ -1363,18 +1363,19 @@ class RTCPeerConnection(AsyncIOEventEmitter):
             rtcp=media.rtp.rtcp,
         )
         if len(media.ssrc):
+            # The retransmission stream is the FID group's second member; a
+            # remote that also sends FEC lists a third SSRC, so the count of
+            # SSRCs alone names nothing.
+            rtx_ssrc = next((group.items[1] for group in media.ssrc_group
+                             if group.semantic == "FID" and len(group.items) == 2
+                             and group.items[0] == media.ssrc[0].ssrc),
+                            media.ssrc[1].ssrc if len(media.ssrc) == 2 else None)
             encodings: dict[int, RTCRtpDecodingParameters] = {}
             for codec in transceiver._codecs:
                 if is_rtx(codec):
                     apt = codec.parameters.get("apt")
-                    if (
-                        isinstance(apt, int)
-                        and apt in encodings
-                        and len(media.ssrc) == 2
-                    ):
-                        encodings[apt].rtx = RTCRtpRtxParameters(
-                            ssrc=media.ssrc[1].ssrc
-                        )
+                    if isinstance(apt, int) and apt in encodings and rtx_ssrc is not None:
+                        encodings[apt].rtx = RTCRtpRtxParameters(ssrc=rtx_ssrc)
                     continue
 
                 encodings[codec.payloadType] = RTCRtpDecodingParameters(

@@ -515,6 +515,12 @@ class RTCRtpReceiver:
             self.__remote_streams[packet.ssrc] = StreamStatistics(codec.clockRate)
         self.__remote_streams[packet.ssrc].add(packet)
 
+        # A FlexFEC repair stream numbers its own packets: fed to the NACK
+        # generator it would name holes the media stream never had, and nothing
+        # here recovers a frame from it.
+        if codec.mimeType.lower() == "video/flexfec-03":
+            return
+
         # unwrap retransmission packet
         if is_rtx(codec):
             original_ssrc = self.__rtx_ssrc.get(packet.ssrc)

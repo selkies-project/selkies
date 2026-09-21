@@ -230,6 +230,9 @@ class MediaPipelinePixel(MediaPipeline):
         self.audio_enabled = audio_enabled
         self.audio_device_name = audio_device_name
         self.capture_cursor = False
+        # A requested IDR not yet captured: a request landing meanwhile is
+        # satisfied by it; one landing after it was captured is not.
+        self.idr_pending = False
         self.produce_data: Callable[..., None] = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None: logger.warning(
             "unhandled produce_data"
         )
@@ -475,10 +478,11 @@ class MediaPipelinePixel(MediaPipeline):
             logger.info(f"Updated framerate to: {self.framerate}")
 
     async def dynamic_idr_frame(self) -> None:
-        """Request an IDR frame from pixelflux."""
+        """Request an IDR frame from pixelflux; `idr_pending` holds until it is captured."""
         if not self._is_screen_capturing or self.capture_module is None:
             return
         try:
+            self.idr_pending = True
             self.capture_module.request_idr_frame()
             logger.debug("IDR frame requested successfully")
         except Exception as e:
@@ -563,6 +567,8 @@ class MediaPipelinePixel(MediaPipeline):
             view = memoryview(frame)
             if len(view) > STRIPE_HEADER_LEN:
                 keyframe = view[0] != 0x04 or (view[1] & 0x0F) == 0x01
+                if keyframe:
+                    self.idr_pending = False
                 data_bytes = view[STRIPE_HEADER_LEN:]
                 now = time.monotonic()
                 if self._video_pts_anchor is None:

@@ -80,7 +80,7 @@ from .stats import (
     RTCRemoteInboundRtpStreamStats,
     RTCStatsReport,
 )
-from .utils import random16, random32, uint16_add, uint32_add
+from .utils import random16, random32, uint16_add, uint16_gte, uint32_add
 from pyee.asyncio import AsyncIOEventEmitter
 
 logger = logging.getLogger(__name__)
@@ -195,6 +195,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self.__rtp_started = asyncio.Event()
         self.__rtp_task: Optional[asyncio.Future[None]] = None
         self.__rtp_history = RtpHistory()
+        # The newest media sequence number sent when the pacer last abandoned a
+        # GOP: a NACK for it or anything before names a packet the keyframe replaces.
+        self.__abandoned: Optional[int] = None
+        self.__last_sequence: Optional[int] = None
         # Frames numbered on the wire for the dependency descriptor, and the number each
         # capture frame id took, which a frame predicting from it is measured against.
         self.__frame_number = 0
@@ -408,19 +412,26 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 )
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_NACK:
             lost = None
+            gone = False
             for seq in packet.lost:
+                if self.__abandoned is not None and uint16_gte(self.__abandoned, seq):
+                    continue
                 sent, frame, times = self.__rtp_history.nacked(seq)
                 if sent is None:
-                    # Gone from the history: only a key frame brings the peer back.
-                    self._emit_pli_event()
+                    # A list runs oldest first, so one let go says nothing about the rest.
+                    gone = True
+                    continue
+                if not await self._retransmit(sent):
                     break
-                await self._retransmit(sent)
                 # A second NACK for the same packet says the retransmission did not reach
                 # the peer either: the frame is lost to it, and the encoder is told so the
                 # frames after it stop predicting from it.
                 if times > 1 and frame is not None and frame != lost:
                     lost = frame
                     self.emit("lost_frame", frame)
+            if gone:
+                # Gone from the history: only a key frame brings the peer back.
+                self._emit_pli_event()
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_TWCC:
             self.transport._twcc_process_feedback(packet.fci)
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_PLI:
@@ -503,10 +514,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
             del self.__frame_numbers[next(iter(self.__frame_numbers))]
         return number, fdiff
 
-    async def _retransmit(self, packet: RtpPacket) -> None:
-        """
-        Retransmit an RTP packet which was reported as lost.
-        """
+    async def _retransmit(self, packet: RtpPacket) -> bool:
+        """Retransmit an RTP packet reported lost; False when the pacer dropped it."""
         if self.__rtx_payload_type is not None:
             packet = wrap_rtx(
                 packet,
@@ -522,8 +531,20 @@ class RTCRtpSender(AsyncIOEventEmitter):
             len(packet.payload)
         )
         self.__log_debug("> %s", packet)
-        packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
-        await self.transport._send_rtp(packet_bytes, rtc_class=CLASS_VIDEO)
+        return await self._send(packet.serialize(self.__rtp_header_extensions_map),
+                                packet.extensions.transport_sequence_number)
+
+    async def _send(self, packet_bytes: bytes, twcc_seq: Optional[int] = None) -> bool:
+        """Hand a packet to the transport. A video packet the pacer refuses was
+        abandoned with its GOP, and every packet sent before it with it: NACKs
+        for them are ignored from then on, since the keyframe the pacer asked for
+        is their repair and a late retransmission would only land behind it."""
+        sent = await self.transport._send_rtp(
+            packet_bytes, rtc_class=CLASS_AUDIO if self.__kind == "audio" else CLASS_VIDEO,
+            twcc_seq=twcc_seq)
+        if not sent:
+            self.__abandoned = self.__last_sequence
+        return sent
 
     def _send_keyframe(self) -> None:
         """
@@ -635,10 +656,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     self.__rtp_history.add(
                         packet, frame_time, enc_frame.dependency[0] if described is not None else None)
                     packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
-                    await self.transport._send_rtp(
-                        packet_bytes,
-                        rtc_class=CLASS_AUDIO if self.__kind == "audio" else CLASS_VIDEO,
-                    )
+                    self.__last_sequence = packet.sequence_number
+                    await self._send(packet_bytes, packet.extensions.transport_sequence_number)
 
                     self.__ntp_timestamp = clock.current_ntp_time()
                     self.__rtp_timestamp = packet.timestamp
@@ -666,7 +685,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                                 self.__fec_sequence_number = uint16_add(
                                     self.__fec_sequence_number, 1
                                 )
-                                await self.transport._send_rtp(fec_bytes, rtc_class=CLASS_VIDEO)
+                                await self._send(fec_bytes)
                             fec_group = []
         except (asyncio.CancelledError, ConnectionError, MediaStreamError):
             pass

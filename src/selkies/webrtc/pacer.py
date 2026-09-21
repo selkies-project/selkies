@@ -32,8 +32,11 @@
 #     injection > drain, and with UDP sends the drain is the pace setting, not
 #     the wire — once one brake drops the pace below the encoder rate, every
 #     further overflow is self-inflicted. So an overflow resets the GOP but
-#     sizes a brake only from a fresh goodput estimate (estimate -
-#     BYPASS_RESERVE_BPS, floored at AIMD_FLOOR_FACTOR x the encoder target),
+#     sizes a brake only from a fresh goodput estimate, and only one measured
+#     on a feedback window the wire cut in several places, since a window
+#     delivered whole reads back the pacer's own output and one cut in a
+#     single run is an outage (estimate - BYPASS_RESERVE_BPS, floored at
+#     AIMD_FLOOR_FACTOR x the encoder target),
 #     at most one brake per BRAKE_HOLD_S; recovery is +25%/s toward
 #     PACE_FACTOR x the encoder target, and only a brake resets its clock, so
 #     reset churn cannot hold the pace at the floor.
@@ -128,6 +131,11 @@ def _stale_deadline_s() -> float:
 VIDEO_STALE_S = _stale_deadline_s()
 # Near-empty windows carry no rate signal.
 MIN_GOODPUT_SAMPLE_BYTES = 2048
+# What a feedback window must show for its delivery rate to size a brake: this
+# share of it lost, in at least this many separate runs. Less says the window
+# measured what the pacer sent; one run of any size is an outage.
+BRAKE_LOSS_FRACTION = 0.1
+BRAKE_LOSS_RUNS = 3
 
 SendNow = Callable[[bytes], Awaitable[None]]
 
@@ -150,6 +158,7 @@ class RtpPacer:
         send_now_data: Optional[SendNow] = None,
         request_keyframe: Optional[Callable[[], None]] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        on_dropped: Optional[Callable[[int], None]] = None,
     ) -> None:
         self._encoder_bps = max(int(encoder_bps), 100_000)
         self._goodput_bps: Optional[int] = None
@@ -158,6 +167,9 @@ class RtpPacer:
         self._send_now = send_now
         self._send_now_data = send_now_data or send_now
         self._request_keyframe = request_keyframe
+        # Told the tag of every video packet dropped, refused or purged, so the
+        # transport's loss accounting can leave them out.
+        self._on_dropped = on_dropped
         self._loop = loop or asyncio.get_running_loop()
 
         self._queues: Dict[int, Deque[bytes]] = {c: deque() for c in _QUEUED_CLASSES}
@@ -173,6 +185,7 @@ class RtpPacer:
         # latency-first stale-GOP deadline. Kept in lockstep at every
         # mutation site (enqueue / trim / drain / wholesale clears).
         self._video_ts: Deque[float] = deque()
+        self._video_tags: Deque[Optional[int]] = deque()
         self.credit = 0.0
         self._debt_cap = 0.0
         self._pace_bps = MIN_PACE_BPS
@@ -188,6 +201,7 @@ class RtpPacer:
         self._idr_floor_bytes = 0
         self._gop_dead = False
         self._last_keyreq = 0.0
+        self._keyreq_answered = True
         self._enabled_at = self._last
         self._gop_dead_at = 0.0
         self._oversize_warned = False
@@ -350,15 +364,23 @@ class RtpPacer:
         else:
             self._idr_floor_bytes = max(self._idr_floor_bytes,
                                         int(size * IDR_FLOOR_FACTOR))
+        self._keyreq_answered = True
         if self._gop_dead:
             self._gop_dead = False
             self.stats["idr_resurrects"] += 1
+            logger.debug("pacer: keyframe of %d bytes resurrects video %.0f ms after the reset",
+                         size, (time.monotonic() - self._gop_dead_at) * 1000)
 
     def request_keyframe_once(self) -> None:
+        """Ask for a keyframe, unless one was asked for within
+        KEYREQ_MIN_INTERVAL_S and has not arrived yet: that one resurrects the
+        stream when it comes, while a reset after it landed needs its own, or
+        video stays dead until the resurrect timeout."""
         now = time.monotonic()
-        if now - self._last_keyreq < KEYREQ_MIN_INTERVAL_S:
+        if not self._keyreq_answered and now - self._last_keyreq < KEYREQ_MIN_INTERVAL_S:
             return
         self._last_keyreq = now
+        self._keyreq_answered = False
         if self._request_keyframe is None:
             logger.warning("pacer: no keyframe callback bound; GOP reset "
                            "relies on the %.1fs timeout resurrect", RESURRECT_TIMEOUT_S)
@@ -376,7 +398,20 @@ class RtpPacer:
                           self.credit + (now - self._last) * self._pace_bps / 8.0)
         self._last = now
 
-    async def send(self, data: bytes, cls: int) -> None:
+    async def send(self, data: bytes, cls: int, tag: Optional[int] = None) -> bool:
+        """Send `data` now, queue it, or drop it.
+
+        Args:
+            data: The datagram.
+            cls: Its priority class.
+            tag: What to report through `on_dropped` if it is dropped.
+
+        Returns:
+            True when the packet went out or queued; False when it was dropped,
+            which only video is: refused while its GOP is abandoned, or the
+            packet that overflowed the budget or found the queue stale and
+            abandoned the GOP itself.
+        """
         if self._stopped:
             raise ConnectionError("pacer stopped")
         n = len(data)
@@ -386,7 +421,7 @@ class RtpPacer:
         if cls == CLASS_RTCP:
             self.stats["fastpath_bytes"] += n
             await self._send_now(data)
-            return
+            return True
 
         self._maybe_recover_pace()
 
@@ -407,7 +442,8 @@ class RtpPacer:
                             "resurrecting video optimistically", RESURRECT_TIMEOUT_S)
             else:
                 self.stats["video_dropped"] += 1
-                return
+                self._drop(tag)
+                return False
 
         # Latency-first stale deadline: video sitting in queue longer than
         # the deadline is delivered-too-late by definition, so the whole GOP
@@ -424,7 +460,8 @@ class RtpPacer:
             if now - self._video_ts[0] > deadline:
                 self._stale_reset(deadline)
                 self.stats["video_dropped"] += 1
-                return
+                self._drop(tag)
+                return False
 
         # Fast path when nothing is buffered: anything credit covers goes
         # straight out (~0 added delay below the rate).
@@ -435,28 +472,21 @@ class RtpPacer:
                 self.stats["fastpath_bytes"] += n
                 sender = self._send_now_data if cls == CLASS_DC else self._send_now
                 await sender(data)
-                return
+                return True
 
-        # Video queue budget: purge oldest video to fit, then GOP-reset.
-        # cap is video-only: audio/DC can never push an IDR out.
-        if cls == CLASS_VIDEO:
-            cap = self._video_cap_bytes()
-            if self._video_bytes + n > cap:
-                self._reset_gop()
-                while self._queues[CLASS_VIDEO] and self._video_bytes + n > cap:
-                    old = self._queues[CLASS_VIDEO].popleft()
-                    self._video_ts.popleft()
-                    self._video_bytes -= len(old)
-                    self._bytes_queued -= len(old)
-                    self.stats["video_dropped"] += 1
-                if self._video_bytes + n > cap:
-                    self.stats["video_dropped"] += 1
-                    return
+        # Video queue budget: a packet the budget cannot hold abandons the GOP,
+        # queue and all. The cap is video-only: audio/DC never push an IDR out.
+        if cls == CLASS_VIDEO and self._video_bytes + n > self._video_cap_bytes():
+            self._reset_gop()
+            self.stats["video_dropped"] += 1
+            self._drop(tag)
+            return False
 
         self._queues[cls].append(data)
         if cls == CLASS_VIDEO:
             self._video_bytes += n
             self._video_ts.append(time.monotonic())
+            self._video_tags.append(tag)
         self._bytes_queued += n
         if self._bytes_queued > self.stats["queue_max_bytes"]:
             self.stats["queue_max_bytes"] = self._bytes_queued
@@ -467,36 +497,45 @@ class RtpPacer:
         if n <= self.credit:
             self._poke.set()
         self._kick()
+        return True
 
     def _stale_reset(self, deadline_s: float) -> None:
-        """Latency-first branch of GOP reset used when queued video outlives
-        its usefulness: unlike a cap overflow (which trims only what doesn't
-        fit), everything in the video queue belongs to the same late GOP, so
-        the whole queue is purged to make room for the fresh keyframe."""
-        n = len(self._queues[CLASS_VIDEO])
-        self._reset_gop("video backlog stale (>%.0fms, %d pkts purged)"
-                        % (deadline_s * 1000, n))
-        self._purge_video()
+        """Latency-first GOP reset for queued video that outlived its usefulness."""
+        self._reset_gop("video backlog stale (>%.0fms)" % (deadline_s * 1000))
         self.stats["stale_resets"] += 1
 
-    def _purge_video(self) -> None:
+    def _drop(self, tag: Optional[int]) -> None:
+        if tag is not None and self._on_dropped is not None:
+            self._on_dropped(tag)
+
+    def _purge_video(self) -> int:
         """Drop the whole video queue, keeping the byte counters and the
-        enqueue-time mirror in lockstep with it."""
+        enqueue-time and tag mirrors in lockstep with it; the packets dropped."""
         dq = self._queues[CLASS_VIDEO]
+        n = len(dq)
         if dq:
-            self.stats["video_dropped"] += len(dq)
+            self.stats["video_dropped"] += n
             dq.clear()
+        for tag in self._video_tags:
+            self._drop(tag)
+        self._video_tags.clear()
         self._video_ts.clear()
         self._bytes_queued -= self._video_bytes
         self._video_bytes = 0
+        return n
 
     def _reset_gop(self, reason: str = "video queue overflow") -> None:
+        """Abandon the GOP: purge the queued video, which nothing behind the
+        requested keyframe can use, refuse video until that keyframe, and
+        brake if wire evidence sizes one."""
+        purged = self._purge_video()
         if not self._gop_dead:
             self._gop_dead = True
             self._gop_dead_at = time.monotonic()
             self._on_overflow()
             self.stats["gop_resets"] += 1
-            logger.info("pacer: %s => GOP reset, keyframe requested", reason)
+            logger.info("pacer: %s => GOP reset, %d queued packets purged, keyframe requested",
+                        reason, purged)
             self.request_keyframe_once()
 
     # ------------------------------------------------------------------ drain
@@ -553,6 +592,7 @@ class RtpPacer:
                         if cls == CLASS_VIDEO:
                             self._video_bytes -= size
                             self._video_ts.popleft()
+                            self._video_tags.popleft()
                         self.credit -= size
                         try:
                             await sender(data)
@@ -563,7 +603,6 @@ class RtpPacer:
                             # purged packets: mark video dead so nothing that
                             # depends on them is sent, and ask for a keyframe.
                             self._reset_gop("send failed")
-                            self._purge_video()
                             self._queues = {c: deque() for c in _QUEUED_CLASSES}
                             self._make_class_table()
                             self._bytes_queued = self._video_bytes = 0

@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
@@ -47,7 +48,8 @@ class Recorder:
 
     Attributes:
         audio_times: Monotonic arrival time per audio packet.
-        video_pkts: `(monotonic_time, rtp_timestamp)` per video packet.
+        video_pkts: `(monotonic_time, rtp_timestamp, sequence_number,
+            repaired_sequence_or_None, payload_head, ssrc)` per video packet.
         ssrc_kind: SSRC to media-kind cache for tap classification.
         twcc_arrivals: twcc_seq to `(recv_monotonic, wire_size)` for the
             pending feedback window.
@@ -72,17 +74,22 @@ class Recorder:
         self.pings = []
         self.ow_video = []
         self.ow_audio = []
+        self.ssrcs: dict = {}
+        self.rtx_map: dict = {}
 
 REC = Recorder()
 _orig_handle_rtp = rrx_mod.RTCRtpReceiver._handle_rtp_packet
 
 async def _wrapped_handle_rtp(self, packet, arrival_time_ms):
     """Tap every received RTP packet into REC before normal handling."""
+    REC.ssrcs[packet.ssrc] = REC.ssrcs.get(packet.ssrc, 0) + 1
     kind = REC.ssrc_kind.get(packet.ssrc)
     if kind is None:
         kind = getattr(self, "_RTCRtpReceiver__kind", None)
         if kind is not None:
             REC.ssrc_kind[packet.ssrc] = kind
+    if kind == "video":
+        REC.rtx_map = getattr(self, "_RTCRtpReceiver__rtx_ssrc", {})
     if kind == "audio":
         REC.n_audio += 1
         REC.audio_bytes += len(packet.payload) + 40
@@ -90,7 +97,11 @@ async def _wrapped_handle_rtp(self, packet, arrival_time_ms):
     elif kind == "video":
         REC.n_video += 1
         REC.video_bytes += len(packet.payload) + 40
-        REC.video_pkts.append((time.monotonic(), packet.timestamp))
+        # A retransmission is recorded under the sequence number it repairs.
+        rtx = packet.ssrc in getattr(self, "_RTCRtpReceiver__rtx_ssrc", {})
+        osn = int.from_bytes(packet.payload[0:2], "big") if rtx and len(packet.payload) >= 2 else None
+        REC.video_pkts.append((time.monotonic(), packet.timestamp, packet.sequence_number, osn,
+                               bytes(packet.payload[2:6] if rtx else packet.payload[:4]), packet.ssrc))
     # abs_send_time is (ntp>>14)&0xFFFFFF: 24-bit, 2^-18 s units, wraps every
     # 64 s. Client and server share the host clock, so skew error is ~0.
     ast = getattr(packet.extensions, "abs_send_time", None)
@@ -180,21 +191,34 @@ class Shaper:
     with a switch-fidelity tail-drop cap (no unbounded bufferbloat)."""
     CAP_BYTES = 250_000
 
-    def __init__(self, rate_bps: Optional[float] = None, delay_s: float = 0.0) -> None:
+    def __init__(self, rate_bps: Optional[float] = None, delay_s: float = 0.0,
+                 loss: float = 0.0, seed: int = 1, outage: Optional[tuple] = None) -> None:
         self.rate = rate_bps
         self.delay_s = delay_s
-        self.free_at = time.monotonic()
+        self.loss = loss
+        # (period_s, length_s): every period, nothing gets through for length.
+        self.outage = outage
+        self.rng = random.Random(seed)
+        self.t0 = self.free_at = time.monotonic()
         self.queued_bytes = 0
         self.dropped = 0
+        self.lost = 0
         self.shaped = 0
     def push(self, data: bytes, emit) -> None:
-        """Schedule `emit` at the datagram's shaped departure time.
+        """Schedule `emit` at the datagram's shaped departure time, or lose the
+        datagram with probability `loss` from a seeded stream, so a run repeats.
 
         Args:
             data: The datagram, sized against the token bucket.
             emit: Zero-argument callable that actually sends it.
         """
         self.shaped += 1
+        if self.loss and self.rng.random() < self.loss:
+            self.lost += 1
+            return
+        if self.outage and (time.monotonic() - self.t0) % self.outage[0] < self.outage[1]:
+            self.lost += 1
+            return
         loop = asyncio.get_running_loop()
         if self.rate is None:
             loop.call_later(self.delay_s, emit) if self.delay_s else emit()
@@ -357,8 +381,11 @@ async def run_client(ws_url: str, measure_s: float, warmup_s: float,
                             RTCSessionDescription(sdp=sdp, type=t))
                         answer = await pc.createAnswer()
                         await pc.setLocalDescription(answer)
+                        # The server sends to these relays, so what enters them is
+                        # its media: the shapers swap so `down` shapes the
+                        # server-to-client leg on every relay.
                         answer_sdp = await rewrite_candidates(
-                            pc.localDescription.sdp, up, down, "answer")
+                            pc.localDescription.sdp, down, up, "answer")
                         await ws.send_str(peer + " " + json.dumps(
                             {"sdp": {"type": "answer", "sdp": answer_sdp}}))
                         LOG.info("answer sent")
@@ -456,7 +483,7 @@ def measure_window(rec: Optional[Recorder] = None) -> dict:
     gaps.sort()
     over60 = sum(1 for g in gaps if g > 0.060)
     frames = {}
-    for t, ts in rec.video_pkts:
+    for t, ts, *_ in rec.video_pkts:
         d = frames.get(ts)
         if d is None:
             frames[ts] = [t, t, 1]
@@ -575,6 +602,11 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
             load_proc = H.spawn(
                 [os.path.join(H.TOOLS, "pacer_load_gen.sh")],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # The listener answers before the service has registered its signaling
+        # peer; a session asked for in between is refused.
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and "Registered peer server-" not in H.server_log(log):
+            await asyncio.sleep(0.2)
         log_before = os.path.getsize(log)
         url = f"ws://127.0.0.1:{H.PORT}/api/ws"
         # The oscillating regime needs to be watched across many periods:

@@ -203,8 +203,10 @@ async def nacks() -> None:
 
     async def retransmit(packet):
         sent.append(packet.sequence_number)
+        return True
 
     stand_in = SimpleNamespace(_RTCRtpSender__rtp_history=history, _retransmit=retransmit,
+                               _RTCRtpSender__abandoned=None,
                                _emit_pli_event=lambda: events.append("pli"),
                                emit=lambda name, *args: events.append((name,) + args))
     nack = lambda *lost: RtcpRtpfbPacket(fmt=RTCP_RTPFB_NACK, ssrc=1, media_ssrc=2, lost=list(lost))
@@ -217,8 +219,8 @@ async def nacks() -> None:
     res.check("one NACK names each lost frame once, and only frames NACKed twice",
               events == [("lost_frame", 10), ("lost_frame", 11)] and sent == [2, 3, 2, 1, 3], events)
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(99, 3))
-    res.check("a NACK past the history asks for a keyframe and stops there",
-              events[-1] == "pli" and sent == [2, 3, 2, 1, 3], (events, sent))
+    res.check("a NACK past the history asks for a keyframe and still repairs the rest",
+              events[-1] == "pli" and sent == [2, 3, 2, 1, 3, 3], (events, sent))
 
 asyncio.run(nacks())
 

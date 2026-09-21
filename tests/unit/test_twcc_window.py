@@ -17,10 +17,12 @@ still be backed off exactly as before.
 """
 import os
 import struct
+from types import SimpleNamespace
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 from selkies.webrtc.rtcdtlstransport import RTCDtlsTransport  # noqa: E402
+from selkies.webrtc.rtp import pack_twcc_fci  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
@@ -44,6 +46,7 @@ def transport() -> RTCDtlsTransport:
     tr = object.__new__(RTCDtlsTransport)
     tr._twcc_seq = 0
     tr._twcc_history = {}
+    tr._twcc_pruned_at = 0.0
     tr.twcc_estimate = None
     tr._pacer = None
     tr._twcc_window = RTCDtlsTransport._twcc_window_zero()
@@ -103,6 +106,73 @@ def main() -> int:
     res.check("a fully lost interval reads as total loss with no goodput",
               window["loss_fraction"] == 1.0 and window["goodput_bps"] == 0,
               window)
+
+    # The deltas chain arrival times from the feedback's reference time, so
+    # where a train sits inside the 64 ms reference grid must not move its rate.
+    def arrivals(tr: RTCDtlsTransport, times: list, fed: list) -> dict:
+        for i in range(len(times)):
+            tr._twcc_history[i] = (PACKET_BYTES, 0.0)
+        tr._pacer = SimpleNamespace(set_goodput_bps=fed.append)
+        tr._twcc_process_feedback(pack_twcc_fci(0, times, 0))
+        return tr.twcc_estimate
+
+    rates = set()
+    for offset_ms in (0, 16, 32, 48, 63):
+        rates.add(arrivals(transport(), [6400.0 + offset_ms + i for i in range(20)], [])["goodput_bps"])
+    res.check("goodput is measured between the arrivals, wherever the reference time falls",
+              rates == {9_600_000}, rates)
+    fed: list = []
+    estimate = arrivals(transport(), [100.0, 103.0, 101.0, 102.0], fed)
+    res.check("reordered arrivals span from the earliest to the latest, without the earliest's bytes",
+              round(estimate["recv_span_s"], 6) == 0.003 and estimate["goodput_bps"] == 9_600_000,
+              estimate)
+    res.check("a window the wire delivered whole sizes no brake", fed == [], fed)
+    fed = []
+    arrivals(transport(), [100.0 + i if i % 5 else None for i in range(20)], fed)
+    res.check("a window the wire cut in several places does", len(fed) == 1 and fed[0] > 0, fed)
+    fed = []
+    arrivals(transport(), [100.0 + i if not 4 <= i < 12 else None for i in range(20)], fed)
+    res.check("one run of loss, however long, is an outage and sizes no brake", fed == [], fed)
+    tr = transport()
+    for _ in range(3000):
+        tr._twcc_next(PACKET_BYTES)
+    res.check("a storm of sent packets waits in the history for its feedback, whatever its count",
+              len(tr._twcc_history) == 3000, len(tr._twcc_history))
+    tr._twcc_history = {seq: (PACKET_BYTES, at - 3.0) for seq, (_, at) in tr._twcc_history.items()}
+    tr._twcc_pruned_at = 0.0
+    tr._twcc_next(PACKET_BYTES)
+    res.check("and is let go once older than the feedback could be", len(tr._twcc_history) == 1, len(tr._twcc_history))
+    estimate = arrivals(transport(), [100.0 + i for i in range(10)] + [900.0 + i for i in range(10)], [])
+    res.check("an outage inside a window is silence, not a rate: the stretches on either side measure",
+              round(estimate["recv_span_s"], 6) == 0.018 and estimate["goodput_bps"] == 9_600_000, estimate)
+    tr = transport()
+    for i in range(20):
+        tr._twcc_history[i] = (PACKET_BYTES, 0.0)
+    for i in (5, 6, 7):
+        tr._twcc_dropped(i)
+    tr._twcc_process_feedback(pack_twcc_fci(0, [100.0 + i if i not in (5, 6, 7, 12) else None for i in range(20)], 0))
+    res.check("packets the pacer dropped are not the wire's loss when the receiver reports them missing",
+              tr.twcc_estimate["lost"] == 1 and round(tr.twcc_estimate["loss_fraction"], 3) == round(1 / 17, 3)
+              and tr.take_twcc_window()["lost"] == 1, tr.twcc_estimate)
+    fed = []
+    estimate = arrivals(transport(), [100.0], fed)
+    res.check("one arrival spans nothing: its bytes count, no rate is published and the pacer is not fed",
+              estimate["bytes_acked"] == PACKET_BYTES and estimate["goodput_bps"] == 0 and fed == [],
+              (estimate, fed))
+
+    tr = transport()
+    for i in range(20):
+        tr._twcc_history[i] = (PACKET_BYTES, 0.0)
+    fci = pack_twcc_fci(0, [6400.0 + i for i in range(20)], 0)
+    tr._twcc_process_feedback(fci[:-8])
+    res.check("a feedback whose deltas run short consumes no history and publishes nothing",
+              len(tr._twcc_history) == 20 and tr.twcc_estimate is None, (len(tr._twcc_history), tr.twcc_estimate))
+    tr._twcc_process_feedback(struct.pack("!HH", 0, 20) + bytes(4))
+    res.check("one whose chunks run short is dropped the same way",
+              len(tr._twcc_history) == 20 and tr.twcc_estimate is None, len(tr._twcc_history))
+    tr._twcc_process_feedback(fci)
+    res.check("the whole feedback then consumes exactly the packets it acknowledges",
+              len(tr._twcc_history) == 0 and tr.twcc_estimate["received"] == 20, len(tr._twcc_history))
 
     return 0 if res.summary() else 1
 

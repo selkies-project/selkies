@@ -1088,7 +1088,8 @@ class WebRTCService(BaseStreamingService):
             if self.media_pipeline:
                 self.media_pipeline.last_resize_success = False
 
-    async def request_idr_for_display(self, display_id: str = "primary") -> None:
+    async def request_idr_for_display(self, display_id: str = "primary",
+                                      unless_pending: bool = False) -> None:
         """Schedule a dynamic IDR frame on the display's encoder, throttled by a
         per-display floor (websockets REQUEST_KEYFRAME parity).
 
@@ -1096,15 +1097,25 @@ class WebRTCService(BaseStreamingService):
         data-channel request or PLI storm would let a single client force
         keyframe bursts for every consumer. A request landing inside the floor
         is satisfied by the IDR the previous request already scheduled.
+
+        Args:
+            unless_pending: Hold the request only while that IDR has yet to be
+                captured, whatever the floor says: a pacer's GOP reset needs a
+                keyframe from after the reset, and one captured before it
+                leaves the stream dead until the pacer's resurrect timeout.
         """
         display_id = display_id or "primary"
+        pipeline = self.display_pipelines.get(display_id)
+        if pipeline is None:
+            return
         now = time.monotonic()
-        if now - self._last_idr_request_times.get(display_id, 0.0) < IDR_REQUEST_FLOOR_S:
+        if unless_pending:
+            if pipeline.idr_pending:
+                return
+        elif now - self._last_idr_request_times.get(display_id, 0.0) < IDR_REQUEST_FLOOR_S:
             return
         self._last_idr_request_times[display_id] = now
-        pipeline = self.display_pipelines.get(display_id)
-        if pipeline is not None:
-            await pipeline.dynamic_idr_frame()
+        await pipeline.dynamic_idr_frame()
 
     def invalidate_reference_for_display(self, display_id: str, frame_id: int) -> None:
         """Tell the display's encoder a peer lost `frame_id`, so the frames after it stop
@@ -2671,7 +2682,7 @@ class WebRTCService(BaseStreamingService):
                 # Must hit the encoder pipeline: video rides the pre-encoded pack()
                 # path, where the sender's __force_keyframe flag is silently ignored.
                 request_keyframe=lambda did_=display_id: asyncio.ensure_future(
-                    self.request_idr_for_display(did_)),
+                    self.request_idr_for_display(did_, unless_pending=True)),
             )
             kf_bytes = getattr(vsender, "_keyframe_bytes", None)
             if kf_bytes:

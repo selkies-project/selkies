@@ -54,6 +54,8 @@ from pylibsrtp import Policy, Session
 
 from . import clock, rtp
 from .pacer import (
+    BRAKE_LOSS_FRACTION,
+    BRAKE_LOSS_RUNS,
     CLASS_DC,
     CLASS_RTCP,
     CLASS_VIDEO,
@@ -79,6 +81,11 @@ from .stats import RTCStatsReport, RTCTransportStats
 CERTIFICATE_T = TypeVar("CERTIFICATE_T", bound="RTCCertificate")
 K = TypeVar("K")
 V = TypeVar("V")
+
+# A gap between two arrivals this long is silence, not delivery.
+TWCC_IDLE_US = 250_000
+# How long a sent packet waits in the transport-cc history for its feedback.
+TWCC_HISTORY_S = 2.0
 
 logger = logging.getLogger(__name__)
 
@@ -423,6 +430,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         # receiver's feedback, and the latest loss/delay estimate derived from it.
         self._twcc_seq = 0
         self._twcc_history: dict[int, tuple[int, float]] = {}
+        self._twcc_pruned_at = 0.0
         self.twcc_estimate: Optional[dict] = None
         self._twcc_window = self._twcc_window_zero()
         # Receive side of transport-wide congestion control: a sender that
@@ -809,6 +817,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
                 send_now=self.transport._send,
                 send_now_data=_send_now_data,
                 request_keyframe=request_keyframe,
+                on_dropped=self._twcc_dropped,
             )
         elif request_keyframe is not None:
             self._pacer._request_keyframe = request_keyframe
@@ -829,7 +838,11 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
     def pacer_snapshot(self) -> Optional[dict]:
         return self._pacer.snapshot() if self._pacer is not None else None
 
-    async def _send_rtp(self, data: bytes, rtc_class: Optional[int] = None) -> None:
+    async def _send_rtp(self, data: bytes, rtc_class: Optional[int] = None,
+                        twcc_seq: Optional[int] = None) -> bool:
+        """Protect and send one RTP or RTCP packet; False when the pacer dropped
+        it. `twcc_seq` names the packet in the transport-cc history, so a drop
+        is accounted as one."""
         if self._state != State.CONNECTED:
             raise ConnectionError("Cannot send encrypted RTP, not connected")
 
@@ -839,12 +852,14 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         else:
             data = self._tx_srtp.protect(data)
             cls = rtc_class if rtc_class is not None else CLASS_VIDEO
+        sent = True
         if self._pacer is not None:
-            await self._pacer.send(data, cls)
+            sent = await self._pacer.send(data, cls, twcc_seq)
         else:
             await self.transport._send(data)
         self.__tx_bytes += len(data)
         self.__tx_packets += 1
+        return sent
 
     async def _twcc_received(self, seq: int, arrival_ms: float, media_ssrc: int,
                              rtcp_ssrc: Optional[int]) -> None:
@@ -899,16 +914,39 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         size and send time for matching against the receiver's transport-cc feedback."""
         seq = self._twcc_seq
         self._twcc_seq = (self._twcc_seq + 1) & 0xFFFF
-        self._twcc_history[seq] = (size, time.time())
-        if len(self._twcc_history) > 2048:
-            for old in sorted(self._twcc_history)[:1024]:
-                self._twcc_history.pop(old, None)
+        now = time.time()
+        self._twcc_history[seq] = (size, now)
+        # Bounded by age, not count: a retransmission storm allocates thousands
+        # of numbers a second, and one let go before its feedback arrives would
+        # read as wire loss. Insertion order is allocation order.
+        if len(self._twcc_history) > 2048 and now - self._twcc_pruned_at > 0.25:
+            self._twcc_pruned_at = now
+            for old, (_size, at) in list(self._twcc_history.items()):
+                if now - at < TWCC_HISTORY_S:
+                    break
+                del self._twcc_history[old]
         return seq
+
+    def _twcc_dropped(self, seq: int) -> None:
+        """Record that the pacer dropped the packet sent under `seq`, so the
+        receiver reporting it missing counts as nothing the wire lost."""
+        if seq in self._twcc_history:
+            self._twcc_history[seq] = (0, self._twcc_history[seq][1])
 
     def _twcc_process_feedback(self, fci: bytes) -> None:
         """Decode a transport-cc feedback FCI (draft-holmer-rmcat-transport-wide-cc):
         walk the packet-status chunks and receive deltas, join them against the send
-        history, and publish a loss / throughput / one-way-delay-trend estimate."""
+        history, and publish a loss / throughput estimate.
+
+        The deltas chain arrival times: the first is the first arrival's offset
+        from the feedback's reference time, each later one the gap from the
+        arrival before, so the interval the bytes were delivered over runs from
+        the earliest arrival to the latest, and the earliest packet's bytes were
+        not delivered inside it. A silence of TWCC_IDLE_US or more between two
+        arrivals is left out of that interval, with the packet ending it: it is
+        an outage or an idle sender, and a rate measured across it would say
+        the wire carries almost nothing. A feedback whose chunks or deltas run
+        short is dropped whole, so a malformed one consumes no history."""
         if len(fci) < 8:
             return
         base_seq, status_count = struct.unpack("!HH", fci[0:4])
@@ -927,58 +965,93 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             else:
                 for i in range(7):
                     statuses.append((chunk >> (12 - 2 * i)) & 0x3)
+        if len(statuses) < status_count:
+            return
         statuses = statuses[:status_count]
 
-        received = bytes_acked = 0
-        delta_sum_us = 0.0
+        arrivals: list[tuple[int, float]] = []
+        missing: list[int] = []
+        at_us = 0.0
         for i, symbol in enumerate(statuses):
-            if symbol in (1, 2):
-                received += 1
-                if pos < len(fci):
-                    if symbol == 1:
-                        delta_sum_us += fci[pos] * 250
-                        pos += 1
-                    elif pos + 2 <= len(fci):
-                        delta_sum_us += (
-                            struct.unpack("!h", fci[pos : pos + 2])[0] * 250
-                        )
-                        pos += 2
-                sent = self._twcc_history.pop((base_seq + i) & 0xFFFF, None)
-                if sent is not None:
-                    bytes_acked += sent[0]
+            if symbol == 1:
+                if pos >= len(fci):
+                    return
+                at_us += fci[pos] * 250
+                pos += 1
+            elif symbol == 2:
+                if pos + 2 > len(fci):
+                    return
+                at_us += struct.unpack("!h", fci[pos : pos + 2])[0] * 250
+                pos += 2
+            else:
+                missing.append((base_seq + i) & 0xFFFF)
+                continue
+            arrivals.append(((base_seq + i) & 0xFFFF, at_us))
         if not statuses:
             return
-        lost = len(statuses) - received
-        # Receive-side pacing span; against bytes_acked this bounds goodput, and its
-        # growth across feedbacks indicates queuing delay building up.
-        span_s = max(delta_sum_us / 1e6, 1e-4)
+        received = len(arrivals)
+        # A packet the pacer dropped was never on the wire to lose. Loss the
+        # wire spread through the window says it is short of room; one run of
+        # it is an outage, which says nothing about the room there is.
+        lost = runs = 0
+        previous = None
+        for seq in missing:
+            if self._twcc_history.pop(seq, (1,))[0] == 0:
+                continue
+            lost += 1
+            if previous is None or (seq - previous) & 0xFFFF != 1:
+                runs += 1
+            previous = seq
+        # The delivery interval is the time between arrivals, less any silence
+        # long enough to be an outage or an idle sender rather than a rate; the
+        # packet opening each stretch was not delivered inside it.
+        by_time = sorted(arrivals, key=lambda a: a[1])
+        opening = {by_time[0][0]} if by_time else set()
+        span_us = 0.0
+        for (_s0, t0), (s1, t1) in zip(by_time, by_time[1:]):
+            if t1 - t0 > TWCC_IDLE_US:
+                opening.add(s1)
+            else:
+                span_us += t1 - t0
+        span_s = span_us / 1e6
+        bytes_acked = spanned = 0
+        for seq, _at in arrivals:
+            sent = self._twcc_history.pop(seq, None)
+            if sent is not None:
+                bytes_acked += sent[0]
+                if seq not in opening:
+                    spanned += sent[0]
+        goodput = int(spanned * 8 / span_s) if span_s > 0 else 0
         self.twcc_estimate = {
             "received": received,
             "lost": lost,
-            "loss_fraction": lost / len(statuses),
+            "loss_fraction": lost / max(1, received + lost),
             "bytes_acked": bytes_acked,
             "recv_span_s": span_s,
-            "goodput_bps": int(bytes_acked * 8 / span_s) if received else 0,
+            "goodput_bps": goodput,
         }
         window = self._twcc_window
         window["received"] += received
         window["lost"] += lost
         window["bytes_acked"] += bytes_acked
+        window["bytes_spanned"] += spanned
         window["span_s"] += span_s
-        if self._pacer is not None and bytes_acked >= MIN_GOODPUT_SAMPLE_BYTES:
-            # Windows carrying almost no data (pure keepalive / control)
-            # carry no rate signal; feeding them to the pacer slams the pace.
-            self._pacer.set_goodput_bps(self.twcc_estimate["goodput_bps"])
+        # A brake sizes itself from a rate the wire limited. A window the wire
+        # delivered whole, or one carrying almost no data, measured the pacer's
+        # own output instead, which a braked pacer can only ever read back.
+        if (self._pacer is not None and goodput and spanned >= MIN_GOODPUT_SAMPLE_BYTES
+                and runs >= BRAKE_LOSS_RUNS and lost >= BRAKE_LOSS_FRACTION * (received + lost)):
+            self._pacer.set_goodput_bps(goodput)
         logger.debug(
             "TWCC feedback: recv=%d lost=%d goodput=%s bps",
             received,
             lost,
-            self.twcc_estimate["goodput_bps"],
+            goodput,
         )
 
     @staticmethod
     def _twcc_window_zero() -> dict:
-        return {"received": 0, "lost": 0, "bytes_acked": 0, "span_s": 0.0}
+        return {"received": 0, "lost": 0, "bytes_acked": 0, "bytes_spanned": 0, "span_s": 0.0}
 
     def take_twcc_window(self) -> Optional[dict]:
         """Drain the transport-cc feedback accumulated since the last call.
@@ -1000,13 +1073,13 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         if not packets:
             return None
         self._twcc_window = self._twcc_window_zero()
-        span_s = max(window["span_s"], 1e-4)
         return {
             "received": window["received"],
             "lost": window["lost"],
             "loss_fraction": window["lost"] / packets,
             "bytes_acked": window["bytes_acked"],
-            "goodput_bps": int(window["bytes_acked"] * 8 / span_s) if window["received"] else 0,
+            "goodput_bps": (int(window["bytes_spanned"] * 8 / window["span_s"])
+                            if window["span_s"] > 0 else 0),
         }
 
     def _set_role(self, role: str) -> None:
