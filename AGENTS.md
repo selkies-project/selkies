@@ -212,7 +212,7 @@ Each is documented in full where named; read that before changing the subsystem.
   WebRTC a second NACK for a packet the sender still holds does (`RTCRtpSender._retransmit`, the `lost_frame`
   event, `RTCApp.on_lost_frame`). A stream whose encoder names no reference -- a stripe, a session that cannot
   invalidate -- gets the key frame instead, and so does a run of drops the encoder never predicts past, or an H.264 loss covering the frame at the
-  encoder's `frame_num` wrap, which FFmpeg's decoder cannot be predicted past.
+  encoder's `frame_num` wrap, which the browsers' FFmpeg decoder cannot be predicted past.
 - The webcam uplink mirrors the microphone: nothing about a frame is decoded or copied in Python
   (`addons/selkies-web-core/lib/webcam-capture.js` header, `src/selkies/webcam.py`,
   `addons/v4l2-interposer/v4l2_interposer.c` header for the interposer's locking rules).

@@ -25,8 +25,9 @@ import helpers as H
 import websockets
 
 TOLD = "the encoder predicts past it"
-#: The wire id VP9 frames carry in the high nibble of their type byte.
+#: The wire ids VP9 and H.265 frames carry in the high nibble of their type byte.
 VP9 = 3
+H265 = 5
 
 
 def settings(dpi: int = 96, encoder: str = "h264enc") -> str:
@@ -49,46 +50,70 @@ async def saw(mark: int, substr: str, timeout: float = 15) -> bool:
 
 
 async def drain(ws, out: list = None) -> None:
-    """Read the stream, noting each video frame's codec, id, and whether it decodes alone."""
+    """Read the stream, noting each video frame's codec, id, whether it decodes alone, and the
+    frame it predicts from (its own id where it names none)."""
     while True:
         try:
             msg = await ws.recv()
         except Exception:
             return
         if out is not None and isinstance(msg, (bytes, bytearray)) and len(msg) > 12 and msg[0] == 0x04:
-            out.append((msg[1] >> 4, int.from_bytes(msg[2:4], "big"), msg[1] & 0x0f == 0x01))
+            out.append((msg[1] >> 4, int.from_bytes(msg[2:4], "big"), msg[1] & 0x0f == 0x01,
+                        int.from_bytes(msg[10:12], "big")))
 
 
-async def key_frame_repair(res: "H.Results") -> None:
-    """A session whose encoder cannot leave the frame out is repaired with a key frame.
+async def stream(ws, codec: int, seen: list) -> list:
+    """The frames of `codec` once the switch to it has taken: the switch restarts the capture,
+    so the stream it replaces is not what is measured."""
+    deadline = time.time() + 25
+    while time.time() < deadline and not any(c == codec for c, *_ in seen):
+        await asyncio.sleep(0.5)
+    return [f for f in seen if f[0] == codec]
 
-    Only libx264 and NVENC predict past a lost frame; every codec libavcodec
-    drives names no reference, and pixelflux codes a key frame there instead.
-    No backend tracks a VP9 session, so this arm reads the same on any host.
+
+async def lost_frame_answers(res: "H.Results") -> None:
+    """A lost frame is predicted past where the encoder can name its references, and repaired
+    with a key frame where it cannot.
+
+    Software VP9 tracks its references through libvpx's flexible reference mode, so the frame
+    after the report predicts from one before the loss and no key frame is spent; a hardware
+    VP9 session on a render node does the same through its reference slots. Software H.265
+    (x265 or kvazaar) offers nothing to steer its references with, names none, and pixelflux
+    codes a key frame there instead; on a host whose GPU takes the H.265 session the encoder
+    predicts past the loss as VP9 does, which the server's encoder line tells apart.
     """
     uri = f"ws://localhost:{H.PORT}/api/websockets"
     async with websockets.connect(uri, max_size=None) as ws:
         await asyncio.wait_for(ws.recv(), timeout=10)
-        await ws.send(settings(encoder="vp9enc"))
         seen: list = []
         pump = asyncio.create_task(drain(ws, seen))
-        # The switch restarts the capture, so wait for the codec that was asked
-        # for rather than measuring the stream it replaces.
-        deadline = time.time() + 25
-        while time.time() < deadline and not any(c == VP9 for c, _, _ in seen):
-            await asyncio.sleep(0.5)
-        res.check("the VP9 session streams", any(c == VP9 for c, _, _ in seen),
-                  f"{len(seen)} frames, codecs {sorted({c for c, _, _ in seen})}")
-        vp9 = [f for f in seen if f[0] == VP9]
-        if vp9:
-            last = vp9[-1][1]
+        for encoder, codec, name in [("vp9enc", VP9, "VP9"), ("h265enc", H265, "H.265")]:
+            seen.clear()
+            mark = len(H.server_log())
+            await ws.send(settings(encoder=encoder))
+            frames = await stream(ws, codec, seen)
+            res.check(f"the {name} session streams", bool(frames),
+                      f"{len(seen)} frames, codecs {sorted({c for c, *_ in seen})}")
+            if not frames:
+                continue
+            tracked = codec == VP9 or "Encoder: software H265" not in H.server_log()[mark:]
+            last = frames[-1][1]
             seen.clear()
             await ws.send(f"LOST_FRAME {last}")
             await asyncio.sleep(2.0)
-            frames = [f for f in seen if f[0] == VP9]
-            keys = sum(1 for _, _, key in frames if key)
-            res.check("a session that cannot predict past it is repaired with a key frame",
-                      keys > 0, f"{len(frames)} frames, {keys} key")
+            frames = [f for f in seen if f[0] == codec]
+            keys = sum(1 for _, _, key, _ in frames if key)
+            # A frame or two encoded before the report reached the encoder still
+            # predict from the lost one; the ones after it reach back past it.
+            behind = [f for f in frames if not f[2] and f[3] != last and (last - f[3]) % 65536 < 0x8000]
+            detail = (f"{len(frames)} frames, {keys} key, {len(behind)} predicting from before the loss, "
+                      f"first from {frames[0][3] if frames else None}, lost {last}")
+            if tracked:
+                res.check(f"{name}: the frames after the report predict from before the loss and cost no key frame",
+                          keys == 0 and bool(behind), detail)
+            else:
+                res.check(f"{name}: a session that cannot predict past it is repaired with a key frame",
+                          keys > 0, detail)
         pump.cancel()
 
 
@@ -127,7 +152,7 @@ async def drive() -> "H.Results":
                   await saw(mark, "Keyframe requested by"), H.server_log()[mark:][-200:])
         pump.cancel()
     await asyncio.sleep(1.0)
-    await key_frame_repair(res)
+    await lost_frame_answers(res)
     res.summary()
     return res
 
