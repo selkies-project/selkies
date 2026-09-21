@@ -1271,10 +1271,9 @@ def encoder_rung(encoder: str, backends: Optional[Dict[str, Dict[str, Optional[s
 
 def software_encoders() -> Dict[str, str]:
     """The software encoder of each codec the installed pixelflux build carries, by
-    codec name: H.264 by the build's feature choice ("x264" or "openh264"), the
-    others by what the FFmpeg it links carries ("x265" or "kvazaar", "libvpx",
-    "svt-av1"). A codec without an entry has no software path in that build.
-    Rendering the settings reference needs no extension, and reads as the
+    codec name: H.264 and H.265 by the build's feature choice ("x264" or
+    "openh264", "x265" or "kvazaar"), "libvpx" for VP8 and VP9, and "svt-av1" for
+    AV1. Rendering the settings reference needs no extension, and reads as the
     default x264 build.
     """
     try:
