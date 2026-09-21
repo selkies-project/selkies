@@ -198,12 +198,14 @@ jobs:
       # Likewise the X server: the images build XLibre's Xvfb with the Selkies
       # patches, and the X11 layout the suites see depends on what the server
       # offers (an output per display against logical monitors), so the suites
-      # drive that server. The pin is read from the Dockerfile as well.
+      # drive that server. The pin and its checksum are read from the
+      # Dockerfile as well.
       - name: Resolve the patched Xvfb pin
         id: xvfb
         run: |
-          eval "$(grep -E '^ARG XLIBRE_TAG=' addons/base/Dockerfile | sed 's/^ARG //')"
+          eval "$(grep -E '^ARG XLIBRE_(TAG|SHA256)=' addons/base/Dockerfile | sed 's/^ARG //')"
           echo "tag=${XLIBRE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${XLIBRE_SHA256}" >> "$GITHUB_OUTPUT"
       - name: Cache the patched Xvfb
         id: xvfb-cache
         uses: actions/cache@v6
@@ -219,7 +221,8 @@ jobs:
             libglvnd-dev libpixman-1-dev libselinux1-dev libssl-dev libx11-dev libxau-dev \
             libxcvt-dev libxdmcp-dev libxext-dev libxfont-dev libxkbfile-dev \
             libxshmfence-dev mesa-common-dev x11proto-dev xtrans-dev
-          XLIBRE_TAG="${{ steps.xvfb.outputs.tag }}" PREFIX="$HOME/.local/xvfb" addons/base/build-xvfb.sh
+          XLIBRE_TAG="${{ steps.xvfb.outputs.tag }}" XLIBRE_SHA256="${{ steps.xvfb.outputs.sha256 }}" \
+            PREFIX="$HOME/.local/xvfb" addons/base/build-xvfb.sh
       - name: Put the patched Xvfb on the session path
         run: echo "$HOME/.local/xvfb/bin" >> "$GITHUB_PATH"
       - name: Verify the patched Xvfb

@@ -209,6 +209,45 @@ jobs:
           path: /tmp/digests/desktop/*
           if-no-files-found: error
           retention-days: 1
+      # What the images were built from and hold, for the release to attach.
+      # The distribution image is a moving tag, so its digest is read from the
+      # provenance the push attached; each package list is read out of the
+      # builder's cache rather than a pull of the image it describes.
+      - name: Record what the images were built from
+        env:
+          TAG_PREFIX: ${{ inputs.tag_prefix }}
+          FLAVOR: ${{ matrix.flavor.name }}
+          ARCH: ${{ matrix.arch.name }}
+          PLATFORM: ${{ matrix.arch.platform }}
+          BASE_DIGEST: ${{ steps.base.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -e
+          out="selkies-${TAG_PREFIX}-images-${FLAVOR}-${ARCH}.txt"
+          {
+            echo "# selkies ${TAG_PREFIX} ${FLAVOR} ${PLATFORM}: the images this build pushed, what they were built from, and the packages each holds"
+            echo "base ${BASE_IMAGE_NAME}@${BASE_DIGEST}"
+            echo "desktop ${IMAGE_NAME}@${DIGEST}"
+            docker buildx imagetools inspect "${BASE_IMAGE_NAME}@${BASE_DIGEST}" --format '{{json .Provenance}}' \
+              | jq -r '.. | objects | select(has("buildDefinition")) | .buildDefinition.resolvedDependencies[] | select(.uri | startswith("pkg:docker/")) | "distribution " + (.uri | capture("^pkg:docker/(?<name>[^@?]+)@(?<tag>[^?]+)") | "\(.name):\(.tag)") + "@sha256:" + .digest.sha256' \
+              | sort -u | grep .
+          } > "${out}"
+          mkdir -p /tmp/empty
+          for image in base desktop; do
+            case "${image}" in
+              base) ref="${BASE_IMAGE_NAME}@${BASE_DIGEST}" ;;
+              desktop) ref="${IMAGE_NAME}@${DIGEST}" ;;
+            esac
+            printf 'FROM %s\nFROM scratch\nCOPY --from=0 /var/lib/dpkg/status /status\n' "${ref}" \
+              | docker buildx build --platform "${PLATFORM}" --output "type=local,dest=/tmp/dpkg-${image}" -f - /tmp/empty
+            { echo; echo "# ${image} packages"; dpkg-query --admindir="/tmp/dpkg-${image}" -W -f '${binary:Package}=${Version}\n'; } >> "${out}"
+          done
+          wc -l "${out}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: images-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
+          path: selkies-*-images-*.txt
+          if-no-files-found: error
 
   merge:
     name: Merge base and desktop manifests (${{ matrix.flavor }})

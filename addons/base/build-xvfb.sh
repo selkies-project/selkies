@@ -13,11 +13,13 @@
 # toolchain and libraries; the protocol headers are built from source where
 # the installed ones predate what the server asks for.
 #
-# Inputs: XLIBRE_TAG (required); PREFIX (default /usr); DESTDIR (default
-# empty), the staging root the binary is installed under; PATCH_DIR (default:
-# patches/ beside this script).
+# Inputs: XLIBRE_TAG and XLIBRE_SHA256 (required), the release tag and the
+# checksum of the archive GitHub generates for it; PREFIX (default /usr);
+# DESTDIR (default empty), the staging root the binary is installed under;
+# PATCH_DIR (default: patches/ beside this script).
 set -euo pipefail
 : "${XLIBRE_TAG:?}"
+: "${XLIBRE_SHA256:?}"
 PREFIX="${PREFIX:-/usr}"
 DESTDIR="${DESTDIR:-}"
 PATCH_DIR="${PATCH_DIR:-$(cd "$(dirname "$0")" && pwd)/patches}"
@@ -25,15 +27,21 @@ SRC="$(mktemp -d)"
 trap 'rm -rf "$SRC"' EXIT
 export PKG_CONFIG_PATH="${PREFIX}/share/pkgconfig:${PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
 
+# The protocol headers' tag is for the reader; the commit is what gets built.
+XORGPROTO_TAG="xorgproto-2024.1"
+XORGPROTO_COMMIT="67469711055522b8adb2d795b01e7ba98cb8816c"
 pkg-config --exists 'presentproto >= 1.4' || {
-    git clone --depth 1 --branch xorgproto-2024.1 \
+    git clone --depth 1 --branch "${XORGPROTO_TAG}" \
         https://gitlab.freedesktop.org/xorg/proto/xorgproto.git "${SRC}/xorgproto"
+    commit="$(git -C "${SRC}/xorgproto" rev-parse HEAD)"
+    [ "${commit}" = "${XORGPROTO_COMMIT}" ] || { echo "${XORGPROTO_TAG} is at ${commit}, not ${XORGPROTO_COMMIT}" >&2; exit 1; }
     meson setup "${SRC}/xorgproto/build" "${SRC}/xorgproto" --prefix="${PREFIX}" --libdir=lib
-    ninja -C "${SRC}/xorgproto/build" install
+    DESTDIR='' ninja -C "${SRC}/xorgproto/build" install
 }
 
 curl -fsSL --retry 5 --connect-timeout 30 -o "${SRC}/xlibre.tar.gz" \
     "https://github.com/X11Libre/xserver/archive/refs/tags/${XLIBRE_TAG}.tar.gz"
+echo "${XLIBRE_SHA256}  ${SRC}/xlibre.tar.gz" | sha256sum -c -
 tar -xf "${SRC}/xlibre.tar.gz" -C "${SRC}"
 cd "${SRC}/xserver-${XLIBRE_TAG}"
 for p in "${PATCH_DIR}"/xvfb-*.patch; do

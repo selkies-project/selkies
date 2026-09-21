@@ -48,12 +48,18 @@ ARG DISTRIB_RELEASE="26.04"
 # outputs with CRTCs of their own that Selkies plugs in as a display is added.
 ARG WLROOTS_VERSION="0.19.3"
 ARG LABWC_VERSION="0.9.7"
+# Both come as the archives GitHub generates for their tags, with no tarball
+# of the project's own beside them, so each tag carries the checksum of the
+# archive the build has to receive.
 ARG XLIBRE_TAG="xlibre-xserver-25.2.2"
+ARG XLIBRE_SHA256="3c1f07f4b5f8a483473097be4b964ee97a2b92adde9de6c0d8d9d7217a382810"
 ARG EGL_X11_TAG="v1.0.6"
+ARG EGL_X11_SHA256="370870b0dea12dde0ddac0b77594ff94215cf2694ac0a5ded98f5d2f9864f6e0"
 
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS xvfb
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG XLIBRE_TAG
+ARG XLIBRE_SHA256
 # The retry configuration the final stage sets further down, repeated here for
 # the same reason the add-ons stage repeats it.
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
@@ -62,6 +68,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         ca-certificates \
         curl \
         gcc \
+        git \
         meson \
         ninja-build \
         patch \
@@ -90,7 +97,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
 COPY addons/base/build-xvfb.sh /build/
 COPY addons/base/patches/xvfb-*.patch /build/patches/
-RUN XLIBRE_TAG="${XLIBRE_TAG}" DESTDIR=/build-out /build/build-xvfb.sh
+RUN XLIBRE_TAG="${XLIBRE_TAG}" XLIBRE_SHA256="${XLIBRE_SHA256}" DESTDIR=/build-out /build/build-xvfb.sh
 
 # NVIDIA's EGL platform library for X11 (xcb and xlib), open source and
 # independent of the driver's version, built from its release tag: through it
@@ -100,6 +107,7 @@ RUN XLIBRE_TAG="${XLIBRE_TAG}" DESTDIR=/build-out /build/build-xvfb.sh
 FROM ${DISTRIB_IMAGE}:${DISTRIB_RELEASE} AS egl-x11
 ARG DEBIAN_FRONTEND="noninteractive"
 ARG EGL_X11_TAG
+ARG EGL_X11_SHA256
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
         > /etc/apt/apt.conf.d/99-selkies-retries
 RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -y \
@@ -124,6 +132,7 @@ RUN set -e; \
     cd /tmp; \
     curl -fsSL --retry 5 --connect-timeout 30 -o egl-x11.tar.gz \
         "https://github.com/NVIDIA/egl-x11/archive/refs/tags/${EGL_X11_TAG}.tar.gz"; \
+    echo "${EGL_X11_SHA256}  egl-x11.tar.gz" | sha256sum -c -; \
     tar -xf egl-x11.tar.gz; \
     cd "egl-x11-${EGL_X11_TAG#v}"; \
     meson setup build --prefix=/usr --libdir="lib/$(gcc -print-multiarch)" --buildtype=release; \
