@@ -673,7 +673,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "enum",
         "default": "h264enc",
         "meta": {"allowed": ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "h264enc-striped", "jpeg"]},
-        "help": "The default video encoder. Every full-frame encoder runs on NVENC or VA-API where the GPU carries the codec and falls back to the software encoder pixelflux was built with: h264enc (x264, or OpenH264 in a GPL-free build), h265enc (x265, or kvazaar in a GPL-free build), vp8enc and vp9enc (libvpx), av1enc (SVT-AV1). h264enc-striped is CPU-striped H.264, jpeg is CPU-striped JPEG. Clients are offered only the encoders this host serves: those whose codec the encode node's GPU encodes (probed once at startup) or the pixelflux build carries a software encoder for. A client whose browser cannot decode the codec steps through the allowed encoders it does decode, in this order (H.264 first when unrestricted), and to jpeg last. The WebRTC transport carries the full-frame encoders and a browser that declines the codec is answered with h264enc; h264enc-striped and jpeg are WebSocket-only.",
+        "help": "The default video encoder. Every full-frame encoder runs on NVENC or VA-API where the GPU carries the codec and falls back to the software encoder pixelflux was built with: h264enc (x264, or OpenH264 in a GPL-free build), h265enc (x265, or kvazaar in a GPL-free build), vp8enc and vp9enc (libvpx), av1enc (SVT-AV1). h264enc-striped is CPU-striped H.264, jpeg is CPU-striped JPEG. Clients are offered only the encoders this host serves: those whose codec the encode node's GPU encodes (probed once at startup) or the pixelflux build carries a software encoder for. A client whose browser cannot decode the codec steps through the allowed encoders it does decode, taking the codecs this host encodes in hardware before those it encodes in software, h264enc-striped after both, and jpeg last of all. The WebRTC transport carries the full-frame encoders and a browser that declines the codec is answered with h264enc; h264enc-striped and jpeg are WebSocket-only.",
     },
     {
         "name": "jpeg_quality",
@@ -1228,6 +1228,19 @@ def canonical_encoder(name: Any) -> str:
     return ENCODER_ALIASES.get(key, text)
 
 
+def encoder_rung(encoder: str, backends: Optional[Dict[str, Dict[str, Optional[str]]]]) -> int:
+    """Where an encoder sits on the fallback ladder, lowest taken first: a codec this host
+    has an engine for, then one it encodes in software, then the striped H.264 path, which no
+    full-frame codec is given up for, and JPEG, which every client decodes, last of all.
+    `backends` is `encoder_backends`, unknown before the probe has run.
+    """
+    if encoder == "jpeg":
+        return 3
+    if encoder in CPU_ONLY_ENCODERS:
+        return 2
+    return 0 if ((backends or {}).get(codec_for_encoder(encoder)) or {}).get("hardware") else 1
+
+
 def software_encoders() -> Dict[str, str]:
     """The software encoder of each codec the installed pixelflux build carries, by
     codec name: H.264 by the build's feature choice ("x264" or "openh264"), the
@@ -1750,7 +1763,8 @@ class AppSettings:
         self._operator_encoder_allowed = served
         value = getattr(self, "_operator_encoder_value", self.encoder)
         if value not in served:
-            fallback = "h264enc" if "h264enc" in served else served[0]
+            backends = self.encoder_backends()
+            fallback = min(served, key=lambda item: encoder_rung(item, backends))
             logger.warning("Encoder %r is not served on this host; using %r.", value, fallback)
             self._operator_encoder_value = fallback
             if self.encoder == value:

@@ -112,6 +112,18 @@ got = probe(
     " print('unknown' if t is None else ("
     " all(v['hardware'] in (None, 'nvenc', 'vaapi') for v in t.values())"
     f" and all(s.settings.encoder_served(e) for e in ({MENU}).split(','))))")
+# A menu whose configured encoder this host does not serve is replaced down the ladder.
+RUNG = ("b = {'h265': {'hardware': 'nvenc', 'software': 'x265'},"
+        " 'vp9': {'hardware': None, 'software': 'libvpx'}};"
+        " print(','.join(sorted(['jpeg', 'h264enc-striped', 'vp9enc', 'h265enc'],"
+        " key=lambda e: s.encoder_rung(e, b))))")
+rungs = probe(RUNG)
+check("the ladder runs hardware, software, striped, then JPEG",
+      rungs == "h265enc,vp9enc,h264enc-striped,jpeg", rungs)
+check("an unprobed table leaves the video encoders above the striped ones",
+      probe("print(s.encoder_rung('av1enc', None) < s.encoder_rung('h264enc-striped', None)"
+            " < s.encoder_rung('jpeg', None))") == "True")
+
 check("probed: the table is unknown or well formed and the menu is served", got in ("unknown", "True"), got)
 
 print(f"[encoder-backends] {passed}/{passed + failed} passed")

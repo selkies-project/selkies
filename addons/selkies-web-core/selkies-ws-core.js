@@ -2801,15 +2801,19 @@ let codecRefusalHeld = null;
 let encoderLocked = false;
 /** The encoders the server allows, in its order, when it restricts them. */
 let encoderAllowed = null;
+/** The backend of each codec on the server, `{codec: {hardware, software}}`, once it has probed. */
+let encoderBackends = null;
 /** The codecs this engine refused in this session. */
 const refusedCodecs = new Set();
 
 /**
- * The rungs a refusal walks when the server does not restrict the encoder:
- * H.264, which every engine decodes and every GPU encodes, then the other
- * video codecs, and JPEG, whose stripes need no `VideoDecoder`, last.
+ * The rungs a refusal walks when the server does not restrict the encoder: the full-frame
+ * video codecs, H.264 first since every engine decodes it and every GPU encodes it, then the
+ * striped H.264 path, which no full-frame codec is given up for, and JPEG, whose stripes need
+ * no `VideoDecoder`, last of all. `nextRung` lifts the codecs the server encodes in hardware
+ * above the full-frame ones it encodes in software.
  */
-const LADDER_ORDER = ['h264enc', 'h264enc-striped', 'vp9enc', 'vp8enc', 'av1enc', 'h265enc', 'jpeg'];
+const LADDER_ORDER = ['h264enc', 'vp9enc', 'vp8enc', 'av1enc', 'h265enc', 'h264enc-striped', 'jpeg'];
 
 /**
  * The next encoder a refusal steps to: the first of `LADDER_ORDER`, among
@@ -2824,7 +2828,11 @@ function nextRung(refused) {
     if (refused) refusedCodecs.add(refused);
     const allowed = Array.isArray(encoderAllowed) && encoderAllowed.length ? encoderAllowed : LADDER_ORDER;
     const rungs = LADDER_ORDER.filter((e) => allowed.includes(e));
-    for (const enc of rungs) {
+    // A codec the server has an engine for costs it no CPU, so it is asked for before the ones
+    // it would encode in software; the striped rungs keep their place at the end.
+    const accelerated = (enc) => isFullFrameVideo(enc)
+        && !!(encoderBackends && (encoderBackends[codecOfEncoder(enc)] || {}).hardware);
+    for (const enc of [...rungs.filter(accelerated), ...rungs.filter((e) => !accelerated(e))]) {
         if (enc === currentEncoderMode) continue;
         if (enc === 'jpeg') return enc;
         const codec = codecOfEncoder(enc);
@@ -7485,6 +7493,7 @@ class WorkerWebSocket {
                   console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
                   handleSettingsMessage(changes, true);
               }
+              if (obj.settings.encoder_backends) encoderBackends = obj.settings.encoder_backends.value || null;
               if (typeof window['encoder'] === 'string') settleServerEncoder(window['encoder'], obj.settings.encoder);
               const serverForcesManual = obj.settings && obj.settings.manual_resolution && obj.settings.manual_resolution.value === true;
 

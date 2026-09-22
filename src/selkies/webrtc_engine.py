@@ -64,7 +64,14 @@ try:
 except (ImportError, RuntimeError):
     pcmflux = None
 
-from .settings import settings as app_settings, inflate_gz_bounded, pipeline_starts_on, software_encoders, software_video_path
+from .settings import (
+    WEBRTC_ENCODER_CHOICES,
+    settings as app_settings,
+    inflate_gz_bounded,
+    pipeline_starts_on,
+    software_encoders,
+    software_video_path,
+)
 from . import audit
 from . import capture_demand
 from . import stream_stats
@@ -1658,10 +1665,17 @@ class RTCApp:
                     f"negotiated {negotiated.mimeType}")
         if negotiated.mimeType.lower() == wanted.lower():
             return
+        # The answer's first codec is the one the peer took out of everything offered, so the
+        # display follows it instead of giving up the codecs between it and H.264.
+        taken = next(
+            (enc for enc in WEBRTC_ENCODER_CHOICES
+             if self.get_mime_by_encoder(enc).lower() == negotiated.mimeType.lower()),
+            "h264enc",
+        )
         moved = False
         if self.on_video_codec_declined is not None:
             try:
-                moved = bool(await self.on_video_codec_declined(display_id, wanted, "h264enc"))
+                moved = bool(await self.on_video_codec_declined(display_id, wanted, taken))
             except Exception:
                 logger.warning("on_video_codec_declined failed", exc_info=True)
         if not moved:
