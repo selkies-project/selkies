@@ -2811,11 +2811,13 @@ const refusedCodecs = new Set();
  * video codecs by the measured time per frame of their software encoders (x264, SVT-AV1,
  * libvpx VP8, x265, libvpx VP9), then the striped H.264 path, which no full-frame codec is
  * given up for, and JPEG, whose stripes need no `VideoDecoder`, last of all. `nextRung` lifts
- * the codecs the server encodes in hardware above the full-frame ones it encodes in software.
- * The server walks the same order, its `ENCODER_LADDER`, for the menu's replacement pick and
- * the WebRTC offer.
+ * the codecs the server encodes in hardware above the full-frame ones it encodes in software,
+ * in `HARDWARE_ORDER`. The server walks the same orders, its `ENCODER_LADDER` and
+ * `HARDWARE_LADDER`, for the menu's replacement pick and the WebRTC offer.
  */
 const LADDER_ORDER = ['h264enc', 'av1enc', 'vp8enc', 'h265enc', 'vp9enc', 'h264enc-striped', 'jpeg'];
+/** The full-frame codecs by compression efficiency: the order the server's hardware codecs are asked for in. */
+const HARDWARE_ORDER = ['av1enc', 'h265enc', 'vp9enc', 'h264enc', 'vp8enc'];
 
 /**
  * The next encoder a refusal steps to: the first of `LADDER_ORDER`, among
@@ -2831,10 +2833,12 @@ function nextRung(refused) {
     const allowed = Array.isArray(encoderAllowed) && encoderAllowed.length ? encoderAllowed : LADDER_ORDER;
     const rungs = LADDER_ORDER.filter((e) => allowed.includes(e));
     // A codec the server has an engine for costs it no CPU, so it is asked for before the ones
-    // it would encode in software; the striped rungs keep their place at the end.
+    // it would encode in software, the most efficient first; the striped rungs keep their
+    // place at the end.
     const accelerated = (enc) => isFullFrameVideo(enc)
         && !!(encoderBackends && (encoderBackends[codecOfEncoder(enc)] || {}).hardware);
-    for (const enc of [...rungs.filter(accelerated), ...rungs.filter((e) => !accelerated(e))]) {
+    const hardware = HARDWARE_ORDER.filter((e) => rungs.includes(e) && accelerated(e));
+    for (const enc of [...hardware, ...rungs.filter((e) => !accelerated(e))]) {
         if (enc === currentEncoderMode) continue;
         if (enc === 'jpeg') return enc;
         const codec = codecOfEncoder(enc);

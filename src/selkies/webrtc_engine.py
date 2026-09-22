@@ -1519,8 +1519,8 @@ class RTCApp:
 
         Every codec matching the MIME type stays eligible — H.264 appears once
         per advertised profile. Behind it come the encoder menu's other codecs
-        in `encoder_rung` order, the host's hardware codecs before its software
-        ones and each group by encode time, so a browser that declines the codec
+        in `encoder_rung` order, the host's hardware codecs, most efficient first,
+        before its software ones by encode time, so a browser that declines the codec
         answers with the first of them it decodes (`_settle_video_codec` reads
         which one it took and moves the display there); the codecs off the menu
         follow, negotiated so a live encoder switch (`switch_display_codec`)
@@ -1679,6 +1679,10 @@ class RTCApp:
              if self.get_mime_by_encoder(enc).lower() == negotiated.mimeType.lower()),
             "h264enc",
         )
+        # Full color was settled for the codec offered; the one taken may carry a 4:4:4 this
+        # peer decodes no better, so it is settled again before the display moves.
+        if peer_obj.get("fullcolor_codecs") is not None and self.get_fullcolor_for_display(display_id):
+            await self._settle_fullcolor(client_peer_id, display_id, taken, peer_obj["fullcolor_codecs"])
         moved = False
         if self.on_video_codec_declined is not None:
             try:

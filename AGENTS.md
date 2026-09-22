@@ -200,8 +200,8 @@ Each is documented in full where named; read that before changing the subsystem.
   server settles that before the first offer (`RTCApp._settle_fullcolor`) and never switches the profile
   under a decoder mid-stream; only a locked full color goes to the refusal ladder (a report over WebRTC). That
   ladder is one order on both transports (`ENCODER_LADDER` and `encoder_rung` in settings.py, `LADDER_ORDER`
-  and `nextRung` in the core): the full-frame codecs the host encodes in hardware, then those it encodes in
-  software, each group by its software encoders' measured time per frame, then striped H.264, and JPEG last. Over WebSockets the client walks it
+  and `nextRung` in the core): the full-frame codecs the host encodes in hardware, most efficient first, then those it
+  encodes in software by their encoders' measured time per frame, then striped H.264, and JPEG last. Over WebSockets the client walks it
   through the encoders it decodes; over WebRTC the offer lists it behind the display's codec
   (`RTCApp.prefer_codec`) and the display follows the codec the answer took.
 - A picture a client could not decode is repaired by taking it out of the encoder's references, not by a key

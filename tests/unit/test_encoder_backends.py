@@ -114,18 +114,19 @@ got = probe(
     " all(v['hardware'] in (None, 'nvenc', 'vaapi') for v in t.values())"
     f" and all(s.settings.encoder_served(e) for e in ({MENU}).split(','))))")
 # A menu whose configured encoder this host does not serve is replaced down the ladder.
-RUNG = ("b = {'h265': {'hardware': 'nvenc', 'software': 'x265'},"
-        " 'vp9': {'hardware': None, 'software': 'libvpx'}};"
-        " print(','.join(sorted(['jpeg', 'h264enc-striped', 'vp9enc', 'h265enc', 'h264enc'],"
+RUNG = ("b = {'h264': {'hardware': 'nvenc', 'software': 'x264'}, 'h265': {'hardware': 'nvenc', 'software': 'x265'},"
+        " 'vp9': {'hardware': None, 'software': 'libvpx'}, 'av1': {'hardware': None, 'software': 'svt-av1'}};"
+        " print(','.join(sorted(['jpeg', 'h264enc-striped', 'vp9enc', 'h265enc', 'h264enc', 'av1enc'],"
         " key=lambda e: s.encoder_rung(e, b))))")
 rungs = probe(RUNG)
-check("the ladder runs hardware, software by encode time, striped, then JPEG",
-      rungs == "h265enc,h264enc,vp9enc,h264enc-striped,jpeg", rungs)
-# One ladder on both sides: the web client's LADDER_ORDER is the server's ENCODER_LADDER.
+check("the ladder runs hardware by efficiency, software by encode time, striped, then JPEG",
+      rungs == "h265enc,h264enc,av1enc,vp9enc,h264enc-striped,jpeg", rungs)
+# One ladder on both sides: the web client's orders are the server's.
 with open(os.path.join(REPO, "addons/selkies-web-core/selkies-ws-core.js")) as core:
-    client = re.search(r"const LADDER_ORDER = \[([^\]]*)\]", core.read()).group(1)
-client = ",".join(item.strip().strip("'") for item in client.split(","))
-check("the client walks the server's ladder", probe("print(','.join(s.ENCODER_LADDER))") == client, client)
+    orders = dict(re.findall(r"const (LADDER_ORDER|HARDWARE_ORDER) = \[([^\]]*)\]", core.read()))
+for name, server in (("LADDER_ORDER", "ENCODER_LADDER"), ("HARDWARE_ORDER", "HARDWARE_LADDER")):
+    client = ",".join(item.strip().strip("'") for item in orders[name].split(","))
+    check(f"the client's {name} is the server's {server}", probe(f"print(','.join(s.{server}))") == client, client)
 check("an unprobed table leaves the video encoders above the striped ones",
       probe("print(s.encoder_rung('av1enc', None) < s.encoder_rung('h264enc-striped', None)"
             " < s.encoder_rung('jpeg', None))") == "True")

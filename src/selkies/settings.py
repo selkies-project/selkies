@@ -673,7 +673,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "enum",
         "default": "h264enc",
         "meta": {"allowed": ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "h264enc-striped", "jpeg"]},
-        "help": "The default video encoder. Every full-frame encoder runs on NVENC or VA-API where the GPU carries the codec and falls back to the software encoder pixelflux was built with: h264enc (x264, or OpenH264 in a GPL-free build), h265enc (x265, or kvazaar in a GPL-free build), vp8enc and vp9enc (libvpx), av1enc (SVT-AV1). h264enc-striped is CPU-striped H.264, jpeg is CPU-striped JPEG. Clients are offered only the encoders this host serves: those whose codec the encode node's GPU encodes (probed once at startup) or the pixelflux build carries a software encoder for. A client whose browser cannot decode the codec steps through the allowed encoders it does decode, taking the codecs this host encodes in hardware before those it encodes in software, each group in order of encode time, h264enc-striped after both, and jpeg last of all. The WebRTC transport carries the full-frame encoders and offers them in the same order behind the display's codec, so a browser that declines the codec answers with the next one it decodes and the display moves to it; h264enc-striped and jpeg are WebSocket-only.",
+        "help": "The default video encoder. Every full-frame encoder runs on NVENC or VA-API where the GPU carries the codec and falls back to the software encoder pixelflux was built with: h264enc (x264, or OpenH264 in a GPL-free build), h265enc (x265, or kvazaar in a GPL-free build), vp8enc and vp9enc (libvpx), av1enc (SVT-AV1). h264enc-striped is CPU-striped H.264, jpeg is CPU-striped JPEG. Clients are offered only the encoders this host serves: those whose codec the encode node's GPU encodes (probed once at startup) or the pixelflux build carries a software encoder for. A client whose browser cannot decode the codec steps through the allowed encoders it does decode, taking the codecs this host encodes in hardware, most efficient first, before those it encodes in software, in order of encode time, then h264enc-striped, and jpeg last of all. The WebRTC transport carries the full-frame encoders and offers them in the same order behind the display's codec, so a browser that declines the codec answers with the next one it decodes and the display moves to it; h264enc-striped and jpeg are WebSocket-only.",
     },
     {
         "name": "jpeg_quality",
@@ -1190,9 +1190,13 @@ CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
 # The fallback ladder, one order on both transports: the full-frame codecs by the measured
 # time per frame of their software encoders (x264, SVT-AV1, libvpx VP8, x265, libvpx VP9),
 # then striped H.264, and JPEG, which every client decodes, last. `encoder_rung` lifts the
-# full-frame codecs the host encodes in hardware above the rest; the web client walks the
-# same order as its `LADDER_ORDER`.
+# full-frame codecs the host encodes in hardware above the rest, in `HARDWARE_LADDER`; the
+# web client walks the same orders as its `LADDER_ORDER` and `HARDWARE_ORDER`.
 ENCODER_LADDER = ("h264enc", "av1enc", "vp8enc", "h265enc", "vp9enc", "h264enc-striped", "jpeg")
+
+# The full-frame codecs by compression efficiency: the order a host with an engine for them
+# takes them in, CPU being no constraint there.
+HARDWARE_LADDER = ("av1enc", "h265enc", "vp9enc", "h264enc", "vp8enc")
 
 # CaptureSettings.encode_node_index where no setting names a node: pixelflux
 # resolves it through auto_gpu as the capture starts.
@@ -1237,10 +1241,10 @@ def canonical_encoder(name: Any) -> str:
 
 def encoder_rung(encoder: str, backends: Optional[Dict[str, Dict[str, Optional[str]]]]) -> Tuple[int, int]:
     """Where an encoder sits on the fallback ladder, lowest taken first: a codec this host
-    has an engine for, then one it encodes in software, then the striped H.264 path, which no
-    full-frame codec is given up for, and JPEG, which every client decodes, last of all, each
-    group in `ENCODER_LADDER`'s order. `backends` is `encoder_backends`, unknown before the
-    probe has run.
+    has an engine for, in `HARDWARE_LADDER`'s order, then one it encodes in software, then the
+    striped H.264 path, which no full-frame codec is given up for, and JPEG, which every client
+    decodes, last of all, the rest in `ENCODER_LADDER`'s order. `backends` is
+    `encoder_backends`, unknown before the probe has run.
     """
     if encoder == "jpeg":
         group = 3
@@ -1248,7 +1252,8 @@ def encoder_rung(encoder: str, backends: Optional[Dict[str, Dict[str, Optional[s
         group = 2
     else:
         group = 0 if ((backends or {}).get(codec_for_encoder(encoder)) or {}).get("hardware") else 1
-    return group, ENCODER_LADDER.index(encoder) if encoder in ENCODER_LADDER else len(ENCODER_LADDER)
+    order = HARDWARE_LADDER if group == 0 else ENCODER_LADDER
+    return group, order.index(encoder) if encoder in order else len(order)
 
 
 def software_encoders() -> Dict[str, str]:

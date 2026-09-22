@@ -226,7 +226,7 @@ def drive_locked(res: "H.Results", p: Any, pinned: bool = False) -> None:
         res.check("[locked] the 4:4:4 the server insists on is named once",
                   len(switched) == 1, switched or said[-2:])
         res.check("[locked] the client steps to a video codec it decodes before JPEG",
-                  encoder in ("vp8enc", "vp9enc", "av1enc"), encoder)
+                  encoder in ("h265enc", "vp8enc", "vp9enc", "av1enc"), encoder)
         res.check("[locked] and the stream plays there", played, played)
         spam = [t for t in said if "Error configuring VNC stripe decoder" in t]
         res.check("[locked] no stripe is left reporting the refusal per frame",
