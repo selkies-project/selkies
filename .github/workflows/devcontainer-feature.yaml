@@ -31,7 +31,7 @@ jobs:
 
   publish:
     name: Publish feature to GHCR
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     needs: validate
     runs-on: ubuntu-latest
     permissions:

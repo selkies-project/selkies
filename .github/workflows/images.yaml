@@ -6,8 +6,9 @@ name: Images
 # multi-arch manifest.
 
 # Triggered by ci.yaml on pushes to main and by release.yaml for releases;
-# can also be run standalone via the Actions tab, in which case it builds
-# the wheel itself unless `wheel_artifact` names an existing artifact.
+# can also be run standalone via the Actions tab, from main alone since the
+# images leave the run, in which case it builds the wheel itself unless
+# `wheel_artifact` names an existing artifact.
 
 on:
   workflow_dispatch:
@@ -72,7 +73,7 @@ jobs:
   build:
     name: ${{ matrix.flavor.name }} (${{ matrix.arch.name }})
     needs: wheel
-    if: ${{ !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result) }}
+    if: ${{ github.ref == 'refs/heads/main' && !cancelled() && contains(fromJSON('["success", "skipped"]'), needs.wheel.result) }}
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false
@@ -308,6 +309,7 @@ jobs:
           publish "${IMAGE_NAME}" /tmp/digests/desktop
 
   addons:
+    if: ${{ github.ref == 'refs/heads/main' }}
     name: ${{ matrix.addon }} (${{ matrix.arch.name }})
     # The TURN server and the TURN REST credential service documented in
     # docs/component.md; independent of the wheel
@@ -403,7 +405,7 @@ jobs:
     # Each push moves the `main-*` tags onto new manifests, and the ones they
     # pointed at before stay in the registry untagged, platform and attestation
     # children included. Nothing else ever removes them.
-    if: ${{ !cancelled() }}
+    if: ${{ github.ref == 'refs/heads/main' && !cancelled() }}
     runs-on: ubuntu-latest
     # The action is not safe to run against a package twice at once, and a
     # release build can overlap a push build

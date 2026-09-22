@@ -84,6 +84,7 @@ jobs:
           PYPI: ${{ inputs.pypi }}
         run: |
           set -e
+          [ "${GITHUB_REF}" = refs/heads/main ] || { echo "a release is cut from main; this run started from ${GITHUB_REF_NAME}" >&2; exit 1; }
           ver="${TAG#v}"
           # The tag becomes the wheel version, so it is PEP 440: X.Y.Z with an
           # optional pre-release, post-release, or dev suffix
