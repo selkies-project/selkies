@@ -210,7 +210,7 @@ docker exec -it selkies bash
 
 > **The default login is `ubuntu` / `mypasswd`.** Change it with `-e PASSWD=...` before putting a session anywhere others can reach it.
 
-Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs.
+Add `--gpus 1 --runtime nvidia` to `docker run` when using NVIDIA GPUs, with the NVIDIA Container Toolkit v1.20.1 or higher on the host.
 
 **2. From inside the test container, call the `generate_rtc_config` method.**
 

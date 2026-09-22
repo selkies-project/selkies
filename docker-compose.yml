@@ -104,9 +104,9 @@ services:
     stdin_open: true
     tty: true
 
-  # Same container with a GPU. NVIDIA needs the container toolkit on the host
-  # and drives OpenGL through Zink; AMD and Intel need nothing beyond the render
-  # nodes, which the display server opens directly.
+  # Same container with a GPU. NVIDIA needs the container toolkit, v1.20.1 or
+  # higher, on the host and drives OpenGL through Zink; AMD and Intel need
+  # nothing beyond the render nodes, which the display server opens directly.
   desktop-gpu:
     extends: desktop
     profiles: ["gpu"]
