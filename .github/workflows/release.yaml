@@ -15,6 +15,14 @@ name: Release
 # notes and release-published.yaml applies it at publication, then rebuilds the
 # docs site, whose `latest` follows the badge.
 #
+# The `pypi` input decides whether the wheel and the sdist go to PyPI once the
+# draft is published: auto sends a release designated as the latest and no
+# pre-release. The decision rides in the draft's notes beside the latest one,
+# and release-published.yaml carries it out from the release's own assets,
+# through the trusted publisher registered on PyPI for that workflow file and
+# the `pypi` environment. PyPI keeps the first upload of a version, so a
+# re-release of one it holds fails there and changes the GitHub release alone.
+#
 # The pinned pixelflux and pcmflux come from the release each project cut for
 # that version: the smoke test, the images, the packages and the AppImages all
 # install the wheels those projects published. `capture_stack: pypi` is the
@@ -30,6 +38,14 @@ on:
         required: true
       latest:
         description: Designate this release as the latest (floating `latest` image tags and the release badge); auto does so for a release and not for a pre-release
+        type: choice
+        options:
+          - auto
+          - always
+          - never
+        default: auto
+      pypi:
+        description: Publish the wheel to PyPI once the draft is published; auto does so for a release designated as the latest and not for a pre-release
         type: choice
         options:
           - auto
@@ -59,11 +75,13 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
       prerelease: ${{ steps.ver.outputs.prerelease }}
       latest: ${{ steps.ver.outputs.latest }}
+      pypi: ${{ steps.ver.outputs.pypi }}
     steps:
       - id: ver
         env:
           TAG: ${{ inputs.tag }}
           LATEST: ${{ inputs.latest }}
+          PYPI: ${{ inputs.pypi }}
         run: |
           set -e
           ver="${TAG#v}"
@@ -83,10 +101,18 @@ jobs:
           esac
           prerelease=false
           if [ "${latest}" = false ] && is_prerelease "${ver}"; then prerelease=true; fi
+          # The wheel goes to PyPI for a designated release that is no
+          # pre-release, again unless the run says otherwise
+          case "${PYPI:-auto}" in
+            always) pypi=true ;;
+            never) pypi=false ;;
+            *) if [ "${latest}" = true ] && ! is_prerelease "${ver}"; then pypi=true; else pypi=false; fi ;;
+          esac
           {
             echo "version=${ver}"
             echo "prerelease=${prerelease}"
             echo "latest=${latest}"
+            echo "pypi=${pypi}"
           } >> "${GITHUB_OUTPUT}"
 
   wheel:
@@ -182,8 +208,9 @@ jobs:
           find release-artifacts -type f \( -name '*.dockerbuild' -o -name '*.conda' \) -delete
           find release-artifacts -type f -exec mv {} release/ \;
           ls -la release/
-      # The run's latest decision rides ahead of the generated notes as the
-      # marker release-published.yaml reads, where it renders as nothing
+      # The run's latest and PyPI decisions ride ahead of the generated notes
+      # as the markers release-published.yaml reads, where they render as
+      # nothing
       - name: Create draft release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
@@ -194,6 +221,6 @@ jobs:
           target_commitish: ${{ github.sha }}
           draft: true
           prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
-          body: "<!-- selkies-release: latest=${{ needs.validate.outputs.latest }} -->"
+          body: "<!-- selkies-release: latest=${{ needs.validate.outputs.latest }} --><!-- selkies-release: pypi=${{ needs.validate.outputs.pypi }} -->"
           generate_release_notes: true
           files: release/*

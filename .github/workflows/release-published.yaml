@@ -5,7 +5,10 @@ name: Release published
 # from anything the draft carried. The run's `latest` decision rides in the
 # draft's notes as a marker; this applies it once the release is public, then
 # rebuilds the docs site, which lists the release and aliases `latest` to the
-# release holding the badge.
+# release holding the badge. The run's `pypi` decision rides beside it, and
+# publishes the wheel and the sdist the release carries through the trusted
+# publisher registered on PyPI for this workflow file and the `pypi`
+# environment.
 
 on:
   release:
@@ -41,3 +44,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run docs.yaml --repo "${GITHUB_REPOSITORY}" --ref "${{ github.event.repository.default_branch }}"
+
+  pypi:
+    name: Publish the wheel to PyPI
+    if: >-
+      ${{ contains(github.event.release.body, '<!-- selkies-release: pypi=true -->') }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/selkies/${{ github.event.release.tag_name }}/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Take the wheel and the sdist off the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" --dir dist --pattern "selkies-${TAG}-py3-none-any.whl" --pattern "selkies-${TAG}.tar.gz"
+      - name: Publish them to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
