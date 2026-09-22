@@ -1512,7 +1512,6 @@ let statsTimer = null, statsBytes = 0, statsDecodeMs = 0, statsFrames = 0;
 let statsFormat, statsHardware = null, statsProbed = null, statsConfig = null;
 const decodeStarts = new Map();
 function noteDecoded(f) {
-  statsFormat = f.format;
   const started = decodeStarts.get(f.timestamp);
   if (started === undefined) return;
   decodeStarts.delete(f.timestamp);
@@ -1590,7 +1589,8 @@ function closeDecoder() {
 function configureDecoder(codec, w, h, software, description) {
   closeDecoder();
   try {
-    dec = new VideoDecoder({ output: present, error: () => { closeDecoder(); self.postMessage({ type: 'decoderError' }); } });
+    dec = new VideoDecoder({ output: (f) => { statsFormat = f.format; present(f); },
+                             error: () => { closeDecoder(); self.postMessage({ type: 'decoderError' }); } });
     // configure() is synchronous, so the next chunk decodes without an async gap and
     // an unsupported config surfaces via error(). The page owns the acceleration
     // preference; unset, the UA default takes a hardware decoder where there is one,
@@ -1799,6 +1799,8 @@ function onH264Stripe(buffer) {
     const rowY = y;
     const dec = new VideoDecoder({
       output: (f) => {
+        // The row decoder's own frame says what made it; the composite it joins is canvas-backed.
+        statsFormat = f.format;
         const rowInfo = stripeDecs[rowY];
         const meta = rowInfo && rowInfo.meta.length ? rowInfo.meta.shift() : null;
         stripeCompose(f, rowY, f.displayHeight, meta ? meta.frameId : wireLastId);
@@ -1818,6 +1820,7 @@ function onH264Stripe(buffer) {
     }
     info = stripeDecs[y] = { dec: dec, w: w, h: h, codec: codec, desc: desc,
                              range: wireFullRange, gotKey: false, meta: [] };
+    statsConfig = { codec: codec, w: w, h: h };
   }
   if (!key && !info.gotKey) { sendNeedKey('no_key'); return; }
   if (!key && info.dec.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
@@ -3955,8 +3958,8 @@ function armSharedStallWatchdog() {
  * @param {VideoFrame} frame
  */
 function handleDecodedVncStripeFrame(yPos, frame) {
+  if (streamStats.open) notePageDecoded(frame);
   if (isFullFrameVideo(currentEncoderMode) && yPos === 0) {
-    if (streamStats.open) notePageDecoded(frame);
     if (document.hidden || (clientMode === 'websockets' && !isSharedMode && !isVideoPipelineActive)) {
       try { frame.close(); } catch (e) {}
       return;
@@ -7083,7 +7086,7 @@ class WorkerWebSocket {
                     colorSpace: decoderColorSpace(dynamicCodec, sessionFullRange),
                     ...(description ? { description } : {})
                 });
-                if (isFullFrameVideo(currentEncoderMode)) pageDecode.config = decoderConfig;
+                pageDecode.config = decoderConfig;
                 vncStripeDecoders[vncStripeYStart] = {
                     decoder: newStripeDecoder,
                     pendingChunks: [],

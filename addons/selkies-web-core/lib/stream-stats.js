@@ -108,7 +108,7 @@ export function webcodecsDecoder({ forcedSoftware, hardwareSupported, format }) 
   if (forcedSoftware) return { decoder: 'software', decoder_evidence: 'prefer-software after a decoder fallback' };
   if (hardwareSupported === false) return { decoder: 'software', decoder_evidence: 'no hardware decoder for this stream' };
   const seen = decoderOfFormat(format);
-  if (seen === 'unknown') return { decoder: 'unknown', decoder_evidence: '' };
+  if (seen === 'unknown') return { decoder: 'unknown', decoder_evidence: format ? `${format} frames` : '' };
   return { decoder: seen, decoder_evidence: `${format === null ? 'opaque' : format} frames` };
 }
 
