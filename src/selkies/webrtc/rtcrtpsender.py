@@ -181,6 +181,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # The negotiated codecs and the one frames go out as; None drops them.
         self.__codecs: list[RTCRtpCodecParameters] = []
         self.__send_codec: Optional[RTCRtpCodecParameters] = None
+        # The codec a switch before the start named, taken out of the answer at the start.
+        self.__pending_codec: Optional[str] = None
         self.__force_keyframe = False
         self.__force_keyframe_used = False
         # Last observed keyframe size (bytes) and whether it was a natural
@@ -327,6 +329,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
             if send_codec is None:
                 raise InvalidStateError("No sendable media codec was negotiated")
             self.__codecs = list(parameters.codecs)
+            if self.__pending_codec is not None:
+                send_codec = self.negotiated_codec(self.__pending_codec) or send_codec
             self.__send_codec = send_codec
             self.__rtx_payload_type = self._rtx_payload_type_for(send_codec)
 
@@ -358,8 +362,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
         """Send the track's frames as the negotiated codec of `mime_type` from
         now on: its payload type, its RTX type and its own packer. A codec the
         peer never took drops the frames instead, until a switch names one it
-        did; before the sender starts, the answer settles the codec."""
+        did; before the sender starts, the switch names the codec it starts on,
+        out of the answer."""
         if not self.__started:
+            self.__pending_codec = mime_type
             return True
         codec = self.negotiated_codec(mime_type)
         self.__send_codec = codec

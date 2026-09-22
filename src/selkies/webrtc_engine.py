@@ -143,6 +143,10 @@ def parse_webrtc_port_range(raw: str) -> Optional[Tuple[int, int]]:
     return port_range
 
 
+# The codec whose 4:4:4 an encoder's stream carries when full color is on; the others encode
+# 4:2:0 whatever is asked.
+FULLCOLOR_CODECS = {"h264enc": "h264", "h264enc-striped": "h264", "h265enc": "h265", "vp9enc": "vp9"}
+
 logger = logging.getLogger("webrtc")
 
 class ConditionalExtraFormatter(logging.Formatter):
@@ -1627,7 +1631,7 @@ class RTCApp:
         Returns:
             Whether the display still emits 4:4:4.
         """
-        codec = {"h264enc": "h264", "h264enc-striped": "h264", "h265enc": "h265", "vp9enc": "vp9"}.get(encoder)
+        codec = FULLCOLOR_CODECS.get(encoder)
         if codec is None or codec in fullcolor_codecs:
             return True
         # An encoder this host carries no 4:4:4 for streams 4:2:0 whatever is asked, so the
@@ -1657,10 +1661,13 @@ class RTCApp:
         The offer put the display's codec first and the menu's other codecs
         behind it down the ladder, so a browser that declines the codec answers
         with the next one it decodes. The display then moves to that encoder
-        through `on_video_codec_declined`; a display whose
-        encoder the operator holds stops sending video to this peer instead,
-        since one codec's bitstream must never be packed as another's, and
-        tells the page so once its channel is open.
+        through `on_video_codec_declined`, or, where the display's full color
+        is held, to the first of the answer's menu codecs the peer decodes at
+        4:4:4 too or that this host encodes 4:2:0 anyway, the step the
+        WebSocket ladder takes; a display whose encoder the operator holds
+        stops sending video to this peer instead, since one codec's bitstream
+        must never be packed as another's, and tells the page so once its
+        channel is open.
         """
         sender = peer_obj.get("video_sender")
         wanted = peer_obj.get("video_mime")
@@ -1670,27 +1677,37 @@ class RTCApp:
             (t for t in peer_obj["peer_conn"].getTransceivers() if t.sender is sender), None)
         if transceiver is None:
             return
-        negotiated = next(
-            (c for c in transceiver._codecs
-             if not c.mimeType.lower().endswith(("/rtx", "/flexfec-03"))), None)
-        if negotiated is None:
+        answered = [c.mimeType.lower() for c in transceiver._codecs
+                    if not c.mimeType.lower().endswith(("/rtx", "/flexfec-03"))]
+        if not answered:
             return
         display_id = peer_obj.get("display_id") or "primary"
-        logger.info(f"Video for peer {client_peer_id} on display '{display_id}' "
-                    f"negotiated {negotiated.mimeType}")
-        if negotiated.mimeType.lower() == wanted.lower():
+        logger.info(f"Video for peer {client_peer_id} on display '{display_id}' negotiated {answered[0]}")
+        if answered[0] == wanted.lower():
             return
-        # The answer's first codec is the first of the offer this peer decodes; the display
-        # follows it.
-        taken = next(
-            (enc for enc in WEBRTC_ENCODER_CHOICES
-             if self.get_mime_by_encoder(enc).lower() == negotiated.mimeType.lower()),
-            "h264enc",
-        )
+        # The answer lists the codecs this peer decodes in the offer's order, the menu's first,
+        # so its first is the rung the display moves to. Under a held full color the rung is the
+        # first menu codec whose 4:4:4 the peer decodes too, or that this host encodes 4:2:0
+        # anyway, and the first stands where there is none.
+        by_mime = {self.get_mime_by_encoder(enc).lower(): enc for enc in WEBRTC_ENCODER_CHOICES}
+        candidates = [by_mime[mime] for mime in answered if mime in by_mime] or ["h264enc"]
+        fullcolor = peer_obj.get("fullcolor_codecs")
+        display_fullcolor = fullcolor is not None and bool(self.get_fullcolor_for_display(display_id))
+        if display_fullcolor and bool(app_settings.video_fullcolor[1]):
+            try:
+                use_cpu = bool(self.get_use_cpu_for_display(display_id))
+            except Exception:
+                use_cpu = bool(app_settings.use_cpu[0])
+            menu = next(d for d in SETTING_DEFINITIONS if d["name"] == "encoder")["meta"]["allowed"]
+            fits = [enc for enc in candidates if enc in menu and (
+                FULLCOLOR_CODECS.get(enc) is None or FULLCOLOR_CODECS[enc] in fullcolor
+                or app_settings.encoder_fullcolor(enc, use_cpu) is False)]
+            candidates = fits or candidates
+        taken = candidates[0]
         # Full color was settled for the codec offered; the one taken may carry a 4:4:4 this
         # peer decodes no better, so it is settled again before the display moves.
-        if peer_obj.get("fullcolor_codecs") is not None and self.get_fullcolor_for_display(display_id):
-            await self._settle_fullcolor(client_peer_id, display_id, taken, peer_obj["fullcolor_codecs"])
+        if display_fullcolor:
+            await self._settle_fullcolor(client_peer_id, display_id, taken, fullcolor)
         moved = False
         if self.on_video_codec_declined is not None:
             try:
