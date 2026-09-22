@@ -13,6 +13,7 @@ side to probe, so that path runs on any machine; the probed path is held to
 its shape wherever the installed pixelflux carries the probe.
 """
 import os
+import re
 import subprocess
 import sys
 
@@ -115,11 +116,16 @@ got = probe(
 # A menu whose configured encoder this host does not serve is replaced down the ladder.
 RUNG = ("b = {'h265': {'hardware': 'nvenc', 'software': 'x265'},"
         " 'vp9': {'hardware': None, 'software': 'libvpx'}};"
-        " print(','.join(sorted(['jpeg', 'h264enc-striped', 'vp9enc', 'h265enc'],"
+        " print(','.join(sorted(['jpeg', 'h264enc-striped', 'vp9enc', 'h265enc', 'h264enc'],"
         " key=lambda e: s.encoder_rung(e, b))))")
 rungs = probe(RUNG)
-check("the ladder runs hardware, software, striped, then JPEG",
-      rungs == "h265enc,vp9enc,h264enc-striped,jpeg", rungs)
+check("the ladder runs hardware, software by encode time, striped, then JPEG",
+      rungs == "h265enc,h264enc,vp9enc,h264enc-striped,jpeg", rungs)
+# One ladder on both sides: the web client's LADDER_ORDER is the server's ENCODER_LADDER.
+with open(os.path.join(REPO, "addons/selkies-web-core/selkies-ws-core.js")) as core:
+    client = re.search(r"const LADDER_ORDER = \[([^\]]*)\]", core.read()).group(1)
+client = ",".join(item.strip().strip("'") for item in client.split(","))
+check("the client walks the server's ladder", probe("print(','.join(s.ENCODER_LADDER))") == client, client)
 check("an unprobed table leaves the video encoders above the striped ones",
       probe("print(s.encoder_rung('av1enc', None) < s.encoder_rung('h264enc-striped', None)"
             " < s.encoder_rung('jpeg', None))") == "True")

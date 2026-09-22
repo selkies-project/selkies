@@ -2808,12 +2808,14 @@ const refusedCodecs = new Set();
 
 /**
  * The rungs a refusal walks when the server does not restrict the encoder: the full-frame
- * video codecs, H.264 first since every engine decodes it and every GPU encodes it, then the
- * striped H.264 path, which no full-frame codec is given up for, and JPEG, whose stripes need
- * no `VideoDecoder`, last of all. `nextRung` lifts the codecs the server encodes in hardware
- * above the full-frame ones it encodes in software.
+ * video codecs by the measured time per frame of their software encoders (x264, SVT-AV1,
+ * libvpx VP8, x265, libvpx VP9), then the striped H.264 path, which no full-frame codec is
+ * given up for, and JPEG, whose stripes need no `VideoDecoder`, last of all. `nextRung` lifts
+ * the codecs the server encodes in hardware above the full-frame ones it encodes in software.
+ * The server walks the same order, its `ENCODER_LADDER`, for the menu's replacement pick and
+ * the WebRTC offer.
  */
-const LADDER_ORDER = ['h264enc', 'vp9enc', 'vp8enc', 'av1enc', 'h265enc', 'h264enc-striped', 'jpeg'];
+const LADDER_ORDER = ['h264enc', 'av1enc', 'vp8enc', 'h265enc', 'vp9enc', 'h264enc-striped', 'jpeg'];
 
 /**
  * The next encoder a refusal steps to: the first of `LADDER_ORDER`, among

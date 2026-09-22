@@ -65,8 +65,10 @@ except (ImportError, RuntimeError):
     pcmflux = None
 
 from .settings import (
+    SETTING_DEFINITIONS,
     WEBRTC_ENCODER_CHOICES,
     settings as app_settings,
+    encoder_rung,
     inflate_gz_bounded,
     pipeline_starts_on,
     software_encoders,
@@ -1512,15 +1514,17 @@ class RTCApp:
 
     def prefer_codec(self, pc: RTCPeerConnection, sender: RTCRtpSender,
                      preferred_mime: str) -> None:
-        """Order a sender's codec preferences: one MIME type first, H.264 behind
-        it, then every other video codec, RTX.
+        """Order a sender's codec preferences: one MIME type first, the other
+        video codecs down the fallback ladder behind it, RTX.
 
         Every codec matching the MIME type stays eligible — H.264 appears once
-        per advertised profile. H.264 follows any other codec so a browser
-        that declines the codec answers with H.264 rather than nothing
-        (`_settle_video_codec` reads which one it took), and the rest are
-        negotiated so a live encoder switch (`switch_display_codec`) changes
-        the payload type without renegotiating. FlexFEC rides along when the
+        per advertised profile. Behind it come the encoder menu's other codecs
+        in `encoder_rung` order, the host's hardware codecs before its software
+        ones and each group by encode time, so a browser that declines the codec
+        answers with the first of them it decodes (`_settle_video_codec` reads
+        which one it took and moves the display there); the codecs off the menu
+        follow, negotiated so a live encoder switch (`switch_display_codec`)
+        changes the payload type without renegotiating. FlexFEC rides along when the
         receiver supports it (Chrome family); a receiver without it answers
         without the codec and the sender emits no repair stream.
 
@@ -1544,12 +1548,14 @@ class RTCApp:
 
         if not chosen_codec:
             raise ValueError(f"Codec {preferred_mime} not found in capabilities")
-        # H.264 right behind the preferred codec, then every other video codec,
-        # so a declined codec lands on H.264 and a later encoder switch finds
-        # its codec already negotiated.
-        for mime in ["video/H264"] + sorted({c.mimeType for c in capabilities.codecs
-                                             if c.mimeType.startswith("video/")}):
-            if mime in (preferred_mime, "video/rtx", "video/flexfec-03"):
+        # The menu's other codecs down the ladder, so a declined codec lands on the next
+        # one the peer decodes and the display can move to, then the codecs off the menu,
+        # negotiated so a later encoder switch finds its payload type in place.
+        menu = next(d for d in SETTING_DEFINITIONS if d["name"] == "encoder")["meta"]["allowed"]
+        backends = app_settings.encoder_backends()
+        ladder = sorted(WEBRTC_ENCODER_CHOICES, key=lambda enc: (enc not in menu, encoder_rung(enc, backends)))
+        for mime in (self.get_mime_by_encoder(enc) for enc in ladder):
+            if mime == preferred_mime:
                 continue
             chosen_codec += [c for c in capabilities.codecs
                              if c.mimeType == mime and c not in chosen_codec]
@@ -1640,9 +1646,10 @@ class RTCApp:
     async def _settle_video_codec(self, client_peer_id: str, peer_obj: Dict[str, Any]) -> None:
         """Take the video codec a peer's answer settled on.
 
-        The offer put the display's codec first and H.264 behind it, so a
-        browser that declines the codec answers with H.264. The display then
-        moves to `h264enc` through `on_video_codec_declined`; a display whose
+        The offer put the display's codec first and the menu's other codecs
+        behind it down the ladder, so a browser that declines the codec answers
+        with the next one it decodes. The display then moves to that encoder
+        through `on_video_codec_declined`; a display whose
         encoder the operator holds stops sending video to this peer instead,
         since one codec's bitstream must never be packed as another's, and
         tells the page so once its channel is open.
@@ -1665,8 +1672,8 @@ class RTCApp:
                     f"negotiated {negotiated.mimeType}")
         if negotiated.mimeType.lower() == wanted.lower():
             return
-        # The answer's first codec is the one the peer took out of everything offered, so the
-        # display follows it instead of giving up the codecs between it and H.264.
+        # The answer's first codec is the first of the offer this peer decodes; the display
+        # follows it.
         taken = next(
             (enc for enc in WEBRTC_ENCODER_CHOICES
              if self.get_mime_by_encoder(enc).lower() == negotiated.mimeType.lower()),
