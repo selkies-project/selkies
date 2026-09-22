@@ -686,7 +686,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "video_fullcolor",
         "type": "bool",
         "default": False,
-        "help": "Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264 and x265; VP9 profile 1 on VA-API and libvpx); other codecs and encoders stay 4:2:0. A client whose decoder has no 4:4:4 profile turns it off for itself, whether it or this default asked for it, and streams 4:2:0 on the same codec; where it is locked on, such a client steps over WebSockets to the next allowed encoder whose 4:4:4 it decodes or that has none, and to JPEG last, and reports the stream over WebRTC. A WebRTC client names the 4:4:4 it decodes in its hello, so its first offer already fits it.",
+        "help": "Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264 and x265; VP9 profile 1 on VA-API and libvpx); other codecs and encoders stay 4:2:0. The server knows which of its encoders carry it on this host, so a client whose decoder has no 4:4:4 profile turns it off for itself only where the stream would carry it, whether it or this default asked for it, and streams 4:2:0 on the same codec; where it is locked on, such a client steps over WebSockets to the next allowed encoder whose 4:4:4 it decodes or that has none, and to JPEG last, and reports the stream over WebRTC. A WebRTC client names the 4:4:4 it decodes in its hello, so its first offer already fits it.",
     },
     {
         "name": "video_streaming_mode",
@@ -1271,7 +1271,20 @@ def software_encoders() -> Dict[str, str]:
     return {str(k): str(v) for k, v in dict(pixelflux.SOFTWARE_ENCODERS).items()}
 
 
+def software_fullcolor() -> Optional[List[str]]:
+    """The codecs whose software encoder in the installed pixelflux build takes a
+    `video_fullcolor` session as 4:4:4 (`pixelflux.SOFTWARE_FULLCOLOR`); None where
+    the build does not say, so a consumer assumes nothing."""
+    try:
+        import pixelflux
+    except ImportError:
+        return None
+    table = getattr(pixelflux, "SOFTWARE_FULLCOLOR", None)
+    return None if table is None else [str(codec) for codec in table]
+
+
 _HARDWARE_ENCODERS: Dict[int, Optional[Dict[str, str]]] = {}
+_HARDWARE_FULLCOLOR: Dict[int, Optional[List[str]]] = {}
 
 
 def hardware_encoders(encode_node_index: int, auto_gpu: str = "") -> Optional[Dict[str, str]]:
@@ -1290,17 +1303,29 @@ def hardware_encoders(encode_node_index: int, auto_gpu: str = "") -> Optional[Di
     node = int(encode_node_index)
     if node not in _HARDWARE_ENCODERS:
         served: Optional[Dict[str, str]] = None
+        fullcolor: Optional[List[str]] = None
         try:
             import pixelflux
             probe = getattr(pixelflux, "hardware_encoders", None)
             if probe is not None:
                 served = {str(k): str(v) for k, v in dict(probe(node, auto_gpu)).items()}
+            probe = getattr(pixelflux, "hardware_fullcolor", None)
+            if probe is not None:
+                fullcolor = [str(codec) for codec in probe(node, auto_gpu)]
         except ImportError:
             served = None
         except Exception as e:
             logger.warning("Hardware encoder probe of render node %d failed: %s", node, e)
         _HARDWARE_ENCODERS[node] = served
+        _HARDWARE_FULLCOLOR[node] = fullcolor
     return _HARDWARE_ENCODERS[node]
+
+
+def hardware_fullcolor(encode_node_index: int, auto_gpu: str = "") -> Optional[List[str]]:
+    """The codecs the GPU behind a render node encodes 4:4:4 (`pixelflux.hardware_fullcolor`),
+    read with `hardware_encoders`; None where nothing can be known."""
+    hardware_encoders(encode_node_index, auto_gpu)
+    return _HARDWARE_FULLCOLOR.get(int(encode_node_index))
 
 
 def software_video_path(encoder: str, use_cpu: bool) -> bool:
@@ -1707,21 +1732,47 @@ class AppSettings:
             return AUTO_ENCODE_NODE
         return None if gid < 0 else gid
 
-    def encoder_backends(self) -> Optional[Dict[str, Dict[str, Optional[str]]]]:
+    def encoder_backends(self) -> Optional[Dict[str, Dict[str, Any]]]:
         """The backends that serve each video codec on this host, by codec
-        name: `hardware` (the backend pixelflux named, or None) from the startup probe and
-        `software` (the pixelflux build's library or None). None before
+        name: `hardware` (the backend pixelflux named, or None) from the startup probe,
+        `software` (the pixelflux build's library or None), and `fullcolor`, whether
+        each of those sides takes a `video_fullcolor` session as 4:4:4 (None where the
+        side is absent or the build does not say). None before
         `resolve_encoder_backends` ran or where the hardware side is unknown,
         so no consumer hides a choice on a guess."""
         hardware = getattr(self, "_hardware_encoders", None)
         if hardware is None:
             return None
         software = software_encoders()
+        hw_fullcolor = getattr(self, "_hardware_fullcolor", None)
+        sw_fullcolor = software_fullcolor()
+
+        def carries(codec: str, backend: Optional[str], table: Optional[List[str]]) -> Optional[bool]:
+            return None if backend is None or table is None else codec in table
+
         return {
-            codec: {"hardware": hardware.get(codec), "software": software.get(codec)}
+            codec: {
+                "hardware": hardware.get(codec),
+                "software": software.get(codec),
+                "fullcolor": {
+                    "hardware": carries(codec, hardware.get(codec), hw_fullcolor),
+                    "software": carries(codec, software.get(codec), sw_fullcolor),
+                },
+            }
             for codec in CODEC_LABELS
             if codec != "jpeg"
         }
+
+    def encoder_fullcolor(self, encoder: str, use_cpu: bool = False) -> Optional[bool]:
+        """Whether a `video_fullcolor` session on this encoder streams 4:4:4 from this host:
+        by the encode node's engine where the codec has one and software is not forced or
+        striped, else by the build's software encoder. None where that side is unknown."""
+        backends = self.encoder_backends()
+        served = (backends or {}).get(codec_for_encoder(canonical_encoder(encoder)))
+        if not served:
+            return None
+        side = "software" if use_cpu or encoder in CPU_ONLY_ENCODERS or not served["hardware"] else "hardware"
+        return served["fullcolor"][side]
 
     def encoder_served(self, encoder: str) -> bool:
         """Whether a session on this encoder comes up on the codec it names
@@ -1755,6 +1806,7 @@ class AppSettings:
         node = self.encode_node_index()
         self._hardware_encoders = ({} if node is None
                                    else hardware_encoders(node, str(self.auto_gpu or "")))
+        self._hardware_fullcolor = [] if node is None else hardware_fullcolor(node, str(self.auto_gpu or ""))
         if self._hardware_encoders is None:
             return
         enc_definition = next(
@@ -2118,8 +2170,9 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
     (the software encoder behind each codec, "x264" or "openh264" for H.264),
     which the dashboards' rate-control default reads, and once the startup
     probe has run, `encoder_backends`: the hardware and software backend of
-    each codec on this host, from which the dashboards show the software
-    encoding switch only where it switches something.
+    each codec on this host and whether each encodes 4:4:4, from which the
+    dashboards show the software encoding switch only where it switches
+    something and the client walks its codec ladder.
     """
     out = {}
     for setting_def in SETTING_DEFINITIONS:

@@ -2777,7 +2777,8 @@ let fullColorLocked = false;
 async function declineUndecodableFullColor(reason) {
     if (!video_fullcolor || fullColorLocked || isSharedMode) return false;
     const codec = codecOfEncoder(currentEncoderMode);
-    if (!codecCarriesFullColor(codec) || await canDecodeFullColor(codec)) return false;
+    // A codec this server encodes 4:2:0 whatever is asked gives the setting nothing to decline.
+    if (!codecCarriesFullColor(codec) || serverFullColor(codec) === false || await canDecodeFullColor(codec)) return false;
     if (!video_fullcolor) return false;
     console.warn(`[Selkies] full color (4:4:4) is off: this browser decodes ${codec} 4:2:0 only.`);
     video_fullcolor = false;
@@ -2801,8 +2802,22 @@ let codecRefusalHeld = null;
 let encoderLocked = false;
 /** The encoders the server allows, in its order, when it restricts them. */
 let encoderAllowed = null;
-/** The backend of each codec on the server, `{codec: {hardware, software}}`, once it has probed. */
+/** The backend of each codec on the server, `{codec: {hardware, software, fullcolor}}`, once it has probed. */
 let encoderBackends = null;
+
+/**
+ * Whether a full-color session on `codec` streams 4:4:4 from this server: the `fullcolor` of
+ * its backend on the side in effect, the engine's unless `use_cpu` or it has none; `null`
+ * while the server has not said.
+ * @param {string} codec The codec name.
+ * @returns {boolean|null}
+ */
+function serverFullColor(codec) {
+    const entry = encoderBackends && encoderBackends[codec];
+    if (!entry || !entry.fullcolor) return null;
+    const answer = entry.fullcolor[(use_cpu || !entry.hardware) ? 'software' : 'hardware'];
+    return typeof answer === 'boolean' ? answer : null;
+}
 /** The codecs this engine refused in this session. */
 const refusedCodecs = new Set();
 
@@ -2843,7 +2858,8 @@ function nextRung(refused) {
         if (enc === 'jpeg') return enc;
         const codec = codecOfEncoder(enc);
         if (refusedCodecs.has(codec) || !canDecodeEncoder(enc)) continue;
-        if (fullColorLocked && video_fullcolor && codecCarriesFullColor(codec) && fullColorDecoded(codec) === false) continue;
+        if (fullColorLocked && video_fullcolor && codecCarriesFullColor(codec) && serverFullColor(codec) !== false
+            && fullColorDecoded(codec) === false) continue;
         return enc;
     }
     return null;

@@ -133,5 +133,21 @@ check("an unprobed table leaves the video encoders above the striped ones",
 
 check("probed: the table is unknown or well formed and the menu is served", got in ("unknown", "True"), got)
 
+# Each side of the table says whether it encodes 4:4:4, or nothing where the build does not say;
+# a session's answer follows the side in effect: the engine, unless software is forced or striped.
+got = probe(
+    "s.settings.resolve_encoder_backends(); t = s.settings.encoder_backends();"
+    " print(all(set(v['fullcolor']) == {'hardware', 'software'} and v['fullcolor']['hardware'] is None"
+    " and v['fullcolor']['software'] in (None, True, False) for v in t.values()))", SELKIES_GPU_ID="-1")
+check("gpu_id -1: no hardware side carries 4:4:4 and the software side answers or says nothing", got == "True", got)
+got = probe(
+    "s.settings._hardware_encoders = {'h264': 'nvenc', 'h265': 'nvenc'}; s.settings._hardware_fullcolor = ['h264'];"
+    " print(s.settings.encoder_fullcolor('h264enc'), s.settings.encoder_fullcolor('h265enc'),"
+    " s.settings.encoder_fullcolor('h264enc', use_cpu=True) in (None, True),"
+    " s.settings.encoder_fullcolor('h264enc-striped') in (None, True), s.settings.encoder_fullcolor('av1enc') in (None, False),"
+    " s.settings.encoder_fullcolor('jpeg'))")
+check("the engine's 4:4:4 answers for a hardware codec, the build's for a forced or striped one",
+      got == "True False True True True None", got)
+
 print(f"[encoder-backends] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

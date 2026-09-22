@@ -1630,6 +1630,14 @@ class RTCApp:
         codec = {"h264enc": "h264", "h264enc-striped": "h264", "h265enc": "h265", "vp9enc": "vp9"}.get(encoder)
         if codec is None or codec in fullcolor_codecs:
             return True
+        # An encoder this host carries no 4:4:4 for streams 4:2:0 whatever is asked, so the
+        # offer describes that and the setting stays for one that does carry it.
+        try:
+            use_cpu = bool(self.get_use_cpu_for_display(display_id))
+        except Exception:
+            use_cpu = bool(app_settings.use_cpu[0])
+        if app_settings.encoder_fullcolor(encoder, use_cpu) is False:
+            return False
         moved = False
         if self.on_fullcolor_declined is not None:
             try:
