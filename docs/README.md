@@ -23,6 +23,8 @@ While designed for clustered or unprivileged containerized environments, Selkies
 
 The HTML5 client runs on Chromium, Firefox, and Safari, with two-way clipboard (text and images), low-latency zero-copy video rendering, automatic GPU selection, resilient keyboard, mouse, and gamepad input, and microphone and webcam forwarding into the session.
 
+Video is H.264, H.265, VP8, VP9 or AV1, chosen from the dashboard, encoded on the GPU wherever it carries the codec (NVENC, VA-API, the Jetson and V4L2 engines) and in software where it does not, with 4:4:4 chroma where both ends carry it, and striped H.264 and Motion JPEG as the paths that play everywhere; the same menu drives both transports, and a codec a browser cannot play is stepped past rather than shown as a black screen. Screen capture and encoding are the work of [pixelflux](components/pixelflux.md) and audio of [pcmflux](components/pcmflux.md), two Rust extensions of the same project with references at <https://pixelflux.selkies.io> and <https://pcmflux.selkies.io>. [Sealskin](https://github.com/selkies-project/sealskin) orchestrates the desktop containers one per user on a single server, an example of building a service on them.
+
 **Please read [Troubleshooting and FAQs](faq.md) first, then use [Discord](https://discord.gg/wDNGDeSW5F) or [GitHub Discussions](https://github.com/selkies-project/selkies/discussions) for support questions. Please only use [Issues](https://github.com/selkies-project/selkies/issues) for technical inquiries or bug reports.**
 
 **NOTE: this project is licensed under the [Mozilla Public License, version 2.0](https://www.mozilla.org/en-US/MPL/2.0/FAQ/), which obliges to share modified code files licensed by MPL-2.0 when distributed externally, but does not apply for any larger work outside this project, which might be open-source or proprietary under any license of choice. Externally originated components outside this project may contain works licensed over more restrictive copyleft/proprietary licenses, as well as other terms of intellectual property, including but not limited to patents, which users or developers are obliged to adhere to.**
@@ -43,7 +45,7 @@ The HTML5 client runs on Chromium, Firefox, and Safari, with two-way clipboard (
 
 [**Secure Mode (token authentication)**](secure-mode.md)
 
-[**Components including Encoders and Interfaces**](component.md)
+[**Components including Encoders and Interfaces**](components/index.md): [pixelflux](components/pixelflux.md), [pcmflux](components/pcmflux.md), the [web client and dashboards](components/web-client.md), the [Base Container](components/base-image.md), the [Desktop Container](components/desktop-image.md), the [KDE Plasma desktops](components/kde-images.md), [gamepads](components/input-interposer.md), the [webcam](components/v4l2-interposer.md), and [TURN](components/turn.md)
 
 [**Development and Contributions**](development.md)
 

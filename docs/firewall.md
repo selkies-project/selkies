@@ -94,7 +94,7 @@ There are currently four different supported TURN server authentication methods,
 
 - Using the JSON configuration file authentication method with the `selkies --rtc-config-json=` option or the `SELKIES_RTC_CONFIG_JSON` environment variable. Selkies probes this file periodically, so it will automatically update the TURN authentication credentials if the JSON file is updated. **All other STUN/TURN credentials are overridden if this file exists.**
 
-- Using the TURN REST API authentication method with the `selkies --turn-rest-uri=` option or the `SELKIES_TURN_REST_URI` environment variable. Selkies probes this REST API endpoint periodically, so it will automatically update the TURN authentication credentials. Consult the **[TURN-REST](component.md#turn-rest)** section for more details of this authentication method. **All other STUN/TURN credentials below are overridden if this option is provided and is valid.**
+- Using the TURN REST API authentication method with the `selkies --turn-rest-uri=` option or the `SELKIES_TURN_REST_URI` environment variable. Selkies probes this REST API endpoint periodically, so it will automatically update the TURN authentication credentials. Consult the **[TURN-REST](components/turn.md#turn-rest)** section for more details of this authentication method. **All other STUN/TURN credentials below are overridden if this option is provided and is valid.**
 
 - **Note that the below two methods are only safe when the Selkies user also has legitimate control of the TURN server. Otherwise, if you maintain a multi-user environment, you are looking for the TURN REST API authentication method, right above.**
 
@@ -112,7 +112,7 @@ If you are using Selkies in a private network without access to the internet, yo
 
 An open-source TURN server for Linux or UNIX-like operating systems that may be used is [coTURN](https://github.com/coturn/coturn), available in major package repositories or as an official container [`coturn/coturn:latest`](https://hub.docker.com/r/coturn/coturn).
 
-The Selkies [coTURN](component.md#coturn) image [`ghcr.io/selkies-project/selkies/coturn:main`](https://github.com/selkies-project/selkies/pkgs/container/selkies%2Fcoturn) is also included in this repository, and may be used to host your own STUN/TURN infrastructure. As this image contains additional features for identifying the external server IP in cloud environments, usage of this container is recommended.
+The Selkies [coTURN](components/turn.md#coturn) image [`ghcr.io/selkies-project/selkies/coturn:main`](https://github.com/selkies-project/selkies/pkgs/container/selkies%2Fcoturn) is also included in this repository, and may be used to host your own STUN/TURN infrastructure. As this image contains additional features for identifying the external server IP in cloud environments, usage of this container is recommended.
 
 [Pion TURN](https://github.com/pion/turn)'s `turn-server-simple` executable or [eturnal](https://eturnal.net) are recommended alternative TURN server implementations that support Windows as well as Linux or MacOS. [STUNner](https://github.com/l7mp/stunner) is a Kubernetes-native STUN and TURN deployment if Helm is possible to be used.
 
@@ -211,7 +211,7 @@ Consult the [coTURN Documentation](https://github.com/coturn/coturn/blob/master/
 
 The [coTURN Container](https://github.com/selkies-project/selkies/tree/main/addons/coturn) is a reference container which provides the [coTURN](https://github.com/coturn/coturn) TURN server. Other than options including `-e TURN_SHARED_SECRET=`, `-e TURN_REALM=`, `-e TURN_PORT=`, `-e TURN_MIN_PORT=`, and `-e TURN_MAX_PORT=`, add more command-line options in `-e TURN_EXTRA_ARGS=`.
 
-**Read the [coTURN](component.md#coturn) section to get started.**
+**Read the [coTURN](components/turn.md#coturn) section to get started.**
 
 **Alternatively**, using the official coTURN container (`--min-port` is at least `49152` and `--max-port` is at most `65535`):
 

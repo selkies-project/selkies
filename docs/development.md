@@ -119,7 +119,7 @@ docker compose --profile gpu up desktop-gpu  # the same container with a GPU att
 
 Each service names the `Dockerfile` that builds it, and those files are also the reference build procedure for a host without Docker®: the commands run in a shell as they stand.
 
-The images take the distribution's packages as its repositories serve them on the day of the build, and build XLibre's Xvfb and NVIDIA's EGL platform library from release archives pinned by tag and checksum in [`addons/base/Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/base/Dockerfile). Every release attaches, per flavor and architecture, the digests of the images and of the distribution image they started from and the list of packages each holds (see [Core Components](component.md#core-components)). Rebuilding an older commit bit for bit would need those repositories as they were that day, which is a downstream qualification build's job: pin the published image by digest, or build against a retained package mirror; the upstream images promise the manifest, not the rebuild.
+The images take the distribution's packages as its repositories serve them on the day of the build, and build XLibre's Xvfb and NVIDIA's EGL platform library from release archives pinned by tag and checksum in [`addons/base/Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/base/Dockerfile). Every release attaches, per flavor and architecture, the digests of the images and of the distribution image they started from and the list of packages each holds (see [Core Components](components/index.md#core-components)). Rebuilding an older commit bit for bit would need those repositories as they were that day, which is a downstream qualification build's job: pin the published image by digest, or build against a retained package mirror; the upstream images promise the manifest, not the rebuild.
 
 `desktop` bind-mounts the checkout at `/opt/selkies-src` and sets `SELKIES_DEV_SOURCE` to it, so the server runs from the tree and a change to it takes effect on a restart rather than a rebuild. `SELKIES_DEV_SOURCE` works on any image, including a published one:
 
@@ -146,7 +146,7 @@ description: One sentence, shown under the title and in search results.
 
 [`docs/meta.json`](https://github.com/selkies-project/selkies/tree/main/docs/meta.json) lists the pages in sidebar order, and a new page has to be added to it to appear there.
 
-Links between pages are written the way GitHub resolves them (`start.md`, or `component.md#encoders`) and are rewritten to site URLs during the build. Images live in `docs/assets` and are referenced relative to the file.
+Links between pages are written the way GitHub resolves them (`start.md`, or `components/index.md#encoders`) and are rewritten to site URLs during the build. Images live in `docs/assets` and are referenced relative to the file.
 
 ### Logo Assets
 
@@ -187,78 +187,7 @@ The comment conventions each language follows are in [`AGENTS.md`](https://githu
 
 ## Container Customization
 
-The reference container images (the [Base Container](https://github.com/selkies-project/selkies/tree/main/addons/base), the [Desktop Container](https://github.com/selkies-project/selkies/tree/main/addons/desktop) built on it, and the LXQt desktop images built by CI) use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor, installed from the distribution's package registry (`s6` package): `s6-svscan /etc/service` starts one `s6-supervise` per service directory — the X11 display server (or the headless Wayland compositor), the desktop session, the audio stack (`pipewire`/`wireplumber`/`pipewire-pulse`), `dbus`, and `selkies`, restarting any that crash. Services are controlled with `s6-svc` and inspected with `s6-svstat`, the `supervisord`/`supervisorctl` equivalents, without any Python dependency (`s6-overlay` is deliberately NOT used: it insists on being PID 1, while plain `s6-svscan` works both as PID 1 and below any foreign init or launcher).
-
-**If you want to change the image behavior, use the original container as a base image and only replace the entrypoint script(s) and/or the s6 service files. This will keep you up to date with the latest updates. Use persistent container tags (such as `v1.0.0-ubuntu26.04` for the [Desktop Container](component.md#desktop-container)) to preserve a specific container build.**
-
-Start with the below sample `Dockerfile` example and place your modified `container-entrypoint.sh` and s6 service files within the same directory or Git repository (switch the `FROM` line to `ghcr.io/selkies-project/selkies/desktop:main-${DISTRIB_FLAVOR}` for the [Desktop Container](component.md#desktop-container), and `ghcr.io/selkies-project/selkies-glx-desktop:26.04` or `ghcr.io/selkies-project/selkies-egl-desktop:26.04` for the desktop containers):
-
-```dockerfile
-ARG DISTRIB_FLAVOR=ubuntu26.04
-FROM ghcr.io/selkies-project/selkies/desktop:main-${DISTRIB_FLAVOR}
-ARG DISTRIB_FLAVOR
-
-USER 0
-SHELL ["/bin/sh", "-c"]
-
-# Replace changed files
-# Copy scripts and service definitions used to start the container with `--chown=1000:1000`
-#COPY --chown=1000:1000 container-entrypoint.sh /etc/container-entrypoint.sh
-#RUN chmod -f 755 /etc/container-entrypoint.sh
-#COPY --chown=1000:1000 selkies-entrypoint.sh /etc/selkies-entrypoint.sh
-#RUN chmod -f 755 /etc/selkies-entrypoint.sh
-# Replace or add s6 services (one directory per service under /etc/service)
-#COPY --chown=1000:1000 services/ /etc/service/
-#RUN find /etc/service -name run -exec chmod -f 755 {} +
-
-USER 1000
-ENV SHELL=/bin/bash
-ENV USER=ubuntu
-ENV HOME=/home/ubuntu
-WORKDIR /home/ubuntu
-
-EXPOSE 8080
-
-ENTRYPOINT ["/etc/container-entrypoint.sh"]
-```
-
-A layer that installs packages needs one more pair. The images are rootless -- every layer runs as uid 1000 through fakeroot -- while their setuid and setgid files (`mount`, `su`, `sudo`, `fusermount3`, the PAM helpers) belong to root, and dpkg replaces a file by hardlinking the old one aside first, which the kernel denies uid 1000 on a setuid file it does not own. An archive update to one of those packages therefore fails the layer that takes it, so bracket the package work with the pair the image ships for it:
-
-```dockerfile
-USER 0
-SHELL ["/bin/sh", "-c"]
-RUN selkies-privileged-files release
-
-USER 1000
-SHELL ["/usr/bin/fakeroot", "--", "/bin/sh", "-c"]
-RUN apt-get update && apt-get install --no-install-recommends -y <packages>
-
-USER 0
-SHELL ["/bin/sh", "-c"]
-RUN selkies-privileged-files restore
-USER 1000
-```
-
-`restore` gives back every owner and bit `release` recorded. A setuid or setgid helper the new packages bring is in no record and needs its own `chown root:root` and `chmod` beside it, since the kernel honors neither bit on a file uid 1000 owns. Inside a running session the same work goes through `sudo-root selkies-privileged-files run apt-get install -y <packages>`: `sudo` is itself one of the files a release hands over, so one root process holds both ends and runs the command as the session user under fakeroot, the way an in-session `sudo apt-get` does.
-
-The entrypoint script of the base images launches `s6-svscan /etc/service` itself, so it does not need to be PID 1 and the image keeps working when another init or launcher is injected above it.
-
-## Container Guide
-
-The [`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) and [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) repositories (the Desktop Containers here) are KDE Plasma desktops built `FROM` the [Base Container](component.md#desktop-container) the way `addons/desktop` builds the LXQt one: the base's `container-entrypoint.sh`, `selkies` service and every other service are used as they are, and each repository adds only its desktop -- packages, session defaults, the browsers, the proot-apps runner -- and the s6 services its session needs, one `run` script each under `services/`. Neither carries an entrypoint, a supervisor configuration or a web server of its own: the base launches `s6-svscan /etc/service`, and Selkies serves the web client and every endpoint on its single port.
-
-The two differ in what the desktop draws on. The EGL image keeps the base's display servers, Plasma on the framebuffer X server by default and natively on a nested `kwin_wayland` under `SELKIES_WAYLAND=true`, and rebuilds `kwin-wayland` from the distribution source so a second display can be a kwin virtual output (`patches/`, `selkies-kwin`). The GLX image replaces the base's framebuffer server with an X.Org server on the GPU (`services/xorg`, configured at start by `selkies-xorg-config` for NVIDIA's driver or the modesetting driver) and is X11 only. Both build on the Ubuntu 26.04 base alone and publish `26.04`, a timestamped `26.04-<build>` and `latest` tags, for amd64 and arm64.
-
-**A change to a shared component is two Pull Requests, one per Desktop Container; a change to what the base provides is one here, and the Desktop Containers pick it up at their next build.** What is shared, and how closely:
-
-| Component | Shared between | When updating |
-| --- | --- | --- |
-| `LICENSE`, the Plasma package set, the session defaults under `/etc/xdg`, the browsers and proot-apps layers, `services/dbus-session` | both Desktop Containers | identical; copy between them |
-| `services/plasma` | both Desktop Containers | identical but for the Wayland branch, which only the EGL image has |
-| The browsers and proot-apps layers, the privileged-file bracket | both Desktop Containers and `addons/desktop` here | identical, with the helper scripts fetched from this repository by `SELKIES_REF` rather than copied |
-| `patches/`, `selkies-kwin`, the kwin rebuild stage | EGL image only | assess against the kwin the archive ships |
-| `services/xorg`, `selkies-xorg-config` | GLX image only | assess by hand |
-| `README.md`, `docker-compose.yml`, `egl.yml`/`xgl.yml`, the publish workflow | both Desktop Containers | similar but not identical; assess by hand |
+The reference images use the [s6 supervision suite](https://skarnet.org/software/s6/) as their service supervisor and a PID-agnostic entrypoint, and a desktop of your own is built on them by replacing the entrypoint or adding s6 services alone. [Base Container](components/base-image.md) describes how the images start, how they are laid out, how a checkout is run inside them, and the package-layer bracket their rootless build needs; [KDE Plasma Desktops](components/kde-images.md) describes the two desktop repositories built that way and what they share.
 
 ## Style Guide
 
@@ -296,7 +225,17 @@ The `integration` tier drives the server over a raw WebSocket or the kernel game
 
 ## Agentic Development
 
-Much of this tree is written and reviewed with coding agents, and the repository is laid out so an agent validates its own work rather than describes it. [`AGENTS.md`](https://github.com/selkies-project/selkies/tree/main/AGENTS.md) (`CLAUDE.md` links to it) is the instruction file every agent reads first: the comment and documentation conventions, the engineering priorities, and the cross-cutting invariants no single module reveals. It is the one file an agent cannot derive from the code, so keep it current as you change what it describes. [pixelflux](https://github.com/selkies-project/pixelflux) and [pcmflux](https://github.com/selkies-project/pcmflux) carry their own, and a change in one repository often belongs in another, so give an agent all three checkouts.
+Much of this tree is written and reviewed with coding agents, and the repository is laid out so an agent validates its own work rather than describes it. [`AGENTS.md`](https://github.com/selkies-project/selkies/tree/main/AGENTS.md) (`CLAUDE.md` links to it) is the instruction file every agent reads first: the comment and documentation conventions, the engineering priorities, and the cross-cutting invariants no single module reveals. It is the one file an agent cannot derive from the code, so keep it current as you change what it describes.
+
+The three core repositories each carry one, and they are written to be read together:
+
+| Repository | What its `AGENTS.md` holds |
+| --- | --- |
+| [selkies](https://github.com/selkies-project/selkies/tree/main/AGENTS.md) | The priority order a change is judged by (latency, unrestricted frame rate, zero-copy, CPU, the GIL), the parity that has to hold between X11 and Wayland and between WebSockets and WebRTC, the paired constants that move together (the codec ladder on the server and in the client, the settings and their documentation), the test tiers and the environment they need, and the commit and pull-request conventions |
+| [pixelflux](https://github.com/selkies-project/pixelflux/tree/main/AGENTS.md) | The capture backends and encoder engines, the probes a session is built from and the ladder it falls through, the Python API Selkies drives and what a change to it has to keep, and the GPU tests that need the hardware |
+| [pcmflux](https://github.com/selkies-project/pcmflux/tree/main/AGENTS.md) | The capture and Opus paths, the microphone and recording sockets, and the same conventions on its side |
+
+A change in one repository often belongs in another, since Selkies pins the capture stack and its suites drive both extensions, so give an agent all three checkouts and have it land a change in each of them, on the same day, in the order the pins are read: `pcmflux` and `pixelflux` first, so that Selkies' own CI builds against the commits it names, then `selkies`.
 
 An agent works in a sandbox it may break, never in the session it is shown on. The devcontainers under [`.devcontainer`](https://github.com/selkies-project/selkies/tree/main/.devcontainer) are that sandbox ready-made: `postcreate.sh` builds the web client, installs the package editable with the pinned capture stack and the test extras, then the Playwright engines, the OpenH264 plugin Firefox negotiates H.264 with, and the C helpers under `tests/tools`. On any other host the same comes from `pip install -e .[test]`, `python3 -m playwright install --with-deps chromium firefox webkit`, `sh tests/tools/fetch-openh264.sh`, `make -C tests/tools` and the packages the `suites` job of [`tests.yaml`](https://github.com/selkies-project/selkies/tree/main/.github/workflows/tests.yaml) installs; Miniforge serves a host whose package manager is closed, with the system `libgbm.so` kept for GBM on NVIDIA. [`scripts/ci/test-stack.sh`](https://github.com/selkies-project/selkies/tree/main/scripts/ci/test-stack.sh) then starts what the suites stream from, an `Xvfb` on `E2E_DISPLAY` (`:99` unless set) with the canvas the containers use and a PulseAudio null sink, leaving both alone when they are up already; CI starts its display with the same script. That display is never the one a desktop runs on, because the suites inject input and resize the root window, which is why `E2E_DISPLAY` is never taken from `DISPLAY`. The Wayland suites nest their own `labwc`, patched as [`addons/base/build-labwc.sh`](https://github.com/selkies-project/selkies/tree/main/addons/base/build-labwc.sh) builds it; a stock one makes them skip, and CI counts a skip as a failure (`tests/tools/assert_no_skips.py`). GPU paths need the hardware: pixelflux's `cargo test gpu_ -- --ignored --nocapture --test-threads=1` on a machine with the NVIDIA driver, and a render node for its dmabuf checks. A change to pixelflux or pcmflux reaches this sandbox as a wheel (`pip wheel . --no-deps` in that checkout) installed into the same environment, and the suites here then drive it over both transports on X11 and Wayland.
 

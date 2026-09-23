@@ -312,7 +312,7 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' }}
     name: ${{ matrix.addon }} (${{ matrix.arch.name }})
     # The TURN server and the TURN REST credential service documented in
-    # docs/component.md; independent of the wheel
+    # docs/components/index.md; independent of the wheel
     runs-on: ${{ matrix.arch.runner }}
     strategy:
       fail-fast: false

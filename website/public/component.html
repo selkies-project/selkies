@@ -1,0 +1,4 @@
+<!doctype html><meta charset="utf-8"><title>Components</title>
+<!-- The components page became the components/ folder; the export serves this at both /component and /component/, so the target is taken from the address itself. -->
+<a id="to">Components</a>
+<script>var t = location.pathname.replace(/\/component\/?$/, '/components/'); document.getElementById('to').href = t; location.replace(t + location.hash);</script>

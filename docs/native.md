@@ -103,7 +103,7 @@ Dynamic resizing (`--enable-resize`, **on by default**) fits the remote resoluti
 selkies-resize 1920x1080
 ```
 
-**4. Check the [**Input Interposer**](component.md#input-interposer) section if you need to use joystick/gamepad devices from your web browser client, and the [**V4L2 Interposer**](component.md#v4l2-interposer) section for the webcam.**
+**4. Check the [**Input Interposer**](components/input-interposer.md) section if you need to use joystick/gamepad devices from your web browser client, and the [**V4L2 Interposer**](components/v4l2-interposer.md) section for the webcam.**
 
 You can install `selkies_input_interposer.so` and `selkies_v4l2_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` and `SELKIES_WEBCAM_INTERPOSER` at them.
 
@@ -134,7 +134,7 @@ Selkies has a modularized architecture, but at runtime it is a **single Python a
 
 `pixelflux`, `pcmflux` and the web client all travel inside whichever medium you installed. There is **no separate multimedia-framework build or web-interface package to install**.
 
-For more information, check the [Components](component.md) section.
+For more information, check the [Components](components/index.md) section.
 
 The [All-In-One Desktop Containers](start.md#desktop-container) support unprivileged self-hosted Kubernetes clusters and Docker®/Podman.
 
@@ -146,7 +146,7 @@ While this instruction assumes that you are installing this project systemwide, 
 
 **1. Install Selkies** by either route above; the native package is the one this script assumes, since it puts `selkies` on `PATH` and pulls in the system libraries through your package manager.
 
-**2. Build the Input Interposer to process gamepad input**, if you need to use joystick/gamepad devices from your web browser client in an environment without `/dev/uinput` — typically an unprivileged container. Where `/dev/uinput` is writable, Selkies registers gamepads as [kernel devices](component.md#kernel-gamepads) instead and this step, along with the `LD_PRELOAD` exports below, is unnecessary. Otherwise applications receive gamepad input only when they are started with the interposer preloaded, and `fake-udev` is additionally required for applications that discover devices through `libudev`. Both are built and wired automatically in the [Desktop Container](component.md#desktop-container) and the desktop containers. Elsewhere, build them from source (they are small `LD_PRELOAD` libraries needing only libc; `fake-udev` passes everything but the pads through to the system `libudev` it finds at runtime):
+**2. Build the Input Interposer to process gamepad input**, if you need to use joystick/gamepad devices from your web browser client in an environment without `/dev/uinput` — typically an unprivileged container. Where `/dev/uinput` is writable, Selkies registers gamepads as [kernel devices](components/input-interposer.md#kernel-gamepads) instead and this step, along with the `LD_PRELOAD` exports below, is unnecessary. Otherwise applications receive gamepad input only when they are started with the interposer preloaded, and `fake-udev` is additionally required for applications that discover devices through `libudev`. Both are built and wired automatically in the [Desktop Container](components/desktop-image.md) and the desktop containers. Elsewhere, build them from source (they are small `LD_PRELOAD` libraries needing only libc; `fake-udev` passes everything but the pads through to the system `libudev` it finds at runtime):
 
 ```bash
 git clone https://github.com/selkies-project/selkies.git && cd selkies
@@ -157,9 +157,9 @@ cd addons/fake-udev && make && cp libudev.so.1.0.0-fake libudev.so.1 libudev.so 
 
 On `x86_64`, add `apt-get install -y gcc-multilib && make -C addons/input-interposer install32` (and `make all32` in `addons/fake-udev`) for 32-bit applications such as most of the Steam and Wine catalog, since `/usr/$LIB` resolves per process bitness. Container images built on the `.deb`, `.rpm`, `.apk` or `.pkg.tar.zst` package need neither step: each of them already carries the interposer, and the `.deb` and `.rpm` carry the 32-bit variant too.
 
-More information can be found in [Input Interposer](component.md#input-interposer).
+More information can be found in [Input Interposer](components/input-interposer.md).
 
-You can install `selkies_input_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` at it. The webcam uplink has a matching library built the same way, `make -C addons/v4l2-interposer && PREFIX=/usr make -C addons/v4l2-interposer install`; see [V4L2 Interposer](component.md#v4l2-interposer).
+You can install `selkies_input_interposer.so` to any non-root path of your choice and point `SELKIES_INTERPOSER` at it. The webcam uplink has a matching library built the same way, `make -C addons/v4l2-interposer && PREFIX=/usr make -C addons/v4l2-interposer install`; see [V4L2 Interposer](components/v4l2-interposer.md).
 
 SDL2 applications discover the four pads through `fake-udev`. Where discovery through `libudev` is unavailable — `SDL_JOYSTICK_DISABLE_UDEV=1`, an SDL sandbox build, or an SDL built without udev — export `SDL_JOYSTICK_DEVICE=/dev/input/event1000:/dev/input/event1001:/dev/input/event1002:/dev/input/event1003` instead, which needs no placeholder files. Never name the joydev nodes there: with `fake-udev` active, a `/dev/input/js0` hint is a second, different node for the slot SDL already enumerated as `event1000`, so the pad shows up twice.
 
@@ -237,4 +237,4 @@ Please read [**WebRTC and Firewall Issues**](firewall.md).
 
 Every push to `main` builds the same media a release does, so an unreleased commit installs exactly like the released one above. **Nothing here needs Docker®.** Log in to GitHub, open that commit's `CI` run in [Actions](https://github.com/selkies-project/selkies/actions), and take its Build Artifacts: the `selkies-wheel` artifact holds the wheel, and the package jobs attach the `.deb`, `.rpm`, `.apk`, `.pkg.tar.zst` and the AppImage. [`gh run download`](https://cli.github.com/manual/gh_run_download) fetches them from a shell instead.
 
-The container images are published to `ghcr.io` rather than attached to the run, as `ghcr.io/selkies-project/selkies/base:main-ubuntu26.04` and `desktop:main-ubuntu26.04` (and the `debiantrixie` flavor of each), which every push moves onto the new build. Run one as the [Desktop Container](component.md#desktop-container) shows, or name it in a `FROM` line to build your own desktop on it — [Container Customization](development.md#container-customization) covers that. Replace `main` with `latest` in any of these tags for the newest release instead of the newest commit.
+The container images are published to `ghcr.io` rather than attached to the run, as `ghcr.io/selkies-project/selkies/base:main-ubuntu26.04` and `desktop:main-ubuntu26.04` (and the `debiantrixie` flavor of each), which every push moves onto the new build. Run one as the [Desktop Container](components/desktop-image.md) shows, or name it in a `FROM` line to build your own desktop on it — [Container Customization](development.md#container-customization) covers that. Replace `main` with `latest` in any of these tags for the newest release instead of the newest commit.

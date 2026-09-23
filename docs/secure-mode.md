@@ -76,3 +76,10 @@ Independent of the mode: `--allowed-origins` (`SELKIES_ALLOWED_ORIGINS`) is the 
 ## Without a Master Token
 
 Nothing above applies but the origin check. The routes are open, or Basic-gated when `--enable-basic-auth` is on: the main password authenticates a controller and the optional `--basic-auth-viewonly-password` a viewer, which is refused the same uploads and mode switches as a viewer token. Bearer headers and the token cookie are ignored, and the roles a client can take are the [sharing links](usage.md#session-sharing) instead of provisioned tokens.
+
+## Reference Implementations
+
+Two orchestrators drive secure mode as this page describes it, and are the place to read how the master token, the token table and the tokened client URL fit together in a service:
+
+- [romm-broker](https://github.com/romm-streaming/romm-broker) starts a container per game session, provisions its tokens through `/api/tokens` and hands each player a tokened URL.
+- [Sealskin](https://github.com/selkies-project/sealskin)'s [`collaboration.py`](https://github.com/selkies-project/sealskin/blob/main/server/app/collaboration.py) manages the token table of a shared desktop as collaborators join and leave, with the controller, viewer and gamepad-slot roles above.

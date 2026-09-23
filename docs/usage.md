@@ -25,7 +25,7 @@ Locked movement is relayed to the remote desktop as-is, so the only acceleration
 
 The side menu is available by clicking the small button on the right side of the interface, or by using the shortcut `Control + Shift + M`; gaming mode is the one mode that hides both.
 
-`Control + Shift + G` toggles the on-screen touch gamepad overlay (the [Universal Touch Gamepad](component.md#universal-touch-gamepad)), which is also available from the side menu.
+`Control + Shift + G` toggles the on-screen touch gamepad overlay (the [Universal Touch Gamepad](components/web-client.md#universal-touch-gamepad)), which is also available from the side menu.
 
 These chords are taken by the client before the session sees them, which collides with an application inside the session that binds the same ones. The shortcuts section of the side menu has a switch that hands every one of them to the session instead; the side menu's own buttons still reach each function, and pressing Escape three times still leaves gaming mode. `--keyboard-shortcuts` sets the starting position for every client and can be locked.
 
@@ -113,7 +113,7 @@ The recording is the one pixelflux makes: an H.264 fragmented MP4, playable from
 Both send a local device into the session, are off by default, and need a secure context (HTTPS, or `localhost`) before the browser hands the device over. Each is toggled from the side menu while the session runs.
 
 - **Microphone** (`--microphone-enabled` / `SELKIES_MICROPHONE_ENABLED`) publishes the browser's microphone as an ordinary PulseAudio source in the session, so applications record it like any capture device. It rides the audio path, so `--audio-enabled=false` disables it as well.
-- **Webcam** (`--webcam-enabled` / `SELKIES_WEBCAM_ENABLED`) publishes the browser's camera as a V4L2 capture device. How applications reach it, and what each of its sinks needs, is in [V4L2 Interposer](component.md#v4l2-interposer).
+- **Webcam** (`--webcam-enabled` / `SELKIES_WEBCAM_ENABLED`) publishes the browser's camera as a V4L2 capture device. How applications reach it, and what each of its sinks needs, is in [V4L2 Interposer](components/v4l2-interposer.md).
 
 ## What a Session Starts With
 
@@ -131,4 +131,4 @@ Every command-line option has a matching environment variable, formed by capital
 
 ## Configuring Encoders, Display Capture, or Transport Protocols
 
-[Components](component.md#encoders) lists every encoder, capture backend, audio path, and transport the runtime implements, with the setting that selects each one.
+[Components](components/index.md#encoders) lists every encoder, capture backend, audio path, and transport the runtime implements, with the setting that selects each one, and the ladder a session steps down when a codec cannot be served. The encoder, the bitrates, the frame rate and the UI scaling are the client's to choose from the dashboard among what the server allows; a deployment sets `SELKIES_ENCODER` only to narrow that menu, and a single value locks it. The [Settings Reference](settings.md) groups every setting by what it governs, the stream settings first.

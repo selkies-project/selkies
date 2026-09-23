@@ -1,0 +1,14 @@
+{
+  "title": "Components",
+  "pages": [
+    "pixelflux",
+    "pcmflux",
+    "web-client",
+    "base-image",
+    "desktop-image",
+    "kde-images",
+    "input-interposer",
+    "v4l2-interposer",
+    "turn"
+  ]
+}

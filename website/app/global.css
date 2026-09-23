@@ -30,6 +30,32 @@ html {
 }
 
 /*
+ * The layout is let out to the width of a 16:9 monitor rather than held to a
+ * reading column: the reference tables (the settings, the encoders, the images)
+ * are wide, and a page that scrolls sideways at full width is worse than one
+ * whose prose runs long. A table wider than its page still scrolls on its own.
+ */
+:root {
+  --fd-layout-width: 120rem;
+}
+
+#nd-page table {
+  width: 100%;
+  table-layout: auto;
+  font-size: 0.875rem;
+}
+
+#nd-page td,
+#nd-page th {
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+#nd-page td:first-child code {
+  white-space: nowrap;
+}
+
+/*
  * Badges are written as a run of linked images on one line, which is a row on
  * GitHub. The typography defaults make every image a block, which would stack
  * them instead.
