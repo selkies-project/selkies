@@ -63,18 +63,19 @@ if not STEP.strip():
     sys.exit(1)
 
 
-def validate(tag: str, latest: str = "") -> tuple:
+def validate(tag: str, latest: str = "", ref: str = "refs/heads/main") -> tuple:
     """The validate step itself, run on a tag: `(accepted, step outputs)`.
 
     `latest` is the workflow's input as the step sees it: `auto`, `always`, `never`, or
-    empty for a run that left the default.
+    empty for a run that left the default; `ref` is the one the run was started from.
     """
     with tempfile.TemporaryDirectory() as tmp:
         out = os.path.join(tmp, "github_output")
         open(out, "w").close()
         proc = subprocess.run(
             ["sh", "-c", STEP], capture_output=True, text=True, timeout=60,
-            env=dict(os.environ, TAG=tag, LATEST=latest, GITHUB_OUTPUT=out))
+            env=dict(os.environ, TAG=tag, LATEST=latest, GITHUB_OUTPUT=out,
+                     GITHUB_REF=ref, GITHUB_REF_NAME=ref.rsplit("/", 1)[-1]))
         outputs = dict(ln.split("=", 1) for ln in open(out).read().splitlines() if "=" in ln)
     return proc.returncode == 0, outputs
 
@@ -104,6 +105,11 @@ TAGS = {
     "2.0.0.0": (False, False),
     "": (False, False),
 }
+# A release is cut from main alone, whatever the tag
+for ref in ("refs/heads/ffmpeg-free", "refs/tags/1.2.3"):
+    ok, _ = validate("1.2.3", ref=ref)
+    check(f"a run started from {ref} is refused", not ok)
+
 for tag, (want_ok, want_pre) in TAGS.items():
     ok, out = validate(tag)
     check(f"{tag or '<empty>'} is {'accepted' if want_ok else 'rejected'}",
