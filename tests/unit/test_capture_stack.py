@@ -71,14 +71,12 @@ esac
 """
 
 
-def probe(pinned: bool, pins=None, pairing=None, **stub) -> tuple:
+def probe(pinned: bool, pins=None, **stub) -> tuple:
     """The locate step, run against a stubbed `gh`: `(accepted, step outputs)`.
 
     `pins` writes a pyproject.toml carrying them; without it a pinned run reads
     the repository's own, which is what a release resolves. A HEAD run reads no
-    pins and runs in a checkout of its own, where `pairing` is the contents of
-    its `.github/capture-stack`, so the branch this test runs on cannot answer
-    for it.
+    pins and runs in a checkout of its own.
     """
     with tempfile.TemporaryDirectory() as tmp:
         os.mkdir(os.path.join(tmp, "bin"))
@@ -92,9 +90,6 @@ def probe(pinned: bool, pins=None, pairing=None, **stub) -> tuple:
             deps = "".join(f'    "{pin}",\n' for pin in pins or [])
             open(os.path.join(tmp, "pyproject.toml"), "w").write(
                 f'[project]\ndependencies = [\n    "Pillow",\n{deps}]\n')
-        if pairing is not None:
-            os.mkdir(os.path.join(tmp, ".github"))
-            open(os.path.join(tmp, ".github", "capture-stack"), "w").write(pairing)
         out = os.path.join(tmp, "github_output")
         open(out, "w").close()
         env = dict(os.environ, GITHUB_OUTPUT=out, PATH=os.path.join(tmp, "bin") + os.pathsep + os.environ["PATH"],
@@ -160,16 +155,6 @@ check("a HEAD no pre-release covers is built", out.get("build") == "true",
 _, out = probe(pinned=False, tags="97ef61d a3290fd")
 check("a HEAD the probe could not read is built", out.get("build") == "true",
       out.get("build", "<unset>"))
-
-# A branch pairs itself with a sibling's branch through .github/capture-stack,
-# which has no pre-release to take and is built from that branch
-_, out = probe(pinned=False, sha=SHA, tags="97ef61d a3290fd", pairing="pixelflux=ref-frames\n")
-check("a paired project is built from the branch named", out.get("pixelflux_ref") == "ref-frames",
-      out.get("pixelflux_ref", "<unset>"))
-check("and takes no pre-release", out.get("pixelflux") == "" and out.get("build") == "true",
-      f"{out.get('pixelflux', '<unset>')} build={out.get('build', '<unset>')}")
-check("a project the file does not name keeps main", out.get("pcmflux_ref") == "main",
-      out.get("pcmflux_ref", "<unset>"))
 
 print(f"[capture-stack] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

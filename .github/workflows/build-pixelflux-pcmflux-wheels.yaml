@@ -41,10 +41,7 @@ jobs:
       pixelflux_ref: ${{ steps.probe.outputs.pixelflux_ref }}
       pcmflux_ref: ${{ steps.probe.outputs.pcmflux_ref }}
     steps:
-      # The pins a pinned run reads live in this repository's pyproject.toml;
-      # the branch an unpinned run builds is main unless .github/capture-stack
-      # names another (`pixelflux=ref-frames`), which a branch pairs itself
-      # with a sibling's branch through
+      # The pins a pinned run reads live in this repository's pyproject.toml
       - uses: actions/checkout@v7
       - id: probe
         env:
@@ -68,14 +65,12 @@ jobs:
                         --jq '.assets[].name' 2>/dev/null || true)"
               case "${assets}" in *"${project}-${want}-"*) tag="${want}" ;; esac
             else
-              ref="$(sed -n "s/^${project}=//p" .github/capture-stack 2>/dev/null || true)"
-              ref="${ref:-main}"
-              # Pre-releases are cut from main alone and tagged with an
-              # abbreviated SHA, so match by prefix
+              ref=main
               sha="$(gh api "repos/${repo}/commits/main" --jq .sha 2>/dev/null || true)"
+              # Pre-releases are tagged with an abbreviated SHA, so match by prefix
               tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
                       --jq '.[].tagName' 2>/dev/null || true)"
-              [ "${ref}" = main ] && for candidate in ${tags}; do
+              for candidate in ${tags}; do
                 case "${sha:-none}" in "${candidate}"*) tag="${candidate}"; break ;; esac
               done
             fi
