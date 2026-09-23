@@ -7,7 +7,8 @@ const docs = defineDocs({
   // Pages stay in the repository's docs/ directory rather than moving under
   // the site, so editing one through GitHub needs no knowledge of Next.js.
   dir: '../docs',
-  docs: { schema: pageSchema },
+  // The processed Markdown of each page is kept for the copies lib/llms.ts serves.
+  docs: { schema: pageSchema, postprocess: { includeProcessedMarkdown: true } },
   meta: { schema: metaSchema },
 });
 

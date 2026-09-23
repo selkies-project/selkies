@@ -92,3 +92,8 @@ export function servedSegment({ version, aliases }: DocsVersion): string {
 export function pageUrl(url: string): string {
   return docsVersions ? `${siteUrl}/${docsVersions.default}${url}` : `${siteUrl}${url}`;
 }
+
+/** The Markdown copy of a page, as app/llms.mdx serves it, site-absolute. */
+export function pageMarkdownUrl(page: { slugs: string[] }): string {
+  return withBasePath(['/llms.mdx', ...page.slugs, 'content.md'].join('/'));
+}
