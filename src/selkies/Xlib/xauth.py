@@ -30,6 +30,7 @@ FamilyChaos = X.FamilyChaos
 FamilyServerInterpreted = X.FamilyServerInterpreted
 FamilyInternetV6 = X.FamilyInternetV6
 FamilyLocal = 256
+FamilyWild = 65535
 
 class Xauthority(object):
     def __init__(self, filename = None):
@@ -122,7 +123,7 @@ class Xauthority(object):
         for efam, eaddr, enum, ename, edata in self.entries:
             if enum == b'' and ename not in matches:
                 enum = num
-            if efam == family and eaddr == address and num == enum:
+            if (efam == FamilyWild or (efam == family and eaddr == address)) and num == enum:
                 matches[ename] = edata
 
         for t in types:

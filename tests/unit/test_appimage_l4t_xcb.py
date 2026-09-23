@@ -82,6 +82,8 @@ res.check("an L4T host carrying none of them is left alone too",
 script = apprun()
 res.check("the preload is never exported over the servers or the session",
           "export LD_PRELOAD" not in script)
+res.check("the session launcher is handed it for Selkies alone",
+          'export SELKIES_PRELOAD="${system_xcb}"' in script)
 res.check("and a host without the marker still reaches the plain exec",
           script.rstrip().endswith('exec "${ENV_BIN}/selkies" "$@"'),
           script.rstrip()[-60:])

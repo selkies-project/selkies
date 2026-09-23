@@ -69,6 +69,13 @@ test = [
     "playwright",
     "websockets",
     "pywayland",
+    "jupyter-server",
+    "jupyter-server-proxy",
+]
+# The Jupyter launcher item and route: `pip install selkies[jupyter]` beside the
+# Jupyter server that should offer the desktop
+jupyter = [
+    "jupyter-server-proxy>=4.1",
 ]
 
 [project.urls]
@@ -79,6 +86,12 @@ Homepage = "https://github.com/selkies-project/selkies"
 selkies = "selkies.__main__:main"
 selkies-resize = "selkies.display_utils:entrypoint"
 selkies-gpu-probe = "selkies.gpu_probe:main"
+selkies-session = "selkies.session:main"
+
+# Jupyter's server proxy reads this group: with jupyter-server-proxy installed
+# beside selkies, every Jupyter server gains a Selkies desktop at /selkies/
+[project.entry-points.jupyter_serverproxy_servers]
+selkies = "selkies.session:jupyter"
 
 # Package the static web files, and the license of the vendored python-xlib
 # fork, as part of the distribution wheel

@@ -1,0 +1,7 @@
+# The port Selkies listens on, the session token the view carries, and the
+# master token that provisions it; OnDemand writes host, port, and password
+# into the session's connection file.
+host=$(hostname)
+port=$(find_port "${host}")
+password=$(create_passwd 32)
+export SELKIES_MASTER_TOKEN="$(create_passwd 32)"

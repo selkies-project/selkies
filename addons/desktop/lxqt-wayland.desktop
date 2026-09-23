@@ -1,0 +1,14 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# The image's LXQt on labwc as a Wayland session, for what starts a desktop
+# from its session file, selkies-session among them. The environment is what
+# startlxqt exports on X11; the desktop names pick the panel's wlroots backend.
+[Desktop Entry]
+Type=Application
+Name=LXQt (labwc)
+Comment=LXQt on the labwc Wayland compositor
+Exec=env QT_QPA_PLATFORMTHEME=lxqt QT_AUTO_SCREEN_SCALE_FACTOR=0 XDG_MENU_PREFIX=lxqt- XDG_CONFIG_DIRS=/etc:/etc/xdg:/usr/share labwc -S lxqt-session
+TryExec=labwc
+DesktopNames=LXQt;labwc;wlroots

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Install what the workspace lacks of Selkies and an X server, as the KasmVNC
+# module does with passwordless sudo, then leave a desktop session running
+# behind the app's port. Coder authenticates the app and terminates TLS, so
+# Selkies runs on the loopback addresses without a login or TLS of its own.
+set -euo pipefail
+
+port=${PORT}
+session='${DESKTOP_ENVIRONMENT}'
+export SELKIES_WAYLAND=${WAYLAND}
+
+if curl -fsS -o /dev/null "http://localhost:$port/api/health" 2> /dev/null; then
+  echo "Selkies already answers on port $port"
+  exit 0
+fi
+
+need_selkies=
+need_xvfb=
+command -v selkies-session > /dev/null || need_selkies=1
+[ "$SELKIES_WAYLAND" = true ] || command -v Xvfb > /dev/null || need_xvfb=1
+if [ -n "$need_selkies$need_xvfb" ]; then
+  if ! sudo -n true 2> /dev/null; then
+    echo "Installing Selkies or Xvfb needs sudo without a password; install them in the image instead" >&2
+    exit 1
+  fi
+  # shellcheck source=/dev/null
+  . /etc/os-release
+  if command -v apt-get > /dev/null; then
+    sudo apt-get -o DPkg::Lock::Timeout=300 update -qq
+    file=(sudo apt-get -o DPkg::Lock::Timeout=300 install -y)
+    repo=(sudo apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends)
+    pkg="$([ "$ID" = ubuntu ] && echo "ubuntu$VERSION_ID" || echo "$VERSION_CODENAME")-$(dpkg --print-architecture).deb"
+    xvfb=xvfb
+  elif command -v dnf > /dev/null; then
+    file=(sudo dnf install -y)
+    repo=(sudo dnf install -y)
+    pkg="$([ "$ID" = fedora ] && echo fc || echo el9)-$(uname -m).rpm"
+    xvfb=xorg-x11-server-Xvfb
+  elif command -v apk > /dev/null; then
+    file=(sudo apk add --allow-untrusted)
+    repo=(sudo apk add)
+    pkg="$(uname -m).apk"
+    xvfb=xvfb
+  elif command -v pacman > /dev/null; then
+    file=(sudo pacman -U --noconfirm)
+    repo=(sudo pacman -S --noconfirm --needed)
+    pkg="$(uname -m).pkg.tar.zst"
+    xvfb=xorg-server-xvfb
+  else
+    echo "No package manager Selkies publishes for (apt, dnf, apk, pacman)" >&2
+    exit 1
+  fi
+  if [ -n "$need_selkies" ]; then
+    version='${SELKIES_VERSION}'
+    [ -n "$version" ] || version=$(curl -fsSL https://api.github.com/repos/selkies-project/selkies/releases/latest \
+      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+    work=$(mktemp -d)
+    curl -fsSL -o "$work/selkies-$version-$pkg" \
+      "https://github.com/selkies-project/selkies/releases/download/$version/selkies-$version-$pkg"
+    "$${file[@]}" "$work/selkies-$version-$pkg"
+    rm -rf "$work"
+  fi
+  [ -z "$need_xvfb" ] || "$${repo[@]}" "$xvfb"
+fi
+
+args=(--port="$port" --enable-basic-auth=false --enable-https=false)
+[ -z "$session" ] || args+=(--session="$session")
+nohup selkies-session "$${args[@]}" > /tmp/selkies-session.log 2>&1 &
+echo "Selkies starts on port $port; its log is /tmp/selkies-session.log"

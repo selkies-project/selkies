@@ -62,6 +62,8 @@ chmod +x "./${APP}"
 
 `--public` accepts connections on every interface, IPv4 and IPv6; without it, Selkies listens on the loopback addresses only (`127.0.0.1,::1`), for a session reached through SSH port forwarding or a reverse proxy on the same machine. `--addr=` names particular addresses to listen on instead, and is not given together with `--public`.
 
+Given `selkies-session` as its first argument, it runs a whole session instead, with its own display and sound server and the host's desktop, as [Jupyter, Coder, and Open OnDemand](platforms.md) describes: `"./${APP}" selkies-session --port=8080 --enable-basic-auth=false`.
+
 What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL`, and the GPU's own driver have to be the host's for the GPU to be reachable at all, an X11 session needs the host's X server (or `Xvfb`), and the headless Wayland backend needs the host's `libwayland-server`. Everything above them travels with the AppImage.
 
 ## Run a session
@@ -141,6 +143,14 @@ The [All-In-One Desktop Containers](start.md#desktop-container) support unprivil
 ### Run a full session on a standalone machine, cloud instance, or virtual machine
 
 **NOTE: STUN/TURN is only relevant to the opt-in WebRTC transport (`--mode=webrtc`). The default WebSocket transport uses a single TCP port. If you use WebRTC mode and both your server and client have closed ports or a restrictive firewall, you will need an external STUN/TURN server capable of `srflx` or `relay` type ICE connections; either open the UDP and TCP port ranges 49152-65535 of your server, or follow the instructions from [WebRTC and Firewall Issues](firewall.md).**
+
+`selkies-session` does all of this from one command where no desktop is already on the screen: it starts a sound server unless one answers, an Xvfb of its own (or, with `SELKIES_WAYLAND=true`, Selkies' compositor), the machine's default desktop, and Selkies with every argument it is given, and it preloads the interposers `SELKIES_INTERPOSER` and `SELKIES_WEBCAM_INTERPOSER` name into that desktop. [Jupyter, Coder, and Open OnDemand](platforms.md) describes it in full:
+
+```bash
+selkies-session --session=xfce --public --port=8080 --basic-auth-password=mypasswd
+```
+
+The steps below do the same by hand, for a machine whose display, sound server, or desktop is set up on its own or has to outlive Selkies.
 
 While this instruction assumes that you are installing this project systemwide, it is possible to install and run all components completely within the userspace.
 

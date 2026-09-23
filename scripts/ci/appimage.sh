@@ -173,7 +173,8 @@ print("every ELF file in the AppDir needs at most GLIBC_2.28")
 FLOOR
 
 # 4) Custom AppRun + desktop integration. No desktop session is bundled: the
-#    AppImage streams an existing X display/Xvfb or a Wayland compositor.
+#    AppImage streams an existing X display/Xvfb or a Wayland compositor, or
+#    runs selkies-session with the host's own desktop.
 mkdir -p AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/512x512/apps
 cat > AppDir/usr/share/applications/selkies.desktop <<'DESKTOP'
 [Desktop Entry]
@@ -186,15 +187,24 @@ Categories=Network;RemoteAccess;
 Terminal=true
 DESKTOP
 cp docs/assets/logo/icon-512x512.png AppDir/usr/share/icons/hicolor/512x512/apps/selkies.png
+# The bundled PulseAudio for selkies-session, which starts its sound server by
+# name: the daemon is told the module directory and startup script its build
+# prefix compiled in, and keeps the libraries AppRun preloads for selkies out.
+mkdir -p AppDir/usr/libexec/selkies-session
+cat > AppDir/usr/libexec/selkies-session/pulseaudio <<'PULSE'
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "${0}")")/../../.."
+unset LD_PRELOAD
+exec "${HERE}/usr/conda/bin/pulseaudio" -p "${HERE}/usr/conda/lib/pulseaudio/modules" \
+    -F "${HERE}/usr/conda/etc/pulse/default.pa" "$@"
+PULSE
+chmod +x AppDir/usr/libexec/selkies-session/pulseaudio
 cat > AppDir/AppRun <<'APPRUN'
 #!/bin/sh
 HERE="$(dirname "$(readlink -f "${0}")")"
 ENV_BIN="${HERE}/usr/conda/bin"
+HOST_PATH="${PATH}"
 export PATH="${ENV_BIN}:${PATH}"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
-export PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR}/pulse/native}"
-export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-256/48000}"
-export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 # Paths to the bundled interposers, for LD_PRELOADing into an application that
 # needs gamepads where /dev/uinput is unreachable, or the webcam where no
 # v4l2loopback device is. Deliberately not added to LD_PRELOAD here: selkies
@@ -219,6 +229,26 @@ first_present_if() {
     done
     return 1
 }
+
+system_xcb="$(first_present_if /etc/nv_tegra_release \
+    /usr/lib/aarch64-linux-gnu/libxcb.so.1 /usr/lib/libxcb.so.1)" || system_xcb=""
+
+# selkies-session brings up its own display, sound server, and desktop in a
+# runtime directory of its own, so it starts before the defaults and servers
+# below; the interposers above are preloaded into its desktop, and the libxcb
+# below into Selkies alone. Those are the host's, with the bundled PulseAudio and
+# tools after them: a bundled session bus names its build machine's paths.
+if [ "${1:-}" = "selkies-session" ]; then
+    shift
+    export PATH="${HOST_PATH}:${HERE}/usr/libexec/selkies-session:${ENV_BIN}"
+    [ -z "${system_xcb}" ] || export SELKIES_PRELOAD="${system_xcb}"
+    exec "${ENV_BIN}/selkies-session" "$@"
+fi
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+export PULSE_SERVER="${PULSE_SERVER:-unix:${XDG_RUNTIME_DIR}/pulse/native}"
+export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-256/48000}"
+export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 
 # A help or version query prints and exits, so it starts no display or audio server
 for arg in "$@"; do
@@ -263,8 +293,6 @@ fi
 
 # Preloaded for selkies alone: the servers started above, and whatever the
 # session runs under them, keep resolving the libraries their own binaries name.
-system_xcb="$(first_present_if /etc/nv_tegra_release \
-    /usr/lib/aarch64-linux-gnu/libxcb.so.1 /usr/lib/libxcb.so.1)" || system_xcb=""
 if [ -n "${system_xcb}" ]; then
     echo "L4T detected; preloading the system ${system_xcb} into selkies"
     exec env LD_PRELOAD="${system_xcb}${LD_PRELOAD:+:${LD_PRELOAD}}" "${ENV_BIN}/selkies" "$@"
