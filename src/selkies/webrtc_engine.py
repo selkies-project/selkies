@@ -1677,20 +1677,20 @@ class RTCApp:
             (t for t in peer_obj["peer_conn"].getTransceivers() if t.sender is sender), None)
         if transceiver is None:
             return
-        answered = [c.mimeType.lower() for c in transceiver._codecs
+        answered = [c.mimeType for c in transceiver._codecs
                     if not c.mimeType.lower().endswith(("/rtx", "/flexfec-03"))]
         if not answered:
             return
         display_id = peer_obj.get("display_id") or "primary"
         logger.info(f"Video for peer {client_peer_id} on display '{display_id}' negotiated {answered[0]}")
-        if answered[0] == wanted.lower():
+        if answered[0].lower() == wanted.lower():
             return
         # The answer lists the codecs this peer decodes in the offer's order, the menu's first,
         # so its first is the rung the display moves to. Under a held full color the rung is the
         # first menu codec whose 4:4:4 the peer decodes too, or that this host encodes 4:2:0
         # anyway, and the first stands where there is none.
         by_mime = {self.get_mime_by_encoder(enc).lower(): enc for enc in WEBRTC_ENCODER_CHOICES}
-        candidates = [by_mime[mime] for mime in answered if mime in by_mime] or ["h264enc"]
+        candidates = [by_mime[mime.lower()] for mime in answered if mime.lower() in by_mime] or ["h264enc"]
         fullcolor = peer_obj.get("fullcolor_codecs")
         display_fullcolor = fullcolor is not None and bool(self.get_fullcolor_for_display(display_id))
         if display_fullcolor and bool(app_settings.video_fullcolor[1]):
