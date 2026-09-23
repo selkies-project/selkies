@@ -126,7 +126,8 @@ async function decoderAccepts(codec, width, height) {
     // The runtime falls back to a software decoder where the hardware one refuses, so an
     // encoder software can play is still offered: a refused default probe is retried on
     // software before it counts as unsupported. The timer stands in for the refusal a decoder
-    // without the profile gives, so an engine that never answers reads as one.
+    // without the profile gives, and an engine that never answers is not asked twice: the
+    // session waits on this, and the second question would only double the wait.
     for (const accel of [undefined, "prefer-software"]) {
         try {
             const config = { codec, codedWidth: width, codedHeight: height };
@@ -136,6 +137,7 @@ async function decoderAccepts(codec, width, height) {
                 new Promise((resolve) => setTimeout(resolve, DECODER_PROBE_TIMEOUT_MS)),
             ]);
             if (support && support.supported) return true;
+            if (support === undefined) return false;
         } catch (err) {
             // Fall through to the next acceleration preference.
         }
