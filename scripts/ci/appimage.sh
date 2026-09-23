@@ -205,6 +205,9 @@ HERE="$(dirname "$(readlink -f "${0}")")"
 ENV_BIN="${HERE}/usr/conda/bin"
 HOST_PATH="${PATH}"
 export PATH="${ENV_BIN}:${PATH}"
+# The bundled libdbus names the system bus under its build prefix; the
+# well-known address reaches the host's, where RTKit schedules the sound server
+export DBUS_SYSTEM_BUS_ADDRESS="${DBUS_SYSTEM_BUS_ADDRESS:-unix:path=/var/run/dbus/system_bus_socket}"
 # Paths to the bundled interposers, for LD_PRELOADing into an application that
 # needs gamepads where /dev/uinput is unreachable, or the webcam where no
 # v4l2loopback device is. Deliberately not added to LD_PRELOAD here: selkies

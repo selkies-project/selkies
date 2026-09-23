@@ -121,6 +121,17 @@ case "${modules}" in
         ;;
 esac
 echo "AppRun's sound server comes up with a sink, on this copy's modules"
+# The system bus it asks RTKit for real-time scheduling on, which the bundled
+# libdbus also has at the build path; a runner without a bus logs the one it tried
+bus="$(sed -n 's|.*Failed to connect to system bus: .*socket \(/[^:]*\):.*|\1|p' "${PULSE_LOG}" | tail -1)"
+case "${bus}" in
+    ""|/var/run/dbus/system_bus_socket) ;;
+    *)
+        echo "::error::AppRun's sound server looked for the system bus at ${bus}"
+        exit 1
+        ;;
+esac
+echo "AppRun's sound server looks for the system bus at the well-known address"
 
 # The mount a user's own run takes: the runtime mounts the image read-only and
 # only extracts itself where FUSE is missing, so the checks above never see it.
