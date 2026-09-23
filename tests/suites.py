@@ -78,6 +78,7 @@ SUITES: list = [
     {"path": "unit/test_appimage_l4t_xcb.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_appimage_relocation.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_docs_tables.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_session_launcher.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_https_selfsigned.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_encoder_cpu_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rate_control_defaults.py", "tier": "unit", "timeout": 180},
@@ -197,6 +198,7 @@ SUITES: list = [
     {"path": "integration/test_webcam_device.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_capture_demand.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_wire_header_picture_type.py", "tier": "integration", "timeout": 300},
+    {"path": "integration/test_session_launcher.py", "tier": "integration", "timeout": 600},
     {"path": "packaging/test_packaging.py", "tier": "integration", "timeout": 1800},
 
     # e2e
@@ -307,6 +309,7 @@ SUITES: list = [
     {"path": "e2e/test_codecs.py", "tier": "e2e", "timeout": 2400,
      "selectors": ["ws-x11", "ws-wl", "wr-x11"]},
     {"path": "e2e/test_ws_unix_socket.py", "tier": "e2e", "timeout": 600},
+    {"path": "e2e/test_jupyter_proxy.py", "tier": "e2e", "timeout": 600},
 
     # on request
     {"path": "perf/test_pacer.py", "tier": "perf", "timeout": 3600},

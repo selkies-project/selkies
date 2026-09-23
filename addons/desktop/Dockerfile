@@ -324,6 +324,8 @@ RUN mkdir -pm755 /usr/local/share/applications && \
 
 # The session's own s6 service, supervised beside the base container's
 COPY --chown=1000:1000 addons/desktop/services/ /etc/service/
+# The same desktop for what starts one from a session file; LXQt ships the X11 one
+COPY --chown=1000:1000 addons/desktop/lxqt-wayland.desktop /usr/share/wayland-sessions/lxqt.desktop
 RUN find /etc/service \( -name run -o -name finish \) -exec chmod -f 755 {} +
 
 RUN printf "==============================================\n=         Selkies Desktop Container          =\n==============================================\n" > /etc/motd

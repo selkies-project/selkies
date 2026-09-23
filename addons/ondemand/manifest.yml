@@ -1,0 +1,9 @@
+---
+name: Selkies Desktop
+category: Interactive Apps
+subcategory: Desktops
+role: batch_connect
+description: |
+  A desktop on a compute node, streamed to the browser by Selkies through the
+  portal's own proxy, with audio, gamepads, and the webcam, and the node's GPU
+  encoding the stream where it has one.

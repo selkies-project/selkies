@@ -1,0 +1,9 @@
+# Provision the view's session token once Selkies answers, before OnDemand
+# reports the session running; a session that never comes up ends the job.
+if wait_until_port_used "${host}:${port}" 120; then
+  curl -fsS -o /dev/null -X POST "http://${host}:${port}/api/tokens" \
+    -H "Authorization: Bearer ${SELKIES_MASTER_TOKEN}" -H "Content-Type: application/json" \
+    -d "{\"${password}\": {\"role\": \"controller\", \"slot\": 1}}" || clean_up 1
+else
+  clean_up 1
+fi

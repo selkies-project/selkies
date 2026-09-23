@@ -45,6 +45,8 @@ Video is H.264, H.265, VP8, VP9, or AV1, chosen from the dashboard, encoded on t
 
 [**Secure Mode (token authentication)**](secure-mode.md)
 
+[**Jupyter, Coder, and Open OnDemand**](platforms.md)
+
 [**Components including Encoders and Interfaces**](components/index.md): [pixelflux](components/pixelflux.md), [pcmflux](components/pcmflux.md), the [web client and dashboards](components/web-client.md), the [Base Container](components/base-image.md), the [Desktop Container](components/desktop-image.md), the [KDE Plasma desktops](components/kde-images.md), [gamepads](components/input-interposer.md), the [webcam](components/v4l2-interposer.md), and [TURN](components/turn.md)
 
 [**Development and Contributions**](development.md)

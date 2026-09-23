@@ -1,0 +1,27 @@
+---
+cluster: "cluster"
+
+attributes:
+  desktop:
+    widget: text_field
+    label: Desktop session
+    help: |
+      A session installed on the node, by name (xfce, kde, lxqt, gnome) or a
+      command to run instead; empty takes the node's default desktop.
+  backend:
+    widget: select
+    label: Display backend
+    options:
+      - ["X11", "false"]
+      - ["Wayland", "true"]
+  selkies_command:
+    widget: hidden_field
+    value: "selkies-session"
+
+form:
+  - bc_num_hours
+  - bc_queue
+  - desktop
+  - backend
+  - selkies_command
+  - bc_email_on_started

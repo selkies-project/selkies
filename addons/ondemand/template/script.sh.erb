@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# The desktop and Selkies on the port before.sh chose. Selkies listens on every
+# interface for the portal's proxy, which may present the node's own address
+# as the host, so the socket admits any origin and is guarded by the session
+# token instead: secure mode admits nobody without one.
+cd "${HOME}" || exit 1
+export SELKIES_WAYLAND="<%= context.backend == "true" ? "true" : "false" %>"
+session='<%= context.desktop.to_s.gsub("'") { %q('"'"') } %>'
+args=(--public --port="${port}" --enable-basic-auth=false --enable-https=false --allowed-origins='*')
+[ -z "${session}" ] || args+=(--session="${session}")
+exec <%= context.selkies_command %> "${args[@]}"
