@@ -68,7 +68,7 @@ jobs:
                         --jq '.assets[].name' 2>/dev/null || true)"
               case "${assets}" in *"${project}-${want}-"*) tag="${want}" ;; esac
             else
-              ref="$(sed -n "s/^${project}=//p" .github/capture-stack 2>/dev/null)"
+              ref="$(sed -n "s/^${project}=//p" .github/capture-stack 2>/dev/null || true)"
               ref="${ref:-main}"
               # Pre-releases are cut from main alone and tagged with an
               # abbreviated SHA, so match by prefix
