@@ -14,14 +14,15 @@ it. Put rationale in the docblock of the function or module it explains, and pre
 helper over a comment. An inline comment is for the line that stays surprising after that — a workaround for a
 specific bug, an ordering or value that looks wrong but is required — and says why the line is that way, not what
 it does. Comments are terse and current: no PR summaries, no issue or task numbers, no narration of what the code
-used to do. Everything is written in American English -- color, behavior, center, initialize, canceled -- except a
-name something upstream owns, such as GitHub Actions' `cancelled()`, a Wayland `Cancelled` event, Python's
-`CancelledError`, the Web Audio `AnalyserNode` or an NVENC `colourMatrix` field. The prose under `docs/` follows the same rule: it describes what the tree does now, not what an
+used to do. Everything is written in American English -- color, behavior, center, initialize, canceled, and the
+serial comma in a list of three or more -- except a name something upstream owns, such as GitHub Actions'
+`cancelled()`, a Wayland `Cancelled` event, Python's `CancelledError`, the Web Audio `AnalyserNode`, or an NVENC
+`colourMatrix` field. The prose under `docs/` follows the same rule: it describes what the tree does now, not what an
 earlier revision did or what a change replaced.
 
 Every language follows one shape: a Google-style docblock on the module, on every class, and on every function
 that is not trivially self-describing, with the types on the signature. A docblock opens with a summary line, then
-parameters, return value and exceptions only where non-obvious; never pad trivial helpers. Contrasting with a
+parameters, return value, and exceptions only where non-obvious; never pad trivial helpers. Contrasting with a
 rejected design alternative is good rationale; narrating past revisions is forbidden. A module's docblock carries
 the mechanism the module implements — a fallback ladder, a wire framing, the `window` contract a streaming core
 publishes for the dashboards. Docblocks render as Markdown, so keep anything shaped like `<name>` or containing
@@ -43,7 +44,7 @@ braces inside backticks.
   published, exported or not, so a closure's docblock is reference material, not a private note.
 
 Vendored code keeps upstream documentation style and is excluded from the reference: the Python forks
-`src/selkies/Xlib`, `src/selkies/webrtc` and `src/selkies/ice`, and the shadcn/ui primitives under
+`src/selkies/Xlib`, `src/selkies/webrtc`, and `src/selkies/ice`, and the shadcn/ui primitives under
 `addons/selkies-dashboard-wish/src/components/ui`; only Selkies-added comments there follow these rules. The three
 Python forks are vendored so that they can be changed here rather than worked around, so editing them is the
 expected way to fix what they do -- a change belongs upstream as well where upstream would take it. The
@@ -150,7 +151,7 @@ what runs where.
 
 Each is documented in full where named; read that before changing the subsystem.
 
-- The Wayland path is subprocess-free: never reintroduce wtype, wl-copy or similar forks where the in-process
+- The Wayland path is subprocess-free: never reintroduce wtype, wl-copy, or similar forks where the in-process
   pixelflux harness exists. Injection and clipboard are fallback ladders whose cooldowns re-probe the top rung
   rather than latching (`src/selkies/input_handler.py` module docstring).
 - A DPI is an output scale on the session compositor, never Xft resources; only a changed capture scale restarts a

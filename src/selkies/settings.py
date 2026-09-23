@@ -224,7 +224,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "audit_webhook_url",
         "type": "str",
         "default": "",
-        "help": 'URL that receives one JSON POST per clipboard transfer, file upload, file download, printed document handed over, page connection and recording, carrying metadata only (the event, an RFC 3339 timestamp, byte size, MIME type or file name) and never the content. Events are delivered in order over one keep-alive connection; a collector that is slow or down loses what overflows the queue rather than stalling the session. Empty (default) sends nothing.',
+        "help": 'URL that receives one JSON POST per clipboard transfer, file upload, file download, printed document handed over, page connection, and recording, carrying metadata only (the event, an RFC 3339 timestamp, byte size, MIME type, or file name) and never the content. Events are delivered in order over one keep-alive connection; a collector that is slow or down loses what overflows the queue rather than stalling the session. Empty (default) sends nothing.',
     },
     {
         "name": "audit_webhook_token",
@@ -385,7 +385,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "keyboard_shortcuts",
         "type": "bool",
         "default": True,
-        "help": "Let the client keep its own chords (Control+Shift with F, M, X or G, and Control+Shift+click) instead of passing them to the session. Turn it off where an application in the session binds the same chords; the side menu's buttons still reach every function, and pressing Escape three times still leaves gaming mode. Clients may override per user unless the value is locked.",
+        "help": "Let the client keep its own chords (Control+Shift with F, M, X, or G, and Control+Shift+click) instead of passing them to the session. Turn it off where an application in the session binds the same chords; the side menu's buttons still reach every function, and pressing Escape three times still leaves gaming mode. Clients may override per user unless the value is locked.",
     },
     {
         "name": "use_browser_cursors",
@@ -654,7 +654,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "str",
         "default": "",
         "env_var": "SUBFOLDER",
-        "help": 'URL path prefix the server is reverse-proxied under; prepended to every route (websockets, tokens, metrics, static files). Slashes are optional, so "desk", "/desk" and "/desk/" are the same prefix and "/" is the root. The web client reads its own prefix from the URL it was loaded from, so only the server needs telling.',
+        "help": 'URL path prefix the server is reverse-proxied under; prepended to every route (websockets, tokens, metrics, static files). Slashes are optional, so "desk", "/desk", and "/desk/" are the same prefix and "/" is the root. The web client reads its own prefix from the URL it was loaded from, so only the server needs telling.',
     },
     {
         "name": "run_after_connect",
@@ -686,7 +686,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "video_fullcolor",
         "type": "bool",
         "default": False,
-        "help": "Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264 and x265; VP9 profile 1 on VA-API and libvpx); other codecs and encoders stay 4:2:0. The server knows which of its encoders carry it on this host, so a client whose decoder has no 4:4:4 profile turns it off for itself only where the stream would carry it, whether it or this default asked for it, and streams 4:2:0 on the same codec; where it is locked on, such a client steps over WebSockets to the next allowed encoder whose 4:4:4 it decodes or that has none, and to JPEG last, and reports the stream over WebRTC. A WebRTC client names the 4:4:4 it decodes in its hello, so its first offer already fits it.",
+        "help": "Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264, and x265; VP9 profile 1 on VA-API and libvpx); other codecs and encoders stay 4:2:0. The server knows which of its encoders carry it on this host, so a client whose decoder has no 4:4:4 profile turns it off for itself only where the stream would carry it, whether it or this default asked for it, and streams 4:2:0 on the same codec; where it is locked on, such a client steps over WebSockets to the next allowed encoder whose 4:4:4 it decodes or that has none, and to JPEG last, and reports the stream over WebRTC. A WebRTC client names the 4:4:4 it decodes in its hello, so its first offer already fits it.",
     },
     {
         "name": "video_streaming_mode",
@@ -1012,14 +1012,14 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "webcam_pixel_format",
         "type": "str",
         "default": "auto",
-        "help": 'Pixel format of the virtual webcam device. "auto" follows the uplink: a browser sending JPEG (no WebCodecs) gets an MJPEG device that carries its frames as received, any other uplink an I420 device, and a later uplink of the other kind re-creates the device for itself while no application is reading it. Or pin "I420" (planar 4:2:0, the browsers\' preference), "NV12", "YUYV" or "MJPEG", which is then kept whatever arrives.',
+        "help": 'Pixel format of the virtual webcam device. "auto" follows the uplink: a browser sending JPEG (no WebCodecs) gets an MJPEG device that carries its frames as received, any other uplink an I420 device, and a later uplink of the other kind re-creates the device for itself while no application is reading it. Or pin "I420" (planar 4:2:0, the browsers\' preference), "NV12", "YUYV", or "MJPEG", which is then kept whatever arrives.',
     },
     {
         "name": "webcam_encoder",
         "type": "enum",
         "default": "auto",
         "meta": {"allowed": ["auto", "h264", "h265", "vp8", "vp9", "av1", "mjpeg"]},
-        "help": 'Codec clients encode the webcam uplink with. Over WebSockets "auto" runs the measured ladder (H.264, else VP8, then VP9, AV1 and H.265 where the engine encodes them, JPEG when none keeps up) on engines that stream camera frames through MediaStreamTrackProcessor, and JPEG on the `<video>`-element path (Firefox): its software encoders can hold the camera rate while costing a full core, which no client-side probe can price. A codec name runs that one codec on every path, trading client CPU for a fraction of the uplink bandwidth, still falling to JPEG where it cannot keep up or encodes the wrong colors; "mjpeg" pins JPEG everywhere. Over WebRTC the browser sends its camera as the named codec when the answer negotiated it, and otherwise, as for "auto" and "mjpeg", as the first codec negotiated. Clients may override per user unless the value is locked.',
+        "help": 'Codec clients encode the webcam uplink with. Over WebSockets "auto" runs the measured ladder (H.264, else VP8, then VP9, AV1, and H.265 where the engine encodes them, JPEG when none keeps up) on engines that stream camera frames through MediaStreamTrackProcessor, and JPEG on the `<video>`-element path (Firefox): its software encoders can hold the camera rate while costing a full core, which no client-side probe can price. A codec name runs that one codec on every path, trading client CPU for a fraction of the uplink bandwidth, still falling to JPEG where it cannot keep up or encodes the wrong colors; "mjpeg" pins JPEG everywhere. Over WebRTC the browser sends its camera as the named codec when the answer negotiated it, and otherwise, as for "auto" and "mjpeg", as the first codec negotiated. Clients may override per user unless the value is locked.',
     },
     {
         "name": "webcam_device",

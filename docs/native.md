@@ -13,7 +13,7 @@ export SELKIES_VERSION="$(curl -fsSL "https://api.github.com/repos/selkies-proje
 
 ## Packages
 
-Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkies-resize` and `selkies-gpu-probe` on `PATH`, carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line. Every file is `selkies-<version>-<distribution>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-ubuntu26.04-amd64.deb`, `selkies-2.0.0-fc-x86_64.rpm`), the distribution left out where the package is not built per distribution; inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
+Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkies-resize`, and `selkies-gpu-probe` on `PATH`, carries both interposers, and pulls every system library it needs through your package manager. Pick your distribution's line. Every file is `selkies-<version>-<distribution>-<architecture>.<format>` with the version exactly as the tag spells it, pre-release or final (`selkies-2.0.0rc0-ubuntu26.04-amd64.deb`, `selkies-2.0.0-fc-x86_64.rpm`), the distribution left out where the package is not built per distribution; inside, the package carries the version the way its packager orders it (`2.0.0~rc0-1` for dpkg and rpm, `2.0.0_rc0-r0` for apk), so the final release upgrades over a pre-release:
 
 ```bash
 # Ubuntu and Debian. The suffix names the distribution the package was built in
@@ -47,7 +47,7 @@ curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SE
 sudo pacman -U "./${PKG}"
 ```
 
-For hardware-accelerated H.264, add your GPU's driver: NVENC comes with the NVIDIA driver (`libnvidia-encode`), and Intel and AMD encode through VA-API (`libva2` plus your vendor's driver — `intel-media-va-driver-non-free` for Intel, or `i965-va-driver-shaders` for older generations, and the AMDGPU driver's own for AMD). `vainfo`, `intel-gpu-tools`, `radeontop` and `nvtop` are optional monitors.
+For hardware-accelerated H.264, add your GPU's driver: NVENC comes with the NVIDIA driver (`libnvidia-encode`), and Intel and AMD encode through VA-API (`libva2` plus your vendor's driver — `intel-media-va-driver-non-free` for Intel, or `i965-va-driver-shaders` for older generations, and the AMDGPU driver's own for AMD). `vainfo`, `intel-gpu-tools`, `radeontop`, and `nvtop` are optional monitors.
 
 ## The AppImage
 
@@ -62,7 +62,7 @@ chmod +x "./${APP}"
 
 `--public` accepts connections on every interface, IPv4 and IPv6; without it, Selkies listens on the loopback addresses only (`127.0.0.1,::1`), for a session reached through SSH port forwarding or a reverse proxy on the same machine. `--addr=` names particular addresses to listen on instead, and is not given together with `--public`.
 
-What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL` and the GPU's own driver have to be the host's for the GPU to be reachable at all, an X11 session needs the host's X server (or `Xvfb`), and the headless Wayland backend needs the host's `libwayland-server`. Everything above them travels with the AppImage.
+What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL`, and the GPU's own driver have to be the host's for the GPU to be reachable at all, an X11 session needs the host's X server (or `Xvfb`), and the headless Wayland backend needs the host's `libwayland-server`. Everything above them travels with the AppImage.
 
 ## Run a session
 
@@ -89,7 +89,7 @@ export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DI
 selkies --public --port=8080 --enable-https=false --https-cert=/etc/ssl/certs/ssl-cert-snakeoil.pem --https-key=/etc/ssl/private/ssl-cert-snakeoil.key --basic-auth-user=user --basic-auth-password=mypasswd --encoder=h264enc --enable-resize=false
 ```
 
-In the default WebSocket mode, `--encoder=` accepts `h264enc` (default), `h265enc`, `vp8enc`, `vp9enc` and `av1enc` (each hardware NVENC or VA-API where the GPU carries the codec, otherwise the software encoder `pixelflux` was built with — `x264` or OpenH264, `x265` or kvazaar, libvpx, SVT-AV1), `h264enc-striped` (striped software H.264), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc`; the same `--encoder=` knob applies to the full-frame encoders (`h264enc`, `h265enc`, `vp8enc`, `vp9enc`, `av1enc`), a browser that declines the codec is answered with H.264, and the striped `h264enc-striped` and `jpeg` fall back to the default with a logged warning.
+In the default WebSocket mode, `--encoder=` accepts `h264enc` (default), `h265enc`, `vp8enc`, `vp9enc`, and `av1enc` (each hardware NVENC or VA-API where the GPU carries the codec, otherwise the software encoder `pixelflux` was built with — `x264` or OpenH264, `x265` or kvazaar, libvpx, SVT-AV1), `h264enc-striped` (striped software H.264), or `jpeg`. Add `--use-cpu=true` to force software encoding. To use the opt-in WebRTC transport instead, add `--mode=webrtc`; the same `--encoder=` knob applies to the full-frame encoders (`h264enc`, `h265enc`, `vp8enc`, `vp9enc`, `av1enc`), a browser that declines the codec is answered with H.264, and the striped `h264enc-striped` and `jpeg` fall back to the default with a logged warning.
 
 `--public` above accepts connections on every interface, IPv4 and IPv6; without it, Selkies listens on the loopback addresses only (`127.0.0.1,::1`), and `--addr=` names particular addresses instead. `--enable-https=false` leaves the web interface on plain HTTP, which browsers accept as a secure context only on `localhost`; the clipboard, gamepads, pointer lock, and the microphone and webcam need one. Setting `--enable-https=true` is the whole switch: the `--https-cert=` and `--https-key=` paths are the `ssl-cert-snakeoil` pair Debian and Ubuntu install, and when they are absent Selkies writes a self-signed pair itself, so nothing has to be prepared. Browsers warn once on a self-signed certificate; a certificate from an authority at those paths, or a reverse proxy terminating TLS in front, avoids the warning.
 
@@ -132,7 +132,7 @@ Selkies has a modularized architecture, but at runtime it is a **single Python a
 - injects keyboard, mouse, and gamepad input through a vendored `python-xlib` (XTEST/XFixes);
 - and, only for the opt-in WebRTC transport, uses a vendored fork of `aiortc`.
 
-`pixelflux`, `pcmflux` and the web client all travel inside whichever medium you installed. There is **no separate multimedia-framework build or web-interface package to install**.
+`pixelflux`, `pcmflux`, and the web client all travel inside whichever medium you installed. There is **no separate multimedia-framework build or web-interface package to install**.
 
 For more information, check the [Components](components/index.md) section.
 

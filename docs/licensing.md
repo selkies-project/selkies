@@ -67,7 +67,7 @@ come in.
 | `importlib_resources` (Python 3.9 only) | Apache-2.0 | permissive | package data on 3.9 | |
 
 The Python interpreter itself (PSF-2.0) and, when installed, the distribution's
-PulseAudio or PipeWire, X servers, Wayland compositors and GPU drivers are
+PulseAudio or PipeWire, X servers, Wayland compositors, and GPU drivers are
 outside the package and keep their own licenses.
 
 ## Vendored code in the Python package
@@ -88,7 +88,7 @@ client; development dependencies only run at build time and ship nothing).
 | --- | --- | --- | --- |
 | `addons/selkies-web-core` | none: the bundle is Selkies' own MPL-2.0 code; `gendb.js` converts the SDL_GameControllerDB `gamecontrollerdb.txt` (Zlib) into the `jsdb/` mapping files at build time | MPL-2.0 (Selkies), Zlib (mappings) | vite, vite-plugin-minify (declared under `dependencies`, used by the build only) and 45 transitive packages: MIT, BSD-2-Clause, BSD-3-Clause, ISC, Apache-2.0, CC0-1.0 (mdn-data), BlueOak-1.0.0 (sax), MPL-2.0 (lightningcss); no copyleft beyond MPL |
 | `addons/selkies-dashboard` | react, react-dom (MIT), js-yaml (MIT) with argparse (Python-2.0); `universalTouchGamepad.js` (MPL-2.0); the core above | MIT, Python-2.0, MPL-2.0 | 167 packages: MIT, BSD-2-Clause, Apache-2.0, ISC, BSD-3-Clause, MPL-2.0, CC0-1.0, BlueOak-1.0.0, Python-2.0, CC-BY-4.0 (caniuse-lite data) |
-| `addons/selkies-dashboard-wish` | react, react-dom, radix-ui and the `@radix-ui/*` primitives, framer-motion, recharts (with d3, ISC), lucide-react (ISC), sonner, next-themes, tailwind-merge, clsx (MIT), class-variance-authority (Apache-2.0), js-yaml (MIT) with argparse (Python-2.0), `@fontsource-variable/inter` (SIL OFL-1.1, the Inter font files are bundled into the build), tw-animate-css (MIT); `universalTouchGamepad.js` (MPL-2.0); the core above | MIT, ISC, Apache-2.0, BSD-3-Clause, BSD-2-Clause, 0BSD, OFL-1.1, Python-2.0, MPL-2.0 | 569 packages (vite, typescript, eslint, tailwindcss with lightningcss under MPL-2.0, shadcn, ...): MIT, ISC, Apache-2.0, BSD, 0BSD, BlueOak-1.0.0, CC0-1.0, CC-BY-4.0; no copyleft beyond MPL |
+| `addons/selkies-dashboard-wish` | react, react-dom, radix-ui, and the `@radix-ui/*` primitives, framer-motion, recharts (with d3, ISC), lucide-react (ISC), sonner, next-themes, tailwind-merge, clsx (MIT), class-variance-authority (Apache-2.0), js-yaml (MIT) with argparse (Python-2.0), `@fontsource-variable/inter` (SIL OFL-1.1, the Inter font files are bundled into the build), tw-animate-css (MIT); `universalTouchGamepad.js` (MPL-2.0); the core above | MIT, ISC, Apache-2.0, BSD-3-Clause, BSD-2-Clause, 0BSD, OFL-1.1, Python-2.0, MPL-2.0 | 569 packages (vite, typescript, eslint, tailwindcss with lightningcss under MPL-2.0, shadcn, ...): MIT, ISC, Apache-2.0, BSD, 0BSD, BlueOak-1.0.0, CC0-1.0, CC-BY-4.0; no copyleft beyond MPL |
 
 `addons/selkies-web-core/package.json` declares `"license": "MPL-2.0"`, the
 license every file of the directory carries, and

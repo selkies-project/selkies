@@ -37,7 +37,7 @@ If this does not fix the connection issue (normally when the server is behind an
 
 If your host sits behind **static 1:1 NAT** — most commonly a cloud instance whose private address is mapped one-to-one to a fixed public/elastic IP, with the WebRTC UDP ports forwarded (see [Self-Hosted Instances](#self-hosted-instances)) — the host ICE candidates Selkies gathers still carry the *private* address, which a remote peer cannot reach, so the connection falls back to a TURN relay (or fails if none is configured). Set the command-line option `--webrtc-public-ip` or the environment variable `SELKIES_WEBRTC_PUBLIC_IP` to your public IPv4 and/or IPv6 address (comma- or space-separated to supply both); Selkies then advertises each address in its host ICE candidates of the matching family (equivalent to a `NAT1TO1` mapping) so the peer connects directly. Server-reflexive (STUN) and relay (TURN) candidates are left untouched, so hole-punching and TURN fallback still work if the direct path is blocked. Leave it empty (the default) on any host that is not behind static 1:1 NAT.
 
-### Restricting the Ports: Port Range, UDP Mux, TCP Mux and ICE-lite
+### Restricting the Ports: Port Range, UDP Mux, TCP Mux, and ICE-lite
 
 Instead of the whole ephemeral UDP range above, the ports WebRTC uses on the host can be confined, the way Pion-based servers do it:
 
@@ -173,7 +173,7 @@ response-origin-only-with-rfc5780
 
 For single-user environments, traditional long-term credential authentication is the easiest, but multi-user environments likely need TURN REST API authentication with a static auth secret.
 
-**Ports specified in `listening-port=`, `min-port=` and `max-port=` must be opened.**
+**Ports specified in `listening-port=`, `min-port=`, and `max-port=` must be opened.**
 
 It is strongly recommended to set the `min-port=` and `max-port=` parameters which specifies the relay ports (all ports between this range must be open). Add the line `no-udp-relay` if you cannot open the UDP `min-port=` to `max-port=` port ranges, or the line `no-tcp-relay` if you cannot open the TCP `min-port=` to `max-port=` port ranges. Note that the `no-udp-relay` option may not be supported with web browsers and may lead to the TURN server not working.
 

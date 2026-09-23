@@ -4,7 +4,7 @@ An `LD_PRELOAD` library that presents a virtual V4L2 capture device
 (`/dev/video0`) fed by the pixelflux virtual camera, over its Unix domain socket
 or from its PipeWire node. It lets Selkies deliver a browser's webcam into a
 container — picked up by unmodified consumers such as Chromium, Firefox,
-`ffmpeg`, GStreamer, `v4l2-ctl` and libv4l2-based applications — without the
+`ffmpeg`, GStreamer, `v4l2-ctl`, and libv4l2-based applications — without the
 `v4l2loopback` kernel module, any `/dev/video*` device, or elevated privilege.
 
 The browser encodes its camera (H.264/VP8 over the WebRTC media track or
@@ -38,7 +38,7 @@ from a PipeWire node alone.
   rate the backend configures (`webcam_pixel_format`, `webcam_width`,
   `webcam_height`). Control ioctls return `EINVAL` per control (terminating
   enumeration loops the way the kernel does for a camera without controls);
-  events, cropping and output ioctls return `ENOTTY`, exactly as a minimal real
+  events, cropping, and output ioctls return `ENOTTY`, exactly as a minimal real
   webcam does.
 - The libc `syscall()` entry point is interposed as well, covering consumers
   built on the libv4l2 wrapper library (OBS, `v4l2-ctl`, distribution

@@ -84,8 +84,8 @@ The side menu's sharing section hands out links to the running session. Each one
 
 | Link | Fragment | What the holder can do |
 | --- | --- | --- |
-| Viewer | `#shared` | watch the session; no keyboard, mouse or gamepad |
-| Player 2, 3 and 4 | `#player2`, `#player3`, `#player4` | watch, and drive the gamepad in that slot |
+| Viewer | `#shared` | watch the session; no keyboard, mouse, or gamepad |
+| Player 2, 3, and 4 | `#player2`, `#player3`, `#player4` | watch, and drive the gamepad in that slot |
 
 Input authority is enforced on the server rather than in the page, so a modified client cannot exceed its role: a viewer's keyboard, mouse, and settings messages are refused whatever it sends, and its gamepad messages are refused unless they drive the slot its own link carries — a `#shared` viewer holds none and drives no gamepad at all.
 
@@ -99,14 +99,14 @@ Every control endpoint lives under `/api`, behind the same credentials as the re
 
 | Endpoint | What it does |
 | --- | --- |
-| `GET /api/sessions` | The pages connected to the active transport: `id`, `transport`, `role`, `slot`, `display`, `connected_at` and `rtt_ms`, the round trip the page's own reports carry, `null` before the first one |
+| `GET /api/sessions` | The pages connected to the active transport: `id`, `transport`, `role`, `slot`, `display`, `connected_at`, and `rtt_ms`, the round trip the page's own reports carry, `null` before the first one |
 | `DELETE /api/sessions/<id>` | Closes that page's connection |
 | `GET /api/recording` | The recording under way, or the last one: `active`, `path`, `frames`, `audio_frames`, `bytes`, `duration_s`, `width`, `height`, and `error` when it failed |
 | `POST /api/recording` | Starts a recording. A JSON body may name a `path`; a relative one lands in the file-manager directory, and no body at all names a timestamped file there, where the files section then offers it for download. One recording at a time: a second start is a conflict |
 | `DELETE /api/recording` | Stops it and reports the finished file |
 | `GET /api/screenshot?display=<name>` | A PNG of that display with the cursor drawn in, the primary when unnamed. On X11 the root, which holds every display |
 
-The recording is the one pixelflux makes: an H.264 fragmented MP4, playable from the first frame, with the session's audio as an Opus track when audio is on and pcmflux is installed. On X11 the video is a capture of its own, so it follows the desktop rather than a client's link; on Wayland it taps the live stream of the output. The audio is a pcmflux capture of the session's sink that runs for the recorder alone and serves its packets as an Ogg Opus stream over a Unix socket, which pixelflux muxes as they are: nothing is decoded, re-encoded or handed through Python, and a client's audio toggle does not affect it. Its frame rate, bitrate and keyframe interval come from pixelflux's `PIXELFLUX_RECORD_FPS`, `PIXELFLUX_RECORD_BITRATE` and `PIXELFLUX_RECORD_KEYFRAME_S`, thirty frames a second and a keyframe every two seconds by default. The audit trail records every connection and recording, so a webhook collector needs no polling.
+The recording is the one pixelflux makes: an H.264 fragmented MP4, playable from the first frame, with the session's audio as an Opus track when audio is on and pcmflux is installed. On X11 the video is a capture of its own, so it follows the desktop rather than a client's link; on Wayland it taps the live stream of the output. The audio is a pcmflux capture of the session's sink that runs for the recorder alone and serves its packets as an Ogg Opus stream over a Unix socket, which pixelflux muxes as they are: nothing is decoded, re-encoded, or handed through Python, and a client's audio toggle does not affect it. Its frame rate, bitrate and keyframe interval come from pixelflux's `PIXELFLUX_RECORD_FPS`, `PIXELFLUX_RECORD_BITRATE` and `PIXELFLUX_RECORD_KEYFRAME_S`, thirty frames a second and a keyframe every two seconds by default. The audit trail records every connection and recording, so a webhook collector needs no polling.
 
 ## Microphone and Webcam
 
@@ -117,7 +117,7 @@ Both send a local device into the session, are off by default, and need a secure
 
 ## What a Session Starts With
 
-A session starts with video, audio and gamepad input on, and the microphone and webcam off; each is then toggled from the side menu. The `--video-on-start`, `--audio-on-start`, `--microphone-on-start`, `--webcam-on-start` and `--gamepad-on-start` settings (`SELKIES_VIDEO_ON_START` and so on) change that start state for a session's primary page: an image that should open silent sets `--audio-on-start=false`, one that should ask for the camera at once sets `--webcam-on-start=true` alongside `--webcam-enabled=true`. Whatever starts off is not captured at all until it is turned on, on either transport: no screen or audio capture runs for a page that does not receive it, a microphone or webcam is not asked for, and gamepads are not polled. A toggle made during the session wins over the start state, a shared viewer and a second display page always start their stream, and the gamepad toggle's choice is remembered by the browser.
+A session starts with video, audio, and gamepad input on, and the microphone and webcam off; each is then toggled from the side menu. The `--video-on-start`, `--audio-on-start`, `--microphone-on-start`, `--webcam-on-start`, and `--gamepad-on-start` settings (`SELKIES_VIDEO_ON_START` and so on) change that start state for a session's primary page: an image that should open silent sets `--audio-on-start=false`, one that should ask for the camera at once sets `--webcam-on-start=true` alongside `--webcam-enabled=true`. Whatever starts off is not captured at all until it is turned on, on either transport: no screen or audio capture runs for a page that does not receive it, a microphone or webcam is not asked for, and gamepads are not polled. A toggle made during the session wins over the start state, a shared viewer and a second display page always start their stream, and the gamepad toggle's choice is remembered by the browser.
 
 `--webcam-on-start=demand` and `--microphone-on-start=demand` replace that start state with the session's own use of the device: the browser is asked for the camera while an application holds the virtual V4L2 device open, and for the microphone while one records from the virtual source, and released a few seconds after the last one lets go, so the light beside the user's camera follows the desktop rather than the session. A toggle made during the session still wins, a shared viewer is never asked, and only one page is asked at a time. Neither policy defaults to it because any process on the desktop can then cause a permission prompt; every ask and release is logged with the reader's name and sent to the audit webhook as `capture.demand`. What the sinks report is an open handle rather than an active stream, so an application that keeps the camera open or holds a live recording stream while muted in software keeps the device asked for.
 
@@ -131,4 +131,4 @@ Every command-line option has a matching environment variable, formed by capital
 
 ## Configuring Encoders, Display Capture, or Transport Protocols
 
-[Components](components/index.md#encoders) lists every encoder, capture backend, audio path, and transport the runtime implements, with the setting that selects each one, and the ladder a session steps down when a codec cannot be served. The encoder, the bitrates, the frame rate and the UI scaling are the client's to choose from the dashboard among what the server allows; a deployment sets `SELKIES_ENCODER` only to narrow that menu, and a single value locks it. The [Settings Reference](settings.md) groups every setting by what it governs, the stream settings first.
+[Components](components/index.md#encoders) lists every encoder, capture backend, audio path, and transport the runtime implements, with the setting that selects each one, and the ladder a session steps down when a codec cannot be served. The encoder, the bitrates, the frame rate, and the UI scaling are the client's to choose from the dashboard among what the server allows; a deployment sets `SELKIES_ENCODER` only to narrow that menu, and a single value locks it. The [Settings Reference](settings.md) groups every setting by what it governs, the stream settings first.

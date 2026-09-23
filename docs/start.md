@@ -32,7 +32,7 @@ docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
 
 ### NVIDIA
 
-The [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit), v1.20.1 or higher, passes the driver, its Vulkan ICD, the DRM nodes and the modeset node in, so the runtime flags are all it takes:
+The [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit), v1.20.1 or higher, passes the driver, its Vulkan ICD, the DRM nodes, and the modeset node in, so the runtime flags are all it takes:
 
 ```bash
 docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
@@ -46,7 +46,7 @@ docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
 
 The container serves HTTPS by default, on the distribution's snakeoil certificate, so the browser warns once until you trust it or name a real certificate with `-e SELKIES_HTTPS_CERT=` and `-e SELKIES_HTTPS_KEY=`; `-e SELKIES_ENABLE_HTTPS=false` serves plain HTTP where something in front already terminates TLS.
 
-`-e SELKIES_BASIC_AUTH_USER=` and `-e SELKIES_BASIC_AUTH_PASSWORD=` replace the default login, `-e SELKIES_MODE=webrtc` opts into the WebRTC transport, and `-e SELKIES_WAYLAND=true` runs the same desktop on the headless Wayland backend. On a machine with more than one GPU, `-e SELKIES_AUTO_GPU=` picks which one the session renders on. [Desktop Container](components/desktop-image.md) covers each of them, along with the second display, the apps panel and the embedded TURN server.
+`-e SELKIES_BASIC_AUTH_USER=` and `-e SELKIES_BASIC_AUTH_PASSWORD=` replace the default login, `-e SELKIES_MODE=webrtc` opts into the WebRTC transport, and `-e SELKIES_WAYLAND=true` runs the same desktop on the headless Wayland backend. On a machine with more than one GPU, `-e SELKIES_AUTO_GPU=` picks which one the session renders on. [Desktop Container](components/desktop-image.md) covers each of them, along with the second display, the apps panel, and the embedded TURN server.
 
 ## Desktop Container
 

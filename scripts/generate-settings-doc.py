@@ -54,7 +54,7 @@ SECTIONS = [
         "audio_enabled", "audio_bitrate", "audio_channels", "audio_device_name", "audio_frame_duration_ms",
         "audio_redundancy", "audio_redundancy_distance", "microphone_enabled",
     ]),
-    ("Display", "Resolution, scaling, cursors and the second display.", [
+    ("Display", "Resolution, scaling, cursors, and the second display.", [
         "enable_resize", "manual_resolution", "manual_width", "manual_height", "force_aligned_resolution",
         "scaling_dpi", "use_css_scaling", "second_screen", "enable_cursors", "cursor_size",
         "use_browser_cursors", "raw_pointer_motion", "watermark_path", "watermark_location", "debug_cursors",
@@ -67,11 +67,11 @@ SECTIONS = [
         "video_on_start", "audio_on_start", "microphone_on_start", "webcam_on_start", "gamepad_on_start",
         "app_wait_ready", "app_ready_file", "run_after_connect", "run_after_disconnect",
     ]),
-    ("Input", "Gamepads, keyboard chords and the input devices published to the session.", [
+    ("Input", "Gamepads, keyboard chords, and the input devices published to the session.", [
         "gamepad_enabled", "uinput_gamepad", "js_socket_path", "uinput_mouse_socket", "publish_input_devices",
         "keyboard_shortcuts", "mac_cmd_as_ctrl",
     ]),
-    ("Clipboard, files and printing", "What leaves and enters the session besides the stream.", [
+    ("Clipboard, files, and printing", "What leaves and enters the session besides the stream.", [
         "enable_clipboard", "enable_binary_clipboard", "clipboard_seamless", "file_transfers",
         "file_manager_path", "file_transfer_limit_mbps", "printing_enabled", "print_spool_path",
     ]),
@@ -90,7 +90,7 @@ SECTIONS = [
         "ui_sidebar_show_fullscreen", "ui_sidebar_show_gaming_mode", "ui_sidebar_show_trackpad",
         "ui_sidebar_show_keyboard_button", "ui_sidebar_show_soft_buttons",
     ]),
-    ("Server", "The transport, the listening address, TLS, the login and the master token.", [
+    ("Server", "The transport, the listening address, TLS, the login, and the master token.", [
         "mode", "enable_dual_mode", "addr", "public", "port", "unix_socket", "subfolder", "web_root",
         "allowed_origins", "enable_https", "https_cert", "https_key", "cert_reload_interval",
         "enable_basic_auth", "basic_auth_user", "basic_auth_password", "basic_auth_viewonly_password",
@@ -103,7 +103,7 @@ SECTIONS = [
         "stun_port", "enable_cloudflare_turn", "cloudflare_turn_token_id", "cloudflare_turn_api_token",
         "webrtc_public_ip", "webrtc_port_range", "webrtc_udp_mux_port", "webrtc_tcp_mux_port", "webrtc_ice_lite",
     ]),
-    ("Recording, audit and metrics", "The recording tap, the audit webhook and the metrics endpoints.", [
+    ("Recording, audit, and metrics", "The recording tap, the audit webhook and the metrics endpoints.", [
         "recording_socket", "audit_webhook_url", "audit_webhook_token", "audit_webhook_timeout",
         "enable_metrics_http", "enable_webrtc_statistics", "webrtc_statistics_dir",
     ]),

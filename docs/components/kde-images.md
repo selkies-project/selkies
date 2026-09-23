@@ -15,11 +15,11 @@ description: The docker-selkies-egl-desktop and docker-selkies-glx-desktop image
 | Second display | A kwin virtual output on Wayland (the image rebuilds `kwin-wayland` with the patch under `patches/kwin`), a RandR monitor on X11 (`kwin_x11` rebuilt with `patches/kwin-x11` to take its screens from those monitors) | A RandR monitor on the X server's one output, with the same `kwin_x11` rebuild |
 | Tags | `26.04`, `26.04-<build>`, `latest` | the same |
 
-Both add the same desktop to the base: `plasma-desktop` with Dolphin, Konsole, KWrite, Gwenview, Ark and System Settings, Firefox and Google Chrome, the [proot-apps](https://github.com/linuxserver/proot-apps) runner behind the dashboards' apps panel, and on `x86_64` Steam behind [proot-bwrap](https://github.com/selkies-project/proot-bwrap) and Wine Staging with `winetricks`. Both build on the Ubuntu 26.04 base alone, since the rebuilt kwin packages are the archive's exact version, and publish for `amd64` and `arm64`. Plasma's own compositing is off in the system defaults, since every desktop animation is bandwidth for nothing on a stream.
+Both add the same desktop to the base: `plasma-desktop` with Dolphin, Konsole, KWrite, Gwenview, Ark, and System Settings, Firefox and Google Chrome, the [proot-apps](https://github.com/linuxserver/proot-apps) runner behind the dashboards' apps panel, and on `x86_64` Steam behind [proot-bwrap](https://github.com/selkies-project/proot-bwrap) and Wine Staging with `winetricks`. Both build on the Ubuntu 26.04 base alone, since the rebuilt kwin packages are the archive's exact version, and publish for `amd64` and `arm64`. Plasma's own compositing is off in the system defaults, since every desktop animation is bandwidth for nothing on a stream.
 
 ## How they start
 
-Neither carries an entrypoint, a supervisor configuration or a web server of its own. The base's `container-entrypoint.sh`, its `selkies` service and every other service are used as they are ([How it starts](base-image.md#how-it-starts)), and each repository adds only the s6 services its session needs under `services/`:
+Neither carries an entrypoint, a supervisor configuration or a web server of its own. The base's `container-entrypoint.sh`, its `selkies` service, and every other service are used as they are ([How it starts](base-image.md#how-it-starts)), and each repository adds only the s6 services its session needs under `services/`:
 
 | Service | Image | Runs |
 | --- | --- | --- |
@@ -33,7 +33,7 @@ On X11 the Plasma shell lays its panels and wallpaper out for the DPI it started
 
 ## Configuration
 
-Everything Selkies reads is a variable of the [Settings Reference](../settings.md); each README's configuration table lists the ones the image adds (`PASSWD`, `TZ`, `START_PLASMA`, and for the GLX image the X server's initial mode `DISPLAY_SIZEW`, `DISPLAY_SIZEH`, `DISPLAY_REFRESH`, `DISPLAY_CDEPTH`, the NVIDIA `VIDEO_PORT`, and `NVIDIA_DRIVER_VERSION` where the host's cannot be read). The video encoder, the bitrates, the frame rate and the UI scaling are chosen from the web interface and are not set in the environment; a single value in `SELKIES_ENCODER` or `SELKIES_SCALING_DPI` locks that choice.
+Everything Selkies reads is a variable of the [Settings Reference](../settings.md); each README's configuration table lists the ones the image adds (`PASSWD`, `TZ`, `START_PLASMA`, and for the GLX image the X server's initial mode `DISPLAY_SIZEW`, `DISPLAY_SIZEH`, `DISPLAY_REFRESH`, `DISPLAY_CDEPTH`, the NVIDIA `VIDEO_PORT`, and `NVIDIA_DRIVER_VERSION` where the host's cannot be read). The video encoder, the bitrates, the frame rate, and the UI scaling are chosen from the web interface and are not set in the environment; a single value in `SELKIES_ENCODER` or `SELKIES_SCALING_DPI` locks that choice.
 
 The GLX image's NVIDIA X server modules (`nvidia_drv.so` and the GLX server module) come in with the driver's libraries from the NVIDIA Container Toolkit v1.20.1 or higher; under a runtime that injects the libraries alone, the first start lifts the two out of the driver installer matching the host's version, and a container that keeps its filesystem keeps them across restarts.
 

@@ -34,7 +34,7 @@ The video encoder and its rate control. The dashboard chooses among what the ser
 | Setting | Default | Description |
 | --- | --- | --- |
 | `--encoder`<br>`SELKIES_ENCODER` | `h264enc`<br>enum: one of `h264enc`, `h265enc`, `vp8enc`, `vp9enc`, `av1enc`, `h264enc-striped`, `jpeg` | The default video encoder. Every full-frame encoder runs on NVENC or VA-API where the GPU carries the codec and falls back to the software encoder pixelflux was built with: h264enc (x264, or OpenH264 in a GPL-free build), h265enc (x265, or kvazaar in a GPL-free build), vp8enc and vp9enc (libvpx), av1enc (SVT-AV1). h264enc-striped is CPU-striped H.264, jpeg is CPU-striped JPEG. Clients are offered only the encoders this host serves: those whose codec the encode node's GPU encodes (probed once at startup) or the pixelflux build carries a software encoder for. A client whose browser cannot decode the codec steps through the allowed encoders it does decode, taking the codecs this host encodes in hardware, most efficient first, before those it encodes in software, in order of encode time, then h264enc-striped, and jpeg last of all. The WebRTC transport carries the full-frame encoders and offers them in the same order behind the display's codec, so a browser that declines the codec answers with the next one it decodes and the display moves to it; h264enc-striped and jpeg are WebSocket-only. |
-| `--video-fullcolor`<br>`SELKIES_VIDEO_FULLCOLOR` | `false`<br>bool | Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264 and x265; VP9 profile 1 on VA-API and libvpx); other codecs and encoders stay 4:2:0. The server knows which of its encoders carry it on this host, so a client whose decoder has no 4:4:4 profile turns it off for itself only where the stream would carry it, whether it or this default asked for it, and streams 4:2:0 on the same codec; where it is locked on, such a client steps over WebSockets to the next allowed encoder whose 4:4:4 it decodes or that has none, and to JPEG last, and reports the stream over WebRTC. A WebRTC client names the 4:4:4 it decodes in its hello, so its first offer already fits it. |
+| `--video-fullcolor`<br>`SELKIES_VIDEO_FULLCOLOR` | `false`<br>bool | Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264, and x265; VP9 profile 1 on VA-API and libvpx); other codecs and encoders stay 4:2:0. The server knows which of its encoders carry it on this host, so a client whose decoder has no 4:4:4 profile turns it off for itself only where the stream would carry it, whether it or this default asked for it, and streams 4:2:0 on the same codec; where it is locked on, such a client steps over WebSockets to the next allowed encoder whose 4:4:4 it decodes or that has none, and to JPEG last, and reports the stream over WebRTC. A WebRTC client names the 4:4:4 it decodes in its hello, so its first offer already fits it. |
 | `--framerate`<br>`SELKIES_FRAMERATE` | `60`<br>range, within `8-240` | Framerate: allowed range (e.g., "8-240"), initial value (e.g., "60"), or both ("60,8-240"); "60-60" locks. |
 | `--video-bitrate`<br>`SELKIES_VIDEO_BITRATE` | `8000`<br>range, within `100-1000000` | Video bitrate aka CBR, in kilobits per second (kbps): allowed range (e.g., "100-1000000"), initial value (e.g., "8000" for 8 Mbps, "250" for 250 kbps), or both ("8000,100-1000000"); "8000-8000" locks. |
 | `--video-crf`<br>`SELKIES_VIDEO_CRF` | `25`<br>range, within `5-50` | Video CRF (constant quality): allowed range (e.g., "5-50"), initial value (e.g., "25"), or both ("25,5-50"); "25-25" locks. |
@@ -73,7 +73,7 @@ Server-to-client audio and the microphone uplink.
 
 ## Display
 
-Resolution, scaling, cursors and the second display.
+Resolution, scaling, cursors, and the second display.
 
 | Setting | Default | Description |
 | --- | --- | --- |
@@ -125,7 +125,7 @@ What a session starts with, and hooks around its first and last client.
 
 ## Input
 
-Gamepads, keyboard chords and the input devices published to the session.
+Gamepads, keyboard chords, and the input devices published to the session.
 
 | Setting | Default | Description |
 | --- | --- | --- |
@@ -134,10 +134,10 @@ Gamepads, keyboard chords and the input devices published to the session.
 | `--js-socket-path`<br>`SELKIES_JS_SOCKET_PATH` | `/tmp`<br>str | Directory to write the Selkies Input Interposer communication sockets to, default: /tmp, results in socket files: /tmp/selkies_js{0-3}.sock |
 | `--uinput-mouse-socket`<br>`SELKIES_UINPUT_MOUSE_SOCKET` | (empty)<br>str | Path to the uinput mouse socket, if not provided uinput is used directly |
 | `--publish-input-devices`<br>`SELKIES_PUBLISH_INPUT_DEVICES` | `false`<br>bool | Mirror the session keyboard and pointer onto input devices applications can read, for the few that enumerate evdev instead of the display server (fullscreen games, remappers). The desktop is driven by the compositor's virtual keyboard or XTEST either way, so this adds a copy of each event and never carries it; it costs a kernel device where /dev/uinput is writable, else an Input Interposer one. |
-| `--keyboard-shortcuts`<br>`SELKIES_KEYBOARD_SHORTCUTS` | `true`<br>bool | Let the client keep its own chords (Control+Shift with F, M, X or G, and Control+Shift+click) instead of passing them to the session. Turn it off where an application in the session binds the same chords; the side menu's buttons still reach every function, and pressing Escape three times still leaves gaming mode. Clients may override per user unless the value is locked. |
+| `--keyboard-shortcuts`<br>`SELKIES_KEYBOARD_SHORTCUTS` | `true`<br>bool | Let the client keep its own chords (Control+Shift with F, M, X, or G, and Control+Shift+click) instead of passing them to the session. Turn it off where an application in the session binds the same chords; the side menu's buttons still reach every function, and pressing Escape three times still leaves gaming mode. Clients may override per user unless the value is locked. |
 | `--mac-cmd-as-ctrl`<br>`SELKIES_MAC_CMD_AS_CTRL` | `true`<br>bool | Send a macOS client's Command chords as their Control chords, so Cmd+C copies in the remote application the way it does locally. Turn it off where the session's window manager takes Super as its own modifier: remapped, a Cmd+Return bound to open a terminal arrives as Ctrl+Return, and Cmd+C interrupts the foreground program instead of copying. Command then arrives as the Super it physically is. Only macOS clients read it. Clients may override per user unless the value is locked. |
 
-## Clipboard, files and printing
+## Clipboard, files, and printing
 
 What leaves and enters the session besides the stream.
 
@@ -159,10 +159,10 @@ The camera uplink and the virtual V4L2 device it is published as.
 | Setting | Default | Description |
 | --- | --- | --- |
 | `--webcam-enabled`<br>`SELKIES_WEBCAM_ENABLED` | `false`<br>bool | Enable client-to-server webcam forwarding to the virtual V4L2 device. |
-| `--webcam-encoder`<br>`SELKIES_WEBCAM_ENCODER` | `auto`<br>enum: one of `auto`, `h264`, `h265`, `vp8`, `vp9`, `av1`, `mjpeg` | Codec clients encode the webcam uplink with. Over WebSockets "auto" runs the measured ladder (H.264, else VP8, then VP9, AV1 and H.265 where the engine encodes them, JPEG when none keeps up) on engines that stream camera frames through MediaStreamTrackProcessor, and JPEG on the `<video>`-element path (Firefox): its software encoders can hold the camera rate while costing a full core, which no client-side probe can price. A codec name runs that one codec on every path, trading client CPU for a fraction of the uplink bandwidth, still falling to JPEG where it cannot keep up or encodes the wrong colors; "mjpeg" pins JPEG everywhere. Over WebRTC the browser sends its camera as the named codec when the answer negotiated it, and otherwise, as for "auto" and "mjpeg", as the first codec negotiated. Clients may override per user unless the value is locked. |
+| `--webcam-encoder`<br>`SELKIES_WEBCAM_ENCODER` | `auto`<br>enum: one of `auto`, `h264`, `h265`, `vp8`, `vp9`, `av1`, `mjpeg` | Codec clients encode the webcam uplink with. Over WebSockets "auto" runs the measured ladder (H.264, else VP8, then VP9, AV1, and H.265 where the engine encodes them, JPEG when none keeps up) on engines that stream camera frames through MediaStreamTrackProcessor, and JPEG on the `<video>`-element path (Firefox): its software encoders can hold the camera rate while costing a full core, which no client-side probe can price. A codec name runs that one codec on every path, trading client CPU for a fraction of the uplink bandwidth, still falling to JPEG where it cannot keep up or encodes the wrong colors; "mjpeg" pins JPEG everywhere. Over WebRTC the browser sends its camera as the named codec when the answer negotiated it, and otherwise, as for "auto" and "mjpeg", as the first codec negotiated. Clients may override per user unless the value is locked. |
 | `--webcam-width`<br>`SELKIES_WEBCAM_WIDTH` | `1280`<br>int | Width of the virtual webcam device; client camera frames are scaled and letterboxed to fit. |
 | `--webcam-height`<br>`SELKIES_WEBCAM_HEIGHT` | `720`<br>int | Height of the virtual webcam device; client camera frames are scaled and letterboxed to fit. |
-| `--webcam-pixel-format`<br>`SELKIES_WEBCAM_PIXEL_FORMAT` | `auto`<br>str | Pixel format of the virtual webcam device. "auto" follows the uplink: a browser sending JPEG (no WebCodecs) gets an MJPEG device that carries its frames as received, any other uplink an I420 device, and a later uplink of the other kind re-creates the device for itself while no application is reading it. Or pin "I420" (planar 4:2:0, the browsers' preference), "NV12", "YUYV" or "MJPEG", which is then kept whatever arrives. |
+| `--webcam-pixel-format`<br>`SELKIES_WEBCAM_PIXEL_FORMAT` | `auto`<br>str | Pixel format of the virtual webcam device. "auto" follows the uplink: a browser sending JPEG (no WebCodecs) gets an MJPEG device that carries its frames as received, any other uplink an I420 device, and a later uplink of the other kind re-creates the device for itself while no application is reading it. Or pin "I420" (planar 4:2:0, the browsers' preference), "NV12", "YUYV", or "MJPEG", which is then kept whatever arrives. |
 | `--webcam-device`<br>`SELKIES_WEBCAM_DEVICE` | `auto`<br>str | Also mirror the webcam into a v4l2loopback kernel device, which applications find without the V4L2 Interposer: "auto" uses the first v4l2loopback output device found (typically a desktop host or privileged container), a path such as "/dev/video10" uses that device, and "false" never does. The interposer socket is always served. |
 | `--webcam-socket-path`<br>`SELKIES_WEBCAM_SOCKET_PATH` | `/tmp`<br>str | Directory to write the Selkies V4L2 Interposer webcam socket to, default: /tmp, results in socket file: /tmp/selkies_webcam0.sock |
 
@@ -208,7 +208,7 @@ What the shipped web interface shows; the feature behind a hidden control keeps 
 
 ## Server
 
-The transport, the listening address, TLS, the login and the master token.
+The transport, the listening address, TLS, the login, and the master token.
 
 | Setting | Default | Description |
 | --- | --- | --- |
@@ -218,7 +218,7 @@ The transport, the listening address, TLS, the login and the master token.
 | `--public`<br>`SELKIES_PUBLIC` | `false`<br>bool | Accept connections on every interface, IPv4 and IPv6 (0.0.0.0,::), instead of the loopback addresses only; the bare flag turns it on. Given together with --addr, the server refuses to start. |
 | `--port`<br>`SELKIES_PORT`<br>`CUSTOM_WS_PORT` | `8080`<br>int, 1 to 65535 | Port to start the streaming service, default: "8080" |
 | `--unix-socket`<br>`SELKIES_UNIX_SOCKET` | (empty)<br>str | Unix socket path to start the streaming service; when set, a Unix domain socket is bound instead of the TCP addr/port pair. |
-| `--subfolder`<br>`SELKIES_SUBFOLDER`<br>`SUBFOLDER` | (empty)<br>str | URL path prefix the server is reverse-proxied under; prepended to every route (websockets, tokens, metrics, static files). Slashes are optional, so "desk", "/desk" and "/desk/" are the same prefix and "/" is the root. The web client reads its own prefix from the URL it was loaded from, so only the server needs telling. |
+| `--subfolder`<br>`SELKIES_SUBFOLDER`<br>`SUBFOLDER` | (empty)<br>str | URL path prefix the server is reverse-proxied under; prepended to every route (websockets, tokens, metrics, static files). Slashes are optional, so "desk", "/desk", and "/desk/" are the same prefix and "/" is the root. The web client reads its own prefix from the URL it was loaded from, so only the server needs telling. |
 | `--web-root`<br>`SELKIES_WEB_ROOT` | (empty)<br>str | Path to directory containing web application files. Defaults to web files packaged with Selkies application |
 | `--allowed-origins`<br>`SELKIES_ALLOWED_ORIGINS` | (empty)<br>str | Comma-separated browser Origins allowed to open the streaming WebSocket (cross-site WebSocket-hijacking guard). Empty (default) allows only same-origin plus non-browser clients that send no Origin; use '*' to allow any origin. |
 | `--enable-https`<br>`SELKIES_ENABLE_HTTPS` | `false`<br>bool | Enable or disable HTTPS for the web application, specifying a valid server certificate is recommended |
@@ -264,14 +264,14 @@ The opt-in WebRTC transport's ICE, STUN and TURN configuration.
 | `--webrtc-tcp-mux-port`<br>`SELKIES_WEBRTC_TCP_MUX_PORT` | `0`<br>int, 0 to 65535 | Single TCP port on which the server accepts ICE-TCP connections (TCPMUX), advertised as a passive TCP host candidate on each host address next to the UDP ones, so a client on a network that blocks UDP still connects; UDP is preferred whenever it works. It may equal the UDP mux port, and a port firewalls pass, such as 443, is the usual choice for a public deployment. 0 (default) offers no TCP candidates. |
 | `--webrtc-ice-lite`<br>`SELKIES_WEBRTC_ICE_LITE` | `false`<br>bool | Run the server's ICE agent as ICE-lite: it offers host candidates only, takes the controlled role and answers the client's connectivity checks instead of sending its own, which suits a server whose host candidates are reachable as advertised (a public address, a static 1:1 NAT with webrtc_public_ip, or forwarded mux ports). STUN and TURN are then unused by the server itself; clients still receive them for candidates of their own. |
 
-## Recording, audit and metrics
+## Recording, audit, and metrics
 
 The recording tap, the audit webhook and the metrics endpoints.
 
 | Setting | Default | Description |
 | --- | --- | --- |
 | `--recording-socket`<br>`SELKIES_RECORDING_SOCKET`<br>`PIXELFLUX_RECORDING_SOCKET` | (empty)<br>str | Unix socket path for the out-of-band H.264 recording tap ('' = off); pixelflux binds it and multiplexes the elementary stream to connected clients. |
-| `--audit-webhook-url`<br>`SELKIES_AUDIT_WEBHOOK_URL` | (empty)<br>str | URL that receives one JSON POST per clipboard transfer, file upload, file download, printed document handed over, page connection and recording, carrying metadata only (the event, an RFC 3339 timestamp, byte size, MIME type or file name) and never the content. Events are delivered in order over one keep-alive connection; a collector that is slow or down loses what overflows the queue rather than stalling the session. Empty (default) sends nothing. |
+| `--audit-webhook-url`<br>`SELKIES_AUDIT_WEBHOOK_URL` | (empty)<br>str | URL that receives one JSON POST per clipboard transfer, file upload, file download, printed document handed over, page connection, and recording, carrying metadata only (the event, an RFC 3339 timestamp, byte size, MIME type, or file name) and never the content. Events are delivered in order over one keep-alive connection; a collector that is slow or down loses what overflows the queue rather than stalling the session. Empty (default) sends nothing. |
 | `--audit-webhook-token`<br>`SELKIES_AUDIT_WEBHOOK_TOKEN` | (empty)<br>str | Bearer token sent in the Authorization header of every audit POST. Empty sends no header. Never sent to clients. |
 | `--audit-webhook-timeout`<br>`SELKIES_AUDIT_WEBHOOK_TIMEOUT` | `2.0`<br>float, from 0.1 | Seconds one audit POST may take before it counts as failed and the next event is sent. |
 | `--enable-metrics-http`<br>`SELKIES_ENABLE_METRICS_HTTP` | `false`<br>bool | Enable the Prometheus HTTP /metrics endpoint. |

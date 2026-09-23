@@ -34,7 +34,7 @@ When an application linked against `libudev` is launched with this library prelo
 *   **Static Data:** All virtual device information is hardcoded in `fake-libudev-core.c`.
 *   **No Real Hardware Interaction:** These are purely virtual constructs. No actual `/dev/input/jsX` or `/dev/input/eventX` device nodes are created in the kernel. The library only makes applications *believe* they exist via `libudev`.
 *   **Hotplug via inotify:** For the virtual gamepads, `udev_monitor_*` is backed by an inotify watch on the socket directory; creating/removing the interposer's device sockets (`selkies_js*.sock`, `selkies_event*.sock`) surfaces as `input`-subsystem `add`/`remove` events. Real hotplug events come from the real library's monitor over the same fd.
-*   **Filters the Pads Cannot Honor:** sysattr, tag and is-initialized matches are forwarded to the real library but do not restrict the virtual gamepads.
+*   **Filters the Pads Cannot Honor:** sysattr, tag, and is-initialized matches are forwarded to the real library but do not restrict the virtual gamepads.
 *   **Fixed Number of Devices:** The number of virtual gamepads is determined at compile time by `NUM_VIRTUAL_GAMEPADS`.
 
 ## Build Instructions

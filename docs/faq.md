@@ -197,7 +197,7 @@ To stream more screens than that, or separate X11 displays, start one Selkies in
 <details>
   <summary>Open Answer</summary>
 
-Try the [TURN-REST Container](components/turn.md#turn-rest) or its underlying turn-rest `app.py` Flask web application. This will output TURN credentials automatically when the Docker®/Podman options `-e TURN_SHARED_SECRET=`, `-e TURN_HOST=`, `-e TURN_PORT=`, `-e TURN_PROTOCOL=`, `-e TURN_TLS=` or environment variables `export TURN_SHARED_SECRET=`, `export TURN_HOST=`, `export TURN_PORT=`, `export TURN_PROTOCOL=`, `export TURN_TLS=` are set.
+Try the [TURN-REST Container](components/turn.md#turn-rest) or its underlying turn-rest `app.py` Flask web application. This will output TURN credentials automatically when the Docker®/Podman options `-e TURN_SHARED_SECRET=`, `-e TURN_HOST=`, `-e TURN_PORT=`, `-e TURN_PROTOCOL=`, `-e TURN_TLS=`, or environment variables `export TURN_SHARED_SECRET=`, `export TURN_HOST=`, `export TURN_PORT=`, `export TURN_PROTOCOL=`, `export TURN_TLS=` are set.
 
 The below steps can be used when you want to test your TURN server configured with a shared secret instead of the legacy username/password authentication:
 

@@ -36,7 +36,7 @@ export LD_PRELOAD="${SELKIES_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
 ```
 
 Do **not** preload this into the Selkies backend process itself. It hooks
-`read`, `close`, `ioctl` and `epoll_ctl` for every file descriptor in the
+`read`, `close`, `ioctl`, and `epoll_ctl` for every file descriptor in the
 process, and its blocking device reads are exactly what an asyncio event loop
 must never do: a hook that blocks there stops the server answering anything.
 The backend is the other end of these sockets and needs no preload;
@@ -50,7 +50,7 @@ export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/selkies_input_interposer.so${LD_PRE
 
 You can replace `/usr/$LIB/selkies_input_interposer.so` with any non-root path of your choice if using the `.tar.gz` tarball. Make sure the correct `selkies_input_interposer.so` is installed in that path.
 
-Chromium, Electron and other binaries built with `_FORTIFY_SOURCE` open devices through glibc's checked entry points (`__open64_2`, `__openat64_2`, `__read_chk`) rather than `open()`; the interposer hooks those too, so a browser's Gamepad API sees the pads with nothing further to set.
+Chromium, Electron, and other binaries built with `_FORTIFY_SOURCE` open devices through glibc's checked entry points (`__open64_2`, `__openat64_2`, `__read_chk`) rather than `open()`; the interposer hooks those too, so a browser's Gamepad API sees the pads with nothing further to set.
 
 SDL2 applications find the four pads through [fake-udev](https://github.com/selkies-project/selkies/tree/main/addons/fake-udev/README.md), which is preloaded alongside the interposer in the container images. Where device discovery through `libudev` is unavailable — `SDL_JOYSTICK_DISABLE_UDEV=1`, an SDL sandbox build, or an SDL built without udev — SDL scans `/dev/input`, and the interposer's evdev nodes appear in that scan, so the pads are found with nothing further to set.
 
@@ -86,7 +86,7 @@ export SDL_JOYSTICK_DEVICE=/dev/input/event1000
 LD_PRELOAD='/usr/$LIB/selkies_input_interposer.so' timeout 10 tests/tools/gamepad/sdlread
 ```
 
-`sdlread` prints the name, GUID, vendor/product and axis/button/hat counts SDL read out of the interposer, then one line per event. `tests/tools/gamepad/sdlenum` lists what SDL enumerates without opening anything.
+`sdlread` prints the name, GUID, vendor/product, and axis/button/hat counts SDL read out of the interposer, then one line per event. `tests/tools/gamepad/sdlenum` lists what SDL enumerates without opening anything.
 
 ## Application-created devices
 
