@@ -264,7 +264,7 @@ jobs:
           # Fatal rather than a note: a run that quietly took an index's copy
           # tests a capture stack nothing ships, and reports it as a pass.
           for project in pixelflux pcmflux; do
-            found="$(find main-wheels -maxdepth 1 -name "${project}-${WHEEL_GLOB}" 2>/dev/null)"
+            found="$(find main-wheels -maxdepth 1 -name "${project}-${WHEEL_GLOB}" 2>/dev/null || true)"
             if [ -z "${found}" ]; then
               echo "::error::No main-HEAD ${project} wheel matching ${WHEEL_GLOB}"
               exit 1
