@@ -1349,7 +1349,7 @@ class WebRTCService(BaseStreamingService):
             # Which of the session's own screens a capture drives changed.
             self.input_handler.resync_session_screens()
 
-    async def _apply_wayland_extension(self, did: str, layouts: Dict[str, Dict[str, int]]) -> bool:
+    async def _apply_wayland_extension(self, did: str, layouts: Dict[str, Dict[str, int]]) -> Optional[str]:
         """Realize the extended layout as compositor screens, BEFORE the
         secondary's pipeline binds a capture — the Wayland counterpart of
         apply_extended_layout.
@@ -1365,12 +1365,15 @@ class WebRTCService(BaseStreamingService):
         still finds in the primary's way is recreated after all.
 
         Returns:
-            False when the output cannot be created or the primary cannot move
-            (the caller drops the display).
+            None once the display's screen is in place, else why it is not --
+            the session compositor refused it a screen, or the capture
+            compositor cannot create its output or move the primary -- which
+            the caller drops the display with.
         """
+        no_output = "The compositor cannot create an output for this display."
         module = self._wayland_capture_handle()
         if module is None:
-            return False
+            return no_output
         oid = wayland_output_id(did)
         s = layouts[did]
         dpi = self._display_dpi(did)
@@ -1402,9 +1405,9 @@ class WebRTCService(BaseStreamingService):
                 existing = None
                 moved = await wayland_reposition_primary(module, p["x"], p["y"])
             if not moved:
-                return False
+                return no_output
         if existing is not None:
-            return True
+            return None
         pw, ph = p.get("w"), p.get("h")
         if (existing0 is not None and pw and ph
                 and (pw < existing0[3] or ph < existing0[4])):
@@ -1423,19 +1426,22 @@ class WebRTCService(BaseStreamingService):
             # The screen this display owns, grown just ahead of the output
             # that adopts its host window, then given the display's own DPI;
             # what the session leaves is this output's capture scale.
-            await self.input_handler.ensure_session_screen(
-                did, size=(s["w"], s["h"]), scale=scale)
+            if not await self.input_handler.ensure_session_screen(
+                    did, size=(s["w"], s["h"]), scale=scale):
+                return "The session compositor cannot add a screen for this display."
             scale = await self.input_handler.realize_wayland_dpi(dpi, did, (s["w"], s["h"]))
         try:
             created = bool(await asyncio.to_thread(
                 module.create_output, oid, s["w"], s["h"], s["x"], s["y"], scale))
         except Exception as e:
             logger.error(f"Wayland create_output {oid} failed: {e}")
-            return False
-        if created and self.input_handler:
+            return no_output
+        if not created:
+            return no_output
+        if self.input_handler:
             # Which of the session's own screens a capture drives changed.
             self.input_handler.resync_session_screens()
-        return created
+        return None
 
     async def _wayland_capture_live(self, did: str, pipeline: MediaPipelinePixel) -> bool:
         """Whether the display's capture really runs in the compositor. The
@@ -1956,10 +1962,9 @@ class WebRTCService(BaseStreamingService):
             )
             layouts[did] = layouts.pop("secondary")
             if IS_WAYLAND:
-                if not await self._apply_wayland_extension(did, layouts):
-                    await self._drop_wayland_secondary(
-                        did, "The compositor cannot create an output for this display."
-                    )
+                refusal = await self._apply_wayland_extension(did, layouts)
+                if refusal:
+                    await self._drop_wayland_secondary(did, refusal)
                     return
             else:
                 # apply_extended_layout fits `layouts` to the root really produced:
