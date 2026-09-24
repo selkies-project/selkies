@@ -3,10 +3,11 @@
 
 KWin serves no control socket, so the labwc rung of the session-screen
 control never answers there; its screens exist on demand as
-`zkde_screencast_unstable_v1` virtual outputs, reached through pixelflux. The
-protocol is also served by a stock kwin that registers no nested virtual
-output, so that rung is proven by growing a probe screen, once per session
-compositor.
+`zkde_screencast_unstable_v1` virtual outputs, reached through pixelflux. That
+the session serves the protocol is read off its registry once per session
+compositor and offers the rung; the screen a display asks for is what proves
+the kwin registers one, so a refused screen leaves that display without one
+and says so.
 
 Drives the session-screen handler with pixelflux and the settings stubbed, so
 what is asserted is which rung is consulted and with what, not a compositor.
@@ -41,7 +42,7 @@ class FakePixelflux:
         self.fail_add: bool = False
         self.fail_control: bool = False
 
-    def app_screen_control_available(self, display):
+    def app_screen_control_offered(self, display):
         self.calls.append(("control", display))
         if self.fail_control:
             raise RuntimeError("connect: no such socket")
@@ -95,15 +96,15 @@ async def scenario(res: "H.Results") -> None:
         pf = FakePixelflux(kde=False)
         handler = make_handler(pf)
         ok, why = await handler.probe_session_screen_capability()
-        res.check("a stock kwin holding one screen offers no second display",
+        res.check("a session serving no virtual-output protocol, holding one screen, offers no second display",
                   not ok and "no screen control" in why, (ok, why))
-        res.check("after its protocol was probed",
+        res.check("after its registry was read",
                   ("control", SESSION) in pf.calls, pf.calls)
         res.check("and the screen count decided",
                   any(c[0] == "list" for c in pf.calls), pf.calls)
         pf.calls.clear()
         await handler.probe_session_screen_capability()
-        res.check("a re-probe keeps that answer rather than growing another probe screen",
+        res.check("a re-probe keeps that answer rather than reading the registry again",
                   not any(c[0] == "control" for c in pf.calls), pf.calls)
 
         pf = FakePixelflux()
@@ -119,7 +120,7 @@ async def scenario(res: "H.Results") -> None:
         pf = FakePixelflux()
         handler = make_handler(pf)
         ok, why = await handler.probe_session_screen_capability()
-        res.check("a kwin that registers the probe screen answers the virtual-output rung",
+        res.check("a kwin serving the virtual-output protocol is offered the rung",
                   ok and pf.calls == [("control", SESSION)], (ok, why, pf.calls))
         res.check("and the control is what the handler reports",
                   handler.session_screen_control_available()
@@ -136,9 +137,9 @@ async def scenario(res: "H.Results") -> None:
                   ("control", SESSION) in pf.calls, pf.calls)
 
         pf.calls.clear()
-        await handler.ensure_session_screen("display2", size=(1280, 720), scale=1.25)
+        grown = await handler.ensure_session_screen("display2", size=(1280, 720), scale=1.25)
         res.check("a display grows a screen named after its output id, seeded with its size",
-                  ("add", SESSION, "SELKIES-2", 1280, 720, 1.25) in pf.calls, pf.calls)
+                  grown and ("add", SESSION, "SELKIES-2", 1280, 720, 1.25) in pf.calls, (grown, pf.calls))
         res.check("and the handler records the screen it grew",
                   handler._session_screens == {"display2": "SELKIES-2"},
                   getattr(handler, "_session_screens", None))
@@ -170,11 +171,11 @@ async def scenario(res: "H.Results") -> None:
 
         pf.fail_add = True
         pf.calls.clear()
-        await handler.ensure_session_screen("display3", size=(800, 600))
+        grown = await handler.ensure_session_screen("display3", size=(800, 600))
         res.check("a refused virtual output leaves the display without a screen, and says so",
-                  not handler._session_screens and
+                  not grown and not handler._session_screens and
                   any("could not add a screen for 'display3'" in line for line in log.lines),
-                  (handler._session_screens, log.lines[-1:]))
+                  (grown, handler._session_screens, log.lines[-1:]))
 
         pf = FakePixelflux(kde=False)
         pf.screens.append(("WL-2", 1920, 0, 1920, 1080))

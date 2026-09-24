@@ -4809,11 +4809,12 @@ class DataStreamingServer(BaseStreamingService):
 
         The second half of the Wayland layout apply, run once the primary's
         capture start has sized its screen (see _apply_wayland_output_layout).
-        A display whose output the compositor cannot create is dropped like the
-        X11 path's unrealizable display, and when the arrangement was built
-        around it the primary returns to the origin -- its capture follows the
-        moved output live, so only the layout and the tracked capture offset
-        change.
+        A display the session compositor refuses a screen for, or whose output
+        the capture compositor cannot create, is dropped like the X11 path's
+        unrealizable display, with that reason, and when the arrangement was
+        built around it the primary returns to the origin -- its capture
+        follows the moved output live, so only the layout and the tracked
+        capture offset change.
 
         Args:
             layouts: display_id to layout rect; mutated when a display is
@@ -4850,31 +4851,34 @@ class DataStreamingServer(BaseStreamingService):
             client = self.display_clients.get(did) or {}
             dpi = self._display_dpi(did)
             scale = float(dpi) / 96.0
+            refusal = None
             if self.input_handler:
-                await self.input_handler.ensure_session_screen(
-                    did, size=(layout['w'], layout['h']), scale=scale)
-                # The screen exists now, so the display's own DPI can reach it;
-                # what the session leaves is this output's capture scale.
-                scale = await self.input_handler.realize_wayland_dpi(
-                    dpi, did, (layout['w'], layout['h']))
-                if client:
-                    client['scale'] = scale
-            created = False
-            try:
-                created = bool(await asyncio.to_thread(
-                    module.create_output, oid,
-                    layout['w'], layout['h'], layout['x'], layout['y'], scale,
-                ))
-            except Exception as e:
-                data_logger.error(f"Wayland create_output {oid} failed: {e}")
-            if created:
-                created_any = True
-                continue
+                if not await self.input_handler.ensure_session_screen(
+                        did, size=(layout['w'], layout['h']), scale=scale):
+                    refusal = "The session compositor cannot add a screen for this display."
+                else:
+                    # The screen exists now, so the display's own DPI can reach it;
+                    # what the session leaves is this output's capture scale.
+                    scale = await self.input_handler.realize_wayland_dpi(
+                        dpi, did, (layout['w'], layout['h']))
+                    if client:
+                        client['scale'] = scale
+            if refusal is None:
+                created = False
+                try:
+                    created = bool(await asyncio.to_thread(
+                        module.create_output, oid,
+                        layout['w'], layout['h'], layout['x'], layout['y'], scale,
+                    ))
+                except Exception as e:
+                    data_logger.error(f"Wayland create_output {oid} failed: {e}")
+                if created:
+                    created_any = True
+                    continue
+                refusal = "The compositor cannot create an output for this display."
             del layouts[did]
             keep_ids.discard(did)
-            await self._drop_wayland_secondary(
-                did, "The compositor cannot create an output for this display."
-            )
+            await self._drop_wayland_secondary(did, refusal)
             if primary_layout and (primary_layout['x'], primary_layout['y']) != (0, 0):
                 if await wayland_reposition_primary(module, 0, 0):
                     primary_layout['x'], primary_layout['y'] = 0, 0

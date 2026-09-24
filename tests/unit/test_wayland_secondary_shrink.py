@@ -140,8 +140,8 @@ async def scenario(res: "H.Results") -> None:
     layouts = shrunk_layouts()
 
     comp = compositor_before()
-    ok = await webrtc_service(comp)._apply_wayland_extension("display2", layouts)
-    res.check("[webrtc] the shrinking secondary is kept", ok, comp.calls)
+    refusal = await webrtc_service(comp)._apply_wayland_extension("display2", layouts)
+    res.check("[webrtc] the shrinking secondary is kept", refusal is None, comp.calls)
     res.check("[webrtc] it shrinks before the primary moves into its old room",
               moves_and_resizes(comp.calls) == [("resize", 2, 1512, 882), ("move", 0, 1512, 0)],
               comp.calls)
@@ -163,9 +163,9 @@ async def scenario(res: "H.Results") -> None:
     # height grows on the capture start.
     mixed = {"primary": dict(PRIMARY), "display2": {"x": 0, "y": 0, "w": 1512, "h": 2000}}
     comp = compositor_before()
-    ok = await webrtc_service(comp)._apply_wayland_extension("display2", mixed)
+    refusal = await webrtc_service(comp)._apply_wayland_extension("display2", mixed)
     res.check("[webrtc] a mixed change shrinks only the axis that gives way",
-              ok and moves_and_resizes(comp.calls)[:2] == [("resize", 2, 1512, 1764), ("move", 0, 1512, 0)],
+              refusal is None and moves_and_resizes(comp.calls)[:2] == [("resize", 2, 1512, 1764), ("move", 0, 1512, 0)],
               comp.calls)
 
     # Growing back: the primary moves out first, nothing is resized here.
@@ -173,9 +173,9 @@ async def scenario(res: "H.Results") -> None:
                            2: (0, 0, 1512, 882, 1.0)})
     grown = {"primary": {"x": 3024, "y": 0, "w": 1920, "h": 992},
              "display2": {"x": 0, "y": 0, "w": 3024, "h": 1764}}
-    ok = await webrtc_service(comp)._apply_wayland_extension("display2", grown)
+    refusal = await webrtc_service(comp)._apply_wayland_extension("display2", grown)
     res.check("[webrtc] a growing secondary waits for the move and its capture start",
-              ok and moves_and_resizes(comp.calls) == [("move", 0, 3024, 0)], comp.calls)
+              refusal is None and moves_and_resizes(comp.calls) == [("move", 0, 3024, 0)], comp.calls)
     comp = FakeCompositor({0: (1512, 0, 1920, 992, 1.0), 1: (1512, 0, 1920, 992, 1.0),
                            2: (0, 0, 1512, 882, 1.0)})
     srv, stopped = websockets_server(comp)
@@ -188,9 +188,9 @@ async def scenario(res: "H.Results") -> None:
     # A compositor that will not shrink the output: recreated, on either transport.
     comp = compositor_before()
     comp.refuse_resize = True
-    ok = await webrtc_service(comp)._apply_wayland_extension("display2", shrunk_layouts())
+    refusal = await webrtc_service(comp)._apply_wayland_extension("display2", shrunk_layouts())
     res.check("[webrtc] a refused shrink recreates the output after the move",
-              ok and moves_and_resizes(comp.calls) == [("resize", 2, 1512, 882), ("destroy", 2),
+              refusal is None and moves_and_resizes(comp.calls) == [("resize", 2, 1512, 882), ("destroy", 2),
                                                        ("move", 0, 1512, 0),
                                                        ("create", 2, 1512, 882, 0, 0)],
               comp.calls)
@@ -210,8 +210,8 @@ async def scenario(res: "H.Results") -> None:
                            2: (0, 0, 3024, 1764, 1.0)})
     same = {"primary": {"x": 3024, "y": 0, "w": 1920, "h": 992},
             "display2": {"x": 0, "y": 0, "w": 3024, "h": 1764}}
-    ok = await webrtc_service(comp)._apply_wayland_extension("display2", same)
-    res.check("[webrtc] an unchanged layout touches no output", ok and not moves_and_resizes(comp.calls),
+    refusal = await webrtc_service(comp)._apply_wayland_extension("display2", same)
+    res.check("[webrtc] an unchanged layout touches no output", refusal is None and not moves_and_resizes(comp.calls),
               comp.calls)
 
 

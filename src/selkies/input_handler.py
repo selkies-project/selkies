@@ -6154,9 +6154,9 @@ class WebRTCInput:
     #: nested-Wayland backend: a wlroots session cannot grow a screen without
     #: it. KWin serves no socket and needs none — its screens are grown as
     #: `zkde_screencast_unstable_v1` virtual outputs through pixelflux
-    #: (`add_app_screen`), the rung probed when this socket is absent by
-    #: growing a probe screen (the protocol answers on stock kwin too, but
-    #: only a patched kwin registers a nested virtual output).
+    #: (`add_app_screen`), the rung offered when this socket is absent and the
+    #: session serves the protocol; whether its kwin registers the screen it
+    #: grows is proven by the first display that asks for one.
     SESSION_IPC_SOCKET = "labwc.sock"
 
     def _session_ipc_path(self) -> Optional[str]:
@@ -6258,16 +6258,15 @@ class WebRTCInput:
         """Re-probe what backs a second display and return the fresh answer.
 
         The control socket decides when it answers; without one, a nested
-        session is probed for KWin's virtual-output protocol, and a session
-        with neither control is asked for its screen count instead, so a
-        compositor started with spare screens keeps its second display.
+        session is asked whether it serves KWin's virtual-output protocol, and
+        a session with neither control is asked for its screen count instead,
+        so a compositor started with spare screens keeps its second display.
 
-        The KWin probe grows a token-sized screen and gives it back, since a
-        stock kwin serves the protocol without registering the output and
-        nothing in the globals tells the two apart. The session sees that
-        screen come and go, so the answer is kept for as long as the session
-        compositor's socket is the same one, and only an unreachable
-        compositor is asked again.
+        The KWin answer is read off the registry, so nothing on the session
+        changes for the asking; the screen a display asks for is what proves
+        the compositor registers one (`ensure_session_screen`). The answer is
+        kept for as long as the session compositor's socket is the same one,
+        and only an unreachable compositor is asked again.
         """
         await self.probe_session_screen_ipc()
         kde = False
@@ -6282,14 +6281,14 @@ class WebRTCInput:
             else:
                 try:
                     kde = bool(await asyncio.to_thread(
-                        self.wayland_input.app_screen_control_available, display))
+                        self.wayland_input.app_screen_control_offered, display))
                 except Exception as e:
                     logger_webrtc_input.debug(f"Session screen control probe failed: {e}")
                 else:
                     self._session_kde_probe = (identity, kde)
                     logger_webrtc_input.debug(
-                        "Session compositor grows screens on demand." if kde else
-                        "Session compositor registers no virtual output; "
+                        "Session compositor offers screens on demand." if kde else
+                        "Session compositor serves no virtual-output protocol; "
                         "a second display needs a spare screen.")
             if not kde:
                 try:
@@ -6401,7 +6400,7 @@ class WebRTCInput:
 
     async def ensure_session_screen(self, display_id: str,
                                     size: Optional[Tuple[int, int]] = None,
-                                    scale: float = 1.0) -> None:
+                                    scale: float = 1.0) -> bool:
         """Grow the session screen a display owns, right before its capture
         output is created.
 
@@ -6422,18 +6421,24 @@ class WebRTCInput:
                 output (the capture output drives the real size); the labwc
                 rung sizes screens through output management instead.
             scale: The display's scale, seeding a KWin virtual output.
+
+        Returns:
+            False when the session compositor refused the screen -- a control
+            socket answering no, or a KWin whose grown output registers as no
+            screen -- which leaves the display nowhere to show; True when it
+            has one, or needs none.
         """
         did = str(display_id or "")
         if (not did or did == "primary" or self.wayland_input is None
                 or not self.session_screen_control_available()):
-            return
+            return True
         if (getattr(settings, "wayland_host_display", "") or "").strip():
-            return
+            return True
         lock = self.__dict__.setdefault("_session_screen_lock", asyncio.Lock())
         async with lock:
             owned = self.__dict__.setdefault("_session_screens", {})
             if did in owned:
-                return
+                return True
 
             async def parked() -> int:
                 try:
@@ -6449,7 +6454,7 @@ class WebRTCInput:
                     logger_webrtc_input.warning(
                         f"Session compositor could not add a screen for '{did}': "
                         f"{reply.get('error', 'no reply')}")
-                    return
+                    return False
                 owned[did] = str(reply.get("output", ""))
             else:
                 name = f"SELKIES-{wayland_output_id(did)}"
@@ -6462,7 +6467,7 @@ class WebRTCInput:
                 except Exception as e:
                     logger_webrtc_input.warning(
                         f"Session compositor could not add a screen for '{did}': {e}")
-                    return
+                    return False
                 owned[did] = name
             logger_webrtc_input.info(
                 f"Session compositor added screen '{owned[did]}' for '{did}'.")
@@ -6473,6 +6478,7 @@ class WebRTCInput:
                         f"Screen '{owned[did]}' produced no host window to adopt.")
                     break
                 await asyncio.sleep(0.05)
+            return True
 
     async def _session_screen_positions(self, display_ids) -> dict:
         """Position of each display's screen among the session's screens,

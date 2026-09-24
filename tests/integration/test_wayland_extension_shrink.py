@@ -89,9 +89,9 @@ def drive(res: "H.Results") -> None:
             "primary": {"x": 0, "y": 0, "w": 1280, "h": 720},
             did: {"x": 1280, "y": 0, "w": 1280, "h": 720},
         }
-        ok = asyncio.run(svc._apply_wayland_extension(did, layouts))
+        refusal = asyncio.run(svc._apply_wayland_extension(did, layouts))
         outs = {o[0]: o for o in sc.list_outputs()}
-        res.check("the secondary was not dropped on the shrink", ok, outs)
+        res.check("the secondary was not dropped on the shrink", refusal is None, (refusal, outs))
         sec = outs.get(oid)
         res.check("the secondary sits at the shrunken primary's edge (+1280)",
                   sec is not None and sec[1] == 1280, sec)
