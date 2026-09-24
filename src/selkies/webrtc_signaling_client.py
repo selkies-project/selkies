@@ -287,7 +287,7 @@ class WebRTCSignalingClient:
         token is the secure-mode collaboration token; `SESSION_END <peer_id>
         <client_type>`; `ERROR ...`; otherwise `<peer_id> <json>` carrying an
         `sdp` or `ice` object. A client's text is relayed here verbatim, so a
-        malformed, non-object or unrecognized payload — and a callback that
+        malformed, non-object, or unrecognized payload — and a callback that
         raises on a stale SDP/ICE — is logged and dropped rather than treated
         as a transport failure, which would tear down every peer's session.
         """

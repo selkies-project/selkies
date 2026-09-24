@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A second display opens where the client asked for it, on the Wayland backend.
 
-"Left", "up" and "down" have to place the second screen there, not beside the
+"Left", "up", and "down" have to place the second screen there, not beside the
 first: each display is a screen of the capture compositor's own, the secondary
 created at the rectangle the layout says and the primary's screen moved off the
 origin for the arrangements that put something left of or above it, so the

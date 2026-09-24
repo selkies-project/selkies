@@ -88,7 +88,7 @@ def wish_open_menu_item(page, label: str) -> bool:
 
 def wish_gamepad_preview(page) -> bool:
     """Whether the Wish gamepad dropdown carries the gamepad preview, a visualizer
-    titled "Gamepad 0": each menubar menu is opened, read and closed again."""
+    titled "Gamepad 0": each menubar menu is opened, read, and closed again."""
     triggers = page.locator('[role="menubar"] button')
     for i in range(triggers.count()):
         try:

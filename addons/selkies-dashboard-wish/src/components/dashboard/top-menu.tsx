@@ -12,7 +12,7 @@
  *
  * Reads the `serverSettings` and `trackpadModeUpdate` messages the core posts
  * on `window` and posts `sidebarVisibilityChanged`, `touchinput:trackpad`,
- * `touchinput:touch` and `setSynth` back; held modifier keys are delivered as
+ * `touchinput:touch`, and `setSynth` back; held modifier keys are delivered as
  * synthetic KeyboardEvents on `window`, which the core's input handler consumes
  * like real ones. A secondary display opens as a new window on the
  * `#display2-<direction>` fragment, placed with the Window Management API
@@ -106,7 +106,7 @@ interface TopMenuProps {
 }
 
 /**
- * The menu bar, its panels and the overlays around it. Server settings are
+ * The menu bar, its panels, and the overlays around it. Server settings are
  * seeded from the cached broadcast because the menu mounts after the core
  * connects; the server's UI customization decides which entries render.
  */

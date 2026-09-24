@@ -200,7 +200,7 @@ def shell_scripts(root: str) -> list:
     return sorted(found)
 
 
-# Every shell script the repository ships: packaging, CI and tooling scripts run
+# Every shell script the repository ships: packaging, CI, and tooling scripts run
 # unattended, where a quoting slip is the same failure with nobody watching.
 ALL_SHELL = shell_scripts(REPO)
 

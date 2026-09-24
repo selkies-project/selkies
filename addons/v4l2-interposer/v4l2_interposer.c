@@ -12,7 +12,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     socket or from its PipeWire node (SELKIES_WEBCAM_SOURCE). It emulates the
     observable half of a fixed-function webcam — one pixel format (raw
     I420/NV12/YUYV, or MJPEG) at one size, as configured by the backend: the
-    VIDIOC_* ioctl surface, MMAP streaming buffers, read() I/O and poll
+    VIDIOC_* ioctl surface, MMAP streaming buffers, read() I/O, and poll
     readiness, so that unmodified consumers capture frames pushed from the
     browser without any kernel module or elevated privilege in the container.
 
@@ -237,7 +237,7 @@ typedef struct {
     uint32_t version;      /* WC_SHM_VERSION */
     uint32_t width;
     uint32_t height;
-    uint32_t fourcc;       /* V4L2 pixel format: YU12, NV12, YUYV or MJPG */
+    uint32_t fourcc;       /* V4L2 pixel format: YU12, NV12, YUYV, or MJPG */
     uint32_t fps_num;
     uint32_t fps_den;
     uint32_t n_slots;
@@ -285,7 +285,7 @@ typedef enum {
     WC_BUF_DONE = 2      /* filled, awaiting DQBUF (transient) */
 } wc_buf_state_t;
 
-/* One application open() handle: its own frame source, staging and buffers. The frame source is
+/* One application open() handle: its own frame source, staging, and buffers. The frame source is
  * either the backend's staging ring (fd = the connected control socket, staging_map set) or a
  * PipeWire stream (fd = our end of a doorbell socketpair, pw set); everything above the source
  * is shared. */
@@ -1187,7 +1187,7 @@ static size_t round_up_page(size_t n);
  * publishes one; any other producer works too) can stand in for the backend's staging ring. The
  * application fd is our end of a socketpair: the PipeWire data thread copies each
  * frame into the handle's latest-frame buffer and writes one byte, so poll(),
- * DQBUF and read() behave exactly as with the ring. libpipewire is loaded at run
+ * DQBUF, and read() behave exactly as with the ring. libpipewire is loaded at run
  * time on the first device open, never at library load: this library is preloaded
  * into every process of an application, and initializing PipeWire during early
  * process startup is what hangs some of them. Built only when the PipeWire

@@ -2,7 +2,7 @@
 """How the client asks for pointer lock, and what it does when the engine says no.
 
 Locked motion is relayed as relative motion, scaled onto the stream's own
-pixels and injected unaccelerated, so the OS acceleration curve the engine
+pixels, and injected unaccelerated, so the OS acceleration curve the engine
 applies to movementX/Y is what separates how far a hand moved from how far the
 remote pointer went. The client asks for the raw deltas instead, except on
 macOS, where the option is granted and taking that curve away leaves the

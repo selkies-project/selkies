@@ -2,7 +2,7 @@
 """The ICE topologies end to end: a browser connects through each of them.
 
 Each block starts a WebRTC server with one topology setting and drives
-Chromium, Firefox and WebKit through Playwright, reading what the browser's
+Chromium, Firefox, and WebKit through Playwright, reading what the browser's
 own RTCPeerConnection.getStats() says about the nominated candidate pair.
 The port range confines the server's candidate to its window, yields the one
 port left of a window whose others are held, and carries a second display in

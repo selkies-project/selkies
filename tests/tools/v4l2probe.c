@@ -1,5 +1,5 @@
 /* libc-level V4L2 capture probe for the webcam tests: enumerates the device,
- * streams N frames in MMAP or read() mode and prints what it saw as key=value
+ * streams N frames in MMAP or read() mode, and prints what it saw as key=value
  * lines, including YUV samples at requested pixels so a test can check colors.
  *
  *   v4l2probe [--read] [--sample X,Y]... [--timeout MS] [--duration MS] [--dump FILE] [DEVICE] [FRAMES]

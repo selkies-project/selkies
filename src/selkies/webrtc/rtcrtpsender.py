@@ -103,9 +103,9 @@ def random_sequence_number() -> int:
 
 #: The colour signal a stream was converted with, as the ITU-T H.273 codes the RTP
 #: colour-space header extension carries, for the two codecs whose bitstream cannot state it:
-#: BT.709 primaries, transfer and matrix at limited range, with the BT.601 matrix for VP8,
+#: BT.709 primaries, transfer, and matrix at limited range, with the BT.601 matrix for VP8,
 #: which is held to the only one a keyframe header's single colour-space bit can name. A
-#: receiver that reads the extension takes it over the bitstream, so H.264, H.265 and AV1 are
+#: receiver that reads the extension takes it over the bitstream, so H.264, H.265, and AV1 are
 #: left to their own headers rather than told here — theirs carry the range as well, which a
 #: 4:4:4 session signals as full and this table has no way to know.
 RTP_COLOR_SPACE = {
@@ -360,7 +360,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
 
     def switch_codec(self, mime_type: str) -> bool:
         """Send the track's frames as the negotiated codec of `mime_type` from
-        now on: its payload type, its RTX type and its own packer. A codec the
+        now on: its payload type, its RTX type, and its own packer. A codec the
         peer never took drops the frames instead, until a switch names one it
         did; before the sender starts, the switch names the codec it starts on,
         out of the answer."""

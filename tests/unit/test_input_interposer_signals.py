@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The input interposer's hooks survive a signal handler that calls them.
 
-The interposer hooks read, ioctl, close and the stat family for every fd in
+The interposer hooks read, ioctl, close, and the stat family for every fd in
 a process, and looks each fd up in its handle tables under a lock. A signal
 handler that reads a pipe (uvloop's, an SDL game's) runs on whichever thread
 the signal lands on, which may be one inside that lookup, so the lookup has

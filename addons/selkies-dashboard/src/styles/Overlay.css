@@ -14,7 +14,7 @@
 .theme-dark {
     /* Core tokens.
        Text colors are picked against the surface they land on rather than
-       against the page: the sidebar, the section panel and a hovered row are
+       against the page: the sidebar, the section panel, and a hovered row are
        three different backgrounds, and the accent-tinted ones (an active
        toggle, an error row) are lighter again. Accent as text is therefore a
        separate, lighter tint of the same hue — the fill color is too dark
@@ -1219,7 +1219,7 @@ body {
     border-color: var(--accent-border);
 }
 
-/* Active state (e.g., muted): soft accent fill, accent border and text. */
+/* Active state (e.g., muted): soft accent fill, accent border, and text. */
 .toggle-button.active {
     background-color: var(--accent-soft);
     color: var(--accent-text);

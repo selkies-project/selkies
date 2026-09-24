@@ -77,7 +77,7 @@ class PathOnlyAccessLogger(AbstractAccessLogger):
     parameter, so the stock request-line atom (which logs ``path_qs``) would
     write credentials into the access log. The line otherwise has the default
     shape: remote address, start time, method + path + version, status, body
-    size, Referer and User-Agent.
+    size, Referer, and User-Agent.
     """
 
     @property
@@ -1148,7 +1148,7 @@ class BaseStreamingService(metaclass=ABCMeta):
     @abstractmethod
     async def sessions(self) -> List[Dict[str, Any]]:
         """The pages connected to this transport: `id`, `transport`, `role`,
-        `slot`, `display`, `connected_at` and `rtt_ms`, the same keys on both."""
+        `slot`, `display`, `connected_at`, and `rtt_ms`, the same keys on both."""
 
     @abstractmethod
     async def disconnect_session(self, session_id: str) -> bool:
@@ -1422,7 +1422,7 @@ class CentralizedStreamServer:
         """Return a self-signed certificate and key, writing one where none is usable.
 
         Turning HTTPS on is otherwise a two-step job — make a certificate, then
-        point at it — and browsers gate the clipboard, gamepads, pointer lock
+        point at it — and browsers gate the clipboard, gamepads, pointer lock,
         and the camera on a secure context, so the step is in everyone's way.
         The configured paths are used when their directory is writable, which
         for the default `ssl-cert-snakeoil` pair means running as root; a user
@@ -1955,7 +1955,7 @@ class CentralizedStreamServer:
             return
         logger.error(
             "Basic authentication is enabled but no password was set. Set one with "
-            "--basic-auth-password, or the SELKIES_BASIC_AUTH_PASSWORD, PASSWORD or "
+            "--basic-auth-password, or the SELKIES_BASIC_AUTH_PASSWORD, PASSWORD, or "
             "PASSWD environment variable; or serve without a login by passing "
             "--enable-basic-auth=false."
         )
@@ -2450,7 +2450,7 @@ class CentralizedStreamServer:
         return web.Response(status=204)
 
     async def handle_recording(self, request: web.Request) -> web.Response:
-        """GET, POST and DELETE /api/recording: the MP4 recording pixelflux
+        """GET, POST, and DELETE /api/recording: the MP4 recording pixelflux
         makes of the session, H.264 with the session's audio as an Opus track
         when audio is on and pcmflux is installed. POST starts one into the
         file-manager directory unless the body names a path, DELETE stops it
@@ -2501,7 +2501,7 @@ class CentralizedStreamServer:
     def _recording_target(self, name: str) -> Optional[str]:
         """Where a requested recording name writes, or `None` when it leaves the
         file-manager directory. The name is a path relative to that directory:
-        an absolute path, a traversal segment and a symlinked parent pointing
+        an absolute path, a traversal segment, and a symlinked parent pointing
         outside are all refused, since the session token that reaches this
         endpoint carries no authority over the rest of the filesystem."""
         base = os.path.realpath(self.upload_dir)

@@ -48,7 +48,7 @@ logger = logging.getLogger("webcam")
 
 WEBCAM_SOCKET_NAME = "selkies_webcam0.sock"
 
-# Codec ids shared by the WebSocket frame header, the WebRTC codec names and
+# Codec ids shared by the WebSocket frame header, the WebRTC codec names, and
 # pixelflux's VirtualCamera.CODEC_* constants.
 CODEC_MJPEG = 0
 CODEC_H264 = 1

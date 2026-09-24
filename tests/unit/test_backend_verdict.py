@@ -88,7 +88,7 @@ def run(stub: str = "exit 1", env: Optional[dict] = None,
         tail: What to print once the blocks have settled.
 
     Returns:
-        `state` (the settled variables), `said` (everything printed) and `rc`.
+        `state` (the settled variables), `said` (everything printed), and `rc`.
     """
     with tempfile.TemporaryDirectory() as tmp:
         probe = os.path.join(tmp, "selkies-gpu-probe")

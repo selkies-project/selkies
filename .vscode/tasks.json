@@ -39,7 +39,7 @@
             }
         },
         {
-            "label": "[run] re-build, re-install and run Selkies",
+            "label": "[run] re-build, re-install, and run Selkies",
             "problemMatcher": [],
             "dependsOrder": "sequence",
             "dependsOn": [

@@ -15,7 +15,7 @@
  * rides URL-encoded in the `X-Upload-Path` header, the secure-mode session
  * token as a Bearer header, and progress is reported to the dashboards as
  * `{type: 'fileUpload'}` window messages with the statuses `start`,
- * `progress`, `end`, `error` and `warning`.
+ * `progress`, `end`, `error`, and `warning`.
  *
  * Files at or under `UPLOAD_CHUNK_BYTES` go up as one plain POST (the whole
  * Blob, no extra headers, the shape every server accepts). Larger files are
@@ -24,7 +24,7 @@
  * proxy's per-request cap (Cloudflare rejects bodies over 100 MB). Each slice
  * carries the same `X-Upload-Path` plus `X-Upload-Id` (an opaque per-file
  * transfer id), `X-Upload-Offset` (the slice's absolute byte offset),
- * `X-Upload-Total` (the final file size in bytes) and, on the last slice,
+ * `X-Upload-Total` (the final file size in bytes), and, on the last slice,
  * `X-Upload-Final: 1`. The server appends slices to a `.part` file and
  * atomically renames it into place on the final one. Progress is cumulative
  * across slices, so the dashboards render one smooth bar per file.
@@ -112,7 +112,7 @@ export function createFileUploader({ canUpload = () => true } = {}) {
 
     /**
      * Uploads one file, as a single POST or as slices by size, reporting
-     * `start`, cumulative `progress` and `end` or `error`.
+     * `start`, cumulative `progress`, and `end` or `error`.
      * @param {File} file The file.
      * @param {string} pathToSend Destination path.
      * @throws {Error} The upload failure, after reporting it.

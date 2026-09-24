@@ -49,7 +49,7 @@ async def saw(mark: int, substr: str, timeout: float = 15) -> bool:
 
 
 async def drain(ws, out: list = None) -> None:
-    """Read the stream, noting each video frame's codec, id and whether it decodes alone."""
+    """Read the stream, noting each video frame's codec, id, and whether it decodes alone."""
     while True:
         try:
             msg = await ws.recv()

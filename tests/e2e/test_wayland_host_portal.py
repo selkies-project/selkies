@@ -5,9 +5,9 @@ A KDE session offers neither screencopy nor the virtual keyboard and pointer pro
 ordinary clients, so `SELKIES_WAYLAND_HOST_DISPLAY` aimed at its socket has pixelflux open a
 RemoteDesktop portal session instead: the monitor's PipeWire stream carries the frames and the
 seat's input goes through the portal by keysym and stream coordinates. This suite runs a real
-KDE stack on a private bus — `kwin_wayland --virtual`, PipeWire, xdg-desktop-portal and its KDE
+KDE stack on a private bus — `kwin_wayland --virtual`, PipeWire, xdg-desktop-portal, and its KDE
 backend — starts the server against it over either transport, and checks the rung was taken,
-the stream negotiated, and that a browser's pointer moves, clicks, scrolls and keys land on a
+the stream negotiated, and that a browser's pointer moves, clicks, scrolls, and keys land on a
 client window inside KWin. KWin's virtual backend records no screencast frames (only its DRM
 and nested Wayland backends emit the output damage the stream is fed from), so the frame checks
 report skipped there and pass where a backend that does emit them is captured.
@@ -46,11 +46,11 @@ def service_exec(name: str) -> str:
 
 
 class KdeRig:
-    """kwin_wayland (virtual backend), PipeWire and the KDE portal on a private session bus and
+    """kwin_wayland (virtual backend), PipeWire, and the KDE portal on a private session bus and
     runtime dir, the way a KDE session exposes them; `socket_path` is the compositor's socket."""
 
     def __init__(self) -> None:
-        # A short path: the compositor's, PipeWire's and the bus's sockets all live under it.
+        # A short path: the compositor's, PipeWire's, and the bus's sockets all live under it.
         self.root = tempfile.mkdtemp(prefix="pf-portal-")
         self.runtime = os.path.join(self.root, "rt")
         os.makedirs(self.runtime, mode=0o700)
@@ -170,7 +170,7 @@ def run(mode: str) -> "H.Results":
                 else:
                     res.skip("video reaches the browser", "the compositor emitted no screencast frame (KWin's virtual backend never does)")
 
-                # Input from the browser: pointer motion, a click, a wheel notch and a key,
+                # Input from the browser: pointer motion, a click, a wheel notch, and a key,
                 # each of which the KDE client inside KWin must report.
                 page.mouse.move(640, 360)
                 page.mouse.click(640, 360)

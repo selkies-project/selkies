@@ -65,7 +65,7 @@ def pages(path: str) -> int:
 async def main() -> None:
     path = os.environ.get("PATH", "") + ":/usr/sbin"
     if printing.PrintQueue.programs() is None or not all(shutil.which(t, path=path) for t in ("lp", "lpstat")):
-        H.skip_suite("cupsd with the cups-filters chain, lp and lpstat are needed (cups-daemon, cups-client, cups-filters)")
+        H.skip_suite("cupsd with the cups-filters chain, lp, and lpstat are needed (cups-daemon, cups-client, cups-filters)")
     res = H.Results("print-queue")
     shutil.rmtree(WORK, ignore_errors=True)
     runtime, spool = os.path.join(WORK, "runtime"), os.path.join(WORK, "spool")

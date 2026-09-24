@@ -5,7 +5,7 @@ Gaming mode is where a game gets its input: fullscreen with the pointer locked,
 the keyboard locked so Escape reaches the session, and locked motion relayed as
 deltas. A headless engine takes synthetic input and holds no keyboard, so this
 drives the installed Chrome, windowed under openbox on a private X server of
-its own, with XTEST keys, clicks and relative motion the way a mouse and a
+its own, with XTEST keys, clicks, and relative motion the way a mouse and a
 keyboard deliver them, while the server streams the test display or its
 Wayland compositor and an SDL2 window in relative mode over that desktop
 (tests/tools/sdl_relative_probe.py) stands in for the game.

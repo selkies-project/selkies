@@ -12,7 +12,7 @@
  * /dev/input/eventN nodes are served by the sibling joystick interposer, to
  * everything the real libudev reports. The pads are built from the static
  * definitions in initialize_virtual_gamepads_data_if_needed(); every other
- * device, subsystem and hotplug event passes through to the real library.
+ * device, subsystem, and hotplug event passes through to the real library.
  *
  * Passthrough. This library carries the `libudev.so.1` SONAME, so the loader
  * never maps the real file for the application; it is dlopen()ed by path at
@@ -31,7 +31,7 @@
  *
  * Policy. The pads live in the "input" subsystem. A real node with one of
  * their names (js0..js3, event1000..event1003) is hidden from enumeration,
- * lookups and the monitor, since that /dev/input path is the interposer's;
+ * lookups, and the monitor, since that /dev/input path is the interposer's;
  * every other real input device stays visible. An enumeration adds the pads
  * when it has no subsystem filter or matches "input" without excluding it; a
  * monitor delivers them when it has no subsystem filter or one for "input"
@@ -41,7 +41,7 @@
  * Each pad is a four-node tree: a usb_device parent (idVendor/idProduct,
  * serial), an input parent under it (the `id` attributes, name, phys, uniq,
  * capabilities), and the js and event children carrying the devnode, the
- * input-major devnum and the ID_INPUT_* properties. The identity values
+ * input-major devnum, and the ID_INPUT_* properties. The identity values
  * (0x045e:0x028e, "Microsoft X-Box 360 pad", the uniq "SGVP%04d") must agree
  * with the ones the joystick interposer reports through its ioctls. A generic
  * scan of "input" yields the js and event nodes whose interposer socket is
@@ -53,7 +53,7 @@
  * becomes an "add" or "remove" for that node. The directory is
  * SELKIES_JS_SOCKET_PATH (default /tmp) and must match the interposer's. The
  * fd handed to consumers is an epoll set over the inotify fd, the real
- * monitor's fd and an eventfd that stays armed while buffered inotify records
+ * monitor's fd, and an eventfd that stays armed while buffered inotify records
  * remain undispensed, so it polls readable exactly while
  * udev_monitor_receive_device() has something to yield.
  *
@@ -792,7 +792,7 @@ struct udev_monitor {
     int n_ref;
     struct udev_monitor *real;
     int real_fd;               // the real monitor's fd, in the epoll set; -1 without one
-    int fd;                    // epoll set over inotify_fd, real_fd and evbuf_efd; -1 => hand out inotify_fd
+    int fd;                    // epoll set over inotify_fd, real_fd, and evbuf_efd; -1 => hand out inotify_fd
     int inotify_fd;            // -1 if unavailable
     int evbuf_efd;             // eventfd armed while evbuf holds an undispensed matching record
     bool evbuf_efd_armed;      // current arm state of evbuf_efd
@@ -1750,7 +1750,7 @@ static bool virtual_matches_property_filters(const virtual_gamepad_definition_t 
     return true;
 }
 
-/* Whether a virtual node passes the enumeration's sysname, parent and
+/* Whether a virtual node passes the enumeration's sysname, parent, and
  * property filters. */
 static bool virtual_matches(const struct udev_enumerate *e, const virtual_gamepad_definition_t *def, virtual_device_node_type_t type) {
     if (e->sysname_filtered && fnmatch(e->sysname_pattern, virtual_sysname(def, type), 0) != 0) {
@@ -1915,7 +1915,7 @@ static bool find_node_by_socket_name(const char *name,
 /* Backs the monitor with an inotify watch on the socket directory so the
  * interposer's socket create/delete surface as add/remove hotplug events, and
  * with the real library's monitor for everything else. The consumer-visible
- * fd is an epoll set over the inotify fd, the real monitor's fd and an
+ * fd is an epoll set over the inotify fd, the real monitor's fd, and an
  * eventfd kept armed while undispensed matching records sit in evbuf: one
  * inotify read() can drain several coalesced records while receive_device
  * dispenses one per call, so raw inotify readability would understate pending

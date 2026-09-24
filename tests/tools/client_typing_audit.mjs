@@ -4,7 +4,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-// What the client puts on the wire when text is typed, pasted or re-typed. Both
+// What the client puts on the wire when text is typed, pasted, or re-typed. Both
 // text-entry paths must emit the character's OWN keysym: a capital sent as Shift plus
 // the lowercase keysym arrives lowercase wherever the X keymap names Shift without
 // binding it as a modifier, and that failure is invisible until someone types one.

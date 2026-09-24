@@ -28,7 +28,7 @@ rung rather than latching into a fallback:
 - Wayland keyboard: the compositor seat keymap (`_WaylandKeymapOwner`), then
   the in-process zwp_virtual_keyboard client, then a data-control clipboard
   paste. The Wayland path is subprocess-free by design; never reintroduce
-  wtype, wl-copy or similar forks where the in-process pixelflux harness
+  wtype, wl-copy, or similar forks where the in-process pixelflux harness
   exists.
 - X11 keyboard: in-process XTEST (`_XTestKeyboard`, with a dynamic
   spare-keycode overlay for unmapped keysyms and an XKB group lock for
@@ -50,7 +50,7 @@ client cannot inject input a controller did not grant: a read-only viewer
 peer (shared/#player co-op) may send only `VIEWER_ALLOWED_PREFIXES`; a viewer
 holding the active mk token while `enable_collab` is on (a read-write
 collaborator) may additionally send `VIEWER_COLLAB_EXTRA_PREFIXES` — the
-keyboard, mouse and clipboard set, including `co,` because IME commits and
+keyboard, mouse, and clipboard set, including `co,` because IME commits and
 atomic typing arrive that way. `cmd` and every settings-mutating message stay
 controller-only. Blur/visibility lifecycle noise (`VIEWER_SILENT_DROP_PREFIXES`)
 from a read-only viewer is normal operation and is dropped without a warning.
@@ -957,7 +957,7 @@ class _X11ClipboardMonitor:
 
         Under INCR each property delete requests the next chunk and a
         zero-length chunk ends the transfer. Only that ends it successfully: a
-        transfer cut short by the idle bound, the overall bound or the size cap
+        transfer cut short by the idle bound, the overall bound, or the size cap
         is discarded, since half an image handed on as content is worse than a
         read that failed. Events are awaited with the remaining deadline so a
         stalled owner cannot wedge the event thread inside a blocking
@@ -1560,7 +1560,7 @@ class _XTestKeyboard:
     def invalidate_mapping(self) -> None:
         """A foreign keymap change (setxkbmap, desktop layout switcher) wiped
         our overlay bindings and may have moved modifier keycodes: drop the
-        overlay bookkeeping, rediscover spares lazily and re-resolve the
+        overlay bookkeeping, rediscover spares lazily, and re-resolve the
         modifier keycodes. Held keys are kept: release replays the exact
         press-time keycode."""
         self._overlay.clear()
@@ -1975,7 +1975,7 @@ def _is_within_directory(directory: str, target: str) -> bool:
         # Paths on different drives or a mix of absolute/relative.
         return False
 
-# Event, button and axis codes from linux/input-event-codes.h.
+# Event, button, and axis codes from linux/input-event-codes.h.
 EV_SYN = 0x00
 EV_KEY = 0x01
 EV_REL = 0x02
@@ -2149,7 +2149,7 @@ def character_to_layout_keysym(char: str) -> int:
 def is_function_keysym(keysym: int) -> bool:
     """Whether a keysym names a key rather than a glyph.
 
-    The X function block (0xFF00 to 0xFFFF: navigation, editing, F-keys
+    The X function block (0xFF00 to 0xFFFF: navigation, editing, F-keys,
     and the keypad) and the XF86 vendor block carry no shifted glyph for a
     held Shift or AltGr to move onto, so a level modifier the client holds
     with one of them is the chord the user meant (Shift+Home selects to the
@@ -2164,7 +2164,7 @@ def overlay_bind_keysym(keysym: int) -> int:
 
     An overlay bind is a key we invent, not one a layout author chose, and the
     receiving toolkits' tables for legacy national/publishing keysyms disagree
-    across versions (permille, signifblank and the angle brackets die or
+    across versions (permille, signifblank, and the angle brackets die or
     mistranslate on a legacy bind) — while Latin-1 and Unicode-plane keysyms
     translate algorithmically everywhere. So any keysym that spells one
     character is bound in that universal form; charless keysyms (XF86, F-keys)
@@ -3156,7 +3156,7 @@ class SelkiesGamepad:
         connection open until shutdown or disconnect.
 
         A JS client first gets its current state replayed as INIT events
-        (joydev semantics); the snapshot, its write and the registration share
+        (joydev semantics); the snapshot, its write, and the registration share
         one loop step, so no broadcast can interleave and the client's first
         live event strictly follows its snapshot. evdev has no in-band INIT:
         those clients poll state through the interposer's ioctl emulation.
@@ -3341,7 +3341,7 @@ class SelkiesGamepad:
 
     async def _process_event_queue(self) -> None:
         """Drain the event queue until the None sentinel, fanning each event out
-        to JS, EVDEV and uinput consumers.
+        to JS, EVDEV, and uinput consumers.
 
         Each client drain is bounded and a stalled client is closed, so a game
         that stops reading its socket cannot freeze delivery for the others.
@@ -3694,7 +3694,7 @@ async def run_client_command(command_to_run: str, logger: logging.Logger,
     display and session bus the desktop uses; None inherits the server's.
     A launch failure or any nonzero exit — above all 127, the
     command-not-installed case — is reported through ``notify`` (async, one
-    text argument) with the runtime, the reason its output gives and the
+    text argument) with the runtime, the reason its output gives, and the
     echoed command, because the dashboards' apps UI marks the action done
     optimistically and needs a counter-signal to roll back. A clean exit
     reaches ``done`` (async, the echoed command), which is what settles a
@@ -3880,7 +3880,7 @@ class WebRTCInput:
             focused app repeats virtual-keyboard keys itself via wl_keyboard
             repeat_info and a server-side repeat would double it.
         key_repeat_delay, key_repeat_interval, key_repeat_tick: Hold before
-            the first repeat, spacing between repeats (~25 Hz) and the repeat
+            the first repeat, spacing between repeats (~25 Hz), and the repeat
             loop's poll period; the first two adopt the X server's own values.
         key_repeat_heartbeat_grace: Repeat pauses when the held key's last
             heartbeat is older than this (stalled stream / hidden tab); kept
@@ -5023,7 +5023,7 @@ class WebRTCInput:
 
         On X11 a keysym with a keycode in the current keymap is injected
         through XTEST on the already-open display, which spares a ~15 ms
-        xdotool fork per shortcut, arrow or function key; a keysym the layout
+        xdotool fork per shortcut, arrow, or function key; a keysym the layout
         lacks is overlay-bound once by the shim and reused, and one only a
         later layout group carries is injected under that group's lock —
         never a per-key xdotool fork, whose transient rebind floods
@@ -5930,7 +5930,7 @@ class WebRTCInput:
     def app_session(self) -> dict:
         """Where the session's applications run: ``x11_display`` (the X server
         they connect to, if any), ``wayland_display`` (the compositor socket,
-        when they are Wayland clients) and ``type`` ("x11" or "wayland").
+        when they are Wayland clients), and ``type`` ("x11" or "wayland").
 
         X11 backend: the server's own DISPLAY. Wayland backend: apps under a
         nested session compositor use its socket and the Xwayland it spawned (the
@@ -6095,7 +6095,7 @@ class WebRTCInput:
     async def note_app_command_finished(self, command: str) -> None:
         """Re-read and announce the installed set after an apps command ran.
 
-        Install, remove and update change it; a launch does not. Broadcast
+        Install, remove, and update change it; a launch does not. Broadcast
         rather than answered to the requester, which already applied the change
         optimistically: it is the session's other pages that have no other way
         to hear.
@@ -6206,7 +6206,7 @@ class WebRTCInput:
         return ok
 
     def _session_socket_identity(self, display: str) -> Tuple[str, int, int]:
-        """The session compositor's socket as an identity — its path, inode
+        """The session compositor's socket as an identity — its path, inode,
         and creation time, zeros where none exists — so a restarted compositor
         reads as a new one and a cached probe answer stays with the instance
         it was measured on."""

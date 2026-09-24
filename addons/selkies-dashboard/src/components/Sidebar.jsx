@@ -11,7 +11,7 @@
  * Renders a draggable toggle handle, the core action buttons (video, audio,
  * microphone, webcam, gamepad), the soft modifier keys and virtual keyboard
  * button for touch clients, the collapsible video, screen, audio, stats,
- * clipboard, files, apps, sharing, gamepads and shortcuts sections, the
+ * clipboard, files, apps, sharing, gamepads, and shortcuts sections, the
  * upload and clipboard notifications, the apps and files modals, and the
  * second-screen placement arrows.
  *
@@ -32,14 +32,14 @@
  * `setScaleLocally`, `setAntiAliasing`, `audioDeviceSelected`,
  * `clipboardUpdateFromUI`, `clipboardImageUpdate`, `requestFullscreen`,
  * `requestGamingMode`, `mode`, `setSynth`, `sidebarVisibilityChanged`, `TOUCH_GAMEPAD_SETUP`,
- * `TOUCH_GAMEPAD_VISIBILITY`, `touchinput:trackpad` and `touchinput:touch`,
+ * `TOUCH_GAMEPAD_VISIBILITY`, `touchinput:trackpad`, and `touchinput:touch`,
  * plus whatever channel a conditional-settings spec propagates through; the
  * stats section (`StreamStats.jsx`) posts `statsOpen` and reads its own. The
  * soft keys dispatch synthetic `KeyboardEvent`s on `window`, and the files
  * section dispatches the `requestFileUpload` DOM event.
  *
  * `window` state it reads: `webrtcInput.gamingMode`,
- * `__SELKIES_STREAMING_MODE__` and `__SELKIES_DUAL_MODE__`; it sets
+ * `__SELKIES_STREAMING_MODE__`, and `__SELKIES_DUAL_MODE__`; it sets
  * `__selkiesModeSwitching` around a transport switch.
  *
  * Persistence: every setting lives in `localStorage` under
@@ -147,7 +147,7 @@ const dpiScalingOptions = [
   { label: "300%", value: 288 },
 ];
 /**
- * Browser language, resolved once: language, form factor and display density
+ * Browser language, resolved once: language, form factor, and display density
  * are fixed for the life of the document, so resolving them at module scope
  * makes them available to the first render and a phone gets the mobile layout
  * without a repaint.
@@ -410,7 +410,7 @@ const SelkiesLogo = ({ width = 30, height = 30, className, t, ...props }) => {
 let cachedAppData = null;
 
 /**
- * Catalog of proot-apps with install, remove, update and launch actions,
+ * Catalog of proot-apps with install, remove, update, and launch actions,
  * posted as app commands through app-commands.js.
  * @param {object} props
  * @param {boolean} props.isOpen Renders nothing while false.
@@ -1644,7 +1644,7 @@ function Sidebar() {
    * Rate control: the hook only sets local state, so when the resolved
    * default diverges from what the server is applying (a transport switch
    * seeds the session with the previous mode's value) this pushes it so the
-   * encoder follows. Pinned, locked or operator-overridden values resolve to
+   * encoder follows. Pinned, locked, or operator-overridden values resolve to
    * the server's value and post nothing. The core persists every mode it is
    * told to apply and resends it on the next connect, so without an explicit
    * pick the stored value is an echo, not a choice: it is dropped once it

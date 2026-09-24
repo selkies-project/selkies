@@ -5,7 +5,7 @@
 # Build selkies-<ver>-1-<arch>.pkg.tar.zst (run inside an Arch container)
 set -eux
 
-# Package managers with no retry option of their own -- apk, dnf, pacman and
+# Package managers with no retry option of their own -- apk, dnf, pacman, and
 # RubyGems all lack one -- are bounded-retried here. This composes with whatever
 # internal retrying the tool already does rather than replacing it, so it cannot
 # lower a default the way an explicit --setopt could.

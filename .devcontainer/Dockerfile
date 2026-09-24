@@ -4,7 +4,7 @@ FROM mcr.microsoft.com/devcontainers/base:${IMAGE_TAG}
 ARG DEBIAN_FRONTEND="noninteractive"
 
 # Every network fetch in this image is retried, because a rebuild that reaches
-# for the apt index, a signing key or a .deb is one transient failure away from
+# for the apt index, a signing key, or a .deb is one transient failure away from
 # losing the whole run. apt is configured once here so each later invocation
 # inherits it -- including the ones inside install-desktop-environment.sh and
 # the NodeSource setup script; curl and pip carry their own flags at each call.

@@ -128,7 +128,7 @@ index 6e21d39..ab51a5c 100644
  
 +/*
 + * Give the screen pixmap a new size, keeping the pixmap object itself: the
-+ * software cursor's Damage record, Present's screen pixmap checks and every
++ * software cursor's Damage record, Present's screen pixmap checks, and every
 + * window's pixmap pointer refer to it, so only its backing store changes.
 + * Content that still fits is carried over and new area is black.
 + *

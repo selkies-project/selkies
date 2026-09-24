@@ -11,12 +11,12 @@ The [Base Container](https://github.com/selkies-project/selkies/tree/main/addons
 | --- | --- |
 | X11 backend | [XLibre](https://github.com/X11Libre/xserver)'s `Xvfb`, built from a release archive pinned by checksum with the two patches under `addons/base/patches`: the screen pixmap lives on the GPU so glamor renders and DRI3 presents there, and the server starts with spare outputs Selkies plugs a second display into |
 | Wayland backend | Selkies' own headless capture compositor, and a nested [labwc](https://labwc.github.io) session compositor built from source with `addons/base/build-labwc.sh` (window management, decorations, XWayland, and a control socket a second screen is asked over) |
-| Audio | PipeWire, WirePlumber and `pipewire-pulse`, which `pcmflux` captures from and the microphone plays into |
-| GPU runtime | NVIDIA's EGL platform libraries for GBM, Wayland and X11 (`egl-x11`, pinned by checksum), Mesa with Zink, the VA-API and Vulkan loaders, and `selkies-gpu-probe`, which measures what the session can render on |
+| Audio | PipeWire, WirePlumber, and `pipewire-pulse`, which `pcmflux` captures from and the microphone plays into |
+| GPU runtime | NVIDIA's EGL platform libraries for GBM, Wayland, and X11 (`egl-x11`, pinned by checksum), Mesa with Zink, the VA-API and Vulkan loaders, and `selkies-gpu-probe`, which measures what the session can render on |
 | Printing | A CUPS scheduler Selkies runs its own print queue on, so a document printed in the session reaches the browser |
 | Supervision | The [s6](https://skarnet.org/software/s6/) supervision suite from the distribution's packages, one service directory per daemon under `/etc/service` |
 | TURN | An embedded [coTURN](turn.md#coturn) for the WebRTC transport, started only when no external TURN server is configured |
-| Selkies | The `selkies` wheel with `pixelflux` and `pcmflux`, the [Input Interposer](input-interposer.md), [fake-udev](input-interposer.md#fake-udev) and the [V4L2 Interposer](v4l2-interposer.md) built from source, and `selkies-privileged-files` |
+| Selkies | The `selkies` wheel with `pixelflux` and `pcmflux`, the [Input Interposer](input-interposer.md), [fake-udev](input-interposer.md#fake-udev), and the [V4L2 Interposer](v4l2-interposer.md) built from source, and `selkies-privileged-files` |
 
 The image is built for Ubuntu 26.04 and Debian Trixie, on `x86_64` and `aarch64`, and is rootless: every layer runs as uid 1000 through `fakeroot`, so the package database and apt cache belong to the session user and `sudo apt-get install` works inside a running session the same way. `sudo-root` is the real thing, for device nodes and permissions only. The setuid and setgid files (`mount`, `su`, `sudo`, `fusermount3`, the PAM helpers) belong to root, which is what the privileged-file bracket below is for.
 
@@ -60,7 +60,7 @@ The services under `/etc/service` are, each a `run` script and a `finish` script
 | `selkies`, `selkies-gpu-probe`, `selkies-resize` | The console scripts of the wheel: the server, the GPU report, and the resize helper for a session with `--enable-resize=false` |
 | `/usr/local/bin/selkies-privileged-files` | The setuid bracket for package layers, and the `sudo-root ... run` path for in-session package management |
 | `/usr/$LIB/selkies_input_interposer.so`, `selkies_v4l2_interposer.so`, `libudev.so.1.0.0-fake` | The preloads the session's applications get, exported as `SELKIES_INTERPOSER`, `SELKIES_WEBCAM_INTERPOSER`, and `FAKE_UDEV_LIB` |
-| `/home/ubuntu` | The session user's home, uid 1000; mount a volume there to keep settings, downloads and installed applications |
+| `/home/ubuntu` | The session user's home, uid 1000; mount a volume there to keep settings, downloads, and installed applications |
 
 ## Running a checkout inside it
 

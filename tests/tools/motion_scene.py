@@ -2,7 +2,7 @@
 """A moving scene whose every frame says which frame it is.
 
 Fills an X display with a solid background, a strip of squares spelling the
-frame index in binary, a bar that steps along the width each frame and a
+frame index in binary, a bar that steps along the width each frame, and a
 scrolling checkerboard band, all placed by the frame index alone. A viewer
 that reads the index off a decoded picture can rebuild the frame it should be
 looking at and count the pixels that disagree; a picture decoded against the

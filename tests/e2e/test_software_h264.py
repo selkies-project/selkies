@@ -24,7 +24,7 @@ import core_lib as C
 # Counts decoded VideoFrames and records every decoder configuration on the
 # page, which is where a full-frame session decodes. The striped modes decode
 # and composite in the video worker, so their evidence is what the client
-# publishes about it -- the wire counter, the row layout the worker reports and
+# publishes about it -- the wire counter, the row layout the worker reports, and
 # which sink element is on screen.
 INSTRUMENT_JS = """
   window.__decoded = 0;

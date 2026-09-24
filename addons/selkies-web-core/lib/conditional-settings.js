@@ -5,7 +5,7 @@
  *
  * Each is a declarative spec, and the precedence ladder, resolution, and
  * (through the dashboards' thin `useConditionalSetting` hook) initialization,
- * server sync and dependency re-derivation are generic; adding a setting is
+ * server sync, and dependency re-derivation are generic; adding a setting is
  * one more spec. A spec fully describes both the read side and the write
  * side so the dashboards touch neither `postMessage` nor localStorage keys
  * directly.

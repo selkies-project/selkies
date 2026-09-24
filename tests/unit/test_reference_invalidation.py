@@ -3,7 +3,7 @@
 
 The RTP sender writes the dependency descriptor the AV1 RTP specification
 defines on every packet of a stream whose encoder names what each frame
-predicts from: the frame's number, its edges and how far back it predicts,
+predicts from: the frame's number, its edges, and how far back it predicts,
 with the dependency structure on a key frame's first packet. The bytes are
 read back with a reader built to libwebrtc's. A second NACK for one packet
 says the retransmission was lost too, and the sender then names the frame

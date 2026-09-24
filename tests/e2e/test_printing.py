@@ -6,14 +6,14 @@ websockets / webrtc:
     printed through the session's own CUPS queue (`lp -d Selkies`) while the
     page is up is announced live, fetched whole, taken out of the spool, and,
     with automatic printing on, opened in a frame for the browser's print
-    dialog. Both dashboards list each document with its switch, print and
+    dialog. Both dashboards list each document with its switch, print, and
     save controls; the switch off leaves the next document in the list only,
     and the save link hands the browser the same bytes. A second display page
     of the same browser is told nothing. The websockets block also drives the
     installed Chrome on the test display and sees its print preview open with
     the document.
 policy:
-    `printing_enabled=false` starts no queue, announces nothing and refuses
+    `printing_enabled=false` starts no queue, announces nothing, and refuses
     the route; a shared viewer page is never told of a document.
 
 Usage: python3 tests/e2e/test_printing.py [websockets|webrtc|policy|all]

@@ -195,7 +195,7 @@ def run(mode: str, wayland: bool) -> bool:
 
             # A root that matches the monitors still shows a broken desktop when the
             # desktop window itself is placed off the layout origin: the far screen
-            # is then left with no wallpaper, icons or menu, and the root's own far
+            # is then left with no wallpaper, icons, or menu, and the root's own far
             # edge is uncovered.
             if shutil.which("wmctrl") is None:
                 res.skip("desktop window covers the layout",

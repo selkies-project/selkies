@@ -293,7 +293,7 @@ def flag_cases() -> None:
 def help_case() -> None:
     out = subprocess.run([sys.executable, "-m", "selkies", "--help"], capture_output=True, text=True,
                          cwd=REPO, env={**os.environ, "PYTHONPATH": os.path.join(REPO, "src")}).stdout
-    check("--help documents the loopback default, --public and 0.0.0.0",
+    check("--help documents the loopback default, --public, and 0.0.0.0",
           "--addr" in out and "--public" in out and "loopback" in out and "0.0.0.0" in out, out[:0])
 
 

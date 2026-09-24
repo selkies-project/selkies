@@ -4,7 +4,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # PID-agnostic container init for the Selkies desktop container. It prepares the
-# runtime environment (joystick, webcam and fake-udev LD_PRELOAD, device nodes,
+# runtime environment (joystick, webcam, and fake-udev LD_PRELOAD, device nodes,
 # TURN defaults), derives the service set from the environment toggles, and then
 # hands service supervision to s6 (`s6-svscan /etc/service`): one `s6-supervise`
 # per service directory, restarts crashed services, and is controlled with
@@ -188,7 +188,7 @@ unset dri3_server gl_path
 # session still gets it through Zink or the X server's own render node
 # (services/xvfb/run); with no GPU at all both backends render in software and
 # switching would trade a capability for nothing. Settled before anything
-# derived from the backend: the display, the session type and the toolkit
+# derived from the backend: the display, the session type, and the toolkit
 # defaults all follow it. SELKIES_WAYLAND_X11_FALLBACK=false keeps Wayland and
 # composites in software, which shares no dmabuf, so a GL client aimed at the
 # Vulkan driver would produce buffers it cannot accept — the Zink override and

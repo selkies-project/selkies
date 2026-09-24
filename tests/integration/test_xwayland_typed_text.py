@@ -44,7 +44,7 @@ def boot(runtime: str) -> tuple:
     """Start a headless labwc with XWayland, and report it and its displays.
 
     Returns:
-        The process, its Wayland socket name and the X display it serves.
+        The process, its Wayland socket name, and the X display it serves.
     """
     startup = os.path.join(runtime, "startup.sh")
     dump = os.path.join(runtime, "env")

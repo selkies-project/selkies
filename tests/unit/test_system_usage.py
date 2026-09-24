@@ -55,7 +55,7 @@ with tempfile.TemporaryDirectory() as root:
     unified(root, 1_000_000, "200000 100000", 3_000_000_000, "4000000000", 1_000_000_000)
     usage = SystemUsage(root=root, proc_cgroup=os.path.join(root, "proc/cgroup"), clock=clock)
     cpu, total, used = usage.sample()
-    check("unified: the first sample reports no CPU, the memory limit and the use without dropped cache",
+    check("unified: the first sample reports no CPU, the memory limit, and the use without dropped cache",
           cpu == 0.0 and total == 4_000_000_000 and used == 2_000_000_000, (cpu, total, used))
     unified(root, 2_000_000, "200000 100000", 3_000_000_000, "4000000000", 1_000_000_000)
     clock.now += 1.0
@@ -95,7 +95,7 @@ with tempfile.TemporaryDirectory() as root:
     tree(root, {"cpu,cpuacct/docker/abc/cpuacct.usage": "3000000000\n"})
     clock.now += 1.0
     cpu, _, _ = usage.sample()
-    check("legacy: the CFS quota, the memory limit and the use without dropped cache",
+    check("legacy: the CFS quota, the memory limit, and the use without dropped cache",
           total == 8_000_000_000 and used == 4_000_000_000 and cpu == 50.0, (total, used, cpu))
 
 with tempfile.TemporaryDirectory() as root:

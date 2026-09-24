@@ -1,7 +1,7 @@
 name: Release
 
 # Maintainer-triggered release: builds the wheel ONCE at the release version,
-# then builds multi-arch images, native packages and AppImages around it, and
+# then builds multi-arch images, native packages, and AppImages around it, and
 # assembles a DRAFT GitHub release with every build artifact attached. The
 # draft is finalized and published manually.
 #
@@ -24,7 +24,7 @@ name: Release
 # re-release of one it holds fails there and changes the GitHub release alone.
 #
 # The pinned pixelflux and pcmflux come from the release each project cut for
-# that version: the smoke test, the images, the packages and the AppImages all
+# that version: the smoke test, the images, the packages, and the AppImages all
 # install the wheels those projects published. `capture_stack: pypi` is the
 # explicit choice to resolve them from PyPI instead, for a release made after
 # the two were published there; nothing takes that road on its own.

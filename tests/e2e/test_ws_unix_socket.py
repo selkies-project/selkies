@@ -2,14 +2,14 @@
 """The websockets transport served from a Unix domain socket alone.
 
 With ``unix_socket`` set the server binds that path instead of the TCP
-addr/port pair, so everything — the static client, the API and the data
+addr/port pair, so everything — the static client, the API, and the data
 WebSocket that carries the stream — has to work over AF_UNIX. A stale socket
 file left at the path by a dead server must be cleared at start (a live one
 must not be), and the server must remove its own file on shutdown.
 
 Checked two ways: a raw client on the socket itself (HTTP over AF_UNIX for
 the API and the client files, a WebSocket over AF_UNIX that completes the
-handshake, sends its settings and receives video frames), and a browser
+handshake, sends its settings, and receives video frames), and a browser
 through the TCP-to-Unix forwarder in tests/tools, standing in for the reverse
 proxy such a deployment puts in front of the socket.
 """
@@ -120,7 +120,7 @@ def stop(proc: Optional[subprocess.Popen]) -> None:
 
 async def stream_over_unix(seconds: float = 8.0) -> dict:
     """Complete the data-WebSocket handshake over the socket, send a primary
-    display's settings and count the video frames that come back."""
+    display's settings, and count the video frames that come back."""
     out = {"mode": None, "video_frames": 0, "error": None}
     settings = {"displayId": "primary", "initialClientWidth": 1280, "initialClientHeight": 720,
                 "manual_resolution": False, "framerate": 60, "encoder": "h264enc",

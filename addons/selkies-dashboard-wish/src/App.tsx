@@ -12,7 +12,7 @@ import { Toaster } from 'sonner';
 
 /**
  * Root of the primary-display dashboard: the theme provider, the overlay
- * portaled into the dashboard root, upload notifications and the toaster.
+ * portaled into the dashboard root, upload notifications, and the toaster.
  * @module
  */
 

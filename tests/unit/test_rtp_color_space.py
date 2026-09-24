@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The RTP color-space header extension the video sender declares for every video codec.
 
-The wire form is libwebrtc's four-byte one: primaries, transfer and matrix as their ITU-T
+The wire form is libwebrtc's four-byte one: primaries, transfer, and matrix as their ITU-T
 H.273 codes, then the range in the high nibble of the last byte with the chroma siting left
 unspecified. It is offered for video, it carries the matrix each codec converts with, it
 survives a pack and parse of an RTP packet, and a packet whose map lacks the extension carries

@@ -11,7 +11,7 @@ At runtime Selkies is a **single Python application**, the `selkies` wheel. The 
 
 | Component | What it does | Documented at |
 | --- | --- | --- |
-| Python application (`selkies`) | Serves the web client and every endpoint on one port, drives the display's input, clipboard, files and printing, and streams over WebSockets or WebRTC | [Usage](../usage.md), [Settings Reference](../settings.md), the [Developer Reference](../development.md#developer-reference) |
+| Python application (`selkies`) | Serves the web client and every endpoint on one port, drives the display's input, clipboard, files, and printing, and streams over WebSockets or WebRTC | [Usage](../usage.md), [Settings Reference](../settings.md), the [Developer Reference](../development.md#developer-reference) |
 | Web client and dashboards | The bundled `selkies-web-core` client and the reference dashboards built on it | [Web Client and Dashboards](web-client.md) |
 | `pixelflux` | Screen capture on X11 and Wayland and video encoding, on the GPU where it carries the codec and in software where it does not | [pixelflux](pixelflux.md), the Rust reference at <https://pixelflux.selkies.io> |
 | `pcmflux` | Audio capture from PulseAudio or PipeWire-Pulse, Opus encoding, and the microphone and recording paths | [pcmflux](pcmflux.md), the Rust reference at <https://pcmflux.selkies.io> |
@@ -28,7 +28,7 @@ At runtime Selkies is a **single Python application**, the `selkies` wheel. The 
 | coTURN and TURN-REST | A TURN server and a credential service for the WebRTC transport behind restrictive networks | [TURN](turn.md) |
 | Universal Touch Gamepad | An on-screen gamepad for touch devices, part of the web client | [Web Client and Dashboards](web-client.md#universal-touch-gamepad) |
 
-[Sealskin](https://github.com/selkies-project/sealskin) is a separate project of the same organization, an example of orchestrating these images one desktop container per user on a single server, with its own web, mobile and browser-extension clients; its documentation is at <https://sealskin.selkies.io>.
+[Sealskin](https://github.com/selkies-project/sealskin) is a separate project of the same organization, an example of orchestrating these images one desktop container per user on a single server, with its own web, mobile, and browser-extension clients; its documentation is at <https://sealskin.selkies.io>.
 
 ## Container Images
 
@@ -78,9 +78,9 @@ When a codec cannot be served as asked, whether the host has no encoder for it o
 
 **WebSocket mode (default)** — every encoder above is available. The full-frame encoders are decoded by WebCodecs in the browser; the striped encoders are decoded per stripe, `jpeg` without WebCodecs at all.
 
-**WebRTC mode (`--mode=webrtc`)** — the same allowed set and dashboard choice drive both transports. WebRTC carries the full-frame encoders (`h264enc`, `h265enc`, `vp8enc`, `vp9enc`, `av1enc`), packetized by the vendored RTP stack (RFC 6184, RFC 7798, RFC 7741, RFC 9628, and the AV1 RTP payload format); the striped framings of `h264enc-striped` and `jpeg` are WebSocket-only, so in this mode the published menu is filtered to the five and either of those two falls back to the default with a logged warning; switching back to WebSockets restores the configured menu and value. The offer puts the display's codec first and the rest of the menu behind it down the ladder: a browser that declines the codec answers with the next one it decodes and the display moves to that encoder for every viewer, logged as a warning, unless the operator's menu holds the encoder, in which case that peer gets no video rather than another codec's bitstream; a live encoder change switches each peer's payload type to the codec it already negotiated, with no renegotiation. Which codecs a browser takes over WebRTC is the browser's own RTP receiver's business (its `RTCRtpReceiver.getCapabilities`, which the dashboards filter the menu by), not WebCodecs': Chromium and Firefox take VP8, VP9 and AV1 everywhere and H.265 only where the platform decodes it, Safari takes H.265 as well.
+**WebRTC mode (`--mode=webrtc`)** — the same allowed set and dashboard choice drive both transports. WebRTC carries the full-frame encoders (`h264enc`, `h265enc`, `vp8enc`, `vp9enc`, `av1enc`), packetized by the vendored RTP stack (RFC 6184, RFC 7798, RFC 7741, RFC 9628, and the AV1 RTP payload format); the striped framings of `h264enc-striped` and `jpeg` are WebSocket-only, so in this mode the published menu is filtered to the five and either of those two falls back to the default with a logged warning; switching back to WebSockets restores the configured menu and value. The offer puts the display's codec first and the rest of the menu behind it down the ladder: a browser that declines the codec answers with the next one it decodes and the display moves to that encoder for every viewer, logged as a warning, unless the operator's menu holds the encoder, in which case that peer gets no video rather than another codec's bitstream; a live encoder change switches each peer's payload type to the codec it already negotiated, with no renegotiation. Which codecs a browser takes over WebRTC is the browser's own RTP receiver's business (its `RTCRtpReceiver.getCapabilities`, which the dashboards filter the menu by), not WebCodecs': Chromium and Firefox take VP8, VP9, and AV1 everywhere and H.265 only where the platform decodes it, Safari takes H.265 as well.
 
-Full color (4:4:4 chroma, `--video-fullcolor`) is carried by H.264 and H.265 on NVENC, VA-API, x264 and x265, and by VP9 profile 1 on VA-API and libvpx. The server learns from `pixelflux` which of its encoders carry it on the host, and the browser tells the server which 4:4:4 profiles its decoder takes, so a full-color stream is only ever sent where both ends carry it; elsewhere the session streams 4:2:0 and says so.
+Full color (4:4:4 chroma, `--video-fullcolor`) is carried by H.264 and H.265 on NVENC, VA-API, x264, and x265, and by VP9 profile 1 on VA-API and libvpx. The server learns from `pixelflux` which of its encoders carry it on the host, and the browser tells the server which 4:4:4 profiles its decoder takes, so a full-color stream is only ever sent where both ends carry it; elsewhere the session streams 4:2:0 and says so.
 
 ### Display Capture
 
@@ -110,7 +110,7 @@ Both are off by default and need a secure context in the browser; see [Usage](..
 | Uplink | Selected with | Codec | Delivered to the session as |
 |---|---|---|---|
 | Microphone | `--microphone-enabled` | Opus (WebRTC) or Opus over the WebSocket | a PulseAudio source, through the same sound server the capture reads |
-| Webcam | `--webcam-enabled` | H.264, VP8, VP9, AV1, H.265 or MJPEG, chosen by `--webcam-encoder` (`auto` measures the client) | a V4L2 device: the [V4L2 Interposer](v4l2-interposer.md) socket, a v4l2loopback device, or a PipeWire `Video/Source` node |
+| Webcam | `--webcam-enabled` | H.264, VP8, VP9, AV1, H.265, or MJPEG, chosen by `--webcam-encoder` (`auto` measures the client) | a V4L2 device: the [V4L2 Interposer](v4l2-interposer.md) socket, a v4l2loopback device, or a PipeWire `Video/Source` node |
 
 ### Transport Protocols
 

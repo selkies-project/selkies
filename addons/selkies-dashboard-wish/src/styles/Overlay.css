@@ -8,7 +8,7 @@
    which draws raw SVG rather than a component. Everything the dashboard shows
    around it is a shadcn component under src/components, so the rules here read
    index.css's tokens and define only the shades those tokens have no name for:
-   a controller's shell, pads and sticks. */
+   a controller's shell, pads, and sticks. */
 
 :root,
 .theme-dark {

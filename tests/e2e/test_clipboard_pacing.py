@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Audio while a large clipboard crosses the session socket.
 
-Audio, video, input and the clipboard share one ordered connection, so a
+Audio, video, input, and the clipboard share one ordered connection, so a
 transfer written as fast as the socket accepts it leaves megabytes in front of
 the next audio packet -- and the socket buffer absorbs them without the
 application ever seeing backpressure, so on a real link the stream stops for

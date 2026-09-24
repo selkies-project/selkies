@@ -2,7 +2,7 @@
 """Every video codec, decoded by each browser engine, over both transports.
 
 For each codec the server is started with ``SELKIES_ENCODER`` set to
-its encoder and the page opens in Chromium, Firefox or WebKit. Over WebSockets
+its encoder and the page opens in Chromium, Firefox, or WebKit. Over WebSockets
 the stream must come up and the painted picture decode whatever the engine can
 do: an engine whose WebCodecs decoder takes the codec keeps it (the page's
 encoder stays the requested one and the server's stream line names the codec),

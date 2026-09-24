@@ -151,7 +151,7 @@ jobs:
     name: Capture stack (main HEAD)
     # Each project's per-commit pre-release when it is published, a build when
     # it is not. Either way the wheels land in this run's artifacts, which is
-    # where the images, packages and suites read them, and running it here
+    # where the images, packages, and suites read them, and running it here
     # rather than inside each caller keeps it to one resolution per run.
     permissions:
       contents: read

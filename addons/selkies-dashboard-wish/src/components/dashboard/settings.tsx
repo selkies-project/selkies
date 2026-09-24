@@ -5,14 +5,14 @@
  */
 
 /**
- * The Settings panel of the wish dashboard: Video, Audio and Resolution tabs
+ * The Settings panel of the wish dashboard: Video, Audio, and Resolution tabs
  * over the streaming core.
  *
  * State arrives through the `message` events the core posts on `window`:
  * `serverSettings` (the server's settings payload, per key a `value`,
- * `allowed`, `min`/`max`, `default`, `locked` and `overridden`),
+ * `allowed`, `min`/`max`, `default`, `locked`, and `overridden`),
  * `effectiveCursorState`, `scalingDpiFollowed` (the UI-scaling default the
- * core re-derived) and `audioDeviceSelected`. Changes go back as
+ * core re-derived), and `audioDeviceSelected`. Changes go back as
  * `window.postMessage` messages: `settings` (debounced key/value batches the
  * core forwards to the server), `mode`, `setScaleLocally`,
  * `setManualResolution`, `resetResolutionToWindow`, `setAntiAliasing`, and
@@ -28,7 +28,7 @@
  * the encoder). Settings that are also derived therefore carry an
  * `_explicit_choice` marker beside their value and resolve through the shared
  * specs of `selkies-web-core/lib/conditional-settings.js`, which honor pinned,
- * locked and operator-overridden server values: a derived write never pins
+ * locked, and operator-overridden server values: a derived write never pins
  * them, and an unmarked stored echo is dropped once the ladder moves on.
  * @module
  */
@@ -255,7 +255,7 @@ function setModeSwitching(active: boolean) {
 }
 
 /**
- * The Settings panel: Video, Audio and Resolution tabs, each hidden when the
+ * The Settings panel: Video, Audio, and Resolution tabs, each hidden when the
  * server's UI customization disables it. Server settings are seeded from the
  * cached broadcast because the panel mounts after the core connects, and every
  * value stays editable afterwards with localStorage taking precedence.
@@ -729,7 +729,7 @@ export function Settings() {
     /**
      * A half-typed size stays in component state: the stored `manual_width` and
      * `manual_height` mean "a manual resolution is applied", which the HiDPI
-     * and UI-scaling derivations read, so only Set, a preset and Reset write them.
+     * and UI-scaling derivations read, so only Set, a preset, and Reset write them.
      */
     const handleManualWidthChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         setManualWidth(event.target.value);
@@ -767,7 +767,7 @@ export function Settings() {
      * The request carries this client's own session token, which a controller's
      * is enough for; a stored master token overrides it, and where neither is
      * accepted a 401 prompts for the master token once, keeps it in
-     * sessionStorage and retries. A viewer is refused 403 and asked nothing.
+     * sessionStorage, and retries. A viewer is refused 403 and asked nothing.
      */
     const handleStreamModeChange = async (mode: string) => {
         if (mode === streamMode) return;
@@ -1534,7 +1534,7 @@ export function Settings() {
                             </>
                         )}
 
-                        {/* Paint-over, Turbo and 4:4:4 are pixelflux encoder features shared by both transports. */}
+                        {/* Paint-over, Turbo, and 4:4:4 are pixelflux encoder features shared by both transports. */}
                         {isH264 && (
                             <>
                                 {showFullColor && (renderableSettings.videoFullColor ?? true) && fullColorDecodable && (

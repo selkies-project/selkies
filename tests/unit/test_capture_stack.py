@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which pixelflux and pcmflux a build carries is decided by one shell step.
 
-Images, packages, AppImages and the suites install the capture stack from wheels
+Images, packages, AppImages, and the suites install the capture stack from wheels
 the run holds rather than from an index, and the `locate` step of
 `build-pixelflux-pcmflux-wheels.yaml` is what names them: each project's
 per-commit pre-release for a build ahead of a release, and the release carrying

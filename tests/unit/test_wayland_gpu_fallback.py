@@ -2,7 +2,7 @@
 """Which backend the example container starts, given what the GPU probe found.
 
 The entrypoint decides, and it has to decide before anything derived from the
-backend -- the display, the session type and the toolkit defaults all follow it,
+backend -- the display, the session type, and the toolkit defaults all follow it,
 so a late switch yields a half-Wayland container. This runs the real entrypoint
 against a stand-in probe and reads the environment it hands to the services,
 rather than restating its logic here; the deciding blocks themselves are pinned

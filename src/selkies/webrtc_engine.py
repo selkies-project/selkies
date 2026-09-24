@@ -504,7 +504,7 @@ class RTCApp:
             greetings (settings, current cursor) reach the joining peer.
         on_data_close: Data channel closed.
         on_data_error: Data channel error.
-        on_data_message: Input dispatcher, called with the message, display id
+        on_data_message: Input dispatcher, called with the message, display id,
             and the peer id as `conn_id`.
         on_peer_gone: Async hook called as `(peer_id, peer_entry)` when a peer
             reaches closed: the id releases per-connection input state
@@ -1126,7 +1126,7 @@ class RTCApp:
         Injects a 125 ms rtx-time, `sps-pps-idr-in-keyframe=1` for H.264/H.265,
         the Opus ptime, and generous video bandwidth ceilings
         (`_munge_video_bandwidth`). Displays can run different encoders,
-        chroma formats and software-encoding flags; the caller passes the ones
+        chroma formats, and software-encoding flags; the caller passes the ones
         this offer's display is using (defaults: the primary/global encoder and
         the configured full-color and software-encoding settings).
 
@@ -2137,7 +2137,7 @@ class RTCApp:
         renegotiation the stack does not do. A locked-off microphone withholds
         the m-line entirely. The webcam has the same shape as one recvonly
         video transceiver. The input data channel is reliable and ordered:
-        input, clipboard and upload control all ride it and none tolerates
+        input, clipboard, and upload control all ride it and none tolerates
         loss.
 
         Args:

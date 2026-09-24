@@ -3,7 +3,7 @@
 
 AudioFrameProcessor is extracted from the websockets core and run under node
 with a stub AudioWorkletProcessor, so priming, underrun re-priming one packet
-deeper, the standing-depth trim, the clean-stretch decay and the drop-oldest
+deeper, the standing-depth trim, the clean-stretch decay, and the drop-oldest
 ceiling are pinned without a browser.
 """
 import os

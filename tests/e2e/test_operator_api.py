@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""The operator API end to end: sessions, recording and screenshots, with the
+"""The operator API end to end: sessions, recording, and screenshots, with the
 audit trail they leave.
 
 websockets / webrtc:
     A controller page and a shared viewer page connect; `/api/sessions` lists
-    both with their roles, an RFC 3339 connection time and a measured round
+    both with their roles, an RFC 3339 connection time, and a measured round
     trip; disconnecting the viewer by id closes it, and the collector hears a
     connect for each page and the disconnect with its length. A recording
     started with no body lands in the file-manager directory as a fragmented

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The ICE topology settings, from the parser to the offer's SDP.
 
-`webrtc_udp_mux_port`, `webrtc_tcp_mux_port` and `webrtc_ice_lite` parse in
+`webrtc_udp_mux_port`, `webrtc_tcp_mux_port`, and `webrtc_ice_lite` parse in
 both spellings, `RTCApp.open_ice_muxes` binds the named ports once on every
 host address (failing loudly on one in use, warning that a port range yields
 to the UDP mux) and `get_rtc_config` carries the muxes and the lite choice to

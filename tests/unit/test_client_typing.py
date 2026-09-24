@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""What the client puts on the wire for typed, pasted and re-typed text.
+"""What the client puts on the wire for typed, pasted, and re-typed text.
 
 A capital has to travel as its own keysym. Sending Shift plus the lowercase
 keysym instead relies on the X keymap binding Shift as a real modifier, which a

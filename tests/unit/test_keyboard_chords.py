@@ -3,7 +3,7 @@
 
 The browsers describe the same physical keyboard differently, and the
 Alt-position key is where they disagree: macOS Option is a level-3 shift that
-Gecko reports as AltGraph, Blink only as altKey and WebKit as a Meta key, while
+Gecko reports as AltGraph, Blink only as altKey, and WebKit as a Meta key, while
 a PC AltGr reports as AltGraph, or as its Ctrl+Alt pair on an older engine.
 Deciding from those flags whether a chord picked a character or named a
 shortcut therefore answers differently per browser -- Option+Z reaching the

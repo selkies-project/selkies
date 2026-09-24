@@ -49,7 +49,7 @@ class _Transport:
 
 
 class _Request:
-    """Only what the helper reads: the transport, the URL and the headers."""
+    """Only what the helper reads: the transport, the URL, and the headers."""
 
     def __init__(self, family, sockname, url, headers=None, secure=False):
         self.transport = _Transport(family, sockname)

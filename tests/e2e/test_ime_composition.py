@@ -22,7 +22,7 @@ Control, neither dropped nor typed twice.
 Finally the two soft-keyboard anatomies of the assist field itself, captured
 from an iPad and an Android phone: iOS keeps the Pinyin preedit in the field
 as composition text (syllables set apart by U+2006), shortens it on Backspace,
-replaces it with the picked candidate and confirms as a deleteCompositionText
+replaces it with the picked candidate, and confirms as a deleteCompositionText
 followed by an insertFromComposition of the same text; Android commits each
 letter as plain insertText with no composition at all. The wire must carry
 the preedit as a rolling diff and the commit exactly once.
@@ -157,7 +157,7 @@ window.__decodeWire = () => {
 </script></body></html>"""
 
 # Captured on Linux Chrome with a live ibus-hangul engine: the preedit rolls
-# forward, cancels to an empty update, compositionend arrives data-less and the
+# forward, cancels to an empty update, compositionend arrives data-less, and the
 # commit rides the textInput after it.
 IBUS_SYLLABLE = [
     ["compositionupdate", "PRE1"],

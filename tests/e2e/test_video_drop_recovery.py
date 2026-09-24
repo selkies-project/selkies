@@ -14,12 +14,12 @@ index, so a decoded picture can be compared with the frame it claims to be,
 and whose noise band keeps a constant-bitrate stream at its configured rate. The
 sender is made to fall behind by pinning the server's event loop to one CPU
 and sharing that CPU with busy processes in bursts. The browser's decoded
-pictures, its inbound-rtp counters and the server's bridge-drop counter are
+pictures, its inbound-rtp counters, and the server's bridge-drop counter are
 read throughout.
 
     python3 tests/e2e/test_video_drop_recovery.py [default|cpu]
 
-E2E_ENGINE selects the browser (chromium, the default, firefox or webkit).
+E2E_ENGINE selects the browser (chromium, the default, firefox, or webkit).
 """
 import os
 import re
@@ -63,7 +63,7 @@ INIT_JS = """
 """
 
 # Reads the frame index off the decoded picture, rebuilds that frame from the
-# scene geometry and counts the sampled pixels that disagree with it. Only the
+# scene geometry, and counts the sampled pixels that disagree with it. Only the
 # interiors of the flat regions and of the checks are compared: quantization
 # softens edges, while a picture decoded against the wrong reference is wrong
 # well inside them.

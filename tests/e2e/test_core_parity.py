@@ -225,7 +225,7 @@ def sink_box(page: Any, mode: str) -> Optional[dict]:
     `videoCanvas` every sink of its own follows.
 
     Returns:
-        `width`, `height`, `left` and `top` in CSS pixels, or None where the
+        `width`, `height`, `left`, and `top` in CSS pixels, or None where the
         page has no such element, which a check reports rather than raising.
     """
     sink = "stream" if mode == "webrtc" else "videoCanvas"
@@ -392,7 +392,7 @@ def soft_keyboard_block(page: Any, res: "H.Results") -> None:
 
     It is a real text input laid over the video, so a mobile engine would open its
     keyboard on every tap of the session -- over the picture, and with no way to
-    dismiss it. Focus, key events and IME composition are unaffected by these two
+    dismiss it. Focus, key events, and IME composition are unaffected by these two
     attributes; the off-screen assist input is what deliberately opens one, so it
     must not carry them.
     """

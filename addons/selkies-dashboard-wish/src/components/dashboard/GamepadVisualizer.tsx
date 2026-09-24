@@ -10,7 +10,7 @@ import { t } from "@/i18n";
 
 /**
  * An SVG picture of one standard-layout pad with pressed buttons, trigger
- * pressure and stick deflection drawn from the state the card keeps.
+ * pressure, and stick deflection drawn from the state the card keeps.
  * @module
  */
 

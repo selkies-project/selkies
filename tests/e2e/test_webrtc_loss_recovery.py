@@ -5,7 +5,7 @@ that replaced it.
 
 A real server in WebRTC mode streams a scene repainted every frame to a
 headless client on the same vendored stack, with every ICE candidate on both
-sides rewritten to a userspace relay that shapes, delays and drops packets
+sides rewritten to a userspace relay that shapes, delays, and drops packets
 from a seeded stream, over each link in LINKS. The client's NACKs cross the
 relay, so the server's retransmissions are real. Read at the client, per
 video packet: its arrival, its sequence number, whether it repairs an earlier

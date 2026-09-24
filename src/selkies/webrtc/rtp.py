@@ -278,14 +278,14 @@ class HeaderExtensionsMap:
 # predicts from nothing and a frame predicting from the one before it, both switch points.
 # 28 bits: structure id 0, one decode target, the second template on the same layer and no
 # more templates, both templates' indications, the templates' frame diffs (none, then one),
-# no chains and no resolutions.
+# no chains, and no resolutions.
 DEPENDENCY_STRUCTURE = int("000000" "00000" "00" "11" "10" "10" "0" "1" "0000" "0" "0" "0", 2)
 
 
 def dependency_descriptor(first: bool, last: bool, frame_number: int,
                           fdiff: Optional[int], keyframe: bool) -> bytes:
     """The dependency descriptor of one packet: whether it opens and closes its frame, the
-    frame's number and how many frames back the frame predicts from -- None for a frame that
+    frame's number, and how many frames back the frame predicts from -- None for a frame that
     predicts from nothing. A frame one back rides the predicted-frame template alone and a
     key frame the other, so most packets carry the three mandatory bytes; a frame further
     back writes its own diff, and a key frame's first packet the structure the receiver
@@ -1005,7 +1005,7 @@ class RtpHistory:
         return entry[0] if entry else None
 
     def nacked(self, sequence_number: int) -> tuple:
-        """The packet a NACK names, the frame it carried and how many NACKs have named it,
+        """The packet a NACK names, the frame it carried, and how many NACKs have named it,
         this one counted; a packet let go reads as (None, None, 0)."""
         entry = self._packets.get(sequence_number)
         if entry is None:
@@ -1089,7 +1089,7 @@ def build_flexfec_03(
     payload_xor = 0
     mask = 0
     for offset, media in covered:
-        # Byte 0 folds in P, X and CC (the version bits stay out); byte 1,
+        # Byte 0 folds in P, X, and CC (the version bits stay out); byte 1,
         # M and PT.
         recovery[0] ^= media[0] & 0x3F
         recovery[1] ^= media[1]

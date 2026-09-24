@@ -428,7 +428,7 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
         "\tProperties:\n\t\tmedia.class = \"Audio/Source\"\n\t\tnode.virtual = \"true\"\n"
     )
     nodes = AC._parse_pactl_list(sample)
-    res.check("parser: two sources with index, name, owner module and properties",
+    res.check("parser: two sources with index, name, owner module, and properties",
               [(n.index, n.name, n.owner_module) for n in nodes]
               == [(149, "output.monitor", 536870913), (41285, "output.SelkiesVirtualMic", 536870917)]
               and nodes[0].proplist.get("device.class") == "monitor"

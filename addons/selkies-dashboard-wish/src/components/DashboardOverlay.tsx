@@ -17,7 +17,7 @@ import '../styles/Overlay.css';
  * The dashboard chrome portaled over the stream: the top menu, whose gamepad
  * dropdown holds the gamepad preview, and the mobile virtual-keyboard button.
  *
- * Owns the pipeline, gamepad and touch-gamepad state the menu and the preview
+ * Owns the pipeline, gamepad, and touch-gamepad state the menu and the preview
  * share. State follows the core's echoes rather than local toggles: a
  * `pipelineControl` or `gamepadControl` request is posted to `window`, and
  * `pipelineStatusUpdate` / `sidebarButtonStatusUpdate` flip the state once
@@ -42,7 +42,7 @@ const TOUCH_GAMEPAD_HOST_DIV_ID = 'touch-gamepad-host';
  * Renders the top menu and the gamepad card into `container`.
  *
  * Touch-gamepad state lives here alone, not in the menu or the card, so the
- * menu entry, the Ctrl+Shift+G hotkey and the card read one value and the
+ * menu entry, the Ctrl+Shift+G hotkey, and the card read one value and the
  * hotkey works even while the menu is unmounted (hidden UI, viewers). The
  * viewer flag is seeded from the URL so a shared or player viewer never sees
  * control UI in the gap before the server's `clientRoleUpdate` lands.

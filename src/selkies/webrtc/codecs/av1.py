@@ -6,7 +6,7 @@
 """AV1 RTP payload format (AOM, v1.0) packetization of temporal units, and the
 reassembly of a received frame's packets back into one.
 
-Packing: the temporal delimiter, tile lists and padding go; every other OBU
+Packing: the temporal delimiter, tile lists, and padding go; every other OBU
 becomes an element without its size field. Elements fill packets behind a
 one-byte aggregation header (Z: the first element continues an OBU from the
 previous packet, Y: the last continues in the next, W: the element count when

@@ -8,7 +8,7 @@
   reads when the user has no rc.xml of their own.
 
   The desktop behaves as it does on X11 under Openbox: every window floats with
-  a titlebar carrying the window menu, iconify, maximize and close, and X11-only
+  a titlebar carrying the window menu, iconify, maximize, and close, and X11-only
   applications keep working through XWayland. LXQt draws the desktop and panel
   itself, anchored through wlr-layer-shell, so labwc contributes no wallpaper or
   bar of its own.

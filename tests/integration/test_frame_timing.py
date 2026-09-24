@@ -2,7 +2,7 @@
 """Every frame pixelflux delivers carries its capture and encode instants, on
 the X11 capture against the test display and on the headless Wayland
 compositor, encoded in hardware where the node has it and in software: CLOCK_MONOTONIC
-nanoseconds that order capture, encode start and encode end, land before the
+nanoseconds that order capture, encode start, and encode end, land before the
 frame reaches Python, and put the whole host leg of a 720p frame well under a
 frame interval. A software session delivers a frame as stripes, each carrying
 the frame's stamps, so the collection is timed rather than counted.
@@ -53,7 +53,7 @@ def judge(res: "H.Results", label: str, frames: list) -> None:
     if not frames:
         return
     ordered = all(0 < c <= s <= e <= now for c, s, e, now in frames)
-    res.check(f"{label}: capture, encode start, encode end and arrival are ordered", ordered,
+    res.check(f"{label}: capture, encode start, encode end, and arrival are ordered", ordered,
               [f for f in frames if not (0 < f[0] <= f[1] <= f[2] <= f[3])][:2])
     # The encoder's own start (an NVENC session takes hundreds of milliseconds to open)
     # is charged to the first frames, the ones captured while it opened included, so

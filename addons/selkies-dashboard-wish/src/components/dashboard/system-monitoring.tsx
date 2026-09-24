@@ -32,11 +32,11 @@ import {
 
 /**
  * The stats overlay: what the stream runs on, the graphs that grow while it
- * stays open, the figures under them and the host's meters, as a compact strip
+ * stays open, the figures under them, and the host's meters, as a compact strip
  * or in full.
  *
  * Everything drawn comes from the core's `window.stream_info`,
- * `window.stream_client` and `window.stream_stats`
+ * `window.stream_client`, and `window.stream_stats`
  * (`selkies-web-core/lib/stream-stats.js`), read once a second while the
  * overlay is mounted and the tab is visible; what a row says and when it warns
  * is `lib/stream-stats-view.js`, shared with the default dashboard. Being on

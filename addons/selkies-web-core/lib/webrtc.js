@@ -44,7 +44,7 @@
  * unordered `pointer` channel, JSON messages downstream, routed by `type` to
  * the `on*` callbacks (`pipeline`,
  * `stream_info`, `stream_stats`, `cursor`, `system`, `ping`,
- * `latency_measurement`, `server_settings`, `display_config_update` and
+ * `latency_measurement`, `server_settings`, `display_config_update`, and
  * `clipboard-msg*`). Either side may gzip a message once the `_gz,1`
  * handshake has been exchanged; the multipart clipboard and
  * `server_settings` kinds keep their arrival order across asynchronous
@@ -57,12 +57,12 @@ import { Input } from "./input";
 /**
  * WebRTC client: one peer connection plus its data channel.
  *
- * Callbacks are assigned as properties: `onstatus`, `ondebug` and `onerror`
+ * Callbacks are assigned as properties: `onstatus`, `ondebug`, and `onerror`
  * receive messages, `onconnectionstatechange` the peer connection state,
  * `ondatachannelopen` and `ondatachannelclose` nothing, `onplaystreamrequired`
  * fires when autoplay was refused and a user gesture is needed, and
  * `onclipboardcontent`, `oncursorchange`, `onsystemaction`, `onstreaminfo`,
- * `onstreamstats`, `onlatencymeasurement`, `onserversettings` and
+ * `onstreamstats`, `onlatencymeasurement`, `onserversettings`, and
  * `ondisplayconfig` receive the payload of the data channel message of the
  * same kind.
  */
@@ -243,7 +243,7 @@ export class WebRTCClient {
 	 * Answers the server's offer: sets the remote description, reserves the
 	 * uplink transceivers, creates the answer, munges it as described in the
 	 * module docblock (the munging has to happen before it becomes the local
-	 * description) and sends it. A rejected `setLocalDescription` is surfaced
+	 * description), and sends it. A rejected `setLocalDescription` is surfaced
 	 * as an error, since swallowing it would stall the session with no answer
 	 * ever sent.
 	 * @param {RTCSessionDescription} sdp
@@ -389,7 +389,7 @@ export class WebRTCClient {
 
 	/**
 	 * Enables or disables the webcam: attaches a getUserMedia video track to
-	 * the reserved sendonly transceiver (the browser encodes H.264, VP8, VP9, H.265 or AV1 over
+	 * the reserved sendonly transceiver (the browser encodes H.264, VP8, VP9, H.265, or AV1 over
 	 * RTP and the server's virtual camera decodes it), or detaches and stops
 	 * it. Disabling also deactivates the sender's encodings, because a null or
 	 * ended track alone does not silence every engine (Firefox keeps the
@@ -445,7 +445,7 @@ export class WebRTCClient {
 	 * Sends the camera as one codec: the `webcam_encoder` name (`h264`, `h265`,
 	 * `vp8`, `vp9`, `av1`) is set on the sender's encoding from the codecs the
 	 * answer negotiated, so the browser leaves the negotiated order for it;
-	 * `auto`, `mjpeg` or a codec the answer lacks returns to that order. The
+	 * `auto`, `mjpeg`, or a codec the answer lacks returns to that order. The
 	 * codec of an encoding is what the engine offers for this, and an engine
 	 * without it keeps the negotiated order, logged once.
 	 * @param {string} codec

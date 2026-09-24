@@ -60,7 +60,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # The test suites, on top of an installed selkies (which already brings
-# pixelflux/pcmflux, aiohttp and psutil): `pip install .[test]`. The browsers the
+# pixelflux/pcmflux, aiohttp, and psutil): `pip install .[test]`. The browsers the
 # e2e tier drives come from `playwright install --with-deps chromium firefox
 # webkit`; WebKit on Linux also needs GStreamer's opengl plugin
 # (gstreamer1.0-gl, on that dependency list), or its video sink falls back.
@@ -109,7 +109,7 @@ where = ["src"]
 testpaths = ["tests"]
 markers = [
     "unit: needs only the source tree",
-    "integration: needs a display, PulseAudio and an installed selkies",
+    "integration: needs a display, PulseAudio, and an installed selkies",
     "e2e: additionally needs Playwright browsers and the built web client",
     "perf: long constrained-link benchmark, run on request",
     "soak: full pixelflux and pcmflux API surface, run on request",

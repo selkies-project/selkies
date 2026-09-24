@@ -18,14 +18,14 @@ import { t } from "@/i18n";
  *
  * Reads `clipboardContentUpdate` and `serverSettings` messages from the core
  * and posts `clipboardUpdateFromUI` (text, on blur), `clipboardImageUpdate`
- * (an image blob) and `settings` (the `enable_binary_clipboard` toggle, which
+ * (an image blob), and `settings` (the `enable_binary_clipboard` toggle, which
  * the core persists). A rejected non-image file is reported through the
  * `fileUpload` warning channel core-emitted clipboard skips use.
  * @module
  */
 
 /**
- * Renders the clipboard text area, the binary-clipboard switch and the image
+ * Renders the clipboard text area, the binary-clipboard switch, and the image
  * upload controls.
  *
  * State is seeded from the cached `clipboardContentUpdate`: the panel mounts
@@ -152,7 +152,7 @@ export function Clipboard() {
 
 	// The preview draws the picked image rather than pointing an <img> at a URL
 	// for it: decoding the bytes that were picked is the whole of it, so there
-	// is no URL to mint, hand to the DOM, scheme-check or revoke.
+	// is no URL to mint, hand to the DOM, scheme-check, or revoke.
 	useEffect(() => {
 		const canvas = previewRef.current;
 		if (!canvas || !clipboardImage) return;

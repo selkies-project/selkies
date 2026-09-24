@@ -4,7 +4,7 @@
 The package registers a server process with jupyter-server-proxy, so a
 Jupyter server lists a Selkies item and serves the desktop at /selkies/: it
 starts the launcher on a Unix socket of the proxy's own and carries the page,
-the API and the data WebSocket behind Jupyter's token. Proved in a browser,
+the API, and the data WebSocket behind Jupyter's token. Proved in a browser,
 where the client loads under the /selkies/ prefix and video flows through
 the proxy. The desktop is a stand-in the server's data directories hold, so the
 host's own never starts beside the one it runs. A Jupyter server killed

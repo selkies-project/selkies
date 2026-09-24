@@ -151,10 +151,10 @@ def internal_turn(**env: str) -> bool:
 check("nothing configured runs the internal server", internal_turn())
 check("a REST service is enough on its own",
       not internal_turn(SELKIES_TURN_REST_URI="https://turn.example.com/creds"))
-check("host, port and a password are enough",
+check("host, port, and a password are enough",
       not internal_turn(SELKIES_TURN_HOST="turn.example.com", SELKIES_TURN_PORT="3478",
                         SELKIES_TURN_USERNAME="u", SELKIES_TURN_PASSWORD="p"))
-check("host, port and a shared secret are enough",
+check("host, port, and a shared secret are enough",
       not internal_turn(SELKIES_TURN_HOST="turn.example.com", SELKIES_TURN_PORT="3478",
                         SELKIES_TURN_SHARED_SECRET="s"))
 check("credentials without a host are not enough",

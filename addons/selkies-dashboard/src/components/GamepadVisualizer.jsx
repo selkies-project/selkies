@@ -20,7 +20,7 @@ const { t } = getTranslator(typeof navigator !== "undefined" ? navigator.languag
 
 /**
  * Draws a standard-layout pad (Xbox naming) with pressed buttons, trigger
- * pressure and stick deflection taken from the core's gamepad state. Button
+ * pressure, and stick deflection taken from the core's gamepad state. Button
  * indices: 0 to 3 face (A, B, X, Y), 4 and 5 bumpers, 6 and 7 triggers, 8
  * Back, 9 Start, 10 and 11 stick clicks, 12 to 15 D-pad; axes 0 and 1 are the
  * left stick, 2 and 3 the right.

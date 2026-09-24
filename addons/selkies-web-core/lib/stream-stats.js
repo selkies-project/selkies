@@ -22,7 +22,7 @@
  * side once a second, and each second's figures land in
  * `window.stream_stats`: `latest`, and `history`, which starts empty when the
  * stats open and grows while they stay open, up to `HISTORY_MAX` seconds. Shut,
- * nothing is sampled, nothing is sent and the server sends nothing. A shared
+ * nothing is sampled, nothing is sent, and the server sends nothing. A shared
  * viewer never subscribes.
  *
  * @module
@@ -37,7 +37,7 @@ export const SERVER_FRESH_MS = 3000;
  * @typedef {Object} StreamInfo The server's description of the stream.
  * @property {string} backend `x11` or `wayland`.
  * @property {string} capture The capture path: `NvFBC`, `DRI3`, `XShm`,
- *     `dmabuf` or `readback`.
+ *     `dmabuf`, or `readback`.
  * @property {boolean} zero_copy Whether frames reach the encoder without a copy.
  * @property {string} capture_reason Why not, empty where there is nothing to explain.
  * @property {string} encoder `NVENC`, `VAAPI`, or the software library.

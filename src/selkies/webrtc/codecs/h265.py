@@ -25,7 +25,7 @@ NAL_TYPE_FU = 49
 FU_HEADER_SIZE = NAL_HEADER_SIZE + 1
 LENGTH_FIELD_SIZE = 2
 AP_HEADER_SIZE = NAL_HEADER_SIZE + LENGTH_FIELD_SIZE
-# IRAP pictures (BLA, IDR, CRA and the reserved IRAP types) open a key frame.
+# IRAP pictures (BLA, IDR, CRA, and the reserved IRAP types) open a key frame.
 IRAP_NAL_TYPES = range(16, 24)
 START_CODE = bytes([0, 0, 0, 1])
 
@@ -54,7 +54,7 @@ class H265Encoder(Encoder):
         package_size = payload_size // num_packets
 
         nal_type = nal_unit_type(data)
-        # The payload header keeps F, the layer id and the TID; its type is FU.
+        # The payload header keeps F, the layer id, and the TID; its type is FU.
         payload_header = bytes([(data[0] & 0x81) | (NAL_TYPE_FU << 1), data[1]])
         fu_header_start = payload_header + bytes([0x80 | nal_type])
         fu_header_middle = payload_header + bytes([nal_type])

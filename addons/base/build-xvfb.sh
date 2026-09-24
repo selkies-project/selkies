@@ -6,7 +6,7 @@
 # Builds XLibre's Xvfb from its release tag with the Selkies patches and
 # installs the one binary. One recipe for the base image and the tests
 # workflow, so the X server the suites drive is the one the images ship. Only
-# the framebuffer server is built, and its paths, extensions and defaults are
+# the framebuffer server is built, and its paths, extensions, and defaults are
 # the distribution package's, so the binary drops in where that one installed
 # it; anything left at the meson default would move a keymap or a font path
 # out from under the rest of the image. The distribution supplies the

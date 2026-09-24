@@ -156,7 +156,7 @@ WISH_DIST = os.path.join(REPO, "addons/selkies-dashboard-wish/dist")
 
 WORKDIR = os.environ.get("E2E_WORKDIR", os.path.join(tempfile.gettempdir(), "selkies-tests"))
 os.makedirs(WORKDIR, exist_ok=True)
-# The XDG runtime directory every compositor, observer and client the suites
+# The XDG runtime directory every compositor, observer, and client the suites
 # start is given: the session's own would collect their sockets beside the
 # desktop's, and a stale socket there can be mistaken for a live compositor.
 RUNTIME_DIR = os.path.join(WORKDIR, "run")

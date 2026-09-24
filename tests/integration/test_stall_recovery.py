@@ -176,7 +176,7 @@ async def suspended(res: H.Results, tag: str, encoder: str) -> None:
     """The client stops reading and acking for 8 s, as a suspended app does.
 
     Two ends are right. Where the socket buffers hold the pause, the client
-    is gated, re-probed and gets live frames once it drains. Where they do
+    is gated, re-probed, and gets live frames once it drains. Where they do
     not, a send blocks past the liveness bound and the server drops the
     socket on purpose, which the page answers with a reconnect.
     """

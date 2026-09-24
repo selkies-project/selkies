@@ -3,7 +3,7 @@ title: KDE Plasma Desktops
 description: The docker-selkies-egl-desktop and docker-selkies-glx-desktop images, what each draws the desktop on, how they are laid out, and how they are developed and kept in step.
 ---
 
-[`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) and [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) are ready-to-go KDE Plasma desktops in separate repositories, built `FROM` the [Base Container](base-image.md) the way [`addons/desktop`](desktop-image.md) builds the LXQt one. Each README carries the run commands for Docker, Kubernetes and Apptainer, the variables the image adds, and its troubleshooting; this page is what the two are and how they relate to what this repository provides.
+[`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) and [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) are ready-to-go KDE Plasma desktops in separate repositories, built `FROM` the [Base Container](base-image.md) the way [`addons/desktop`](desktop-image.md) builds the LXQt one. Each README carries the run commands for Docker, Kubernetes, and Apptainer, the variables the image adds, and its troubleshooting; this page is what the two are and how they relate to what this repository provides.
 
 ## What each one is
 
@@ -19,12 +19,12 @@ Both add the same desktop to the base: `plasma-desktop` with Dolphin, Konsole, K
 
 ## How they start
 
-Neither carries an entrypoint, a supervisor configuration or a web server of its own. The base's `container-entrypoint.sh`, its `selkies` service, and every other service are used as they are ([How it starts](base-image.md#how-it-starts)), and each repository adds only the s6 services its session needs under `services/`:
+Neither carries an entrypoint, a supervisor configuration, or a web server of its own. The base's `container-entrypoint.sh`, its `selkies` service, and every other service are used as they are ([How it starts](base-image.md#how-it-starts)), and each repository adds only the s6 services its session needs under `services/`:
 
 | Service | Image | Runs |
 | --- | --- | --- |
 | `dbus-session` | both | The session bus Plasma's components find each other on |
-| `plasma` | both | The Plasma session on X11, `startplasma-x11` on the display server, or `kwin_x11` alone under `START_PLASMA=false`, so a single application from the apps panel is managed, resized and maximized without a desktop around it; on the EGL image's Wayland backend it parks, since the Plasma session is then the nested compositor the base's `wayland` service starts |
+| `plasma` | both | The Plasma session on X11, `startplasma-x11` on the display server, or `kwin_x11` alone under `START_PLASMA=false`, so a single application from the apps panel is managed, resized, and maximized without a desktop around it; on the EGL image's Wayland backend it parks, since the Plasma session is then the nested compositor the base's `wayland` service starts |
 | `xorg` | GLX only | The X.Org server, on the GPU the base resolved for the session, sharing a virtual terminal it never switches to; its log is at `/tmp/runtime-ubuntu/Xorg.log` |
 
 The EGL image sets `SELKIES_WAYLAND_COMPOSITOR` to the Plasma session, so the base's `wayland` service starts `kwin_wayland` rather than labwc. The GLX image removes the base's `xvfb` and `wayland` services and presets `DISABLE_ZINK=true`, since OpenGL goes through the X server's own GLX vendor; where another display server already holds the GPU's DRM master, a host session on the same card, its `xorg` service hands over to the base's framebuffer server, which it keeps as `selkies-xvfb-server`, rather than fail the session.
@@ -53,4 +53,4 @@ A change to a shared component is two Pull Requests, one per repository; a chang
 | `services/xorg`, `selkies-xorg-config` | GLX image only | assess by hand |
 | `README.md`, `docker-compose.yml`, `egl.yml`/`xgl.yml`, the publish workflow | both repositories | similar but not identical; assess by hand |
 
-Each repository's `container-publish.yml` builds both architectures on native runners, pushes by digest and merges the manifest under the release, timestamped and `latest` tags on a push to `main`; a pull request builds both architectures and pushes nothing.
+Each repository's `container-publish.yml` builds both architectures on native runners, pushes by digest, and merges the manifest under the release, timestamped and `latest` tags on a push to `main`; a pull request builds both architectures and pushes nothing.

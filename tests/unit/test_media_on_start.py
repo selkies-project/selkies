@@ -3,13 +3,13 @@
 
 Every pipeline the side menu toggles (video, audio, microphone, webcam,
 gamepad) has a bool setting naming the state a session starts in, defaulting
-to what a session starts with anyway: video, audio and gamepad on, microphone
+to what a session starts with anyway: video, audio, and gamepad on, microphone
 and webcam off. `pipeline_starts_on` resolves them for a page and exempts
 shared viewers and second display pages. Server side, the WebRTC service
 registers a peer with its senders paused by that rule, starts only the
-captures a peer receives and pauses or resumes the shared audio capture as
+captures a peer receives, and pauses or resumes the shared audio capture as
 peers toggle it, and the pipeline starts its two captures one by one. Driven
-with fakes and loopback peer connections: no pixelflux, pcmflux or browser.
+with fakes and loopback peer connections: no pixelflux, pcmflux, or browser.
 """
 import asyncio
 import os
@@ -81,7 +81,7 @@ def settings_block(res: H.Results) -> None:
     res.check("video_on_start keeps its default when unset", parsed.video_on_start == (True, False), parsed.video_on_start)
 
     set_policy()
-    res.check("defaults: the primary owner starts video, audio and gamepad on, devices off",
+    res.check("defaults: the primary owner starts video, audio, and gamepad on, devices off",
               [pipeline_starts_on(p) for p in START_STATE_PIPELINES] == [True, True, False, False, True])
     set_policy(video=False, audio=False, microphone=True, webcam=True, gamepad=False)
     res.check("policy: the primary owner follows every setting",

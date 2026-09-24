@@ -19,14 +19,14 @@
 #
 #   - X11 display server (XLibre's Xvfb, with glamor and DRI3) and the headless Wayland backend
 #     with SELKIES_WAYLAND=true, whose nested labwc supplies window management,
-#     decorations and XWayland
+#     decorations, and XWayland
 #   - s6 service supervision, running as PID 1 or below a foreign init
 #   - Joystick interposer + fake-udev (container-only gamepad plumbing) and the
 #     V4L2 webcam interposer, all built in-tree and wired with LD_PRELOAD
 #   - GPU wiring: NVIDIA/VA-API/Vulkan runtime, Zink for hardware OpenGL, and
 #     the 32-bit graphics runtime on x86, which a 32-bit application needs a
 #     complete second copy of
-#   - Audio: PipeWire with the PulseAudio, ALSA, JACK and V4L2 interfaces,
+#   - Audio: PipeWire with the PulseAudio, ALSA, JACK, and V4L2 interfaces,
 #     recorded through the PulseAudio one by pcmflux
 #   - Embedded coTURN for WebRTC firewall traversal
 #   - Selkies installed with pip from the wheels dropped into `wheels/` (its
@@ -270,7 +270,7 @@ ARG DISTRIB_IMAGE
 ARG DISTRIB_RELEASE
 
 # Every network fetch in this image is retried, because a build that reaches for
-# a package index, a signing key or a wheel is one transient failure away from
+# a package index, a signing key, or a wheel is one transient failure away from
 # losing the whole run. apt is configured once here so each of its later
 # invocations inherits it; curl and pip carry their own flags at each call.
 RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries::Delay::Maximum "30";\n' \
@@ -327,7 +327,7 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     # released for the whole rootless build in between: dpkg replaces a file by
     # hardlinking the old one aside, which the kernel denies uid 1000 on a
     # setuid file it does not own, and an archive update to util-linux, shadow,
-    # sudo, fuse3 or dbus would fail the layer taking it.
+    # sudo, fuse3, or dbus would fail the layer taking it.
     selkies-privileged-files release && \
     { chown -R -f -h --no-preserve-root ubuntu:ubuntu / || echo 'Failed to set filesystem ownership in some paths to ubuntu user'; }
 
@@ -360,7 +360,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         dnsutils \
         # A session hands the user a terminal: `file` is what desktop tooling
         # types a path with, `less` is the pager man and git reach for, and the
-        # editors, monitor and version control a shell session is expected to
+        # editors, monitor, and version control a shell session is expected to
         # have. Not desktop components: any session built on this one wants them
         file \
         less \
@@ -672,7 +672,7 @@ RUN chmod -f 755 /etc/container-entrypoint.sh /etc/selkies-entrypoint.sh && \
 # Configure bashrc to show /etc/motd and enable bash completion, and to give an
 # interactive shell the running session's environment. A shell started with
 # `docker exec` is not a child of the entrypoint and inherits none of what it
-# resolved, so DISPLAY, WAYLAND_DISPLAY and the audio socket are all unset and
+# resolved, so DISPLAY, WAYLAND_DISPLAY, and the audio socket are all unset and
 # every graphical command fails. Only filled in when the caller passed no
 # display of their own.
 RUN echo "[ -n \"\$PS1\" ] && [ -z \"\$DISPLAY\" ] && [ -z \"\$WAYLAND_DISPLAY\" ] && [ -r \"\${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}/container-env\" ] && . \"\${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}/container-env\"" >> /etc/bash.bashrc && \

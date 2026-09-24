@@ -15,7 +15,7 @@
  * derivation too, so both dashboards and both cores agree on all of them.
  *
  * Core state cache: the core broadcasts `serverSettings` once per connection
- * and `clipboardContentUpdate`, `effectiveCursorState` and
+ * and `clipboardContentUpdate`, `effectiveCursorState`, and
  * `audioDeviceSelected` only when something changes, but the panel components
  * (Settings, Sharing, Files, Clipboard) mount lazily when their menu opens,
  * after those messages. The latest of each is cached at module scope so a
@@ -148,7 +148,7 @@ export function isSettingRenderable(setting: any): boolean {
  * Derives every visibility flag the panels read from a `serverSettings`
  * payload: the admin's `ui_*` toggles, per-control renderability from each
  * setting's own constraints, the sharing roles, the stream-control menu
- * entries and the file-transfer directions.
+ * entries, and the file-transfer directions.
  */
 export function computeRenderableSettings(serverSettings: any): Record<string, any> {
   if (!serverSettings) return {};

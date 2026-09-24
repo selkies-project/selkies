@@ -35,7 +35,7 @@
  * chunked clipboard upload of lib/clipboard-worker-bridge.js,
  * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>`,
  * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
- * user's desktop, relayed to the other displays) and the input verbs of
+ * user's desktop, relayed to the other displays), and the input verbs of
  * lib/input.js. The server sends `MODE websockets`, `AUTH_SUCCESS,{json}`,
  * `ROLE_UPDATE,{json}`, `MK_ACCESS,<0|1>`, `VIDEO_STARTED`, `VIDEO_STOPPED`,
  * `AUDIO_STARTED`, `AUDIO_STOPPED`, `AUDIO_DISABLED`, `MICROPHONE_DISABLED`,
@@ -45,7 +45,7 @@
  * `KILL <reason>`, the clipboard family (`clipboard,`, `clipboard_binary,`,
  * `clipboard_start,`, `clipboard_data,`, `clipboard_finish`,
  * `clipboard_reply,`), and JSON objects typed `server_settings`,
- * `server_apps`, `pipeline_status`, `stream_resolution`, `stream_info` and
+ * `server_apps`, `pipeline_status`, `stream_resolution`, `stream_info`, and
  * `stream_stats` (lib/stream-stats.js).
  *
  * Video is decoded with WebCodecs: a JPEG stripe through ImageDecoder, an
@@ -68,23 +68,23 @@
  * `settings`, `getStats`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `pipelineStatusUpdate`, `pipelineControl`, `audioDeviceSelected`,
  * `gamepadControl`, `requestFullscreen`, `command`, `touchinput:trackpad`,
- * `touchinput:touch`, `sidebarVisibilityChanged` and `statsOpen`, and posts
+ * `touchinput:touch`, `sidebarVisibilityChanged`, and `statsOpen`, and posts
  * `pipelineStatusUpdate`, `sidebarButtonStatusUpdate`, `serverSettings`,
  * `systemApps`, `stats` (to the parent window), `clientRoleUpdate`,
  * `effectiveCursorState`, `scalingDpiFollowed`, `trackpadModeUpdate`,
  * `clipboardContentUpdate`, the clipboard preview of lib/clipboard-sync.js,
  * `fileUpload`,
- * `toggleDashboard` and `toggleTouchGamepad`. The `window` globals it
+ * `toggleDashboard`, and `toggleTouchGamepad`. The `window` globals it
  * publishes for the dashboards and the tests are `webrtcInput` (the Input
  * handler), `fps`, `videoChunksReceived`, `videoDivertOn`, `videoStripeRows`
  * (the row layout the video worker is decoding), `webcamCodec`,
- * `stream_info`, `stream_client` and `stream_stats` (lib/stream-stats.js),
+ * `stream_info`, `stream_client`, and `stream_stats` (lib/stream-stats.js),
  * `currentAudioBufferSize`,
  * `currentAudioBufferDuration`, `currentAudioLevel`,
  * `currentAudioUnderrunSamples`, `currentAudioWorkletDropped`,
  * `currentAudioDropped`, `manual_resolution`, `enable_resize`,
  * `streamResolutionDiverged`, `isAudioInitializing`, `isFallingBack`,
- * `isCleaningUp`, `applyTimestamp` and `selkiesTransport` (the page-side
+ * `isCleaningUp`, `applyTimestamp`, and `selkiesTransport` (the page-side
  * handle on the session socket, which itself runs in a worker), plus one
  * `window[key]` per server setting mirrored by sanitizeAndStoreSettings.
  *
@@ -402,7 +402,7 @@ const VISIBLE_FRAME_PROBE_MS = 2500;
  * Shared-mode stall watchdog. A shared viewer's stream can die mid-session
  * without notification (the controller's tab-hide stops the broadcast
  * encoder) after the one-shot START_VIDEO watchdog is already cleared. While
- * visible, ready and unpaused, a gap in video chunks resends START_VIDEO (the
+ * visible, ready, and unpaused, a gap in video chunks resends START_VIDEO (the
  * server both resyncs a live capture and restarts a dead one), with
  * exponential backoff so a static stream is not spammed.
  */
@@ -644,7 +644,7 @@ const clipboardWorker = new ClipboardWorkerBridge();
 const reencodePngOffThread = (blob) => clipboardWorker.reencodePng(blob).then((r) => r.result);
 let enable_binary_clipboard = true;
 /**
- * Server-clipboard cache, change-only sync and Ctrl/Cmd+C request queue
+ * Server-clipboard cache, change-only sync, and Ctrl/Cmd+C request queue
  * (lib/clipboard-sync.js); the send hook late-binds `websocket`.
  */
 /**
@@ -748,11 +748,11 @@ if (authToken) {
         playerInputTargetIndex = 3;
     }
 }
-/** Shared-viewer handshake state: `idle`, `ready` or `error`. */
+/** Shared-viewer handshake state: `idle`, `ready`, or `error`. */
 let sharedClientState = 'idle';
 /**
  * Whether this shared viewer paused its own video feed on tab-hide; the server
- * drops just this socket from the broadcast while control, cursor and audio stay.
+ * drops just this socket from the broadcast while control, cursor, and audio stay.
  */
 let sharedVideoPaused = false;
 let isSharedMode = detectedSharedModeType !== null;
@@ -1169,7 +1169,7 @@ const setStringParam = (key, value) => {
  * value (`audio_channels`) configures pipelines rather than preferences and
  * is mirrored only.
  * @param {Object<string, Object>} serverSettings Per-key descriptors carrying
- *     `value`, `default`, `min`, `max`, `allowed`, `locked` and `overridden`.
+ *     `value`, `default`, `min`, `max`, `allowed`, `locked`, and `overridden`.
  * @returns {Object<string, *>} Settings whose effective value changed and must
  *     be applied by the caller.
  */
@@ -1623,7 +1623,7 @@ function decodeChunk(key, data, timestamp, frameId, reference) {
 // presentation never touch the page. The header is parsed here and the codec
 // is derived from each keyframe's SPS; hints carry the page's fallback guess
 // and acceleration preference. Wire stats go up once a second for the page's
-// counters, watchdogs and fps, with the row layout this side is decoding.
+// counters, watchdogs, and fps, with the row layout this side is decoding.
 let wireCodec = null, wireW = 0, wireH = 0, wireHint = null, wireSoftware = false, wireChromium = false;
 // The range the session converted at, and the one each decoder was configured
 // with: a decoder outlives the report that names the range, so a change has to
@@ -1641,7 +1641,7 @@ let wireChunks = 0, wireFrames = 0, wireLastId = -1, wireStatsTimer = null;
 // share, which a stringified function would carry in here unresolved.
 ${wireCodecsSource.replace(/^export /gm, '')}
 
-// The striped modes (h264enc-striped, jpeg) decode, composite and present in
+// The striped modes (h264enc-striped, jpeg) decode, composite, and present in
 // here: a VideoDecoder per row offset or an in-worker JPEG decode, drawn onto
 // a persistent back-buffer so undamaged rows survive, presented by the page's
 // rule -- last row landed, or the socket and decoders proven quiet (the
@@ -2641,7 +2641,7 @@ const updateCanvasImageRendering = () => {
   }
 };
 
-/** Installs the page's base stylesheet: the video container, its sinks, the overlay input and the start button. */
+/** Installs the page's base stylesheet: the video container, its sinks, the overlay input, and the start button. */
 const injectCSS = () => {
   const style = document.createElement('style');
   style.textContent = `
@@ -3008,7 +3008,7 @@ function currentDisplayScale(dpr) {
  * client-authoritative (the derived default or the dashboard's pick, sent
  * live so it reaches the running server; the desktop DPI is independent of
  * the resolution). The payload also carries the keyboard layout, the client
- * geometry or manual resolution, the display identity and the audio-RED
+ * geometry or manual resolution, the display identity, and the audio-RED
  * capability that makes the server enable Opus redundancy.
  * @returns {Object<string, *>}
  */
@@ -3101,7 +3101,7 @@ function updateToggleButtonAppearance(buttonElement, isActive) {
 }
 
 /**
- * Sends `r,WxH,displayId` with the aligned, DPR-scaled and 4080-capped stream
+ * Sends `r,WxH,displayId` with the aligned, DPR-scaled, and 4080-capped stream
  * resolution; blocked in shared mode, where the viewer follows the controller.
  * @param {number} width CSS pixels, or the exact size in manual mode.
  * @param {number} height
@@ -3182,7 +3182,7 @@ function syncSinkToCanvasStyle() {
 
 /**
  * Sizes the canvas for a manual resolution: the backing buffer at the target
- * size (DPR-scaled unless CSS scaling, shared mode or manual mode pin it to
+ * size (DPR-scaled unless CSS scaling, shared mode, or manual mode pin it to
  * 1), the CSS box either scaled to fit the container or exact and centered.
  * Exact is one stream pixel per device pixel, independent of the HiDPI flag,
  * which a manual resolution does not read. The overlay input follows the box
@@ -3430,7 +3430,7 @@ function updateUIForSharedMode() {
  * video sink (see `supportsWindowMSTG`), logging it once since a canvas
  * fallback explains a session's CPU cost, and starts the worker handshake
  * early so its decoder is ready before the first frame, then sizes the canvas
- * for shared, manual or automatic resolution.
+ * for shared, manual, or automatic resolution.
  */
 const initializeUI = () => {
   injectCSS();
@@ -3724,8 +3724,8 @@ function ensureStripeBackBuffer() {
  * Source of the stripe compositor worker. It draws each decoded stripe onto an
  * OffscreenCanvas back-buffer and hands the finished frame back as one
  * ImageBitmap to blit, so the per-stripe compositing leaves the main thread
- * while the page keeps the decode and the reorder, damage and boundary logic.
- * The main-thread back-buffer is the fallback when a worker, OffscreenCanvas
+ * while the page keeps the decode and the reorder, damage, and boundary logic.
+ * The main-thread back-buffer is the fallback when a worker, OffscreenCanvas,
  * or createImageBitmap is unavailable, or `offscreen_worker=false`.
  */
 const STRIPE_WORKER_SRC = `
@@ -3918,7 +3918,7 @@ function clearSharedStallWatchdog() {
 
 /**
  * Arms the shared-mode stall watchdog (see `sharedStallWatchdogId`). While the
- * viewer is hidden, paused or not yet ready it expects no chunks, so the clock
+ * viewer is hidden, paused, or not yet ready it expects no chunks, so the clock
  * is kept fresh and the watchdog cannot fire the instant those states end.
  */
 function armSharedStallWatchdog() {
@@ -5274,7 +5274,7 @@ function fetchLatestRCvalue(newMode) {
 /**
  * Posts a `stats` snapshot to the parent window: the stream's description on
  * both sides, the last second's figures where the stats are open, client fps,
- * buffers and pipeline state.
+ * buffers, and pipeline state.
  */
 function sendStatsMessage() {
   const stats = {
@@ -5303,7 +5303,7 @@ function sendStatsMessage() {
 /**
  * Runs the connection: pre-flight checks and the page build, the clipboard
  * gesture wiring, the tab visibility handling, the paint loop, audio setup,
- * and the socket with its message dispatch, reconnect and fallback paths.
+ * and the socket with its message dispatch, reconnect, and fallback paths.
  * Called once the document has loaded.
  */
 function initWebsockets() {
@@ -5361,7 +5361,7 @@ function initWebsockets() {
   /**
    * Pauses video while the tab is hidden and resumes it on show. A shared
    * viewer pauses only its own feed (the server drops this socket from the
-   * broadcast and resumes it with a reset and IDR; control, cursor and audio
+   * broadcast and resumes it with a reset and IDR; control, cursor, and audio
    * stay live). A controller's pause is deferred, because a navigating
    * document reports hidden just before it unloads and a STOP_VIDEO sent then
    * races the successor connection; timers never fire in an unloading
@@ -6701,7 +6701,7 @@ class WorkerWebSocket {
    * geometry or manual resolution, the DPR-derived `scaling_dpi` seeded into
    * this very first payload so the desktop comes up at the right density
    * without a second capture restart, the display identity, the keyboard
-   * layout and the audio-RED capability; a secondary sends only its own
+   * layout, and the audio-RED capability; a secondary sends only its own
    * suffixed per-display keys, never the primary's), advertises gzip,
    * requests the cache-only clipboard, and starts the metrics and ack timers.
    */
@@ -6885,7 +6885,7 @@ class WorkerWebSocket {
   /**
    * Dispatches one message from the server (see the module docblock for the
    * framing): audio to the decode worker, JPEG stripes to the JPEG decoder,
-   * H.264 to the worker, main or per-stripe decoder the mode selects, and
+   * H.264 to the worker, main, or per-stripe decoder the mode selects, and
    * every control text to its handler. Every video chunk clears the
    * START_VIDEO watchdog and bumps `window.videoChunksReceived`, the "encoded
    * video ever arrived" signal the visibility probe reads.
@@ -7633,7 +7633,7 @@ class WorkerWebSocket {
              if (appliedWidth > 0 && appliedHeight > 0) {
                // The realized resolution can differ from the request (encoder
                // alignment, RandR cell snapping, a rejected mode-set); canvas,
-               // stripe decoders and input mapping follow it.
+               // stripe decoders, and input mapping follow it.
                const dprUsed = window.manual_resolution ? 1 : streamDensity();
                const bufferWidth = alignResolution(appliedWidth);
                const bufferHeight = alignResolution(appliedHeight);
@@ -8171,7 +8171,7 @@ function clearDecodedStripesQueue() {
 
 /**
  * Multistream Opus layouts for surround: the decoder needs an OpusHead
- * description carrying the same stream, coupled and mapping tables the
+ * description carrying the same stream, coupled, and mapping tables the
  * server encodes with.
  */
 const MULTIOPUS_CLIENT_LAYOUTS = {
@@ -8181,7 +8181,7 @@ const MULTIOPUS_CLIENT_LAYOUTS = {
 
 /**
  * The server's `audio_channels` setting, limited to the layouts the decoder handles.
- * @returns {number} 1, 2, 6 or 8; 2 when unset or unknown.
+ * @returns {number} 1, 2, 6, or 8; 2 when unset or unknown.
  */
 function getAudioChannelCount() {
   const ch = parseInt(window.audio_channels, 10);
@@ -8217,9 +8217,9 @@ function buildMultiopusDescription(channels) {
 
 /**
  * Source of the Opus decode worker. It answers `init` (channels and the
- * surround description), `decode`, `reinitialize`, `updatePipelineStatus`
+ * surround description), `decode`, `reinitialize`, `updatePipelineStatus`,
  * and `close`, and posts `decodedAudioData` with interleaved f32 PCM,
- * `decoderInitialized`, `decoderInitFailed` and `decoderError`; a fatal
+ * `decoderInitialized`, `decoderInitFailed`, and `decoderError`; a fatal
  * decoder error is never re-initialized from inside, since a persistent
  * failure would spin, the page drives recovery.
  */
@@ -8585,7 +8585,7 @@ async function startMicrophoneCapture(askedByServer = false) {
   }
 }
 
-/** Stops the microphone uplink and releases the stream, worklet, worker and context. */
+/** Stops the microphone uplink and releases the stream, worklet, worker, and context. */
 function stopMicrophoneCapture() {
   if (!isMicrophoneActive && !micStream && !micAudioContext) {
     if (isMicrophoneActive) {
@@ -8721,7 +8721,7 @@ function stopWebcamCapture() {
   }
 }
 
-/** Tears everything down on unload: timers, capture, socket, audio, decoders and buffers, then resets the UI state. */
+/** Tears everything down on unload: timers, capture, socket, audio, decoders, and buffers, then resets the UI state. */
 function cleanup() {
   if (metricsIntervalId) {
     clearInterval(metricsIntervalId);
@@ -8788,7 +8788,7 @@ function cleanup() {
 
 /**
  * Resets the video state after the server's PIPELINE_RESETTING: the shared
- * keyframe gate, the frame id, every buffer and the decoders of the current
+ * keyframe gate, the frame id, every buffer, and the decoders of the current
  * mode, clearing the canvas for the modes that repaint it whole.
  * @param {string} [reason] Logged.
  */

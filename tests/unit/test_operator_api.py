@@ -367,7 +367,7 @@ async def transport_cases() -> None:
             second: {"id": "d2", "role": "controller", "slot": None, "connected_at": 1_000_002.0}})
         try:
             listed = {s["id"]: s for s in await ws.sessions()}
-            check("websockets: every page is listed with its role, slot and display",
+            check("websockets: every page is listed with its role, slot, and display",
                   {k: (v["role"], v["slot"], v["display"], v["transport"]) for k, v in listed.items()} == {
                       "c1": ("controller", None, "primary", "websockets"),
                       "v1": ("viewer", 2, "primary", "websockets"),

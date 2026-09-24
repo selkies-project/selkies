@@ -6,7 +6,7 @@
 # top of the Selkies base container.
 #
 # The base (addons/base) is the whole session apart from what it looks like —
-# X11 and the Wayland backend, audio, GPU wiring, s6, coTURN and Selkies
+# X11 and the Wayland backend, audio, GPU wiring, s6, coTURN, and Selkies
 # itself. This layer adds only the desktop: LXQt with the Openbox window
 # manager on X11 and natively on the nested labwc compositor under
 # SELKIES_WAYLAND=true, the browsers, and the proot-apps runner behind the
@@ -34,7 +34,7 @@ ARG DEBIAN_FRONTEND="noninteractive"
 # The base ships its setuid and setgid files owned by root, and dpkg replaces a
 # file by hardlinking the old one aside first -- which the kernel denies uid
 # 1000 on a setuid file it does not own. Released for the layers below, an
-# archive update to util-linux, shadow, sudo, fuse3 or dbus is just another
+# archive update to util-linux, shadow, sudo, fuse3, or dbus is just another
 # package; without this it fails the layer that takes it.
 USER 0
 SHELL ["/bin/sh", "-c"]
@@ -120,7 +120,7 @@ RUN apt-get clean && apt-get update && apt-get install --no-install-recommends -
         # it. Without the SVG icon engine every scalable icon in the session — menu
         # entries, the panel's menu button, tray icons — is silently blank
         qt6-svg-plugins \
-        # Qt reads only PNG, JPEG and GIF on its own; the rest of what a clipboard
+        # Qt reads only PNG, JPEG, and GIF on its own; the rest of what a clipboard
         # image or a downloaded file arrives as (WebP, TIFF, AVIF, HEIF) needs
         # these, and without them lximage-qt and the file manager show nothing
         qt6-image-formats-plugins \
@@ -295,7 +295,7 @@ RUN set -eu; \
 
 # Leaving the session is not something this desktop can offer: logging out or
 # locking ends or blocks the session the stream is showing and leaves a
-# connected client on a dead display, and shutdown, reboot, suspend and
+# connected client on a dead display, and shutdown, reboot, suspend, and
 # hibernate address an init this container does not run.
 #
 # Every one of those entries runs the one lxqt-leave binary, and the panel's own

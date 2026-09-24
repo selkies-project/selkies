@@ -3,7 +3,7 @@
 
 The repair payload XORs everything after each protected packet's fixed
 header, shorter packets padded with zeros to the longest, and the recovery
-fields fold in the header bits, the lengths and the timestamps. The builder
+fields fold in the header bits, the lengths, and the timestamps. The builder
 is checked against a plain byte loop over packets of unequal lengths, several
 interleaved repairs against the receiver's one-missing-at-a-time recovery,
 the repair density against the loss it follows, and the NTP clock against the

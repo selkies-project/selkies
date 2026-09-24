@@ -96,14 +96,14 @@ SECTIONS = [
         "enable_basic_auth", "basic_auth_user", "basic_auth_password", "basic_auth_viewonly_password",
         "master_token", "command_enabled", "debug",
     ]),
-    ("WebRTC and TURN", "The opt-in WebRTC transport's ICE, STUN and TURN configuration.", [
+    ("WebRTC and TURN", "The opt-in WebRTC transport's ICE, STUN, and TURN configuration.", [
         "rtc_config_json", "turn_host", "turn_port", "turn_protocol", "turn_tls", "turn_shared_secret",
         "turn_username", "turn_password", "turn_rest_uri", "turn_rest_api_key", "turn_rest_username",
         "turn_rest_username_auth_header", "turn_rest_protocol_header", "turn_rest_tls_header", "stun_host",
         "stun_port", "enable_cloudflare_turn", "cloudflare_turn_token_id", "cloudflare_turn_api_token",
         "webrtc_public_ip", "webrtc_port_range", "webrtc_udp_mux_port", "webrtc_tcp_mux_port", "webrtc_ice_lite",
     ]),
-    ("Recording, audit, and metrics", "The recording tap, the audit webhook and the metrics endpoints.", [
+    ("Recording, audit, and metrics", "The recording tap, the audit webhook, and the metrics endpoints.", [
         "recording_socket", "audit_webhook_url", "audit_webhook_token", "audit_webhook_timeout",
         "enable_metrics_http", "enable_webrtc_statistics", "webrtc_statistics_dir",
     ]),

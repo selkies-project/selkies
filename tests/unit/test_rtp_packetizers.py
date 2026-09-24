@@ -3,7 +3,7 @@
 
 Every packet stays within the MTU, a frame's key-frame flag is read from its
 own bitstream, and the depayloaders rebuild what the packers cut up: H.265
-through single NAL units, aggregation packets and fragmentation units, VP9
+through single NAL units, aggregation packets, and fragmentation units, VP9
 through its payload descriptor, AV1 through the frame assembler that joins
 one OBU's fragments across packets and restores the size fields, and whose
 packets are also checked against the payload format itself: the aggregation

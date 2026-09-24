@@ -531,7 +531,7 @@ class TcpMux:
         return protocol
 
     async def close(self) -> None:
-        """Detach every protocol, end their streams and stop listening; the port is free on return."""
+        """Detach every protocol, end their streams, and stop listening; the port is free on return."""
         self._closed = True
         listeners = list(self._listeners.values())
         self._listeners.clear()

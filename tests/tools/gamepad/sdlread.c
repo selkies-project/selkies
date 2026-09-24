@@ -3,7 +3,7 @@
  * sdlenum only counts what SDL enumerates; this reads a pad, so it shows what
  * an SDL2 application actually gets out of the Input Interposer (or a
  * kernel device): name, GUID, vendor/product, control counts, then one line
- * per button, axis and hat event. Runs until SIGINT/SIGTERM, so
+ * per button, axis, and hat event. Runs until SIGINT/SIGTERM, so
  * `timeout 10 sdlread` is a complete run.
  *
  *   sdlread [joystick-index]

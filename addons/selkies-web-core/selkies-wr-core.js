@@ -55,7 +55,7 @@
  * runs one pipeline per display, and the position rides the connect metadata.
  *
  * Contract with the dashboards. Globals published on `window`: `selkiesLogs`
- * (capped log ring buffers), `fps`, `stream_info`, `stream_client` and
+ * (capped log ring buffers), `fps`, `stream_info`, `stream_client`, and
  * `stream_stats` (lib/stream-stats.js), `currentAudioBufferSize`, `manualResolution`,
  * `enable_resize`, `streamResolutionDiverged`, `webrtcInput`, and every server
  * setting as `window[key]`. Window messages handled (same origin):
@@ -119,7 +119,7 @@ let __clipboardTransferCounter = 0;
 /** The server's `command_enabled`; true until a server advertises otherwise. */
 let serverCommandEnabled = true;
 
-/** Injects the stylesheet for the video container, overlay and status bar. */
+/** Injects the stylesheet for the video container, overlay, and status bar. */
 function InitUI() {
 	let style = document.createElement('style');
 	style.textContent = `
@@ -226,7 +226,7 @@ function InitUI() {
 /**
  * Builds the WebRTC core.
  * @returns {{initialize: () => void, cleanup: () => void}} `initialize`
- *     builds the DOM, connects signaling and opens the peer connection;
+ *     builds the DOM, connects signaling, and opens the peer connection;
  *     `cleanup` tears the session down and resets every session-scoped value.
  */
 export default function webrtc() {
@@ -454,7 +454,7 @@ export default function webrtc() {
 	/**
 	 * Chromium-engine detection: userAgentData brands are authoritative and
 	 * `window.chrome` a fallback for older engines that expose no brands; iOS,
-	 * Firefox and CriOS are excluded.
+	 * Firefox, and CriOS are excluded.
 	 */
 	const isChromium = (() => {
 		const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -1578,7 +1578,7 @@ export default function webrtc() {
 	/**
 	 * Starts the webcam uplink: the camera track rides the sendonly video
 	 * transceiver the server reserved in the bundled SDP (the mirror of the
-	 * microphone), so the browser's own encoder produces the H.264, VP8, VP9, H.265 or AV1 the
+	 * microphone), so the browser's own encoder produces the H.264, VP8, VP9, H.265, or AV1 the
 	 * server's virtual camera decodes, with RTP congestion control and no
 	 * data-channel framing.
 	 *
@@ -1654,9 +1654,9 @@ export default function webrtc() {
 
 	/**
 	 * Handles a same-origin dashboard window message; the module docblock
-	 * lists the types. A shared page ignores the resolution, command and
+	 * lists the types. A shared page ignores the resolution, command, and
 	 * clipboard cases: a viewer never drives resolution policy, never reaches
-	 * the server's command execution path and never writes its clipboard.
+	 * the server's command execution path, and never writes its clipboard.
 	 * @param {MessageEvent} event
 	 */
 	function handleMessage(event) {
@@ -2618,7 +2618,7 @@ export default function webrtc() {
 
 	return {
 		/**
-		 * Builds the DOM, reads the persisted settings, connects signaling and
+		 * Builds the DOM, reads the persisted settings, connects signaling, and
 		 * opens the peer connection. Settings are read with fallbacks and never
 		 * written back, so a fresh profile keeps every key unset and
 		 * server-pushed defaults stay re-pushable.
@@ -3026,7 +3026,7 @@ export default function webrtc() {
 			 * session; it is armed before the shared-mode return so the state is
 			 * consistent either way. Caching is unconditional, since gating it on
 			 * clipboardStatus made the first payload depend on message ordering;
-			 * only the local write is gated, on enablement, direction policy and
+			 * only the local write is gated, on enablement, direction policy, and
 			 * the connect-time reply being cache-only. The fetch flag is consumed
 			 * before the decode, so arrival order decides which payload settles
 			 * the init fetch.

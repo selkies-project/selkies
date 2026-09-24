@@ -70,7 +70,7 @@ fi
 echo "every entry point names an interpreter inside this copy"
 
 "${PREFIX}/bin/python" -c "import selkies, pixelflux, pcmflux"
-echo "selkies, pixelflux and pcmflux import"
+echo "selkies, pixelflux, and pcmflux import"
 
 # The sound server AppRun starts, started by AppRun: a daemon that finds no
 # module directory exits with "startup without any loaded modules", taking

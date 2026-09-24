@@ -49,7 +49,7 @@ class EncodedPacket:
     and frees the GIL that a `bytes(frame)` copy would hold for the memcpy.
     `keyframe` says whether the sample decodes on its own, as the encoder
     reported it; audio samples always do. `timing` is a video frame's capture,
-    encode-start and encode-end instants in CLOCK_MONOTONIC nanoseconds as the
+    encode-start, and encode-end instants in CLOCK_MONOTONIC nanoseconds as the
     capture library stamped them, or None where it did not. `dependency` is a
     video frame's own id and the id of the frame it predicts from (None for a
     frame predicting from nothing), where the encoder tracks its references

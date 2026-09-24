@@ -11,7 +11,7 @@ subsystem (KWin for its render nodes) sees the same devices as without the
 preload, and the host's own input devices stay listed beside the pads.
 
 Builds fake-udev and the udevscan tool into a scratch directory, then scans
-under LD_PRELOAD with sockets present for none, one and all four slots, scans
+under LD_PRELOAD with sockets present for none, one, and all four slots, scans
 a subsystem the pads do not live in, and scans with passthrough disabled.
 """
 import os

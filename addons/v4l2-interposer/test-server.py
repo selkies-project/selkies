@@ -68,7 +68,7 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=1280, help="advertised device width")
     parser.add_argument("--height", type=int, default=720, help="advertised device height")
     parser.add_argument("--fps", type=int, default=30)
-    parser.add_argument("--pixel-format", default="I420", help="I420, NV12 or YUYV")
+    parser.add_argument("--pixel-format", default="I420", help="I420, NV12, or YUYV")
     parser.add_argument("--device", default="", help='v4l2loopback output device to mirror ("auto" or a path)')
     parser.add_argument("--source-width", type=int, default=0, help="synthetic camera width (default: device width)")
     parser.add_argument("--source-height", type=int, default=0, help="synthetic camera height (default: device height)")

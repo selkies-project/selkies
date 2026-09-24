@@ -43,7 +43,7 @@ def _startup_summary() -> str:
     """The one line that says what this server came up as.
 
     Transport, capture backend, encoder and rate, how the desktop is sized,
-    and which of audio, gamepads and access control are on: the facts a log
+    and which of audio, gamepads, and access control are on: the facts a log
     reader needs before any client line makes sense.
     """
     try:
@@ -92,7 +92,7 @@ async def wait_for_app_ready(ready_file: str, app_wait_ready: bool = False) -> N
 def _install_shutdown_signal_handlers() -> None:
     """Make a service-manager stop (systemd, `docker stop`, `kill`) unwind the same
     way Ctrl-C does: canceling the main task raises CancelledError through the
-    server loop, so the streaming service is stopped, the unix socket is removed and
+    server loop, so the streaming service is stopped, the unix socket is removed, and
     the disconnect hooks run. Without this SIGTERM is fatal by default, and as
     container PID 1 it is ignored outright until SIGKILL.
 

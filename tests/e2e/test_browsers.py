@@ -185,7 +185,7 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
 
 
 def striped_block(engine: str) -> "H.Results":
-    """The striped encoder on one engine: the video worker decodes, composites
+    """The striped encoder on one engine: the video worker decodes, composites,
     and presents it off the page where the engine allows.
 
     chromium and firefox take the divert (fps counts the worker's composites,

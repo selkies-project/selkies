@@ -3,7 +3,7 @@
 
 A hand-rolled active peer plays the browser: it opens the TCP stream to the
 passive candidate, frames STUN and data per RFC 4571, checks with
-USE-CANDIDATE and answers the server's own check. Against that peer a full
+USE-CANDIDATE, and answers the server's own check. Against that peer a full
 server nominates over the stream and exchanges data both ways, an ICE-lite
 server completes on the peer's nomination without a check of its own, the
 TCP candidate ranks below the UDP one, a stream whose first frame is not a

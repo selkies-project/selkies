@@ -19,7 +19,7 @@ pixelflux as `debug_logging`.
 Two sources would bury a debug run on their own and are held back even
 then. Pillow logs every PNG chunk it writes at DEBUG, and the cursor path
 encodes a PNG per cursor change, so the `PIL` logger is pinned at WARNING.
-The vendored WebRTC and ICE stacks log every STUN check, DTLS record and
+The vendored WebRTC and ICE stacks log every STUN check, DTLS record, and
 state change; `PacedFilter` on the root handler lets the first record of
 each message template through and then one per `PACE_PERIOD_S` seconds,
 carrying the count of the records it held back, while the per-packet RTP

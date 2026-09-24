@@ -4,7 +4,7 @@
 #
 # The distro's absolute paths are rebased under $SB and the tools that need root
 # or a network are replaced by stubs recording their argv. Everything else --
-# sed, cp, mkdir, find, the real venv creation and wheel install -- runs for
+# sed, cp, mkdir, find, the real venv creation, and wheel install -- runs for
 # real, which is what the read-only-mount and staging-path bugs depend on. CI
 # builds these packages in real containers; this is the check that runs anywhere
 # and catches the same class of defect in seconds.

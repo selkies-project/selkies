@@ -8,7 +8,7 @@
 set -eux
 export DEBIAN_FRONTEND="noninteractive"
 
-# Package managers with no retry option of their own -- apk, dnf, pacman and
+# Package managers with no retry option of their own -- apk, dnf, pacman, and
 # RubyGems all lack one -- are bounded-retried here. This composes with whatever
 # internal retrying the tool already does rather than replacing it, so it cannot
 # lower a default the way an explicit --setopt could.

@@ -7,7 +7,7 @@
 /*
  * Signal re-entrancy check for the input interposer, run under its preload.
  *
- * Worker threads loop over open, read, ioctl and close on a plain file while
+ * Worker threads loop over open, read, ioctl, and close on a plain file while
  * a signal handler reads and writes a pipe, the shape of uvloop's SIGCHLD
  * handler and of an SDL game's own handlers. The signal is blocked on the
  * main thread so it lands on a worker, which may be inside a hooked call when

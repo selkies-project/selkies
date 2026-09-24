@@ -10,7 +10,7 @@ set -e
 
 cd "${WORKSPACE_FOLDER:-/workspaces/selkies}"
 
-# The same script the wheel build, the conda recipe and the root Dockerfile run,
+# The same script the wheel build, the conda recipe, and the root Dockerfile run,
 # so the bundle under src/selkies/selkies_web is the one every channel ships
 ./scripts/ci/build-web.sh
 

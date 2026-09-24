@@ -122,7 +122,7 @@ export const parseAvcCodecFromAnnexB = (bytes) => {
   const hex2 = (n) => n.toString(16).toUpperCase().padStart(2, '0');
   for (const nal of annexbNals(bytes)) {
     if ((nal[0] & 0x80) === 0 && (nal[0] & 0x1f) === 7) {
-      // profile_idc, constraint flags and level_idc are the first three RBSP
+      // profile_idc, constraint flags, and level_idc are the first three RBSP
       // bytes and, with profile_idc always >= 66, never need emulation prevention.
       if (nal.length < 4) return null;
       return `avc1.${hex2(nal[1])}${hex2(nal[2])}${hex2(nal[3])}`;

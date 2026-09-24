@@ -3,7 +3,7 @@
 
 The injectors lift a held Shift/AltGr around a keysym whose keymap level does
 not want it, so a client layout's Shift pairing cannot move a glyph onto a
-different one. Left, Home, End and the rest of the function block sit at
+different one. Left, Home, End, and the rest of the function block sit at
 level 0 too, and lifting Shift around them turns Shift+Home into a bare Home:
 the selection the user was extending never happens, while Ctrl+Shift+Home, a
 chord the injectors never neutralize, still works. The checks send the wire

@@ -232,7 +232,7 @@ def firefox_persistent_context(pw: Any, viewport: Optional[dict] = None,
     """A headless Firefox context on the persistent profile.
 
     Carries the autoplay allowance `launch_browser` gives Firefox, the clipboard
-    testing pref and the OpenH264 prefs; the caller closes the context.
+    testing pref, and the OpenH264 prefs; the caller closes the context.
     """
     user_prefs = {
         "media.gmp-gmpopenh264.enabled": True,

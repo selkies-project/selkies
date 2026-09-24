@@ -86,7 +86,7 @@ diff --git a/hw/vfb/InitOutput.c b/hw/vfb/InitOutput.c
 + * sets VFB_CONNECTED_PROP on it, and unplugging is the same property back
 + * at 0. The connection state is the server's to report, so this is the one
 + * part of adding a display a client cannot do through RandR alone; the mode,
-+ * the CRTC and the screen size it sets itself, as it would for hardware.
++ * the CRTC, and the screen size it sets itself, as it would for hardware.
 + * The first output is the screen the server starts with and stays connected.
 + */
 +static Bool

@@ -6,7 +6,7 @@
 #
 # One RtpPacer per RTCDtlsTransport. Priority classes, highest first:
 # RTCP + audio (which bypass the token bucket entirely: they are protocol
-# rate-limited, tiny and latency-critical), data-channel, video (incl. RTX and
+# rate-limited, tiny, and latency-critical), data-channel, video (incl. RTX and
 # FEC).
 #
 # Scheduling is an event-driven token bucket. A packet goes straight out when
@@ -54,7 +54,7 @@ logger = logging.getLogger("selkies_webrtc_pacer")
 CLASS_RTCP = 0
 CLASS_AUDIO = 0
 # CLASS_DC carries data-channel traffic (input, status, clipboard);
-# CLASS_VIDEO carries video RTP, RTX and FEC.
+# CLASS_VIDEO carries video RTP, RTX, and FEC.
 CLASS_DC = 1
 CLASS_VIDEO = 2
 # Classes that own a queue: class 0 bypasses the bucket and is never enqueued.
@@ -167,7 +167,7 @@ class RtpPacer:
         self._send_now = send_now
         self._send_now_data = send_now_data or send_now
         self._request_keyframe = request_keyframe
-        # Told the tag of every video packet dropped, refused or purged, so the
+        # Told the tag of every video packet dropped, refused, or purged, so the
         # transport's loss accounting can leave them out.
         self._on_dropped = on_dropped
         self._loop = loop or asyncio.get_running_loop()
@@ -345,7 +345,7 @@ class RtpPacer:
 
         Only NATURAL keyframes enter the window: a forced keyframe is emitted at
         the collapsed bitrate that made us ask for it, so letting it evict a
-        window entry would shrink the floor, shrink the cap and trigger the next
+        window entry would shrink the floor, shrink the cap, and trigger the next
         reset — a self-reinforcing keyframe-churn cycle. A forced keyframe may
         still RAISE the floor, so a cap too small to hold one IDR still grows out
         of the churn.

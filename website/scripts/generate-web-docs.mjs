@@ -6,7 +6,7 @@
  * and adds one gitignored folder per addon beside the Python modules. TypeDoc
  * reads plain JavaScript through the TypeScript compiler's JSDoc support and
  * TypeScript natively, so one configuration covers selkies-web-core, the
- * dashboard and the wish dashboard; typedoc-plugin-markdown writes the pages
+ * dashboard, and the wish dashboard; typedoc-plugin-markdown writes the pages
  * as Markdown (not MDX, so nothing in a comment can be mistaken for JSX) and
  * web-reference-plugin.mjs adds front matter and hides `_`-prefixed members.
  *

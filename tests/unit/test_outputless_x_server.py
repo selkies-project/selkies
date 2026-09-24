@@ -51,7 +51,7 @@ async def scenario(res: "H.Results") -> None:
                   curr == "1920x1080" and name is None and modes == [], (curr, name, modes))
         fake_xrandr(bindir, WITH_OUTPUT)
         curr, fitted, modes, _, name = await DX._get_new_res_xrandr("2560x1440")
-        res.check("one with an output reports the output, its modes and the fitted size",
+        res.check("one with an output reports the output, its modes, and the fitted size",
                   curr == "1280x720" and name == "screen" and modes == ["1280x720", "8192x4096"]
                   and fitted == "2560x1440", (curr, name, modes, fitted))
     finally:

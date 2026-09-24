@@ -27,7 +27,7 @@
  *
  * Speaks the line protocol of the server's signaling WebSocket. `HELLO
  * <peer type> <json>` registers the client, the JSON carrying its type, slot,
- * strict-viewer flag, secure-mode token, display id and display position;
+ * strict-viewer flag, secure-mode token, display id, and display position;
  * `SESSION server` asks for the server peer and is answered with
  * `SESSION_OK <peer id>`; from then on the SDP and the ICE candidates travel
  * as `<peer id> {"sdp": ...}` and `<peer id> {"ice": ...}` lines, and
@@ -43,7 +43,7 @@
 /**
  * Connection to the signaling server, delivering SDP and ICE to callbacks.
  *
- * Callbacks are assigned as properties: `onstatus`, `ondebug` and `onerror`
+ * Callbacks are assigned as properties: `onstatus`, `ondebug`, and `onerror`
  * receive messages, `onsdp` an `RTCSessionDescription`, `onice` an
  * `RTCIceCandidate`, `ondisconnect` whether the app should reconnect,
  * `onshowalert` a reason to show the user, and `onfatalretry` replaces the
@@ -108,7 +108,7 @@ export class WebRTCSignaling {
         /** Called with whether the app should reconnect. @type {?function(boolean): void} */
         this.ondisconnect = null;
 
-        /** `'disconnected'`, `'connecting'` or `'connected'`. @type {string} */
+        /** `'disconnected'`, `'connecting'`, or `'connected'`. @type {string} */
         this.state = 'disconnected';
 
         /** @type {number} */
@@ -349,7 +349,7 @@ export class WebRTCSignaling {
     }
 
     /**
-     * Opens the signaling socket; registration, the session request and the
+     * Opens the signaling socket; registration, the session request, and the
      * SDP and ICE exchange follow from the socket events.
      */
     connect() {

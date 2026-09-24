@@ -108,7 +108,7 @@ class WebRTCPeerManagement:
             peers come and go; the server's own signaling peer does not count.
         rtc_config: Config served from `/api/turn`. Primarily the config the
             server itself resolved via `get_rtc_configuration()` (REST,
-            Cloudflare, JSON file, legacy, HMAC or built-in default), passed
+            Cloudflare, JSON file, legacy, HMAC, or built-in default), passed
             as `options.rtc_config` and kept fresh by the RTC monitors through
             `set_rtc_config`, so the client negotiates with the same ICE
             servers as the server; the local `rtc_config_file` is read only

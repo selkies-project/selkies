@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A GOP the pacer abandons is gone from the queue, the wire and the repairs.
+"""A GOP the pacer abandons is gone from the queue, the wire, and the repairs.
 
 A video packet the queue budget cannot hold abandons its GOP: every queued
 packet of it is purged rather than trimmed to fit, since nothing behind the

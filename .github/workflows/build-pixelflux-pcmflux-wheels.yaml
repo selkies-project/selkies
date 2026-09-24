@@ -1,7 +1,7 @@
 name: Capture stack wheels
 
 # Puts pixelflux and pcmflux into this run's artifacts, so container images,
-# native packages, AppImages and the suites ride wheels this run holds rather
+# native packages, AppImages, and the suites ride wheels this run holds rather
 # than an index. `pinned` says which build: the main branch (HEAD) of
 # selkies-project/pixelflux and selkies-project/pcmflux, which is what the
 # builds ahead of a release carry, or the versions this repository pins, which

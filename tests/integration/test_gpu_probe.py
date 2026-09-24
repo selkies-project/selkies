@@ -91,7 +91,7 @@ def main() -> bool:
     client = ("SELKIES_GPU_GL_VENDOR", "SELKIES_GPU_EGL_X11",
               "SELKIES_GPU_MESA_DRIVER", "SELKIES_GPU_VULKAN_PRESENTS")
     res.check("every client-path fact is reported", all(k in facts for k in client), sorted(facts))
-    res.check("Mesa's route is one of native, zink or software",
+    res.check("Mesa's route is one of native, zink, or software",
               facts.get("SELKIES_GPU_MESA_DRIVER") in ("native", "zink", ""), facts)
     res.check("whether Vulkan presents is answered only where Zink is Mesa's route",
               (facts.get("SELKIES_GPU_VULKAN_PRESENTS") in ("true", "false")) == (facts.get("SELKIES_GPU_MESA_DRIVER") == "zink")

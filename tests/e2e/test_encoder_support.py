@@ -92,7 +92,7 @@ def menu_block(dashboard: str, mode: str) -> "H.Results":
                       entries is not None and len(entries) == (5 if mode == "webrtc" else 7), entries)
             res.check("H.265, which this browser does not play, is listed disabled and marked as unsupported here",
                       H265 in by_label and by_label[H265][1] and UNSUPPORTED in by_label[H265][0], by_label.get(H265))
-            res.check("H.264 is listed, enabled and unmarked",
+            res.check("H.264 is listed, enabled, and unmarked",
                       H264 in by_label and not by_label[H264][1] and UNSUPPORTED not in by_label[H264][0], by_label.get(H264))
             if dashboard == "wish":
                 layers = page.evaluate(

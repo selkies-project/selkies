@@ -96,7 +96,7 @@ def start_turnserver(binary: str, port: int) -> subprocess.Popen:
     """coturn on loopback with the shared-secret (HMAC) credential scheme.
 
     Loopback peers are allowed because both ends of this run live on
-    127.0.0.1, which coturn refuses to relay to by default; TLS, the CLI port
+    127.0.0.1, which coturn refuses to relay to by default; TLS, the CLI port,
     and the TCP relay are off so nothing but the one UDP listener binds.
     """
     log = open(os.path.join(H.WORKDIR, "turnserver.log"), "w")

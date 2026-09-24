@@ -14,7 +14,7 @@ and one on a host with no GPU, which is an ordinary deployment, are told apart
 from one that fell back. It is sent once when the capture settles and again when
 it changes, since a session can demote itself mid-stream.
 
-`stream_stats` carries the numbers that move: the host's CPU, memory and GPU, the
+`stream_stats` carries the numbers that move: the host's CPU, memory, and GPU, the
 rate and cost of the encode, and over WebSockets the round trip and whether the
 server is holding frames back (a WebRTC page measures its own link). It
 flows only to a connection that asked for it (the `_stats,1` verb a page sends

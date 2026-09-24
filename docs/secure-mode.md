@@ -40,7 +40,7 @@ The static web client (`/`, its scripts and assets) is served without credential
 | `/api/files/...` (listing and downloads) | session or master token |
 | `/api/print/<name>` (a printed document) | session or master token; viewer tokens are refused (403) |
 | `/api/sessions` and `/api/screenshot` | session or master token |
-| `DELETE /api/sessions/<id>`, `POST` and `DELETE /api/recording` | session or master token (either header); viewer tokens are refused (403) |
+| `DELETE /api/sessions/<id>`, `POST`, and `DELETE /api/recording` | session or master token (either header); viewer tokens are refused (403) |
 | `GET /api/recording` | session or master token |
 | `/api/turn` (WebRTC ICE/TURN configuration) | session or master token |
 | `/api/metrics` (when `--enable-metrics-http`) | session or master token |
@@ -79,7 +79,7 @@ Nothing above applies but the origin check. The routes are open, or Basic-gated 
 
 ## Reference Implementations
 
-Two orchestrators drive secure mode as this page describes it, and are the place to read how the master token, the token table and the tokened client URL fit together in a service:
+Two orchestrators drive secure mode as this page describes it, and are the place to read how the master token, the token table, and the tokened client URL fit together in a service:
 
-- [romm-broker](https://github.com/romm-streaming/romm-broker) starts a container per game session, provisions its tokens through `/api/tokens` and hands each player a tokened URL.
+- [romm-broker](https://github.com/romm-streaming/romm-broker) starts a container per game session, provisions its tokens through `/api/tokens`, and hands each player a tokened URL.
 - [Sealskin](https://github.com/selkies-project/sealskin)'s [`collaboration.py`](https://github.com/selkies-project/sealskin/blob/main/server/app/collaboration.py) manages the token table of a shared desktop as collaborators join and leave, with the controller, viewer, and gamepad-slot roles above.

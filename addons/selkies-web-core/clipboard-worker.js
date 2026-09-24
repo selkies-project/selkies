@@ -16,7 +16,7 @@
  * decoded size, which the bridge reports and compares against limits.
  *
  * A multipart download arrives as `DECODE_BEGIN`, one `DECODE_CHUNK` per
- * message and `DECODE_END`, which alone answers; `DECODE_ABORT` drops an
+ * message, and `DECODE_END`, which alone answers; `DECODE_ABORT` drops an
  * unfinished one. Only that keeps the payload off the main thread entirely:
  * joining the chunks there first builds the whole base64 string, and then
  * copies it again into the message that carries it here.

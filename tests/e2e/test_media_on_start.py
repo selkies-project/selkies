@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The session start policy end to end, over both transports in Chromium.
 
-A session starts with video, audio and gamepad input on and the microphone
+A session starts with video, audio, and gamepad input on and the microphone
 and webcam off; the `*_on_start` settings change that for the session owner's
 primary page, and what starts off is not captured at all until the side menu
 turns it on. Each block starts a server with one setting flipped and reads

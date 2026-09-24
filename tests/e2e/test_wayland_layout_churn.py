@@ -35,7 +35,7 @@ SECONDARY_SIZES = [(1280, 720), (1920, 1080)]
 
 
 def log_trouble(line: str) -> bool:
-    """A compositor refusal, a dropped frame or a crash; the audio capture's own retries are
+    """A compositor refusal, a dropped frame, or a crash; the audio capture's own retries are
     not this suite's to judge."""
     if line.startswith("[pcmflux]"):
         return False

@@ -10,7 +10,7 @@ busy processes in short bursts, each long enough to drop frames and too short
 for the receiver to ask for a keyframe on its own. The scene is tests/tools/motion_scene.py, whose every frame spells its own
 index, so a decoded picture can be compared with the frame it claims to be.
 Counted throughout: the frames the server dropped, those of them the encoder
-was told to predict past, the keyframes decoded and the picture-loss
+was told to predict past, the keyframes decoded, and the picture-loss
 indications the receiver sent. Measured against the same load without the
 repair, which spends a keyframe for every six frames it drops: 286 drops and 49
 keyframes there, 260 drops and none here.

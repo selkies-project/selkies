@@ -19,7 +19,7 @@
  * namespace (origin plus pathname, never the query: a per-session `?token=`
  * must not mint a namespace per connect and exhaust the origin's quota). This
  * module also owns the one-time migration from the two legacy key schemes: a
- * sanitizer that kept `?`, `=` and `:` literal, and a full-href derivation
+ * sanitizer that kept `?`, `=`, and `:` literal, and a full-href derivation
  * whose token-scoped keys are pruned on every load to recover stores the leak
  * already filled.
  * @module

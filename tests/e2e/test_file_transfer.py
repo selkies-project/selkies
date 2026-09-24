@@ -14,7 +14,7 @@ websockets / webrtc:
     client's slicing threshold through the page so the client's chunked path is
     exercised end to end.
 policy:
-    `file_transfers=upload`, `download` and `none` each refuse the other
+    `file_transfers=upload`, `download`, and `none` each refuse the other
     direction on the wire and hide its button in both dashboards; with Basic
     auth the view-only password (the server's viewer ceiling) downloads but
     cannot upload, and a shared/viewer page never starts an upload at all.
@@ -144,7 +144,7 @@ def api_checks(res: "H.Results", full: bool) -> None:
 
     Args:
         res: Results accumulator.
-        full: Also cover slicing, the refusals and the index details; the
+        full: Also cover slicing, the refusals, and the index details; the
             other transport's block repeats only the plain round trip, since
             the routes are transport-independent.
     """

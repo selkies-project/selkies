@@ -6,7 +6,7 @@ derives the prefix from its own document path rather than assuming the root,
 and a client that gets that wrong asks a server that only answers
 ``/desk/api/...`` for ``/api/...`` and comes up dead with no visible cause.
 Both streaming cores and both dashboards compute it, so each payload is served
-under the prefix here and watched for where its requests, its websocket and
+under the prefix here and watched for where its requests, its websocket, and
 its static assets actually go.
 """
 import os

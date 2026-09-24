@@ -53,7 +53,7 @@ The video encoder and its rate control. The dashboard chooses among what the ser
 | `--use-cpu`<br>`SELKIES_USE_CPU` | `false`<br>bool | Force CPU-based encoding for pixelflux. |
 | `--gpu-id`<br>`SELKIES_GPU_ID` | (empty)<br>str | GPU ID for hardware video encoders: selects /dev/dri/renderD{128 + n} and the GPU-stats index. Empty (default) sets no explicit pick, encoding on ID 0 — the first GPU — or on the GPU chosen by --auto-gpu; -1 disables hardware encoding. Ignored when --encode-dri specifies a device path. |
 | `--encode-dri`<br>`SELKIES_ENCODE_DRI`<br>`DRI_NODE` | (empty)<br>str | Path to the DRI render node the ENCODER uses (VA-API/NVENC device selection). |
-| `--webrtc-pacer`<br>`SELKIES_WEBRTC_PACER` | `true`<br>bool | Pace outgoing WebRTC packets per transport with strict priorities (audio/RTCP > data-channel > video), an IDR-aware video queue budget and GOP-reset recovery, so audio and interactive signaling are protected from video bursts on congested links. Enabled by default; set SELKIES_WEBRTC_PACER=false to disable. SELKIES_WEBRTC_PACER_STALE_MS sets the stale-GOP purge deadline in milliseconds (0 = disabled). |
+| `--webrtc-pacer`<br>`SELKIES_WEBRTC_PACER` | `true`<br>bool | Pace outgoing WebRTC packets per transport with strict priorities (audio/RTCP > data-channel > video), an IDR-aware video queue budget, and GOP-reset recovery, so audio and interactive signaling are protected from video bursts on congested links. Enabled by default; set SELKIES_WEBRTC_PACER=false to disable. SELKIES_WEBRTC_PACER_STALE_MS sets the stale-GOP purge deadline in milliseconds (0 = disabled). |
 | `--backpressure-queue-size`<br>`SELKIES_BACKPRESSURE_QUEUE_SIZE` | `120`<br>int, 1 to 100000 | Max frames/audio chunks buffered per stream before dropping under backpressure (WebSockets mode). Higher tolerates larger client hiccups at the cost of latency. |
 
 ## Audio
@@ -225,7 +225,7 @@ The transport, the listening address, TLS, the login, and the master token.
 | `--https-cert`<br>`SELKIES_HTTPS_CERT` | `/etc/ssl/certs/ssl-cert-snakeoil.pem`<br>str | Path to the TLS server certificate file when HTTPS is enabled |
 | `--https-key`<br>`SELKIES_HTTPS_KEY` | `/etc/ssl/private/ssl-cert-snakeoil.key`<br>str | Path to the TLS server private key file when HTTPS is enabled, set to an empty value if the private key is included in the certificate Never sent to clients. |
 | `--cert-reload-interval`<br>`SELKIES_CERT_RELOAD_INTERVAL` | `30`<br>int, from 0 | Seconds between checks for SSL certificate file changes when HTTPS is enabled, set to 0 to disable automatic certificate reloading |
-| `--enable-basic-auth`<br>`SELKIES_ENABLE_BASIC_AUTH` | `true`<br>bool | Enable basic authentication on the server. On by default, and the server refuses to start until a password is set through --basic-auth-password, SELKIES_BASIC_AUTH_PASSWORD, PASSWORD or PASSWD; pass --enable-basic-auth=false to serve without a login instead. |
+| `--enable-basic-auth`<br>`SELKIES_ENABLE_BASIC_AUTH` | `true`<br>bool | Enable basic authentication on the server. On by default, and the server refuses to start until a password is set through --basic-auth-password, SELKIES_BASIC_AUTH_PASSWORD, PASSWORD, or PASSWD; pass --enable-basic-auth=false to serve without a login instead. |
 | `--basic-auth-user`<br>`SELKIES_BASIC_AUTH_USER`<br>`CUSTOM_USER`<br>`USERNAME`<br>`USER` | `ubuntu`<br>str | Username for basic authentication; resolves from the CUSTOM_USER, then USERNAME, then USER environment variables, and defaults to "ubuntu" when none is set. Never sent to clients. |
 | `--basic-auth-password`<br>`SELKIES_BASIC_AUTH_PASSWORD`<br>`PASSWORD`<br>`PASSWD` | (empty)<br>str | Password used when basic authentication is set; resolves from SELKIES_BASIC_AUTH_PASSWORD, then PASSWORD, then PASSWD, so an image that already names a container account password does not have to repeat it. There is no default: the server will not start with basic authentication enabled until one of these is set. Never sent to clients. |
 | `--basic-auth-viewonly-password`<br>`SELKIES_BASIC_AUTH_VIEWONLY_PASSWORD`<br>`VIEWONLY_PASSWORD` | (empty)<br>str | Optional second basic-auth password that grants view-only access. Clients authenticating with it are capped at the viewer role (no keyboard, mouse, clipboard, gamepad, or command input) regardless of the role they request, while the main password authorizes full control. Empty disables the split. Ignored in secure mode, where the master token governs roles. Never sent to clients. |
@@ -235,7 +235,7 @@ The transport, the listening address, TLS, the login, and the master token.
 
 ## WebRTC and TURN
 
-The opt-in WebRTC transport's ICE, STUN and TURN configuration.
+The opt-in WebRTC transport's ICE, STUN, and TURN configuration.
 
 | Setting | Default | Description |
 | --- | --- | --- |
@@ -262,11 +262,11 @@ The opt-in WebRTC transport's ICE, STUN and TURN configuration.
 | `--webrtc-port-range`<br>`SELKIES_WEBRTC_PORT_RANGE` | (empty)<br>str | Inclusive UDP port range "min-max" (e.g. "50000-50100") that the local sockets behind direct WebRTC host ICE candidates bind into, for scheduler-managed deployments that allot each session a small firewalled window. Both bounds must lie within 1024-65535; a malformed or out-of-range value is rejected rather than clamped. Distinct from TURN_MIN_PORT/TURN_MAX_PORT, which confine the TURN relay allocation on the TURN server. Empty (default) keeps ephemeral OS-assigned ports. |
 | `--webrtc-udp-mux-port`<br>`SELKIES_WEBRTC_UDP_MUX_PORT` | `0`<br>int, 0 to 65535 | Single UDP port every WebRTC session shares for its host ICE candidates (UDPMUX): bound once on each host address at startup, with sessions told apart by their ICE username fragment, so one forwarded port (e.g. "-p 59000:59000/udp") serves any number of sessions. STUN server-reflexive discovery rides the same port; TURN relay and mDNS sockets stay separate, and webrtc_port_range is unused. 0 (default) gives each session sockets of its own. |
 | `--webrtc-tcp-mux-port`<br>`SELKIES_WEBRTC_TCP_MUX_PORT` | `0`<br>int, 0 to 65535 | Single TCP port on which the server accepts ICE-TCP connections (TCPMUX), advertised as a passive TCP host candidate on each host address next to the UDP ones, so a client on a network that blocks UDP still connects; UDP is preferred whenever it works. It may equal the UDP mux port, and a port firewalls pass, such as 443, is the usual choice for a public deployment. 0 (default) offers no TCP candidates. |
-| `--webrtc-ice-lite`<br>`SELKIES_WEBRTC_ICE_LITE` | `false`<br>bool | Run the server's ICE agent as ICE-lite: it offers host candidates only, takes the controlled role and answers the client's connectivity checks instead of sending its own, which suits a server whose host candidates are reachable as advertised (a public address, a static 1:1 NAT with webrtc_public_ip, or forwarded mux ports). STUN and TURN are then unused by the server itself; clients still receive them for candidates of their own. |
+| `--webrtc-ice-lite`<br>`SELKIES_WEBRTC_ICE_LITE` | `false`<br>bool | Run the server's ICE agent as ICE-lite: it offers host candidates only, takes the controlled role, and answers the client's connectivity checks instead of sending its own, which suits a server whose host candidates are reachable as advertised (a public address, a static 1:1 NAT with webrtc_public_ip, or forwarded mux ports). STUN and TURN are then unused by the server itself; clients still receive them for candidates of their own. |
 
 ## Recording, audit, and metrics
 
-The recording tap, the audit webhook and the metrics endpoints.
+The recording tap, the audit webhook, and the metrics endpoints.
 
 | Setting | Default | Description |
 | --- | --- | --- |

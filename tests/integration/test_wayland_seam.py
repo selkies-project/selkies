@@ -174,7 +174,7 @@ class Patch:
 
 def main() -> "H.Results":
     """Walk a window across the seam and watch both displays' pixels."""
-    # A previous run's env dump, log and socket files would be read as this
+    # A previous run's env dump, log, and socket files would be read as this
     # run's; a stale display number can even point at a live foreign server.
     shutil.rmtree(RUNTIME, ignore_errors=True)
     os.makedirs(RUNTIME, mode=0o700, exist_ok=True)

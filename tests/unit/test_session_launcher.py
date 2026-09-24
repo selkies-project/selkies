@@ -8,7 +8,7 @@ XDG_CURRENT_DESKTOP, by the default the host's display manager or session
 alternative records, or else the session named after its own desktop; a name
 only the other backend's sessions carry stands for their desktop, and one no
 file carries runs as a command. The backend is Selkies' own setting, read by Selkies' parser,
-so SELKIES_WAYLAND, its legacy name and --wayland mean what they mean to the
+so SELKIES_WAYLAND, its legacy name, and --wayland mean what they mean to the
 server. The X authority file holds one wildcard cookie, which the vendored
 Xlib must match on any display as libXau does. The package registers the
 console script and the Jupyter server-proxy entry.

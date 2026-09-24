@@ -35,7 +35,7 @@ from playwright.sync_api import sync_playwright
 
 WL_SOCKET = "wayland-1"
 # The color painted on the server, and how far a decoded sample may stray
-# from it (4:2:0 chroma, limited range and two codecs' rounding).
+# from it (4:2:0 chroma, limited range, and two codecs' rounding).
 PAINT = (40, 120, 220)
 PAINT_ARGB = "ff2878dc"
 TOLERANCE = 24

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """HTTPS comes up without anyone having made a certificate first.
 
-Browsers gate the clipboard, gamepads, pointer lock and the camera on a secure
+Browsers gate the clipboard, gamepads, pointer lock, and the camera on a secure
 context, so a session that is not on localhost needs TLS before those work at
 all. Requiring a certificate to exist first made turning it on a two-step job,
 and the error told the operator to run openssl. Enabling HTTPS now mints a

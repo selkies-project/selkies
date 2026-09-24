@@ -23,7 +23,7 @@
  */
 
 /**
- * Keyboard, pointer, touch, wheel and gamepad capture on the stream element,
+ * Keyboard, pointer, touch, wheel, and gamepad capture on the stream element,
  * sent to the server as the text messages of the input protocol.
  *
  * Keyboard: every event resolves to an X11 keysym through noVNC's key tables
@@ -56,7 +56,7 @@
  * `m,<x>,<y>,<mask>,<magnitude>` (absolute) and
  * `m2,<dx>,<dy>,<mask>,<magnitude>` (relative; scroll pulses ride mask bits
  * 3 to 7); `p,<0|1>` and `SET_NATIVE_CURSOR_RENDERING,<0|1>` on pointer lock
- * changes; `js,c`, `js,d`, `js,b`, `js,a` and `js,h` for gamepads.
+ * changes; `js,c`, `js,d`, `js,b`, `js,a`, and `js,h` for gamepads.
  * @module
  */
 
@@ -1283,7 +1283,7 @@ const KeyboardUtil = {
      * Keysym from the physical key code, for a shortcut chord whose logical
      * key an IME swallowed (keyCode 229, key `Process`) or a non-Latin layout
      * localized. Shortcuts match on the base level keysym, so letters map
-     * lowercase; covers letters, digits, punctuation and the non-printable
+     * lowercase; covers letters, digits, punctuation, and the non-printable
      * keys common shortcuts use.
      * @param {string} code
      * @returns {number|null}
@@ -2484,7 +2484,7 @@ export class Input {
      * Whether every Alt-position key down is a level shift rather than Alt.
      * This client wraps Alt_L around a chord because it read the Alt-position
      * key as Alt, so a key it read as anything else must not be wrapped: the
-     * `getKeysym` remaps put macOS Option on Mode_switch, ISO_Level3_Shift or
+     * `getKeysym` remaps put macOS Option on Mode_switch, ISO_Level3_Shift, or
      * Meta_L there, and only Alt_L/Alt_R name the action modifier. With
      * nothing resolved for it -- a keydown an IME or an OS grab swallowed --
      * only an engine's own `AltGraph` says it shifted a level.
@@ -3845,7 +3845,7 @@ export class Input {
 
     /**
      * Forgets everything learned about the current scroll device: notch
-     * quantums, classification samples and fractional-notch carries. Called
+     * quantums, classification samples, and fractional-notch carries. Called
      * after a wheel-idle gap, since the learned state only holds for the
      * device that produced it; afterwards behavior matches a fresh page load.
      */
@@ -3910,7 +3910,7 @@ export class Input {
     /**
      * Normalizes a vertical wheel delta to a fractional count of notches,
      * learning the per-notch quantum per delta mode (the smallest observed
-     * jump) so mice, high-resolution mice and line-mode wheels all resolve to
+     * jump) so mice, high-resolution mice, and line-mode wheels all resolve to
      * about one notch per detent. Trackpad pixel deltas measure pan distance,
      * not notches, so they take a fixed 100px notch like the horizontal axis
      * (the learned quantum would be the gesture's tiniest ramp-up sample);
@@ -4345,7 +4345,7 @@ export class Input {
         this.resyncGamepads();
     }
 
-    /** Attaches the keyboard, pointer, touch, wheel and composition listeners and shows the cursor. */
+    /** Attaches the keyboard, pointer, touch, wheel, and composition listeners and shows the cursor. */
     attach_context() {
         if (this.inputAttached) return;
         this._windowMath();
@@ -4511,7 +4511,7 @@ export class Input {
 
     /**
      * Enters gaming mode: fullscreen that also holds the pointer and the
-     * keyboard, so a game sees Escape, Alt+Tab and raw motion instead of the
+     * keyboard, so a game sees Escape, Alt+Tab, and raw motion instead of the
      * browser. A locked keyboard delivers a short Escape to the session, so
      * holding it is what leaves this mode.
      *

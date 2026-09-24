@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """An application under the interposer with no kernel /dev/uinput still creates
-virtual input devices: its open("/dev/uinput"), the UI_* setup ioctls and the
+virtual input devices: its open("/dev/uinput"), the UI_* setup ioctls, and the
 event writes are served in userspace, the created device appears as a
 /dev/input/eventN backed by a socket, and a sibling process reads it as an
 ordinary evdev device. On a host with a writable /dev/uinput the path is not

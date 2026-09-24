@@ -27,7 +27,7 @@ import {
 
 /**
  * The apps modal: the proot-apps catalog, fetched from its GitHub metadata,
- * with install, remove, update and launch actions.
+ * with install, remove, update, and launch actions.
  *
  * Actions go through the apps command contract both dashboards share
  * (`selkies-web-core/lib/app-commands.js`): it posts the selkies-proot wrapper
@@ -74,7 +74,7 @@ interface AppsProps {
 }
 
 /**
- * Renders the catalog grid, its search box and the per-app detail view
+ * Renders the catalog grid, its search box, and the per-app detail view
  * inside a dialog controlled by the parent.
  *
  * The catalog is fetched once per modal open, plus explicit Retry presses; a

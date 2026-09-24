@@ -291,7 +291,7 @@ def _sync_announce_monitor_change(
     RRScreenChangeNotify or RRNotify. So a swap that does not resize the
     framebuffer never reaches a running desktop, which keeps painting and
     constraining windows against the monitors it last saw. An output property
-    is the one RRNotify carrying no geometry, physical size or CRTC of its own,
+    is the one RRNotify carrying no geometry, physical size, or CRTC of its own,
     and the server emits it even for an unchanged value.
 
     A server with no output carries no property to bump, so nothing is sent
@@ -546,7 +546,7 @@ def restart_command(command: List[str]) -> List[str]:
 
     The command line a session started its manager with carries the autostart
     hook (Openbox's `--startup openbox-autostart`), and a restart that keeps
-    it runs the desktop's autostart again: a terminal, a panel and everything
+    it runs the desktop's autostart again: a terminal, a panel, and everything
     else the session opens, once per restart. The manager is being restarted
     only to re-read the monitor set, so the session's own options are dropped.
 

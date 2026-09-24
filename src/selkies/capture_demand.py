@@ -6,7 +6,7 @@
 A device requested at connect is held until the session ends, so the indicator beside the
 user's camera reports the session's length rather than the desktop's use. With
 ``webcam_on_start`` or ``microphone_on_start`` set to ``demand``, a `CaptureDemand` per device polls its
-readers instead: the interposer's clients, PipeWire's consumers and a kernel device's openers
+readers instead: the interposer's clients, PipeWire's consumers, and a kernel device's openers
 for the camera (`webcam.VirtualWebcam.consumers`), the sound server's recording streams for the
 microphone (`audio_control.AudioControl.recorders`). A reader is passed on at the poll that
 finds it; its absence only once it has lasted the device's hold-off, so an application's

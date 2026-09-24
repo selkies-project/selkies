@@ -247,7 +247,7 @@ def drive_pinned(res: "H.Results", p: Any) -> None:
         said = []
         page.on("console", lambda m: said.append(m.text))
         page.goto(PAGE_DECODE_URL, wait_until="load")
-        # Past the no-output watchdog, its software retry and the reload the
+        # Past the no-output watchdog, its software retry, and the reload the
         # fatal fallback ends in, none of which a stream the engine refused
         # may reach.
         page.wait_for_timeout(25000)

@@ -12,7 +12,7 @@ behind nvitop/nvtop; exact PCI identity, no subprocess per poll) with an
 its load through devfreq. Every other card is read through DRM: amdgpu counts
 utilization and VRAM device-wide in sysfs, and the rest have the engine times in
 their clients' fdinfo summed, the kernel's vendor-neutral interface that i915,
-xe, Mali, Adreno and VideoCore all write. A card whose driver writes neither --
+xe, Mali, Adreno, and VideoCore all write. A card whose driver writes neither --
 Apple's, on Asahi -- is listed with no utilization rather than a zero.
 
 ``get_gpus(dri_node=...)`` keys the readings to the render node the pipeline

@@ -27,7 +27,7 @@ import { isMobileClient } from "@/utils";
 
 interface GamepadProps {
     /**
-     * Owned by DashboardOverlay, one source for the menu entry, the hotkey
+     * Owned by DashboardOverlay, one source for the menu entry, the hotkey,
      * and this preview: while the touch overlay is up the physical visualizer
      * would only mirror it, so it is hidden.
      */

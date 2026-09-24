@@ -31,7 +31,7 @@ would show them and need no knowledge of the framebuffer
 the primary publishes the move first (`output_layout_stage`). Anywhere else
 the server has one CRTC covering the framebuffer and each display is a RandR
 1.5 logical monitor over it, which consumers that build their screens from
-CRTCs do not follow; that layout, the window-manager restart it needs and the
+CRTCs do not follow; that layout, the window-manager restart it needs, and the
 subprocess fallbacks are `display_utils_xrandr`, which this module imports
 only at the point it falls back.
 

@@ -6,16 +6,16 @@
 
 /**
  * The sidebar's stats: what the stream runs on, the graphs that grow while the
- * section stays open, the figures under them and the host's meters.
+ * section stays open, the figures under them, and the host's meters.
  *
  * Everything drawn comes from the core's `window.stream_info`,
- * `window.stream_client` and `window.stream_stats`
+ * `window.stream_client`, and `window.stream_stats`
  * (`selkies-web-core/lib/stream-stats.js`), read once a second and only while
  * the section is on screen; what a row says and when it warns is
  * `lib/stream-stats-view.js`, shared with the wish dashboard. Being on screen
  * is what turns the numbers on: the component posts `statsOpen` to the core,
  * which asks the server for them, and posts it again with `open: false` when
- * the section folds, the sidebar shuts or the tab hides.
+ * the section folds, the sidebar shuts, or the tab hides.
  * @module
  */
 import { useEffect, useMemo, useState } from "react";

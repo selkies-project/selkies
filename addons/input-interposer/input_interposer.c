@@ -41,7 +41,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
     Device identity (name, VID/PID, uniq) answered through the ioctls is hard
     coded to the same values the sibling fake-udev library publishes, so udev,
-    joydev and evdev consumers agree on one device. stat()/fstat() families
+    joydev, and evdev consumers agree on one device. stat()/fstat() families
     forge a character device with major 13 and the node's index as minor,
     which SDL uses to dedupe devices, and /dev/input listings (readdir/scandir)
     gain the evdev nodes whose sockets are currently bound, for scanners that
@@ -348,7 +348,7 @@ typedef struct {
 
 /**
  * One interposed device: its type (DEV_TYPE_JS/DEV_TYPE_EV), device path, socket
- * path and the table of outstanding open() handles. handle_count is statically
+ * path, and the table of outstanding open() handles. handle_count is statically
  * zero, so fd lookups match nothing before the first open() even when an
  * intercepted call runs before the constructor. corr is device-global like the
  * kernel joystick driver's correction state; js_config is the server's
@@ -1248,7 +1248,7 @@ int scandir64(const char *dirp, struct dirent64 ***namelist,
  * peer therefore cannot hang the opening thread. The peer-supplied button and
  * axis counts are clamped to the map array bounds.
  *
- * @return 0 with the config filled, -1 on read error, EOF or timeout.
+ * @return 0 with the config filled, -1 on read error, EOF, or timeout.
  */
 static int read_socket_config(int sockfd, js_config_t *config_dest) {
     ssize_t bytes_to_read = sizeof(js_config_t);
@@ -1341,7 +1341,7 @@ config_read_cleanup:
 
 /**
  * Connects to a device socket (retrying ENOENT/ECONNREFUSED for up to
- * SOCKET_CONNECT_TIMEOUT_MS), reads the device configuration and sends the
+ * SOCKET_CONNECT_TIMEOUT_MS), reads the device configuration, and sends the
  * one-byte architecture specifier. Works on locals and out-params only, never
  * the shared slot, so it runs without interposers_mutex; the caller publishes
  * the fd and config under the lock.
@@ -1407,7 +1407,7 @@ connect_fail:
 /* ==== App-created uinput devices ======================================= */
 /* An application under the preload with no writable kernel /dev/uinput (an
  * unprivileged container) still creates virtual input devices here: its
- * open("/dev/uinput"), the UI_* setup ioctls and the event writes are served
+ * open("/dev/uinput"), the UI_* setup ioctls, and the event writes are served
  * in userspace. UI_DEV_CREATE binds a socket in the shared directory and
  * writes a descriptor file beside it; the events the creator writes fan out to
  * every sibling process that opens the resulting /dev/input/eventN, whose
@@ -1585,7 +1585,7 @@ static int udyn_write_desc(int num, const udyn_desc_t *d) {
 }
 
 /* UI_DEV_CREATE: bind the first free dynamic node's socket, write its
- * descriptor and start the accept thread. Holds udyn_mutex. */
+ * descriptor, and start the accept thread. Holds udyn_mutex. */
 static int udyn_create_device_locked(udyn_creator_t *c) {
     if (c->created) return 0;
     int listen_fd = -1, chosen = -1;
@@ -1695,7 +1695,7 @@ static int udyn_creator_ioctl(udyn_creator_t *c, ioctl_request_t request, void *
         return 0;
     }
     if (request == UI_GET_VERSION) { *(unsigned int *)arg = 5; return 0; }
-    /* UI_SET_PHYS, force-feedback upload/erase and other setup calls: accepted. */
+    /* UI_SET_PHYS, force-feedback upload/erase, and other setup calls: accepted. */
     return 0;
 }
 
@@ -2466,7 +2466,7 @@ int close(int fd) {
  * stalls mid-event cannot hang the caller. Appends at `*consumed`.
  *
  * @return 1 once the whole event is in `buf`; 0 when only a prefix is (budget
- *         exhausted, EOF or hard error), with `*consumed` counting it.
+ *         exhausted, EOF, or hard error), with `*consumed` counting it.
  */
 static int drain_event_remainder(int fd, void *buf, size_t *consumed, size_t event_size, int budget_ms) {
     struct timespec drain_start;
@@ -2936,7 +2936,7 @@ exit_js_ioctl:
  * for EVIOCGPHYS/EVIOCGUNIQ derives. Anything else, including joydev ioctls,
  * is ENOTTY.
  *
- * @return 0, a string length, the buffer length or an effect id, or -1 with
+ * @return 0, a string length, the buffer length, or an effect id, or -1 with
  *         errno set.
  */
 int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd, ioctl_request_t request, void *arg) {

@@ -1,6 +1,6 @@
 [codespell]
 # npm dependencies, lockfiles, local build output, generated bundles, the
-# translation catalogs, the TypeScript build caches and the desktop theme
+# translation catalogs, the TypeScript build caches, and the desktop theme
 # configs (whose keys are spelled by their toolkits, e.g. openbox's
 # osd.hilight.bg) are not ours to spell-check.
 skip = ./.git,./build,./addons/*/node_modules,./addons/*/dist,./addons/desktop/theme,./website/node_modules,./website/out,./website/.next,./website/public,./src/selkies/selkies_web,*.lock,package-lock.json,*.tsbuildinfo,*.min.js,selkies-core.js,translations.js,translations-extra.ts,*.svg,*.png,*.ico,*.woff,*.woff2

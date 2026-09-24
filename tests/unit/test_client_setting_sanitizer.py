@@ -2,7 +2,7 @@
 """What a client is allowed to change, and what it is given back when it is not.
 
 Both transports hand every client-proposed setting to the one sanitizer in
-settings.py, so a value is accepted, clamped or refused identically whichever
+settings.py, so a value is accepted, clamped, or refused identically whichever
 socket delivered it. The rules that are easy to break silently: a range clamps
 into the operator's own bounds while an int clamps into the declared ones; an
 enum outside the allowed stops falls back to the server's resolved value rather

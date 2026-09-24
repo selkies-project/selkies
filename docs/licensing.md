@@ -10,7 +10,7 @@ Selkies is licensed under the [Mozilla Public License 2.0](https://github.com/se
 is file-level copyleft: a modified MPL file stays MPL when distributed, the
 larger work around it may be under any license. The Python package, the web
 client, the addons (Input Interposer, V4L2 interposer, fake-udev, coturn and
-TURN REST helpers, universal touch gamepad) and the build and packaging scripts
+TURN REST helpers, universal touch gamepad), and the build and packaging scripts
 all carry MPL-2.0 headers.
 
 Categories used on this page: **copyleft** (GPL: the combined binary must be
@@ -26,7 +26,7 @@ GPL-licensed libraries into an installation made from the release wheels:
 
 | Source | GPL component | How it gets in | How to leave it out |
 | --- | --- | --- | --- |
-| `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), which encodes H.264 in software wherever no GPU encoder is used: the `h264enc` fallback and `h264enc-striped` alike; and x265 (GPL-2.0-or-later), reached through FFmpeg, behind `h265enc` in the same case | the default `gpl` Cargo feature of pixelflux; the published wheels are built with it and bundle `libx264.so`, `libx265.so` and a GPL-built FFmpeg | build pixelflux with `PIXELFLUX_ENABLE_GPL=0` (`--no-default-features --features openh264`): BSD-licensed Cisco OpenH264 and kvazaar take the places of libx264 and x265; VP8/VP9 (libvpx) and AV1 (SVT-AV1) are BSD-licensed in every build. The inventory and the check that keeps that build copyleft-free live in [pixelflux's LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md); pixelflux's musllinux wheels additionally bundle Alpine's GPL-built FFmpeg, see there. |
+| `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), which encodes H.264 in software wherever no GPU encoder is used: the `h264enc` fallback and `h264enc-striped` alike; and x265 (GPL-2.0-or-later), reached through FFmpeg, behind `h265enc` in the same case | the default `gpl` Cargo feature of pixelflux; the published wheels are built with it and bundle `libx264.so`, `libx265.so`, and a GPL-built FFmpeg | build pixelflux with `PIXELFLUX_ENABLE_GPL=0` (`--no-default-features --features openh264`): BSD-licensed Cisco OpenH264 and kvazaar take the places of libx264 and x265; VP8/VP9 (libvpx) and AV1 (SVT-AV1) are BSD-licensed in every build. The inventory and the check that keeps that build copyleft-free live in [pixelflux's LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md); pixelflux's musllinux wheels additionally bundle Alpine's GPL-built FFmpeg, see there. |
 
 The WebRTC stack adds no FFmpeg of its own: pixelflux and pcmflux encode and
 decode the video and audio, and the RTP layer packetizes their output through
@@ -110,14 +110,14 @@ so it matches the sources.
 
 pixelflux builds with its GPL components on by default (libx264 for software
 H.264), and that is the supported default for every deployment — the release wheels,
-the container images and the AppImage, which may therefore bundle a GPL FFmpeg
+the container images, and the AppImage, which may therefore bundle a GPL FFmpeg
 through pixelflux. `PIXELFLUX_ENABLE_GPL=0` is the opt-out for operators who
 need a copyleft-free build; the sections below describe both.
 
 ## What a non-GPL deployment contains
 
 With pixelflux built with `PIXELFLUX_ENABLE_GPL=0`: Selkies, pixelflux,
-pcmflux and the web client under the weak copyleft of MPL-2.0, the permissive
+pcmflux, and the web client under the weak copyleft of MPL-2.0, the permissive
 Python packages above, and the LGPL libraries they load (libpulse through
 pcmflux and pulsectl, python-xlib, glibc, FFmpeg as an LGPL build through
 pixelflux). Nothing GPL, and nothing that reaches beyond its own files. The
@@ -135,7 +135,7 @@ deployment that ships them is distributed under GPL terms for those parts.
 ## How this is kept up to date
 
 Selkies has no license gate of its own: the copyleft switch is pixelflux's, and
-pixelflux's `scripts/check-licenses.py`, `deny.toml` and `Licenses` workflow
+pixelflux's `scripts/check-licenses.py`, `deny.toml`, and `Licenses` workflow
 enforce that its non-GPL build stays copyleft-free (pcmflux carries the same
 cargo-deny check). This page is the inventory of what Selkies adds on top.
 Regenerate the figures with `pip show` or `importlib.metadata` for the Python

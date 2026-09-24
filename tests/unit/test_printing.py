@@ -2,8 +2,8 @@
 """Printed documents reach the browser through the spool.
 
 A document that lands whole in the print spool is announced once, whatever
-way it landed; `/api/print/<name>` serves it, records it for the audit and
-takes it out of the spool, refusing a viewer, a disabled policy and any name
+way it landed; `/api/print/<name>` serves it, records it for the audit, and
+takes it out of the spool, refusing a viewer, a disabled policy, and any name
 that is not a document in the spool; and each transport announces to the
 primary controller pages alone.
 """

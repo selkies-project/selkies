@@ -3,12 +3,12 @@
 
 The real auth middleware runs on a stub application carrying the route set the
 server registers. With a master token set and Basic auth off, uploads, the file
-listing, TURN and metrics want a provisioned session token — as a Bearer header,
+listing, TURN, and metrics want a provisioned session token — as a Bearer header,
 as ``?token=``, or as the cookie the web client sets — or the master token;
 the control endpoints (``/api/tokens``, ``/api/switch``) take the master token
 as ``Authorization: Bearer`` or, beside a Basic login's Authorization header,
 in the named fallback header; the
-liveness routes, the static client and the WebSocket handshakes (which carry
+liveness routes, the static client, and the WebSocket handshakes (which carry
 their own token gate) stay as they are. A viewer-role token is refused where
 the view-only password is. With Basic auth on as well, a token is accepted
 beside the Basic credentials; without a master token nothing changes.

@@ -50,7 +50,7 @@ export const WEBCAM_CODEC_H265 = 5;
 /**
  * Candidates in preference order; support reports are no promise of speed,
  * so the probe measures each on real frames (Firefox's software H.264 tops
- * out under 30 fps at 720p where its VP8 runs three times faster). VP9, AV1
+ * out under 30 fps at 720p where its VP8 runs three times faster). VP9, AV1,
  * and H.265 come after the two every engine encodes: their software encoders
  * are slower still, and H.265 exists only where the platform encodes it.
  */
@@ -779,7 +779,7 @@ export class WebcamCapture {
     }
   }
 
-  /** Stops the capture and releases the camera, encoder and workers; idempotent. */
+  /** Stops the capture and releases the camera, encoder, and workers; idempotent. */
   stop() {
     if (!this._active && !this._stream) {
       return;

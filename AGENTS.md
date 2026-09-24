@@ -187,7 +187,7 @@ Each is documented in full where named; read that before changing the subsystem.
   reaching one that never saw the press and leaving one that never sees the release
   (`Input._mouseButtonMovement`).
 - That drag is placed through the stream box the page it crossed onto published in desktop coordinates (the
-  `vp` verb), never from the grabbed page's own coordinates: two viewports share no origin, chrome height or
+  `vp` verb), never from the grabbed page's own coordinates: two viewports share no origin, chrome height, or
   device pixel ratio. Two events have to agree on the offset between a page's client frame and the desktop's
   before it publishes a box, because page zoom scales one frame and not the other, and short of that agreement
   the crossing keeps to the scaled overshoot. So does a crossing between two boxes that overlap on the desktop:

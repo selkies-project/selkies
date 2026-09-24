@@ -6,7 +6,7 @@
 
 Every transfer the server carries — clipboard content in either direction,
 a file upload, a file download — is one JSON object on `audit_webhook_url`:
-its `event`, an RFC 3339 `ts`, and metadata (byte size, MIME type or file
+its `event`, an RFC 3339 `ts`, and metadata (byte size, MIME type, or file
 name), never the content. Events queue in order and one task delivers them
 over a single keep-alive connection, so a transfer pays an enqueue and
 nothing else; a collector that is slow or down loses what overflows the

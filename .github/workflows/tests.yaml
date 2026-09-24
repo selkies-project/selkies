@@ -134,7 +134,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
-      - name: Install the display server, audio and GPU userspace
+      - name: Install the display server, audio, and GPU userspace
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
@@ -229,7 +229,7 @@ jobs:
         run: |
           Xvfb -help 2>&1 | grep -q -- 'CRTCs per screen (default: 4)'
       # The suites have to exercise the pixelflux and pcmflux that the images,
-      # packages and AppImages ship, which come from main HEAD rather than any
+      # packages, and AppImages ship, which come from main HEAD rather than any
       # released version. Whichever job resolved them left them here.
       - name: Download the pixelflux wheels (main HEAD)
         uses: actions/download-artifact@v8

@@ -2,7 +2,7 @@
 """Secure mode binds the API routes to the session token, on a real server.
 
 routes:      with a master token set and Basic auth off, /api/upload,
-             /api/files/ (listing and download), /api/turn and /api/metrics
+             /api/files/ (listing and download), /api/turn, and /api/metrics
              refuse a request without a token and take one as a Bearer
              header, as ?token=, or as the client's cookie; a viewer-role
              token cannot upload; the master token is accepted everywhere;

@@ -192,7 +192,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "webrtc_pacer",
         "type": "bool",
         "default": True,
-        "help": "Pace outgoing WebRTC packets per transport with strict priorities (audio/RTCP > data-channel > video), an IDR-aware video queue budget and GOP-reset recovery, so audio and interactive signaling are protected from video bursts on congested links. Enabled by default; set SELKIES_WEBRTC_PACER=false to disable. SELKIES_WEBRTC_PACER_STALE_MS sets the stale-GOP purge deadline in milliseconds (0 = disabled).",
+        "help": "Pace outgoing WebRTC packets per transport with strict priorities (audio/RTCP > data-channel > video), an IDR-aware video queue budget, and GOP-reset recovery, so audio and interactive signaling are protected from video bursts on congested links. Enabled by default; set SELKIES_WEBRTC_PACER=false to disable. SELKIES_WEBRTC_PACER_STALE_MS sets the stale-GOP purge deadline in milliseconds (0 = disabled).",
     },
     {
         "name": "file_transfers",
@@ -626,7 +626,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "enable_basic_auth",
         "type": "bool",
         "default": True,
-        "help": "Enable basic authentication on the server. On by default, and the server refuses to start until a password is set through --basic-auth-password, SELKIES_BASIC_AUTH_PASSWORD, PASSWORD or PASSWD; pass --enable-basic-auth=false to serve without a login instead.",
+        "help": "Enable basic authentication on the server. On by default, and the server refuses to start until a password is set through --basic-auth-password, SELKIES_BASIC_AUTH_PASSWORD, PASSWORD, or PASSWD; pass --enable-basic-auth=false to serve without a login instead.",
     },
     {
         "name": "basic_auth_user",
@@ -946,7 +946,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "webrtc_ice_lite",
         "type": "bool",
         "default": False,
-        "help": "Run the server's ICE agent as ICE-lite: it offers host candidates only, takes the controlled role and answers the client's connectivity checks instead of sending its own, which suits a server whose host candidates are reachable as advertised (a public address, a static 1:1 NAT with webrtc_public_ip, or forwarded mux ports). STUN and TURN are then unused by the server itself; clients still receive them for candidates of their own.",
+        "help": "Run the server's ICE agent as ICE-lite: it offers host candidates only, takes the controlled role, and answers the client's connectivity checks instead of sending its own, which suits a server whose host candidates are reachable as advertised (a public address, a static 1:1 NAT with webrtc_public_ip, or forwarded mux ports). STUN and TURN are then unused by the server itself; clients still receive them for candidates of their own.",
     },
     {
         "name": "enable_cloudflare_turn",
@@ -1290,7 +1290,7 @@ _HARDWARE_FULLCOLOR: Dict[int, Optional[List[str]]] = {}
 def hardware_encoders(encode_node_index: int, auto_gpu: str = "") -> Optional[Dict[str, str]]:
     """The hardware encoder of each codec the GPU behind a render node serves,
     by codec name, as the backend pixelflux named when it probed the node once and
-    remembered ("nvenc", "vaapi", "tegra" or "v4l2"); a codec without an entry has no hardware path on that node. None
+    remembered ("nvenc", "vaapi", "tegra", or "v4l2"); a codec without an entry has no hardware path on that node. None
     where nothing can be known: no pixelflux to ask (rendering the settings
     reference), or one without the probe, so a caller narrows nothing on a guess.
 
@@ -2113,7 +2113,7 @@ def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) ->
     return bool(default) if requested is None else bool(requested)
 
 
-# Never broadcast to clients: listener, filesystem and lifecycle-hook settings
+# Never broadcast to clients: listener, filesystem, and lifecycle-hook settings
 # a browser has no use for and that disclose host layout.
 CLIENT_PAYLOAD_EXCLUDED = [
     'port', 'addr', 'public', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',

@@ -4,7 +4,7 @@
 A hardware H.264 decoder can accept its config and then fail at decode() —
 isConfigSupported does not predict it — so the client retries the same encoder
 with hardwareAcceleration 'prefer-software' before the ladder closes the socket,
-degrades the encoder and reloads. A decoder can also take its config and then neither output a frame nor error, so nothing
+degrades the encoder, and reloads. A decoder can also take its config and then neither output a frame nor error, so nothing
 signals the ladder; the ``silent`` block injects that and checks the no-output watchdog trips
 the same retry. These blocks inject exactly those failures into a real browser and check each
 arm of the decision.

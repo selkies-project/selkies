@@ -11,9 +11,9 @@ The browser encodes its camera (H.264/VP8 over the WebRTC media track or
 WebCodecs over the WebSocket, MJPEG as the last-resort canvas path). The Selkies
 backend hands every encoded frame to `pixelflux.VirtualCamera`, which decodes it,
 fits it into the device's fixed raw format (I420 by default), publishes it into a
-shared-memory ring and rings a one-byte doorbell on the socket. This library
+shared-memory ring, and rings a one-byte doorbell on the socket. This library
 emulates the observable half of a fixed-function webcam: the `VIDIOC_*` ioctl
-surface, MMAP streaming buffers, `read()` I/O and `poll()` readiness.
+surface, MMAP streaming buffers, `read()` I/O, and `poll()` readiness.
 
 Where a v4l2loopback device is available (a desktop host, or a privileged
 container), pixelflux mirrors the same frames into it (`webcam_device`), and
@@ -34,7 +34,7 @@ from a PipeWire node alone.
   staging memfd once per connection via `SCM_RIGHTS`; `mmap()` of the device fd
   is redirected onto a per-handle buffer memfd, so the application maps real
   shared memory and `DQBUF` copies one frame into it.
-- Only a fixed format is advertised: the pixel format, resolution and frame
+- Only a fixed format is advertised: the pixel format, resolution, and frame
   rate the backend configures (`webcam_pixel_format`, `webcam_width`,
   `webcam_height`). Control ioctls return `EINVAL` per control (terminating
   enumeration loops the way the kernel does for a camera without controls);

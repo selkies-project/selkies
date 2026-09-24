@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 /* Scans the "input" subsystem (or the one named as the argument) and reports
- * how many devices it holds, how many carry ID_INPUT_JOYSTICK and how many
+ * how many devices it holds, how many carry ID_INPUT_JOYSTICK, and how many
  * are Selkies virtual pads, then the devnode of each device on its own line. */
 int main(int argc, char **argv) {
     const char *subsystem = argc > 1 ? argv[1] : "input";

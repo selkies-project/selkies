@@ -32,7 +32,7 @@ pcmflux's re-zeroing sample clock) so pts never jumps backward.
 A running pipeline is the display's media graph; its two captures are
 started and paused one by one underneath it. `start_media_pipeline` opens
 only the captures a consumer asked for, and `pause_screen_capture`,
-`resume_screen_capture`, `pause_audio_capture` and `resume_audio_capture`
+`resume_screen_capture`, `pause_audio_capture`, and `resume_audio_capture`
 stop and restart each while the pipeline stays running, so a session whose
 policy starts video or audio off never captures what nobody receives.
 

@@ -996,7 +996,7 @@ class DataStreamingServer(BaseStreamingService):
         video_paused_clients: Sockets that sent STOP_VIDEO (hidden tab) —
             any shared client, not viewers alone — excluded from the primary
             video fan-out until their next START_VIDEO while capture, control,
-            cursor and audio keep running.
+            cursor, and audio keep running.
         _persistent_capture_modules: One ScreenCapture per display id for the
             server's lifetime, so a restart does not re-initialize the backend
             (NVENC session, CUDA context, compositor handle).
@@ -1014,7 +1014,7 @@ class DataStreamingServer(BaseStreamingService):
             was started with.
         _pcmflux_reported_failure: `(module id, reason)` of the failure already
             logged for the current audio run.
-        _resource_monitor: The one sampler of CPU, memory and GPU
+        _resource_monitor: The one sampler of CPU, memory, and GPU
             (`resource_stats.ResourceMonitor`), started with the first
             connection and stopped with the last; its tick sends `stream_stats`
             and it samples only while `_stats_subscribers` is not empty.
@@ -1519,7 +1519,7 @@ class DataStreamingServer(BaseStreamingService):
         Rebroadcast with the layout, since a page maps a drag that crossed onto
         a neighbor through the neighbor's box rather than off its own edge.
         Only the browser knows those origins, and they are the only thing
-        relating two viewports whose monitors, window chrome and device pixel
+        relating two viewports whose monitors, window chrome, and device pixel
         ratios all differ. Ignored for an unknown display or an impossible box.
         """
         display_state = self.display_clients.get(display_id)
@@ -1546,7 +1546,7 @@ class DataStreamingServer(BaseStreamingService):
     def _display_config_payload(self) -> dict:
         """DISPLAY_CONFIG_UPDATE body: the display roster, the backend, plus
         each laid-out display's rectangle, its client's reported CSS-to-remote
-        scale and the desktop box that client draws it in, so a page can map a
+        scale, and the desktop box that client draws it in, so a page can map a
         cross-display drag into its neighbor's region and, on X11, a secondary
         can follow the primary's density."""
         payload = {
@@ -2147,7 +2147,7 @@ class DataStreamingServer(BaseStreamingService):
 
     async def _send_stream_stats(self, _now: float) -> None:
         """Resource-monitor tick: one `stream_stats` to every subscribed controller,
-        with its own display's encode figures, round trip and throttle state."""
+        with its own display's encode figures, round trip, and throttle state."""
         if not self._stats_subscribers:
             return
         host = stream_stats.host_stats(self._resource_monitor)
@@ -3341,7 +3341,7 @@ class DataStreamingServer(BaseStreamingService):
         teardown behind the reconnect grace, and last-client
         pipeline/collector shutdown.
 
-        Held keys, modifiers and pointer buttons are one global desktop state,
+        Held keys, modifiers, and pointer buttons are one global desktop state,
         so a departing socket force-releases them only if it could drive input
         AND its state is now unowned: the primary display's owner always
         qualifies, anything else only as the last input-capable client — a
@@ -4711,7 +4711,7 @@ class DataStreamingServer(BaseStreamingService):
         placement that overlaps a live output, and the primary's screen takes
         its new size only once its capture has restarted, so a secondary moving
         into room a shrinking primary gives up can only be created after that.
-        This pass therefore only removes, shrinks, moves and grows: stale and
+        This pass therefore only removes, shrinks, moves, and grows: stale and
         moved secondaries are destroyed (a secondary reposition is a destroy +
         recreate; its capture dies with the output and the start loop rebuilds
         it), a secondary that keeps its origin but shrinks gives the room up in

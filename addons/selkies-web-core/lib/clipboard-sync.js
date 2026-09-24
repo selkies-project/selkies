@@ -45,7 +45,7 @@ export function digestedPayload(byteLength, hash) {
  * Re-encodes a raster blob as PNG.
  *
  * Chromium's async clipboard accepts only `image/png` on write, but a source
- * may offer only JPEG, BMP or WebP, so the blob is decoded with the browser's
+ * may offer only JPEG, BMP, or WebP, so the blob is decoded with the browser's
  * own decoders and re-encoded first.
  * @param {Blob} blob The image.
  * @returns {Promise<Blob>} The PNG.
@@ -627,7 +627,7 @@ export function clipboardPreviewMessage(text) {
  */
 
 /**
- * Server-clipboard cache, change-only signature and the Ctrl/Cmd+C request
+ * Server-clipboard cache, change-only signature, and the Ctrl/Cmd+C request
  * queue with its one-behind guard.
  *
  * The server reads its clipboard the instant REQUEST_CLIPBOARD arrives,

@@ -37,7 +37,7 @@ services:
     image: selkies-base:latest-${DISTRIB_IMAGE:-ubuntu}${DISTRIB_RELEASE:-26.04}
     build:
       # Repository root: the Dockerfile also pulls in addons/input-interposer,
-      # addons/fake-udev and addons/v4l2-interposer
+      # addons/fake-udev, and addons/v4l2-interposer
       context: .
       dockerfile: addons/base/Dockerfile
       args:
@@ -80,7 +80,7 @@ services:
       # Use the headless Wayland backend instead of X11 (default: X11 Xvfb).
       SELKIES_WAYLAND: ${SELKIES_WAYLAND:-false}
       # Session compositor nested in the capture compositor, supplying window
-      # management, decorations and XWayland; empty picks labwc, "none" drops it
+      # management, decorations, and XWayland; empty picks labwc, "none" drops it
       SELKIES_WAYLAND_COMPOSITOR: ${SELKIES_WAYLAND_COMPOSITOR:-}
       # Render/encode GPU selection; empty means auto-detect
       SELKIES_RENDER_DRI: ${SELKIES_RENDER_DRI:-}

@@ -595,7 +595,7 @@ class WebRTCService(BaseStreamingService):
         self.peer_manager.on_client_presence = self.supervisor.set_clients_present
 
     def setup_callbacks(self) -> None:
-        """Wire signaling, RTC app, media pipeline, input handler and monitor
+        """Wire signaling, RTC app, media pipeline, input handler, and monitor
         callbacks to each other.
 
         Cursors come from pixelflux on both backends (Wayland compositor / X11
@@ -2104,7 +2104,7 @@ class WebRTCService(BaseStreamingService):
         Rebroadcast with the layout, since a page maps a drag that crossed onto
         a neighbor through the neighbor's box rather than off its own edge.
         Only the browser knows those origins, and they are the only thing
-        relating two viewports whose monitors, window chrome and device pixel
+        relating two viewports whose monitors, window chrome, and device pixel
         ratios all differ. Ignored for an unknown display or an impossible box.
         """
         if display_id not in self.display_layouts:
@@ -2131,7 +2131,7 @@ class WebRTCService(BaseStreamingService):
     def _display_config_payload(self) -> Dict[str, Any]:
         """display_config_update body: the display roster, the backend, plus
         each laid-out display's rectangle, its client's reported CSS-to-remote
-        scale and the desktop box that client draws it in, so a page can map a
+        scale, and the desktop box that client draws it in, so a page can map a
         cross-display drag into its neighbor's region and, on X11, a secondary
         can follow the primary's density."""
         displays = ["primary"] + [d for d in self.display_clients.keys() if d != "primary"]
@@ -2198,7 +2198,7 @@ class WebRTCService(BaseStreamingService):
         An operator-set DPI (CLI/env) governs the desktop and is never
         clobbered by a client sync. Idempotent: the dashboard and the core
         each re-assert their DPI on settings broadcasts, and every apply churns
-        xrdb, xsettingsd SIGHUP and cursor themes. On Wayland the DPI runs the
+        xrdb, xsettingsd SIGHUP, and cursor themes. On Wayland the DPI runs the
         scale ladder per display: the session compositor scales the screen
         backing it, and only what it leaves becomes that display's capture
         scale, whose change restarts the capture (the WS path threads the same
