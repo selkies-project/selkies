@@ -2,11 +2,13 @@
 """A rootful Xwayland desktop is adopted only when the X server really is one.
 
 On the Wayland backend a live X server on $DISPLAY is taken as a rootful
-Xwayland hosting an X11 desktop — its selection is watched and its apps launch
-on it. A leftover Xvfb/Xorg that merely holds the display number (a
+Xwayland hosting an X11 desktop — its selection is watched, its apps launch on
+it, and no second display is offered, since that desktop is one X screen of a
+fixed size. A leftover Xvfb/Xorg that merely holds the display number (a
 devcontainer's own :20, say) must not be: the server has to be an Xwayland
-process of this user whose args name the display. _x11_session_display and the
-rootful branch of app_session must agree on that test.
+process of this user whose args name the display. _x11_session_display, the
+rootful branch of app_session, and the second-screen capability must agree on
+that test.
 """
 import os
 import sys
@@ -29,7 +31,8 @@ def check(label: str, ok, detail="") -> None:
 def make_handler(separate: bool = False) -> WebRTCInput:
     h = WebRTCInput.__new__(WebRTCInput)
     h.is_wayland = True
-    h._app_wayland_display = lambda: "wayland-1"
+    h._app_wayland_display = lambda: "wayland-1" if separate else "wayland-0"
+    h._wayland_display_name = lambda: "wayland-0"
     h._has_separate_app_compositor = lambda: separate
     return h
 
@@ -49,7 +52,10 @@ def main():
               h._x11_session_display() is None)
         s = h.app_session()
         check("app_session ignores a non-Xwayland server, apps stay Wayland",
-              s == {"x11_display": None, "wayland_display": "wayland-1", "type": "wayland"}, str(s))
+              s == {"x11_display": None, "wayland_display": "wayland-0", "type": "wayland"}, str(s))
+        cap = h.session_screen_capability()
+        check("Wayland clients on the capture compositor are offered a second display",
+              cap == (True, ""), str(cap))
 
         ih.x_display_is_xwayland = lambda name: name == disp
         h = make_handler()
@@ -58,6 +64,12 @@ def main():
         s = h.app_session()
         check("app_session adopts the rootful Xwayland as an X session",
               s == {"x11_display": disp, "wayland_display": None, "type": "x11"}, str(s))
+        cap = h.session_screen_capability()
+        check("a rootful Xwayland desktop is offered no second display, and told why",
+              cap[0] is False and "rootful Xwayland" in cap[1], str(cap))
+        h._session_ipc_ok = True
+        check("a session compositor with a screen control still is",
+              h.session_screen_capability() == (True, ""), str(h.session_screen_capability()))
 
         ih.x_display_live = lambda name: False
         h = make_handler()
