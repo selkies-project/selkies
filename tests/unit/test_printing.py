@@ -250,6 +250,34 @@ async def transport_cases() -> None:
           one.sent == [{"type": "print_document", "data": {"name": "Late.pdf", "size_bytes": 3}}], one.sent)
 
 
+def scheduler_cases(root: str) -> None:
+    """A scheduler installed for root alone is named with its mode rather than reported absent."""
+    prefix = os.path.join(root, "usr")
+    cupsd = os.path.join(prefix, "sbin", "cupsd")
+    os.makedirs(os.path.dirname(cupsd))
+    open(cupsd, "w").close()
+    os.chmod(cupsd, 0)
+    saved, search = os.environ.get("PATH", ""), printing.PrintQueue.SEARCH_PATH
+    os.environ["PATH"] = os.path.dirname(cupsd)
+    printing.PrintQueue.SEARCH_PATH = ""
+    try:
+        check("a scheduler this user cannot read serves no queue", printing.PrintQueue.programs() is None)
+        check("and is named with its mode", printing.PrintQueue.locked_scheduler() == (cupsd, 0),
+              printing.PrintQueue.locked_scheduler())
+        os.chmod(cupsd, 0o755)
+        os.makedirs(os.path.join(prefix, "lib", "cups", "daemon"))
+        os.makedirs(os.path.join(prefix, "lib", "cups", "filter"))
+        open(os.path.join(prefix, "lib", "cups", "daemon", "cups-exec"), "w").close()
+        check("a readable one is found with its program and data directories",
+              printing.PrintQueue.programs() == (cupsd, os.path.join(prefix, "lib", "cups"),
+                                                 os.path.join(prefix, "share", "cups")),
+              printing.PrintQueue.programs())
+        check("and nothing stands in its way", printing.PrintQueue.locked_scheduler() is None)
+    finally:
+        os.environ["PATH"] = saved
+        printing.PrintQueue.SEARCH_PATH = search
+
+
 async def main() -> None:
     root = tempfile.mkdtemp(prefix="selkies-printing-")
     spool, elsewhere = os.path.join(root, "spool"), os.path.join(root, "elsewhere")
@@ -257,6 +285,7 @@ async def main() -> None:
     os.makedirs(elsewhere)
     try:
         name_cases()
+        scheduler_cases(os.path.join(root, "arch"))
         pending_cases(spool)
         await watcher_cases(spool, elsewhere)
         await route_cases(spool)
