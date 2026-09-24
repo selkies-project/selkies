@@ -4,7 +4,8 @@
  * designates as the latest (the newest tag where that cannot be asked) is built
  * under the `latest` alias, which the site root redirects to, and its own
  * segment redirects there page by page rather than carrying a second copy of
- * the largest build.
+ * the largest build. A pre-release leaves the list once its release is tagged,
+ * and its segment redirects to that release the same way.
  *
  * Every version is rendered by this tree's site tooling over that version's
  * own pages and source, so a fix to the site reaches every version the next
@@ -55,7 +56,13 @@ function parseVersion(tag) {
   const match = VERSION.exec(tag);
   if (!match) return undefined;
   const [, numbers, label = 'final', count] = match;
-  return { numbers: numbers.split('.').map(Number), rank: RANK[label.toLowerCase()], count: Number(count || 0) };
+  return {
+    numbers: numbers.split('.').map(Number),
+    // The release it belongs to, which 2.0 and 2.0.0 both name
+    release: numbers.replace(/(\.0+)+$/, ''),
+    rank: RANK[label.toLowerCase()],
+    count: Number(count || 0),
+  };
 }
 
 function compareVersions(a, b) {
@@ -202,7 +209,10 @@ async function latestRelease() {
   }
 }
 
-const tags = releases();
+const tagged = releases();
+const releaseOf = (t) => tagged.find((r) => r.parsed.rank >= RANK.final && r.parsed.release === t.parsed.release);
+const superseded = tagged.filter((t) => t.parsed.rank < RANK.final && releaseOf(t));
+const tags = tagged.filter((t) => !superseded.includes(t));
 // The `latest` alias follows the release GitHub designates as the latest, which a
 // pre-release is not unless a maintainer says so, the way the floating image tags
 // do; the newest tag stands in where that cannot be asked or names no built version.
@@ -235,6 +245,10 @@ try {
   });
   await writeRoot(staging, index);
   if (newest) await writeRedirects(staging, newest.segment, LATEST);
+  for (const t of superseded) {
+    const release = releaseOf(t);
+    await writeRedirects(staging, t.segment, release === newest ? LATEST : release.segment);
+  }
 
   const out = join(site, 'out');
   await rm(out, { recursive: true, force: true });
