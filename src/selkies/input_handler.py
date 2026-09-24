@@ -6233,12 +6233,15 @@ class WebRTCInput:
 
         A nested session compositor with a screen control grows a screen on
         demand — over the labwc control socket, or KWin's virtual-output
-        protocol; without one, spare screens it opened at startup can
-        still be arranged for a display (the spare-screen hold). A session
-        running directly on the capture compositor needs neither: every
-        capture output is a monitor of its own there. Only a nested session
-        holding a single screen with no screen control has nowhere to show a
-        second display.
+        protocol, whose presence is the offer and whose screen is proven when
+        a display asks for one; without one, spare screens it opened at
+        startup can still be arranged for a display (the spare-screen hold).
+        A session of Wayland clients running directly on the capture
+        compositor needs neither: every capture output is a monitor of its own
+        there. An X11 desktop in a rootful Xwayland on the capture compositor
+        is one X screen of a fixed size, which no second capture output
+        extends, and a nested session holding a single screen with no screen
+        control has nowhere to show one either.
 
         Returns:
             `(available, reason)`; the reason is empty when available.
@@ -6248,6 +6251,9 @@ class WebRTCInput:
         if self.session_screen_control_available():
             return True, ""
         if not self._session_is_nested():
+            if self._x11_session_display():
+                return False, ("An X11 desktop in a rootful Xwayland is one screen of a "
+                               "fixed size: a second display has nowhere to show.")
             return True, ""
         if int(getattr(self, "_session_screen_count", 0) or 0) >= 2:
             return True, ""
