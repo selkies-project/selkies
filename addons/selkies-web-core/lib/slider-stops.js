@@ -10,8 +10,11 @@
  * it is not.
  */
 
-/** Frame rates a display or a video runs at, in frames per second, ascending. */
-export const FRAMERATE_STOPS = [8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144, 165, 240];
+/**
+ * Frame rates in frames per second, ascending: the rates displays and videos
+ * run at, with the rates between them where a step of a few frames is felt.
+ */
+export const FRAMERATE_STOPS = [8, 10, 12, 15, 18, 20, 24, 25, 30, 36, 40, 45, 48, 50, 60, 72, 75, 80, 90, 100, 120, 144, 165, 180, 200, 240];
 
 /**
  * CBR bitrates in kbps, ascending: sub-Mbps steps for constrained links,

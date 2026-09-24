@@ -47,16 +47,17 @@ const descending = (list) => list.every((v, i) => i === 0 || v < list[i - 1]);
 {
     const inside = stopsWithin(FRAMERATE_STOPS, 30, 120);
     check('a server span keeps the stops inside it, in order',
-        inside.join(',') === '30,48,50,60,90,100,120', inside.join(','));
+        inside.join(',') === '30,36,40,45,48,50,60,72,75,80,90,100,120', inside.join(','));
     check('a span between two stops offers its floor alone',
-        stopsWithin(FRAMERATE_STOPS, 61, 89).join(',') === '61', stopsWithin(FRAMERATE_STOPS, 61, 89).join(','));
+        stopsWithin(FRAMERATE_STOPS, 61, 71).join(',') === '61', stopsWithin(FRAMERATE_STOPS, 61, 71).join(','));
     check('a descending list keeps its order inside a span',
         stopsWithin(CRF_STOPS, 10, 30).join(',') === '30,25,20,15,10', stopsWithin(CRF_STOPS, 10, 30).join(','));
 }
 
 {
-    check('a stop maps to its own index', stopIndex(FRAMERATE_STOPS, 60) === 8, stopIndex(FRAMERATE_STOPS, 60));
-    check('a value between stops maps to the nearer one', stopIndex(FRAMERATE_STOPS, 56) === 8 && stopIndex(FRAMERATE_STOPS, 52) === 7,
+    check('a stop maps to its own index', stopIndex(FRAMERATE_STOPS, 60) === FRAMERATE_STOPS.indexOf(60), stopIndex(FRAMERATE_STOPS, 60));
+    check('a value between stops maps to the nearer one',
+        stopIndex(FRAMERATE_STOPS, 56) === FRAMERATE_STOPS.indexOf(60) && stopIndex(FRAMERATE_STOPS, 52) === FRAMERATE_STOPS.indexOf(50),
         `${stopIndex(FRAMERATE_STOPS, 56)} ${stopIndex(FRAMERATE_STOPS, 52)}`);
     check('a tie goes to the earlier stop', stopIndex(BITRATE_STOPS, 7000) === BITRATE_STOPS.indexOf(6000), stopIndex(BITRATE_STOPS, 7000));
     check('a value past either end maps to that end',
