@@ -49,6 +49,7 @@ from .display_utils import (
     _module_display,
     _sync_client_windows,
     _sync_follow_display_moves,
+    seat_desktop_windows,
     _x11_lock,
     applied_dpi,
     ensure_mode,
@@ -278,6 +279,7 @@ def _sync_follow(snapshot: Tuple[list, Dict[str, Rect]], after: Dict[str, Rect])
     with _x11_lock:
         d = _module_display()
         _sync_follow_display_moves(d, d.screen().root, windows, before, after)
+    seat_desktop_windows()
 
 
 def _sync_windows_to_origin(snapshot: Tuple[list, Dict[str, Rect]]) -> None:
