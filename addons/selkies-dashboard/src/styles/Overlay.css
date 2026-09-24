@@ -664,6 +664,25 @@
      box-shadow: 0 0 0 4px var(--accent-soft);
 }
 
+/* A finger lands less precisely than a mouse and hides what it touches: under
+   a coarse pointer the slider's row is taller and its thumb wider, and a touch
+   that starts on the slider stays with it instead of scrolling the sidebar. */
+@media (pointer: coarse) {
+    .dev-setting-item input[type="range"] {
+        height: 36px;
+        touch-action: none;
+    }
+    .dev-setting-item input[type="range"]::-webkit-slider-thumb {
+        width: 24px;
+        height: 24px;
+        margin-top: -9px;
+    }
+    .dev-setting-item input[type="range"]::-moz-range-thumb {
+        width: 20px;
+        height: 20px;
+    }
+}
+
 /* --- Stream stats --- */
 /* The two series colors are a validated pair for each surface (dataviz
    validator: lightness band, chroma floor, CVD and normal-vision separation,

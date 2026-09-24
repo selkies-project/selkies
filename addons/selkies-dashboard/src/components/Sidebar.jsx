@@ -53,6 +53,7 @@
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
+import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, stopIndex, stopsWithin } from "../../../selkies-web-core/lib/slider-stops.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
@@ -196,14 +197,6 @@ const audioBitrateOptions = [32000, 48000, 64000, 96000, 128000, 192000, 256000,
 const DEFAULT_VIDEO_BITRATE = 8000;
 const RATE_CONTROL_CBR = "cbr";
 const RATE_CONTROL_CRF = "crf";
-
-/** Sub-Mbps CBR stops in kbps for constrained links, ahead of the 1000-kbps steps. */
-const SUB_MBPS_BITRATE_STEPS = [100, 250, 500, 750];
-/**
- * CBR stops above 100000 kbps: per-1000 granularity stops mattering there and
- * a 1000-position slider would be unusable.
- */
-const COARSE_MBPS_BITRATE_STEPS = [150000, 200000, 300000, 400000, 500000, 750000, 1000000];
 
 
 /** Parses a dimension and rounds it down to an even number; non-numbers become 0. */
@@ -2076,12 +2069,13 @@ function Sidebar() {
   const wceServerValue = webcamEncoderOptions.includes(wceServer?.value) ? wceServer.value : null;
   const wceChoice = webcamEncoderOptions.includes(webcamEncoderChoice) ? webcamEncoderChoice : null;
   const webcamEncoder = (wceServer?.locked && wceServerValue) || wceChoice || wceServerValue || "auto";
+  /** The frame rate, bitrate, and CRF sliders carry an index into their stops. */
   const handleFramerateChange = (event) => {
-    const selectedFramerate = parseInt(event.target.value, 10);
+    const selectedFramerate = framerateOptions[parseInt(event.target.value, 10)];
+    if (selectedFramerate === undefined) return;
     setFramerate(selectedFramerate);
     debouncedPostSetting({ framerate: selectedFramerate });
   };
-  /** Video bitrate slider: its value is an index into `videoBitrateOptions`. */
   const handleVideoBitrateChange = (event) => {
     const index = parseInt(event.target.value, 10);
     const selectedVideoBitrate = videoBitrateOptions[index];
@@ -2105,12 +2099,14 @@ function Sidebar() {
     debouncedPostSetting({ paint_over_jpeg_quality: selectedQuality });
   };
   const handleVideoCRFChange = (event) => {
-    const selectedCRF = parseInt(event.target.value, 10);
+    const selectedCRF = videoCRFOptions[parseInt(event.target.value, 10)];
+    if (selectedCRF === undefined) return;
     setVideoCRF(selectedCRF);
     debouncedPostSetting({ video_crf: selectedCRF });
   };
   const handleH264PaintoverCRFChange = (event) => {
-    const selectedCRF = parseInt(event.target.value, 10);
+    const selectedCRF = videoPaintoverCRFOptions[parseInt(event.target.value, 10)];
+    if (selectedCRF === undefined) return;
     setVideoPaintoverCRF(selectedCRF);
     debouncedPostSetting({ video_paintover_crf: selectedCRF });
   };
@@ -2844,23 +2840,14 @@ function Sidebar() {
     : (serverSettings?.rate_control_mode?.value ?? rateControlMode);
 
   /**
-   * CBR slider stops within the server's range: the sub-Mbps steps, 1000-kbps
-   * steps to 100000, then the coarse steps to 1000000.
+   * The slider stops inside the server's ranges; a stored value between stops
+   * (a server default, a clamp) shows at the nearest one.
    */
-  const videoBitrateOptions = (() => {
-    const min = serverSettings?.video_bitrate?.min ?? 100;
-    const max = serverSettings?.video_bitrate?.max ?? 1000000;
-    const stops = SUB_MBPS_BITRATE_STEPS.filter((v) => v >= min && v <= max);
-    for (let v = Math.max(1000, Math.ceil(min / 1000) * 1000); v <= Math.min(100000, Math.floor(max / 1000) * 1000); v += 1000) stops.push(v);
-    stops.push(...COARSE_MBPS_BITRATE_STEPS.filter((v) => v >= min && v <= max));
-    return stops.length ? stops : [min];
-  })();
-  const bitrateSliderIndex = (() => {
-    const exact = videoBitrateOptions.indexOf(videoBitrate);
-    if (exact >= 0) return exact;
-    const above = videoBitrateOptions.findIndex((v) => v >= videoBitrate);
-    return above >= 0 ? above : videoBitrateOptions.length - 1;
-  })();
+  const videoBitrateOptions = stopsWithin(BITRATE_STOPS, serverSettings?.video_bitrate?.min ?? 100, serverSettings?.video_bitrate?.max ?? 1000000);
+  const bitrateSliderIndex = stopIndex(videoBitrateOptions, videoBitrate);
+  const framerateOptions = stopsWithin(FRAMERATE_STOPS, serverSettings?.framerate?.min ?? 8, serverSettings?.framerate?.max ?? 240);
+  const videoCRFOptions = stopsWithin(CRF_STOPS, serverSettings?.video_crf?.min ?? 5, serverSettings?.video_crf?.max ?? 50);
+  const videoPaintoverCRFOptions = stopsWithin(CRF_STOPS, serverSettings?.video_paintover_crf?.min ?? 5, serverSettings?.video_paintover_crf?.max ?? 50);
   const formatBitrate = (v) => `${v / 1000} Mbps`;
   if (serverSettings && serverSettings.ui_show_sidebar?.value === false) {
     return null;
@@ -3219,10 +3206,10 @@ function Sidebar() {
                     <input
                       type="range"
                       id="framerateSlider"
-                      min={serverSettings?.framerate?.min || 8}
-                      max={serverSettings?.framerate?.max || 240}
+                      min={0}
+                      max={framerateOptions.length - 1}
                       step="1"
-                      value={framerate}
+                      value={stopIndex(framerateOptions, framerate)}
                       onChange={handleFramerateChange}
                       disabled={!serverSettings || serverSettings.framerate?.min === serverSettings.framerate?.max}
                     />
@@ -3278,13 +3265,12 @@ function Sidebar() {
                     <input
                       type="range"
                       id="videoCRFSlider"
-                      min={serverSettings?.video_crf?.min || 5}
-                      max={serverSettings?.video_crf?.max || 50}
+                      min={0}
+                      max={videoCRFOptions.length - 1}
                       step="1"
-                      value={video_crf}
+                      value={stopIndex(videoCRFOptions, video_crf)}
                       onChange={handleVideoCRFChange}
                       disabled={!serverSettings || serverSettings.video_crf?.min === serverSettings.video_crf?.max}
-                      style={{ direction: 'rtl' }}
                     />
                   </div>
                 )}
@@ -3313,13 +3299,12 @@ function Sidebar() {
                     <input
                       type="range"
                       id="videoPaintoverCRFSlider"
-                      min={serverSettings?.video_paintover_crf?.min || 5}
-                      max={serverSettings?.video_paintover_crf?.max || 50}
+                      min={0}
+                      max={videoPaintoverCRFOptions.length - 1}
                       step="1"
-                      value={videoPaintoverCRF}
+                      value={stopIndex(videoPaintoverCRFOptions, videoPaintoverCRF)}
                       onChange={handleH264PaintoverCRFChange}
                       disabled={!serverSettings || serverSettings.video_paintover_crf?.min === serverSettings.video_paintover_crf?.max}
-                      style={{ direction: 'rtl' }}
                     />
                   </div>
                 )}
