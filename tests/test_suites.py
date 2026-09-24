@@ -53,13 +53,16 @@ def keep_logs(case: str, since: float) -> None:
         pass
 
 
-# What `helpers.answers_within` prints when a browser stops answering, and what
-# Playwright raises when one goes away. WebKit's video process wedges on a
-# loaded runner often enough to take a suite with it, and every call after that
-# reads as absent video, so a run that says so is not a result: it is repeated
-# once, both attempts printed, and a loss that repeats fails as it did before.
+# What `helpers.answers_within` prints when a browser stops answering, what
+# Playwright raises when one goes away, and what `core_lib.wait_wr_video` prints
+# when a player never starts on frames its engine decodes. WebKit's video
+# process wedges on a loaded runner often enough to take a suite with it, and
+# every call after that reads as absent video, so a run that says so is not a
+# result: it is repeated once, both attempts printed, and a loss that repeats
+# fails as it did before.
 STALLED = ("did not answer within", "stopped answering earlier",
-           "Target page, context or browser has been closed")
+           "Target page, context or browser has been closed",
+           "sat at HAVE_NOTHING on a live track")
 
 
 def stalled(text: str) -> bool:
@@ -80,7 +83,7 @@ def test_suite(path: str, selector: Optional[str], timeout: int) -> None:
         if proc.returncode != 0 and stalled(proc.stdout + proc.stderr):
             sys.stdout.write(proc.stdout)
             sys.stderr.write(proc.stderr)
-            print(f"note: {case} lost a browser mid-run; running it once more",
+            print(f"note: {case} lost a browser or its player mid-run; running it once more",
                   flush=True)
             keep_logs(case + "-stalled", started)
             proc = subprocess.run(cmd, cwd=TESTS, capture_output=True, text=True,

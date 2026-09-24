@@ -423,8 +423,20 @@ def wait_wr_video(page: Any, timeout: float = 45) -> Optional[dict]:
         if info:
             return info
         time.sleep(0.5)
-    print(f"[wr-video] no decoded frame in {timeout:.0f}s: {wr_video_state(page)}", flush=True)
+    state = wr_video_state(page)
+    print(f"[wr-video] no frame shown in {timeout:.0f}s: {state}", flush=True)
+    if player_stuck(state):
+        print("[wr-video] the <video> sat at HAVE_NOTHING on a live track its peer connection decodes", flush=True)
     return None
+
+
+def player_stuck(state: Any) -> bool:
+    """Whether `state` is Playwright WebKit's player stall: its GStreamer player
+    never prerolls some H.264 sessions, while the decoder behind it runs, and no
+    page call brings it back."""
+    video = state.get("video") if isinstance(state, dict) else None
+    return bool(video and video["readyState"] == 0 and "video:live" in (video["tracks"] or [])
+                and any(i.get("kind") == "video" and i.get("decoded") for pc in state["pcs"] for i in pc["inbound"]))
 
 
 WR_VIDEO_STATE_JS = """(async () => {
