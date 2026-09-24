@@ -65,5 +65,10 @@ for name, res in report.items():
     check(f"{name}: a label ends in a colon in every locale or in none",
           not punctuation, detail)
 
+    if "misrouted" in res:
+        misrouted = res["misrouted"]
+        detail = ", ".join(f"{tag} -> {got}" for tag, got in list(misrouted.items())[:4]) or f"{res['routes']} tags"
+        check(f"{name}: a browser tag reads the dictionary written for it", not misrouted, detail)
+
 print(f"[i18n] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

@@ -5038,13 +5038,26 @@ const translations = {
     da,
 };
 
+/**
+ * The dictionary key a browser language tag reads: its base language, so
+ * 'en-US' reads 'en', except Chinese, which is two written languages under
+ * one base: a tag naming the Traditional script or a region that writes it
+ * (Taiwan, Hong Kong, Macao) reads 'zh_tw', any other Chinese tag 'zh_cn'.
+ * A key no dictionary has falls back to English at the lookup.
+ */
+export const resolveLocale = (langCode = 'en') => {
+    const parts = String(langCode).toLowerCase().split(/[-_]/);
+    if (parts[0] === 'zh') {
+        return parts.slice(1).some((p) => ['hant', 'tw', 'hk', 'mo'].includes(p)) ? 'zh_tw' : 'zh_cn';
+    }
+    return parts[0];
+};
+
 // Function to get translations based on language code
 // Falls back to 'en' if the language or specific key is missing
 export const getTranslator = (langCode = 'en') => {
-    // Reduce a full tag to its base language, so 'en-US' resolves to 'en'.
-    const baseLang = langCode.split('-')[0].toLowerCase();
-    // Use the specific language dictionary if available, otherwise default to English
-    const langDict = translations[baseLang] || translations.en;
+    // The dictionary the tag reads, if there is one, otherwise English
+    const langDict = translations[resolveLocale(langCode)] || translations.en;
     // Always use English as the ultimate fallback if a key is missing even in the selected language
     const fallbackDict = translations.en;
 
