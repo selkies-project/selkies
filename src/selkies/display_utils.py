@@ -35,6 +35,20 @@ CRTCs do not follow; that layout, the window-manager restart it needs, and the
 subprocess fallbacks are `display_utils_xrandr`, which this module imports
 only at the point it falls back.
 
+Either way RandR moves a screen and leaves every window at its root
+coordinates: the primary moves back to the origin when the display on its left
+leaves, or aside when one is added there, and takes none of its windows along,
+so they end up beyond the screen or on the other display. Openbox and xfwm4
+carry an unmaximized window along with its monitor by themselves; Marco,
+Metacity, and KWin leave it where it was, and xfwm4 maximizes a window again
+on the monitor its restored geometry falls on. Every layout change therefore
+reads the manager's client list before it moves anything and asks the manager
+afterwards, through `_NET_MOVERESIZE_WINDOW`, to move each window by its own
+display's move and each window of a display that is gone onto the primary
+(`window_moves`, `_sync_follow_display_moves`), once the framebuffer holds the
+layout, since a manager constrains a move against the screen it has; the
+desktop window and panels place themselves and are left alone.
+
 DPI handling here is X11-only by design: on the Wayland backend a DPI is an
 output scale on the session compositor (applied in-process through
 wlr-output-management), never Xft resources — XWayland runs in the
@@ -51,6 +65,7 @@ import stat
 import struct
 import sys
 import tempfile
+import time
 import zlib
 from asyncio import subprocess
 import asyncio
@@ -65,6 +80,7 @@ from .Xlib import Xatom as x11_Xatom
 from .Xlib import display as x11_display
 from .Xlib import error as x11_error
 from .Xlib.ext import randr
+from .Xlib.protocol import event as x11_event
 from .Xlib.protocol import request as x11_request
 
 import logging
@@ -554,6 +570,191 @@ def _plug(d: x11_display.Display, out_id: int, plugged: bool) -> None:
         x11_X.PropModeReplace, (32, [1 if plugged else 0]))
 
 
+#: A display's rectangle, ``(x, y, w, h)`` in root coordinates.
+Rect = Tuple[int, int, int, int]
+
+#: Window types a layout leaves where they are: the desktop window covers the
+#: root whatever the layout, and a panel places itself on its monitor's edge.
+_SELF_PLACING_WINDOW_TYPES = ("_NET_WM_WINDOW_TYPE_DESKTOP", "_NET_WM_WINDOW_TYPE_DOCK")
+
+
+def window_moves(
+    windows: Iterable[Tuple[Any, int, int, int, int]],
+    before: Dict[str, Rect], after: Dict[str, Rect],
+) -> List[Tuple[Any, int, int]]:
+    """Where each window goes when the displays move from ``before`` to ``after``.
+
+    A window belongs to the display whose old rectangle holds its center. One
+    whose display moved goes with it, by the display's own move, so it keeps
+    its place on that screen; one whose display is gone goes onto the primary,
+    at the same place within it. Either is brought inside its new screen where
+    it would poke out of it, so no title bar ends up beyond an edge. A window
+    on no display, or on one that stayed, keeps its place.
+
+    Args:
+        windows: ``(window, x, y, w, h)`` in root coordinates.
+        before: Display id to rectangle as the displays were.
+        after: The same for the layout replacing them.
+
+    Returns:
+        ``(window, x, y)`` for every window that moves.
+    """
+    moves = []
+    primary = after.get("primary")
+    for win, x, y, w, h in windows:
+        cx, cy = x + w // 2, y + h // 2
+        home = next((did for did, (bx, by, bw, bh) in before.items()
+                     if bx <= cx < bx + bw and by <= cy < by + bh), None)
+        if home is None:
+            continue
+        old, new = before[home], after.get(home, primary)
+        if new is None:
+            continue
+        nx, ny = x + new[0] - old[0], y + new[1] - old[1]
+        nx = min(max(nx, new[0]), new[0] + max(new[2] - w, 0))
+        ny = min(max(ny, new[1]), new[1] + max(new[3] - h, 0))
+        if (nx, ny) != (x, y):
+            moves.append((win, nx, ny))
+    return moves
+
+
+def _sync_client_windows(d: x11_display.Display, root: Any) -> List[Tuple[Any, int, int, int, int]]:
+    """The window manager's clients with their rectangles in root coordinates,
+    less the self-placing kinds; empty where no manager publishes
+    ``_NET_CLIENT_LIST``."""
+    listed = root.get_full_property(d.intern_atom("_NET_CLIENT_LIST"), x11_X.AnyPropertyType)
+    if listed is None:
+        return []
+    self_placing = {d.intern_atom(name) for name in _SELF_PLACING_WINDOW_TYPES}
+    kind_atom = d.intern_atom("_NET_WM_WINDOW_TYPE")
+    windows = []
+    for wid in listed.value:
+        win = d.create_resource_object("window", int(wid))
+        try:
+            kind = win.get_full_property(kind_atom, x11_X.AnyPropertyType)
+            if kind is not None and self_placing.intersection(int(a) for a in kind.value):
+                continue
+            geom = win.get_geometry()
+            at = root.translate_coords(win, 0, 0)
+        except x11_error.XError:
+            continue
+        windows.append((win, int(at.x), int(at.y), int(geom.width), int(geom.height)))
+    return windows
+
+
+def _sync_output_rects(d: x11_display.Display, ts: int, outputs: Dict[str, int]) -> Dict[str, Rect]:
+    """Each display's rectangle from its output's CRTC, for the outputs driving one."""
+    rects = {}
+    for did, out_id in outputs.items():
+        oi = randr.get_output_info(d, out_id, ts)
+        if oi.crtc:
+            ci = randr.get_crtc_info(d, oi.crtc, ts)
+            if ci.mode:
+                rects[did] = (ci.x, ci.y, ci.width, ci.height)
+    return rects
+
+
+#: How long a window manager is given to put the windows where they were
+#: asked to go, read back and asked again meanwhile.
+_MANAGER_SETTLE_S = 1.5
+
+#: How far a client may sit from where it was asked to go and count as there.
+_MOVE_SLACK = 2
+
+
+def _sync_set_maximized(d: x11_display.Display, root: Any, win: Any, on: bool) -> None:
+    """Ask the manager to maximize `win` both ways, or to restore it."""
+    root.send_event(
+        x11_event.ClientMessage(
+            window=win, client_type=d.intern_atom("_NET_WM_STATE"),
+            data=(32, [1 if on else 0, d.intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ"),
+                       d.intern_atom("_NET_WM_STATE_MAXIMIZED_VERT"), 2, 0])),
+        event_mask=x11_X.SubstructureRedirectMask | x11_X.SubstructureNotifyMask)
+
+
+def _sync_is_maximized(d: x11_display.Display, win: Any) -> bool:
+    state = win.get_full_property(d.intern_atom("_NET_WM_STATE"), x11_X.AnyPropertyType)
+    if state is None:
+        return False
+    maximized = {d.intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ"), d.intern_atom("_NET_WM_STATE_MAXIMIZED_VERT")}
+    return bool(maximized.intersection(int(a) for a in state.value))
+
+
+def _sync_follow_display_moves(
+    d: x11_display.Display, root: Any, windows: List[Tuple[Any, int, int, int, int]],
+    before: Dict[str, Rect], after: Dict[str, Rect],
+) -> int:
+    """Ask the window manager for every move `window_moves` wants, each an
+    ``_NET_MOVERESIZE_WINDOW`` with static gravity, so the request names the
+    client window's own corner and the frame around it stays the manager's
+    business, from a pager's source indication so it is honored as a user's
+    own move would be.
+
+    The result is read back and a window not where it was asked to go is
+    asked again, for a bounded moment: a manager still taking in the new
+    screen re-places the window by its own rule after the request (KWin does,
+    for a display added above), and the later ask is the one that stands. A
+    maximized window is measured by the screen its center is on, since its
+    corner is the manager's; one the manager kept on the screen it was
+    maximized on (xfwm4 maximizes a window again on the monitor its restored
+    geometry falls on) is restored for the move and maximized again once it
+    has landed.
+
+    Returns:
+        How many windows were asked to move.
+    """
+    moves = window_moves(windows, before, after)
+    if not moves:
+        return 0
+    move_atom = d.intern_atom("_NET_MOVERESIZE_WINDOW")
+    flags = x11_X.StaticGravity | (1 << 8) | (1 << 9) | (2 << 12)
+    sizes = {win.id: (w, h) for win, _, _, w, h in windows}
+
+    def screen_of(x: int, y: int, w: int, h: int) -> Optional[Rect]:
+        cx, cy = x + w // 2, y + h // 2
+        return next((r for r in after.values() if r[0] <= cx < r[0] + r[2] and r[1] <= cy < r[1] + r[3]), None)
+
+    pending = {win.id: (win, x, y) for win, x, y in moves}
+    restored: set = set()
+    deadline = time.monotonic() + _MANAGER_SETTLE_S
+    rounds = 0
+    while pending:
+        for win, x, y in pending.values():
+            root.send_event(
+                x11_event.ClientMessage(window=win, client_type=move_atom, data=(32, [flags, x, y, 0, 0])),
+                event_mask=x11_X.SubstructureRedirectMask | x11_X.SubstructureNotifyMask)
+        d.flush()
+        time.sleep(0.15)
+        rounds += 1
+        for wid, (win, x, y) in list(pending.items()):
+            try:
+                at = root.translate_coords(win, 0, 0)
+                maximized = _sync_is_maximized(d, win)
+            except x11_error.XError:
+                del pending[wid]
+                continue
+            w, h = sizes[wid]
+            landed = (abs(at.x - x) <= _MOVE_SLACK and abs(at.y - y) <= _MOVE_SLACK) or (
+                maximized and screen_of(at.x, at.y, w, h) == screen_of(x, y, w, h))
+            if landed:
+                del pending[wid]
+                if wid in restored:
+                    _sync_set_maximized(d, root, win, True)
+            elif maximized and rounds > 1 and wid not in restored:
+                restored.add(wid)
+                _sync_set_maximized(d, root, win, False)
+        if time.monotonic() >= deadline:
+            break
+    for wid in restored:
+        if wid in pending:
+            _sync_set_maximized(d, root, pending[wid][0], True)
+    d.flush()
+    logger_app_resize.debug(
+        f"Asked the window manager to move {len(moves)} window(s) with their displays; "
+        f"{len(pending)} not there after {rounds} round(s).")
+    return len(moves)
+
+
 def _sync_apply_output_layout(
     layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int
 ) -> None:
@@ -585,6 +786,8 @@ def _sync_apply_output_layout(
             if len(layouts) > 1 + len(spare):
                 raise RuntimeError(
                     f"{len(layouts)} displays but {1 + len(spare)} outputs")
+            windows = _sync_client_windows(d, root)
+            before = _sync_output_rects(d, res.config_timestamp, {"primary": primary_out, **_output_of})
             held = {did: out for did, out in _output_of.items()
                     if did in layouts and out in spare}
             free = [out for out in spare if out not in held.values()]
@@ -647,6 +850,9 @@ def _sync_apply_output_layout(
                 got = (ci.x, ci.y, ci.width, ci.height) if ci else None
                 if got != (l["x"], l["y"], l["w"], l["h"]):
                     raise RuntimeError(f"display '{did}' realized as {got}")
+            _sync_follow_display_moves(
+                d, root, windows, before,
+                {did: (l["x"], l["y"], l["w"], l["h"]) for did, l in layouts.items()})
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
@@ -728,14 +934,16 @@ def _sync_retire_outputs() -> None:
         try:
             d = _module_display()
             try:
-                _, res, primary_out, poi, _ = _connected_output_state(d)
+                root, res, primary_out, poi, _ = _connected_output_state(d)
             except RuntimeError:
                 return
             spare = _pluggable_outputs(d, res, primary_out)
             if not spare:
                 return
-            _output_of.clear()
             ts = res.config_timestamp
+            windows = _sync_client_windows(d, root)
+            before = _sync_output_rects(d, ts, {"primary": primary_out, **_output_of})
+            _output_of.clear()
             d.grab_server()
             try:
                 for out_id in spare:
@@ -755,6 +963,9 @@ def _sync_retire_outputs() -> None:
                 except Exception:
                     pass
             d.sync()
+            if "primary" in before:
+                _sync_follow_display_moves(
+                    d, root, windows, before, {"primary": (0, 0) + before["primary"][2:]})
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()

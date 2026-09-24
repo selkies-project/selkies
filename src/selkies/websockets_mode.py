@@ -95,8 +95,10 @@ from .display_utils import (
 )
 from .display_utils_xrandr import (
     MultiMonitorWindowManager,
+    follow_display_moves,
     generate_xrandr_gtf_modeline,
     replace_selkies_monitors,
+    window_snapshot,
 )
 from .input_handler import (
     CLIPBOARD_FLAVOURS_MIME,
@@ -5191,6 +5193,7 @@ class DataStreamingServer(BaseStreamingService):
                 # rectangles and under a server grab: window managers re-tile on
                 # every root ConfigureNotify and must never see a monitor-less
                 # or partial set.
+                snapshot = await window_snapshot()
                 await replace_selkies_monitors(layouts, screen_name=screen_name)
                 # A mode change is the dominant cost of a reconfigure (CRTC reprogram,
                 # every client repaints), so a same-size reload skips it. A live
@@ -5205,6 +5208,7 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.info(f"Mode-set for {total_mode_str} failed; grew the framebuffer instead.")
                     else:
                         data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
+                await follow_display_moves(snapshot, layouts)
             # The X server is the authority: a driver can refuse the size and leave
             # the root as it was, and a region outside the root grabs garbage.
             realized_w, realized_h = await read_realized_root((total_width, total_height))
