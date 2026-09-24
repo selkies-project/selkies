@@ -1,0 +1,14 @@
+# Arch installs the CUPS scheduler readable by root alone, and the Selkies print
+# queue runs a copy of it as the session user, so the mode is opened whenever
+# either package is installed or upgraded.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = cups
+Target = selkies
+
+[Action]
+Description = Letting the Selkies print queue read the CUPS scheduler...
+When = PostTransaction
+Exec = /usr/bin/sh -c 'test -e /usr/bin/cupsd && /usr/bin/chmod 0755 /usr/bin/cupsd || :'

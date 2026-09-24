@@ -47,6 +47,8 @@ curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SE
 sudo pacman -U "./${PKG}"
 ```
 
+The Arch package also carries a pacman hook that opens the CUPS scheduler's mode whenever `cups` or `selkies` is installed or upgraded: Arch installs `cupsd` readable by root alone, and the print queue runs a copy of it as the session user.
+
 For hardware-accelerated H.264, add your GPU's driver: NVENC comes with the NVIDIA driver (`libnvidia-encode`), and Intel and AMD encode through VA-API (`libva2` plus your vendor's driver — `intel-media-va-driver-non-free` for Intel, or `i965-va-driver-shaders` for older generations, and the AMDGPU driver's own for AMD). `vainfo`, `intel-gpu-tools`, `radeontop`, and `nvtop` are optional monitors.
 
 ## The AppImage
