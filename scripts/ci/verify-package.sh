@@ -78,4 +78,17 @@ print("every runtime-loaded library is present")
 PY
 
 /opt/selkies/bin/python3 -c "import pixelflux, pcmflux"
+
+# Arch installs the CUPS scheduler readable by root alone; the package's pacman
+# hook opens it on the cups install, which is what lets the print queue run a
+# copy of it as the session user.
+if command -v pacman > /dev/null; then
+    pacman -S --noconfirm --needed cups > /dev/null
+    mode="$(stat -c %a /usr/bin/cupsd)"
+    [ "${mode}" = "755" ] || {
+        echo "::error::the pacman hook left /usr/bin/cupsd at mode ${mode}"
+        exit 1
+    }
+    echo "the pacman hook opened the CUPS scheduler"
+fi
 echo "pixelflux and pcmflux import"
