@@ -42,10 +42,13 @@ from .Xlib import error as x11_error
 from .Xlib.ext import randr
 from .Xlib.ext import res as xres
 from .display_utils import (
+    Rect,
     _communicate_or_kill,
     _drop_module_display,
     _first_connected_output,
     _module_display,
+    _sync_client_windows,
+    _sync_follow_display_moves,
     _x11_lock,
     applied_dpi,
     ensure_mode,
@@ -248,6 +251,56 @@ def _sync_selkies_monitors(
             monitors[name] = (m.x, m.y, m.width_in_pixels, m.height_in_pixels,
                               bool(m.crtcs), bool(m.primary))
     return monitors
+
+
+def _sync_display_rects(d: x11_display.Display, root: Any) -> Dict[str, Rect]:
+    """Each display's rectangle as the logical monitors have it; with none
+    defined, the primary is the framebuffer."""
+    rects = {name[len("selkies-"):]: m[:4] for name, m in _sync_selkies_monitors(d, root).items()}
+    if not rects:
+        geom = root.get_geometry()
+        rects["primary"] = (0, 0, int(geom.width), int(geom.height))
+    return rects
+
+
+def _sync_window_snapshot() -> Tuple[list, Dict[str, Rect]]:
+    """The manager's clients and the displays' rectangles, read before a
+    layout change moves anything."""
+    with _x11_lock:
+        d = _module_display()
+        root = d.screen().root
+        return _sync_client_windows(d, root), _sync_display_rects(d, root)
+
+
+def _sync_follow(snapshot: Tuple[list, Dict[str, Rect]], after: Dict[str, Rect]) -> None:
+    """Move the windows of `snapshot` with their displays into ``after``."""
+    windows, before = snapshot
+    with _x11_lock:
+        d = _module_display()
+        _sync_follow_display_moves(d, d.screen().root, windows, before, after)
+
+
+def _sync_windows_to_origin(snapshot: Tuple[list, Dict[str, Rect]]) -> None:
+    """With the monitors gone the primary is the framebuffer at the origin:
+    move the windows of `snapshot` there with it."""
+    if "primary" in snapshot[1]:
+        _sync_follow(snapshot, {"primary": (0, 0) + snapshot[1]["primary"][2:]})
+
+
+async def window_snapshot() -> Tuple[list, Dict[str, Rect]]:
+    """The manager's clients and the displays' rectangles as the logical
+    monitors have them, read before a layout is swapped in."""
+    return await asyncio.to_thread(_sync_window_snapshot)
+
+
+async def follow_display_moves(snapshot: Tuple[list, Dict[str, Rect]],
+                               layouts: Dict[str, Dict[str, int]]) -> None:
+    """Move the windows of `snapshot` with their displays into ``layouts``,
+    once the framebuffer holds the layout: a manager constrains a move against
+    the screen it has, so one asked between the monitor swap and the resize
+    that follows it is pushed back inside the old framebuffer."""
+    await asyncio.to_thread(_sync_follow, snapshot, {
+        did: (int(l["x"]), int(l["y"]), int(l["w"]), int(l["h"])) for did, l in layouts.items()})
 
 
 def drop_selkies_monitors(d: x11_display.Display, root: Any) -> None:
@@ -820,12 +873,16 @@ async def clear_selkies_monitors() -> None:
     A server with no connected output has no screen of its own to fall back to:
     its monitors are the only ones the toolkits see, so one covering the
     framebuffer takes the layout's place rather than leaving the desktop with
-    nowhere to put a window.
+    nowhere to put a window. The primary's windows follow it back to the
+    origin, and a departed display's onto it.
     """
     names = await list_selkies_monitors()
+    snapshot = await window_snapshot() if names else None
     for monitor_name in names:
         await delete_logical_monitor(monitor_name)
     restored = await asyncio.to_thread(_sync_restore_framebuffer_monitor)
+    if snapshot is not None:
+        await asyncio.to_thread(_sync_windows_to_origin, snapshot)
     if names and not restored:
         await announce_monitor_change()
 
@@ -853,6 +910,8 @@ async def apply_monitor_layout(
     redefined at the fitted rectangles (a dropped display's monitor
     disappears with the swap), while a root that merely came back larger than
     asked leaves them alone, since every swap makes window managers re-tile.
+    The windows follow their displays last of all, once the framebuffer holds
+    the layout (`follow_display_moves`).
 
     Returns:
         True when the framebuffer and monitors were set. ``layouts`` is fitted
@@ -863,6 +922,7 @@ async def apply_monitor_layout(
         nothing could be laid out; the monitors are torn down.
     """
     total_mode = f"{total_w}x{total_h}"
+    snapshot = await window_snapshot()
     curr_res, _, available, _, screen_name = await get_new_res(total_mode)
     if not screen_name:
         # No output means no mode to create or set, and the framebuffer alone is
@@ -892,6 +952,7 @@ async def apply_monitor_layout(
                 )
     realized_w, realized_h = await read_realized_root((total_w, total_h))
     if (realized_w, realized_h) == (total_w, total_h):
+        await follow_display_moves(snapshot, layouts)
         return True
     logger_app_resize.warning(
         f"Realized screen size {realized_w}x{realized_h} differs from target "
@@ -919,6 +980,7 @@ async def apply_monitor_layout(
         if not await replace_selkies_monitors(layouts, screen_name=screen_name):
             await clear_selkies_monitors()
             return False
+    await follow_display_moves(snapshot, layouts)
     return True
 
 
