@@ -47,7 +47,9 @@ afterwards, through `_NET_MOVERESIZE_WINDOW`, to move each window by its own
 display's move and each window of a display that is gone onto the primary
 (`window_moves`, `_sync_follow_display_moves`), once the framebuffer holds the
 layout, since a manager constrains a move against the screen it has; the
-desktop window and panels place themselves and are left alone.
+desktop window and panels place themselves and are left alone, except that a
+desktop window its manager left reaching past the screen is asked back to the
+origin (`_sync_seat_desktop_windows`).
 
 DPI handling here is X11-only by design: on the Wayland backend a DPI is an
 output scale on the session compositor (applied in-process through
@@ -755,6 +757,84 @@ def _sync_follow_display_moves(
     return len(moves)
 
 
+#: How long a desktop is given to size its background window to a new
+#: arrangement, watched for one left away from the origin.
+_DESKTOP_SETTLE_S = 3.0
+
+
+def _sync_seat_desktop_windows(settle_s: float = _DESKTOP_SETTLE_S) -> int:
+    """Keep a desktop's background window at the screen's origin while the
+    desktop takes in a new arrangement.
+
+    pcmanfm-qt draws one window over the union of the screens on X11 and,
+    told of the screens one at a time, first moves it to the primary's new
+    place and then grows it to the union; Openbox keeps the top or left edge
+    of a window growing that way on the monitor most of it is on, so a display
+    added above or left of the primary leaves the grown window at the
+    primary's offset with the union's size, blank on the new display and
+    showing it the primary's share of the wallpaper. A desktop window reaching
+    past the screen is asked, as a pager's move of its own corner, to sit at
+    the origin, which a manager grants since nothing grows. The desktop's
+    asks follow the manager's notices by a moment of their own, so the screen
+    is watched for a bounded moment, on a connection of this call's own since
+    it runs beside the layout's thread.
+
+    Returns:
+        How many windows were seated.
+    """
+    try:
+        d = x11_display.Display()
+    except Exception as e:
+        logger_app_resize.debug(f"No X connection to watch the desktop window on ({e}).")
+        return 0
+    seated: set = set()
+    try:
+        root = d.screen().root
+        list_atom = d.intern_atom("_NET_CLIENT_LIST")
+        kind_atom = d.intern_atom("_NET_WM_WINDOW_TYPE")
+        desktop_atom = d.intern_atom("_NET_WM_WINDOW_TYPE_DESKTOP")
+        move_atom = d.intern_atom("_NET_MOVERESIZE_WINDOW")
+        flags = x11_X.StaticGravity | (1 << 8) | (1 << 9) | (2 << 12)
+        deadline = time.monotonic() + settle_s
+        while True:
+            screen = root.get_geometry()
+            listed = root.get_full_property(list_atom, x11_X.AnyPropertyType)
+            for wid in (listed.value if listed is not None else []):
+                win = d.create_resource_object("window", int(wid))
+                try:
+                    kind = win.get_full_property(kind_atom, x11_X.AnyPropertyType)
+                    if kind is None or desktop_atom not in (int(a) for a in kind.value):
+                        continue
+                    geom = win.get_geometry()
+                    at = root.translate_coords(win, 0, 0)
+                except x11_error.XError:
+                    continue
+                if (at.x, at.y) != (0, 0) and (
+                        at.x + geom.width > screen.width or at.y + geom.height > screen.height):
+                    root.send_event(
+                        x11_event.ClientMessage(window=win, client_type=move_atom, data=(32, [flags, 0, 0, 0, 0])),
+                        event_mask=x11_X.SubstructureRedirectMask | x11_X.SubstructureNotifyMask)
+                    d.flush()
+                    seated.add(int(wid))
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.15)
+    except Exception as e:
+        logger_app_resize.debug(f"Stopped watching the desktop window ({e}).")
+    finally:
+        d.close()
+    if seated:
+        logger_app_resize.debug(f"Asked the window manager to seat {len(seated)} desktop window(s) at the origin.")
+    return len(seated)
+
+
+def seat_desktop_windows() -> None:
+    """Watch for a desktop window the arrangement just applied left away from
+    the origin, beside the layout's own thread so no display waits on the
+    desktop's own reaction."""
+    threading.Thread(target=_sync_seat_desktop_windows, name="selkies-desktop-seat", daemon=True).start()
+
+
 def _sync_apply_output_layout(
     layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int
 ) -> None:
@@ -853,6 +933,7 @@ def _sync_apply_output_layout(
             _sync_follow_display_moves(
                 d, root, windows, before,
                 {did: (l["x"], l["y"], l["w"], l["h"]) for did, l in layouts.items()})
+            seat_desktop_windows()
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
@@ -966,6 +1047,7 @@ def _sync_retire_outputs() -> None:
             if "primary" in before:
                 _sync_follow_display_moves(
                     d, root, windows, before, {"primary": (0, 0) + before["primary"][2:]})
+            seat_desktop_windows()
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()

@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
 from selkies import display_utils as DU
-from selkies.Xlib import X, Xutil, display as xdisplay
+from selkies.Xlib import X, Xatom, Xutil, display as xdisplay
 from selkies.Xlib.protocol import event as xevent
 
 PRIMARY = (1280, 720)
@@ -74,6 +74,21 @@ def make_window(d: xdisplay.Display, name: str, x: int, y: int, w: int, h: int):
             event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
         d.sync()
         settle(d, win, (x, y), timeout=2.0)
+    return win
+
+
+def make_desktop_window(d: xdisplay.Display, w: int, h: int):
+    """A desktop's background window the way pcmanfm-qt makes its one: of the
+    desktop type, static gravity, over the screen from the origin."""
+    screen = d.screen()
+    win = screen.root.create_window(0, 0, w, h, 0, screen.root_depth, X.InputOutput, X.CopyFromParent,
+                                    background_pixel=screen.black_pixel)
+    win.set_wm_name("follow-desktop")
+    win.set_wm_normal_hints(flags=Xutil.PWinGravity, win_gravity=X.StaticGravity)
+    win.change_property(d.intern_atom("_NET_WM_WINDOW_TYPE"), Xatom.ATOM, 32,
+                        [d.intern_atom("_NET_WM_WINDOW_TYPE_DESKTOP")])
+    win.map()
+    d.sync()
     return win
 
 
@@ -182,6 +197,44 @@ def run(wm: list, xvfb: str) -> bool:
             time.sleep(0.5)
             gotbig = place(d, big)
             res.check("and the maximized window back over the primary", inside(gotbig, (0, 0) + PRIMARY), gotbig)
+
+        # A desktop told of the screens one at a time, the way Qt tells
+        # pcmanfm-qt, moves its background window to the primary's new place
+        # and then grows it over the union; a manager may keep the grown
+        # window's top edge on the primary (Openbox does), leaving it at the
+        # primary's offset. Asked once the layout's own watch has ended, so the
+        # manager's answer is seen bare, then the watch's fix-up is applied.
+        desk = make_desktop_window(d, PRIMARY[0], PRIMARY[1])
+        time.sleep(0.8)
+        layouts, prect = extend("up")
+        time.sleep(DU._DESKTOP_SETTLE_S + 0.5)
+        tw = max(l["x"] + l["w"] for l in layouts.values())
+        th = max(l["y"] + l["h"] for l in layouts.values())
+        desk.configure(x=0, y=prect[1])
+        d.sync()
+        time.sleep(0.3)
+        desk.configure(x=0, y=0, width=tw, height=th)
+        d.sync()
+        time.sleep(0.3)
+        grown = place(d, desk)
+        print(f"[{tag}] the manager left the grown desktop window at {grown} (union {tw}x{th})", flush=True)
+        if near(grown, (0, 0)):
+            # A manager that granted the origin is given the state Openbox
+            # leaves on the desktop image: the union's size at the primary's
+            # offset, reaching past the screen.
+            desk.configure(x=0, y=prect[1], width=tw, height=th)
+            d.sync()
+            time.sleep(0.3)
+            grown = place(d, desk)
+        seated = DU._sync_seat_desktop_windows(1.0)
+        got = place(d, desk)
+        res.check("a desktop window left at the primary's offset with the union's size is seated at the origin",
+                  near(got, (0, 0)) and abs(got[2] - tw) <= SLACK and abs(got[3] - th) <= SLACK,
+                  f"from {grown}, asked {seated}, now {got}")
+        desk.destroy()
+        d.sync()
+        collapse()
+        time.sleep(0.5)
 
         layouts, prect = extend("left")
         time.sleep(0.5)
