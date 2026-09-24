@@ -17,6 +17,7 @@ import logging
 import os
 import shutil
 import signal
+import stat
 import tempfile
 from importlib.resources import files
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -144,10 +145,14 @@ class PrintQueue:
         self.spool = spool
         self.process: Optional[asyncio.subprocess.Process] = None
 
+    #: Where the scheduler is looked for, beyond PATH: the sbin directories a
+    #: session's PATH usually leaves out.
+    SEARCH_PATH = ":/usr/sbin:/usr/local/sbin"
+
     @staticmethod
     def programs() -> Optional[Tuple[str, str, str]]:
         """`(cupsd, server bin, data dir)` of the installed CUPS, or None."""
-        path = os.environ.get("PATH", "") + ":/usr/sbin:/usr/local/sbin"
+        path = os.environ.get("PATH", "") + PrintQueue.SEARCH_PATH
         cupsd = shutil.which("cupsd", path=path)
         if not cupsd:
             return None
@@ -158,6 +163,18 @@ class PrintQueue:
                     and os.path.isdir(os.path.join(server_bin, "filter")):
                 return cupsd, server_bin, os.path.join(prefix, "share", "cups")
         return None
+
+    @staticmethod
+    def locked_scheduler() -> Optional[Tuple[str, int]]:
+        """`(path, mode)` of a cupsd on the search path that this user can
+        neither read nor run, which `programs` passes over, or None. The queue
+        runs a copy of the program as the session user, so a scheduler
+        installed for root alone cannot serve it however it is configured."""
+        path = os.environ.get("PATH", "") + PrintQueue.SEARCH_PATH
+        cupsd = shutil.which("cupsd", mode=os.F_OK, path=path)
+        if not cupsd or os.access(cupsd, os.R_OK | os.X_OK):
+            return None
+        return cupsd, stat.S_IMODE(os.stat(cupsd).st_mode)
 
     def _prepare(self, server_bin: str, data_dir: str) -> None:
         for sub in ("ppd", "state", "cache", "spool", "tmp", "bin/backend"):
@@ -215,9 +232,15 @@ ErrorPolicy retry-job
         """Start the scheduler; False where CUPS is not installed."""
         found = self.programs()
         if found is None:
-            logger.info("No CUPS scheduler on this host: documents printed into the spool are "
-                        "still handed over, but there is no Selkies queue to print to "
-                        "(cups-daemon and cups-filters provide one)")
+            locked = self.locked_scheduler()
+            if locked:
+                logger.warning("No print queue: %s is mode %o, which this user can neither read nor "
+                               "run; a Selkies queue needs the scheduler readable (Arch's cups "
+                               "package installs it for root alone)", *locked)
+            else:
+                logger.info("No CUPS scheduler on this host: documents printed into the spool are "
+                            "still handed over, but there is no Selkies queue to print to "
+                            "(cups-daemon and cups-filters provide one)")
             return False
         cupsd, server_bin, data_dir = found
         # The scheduler runs as a copy of the program: a distribution confines
