@@ -18,6 +18,8 @@ export const gitConfig = {
 
 export const repoUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
 
+export const projectUrl = 'https://selkies.io';
+
 // The path this build is served from. Empty for a plain build at a domain
 // root; a fork on a GitHub Pages project path sets it, and build-versions.mjs
 // appends the version segment. next.config.mjs applies it to routed URLs, so

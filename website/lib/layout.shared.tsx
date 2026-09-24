@@ -3,7 +3,7 @@ import Image from 'next/image';
 // Imported rather than referenced by URL: a bare path would be emitted without
 // the GitHub Pages base path and 404 in production.
 import icon from '../../docs/assets/logo/icon-192x192.png';
-import { repoUrl, siteName } from './shared';
+import { projectUrl, repoUrl, siteName } from './shared';
 
 export function baseOptions(): BaseLayoutProps {
   return {
@@ -15,6 +15,7 @@ export function baseOptions(): BaseLayoutProps {
         </>
       ),
     },
+    links: [{ text: 'selkies.io', url: projectUrl, external: true }],
     githubUrl: repoUrl,
   };
 }
