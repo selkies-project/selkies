@@ -4,7 +4,7 @@
 
 // Wish-only UI strings, overlaid on the classic dashboard dictionary by
 // src/i18n.ts (extras win, then the classic translator with its English
-// fallback). Locale codes mirror translations.js: en es zh hi pt fr ru de
+// fallback). Locale codes mirror translations.js: en es zh_cn zh_tw hi pt fr ru de
 // tr it nl ar ko ja vi th fil da. Interpolation uses the same {var} syntax.
 
 const en = {
@@ -127,7 +127,7 @@ const es = {
     shortcuts: { citeNotice: "Cita nuestro artículo académicamente" },
 };
 
-const zh = {
+const zh_cn = {
     common: { on: "开", off: "关", enabled: "已启用", disabled: "已禁用", close: "关闭" },
     topMenu: {
         gaming: "游戏",
@@ -1087,4 +1087,64 @@ const da = {
     shortcuts: { citeNotice: "Citér vores artikel akademisk" },
 };
 
-export const extras: Record<string, any> = { en, es, zh, hi, pt, fr, ru, de, tr, it, nl, ar, ko, ja, vi, th, fil, da };
+const zh_tw = {
+    common: { on: "開", off: "關", enabled: "已開啟", disabled: "已停用", close: "關閉" },
+    topMenu: {
+        gaming: "遊戲",
+        gamepadInput: "手制輸入",
+        streamControls: "串流控制",
+        videoStream: "視訊串流",
+        audioStream: "音訊串流",
+        microphone: "麥克風",
+        webcam: "視訊鏡頭",
+        touchControls: "觸控",
+        touchGamepad: "虛擬觸控手制",
+        virtualKeyboard: "螢幕小鍵盤",
+        settings: "設定",
+        systemMonitoring: "系統監視",
+        toggleFullscreen: "切換到全螢幕",
+        dragHandle: "拖曳把手",
+        toolsPanels: "工具面板",
+    },
+    settingsTabs: { video: "視訊", audio: "音訊", resolution: "解析度" },
+    screen: { setButton: "設定" },
+    audio: { defaultDevice: "預設" },
+    stats: { monitorTitle: "系統效能監視器", compactView: "精簡模式", detailedView: "詳細檢視" },
+    apps: {
+        subtitle: "安裝與管理應用程式",
+        launchApp: "啟動 {name}",
+        installApp: "安裝 {name}",
+        updateApp: "更新 {name}",
+        removeApp: "刪除 {name}",
+    },
+    files: { subtitle: "下載與管理檔案" },
+    uploads: {
+        uploadingFile: "上傳中 {fileName}...",
+        uploadingFileProgress: "上傳中 {fileName}：{progress}%",
+        uploadSuccessFile: "{fileName} 上傳成功",
+        uploadFailedFile: "上傳 {fileName} 失敗：{errorMessage}",
+    },
+    sharing: {
+        shareLinksTitle: "分享連線連結",
+        tooltipLine1: "分享此連結，讓他人以「僅檢視」或「可控制」的權限加入您的瀏覽畫面。",
+        tooltipLine2: "每個連結皆可授予特定角色的存取權限。",
+        viewerLabel: "觀眾",
+        viewerBadge: "僅能觀看",
+        controllerLabel: "控制器 {n}",
+        controllerBadge: "遊戲手制 {n}",
+        copy: "複製",
+        copied: "已複製！",
+        copyAria: "複製{label}連結",
+        disabledByAdmin: "伺服器管理員已停用共享功能。",
+        noneAvailable: "目前沒有可用的分享選項。",
+    },
+    clipboard: {
+        inputPlaceholder: "輸入文字以複製到遠端剪貼簿...",
+        uploadImage: "上傳圖片",
+        clearImage: "清除圖片",
+        previewAlt: "剪貼簿預覽",
+    },
+    shortcuts: { citeNotice: "引用我們的論文" },
+};
+
+export const extras: Record<string, any> = { en, es, zh_cn, zh_tw, hi, pt, fr, ru, de, tr, it, nl, ar, ko, ja, vi, th, fil, da };
