@@ -36,6 +36,7 @@
 import { Card, CardContent } from "@/components/ui/card";
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, isMacDesktop } from "../../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders } from "../../../../selkies-web-core/lib/session-token.js";
+import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, stopIndex, stopsWithin } from "../../../../selkies-web-core/lib/slider-stops.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
@@ -162,19 +163,6 @@ const encoderOptionsRTC = [
 
 /** Encoders that support both CBR and CRF (constant-QP) rate control. */
 const VIDEO_ENCODERS = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "h264enc-striped"];
-
-const FRAMERATE_STEPS = [8, 12, 15, 24, 25, 30, 48, 50, 60, 90, 100, 120, 144, 165, 240];
-
-/** CRF stops, inside the server-supported `video_crf` range (min 5). */
-const videoCRFOptions = [50, 45, 40, 35, 30, 25, 20, 10, 5];
-
-/** Sub-Mbps CBR stops (kbps) for constrained links, ahead of the 1000-kbps steps. */
-const SUB_MBPS_BITRATE_STEPS = [100, 250, 500, 750];
-/**
- * CBR stops above 100000 kbps, where per-1000 granularity stops mattering and
- * a 1000-position slider would be unusable.
- */
-const COARSE_MBPS_BITRATE_STEPS = [150000, 200000, 300000, 400000, 500000, 750000, 1000000];
 
 const readStored = (key: string) => localStorage.getItem(getPrefixedKey(key));
 
@@ -1042,51 +1030,17 @@ export function Settings() {
         resetDpiToDerivedDefault();
     };
 
-    /** CBR stops: the sub-Mbps steps, whole-Mbps steps to 100000, then the coarse steps, clipped to the server range. */
-    const videoBitrateOptions = (() => {
-        const min = serverSettings?.video_bitrate?.min ?? 100;
-        const max = serverSettings?.video_bitrate?.max ?? 1000000;
-        const stops = SUB_MBPS_BITRATE_STEPS.filter(v => v >= min && v <= max);
-        for (let v = Math.max(1000, Math.ceil(min / 1000) * 1000); v <= Math.min(100000, Math.floor(max / 1000) * 1000); v += 1000) stops.push(v);
-        stops.push(...COARSE_MBPS_BITRATE_STEPS.filter(v => v >= min && v <= max));
-        return stops.length ? stops : [min];
-    })();
-    /** Framerate stops clipped to the server-allowed span, as the stored value itself is clamped. */
-    const framerateOptions = (() => {
-        const min = serverSettings?.framerate?.min ?? 8;
-        const max = serverSettings?.framerate?.max ?? 240;
-        const stops = FRAMERATE_STEPS.filter(v => v >= min && v <= max);
-        return stops.length ? stops : [min];
-    })();
-    const framerateIndex = (() => {
-        const exact = framerateOptions.indexOf(framerate);
-        if (exact >= 0) return exact;
-        const above = framerateOptions.findIndex(v => v >= framerate);
-        return above >= 0 ? above : framerateOptions.length - 1;
-    })();
-    const bitrateIndex = (() => {
-        const exact = videoBitrateOptions.indexOf(videoBitRate);
-        if (exact >= 0) return exact;
-        const above = videoBitrateOptions.findIndex(v => v >= videoBitRate);
-        return above >= 0 ? above : videoBitrateOptions.length - 1;
-    })();
     /**
-     * CRF stops clipped to the server-allowed span. The list descends (higher
-     * quality to the right), so the nearest fallback for an off-stop value
-     * (server default, clamp) is the first stop at or below it.
+     * The slider stops inside the server's ranges; a stored value between stops
+     * (a server default, a clamp) shows at the nearest one.
      */
-    const videoCRFChoices = (() => {
-        const min = serverSettings?.video_crf?.min ?? 5;
-        const max = serverSettings?.video_crf?.max ?? 50;
-        const stops = videoCRFOptions.filter(v => v >= min && v <= max);
-        return stops.length ? stops : [min];
-    })();
-    const videoCRFIndex = (() => {
-        const exact = videoCRFChoices.indexOf(videoCRF);
-        if (exact >= 0) return exact;
-        const below = videoCRFChoices.findIndex(v => v <= videoCRF);
-        return below >= 0 ? below : videoCRFChoices.length - 1;
-    })();
+    const videoBitrateOptions = stopsWithin(BITRATE_STOPS, serverSettings?.video_bitrate?.min ?? 100, serverSettings?.video_bitrate?.max ?? 1000000);
+    const bitrateIndex = stopIndex(videoBitrateOptions, videoBitRate);
+    const framerateOptions = stopsWithin(FRAMERATE_STOPS, serverSettings?.framerate?.min ?? 8, serverSettings?.framerate?.max ?? 240);
+    const framerateIndex = stopIndex(framerateOptions, framerate);
+    const videoCRFChoices = stopsWithin(CRF_STOPS, serverSettings?.video_crf?.min ?? 5, serverSettings?.video_crf?.max ?? 50);
+    const videoCRFIndex = stopIndex(videoCRFChoices, videoCRF);
+    const videoPaintoverCRFChoices = stopsWithin(CRF_STOPS, serverSettings?.video_paintover_crf?.min ?? 5, serverSettings?.video_paintover_crf?.max ?? 50);
     const formatBitrate = (v: number) => `${v / 1000} Mbps`;
 
     const audioBitrateChoices = (serverSettings?.audio_bitrate?.allowed?.map((v: string) => parseInt(v, 10))) || audioBitrateOptions;
@@ -1605,11 +1559,14 @@ export function Settings() {
                                     <label className="text-sm font-medium">{tl('sections.video.paintoverCrfLabel', { crf: videoPaintoverCRF })}</label>
                                     <div className="flex items-center gap-2">
                                         <Slider
-                                            min={serverSettings?.video_paintover_crf?.min || 5}
-                                            max={serverSettings?.video_paintover_crf?.max || 50}
+                                            min={0}
+                                            max={videoPaintoverCRFChoices.length - 1}
                                             step={1}
-                                            value={[videoPaintoverCRF]}
-                                            onValueChange={(value) => handleH264PaintoverCRFChange(value[0])}
+                                            value={[stopIndex(videoPaintoverCRFChoices, videoPaintoverCRF)]}
+                                            onValueChange={(value) => {
+                                                const newCRF = videoPaintoverCRFChoices[value[0]];
+                                                if (newCRF !== undefined) handleH264PaintoverCRFChange(newCRF);
+                                            }}
                                             disabled={!serverSettings || serverSettings.video_paintover_crf?.min === serverSettings.video_paintover_crf?.max}
                                             className="flex-1"
                                         />
