@@ -4,10 +4,19 @@
 // invisible until it renders as "clipboard.uploadImage" on screen. Emits JSON:
 // {dashboard: {unresolved: {key: [site]}, gaps: {locale: [key]}, keys: n}}.
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const ADDONS = process.argv[2];
-const LOCALES = "en es zh hi pt fr ru de tr it nl ar ko ja vi th fil da".split(" ");
+const LOCALES = "en es zh_cn zh_tw hi pt fr ru de tr it nl ar ko ja vi th fil da".split(" ");
+
+// A browser tag has to read the dictionary written for it: Chinese is two
+// written languages under one base language, told apart by script and region.
+const ROUTES = {
+  "en": "en", "en-US": "en", "pt-BR": "pt", "ja-JP": "ja", "fil": "fil",
+  "zh": "zh_cn", "zh-CN": "zh_cn", "zh-SG": "zh_cn", "zh-Hans": "zh_cn", "zh-Hans-SG": "zh_cn",
+  "zh-TW": "zh_tw", "zh-HK": "zh_tw", "zh-MO": "zh_tw", "zh-Hant": "zh_tw", "zh-Hant-TW": "zh_tw", "zh-Hant-HK": "zh_tw",
+};
 const CLASSIC = `${ADDONS}/selkies-dashboard`;
 const WISH = `${ADDONS}/selkies-dashboard-wish`;
 
@@ -37,6 +46,7 @@ function literal(src, name) {
 }
 
 const classicSrc = readFileSync(`${CLASSIC}/src/translations.js`, "utf8");
+const { resolveLocale } = await import(pathToFileURL(resolve(`${CLASSIC}/src/translations.js`)).href);
 const extraSrc = readFileSync(`${WISH}/src/translations-extra.ts`, "utf8");
 const classic = Object.fromEntries(LOCALES.map((l) => [l, literal(classicSrc, l)]));
 const extra = Object.fromEntries(LOCALES.map((l) => [l, literal(extraSrc, l)]));
@@ -112,5 +122,15 @@ for (const [name, dir, dicts] of [
   }
   report[name] = { keys, locales: LOCALES.length, enKeys: enKeys.length, unresolved, gaps,
                    punctuation };
+  if (name === "classic") {
+    // Both dashboards read the classic resolver, and a key it names must exist.
+    const misrouted = {};
+    for (const [tag, want] of Object.entries(ROUTES)) {
+      const got = resolveLocale(tag);
+      if (got !== want || !dict[got]) misrouted[tag] = got;
+    }
+    report[name].misrouted = misrouted;
+    report[name].routes = Object.keys(ROUTES).length;
+  }
 }
 process.stdout.write(JSON.stringify(report));

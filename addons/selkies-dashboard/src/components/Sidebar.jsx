@@ -156,7 +156,6 @@ const dpiScalingOptions = [
 const BROWSER_LANG_TAG =
   (typeof navigator !== "undefined" &&
     (navigator.language || navigator.userLanguage)) || "en";
-const BROWSER_PRIMARY_LANG = BROWSER_LANG_TAG.split("-")[0].toLowerCase();
 
 const DEFAULT_FRAMERATE = 60;
 const DEFAULT_JPEG_QUALITY = 40;
@@ -889,7 +888,9 @@ function Sidebar() {
     setIsOpen(!isOpen);
   };
   const isSecondaryDisplay = displayId === 'display2';
-  const translator = useMemo(() => getTranslator(BROWSER_PRIMARY_LANG), []);
+  // The full tag, since the translator picks the written form of Chinese by
+  // its region and script.
+  const translator = useMemo(() => getTranslator(BROWSER_LANG_TAG), []);
   // system-ui picks its face from the document language, and the script-aware
   // type rules key off it. Region included: zh-TW is not zh-CN.
   useEffect(() => {
