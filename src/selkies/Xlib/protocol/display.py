@@ -387,7 +387,7 @@ class Display(object):
         send_recv_lock MUST be LOCKED when send_and_recv is called.
         It will be UNLOCKED at return.
 
-        Exactly or one of the parameters flush, event, request and recv must
+        Exactly or one of the parameters flush, event, request, and recv must
         be set to control the return condition.
 
         To attempt to send all requests in the queue, flush should
@@ -614,7 +614,7 @@ class Display(object):
                         raise self.socket_error
 
                     if not bytes_recv:
-                        # Clear up, set a connection closed indicator and raise it
+                        # Clear up, set a connection closed indicator, and raise it
                         self.close_internal('server')
                         raise self.socket_error
 

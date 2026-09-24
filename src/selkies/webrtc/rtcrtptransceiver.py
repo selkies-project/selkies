@@ -83,7 +83,7 @@ class RTCRtpTransceiver:
         """
         The currently negotiated direction of the transceiver.
 
-        One of `'sendrecv'`, `'sendonly'`, `'recvonly'`, `'inactive'` or `None`.
+        One of `'sendrecv'`, `'sendonly'`, `'recvonly'`, `'inactive'`, or `None`.
         """
         return self.__currentDirection
 
@@ -94,7 +94,7 @@ class RTCRtpTransceiver:
         :meth:`RTCPeerConnection.createOffer` and
         :meth:`RTCPeerConnection.createAnswer`.
 
-        One of `'sendrecv'`, `'sendonly'`, `'recvonly'` or `'inactive'`.
+        One of `'sendrecv'`, `'sendonly'`, `'recvonly'`, or `'inactive'`.
         """
         return self.__direction
 

@@ -1,4 +1,4 @@
-# Xlib.protocol.rq -- structure primitives for request, events and errors
+# Xlib.protocol.rq -- structure primitives for request, events, and errors
 #
 #    Copyright (C) 2000-2002 Peter Liljenberg <petli@ctrl-c.liu.se>
 #
@@ -47,8 +47,8 @@ signed_codes = { 1: 'b', 2: 'h', 4: 'l' }
 unsigned_codes = { 1: 'B', 2: 'H', 4: 'L' }
 
 
-# Unfortunately, we don't know the array sizes of B, H and L, since
-# these use the underlying architecture's size for a char, short and
+# Unfortunately, we don't know the array sizes of B, H, and L, since
+# these use the underlying architecture's size for a char, short, and
 # long.  Therefore we probe for their sizes, and additionally create
 # a mapping that translates from struct codes to array codes.
 #
@@ -478,7 +478,7 @@ class String16(ValueField):
 
 
 class List(ValueField):
-    """The List, FixedList and Object fields store compound data objects.
+    """The List, FixedList, and Object fields store compound data objects.
     The type of data objects must be provided as an object with the
     following attributes and methods:
 
@@ -626,7 +626,7 @@ class Object(ValueField):
         elif isinstance(val, DictWrapper):
             data = val._data
         else:
-            raise TypeError('Object value must be tuple, dictionary or DictWrapper: %s' % val)
+            raise TypeError('Object value must be tuple, dictionary, or DictWrapper: %s' % val)
 
         vals = []
         for f in self.type.fields:
@@ -944,7 +944,7 @@ class Struct(object):
     def __init__(self, *fields):
         self.fields = fields
 
-        # Structures for to_binary, parse_value and parse_binary
+        # Structures for to_binary, parse_value, and parse_binary
         self.static_codes = '='
         self.static_values = 0
         self.static_fields = []
@@ -1083,7 +1083,7 @@ class Struct(object):
 
         """ This function allows Struct objects to be used in List and
         Object fields.  Each item represents the arguments to pass to
-        to_binary, either a tuple, a dictionary or a DictWrapper.
+        to_binary, either a tuple, a dictionary, or a DictWrapper.
 
         """
 

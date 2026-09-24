@@ -130,7 +130,7 @@ class RTCTransportStats(RTCStats):
 class RTCStatsReport(dict):
     """
     Provides statistics data about WebRTC connections as returned by the
-    :meth:`RTCPeerConnection.getStats()`, :meth:`RTCRtpReceiver.getStats()`
+    :meth:`RTCPeerConnection.getStats()`, :meth:`RTCRtpReceiver.getStats()`,
     and :meth:`RTCRtpSender.getStats()` coroutines.
 
     This object consists of a mapping of string identifiers to objects which

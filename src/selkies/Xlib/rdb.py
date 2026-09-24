@@ -252,7 +252,7 @@ class ResourceDB(object):
             # the mappings by applying these rules in order:
 
             # Rule 1: If the current group contains a match for the
-            # name, class or '?', we drop all previously found loose
+            # name, class, or '?', we drop all previously found loose
             # binding mappings.
 
             # Rule 2: A matching name has precedence over a matching

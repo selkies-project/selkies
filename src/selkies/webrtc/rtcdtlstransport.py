@@ -468,7 +468,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         """
         The current state of the DTLS transport.
 
-        One of `'new'`, `'connecting'`, `'connected'`, `'closed'` or `'failed'`.
+        One of `'new'`, `'connecting'`, `'connected'`, `'closed'`, or `'failed'`.
         """
         return str(self._state)[6:].lower()
 

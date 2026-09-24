@@ -285,7 +285,7 @@ class SetScreenConfig(rq.ReplyRequest):
         )
 
 def set_screen_config(self, size_id, rotation, config_timestamp, rate=0, timestamp=X.CurrentTime):
-    """Sets the screen to the specified size, rate, rotation and reflection.
+    """Sets the screen to the specified size, rate, rotation, and reflection.
 
     rate can be 0 to have the server select an appropriate rate.
 

@@ -321,7 +321,7 @@ class Display(object):
 
         Add an extension subevent.  CODE is the numeric code, subcode
         is the sub-ID of this event that shares the code ID with other
-        sub-events and EVT is the event class.  EVT will be cloned, and
+        sub-events, and EVT is the event class.  EVT will be cloned, and
         the attribute _code of the new event class will be set to CODE.
 
         If NAME is omitted, it will be set to the name of EVT.  This
@@ -585,7 +585,7 @@ class Display(object):
 
     def set_input_focus(self, focus, revert_to, time, onerror = None):
         """Set input focus to focus, which should be a window,
-        X.PointerRoot or X.NONE. revert_to specifies where the focus
+        X.PointerRoot, or X.NONE. revert_to specifies where the focus
         reverts to if the focused window becomes not visible, and should
         be X.RevertToParent, RevertToPointerRoot, or RevertToNone. See
         XSetInputFocus(3X11) for details.
@@ -602,7 +602,7 @@ class Display(object):
 
         focus
             The window which currently holds the input
-            focus, X.NONE or X.PointerRoot.
+            focus, X.NONE, or X.PointerRoot.
         revert_to
             Where the focus will revert, one of X.RevertToParent,
             RevertToPointerRoot, or RevertToNone. """
@@ -784,7 +784,7 @@ class Display(object):
         bell_pitch
 
         bell_duration
-            The volume, pitch and duration of the bell. """
+            The volume, pitch, and duration of the bell. """
         return request.GetKeyboardControl(display = self.display)
 
     def bell(self, percent = 0, onerror = None):
@@ -852,7 +852,7 @@ class Display(object):
     def change_hosts(self, mode, host_family, host, onerror = None):
         """mode is either X.HostInsert or X.HostDelete. host_family is
         one of X.FamilyInternet, X.FamilyDECnet, X.FamilyChaos,
-        X.FamilyServerInterpreted or X.FamilyInternetV6.
+        X.FamilyServerInterpreted, or X.FamilyInternetV6.
 
         host is a list of bytes. For the Internet family, it should be the
         four bytes of an IPv4 address."""
@@ -871,7 +871,7 @@ hosts
     The hosts on the access list. Each entry has the following attributes:
 
     family
-        X.FamilyInternet, X.FamilyDECnet, X.FamilyChaos, X.FamilyServerInterpreted or X.FamilyInternetV6.
+        X.FamilyInternet, X.FamilyDECnet, X.FamilyChaos, X.FamilyServerInterpreted, or X.FamilyInternetV6.
     name
         A list of byte values, the coding depends on family. For the Internet family, it is the 4 bytes of an IPv4 address.
 
@@ -927,7 +927,7 @@ hosts
 
     def set_modifier_mapping(self, keycodes):
         """Set the keycodes for the eight modifiers X.Shift, X.Lock,
-        X.Control, X.Mod1, X.Mod2, X.Mod3, X.Mod4 and X.Mod5. keycodes
+        X.Control, X.Mod1, X.Mod2, X.Mod3, X.Mod4, and X.Mod5. keycodes
         should be a eight-element list where each entry is a list of the
         keycodes that should be bound to that modifier.
 

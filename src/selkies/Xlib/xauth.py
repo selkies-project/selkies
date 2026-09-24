@@ -105,7 +105,7 @@ class Xauthority(object):
     def get_best_auth(self, family, address, dispno,
                       types = ( b"MIT-MAGIC-COOKIE-1", )):
 
-        """Find an authentication entry matching FAMILY, ADDRESS and
+        """Find an authentication entry matching FAMILY, ADDRESS, and
         DISPNO.
 
         The name of the auth scheme must match one of the names in

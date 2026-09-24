@@ -752,7 +752,7 @@ NV_CTRL_FRAMELOCK_MASTER_TRUE = 1  # deprecated
 
 #
 # NV_CTRL_FRAMELOCK_POLARITY - sync either to the rising edge of the
-# frame lock pulse, the falling edge of the frame lock pulse or both.
+# frame lock pulse, the falling edge of the frame lock pulse, or both.
 #
 # On Quadro Sync II, this attribute is ignored when
 # NV_CTRL_USE_HOUSE_SYNC is OUTPUT.
@@ -2373,7 +2373,7 @@ NV_CTRL_DEPTH_30_ALLOWED = 279  # R--G
 
 #
 # NV_CTRL_MODE_SET_EVENT This attribute is sent as an event
-# when hotkey, ctrl-alt-+/- or randr event occurs.  Note that
+# when hotkey, ctrl-alt-+/-, or randr event occurs.  Note that
 # This attribute cannot be set or queried and is meant to
 # be received by clients that wish to be notified of when
 # mode set events occur.
@@ -2450,7 +2450,7 @@ NV_CTRL_FRAMELOCK_SLAVEABLE = 295  # deprecated
 #
 # NV_CTRL_GVO_SYNC_TO_DISPLAY This attribute controls whether or not
 # the non-SDI display device will be sync'ed to the SDI display device
-# (when configured in TwinView, Clone Mode or when using the SDI device
+# (when configured in TwinView, Clone Mode, or when using the SDI device
 # with OpenGL).
 #
 
@@ -2719,7 +2719,7 @@ NV_CTRL_THERMAL_COOLER_LEVEL_SET_DEFAULT = 321  # -W-C
 #
 # NV_CTRL_THERMAL_COOLER_CONTROL_TYPE -
 # Returns a cooler's control signal characteristics.
-# The possible types are restricted, Variable and Toggle.
+# The possible types are restricted, Variable, and Toggle.
 #
 
 NV_CTRL_THERMAL_COOLER_CONTROL_TYPE = 322  # R--C
@@ -2729,7 +2729,7 @@ NV_CTRL_THERMAL_COOLER_CONTROL_TYPE_VARIABLE = 2
 
 #
 # NV_CTRL_THERMAL_COOLER_TARGET - Returns objects that cooler cools.
-# Targets may be GPU, Memory, Power Supply or All of these.
+# Targets may be GPU, Memory, Power Supply, or All of these.
 # GPU_RELATED = GPU | MEMORY | POWER_SUPPLY
 #
 #
@@ -3353,7 +3353,7 @@ NV_CTRL_DISPLAY_RANDR_OUTPUT_ID = 391  # R-D-
 
 #
 # NV_CTRL_FRAMELOCK_DISPLAY_CONFIG - Configures whether the display device
-# should listen, ignore or drive the framelock sync signal.
+# should listen, ignore, or drive the framelock sync signal.
 #
 # Note that whether or not a display device may be set as a client/server
 # depends on the current configuration.  For example, only one server may be
@@ -4121,7 +4121,7 @@ NV_CTRL_STRING_SLI_MODE = 28  # R---*/
 # Not all tokens will be reported on all GPUs, and additional tokens
 # may be added in the future.
 # For backwards compatibility we still provide nvclock, memclock, and
-# processorclock those are the same as nvclockmin, memclockmin and
+# processorclock those are the same as nvclockmin, memclockmin, and
 # processorclockmin.
 #
 # Note: These clock values take into account the offset
@@ -4208,7 +4208,7 @@ NV_CTRL_STRING_VCSC_FAN_STATUS = 30  # R---V
 # NV_CTRL_STRING_VCSC_TEMPERATURES - Deprecated
 #
 # Returns a string with all Temperature readings in the Visual Computing
-# System, if such a query is supported.  Intake, Exhaust and Board Temperature
+# System, if such a query is supported.  Intake, Exhaust, and Board Temperature
 # values are reported in Celsius.
 #
 # Valid tokens:
@@ -4234,7 +4234,7 @@ NV_CTRL_STRING_VCSC_TEMPERATURES = 31  # R---V
 #
 # Returns a string with all Power Supply Unit related readings in the Visual
 # Computing System, if such a query is supported.  Current in amperes, Power
-# in watts, Voltage in volts and PSU state may be reported.  Not all PSU types
+# in watts, Voltage in volts, and PSU state may be reported.  Not all PSU types
 # support all of these values, and therefore some readings may be unknown.
 #
 # Valid tokens:
@@ -4281,11 +4281,11 @@ NV_CTRL_STRING_GVO_VIDEO_FORMAT_NAME = 33  # renamed
 
 #
 # NV_CTRL_STRING_GPU_CURRENT_CLOCK_FREQS - returns a string with the
-# associated NV Clock, Memory Clock and Processor Clock values.
+# associated NV Clock, Memory Clock, and Processor Clock values.
 #
 # Current valid tokens are "nvclock", "nvclockmin", "nvclockmax",
 # "memclock", "memclockmin", "memclockmax", "processorclock",
-# "processorclockmin" and "processorclockmax".
+# "processorclockmin", and "processorclockmax".
 # Not all tokens will be reported on all GPUs, and additional tokens
 # may be added in the future.
 #
@@ -4478,7 +4478,7 @@ NV_CTRL_STRING_GPU_UUID = 52  # R--G
 # NV_CTRL_STRING_GPU_UTILIZATION - Returns the current percentage usage
 # of the various components of the GPU.
 #
-# Current valid tokens are "graphics", "memory", "video" and "PCIe".
+# Current valid tokens are "graphics", "memory", "video", and "PCIe".
 # Not all tokens will be reported on all GPUs, and additional tokens
 # may be added in the future.
 #

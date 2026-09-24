@@ -76,7 +76,7 @@ def get_display(display):
 def get_socket(dname, protocol, host, dno):
     """socket = get_socket(dname, protocol, host, dno)
 
-    Connect to the display specified by DNAME, PROTOCOL, HOST and DNO, which
+    Connect to the display specified by DNAME, PROTOCOL, HOST, and DNO, which
     are the corresponding values from a previous call to get_display().
 
     Return SOCKET, a new socket object connected to the X server.
@@ -91,7 +91,7 @@ def get_auth(sock, dname, protocol, host, dno):
     """auth_name, auth_data = get_auth(sock, dname, protocol, host, dno)
 
     Return authentication data for the display on the other side of
-    SOCK, which was opened with DNAME, HOST and DNO, using PROTOCOL.
+    SOCK, which was opened with DNAME, HOST, and DNO, using PROTOCOL.
 
     Return AUTH_NAME and AUTH_DATA, two strings to be used in the
     connection setup request.

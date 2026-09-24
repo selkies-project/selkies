@@ -80,7 +80,7 @@ Tue Jan  9 10:03:25 2001  Peter Liljenberg  <petli@cendio.se>
 	* rq.py: The fix for 64-bit platforms didn't work, and close
 	scrutiny of structmodule.c shows why: it turns out that '='
 	translates into '<' or '>', the one the platform would use.  This
-	means B is one byte, H is two and L is four, and no extra
+	means B is one byte, H is two, and L is four, and no extra
 	alignment, always.  '@', which is the default, selects native
 	number of bytes, which on Alpha means that 'L' is eight bytes.
 
@@ -99,7 +99,7 @@ Fri Dec 29 17:05:02 2000  Peter Liljenberg  <petli@cendio.se>
 
 	* rq.py: Alpha forces us to probe how many bytes each struct code
 	in 'bhil' represents, instead of being able to assume that b is 1,
-	h is 2 and l is 4.
+	h is 2, and l is 4.
 
 2000-12-21    <petli@cendio.se>
 

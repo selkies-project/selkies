@@ -208,7 +208,7 @@ def parse_stun_turn_uri(uri: str) -> dict[str, Any]:
 
 class RTCIceGatherer(AsyncIOEventEmitter):
     """
-    The :class:`RTCIceGatherer` interface gathers local host, server reflexive
+    The :class:`RTCIceGatherer` interface gathers local host, server reflexive,
     and relay candidates, as well as enabling the retrieval of local
     Interactive Connectivity Establishment (ICE) parameters which can be
     exchanged in signaling.
