@@ -1960,21 +1960,6 @@ INPUT_X_REPLY_TIMEOUT_S = 20.0
 INPUT_X_EVENT_POLL_S = 0.02
 
 
-def _is_within_directory(directory: str, target: str) -> bool:
-    """Return True if `target` is `directory` itself or strictly inside it.
-
-    Compares on path-segment boundaries via os.path.commonpath rather than a
-    bare string prefix (which would accept sibling dirs sharing a name prefix).
-    Both paths should already be absolute/realpath-resolved by the caller.
-    """
-    directory = os.path.abspath(directory)
-    target = os.path.abspath(target)
-    try:
-        return os.path.commonpath([directory, target]) == directory
-    except ValueError:
-        # Paths on different drives or a mix of absolute/relative.
-        return False
-
 # Event, button, and axis codes from linux/input-event-codes.h.
 EV_SYN = 0x00
 EV_KEY = 0x01
