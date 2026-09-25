@@ -7,7 +7,9 @@
 A minimal Flask app implementing the TURN REST API: it mints time-limited
 HMAC-SHA1 credentials (coturn's ``use-auth-secret`` scheme) from a shared
 secret, optionally gated behind an API key, and returns the TURN URI list a
-WebRTC client feeds into its RTCPeerConnection configuration. All deployment
+WebRTC client feeds into its RTCPeerConnection configuration. Without
+`TURN_API_KEY` it mints them for anyone who reaches it, which startup warns of
+for any secret but the public default. All deployment
 knobs come from `TURN_*` environment variables read at import time. Run
 directly, the development server listens on `TURN_REST_ADDR` (host names or
 addresses, comma-separated, the loopback addresses by default) at
@@ -21,6 +23,7 @@ import time
 import hmac
 import hashlib
 import base64
+import logging
 import secrets
 import string
 
@@ -33,6 +36,10 @@ turn_port = os.environ.get('TURN_PORT', '443')
 turn_protocol_default = os.environ.get('TURN_PROTOCOL', 'udp')
 turn_tls_default = os.environ.get('TURN_TLS', 'false')
 turn_ttl_default = os.environ.get('TURN_TTL', '86400')
+
+if not turn_api_key and shared_secret != 'openrelayprojectsecret':
+    logging.getLogger('turn-rest').warning(
+        'TURN_API_KEY is unset: relay credentials for %s are minted for anyone who reaches this service', turn_host)
 
 app = Flask(__name__)
 
