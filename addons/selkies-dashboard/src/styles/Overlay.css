@@ -726,7 +726,7 @@
 .stream-status-icon.good { fill: var(--stat-good); }
 .stream-status-icon.warn { fill: var(--stat-warn); }
 .stream-row-label {
-    margin-right: 6px;
+    margin-right: 3px;
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;

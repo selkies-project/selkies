@@ -220,7 +220,7 @@ export default function StreamStats({ t, active, framerate }) {
             <StatusIcon status={row.status} />
             <span className="stream-row-text">
               <span>
-                <span className="stream-row-label">{t(`sections.stats.${row.key}Label`)}</span>
+                <span className="stream-row-label">{t(`sections.stats.${row.key}Label`)}</span>{" "}
                 <span className="stream-row-value">{row.value || t("sections.stats.tooltipMemoryNA")}</span>
               </span>
               {row.detail && <span className="stream-row-detail">{row.detail}</span>}
