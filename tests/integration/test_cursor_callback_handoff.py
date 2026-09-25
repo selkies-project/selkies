@@ -10,8 +10,8 @@ cursor they last received.
 
 Drives two ScreenCapture objects on each backend, the X test display and
 pixelflux's own Wayland compositor: the first captures and registers, the
-second registers and withdraws. On X11 a changed root cursor then has to reach
-the primary as well.
+second registers and withdraws. On X11 a changed cursor on screen then has to
+reach the primary as well.
 """
 import os
 import sys
@@ -28,14 +28,27 @@ def wait_for(events: list, count: int, timeout: float = 5.0) -> bool:
     return len(events) >= count
 
 
-def set_root_cursor(shape: int) -> None:
-    from selkies.Xlib import display as xdisp
+def cover_screen() -> tuple:
+    """Map a raised input-only window over the whole screen, whose cursor is then the
+    one on screen wherever the pointer is: a suite before this one can leave a window
+    with a cursor of its own under the pointer, where a changed root cursor shows nothing."""
+    from selkies.Xlib import X, display as xdisp
     d = xdisp.Display(H.require_display())
+    screen = d.screen()
+    win = screen.root.create_window(0, 0, screen.width_in_pixels, screen.height_in_pixels, 0, 0,
+                                    X.InputOnly, X.CopyFromParent, override_redirect=True)
+    win.map()
+    win.configure(stack_mode=X.Above)
+    d.sync()
+    return d, win
+
+
+def set_cursor(cover: tuple, shape: int) -> None:
+    d, win = cover
     font = d.open_font("cursor")
     cursor = font.create_glyph_cursor(font, shape, shape + 1, (0, 0, 0), (65535, 65535, 65535))
-    d.screen().root.change_attributes(cursor=cursor)
+    win.change_attributes(cursor=cursor)
     d.sync()
-    d.close()
 
 
 def run(backend: str) -> "H.Results":
@@ -53,13 +66,14 @@ def run(backend: str) -> "H.Results":
     cs.codec = "jpeg"
     cs.capture_cursor = False
 
+    cover = None if wayland else cover_screen()
     primary = pixelflux.ScreenCapture()
     secondary = pixelflux.ScreenCapture()
     primary.set_cursor_callback(lambda mt, data, hx, hy: primary_events.append(mt))
     primary.start_capture(lambda frame: None, cs)
     try:
-        if not wayland:
-            set_root_cursor(150)
+        if cover:
+            set_cursor(cover, 150)
         res.check("the primary's callback receives the cursor", wait_for(primary_events, 1), primary_events)
 
         secondary.set_cursor_callback(lambda mt, data, hx, hy: secondary_events.append(mt))
@@ -75,7 +89,7 @@ def run(backend: str) -> "H.Results":
             time.sleep(1.0)
         else:
             before = len(primary_events)
-            set_root_cursor(68)
+            set_cursor(cover, 68)
             res.check("a later cursor change reaches the primary", wait_for(primary_events, before + 1),
                       f"{len(primary_events) - before} after")
         res.check("the withdrawn callback hears nothing more", len(secondary_events) == after_withdrawal,
@@ -83,6 +97,8 @@ def run(backend: str) -> "H.Results":
     finally:
         primary.stop_capture()
         primary.clear_cursor_callback()
+        if cover:
+            cover[0].close()
     return res
 
 
