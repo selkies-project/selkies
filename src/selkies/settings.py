@@ -224,7 +224,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "audit_webhook_url",
         "type": "str",
         "default": "",
-        "help": 'URL that receives one JSON POST per clipboard transfer, file upload, file download, printed document handed over, page connection, and recording, carrying metadata only (the event, an RFC 3339 timestamp, byte size, MIME type, or file name) and never the content. Events are delivered in order over one keep-alive connection; a collector that is slow or down loses what overflows the queue rather than stalling the session. Empty (default) sends nothing.',
+        "help": 'URL that receives one JSON POST per clipboard transfer, file upload, file download, printed document handed over, page connection, and recording, carrying metadata only (the event, an RFC 3339 timestamp, byte size, MIME type, or file name) and never the content. Events are delivered in order over one keep-alive connection; a collector that is slow or down loses what overflows the queue rather than stalling the session, and is sent an audit.dropped event with the count once the queue drains. Empty (default) sends nothing.',
     },
     {
         "name": "audit_webhook_token",

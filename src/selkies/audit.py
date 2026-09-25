@@ -10,7 +10,8 @@ its `event`, an RFC 3339 `ts`, and metadata (byte size, MIME type, or file
 name), never the content. Events queue in order and one task delivers them
 over a single keep-alive connection, so a transfer pays an enqueue and
 nothing else; a collector that is slow or down loses what overflows the
-queue rather than stalling a session, and each outage is logged once.
+queue rather than stalling a session, each outage is logged once, and once
+the queue drains an `audit.dropped` event carries the count it lost.
 Without a URL every call is a no-op.
 """
 
@@ -31,6 +32,7 @@ QUEUE_BOUND = 1024
 _queue: Optional[asyncio.Queue] = None
 _sender: Optional[asyncio.Task] = None
 _overflowing = False
+_dropped = 0
 _closing = False
 
 
@@ -41,7 +43,7 @@ def rfc3339(ts: float) -> str:
 
 def emit(event: str, **fields: Any) -> None:
     """Queue one event and return at once."""
-    global _queue, _sender, _overflowing
+    global _queue, _sender, _overflowing, _dropped
     if not settings.audit_webhook_url:
         return
     if _queue is None:
@@ -50,6 +52,7 @@ def emit(event: str, **fields: Any) -> None:
     try:
         _queue.put_nowait({"event": event, "ts": time.time(), **fields})
     except asyncio.QueueFull:
+        _dropped += 1
         if not _overflowing:
             logger.warning("Audit webhook queue full (%d events); dropping events until it drains", QUEUE_BOUND)
             _overflowing = True
@@ -57,7 +60,7 @@ def emit(event: str, **fields: Any) -> None:
 
 async def _deliver(queue: asyncio.Queue) -> None:
     """Send queued events one by one; an outage is logged once, its end too."""
-    global _overflowing
+    global _overflowing, _dropped
     headers = {}
     if settings.audit_webhook_token:
         headers["Authorization"] = f"Bearer {settings.audit_webhook_token}"
@@ -77,6 +80,9 @@ async def _deliver(queue: asyncio.Queue) -> None:
                 queue.task_done()
             if queue.empty():
                 _overflowing = False
+                if _dropped:
+                    queue.put_nowait({"event": "audit.dropped", "ts": time.time(), "count": _dropped})
+                    _dropped = 0
             if failure and not failing:
                 logger.warning("Audit webhook failed: %s; events are dropped until it answers", failure)
             elif failing and not failure:
