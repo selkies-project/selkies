@@ -148,6 +148,8 @@ SUITES: list = [
 
     # integration
     {"path": "integration/test_uinput_backend.py", "tier": "integration", "timeout": 300},
+    {"path": "integration/test_cursor_callback_handoff.py", "tier": "integration", "timeout": 300,
+     "selectors": ["x11", "wayland"]},
     {"path": "integration/test_gamepad_release.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_gamepad_switch.py", "tier": "integration", "timeout": 900},
     {"path": "integration/test_stall_recovery.py", "tier": "integration", "timeout": 900,
