@@ -3,16 +3,27 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 # Every ecosystem is grouped into a single weekly pull request: this repository
-# carries five of them across a dozen manifests, and one pull request per
+# carries six of them across a dozen manifests, and one pull request per
 # dependency would bury everything else.
 version: 2
 updates:
+  # The workflows and the composite actions they call: `/` alone reads only
+  # `.github/workflows` and a root `action.yml`
   - package-ecosystem: github-actions
-    directory: /
+    directories: ["/", "/.github/actions/*"]
     schedule:
       interval: weekly
     groups:
       actions:
+        patterns: ["*"]
+
+  # The hooks `.pre-commit-config.yaml` pins by `rev`, which CI's Lint job runs
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      pre-commit-hooks:
         patterns: ["*"]
 
   # No pip entry: every Python dependency here is a lower bound with no upper
