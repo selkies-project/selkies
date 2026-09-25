@@ -30,6 +30,13 @@ FPS_HIST_BUCKETS = (0, 20, 40, 60)
 WEBRTC_CSV_MAX_HEADERS = 2048
 WEBRTC_CSV_MAX_RETAINED_ROWS = 100000
 
+
+def _no_follow(path: str, flags: int) -> int:
+    """Open a statistics file without following a link at its name, creating it
+    readable by its owner alone: the names are predictable, and in a shared
+    directory another account could plant a link there first."""
+    return os.open(path, flags | os.O_NOFOLLOW, 0o600)
+
 class Metrics:
     """Prometheus metrics plus optional CSV capture of client WebRTC stats.
 
@@ -277,7 +284,7 @@ class Metrics:
         Returns:
             The resulting on-disk data-row count.
         """
-        with open(file_path, 'r', newline='') as stats_file:
+        with open(file_path, 'r', newline='', opener=_no_follow) as stats_file:
             rows = list(csv.reader(stats_file, delimiter=','))
         if not rows:
             return 0
@@ -286,7 +293,7 @@ class Metrics:
             return len(data)
         data = data[-WEBRTC_CSV_MAX_RETAINED_ROWS:]
         tmp_path = file_path + ".tmp"
-        with open(tmp_path, 'w', newline='') as stats_file:
+        with open(tmp_path, 'w', newline='', opener=_no_follow) as stats_file:
             csv_writer = csv.writer(stats_file)
             csv_writer.writerow(header)
             csv_writer.writerows(data)
@@ -333,7 +340,7 @@ class Metrics:
                     if prev_names is not None and frozenset(prev_names) == frozenset(header_names):
                         value_by_name = dict(zip(headers, values))
                         remapped = [value_by_name.get(name, "NaN") for name in prev_names]
-                        with open(file_path, 'a+', newline='') as stats_file:
+                        with open(file_path, 'a+', newline='', opener=_no_follow) as stats_file:
                             csv.writer(stats_file, quotechar='"').writerow(remapped)
                         self._bump_and_cap_rows(file_path, is_audio)
                         return
@@ -350,7 +357,7 @@ class Metrics:
                         self.stats_video_row_count = new_rows
                     return
 
-                with open(file_path, 'a+', newline='') as stats_file:
+                with open(file_path, 'a+', newline='', opener=_no_follow) as stats_file:
                     csv_writer = csv.writer(stats_file, quotechar='"')
                     if prev_len is None:
                         csv_writer.writerow(headers)
@@ -396,7 +403,7 @@ class Metrics:
             prev_headers = None
             prev_values = []
             try:
-                with open(file_path, 'r', newline='') as stats_file:
+                with open(file_path, 'r', newline='', opener=_no_follow) as stats_file:
                     csv_reader = csv.reader(stats_file, delimiter=',')
                     for idx, row in enumerate(csv_reader):
                         if idx == 0:
@@ -407,7 +414,7 @@ class Metrics:
                 pass
 
             if not prev_headers:
-                with open(file_path, 'w', newline='') as stats_file:
+                with open(file_path, 'w', newline='', opener=_no_follow) as stats_file:
                     csv_writer = csv.writer(stats_file)
                     csv_writer.writerow(headers)
                     csv_writer.writerow(values)
@@ -445,7 +452,7 @@ class Metrics:
             remapped_new = remap(values, new_index)
 
             tmp_path = file_path + ".tmp"
-            with open(tmp_path, 'w', newline='') as stats_file:
+            with open(tmp_path, 'w', newline='', opener=_no_follow) as stats_file:
                 csv_writer = csv.writer(stats_file)
                 csv_writer.writerow(merged_headers)
                 csv_writer.writerows(remapped_prev)
