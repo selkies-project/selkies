@@ -57,11 +57,13 @@ async def run(res: H.Results) -> None:
 
         # /dev/video0 is the interposer's own default, not a guess about this host's
         # loopback nodes: SELKIES_WEBCAM_DEVICE picks another index and neither the
-        # server nor this suite sets it, so the two agree by construction.
+        # server nor this suite sets it, so the two agree by construction. The camera
+        # socket is in the server's runtime directory, which an application of its
+        # session shares.
         opener = subprocess.Popen(
             [sys.executable, "-c",
              f"import os,time;f=os.open({DEVICE!r},os.O_RDWR);time.sleep(40);os.close(f)"],
-            env=dict(os.environ, LD_PRELOAD=INTERPOSER),
+            env=dict(os.environ, LD_PRELOAD=INTERPOSER, XDG_RUNTIME_DIR=H.RUNTIME_DIR),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             held = await demands(ws, 8.0, "webcam")
