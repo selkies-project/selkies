@@ -1,18 +1,18 @@
 xvfb: run the fake vblank at the rate a client asks for, on a precise timer
 
-A screen without a driver of its own presents on a fake vblank whose rate is
-fixed when the server starts (-fakescreenfps, 60 by default), so a client
-that waits for it -- a Vulkan or GL client presenting FIFO, a compositor that
-paces itself on Present -- draws no faster than that however fast the screen
-is streamed. The server's timers count whole milliseconds, which puts any
-rate whose interval is not one on an uneven cadence.
+A client that waits for the fake vblank of a screen without a driver of its
+own -- a Vulkan or GL client presenting FIFO, a compositor that paces itself
+on Present -- draws at that vblank's rate, so the rate follows what a client
+sets and the cadence keeps microseconds.
 
 - A client sets _FAKE_SCREEN_FPS (CARDINAL, 1 to 1000) on the root window,
-  and the screen runs at the faster of that rate and the one it started at;
-  deleting the property returns it to the start rate. The MSC stays
-  continuous across a change, and vblanks already queued are retimed at once.
+  and the screen runs at the faster of that rate and the one it started at
+  (-fakescreenfps, 60 by default); deleting the property returns it to the
+  start rate. The MSC stays continuous across a change, and vblanks already
+  queued are retimed at once.
 - One timerfd serves the queue, armed for its soonest vblank to the
-  microsecond.
+  microsecond, so a rate whose interval is not a whole millisecond keeps an
+  even cadence.
 
 diff --git a/Xext/present/present_fake.c b/Xext/present/present_fake.c
 index a29db24..c38a3d7 100644

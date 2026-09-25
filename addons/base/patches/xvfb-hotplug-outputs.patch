@@ -1,11 +1,10 @@
 xvfb: spare outputs a client plugs in and out, each with its own CRTC
 
-A display added to a session is a logical monitor over the one output today,
-because the server has one CRTC, and every consumer that builds its screens
-from CRTCs (kwin_x11) or notifies only for a monitor that is its CRTC (Qt's
-xcb plugin) gets a second display wrong. With a CRTC and an output per
-display the server describes what real hardware does and nothing downstream
-needs to know it is a framebuffer.
+Each display of a session is an output with a CRTC of its own, as real
+hardware gives it, so a consumer that builds its screens from CRTCs
+(kwin_x11) or notifies only for a monitor that is its CRTC (Qt's xcb plugin)
+sees every display, and nothing downstream needs to know the server is a
+framebuffer.
 
 - The server starts with 4 CRTCs unless -crtcs says otherwise. The first
   output is the screen it starts with, at the size -screen gave it; the rest

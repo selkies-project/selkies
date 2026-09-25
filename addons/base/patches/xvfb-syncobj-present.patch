@@ -1,12 +1,11 @@
 xvfb: synchronize DRI3 presents explicitly with timeline syncobjs
 
-A DRI3 client's frame reaches this server's screen only as a Present copy
-that glamor queues on its own context, and the server learns nothing of when
-the client's rendering into the pixmap completes or tells the client when
-the copy has read it. Implicit fences on the dmabuf close both gaps where a
-driver attaches them; the NVIDIA driver attaches none, and presents from its
-Vulkan driver land out of order: a frame shows a swapchain image as it was
-one cycle before or after.
+A DRI3 client's frame reaches this server's screen as a Present copy that
+glamor queues on its own context, so the copy has to wait for the client's
+rendering into the pixmap, and the client has to learn when the copy has
+read it before it draws there again. The NVIDIA driver attaches no implicit
+fence to a buffer it shares; it says both through DRI3 1.4 timeline
+syncobjs, which this server imports.
 
 - glamor imports DRI3 1.4 timeline syncobjs on its render node where the
   kernel has them and the eventfd ioctl to wait on them with, and EGL can
