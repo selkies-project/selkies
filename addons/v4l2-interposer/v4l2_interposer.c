@@ -1157,7 +1157,22 @@ static int connect_socket(wc_handle_t *out, int open_flags) {
         return -1;
     }
 
-    size_t staging_size = (size_t)cfg.data_offset + (size_t)cfg.n_slots * (size_t)cfg.slot_size;
+    /* The layout comes from the peer, so it is checked before the map: the slot records sit
+     * between the header and the frames, and the frames inside the memfd it sent, since a
+     * frame read past the memfd's end faults the application. */
+    uint64_t ctrl_end = (uint64_t)cfg.ctrl_offset + (uint64_t)cfg.n_slots * cfg.ctrl_stride;
+    uint64_t staging_end = (uint64_t)cfg.data_offset + (uint64_t)cfg.n_slots * cfg.slot_size;
+    struct stat st;
+    if (cfg.ctrl_offset < sizeof(wc_shm_header_t) || cfg.ctrl_stride < sizeof(wc_shm_ctrl_t) ||
+        ctrl_end > cfg.data_offset || staging_end > SIZE_MAX ||
+        real_fstat(staging_fd, &st) != 0 || (uint64_t)st.st_size < staging_end) {
+        swc_log_error("staging layout outside its memfd: slots %u x %u at %u, frames %u x %u at %u",
+                      cfg.n_slots, cfg.ctrl_stride, cfg.ctrl_offset, cfg.n_slots, cfg.slot_size, cfg.data_offset);
+        real_close(staging_fd);
+        real_close(sockfd);
+        return -1;
+    }
+    size_t staging_size = (size_t)staging_end;
     void *map = real_mmap(NULL, staging_size, PROT_READ, MAP_SHARED, staging_fd, 0);
     real_close(staging_fd);
     if (map == MAP_FAILED) {
