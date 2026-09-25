@@ -42,7 +42,7 @@ try:
 except (ImportError, RuntimeError):
     VirtualCamera = VirtualCameraSettings = None
 
-from .settings import settings as app_settings
+from .settings import settings as app_settings, socket_dir
 
 logger = logging.getLogger("webcam")
 
@@ -100,7 +100,7 @@ def webcam_uplink_allowed(is_viewer: bool, is_collaborator: bool) -> bool:
 
 def webcam_socket_path() -> str:
     """Full path of the interposer socket, inside the configured socket directory."""
-    return os.path.join(app_settings.webcam_socket_path or "/tmp", WEBCAM_SOCKET_NAME)
+    return os.path.join(socket_dir(app_settings.webcam_socket_path), WEBCAM_SOCKET_NAME)
 
 
 def device_pixel_format(setting: str, codec: Optional[int]) -> str:

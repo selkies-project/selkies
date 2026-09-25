@@ -110,7 +110,7 @@ from .input_handler import (
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
-from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting
+from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting, socket_dir
 from .settings import settings as app_settings
 from . import sessions
 from . import audit
@@ -1106,7 +1106,7 @@ class DataStreamingServer(BaseStreamingService):
         self._stats_sending: Set[web.WebSocketResponse] = set()
         self._stream_watches: Dict[str, stream_stats.StreamWatch] = {}
         self.uinput_mouse_socket = UINPUT_MOUSE_SOCKET
-        self.js_socket_path = settings.js_socket_path
+        self.js_socket_path = socket_dir(settings.js_socket_path)
         self.enable_clipboard = settings.enable_clipboard
         self.enable_binary_clipboard = self.cli_args.enable_binary_clipboard[0]
         self.enable_cursors = ENABLE_CURSORS

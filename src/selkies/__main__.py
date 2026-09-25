@@ -27,7 +27,7 @@ import asyncio
 import logging
 from importlib.metadata import PackageNotFoundError, version
 
-from .settings import settings
+from .settings import settings, socket_dir
 from .display_utils import cursor_size_for_dpi, restore_dpi, set_cursor_size
 from .webrtc_mode import WebRTCService
 from .websockets_mode import DataStreamingServer
@@ -144,8 +144,8 @@ async def run() -> None:
     """
     _install_shutdown_signal_handlers()
 
-    os.environ["SELKIES_JS_SOCKET_PATH"] = settings.js_socket_path
-    os.environ["SELKIES_WEBCAM_SOCKET_PATH"] = settings.webcam_socket_path
+    os.environ["SELKIES_JS_SOCKET_PATH"] = socket_dir(settings.js_socket_path)
+    os.environ["SELKIES_WEBCAM_SOCKET_PATH"] = socket_dir(settings.webcam_socket_path)
 
     if settings.computer_use_bind:
         try:

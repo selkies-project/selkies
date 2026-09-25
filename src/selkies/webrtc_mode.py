@@ -69,7 +69,7 @@ from .metrics import Metrics
 from . import resource_stats
 from . import stream_stats
 from .settings import (settings, AppSettings, SETTING_DEFINITIONS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX,
-                       build_client_settings_payload, sanitize_client_setting)
+                       build_client_settings_payload, sanitize_client_setting, socket_dir)
 from types import SimpleNamespace
 from .webrtc_ice_config import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
 from .stream_server import BaseStreamingService, CentralizedStreamServer, CongestionSteer
@@ -393,7 +393,7 @@ class WebRTCService(BaseStreamingService):
         self.input_handler = WebRTCInput(
             rtc_app=self.rtc_app,
             uinput_mouse_socket_path=getattr(self.args, "uinput_mouse_socket", "") or "",
-            js_socket_path_prefix=getattr(self.args, "js_socket_path", "/tmp"),
+            js_socket_path_prefix=socket_dir(getattr(self.args, "js_socket_path", "")),
             enable_clipboard=self.args.enable_clipboard,
             enable_binary_clipboard="true"
             if self.args.enable_binary_clipboard

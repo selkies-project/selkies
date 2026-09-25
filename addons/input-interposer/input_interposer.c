@@ -453,8 +453,12 @@ __attribute__((constructor)) void init_interposer() {
         pthread_mutexattr_destroy(&recursive);
     }
 
-    /* SELKIES_JS_SOCKET_PATH relocates the sockets (basename kept) to match the backend. */
+    /* SELKIES_JS_SOCKET_PATH relocates the sockets (basename kept) to match the backend;
+     * unset, they are in XDG_RUNTIME_DIR where the backend binds them by default, and in
+     * /tmp only where that is unset too. */
     const char *sock_dir = getenv("SELKIES_JS_SOCKET_PATH");
+    if (!sock_dir || !sock_dir[0])
+        sock_dir = getenv("XDG_RUNTIME_DIR");
     if (sock_dir && sock_dir[0]) {
         for (size_t i = 0; i < NUM_INTERPOSERS(); i++) {
             const char *slash = strrchr(interposers[i].socket_path, '/');

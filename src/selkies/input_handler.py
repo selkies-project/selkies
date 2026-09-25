@@ -3217,20 +3217,35 @@ class SelkiesGamepad:
     async def _run_single_server(self, interposer_socket_path: str,
                                  is_evdev_socket: bool) -> Optional[asyncio.AbstractServer]:
         """Bind one interposer Unix server (unlinking a stale socket file first);
-        None on failure."""
+        None on failure.
+
+        A file at the path that another account owns is refused: in a shared
+        directory it is that account's listener, and every application of this
+        session would open it as its gamepad.
+        """
         sock_dir = os.path.dirname(interposer_socket_path)
         if sock_dir and not os.path.exists(sock_dir):
             try: os.makedirs(sock_dir, exist_ok=True)
             except OSError as e:
                 logger_selkies_gamepad.error(f"Failed to create directory {sock_dir} for socket: {e}")
                 return None
-        
-        if os.path.exists(interposer_socket_path):
+
+        try:
+            owner = os.lstat(interposer_socket_path).st_uid
+        except FileNotFoundError:
+            owner = None
+        if owner is not None and owner != os.geteuid():
+            logger_selkies_gamepad.error(
+                f"{interposer_socket_path} belongs to uid {owner}, not this session: gamepads are not "
+                f"served there; point js_socket_path at a directory of this user's own.")
+            return None
+        if owner is not None:
             try:
                 os.unlink(interposer_socket_path)
                 logger_selkies_gamepad.debug(f"Removed existing socket file: {interposer_socket_path}")
             except OSError as e:
-                logger_selkies_gamepad.warning(f"Could not remove existing file at {interposer_socket_path}: {e}. Bind might fail.")
+                logger_selkies_gamepad.error(f"Could not remove the stale socket at {interposer_socket_path}: {e}")
+                return None
 
         try:
             server = await asyncio.start_unix_server(

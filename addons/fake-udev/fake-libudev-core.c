@@ -51,7 +51,8 @@
  * A udev_monitor reports pad hotplug by watching the interposer's socket
  * directory with inotify: creation or deletion of "selkies_<sysname>.sock"
  * becomes an "add" or "remove" for that node. The directory is
- * SELKIES_JS_SOCKET_PATH (default /tmp) and must match the interposer's. The
+ * SELKIES_JS_SOCKET_PATH, else XDG_RUNTIME_DIR, else /tmp, as the interposer
+ * and the server resolve it. The
  * fd handed to consumers is an epoll set over the inotify fd, the real
  * monitor's fd, and an eventfd that stays armed while buffered inotify records
  * remain undispensed, so it polls readable exactly while
@@ -313,6 +314,8 @@ static void fake_udev_load_real(void) {
 
 static const char *fake_udev_socket_dir(void) {
     const char *d = getenv("SELKIES_JS_SOCKET_PATH");
+    if (!d || !d[0])
+        d = getenv("XDG_RUNTIME_DIR");
     return (d && d[0]) ? d : FAKE_UDEV_SOCKET_DIR_DEFAULT;
 }
 

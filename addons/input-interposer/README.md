@@ -94,7 +94,7 @@ Where `/dev/uinput` is not writable — the usual case in an unprivileged contai
 
 ## Unix domain socket protocol
 
-Selkies is the server (`SelkiesGamepad` in `selkies.input_handler`) and this library is the client. The sockets are `AF_UNIX`/`SOCK_STREAM` and live in `$SELKIES_JS_SOCKET_PATH` (default `/tmp`, set from `--js_socket_path`): `selkies_js<0-3>.sock` backs `/dev/input/js<0-3>` and `selkies_event100<0-3>.sock` backs `/dev/input/event100<0-3>`.
+Selkies is the server (`SelkiesGamepad` in `selkies.input_handler`) and this library is the client. The sockets are `AF_UNIX`/`SOCK_STREAM` and live in `$SELKIES_JS_SOCKET_PATH` (set from `--js_socket_path`; unset, `$XDG_RUNTIME_DIR`, the session's private directory, and `/tmp` where that is unset too): `selkies_js<0-3>.sock` backs `/dev/input/js<0-3>` and `selkies_event100<0-3>.sock` backs `/dev/input/event100<0-3>`.
 
 Every `open()` of an interposed device makes its own connection (up to 16 per device), so each handle gets the full event stream. A connect is retried for 250 ms; if nothing is listening, `open()` fails with `EIO`.
 

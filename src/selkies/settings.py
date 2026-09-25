@@ -987,14 +987,14 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "js_socket_path",
         "type": "str",
-        "default": "/tmp",
-        "help": "Directory to write the Selkies Input Interposer communication sockets to, default: /tmp, results in socket files: /tmp/selkies_js{0-3}.sock",
+        "default": "",
+        "help": "Directory for the Selkies Input Interposer sockets (selkies_js{0-3}.sock, selkies_event{1000-1003}.sock). Empty uses XDG_RUNTIME_DIR, the session's private directory, and /tmp where that is unset; the interposer looks in the same place.",
     },
     {
         "name": "webcam_socket_path",
         "type": "str",
-        "default": "/tmp",
-        "help": "Directory to write the Selkies V4L2 Interposer webcam socket to, default: /tmp, results in socket file: /tmp/selkies_webcam0.sock",
+        "default": "",
+        "help": "Directory for the Selkies V4L2 Interposer webcam socket (selkies_webcam0.sock). Empty uses XDG_RUNTIME_DIR, the session's private directory, and /tmp where that is unset; the interposer looks in the same place.",
     },
     {
         "name": "webcam_width",
@@ -2125,6 +2125,23 @@ CLIENT_PAYLOAD_EXCLUDED = [
     'wayland_host_display', 'app_wayland_display',
     'audit_webhook_url', 'audit_webhook_timeout',
 ]
+
+
+def socket_dir(configured: str) -> str:
+    """The directory the interposer sockets live in.
+
+    The operator's when set, else the session's private runtime directory, where
+    no other account can take a socket's name first (in a shared `/tmp` whoever
+    binds a name first serves every application the session starts), else
+    `/tmp`. The interposers and fake-udev resolve the same fallback.
+
+    Args:
+        configured: The `js_socket_path` or `webcam_socket_path` setting.
+
+    Returns:
+        The directory to bind or connect in.
+    """
+    return configured or os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
 
 
 def _published_enum_allowed(setting_def: Dict[str, Any], value: Any) -> List[str]:

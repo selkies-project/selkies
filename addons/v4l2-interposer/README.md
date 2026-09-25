@@ -110,7 +110,7 @@ export SELKIES_WEBCAM_INTERPOSER='/usr/$LIB/selkies_v4l2_interposer.so'
 export LD_PRELOAD="${SELKIES_WEBCAM_INTERPOSER}${LD_PRELOAD:+:${LD_PRELOAD}}"
 # Optional overrides (must match the backend):
 #   SELKIES_WEBCAM_DEVICE=0                     -> /dev/video0
-#   SELKIES_WEBCAM_SOCKET_PATH=/tmp             -> /tmp/selkies_webcam0.sock
+#   SELKIES_WEBCAM_SOCKET_PATH=/srv/cam         -> /srv/cam/selkies_webcam0.sock (default: $XDG_RUNTIME_DIR, else /tmp)
 #   SELKIES_WEBCAM_SOURCE=auto|socket|pipewire  -> where frames come from
 #   SELKIES_WEBCAM_PIPEWIRE_NODE=selkies-webcam -> the node the pipewire source uses
 #   WEBCAM_LOG=1                                -> stderr diagnostics

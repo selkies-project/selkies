@@ -106,7 +106,8 @@ typedef int ioctl_request_t;
 
 /* Default virtual device and its backing socket. The device index is
  * overridable with SELKIES_WEBCAM_DEVICE; the socket directory with
- * SELKIES_WEBCAM_SOCKET_PATH (basename kept), matching the backend. */
+ * SELKIES_WEBCAM_SOCKET_PATH (basename kept), else XDG_RUNTIME_DIR, else /tmp,
+ * matching the backend. */
 #define WC_DEFAULT_DEVICE_PATH "/dev/video0"
 #define WC_DEFAULT_SOCKET_PATH "/tmp/selkies_webcam0.sock"
 #define WC_VIDEO_MAJOR 81
@@ -522,6 +523,8 @@ __attribute__((constructor)) static void swc_init_interposer(void) {
         }
     }
     const char *sock_dir = getenv("SELKIES_WEBCAM_SOCKET_PATH");
+    if (!sock_dir || !sock_dir[0])
+        sock_dir = getenv("XDG_RUNTIME_DIR");
     if (sock_dir && sock_dir[0]) {
         const char *slash = strrchr(g_socket_path, '/');
         const char *base = slash ? slash + 1 : g_socket_path;
