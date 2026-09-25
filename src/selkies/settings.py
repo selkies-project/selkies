@@ -771,7 +771,13 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "computer_use_bind",
         "type": "str",
         "default": "",
-        "help": "Start pixelflux's Computer-Use HTTP server on comma-separated entries: a bare port listens on the loopback addresses only, host:port names the address to listen on (0.0.0.0:9500,[::]:9500 accepts connections on every interface). Empty leaves it off; the PIXELFLUX_CU environment variable remains the standalone fallback.",
+        "help": "Start pixelflux's Computer-Use HTTP server on comma-separated entries: a bare port listens on the loopback addresses only, which every account on the host can reach, host:port names the address to listen on (0.0.0.0:9500,[::]:9500 accepts connections on every interface). A caller drives the desktop with this user's full authority, so the server needs --computer-use-token and does not start without it. Empty leaves it off; the PIXELFLUX_CU environment variable remains the standalone fallback.",
+    },
+    {
+        "name": "computer_use_token",
+        "type": "str",
+        "default": "",
+        "help": "Bearer token every Computer-Use request has to carry (Authorization: Bearer <token>); falls back to the PIXELFLUX_CU_TOKEN environment variable.",
     },
     {
         "name": "wayland_host_display",
@@ -1130,6 +1136,7 @@ SENSITIVE_SETTING_NAMES = frozenset({
     "cloudflare_turn_token_id",
     "cloudflare_turn_api_token",
     "audit_webhook_token",
+    "computer_use_token",
 })
 for _setting_def in SETTING_DEFINITIONS:
     if _setting_def["name"] in SENSITIVE_SETTING_NAMES:
@@ -2121,7 +2128,7 @@ CLIENT_PAYLOAD_EXCLUDED = [
     'file_manager_path', 'print_spool_path', 'run_after_connect', 'run_after_disconnect',
     'https_cert', 'rtc_config_json', 'app_ready_file', 'js_socket_path',
     'webcam_socket_path', 'webcam_device',
-    'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind',
+    'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind', 'computer_use_token',
     'wayland_host_display', 'app_wayland_display',
     'audit_webhook_url', 'audit_webhook_timeout',
 ]

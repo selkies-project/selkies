@@ -27,6 +27,7 @@ import helpers as H
 # the capture checks paint the root and resize it.
 TEST_DISPLAY = ""
 CU_PORT = 9599
+CU_TOKEN = "soak-computer-use"
 REC_SOCK = os.path.join(H.WORKDIR, "pixelflux-rec.sock")
 
 
@@ -79,7 +80,8 @@ def cursor_withdrawal(res: "H.Results", backend: str, cap) -> None:
 def curl_json(url: str, body=None, timeout: float = 15) -> bytes:
     """GET (or POST when a body is given) a URL and return the raw response."""
     data = body.encode() if isinstance(body, str) else body
-    req = urllib.request.Request(url, data=data, method="POST" if body is not None else "GET")
+    req = urllib.request.Request(url, data=data, method="POST" if body is not None else "GET",
+                                 headers={"Authorization": f"Bearer {CU_TOKEN}"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
@@ -362,7 +364,7 @@ def main() -> "H.Results":
         res.check("wayland standalone", False, repr(e)[:200])
 
     try:
-        pixelflux.start_computer_use(str(CU_PORT))
+        pixelflux.start_computer_use(str(CU_PORT), CU_TOKEN)
         time.sleep(1.0)
         base = f"http://127.0.0.1:{CU_PORT}"
         r = json.loads(curl_json(f"{base}/computer-use", '{"action":"screenshot"}'))

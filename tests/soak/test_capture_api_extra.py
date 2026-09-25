@@ -43,6 +43,7 @@ from typing import Optional
 TEST_DISPLAY = ""
 CU_PORT = 9600
 CU_BASE = f"http://127.0.0.1:{CU_PORT}"
+CU_TOKEN = "soak-computer-use"
 
 
 def curl(url: str, body=None, timeout: float = 30) -> tuple:
@@ -53,7 +54,8 @@ def curl(url: str, body=None, timeout: float = 30) -> tuple:
         raised, so error-status assertions can read the body.
     """
     data = body.encode() if isinstance(body, str) else body
-    req = urllib.request.Request(url, data=data,
+    headers = {"Authorization": f"Bearer {CU_TOKEN}"} if url.startswith(CU_BASE) else {}
+    req = urllib.request.Request(url, data=data, headers=headers,
                                  method="POST" if body is not None else "GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -192,7 +194,7 @@ def main() -> Results:
                    capture_output=True)
 
     print("\n=== Phase A: X11 Computer Use ===", flush=True)
-    pixelflux.start_computer_use(str(CU_PORT))
+    pixelflux.start_computer_use(str(CU_PORT), CU_TOKEN)
     time.sleep(1.0)
 
     def cu(name: str, payload: dict, pred, detail: str = "") -> None:
@@ -205,6 +207,20 @@ def main() -> Results:
 
     RW, RH = x_root_size()
     res.check("cu: root size read", RW > 0 and RH > 0, f"{RW}x{RH}")
+
+    for label, headers in (("no token", {}), ("a wrong token", {"Authorization": "Bearer nope"})):
+        req = urllib.request.Request(f"{CU_BASE}/computer-use", data=b'{"action":"cursor_position"}',
+                                     method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                refused = r.status
+        except urllib.error.HTTPError as e:
+            refused = e.code
+        res.check(f"cu: a request with {label} is refused", refused == 401, refused)
+    stray = f"/tmp/cap-soak2-anywhere-{os.getpid()}.mp4"
+    st, out = curl(f"{CU_BASE}/record_start", json.dumps({"path": stray}))
+    res.check("cu: a recording named outside PIXELFLUX_RECORD_DIR is refused",
+              b"error" in out and not os.path.exists(stray), out[:100])
 
     st, out = cu_json({"action": "screenshot"})
     got = png_size(base64.b64decode(out.get("data", ""))) if out.get("data") else None

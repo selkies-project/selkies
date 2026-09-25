@@ -150,7 +150,7 @@ async def run() -> None:
     if settings.computer_use_bind:
         try:
             from pixelflux import start_computer_use
-            start_computer_use(settings.computer_use_bind)
+            start_computer_use(settings.computer_use_bind, settings.computer_use_token or None)
         except Exception as e:
             logger.warning(f"Computer-Use server not started: {e}")
 

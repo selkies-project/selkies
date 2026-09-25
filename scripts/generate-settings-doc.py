@@ -61,7 +61,7 @@ SECTIONS = [
     ]),
     ("Backends", "The X11 or Wayland capture backend and the GPU it renders on.", [
         "wayland", "render_dri", "auto_gpu", "app_wayland_display", "wayland_host_display",
-        "wayland_socket_index", "computer_use_bind",
+        "wayland_socket_index", "computer_use_bind", "computer_use_token",
     ]),
     ("Session start", "What a session starts with, and hooks around its first and last client.", [
         "video_on_start", "audio_on_start", "microphone_on_start", "webcam_on_start", "gamepad_on_start",
