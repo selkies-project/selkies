@@ -31,6 +31,17 @@ def fake_fps() -> Optional[int]:
         d.close()
 
 
+def clear_leftover() -> None:
+    """Delete a rate a capture left behind: a server killed mid-stream, as an earlier suite's
+    SIGKILL does, never takes its rate back, and the check is of this server."""
+    d = H.x_display()
+    try:
+        d.screen().root.delete_property(d.intern_atom("_FAKE_SCREEN_FPS"))
+        d.sync()
+    finally:
+        d.close()
+
+
 def settles(want: Optional[int], timeout: float = 15) -> Optional[int]:
     deadline = time.time() + timeout
     got = fake_fps()
@@ -42,6 +53,7 @@ def settles(want: Optional[int], timeout: float = 15) -> Optional[int]:
 
 def run(mode: str) -> bool:
     res = H.Results(f"vblank-{mode}")
+    clear_leftover()
     H.server_start(mode=mode, wayland=False, extra_env={"SELKIES_FRAMERATE": "144"})
     try:
         res.check("nothing is published before a page streams", settles(None, 3) is None, fake_fps())
