@@ -1,0 +1,267 @@
+xvfb: run the fake vblank at the rate a client asks for, on a precise timer
+
+A screen without a driver of its own presents on a fake vblank whose rate is
+fixed when the server starts (-fakescreenfps, 60 by default), so a client
+that waits for it -- a Vulkan or GL client presenting FIFO, a compositor that
+paces itself on Present -- draws no faster than that however fast the screen
+is streamed. The server's timers count whole milliseconds, which puts any
+rate whose interval is not one on an uneven cadence.
+
+- A client sets _FAKE_SCREEN_FPS (CARDINAL, 1 to 1000) on the root window,
+  and the screen runs at the faster of that rate and the one it started at;
+  deleting the property returns it to the start rate. The MSC stays
+  continuous across a change, and vblanks already queued are retimed at once.
+- One timerfd serves the queue, armed for its soonest vblank to the
+  microsecond.
+
+diff --git a/Xext/present/present_fake.c b/Xext/present/present_fake.c
+index a29db24..c38a3d7 100644
+--- a/Xext/present/present_fake.c
++++ b/Xext/present/present_fake.c
+@@ -21,25 +21,94 @@
+  */
+ #include <dix-config.h>
+ 
++#include <errno.h>
++#include <string.h>
++#include <sys/timerfd.h>
++#include <unistd.h>
++#include <X11/Xatom.h>
++
++#include "dix/property_priv.h"
+ #include "include/list.h"
+ #include "Xext/present/present_priv.h"
++#include "propertyst.h"
+ 
+ static struct xorg_list fake_vblank_queue;
+ 
++/*
++ * One timer serves the whole queue, armed for its soonest vblank to the
++ * microsecond: the server's own timers count whole milliseconds, which puts
++ * any rate whose interval is not one on an uneven cadence.
++ */
++static int fake_vblank_fd = -1;
++
++/*
++ * A client raises a screen's rate while the server runs by setting this on
++ * its root window (CARDINAL, frames per second, 1 to 1000); the screen runs
++ * at the faster of that and the rate it started at.
++ */
++static Atom fake_fps_atom;
++
+ typedef struct present_fake_vblank {
+     struct xorg_list            list;
+     uint64_t                    event_id;
+-    OsTimerPtr                  timer;
++    uint64_t                    msc;
+     ScreenPtr                   screen;
+ } present_fake_vblank_rec, *present_fake_vblank_ptr;
+ 
++static uint64_t
++present_fake_msc(present_screen_priv_ptr screen_priv, uint64_t ust)
++{
++    return screen_priv->fake_msc_base +
++        (ust - screen_priv->fake_ust_base) / screen_priv->fake_interval;
++}
++
++static uint64_t
++present_fake_ust(present_screen_priv_ptr screen_priv, uint64_t msc)
++{
++    if (msc <= screen_priv->fake_msc_base)
++        return screen_priv->fake_ust_base;
++    return screen_priv->fake_ust_base +
++        (msc - screen_priv->fake_msc_base) * screen_priv->fake_interval;
++}
++
++/*
++ * The screen's private, its interval brought up to date with the root
++ * window property. A change restarts the count from the current MSC, so
++ * MSCs stay continuous across it.
++ */
++static present_screen_priv_ptr
++present_fake_priv(ScreenPtr screen)
++{
++    present_screen_priv_ptr     screen_priv = present_screen_priv(screen);
++    uint32_t                    interval = screen_priv->fake_start_interval;
++    PropertyPtr                 prop;
++
++    if (screen->root &&
++        dixLookupProperty(&prop, screen->root, fake_fps_atom, serverClient,
++                          DixReadAccess) == Success &&
++        prop->type == XA_CARDINAL && prop->format == 32 && prop->size == 1) {
++        uint32_t fps = *(uint32_t *) prop->data;
++
++        if (fps >= 1 && fps <= 1000 && 1000000 / fps < interval)
++            interval = 1000000 / fps;
++    }
++    if (interval != screen_priv->fake_interval) {
++        uint64_t now = GetTimeInMicros();
++
++        screen_priv->fake_msc_base = present_fake_msc(screen_priv, now);
++        screen_priv->fake_ust_base = now;
++        screen_priv->fake_interval = interval;
++    }
++    return screen_priv;
++}
++
+ int
+ present_fake_get_ust_msc(ScreenPtr screen, uint64_t *ust, uint64_t *msc)
+ {
+-    present_screen_priv_ptr screen_priv = present_screen_priv(screen);
++    present_screen_priv_ptr screen_priv = present_fake_priv(screen);
+ 
+     *ust = GetTimeInMicros();
+-    *msc = (*ust + screen_priv->fake_interval / 2) / screen_priv->fake_interval;
++    *msc = present_fake_msc(screen_priv, *ust);
+     return Success;
+ }
+ 
+@@ -52,18 +121,65 @@ present_fake_notify(ScreenPtr screen, uint64_t event_id)
+     present_event_notify(event_id, ust, msc);
+ }
+ 
+-static CARD32
+-present_fake_do_timer(OsTimerPtr timer,
+-                      CARD32 time,
+-                      void *arg)
++static void
++present_fake_arm(void)
+ {
+-    present_fake_vblank_ptr     fake_vblank = arg;
++    struct itimerspec           its = { 0 };
++    present_fake_vblank_ptr     fake_vblank;
++    uint64_t                    next = UINT64_MAX;
+ 
+-    present_fake_notify(fake_vblank->screen, fake_vblank->event_id);
+-    xorg_list_del(&fake_vblank->list);
+-    TimerFree(fake_vblank->timer);
+-    free(fake_vblank);
+-    return 0;
++    xorg_list_for_each_entry(fake_vblank, &fake_vblank_queue, list) {
++        uint64_t ust = present_fake_ust(present_fake_priv(fake_vblank->screen),
++                                        fake_vblank->msc);
++        if (ust < next)
++            next = ust;
++    }
++    if (next != UINT64_MAX) {
++        its.it_value.tv_sec = next / 1000000;
++        its.it_value.tv_nsec = next % 1000000 * 1000;
++    }
++    timerfd_settime(fake_vblank_fd, TFD_TIMER_ABSTIME, &its, NULL);
++}
++
++static void
++present_fake_do_timer(int fd, int ready, void *data)
++{
++    struct xorg_list            due;
++    present_fake_vblank_ptr     fake_vblank, tmp;
++    uint64_t                    expirations;
++    uint64_t                    now = GetTimeInMicros();
++
++    if (read(fd, &expirations, sizeof(expirations)) < 0 && errno != EAGAIN)
++        ErrorF("present: fake vblank timer: %s\n", strerror(errno));
++    xorg_list_init(&due);
++    xorg_list_for_each_entry_safe(fake_vblank, tmp, &fake_vblank_queue, list) {
++        if (present_fake_ust(present_fake_priv(fake_vblank->screen),
++                             fake_vblank->msc) <= now) {
++            xorg_list_del(&fake_vblank->list);
++            xorg_list_append(&fake_vblank->list, &due);
++        }
++    }
++    xorg_list_for_each_entry_safe(fake_vblank, tmp, &due, list) {
++        xorg_list_del(&fake_vblank->list);
++        present_fake_notify(fake_vblank->screen, fake_vblank->event_id);
++        free(fake_vblank);
++    }
++    present_fake_arm();
++}
++
++/*
++ * A request touching the property wakes the timer at once, so the queue is
++ * retimed as the rate changes rather than at the next vblank a client asks
++ * for; the request has run by the time the server polls again.
++ */
++static void
++present_fake_property_filter(CallbackListPtr *pcbl, void *closure, void *calldata)
++{
++    static const struct itimerspec at_once = { .it_value = { 0, 1 } };
++    PropertyFilterParam        *p = calldata;
++
++    if (p->property == fake_fps_atom)
++        timerfd_settime(fake_vblank_fd, TFD_TIMER_ABSTIME, &at_once, NULL);
+ }
+ 
+ void
+@@ -73,7 +189,6 @@ present_fake_abort_vblank(ScreenPtr screen, uint64_t event_id, uint64_t msc)
+ 
+     xorg_list_for_each_entry_safe(fake_vblank, tmp, &fake_vblank_queue, list) {
+         if (fake_vblank->event_id == event_id) {
+-            TimerFree(fake_vblank->timer); /* TimerFree will call TimerCancel() */
+             xorg_list_del(&fake_vblank->list);
+             free (fake_vblank);
+             break;
+@@ -86,13 +201,9 @@ present_fake_queue_vblank(ScreenPtr     screen,
+                           uint64_t      event_id,
+                           uint64_t      msc)
+ {
+-    present_screen_priv_ptr     screen_priv = present_screen_priv(screen);
+-    uint64_t                    ust = msc * screen_priv->fake_interval;
+-    uint64_t                    now = GetTimeInMicros();
+-    INT32                       delay = ((int64_t) (ust - now)) / 1000;
+     present_fake_vblank_ptr     fake_vblank;
+ 
+-    if (delay <= 0) {
++    if (present_fake_ust(present_fake_priv(screen), msc) <= GetTimeInMicros()) {
+         present_fake_notify(screen, event_id);
+         return Success;
+     }
+@@ -103,13 +214,9 @@ present_fake_queue_vblank(ScreenPtr     screen,
+ 
+     fake_vblank->screen = screen;
+     fake_vblank->event_id = event_id;
+-    fake_vblank->timer = TimerSet(NULL, 0, delay, present_fake_do_timer, fake_vblank);
+-    if (!fake_vblank->timer) {
+-        free(fake_vblank);
+-        return BadAlloc;
+-    }
+-
++    fake_vblank->msc = msc;
+     xorg_list_add(&fake_vblank->list, &fake_vblank_queue);
++    present_fake_arm();
+ 
+     return Success;
+ }
+@@ -136,11 +243,18 @@ present_fake_screen_init(ScreenPtr screen)
+         else
+             fake_fps = 60;
+     }
+-    screen_priv->fake_interval = 1000000 / fake_fps;
++    screen_priv->fake_interval = screen_priv->fake_start_interval = 1000000 / fake_fps;
++    fake_fps_atom = MakeAtom("_FAKE_SCREEN_FPS", strlen("_FAKE_SCREEN_FPS"), TRUE);
+ }
+ 
+ void
+ present_fake_queue_init(void)
+ {
+     xorg_list_init(&fake_vblank_queue);
++    if (fake_vblank_fd < 0)
++        fake_vblank_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
++    if (fake_vblank_fd < 0)
++        FatalError("present: no timer for the fake vblank: %s\n", strerror(errno));
++    SetNotifyFd(fake_vblank_fd, present_fake_do_timer, X_NOTIFY_READ, NULL);
++    AddCallback(&PropertyFilterCallback, present_fake_property_filter, NULL);
+ }
+diff --git a/Xext/present/present_priv.h b/Xext/present/present_priv.h
+index fe1a471..48dedd7 100644
+--- a/Xext/present/present_priv.h
++++ b/Xext/present/present_priv.h
+@@ -172,6 +172,9 @@ struct present_screen_priv {
+     uint64_t                    unflip_event_id;
+ 
+     uint32_t                    fake_interval;
++    uint32_t                    fake_start_interval;
++    uint64_t                    fake_ust_base;
++    uint64_t                    fake_msc_base;
+ 
+     /* Currently active flipped pixmap and fence */
+     RRCrtcPtr                   flip_crtc;

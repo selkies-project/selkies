@@ -46,8 +46,10 @@ ARG DISTRIB_RELEASE="26.04"
 # pixmap on the GPU and sizes the framebuffer to the RandR screen, and
 # addons/base/patches/xvfb-hotplug-outputs.patch, which gives the server spare
 # outputs with CRTCs of their own that Selkies plugs in as a display is added,
-# and addons/base/patches/xvfb-syncobj-present.patch, which lets a DRI3 client
-# synchronize its presents explicitly, as the NVIDIA driver's must.
+# addons/base/patches/xvfb-syncobj-present.patch, which lets a DRI3 client
+# synchronize its presents explicitly, as the NVIDIA driver's must, and
+# addons/base/patches/xvfb-vblank-rate.patch, which runs the vblank the server
+# fakes at the rate the session is captured at, on a microsecond timer.
 ARG WLROOTS_VERSION="0.19.3"
 ARG LABWC_VERSION="0.9.7"
 # Both come as the archives GitHub generates for their tags, with no tarball
