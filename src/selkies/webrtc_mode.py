@@ -683,6 +683,7 @@ class WebRTCService(BaseStreamingService):
         self.input_handler.on_scaling_ratio = self.handle_scaling
         self.input_handler.on_resize = self.on_resize_handler
         self.input_handler.on_session_compositor_adopted = self._resync_wayland_session_scale
+        self.input_handler.on_session_screens_changed = self._republish_second_screen
 
         self.resource_monitor.on_tick = self.handle_resource_tick
         self.resource_monitor.watched = lambda: bool(self.rtc_app and self.rtc_app.stats_displays())
@@ -2305,6 +2306,14 @@ class WebRTCService(BaseStreamingService):
                     await self._size_wayland_screen(pipeline.width, pipeline.height)
                 await pipeline.restart_screen_capture()
                 await self._push_wayland_realized_geometry(did, pipeline)
+
+    async def _republish_second_screen(self) -> None:
+        """Re-read what backs a second display and re-announce the server
+        settings, so every page shows the second-display offer the session
+        allows now rather than the one it allowed when the page connected."""
+        await self._refresh_second_screen_capacity()
+        if self.rtc_app:
+            self.rtc_app.send_media_data_over_channel("server_settings", self._server_settings_payload())
 
     async def _resync_wayland_session_scale(self, dpi: Any) -> None:
         """A session compositor was adopted after captures started: run the

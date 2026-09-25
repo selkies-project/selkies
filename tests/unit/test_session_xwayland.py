@@ -11,6 +11,7 @@ rootful branch of app_session, and the second-screen capability must agree on
 that test.
 """
 import os
+import asyncio
 import sys
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -67,6 +68,24 @@ def main():
         cap = h.session_screen_capability()
         check("a rootful Xwayland desktop is offered no second display, and told why",
               cap[0] is False and "rootful Xwayland" in cap[1], str(cap))
+        announced = []
+
+        async def screens_changed():
+            announced.append(h.session_screen_capability()[0])
+
+        async def monitor_comes_up():
+            h._x11_monitor_build_lock = asyncio.Lock()
+            await h._ensure_x11_clipboard_monitor_async()
+            await asyncio.sleep(0)
+
+        h.on_session_screens_changed = screens_changed
+        h._x11_clipboard_monitor = None
+        h._x11_monitor_retry_at = 0.0
+        h._bg_tasks = set()
+        h._ensure_x11_clipboard_monitor = lambda name: object()
+        asyncio.run(monitor_comes_up())
+        check("its monitor coming up tells the transport, which then offers no second display",
+              announced == [False], str(announced))
         h._session_ipc_ok = True
         check("a session compositor with a screen control still is",
               h.session_screen_capability() == (True, ""), str(h.session_screen_capability()))

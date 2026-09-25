@@ -3801,6 +3801,11 @@ class WebRTCInput:
             started: the session takes the scale and the capture output, which
             took it while the session was still starting, drops it. Unset,
             only the session is scaled.
+        on_session_screens_changed: Awaitable a transport installs to tell its
+            pages again what a second display can do, once the session behind
+            the displays changed after they connected: a nested compositor
+            adopted, or a rootful Xwayland, which no second display extends,
+            come up.
         _x_event_wake, _x_watcher_fd: Event-driven wake for the keymap watch:
             a loop reader on the input connection's fd sets the Event, so it
             blocks with zero wakeups instead of polling the socket.
@@ -4024,6 +4029,7 @@ class WebRTCInput:
         self.data_server_instance = data_server_instance
         self.on_update_settings = lambda settings_json, display_id="primary": logger_webrtc_input.warning("unhandled update_settings")
         self.on_session_compositor_adopted = None
+        self.on_session_screens_changed = None
         self.is_wayland = is_wayland
         self.wayland_input = None
         self._client_kb_layout = None
@@ -5923,6 +5929,7 @@ class WebRTCInput:
                 logger_webrtc_input.debug(
                     f"pixelflux set_app_wayland_display failed: {e}")
             self._schedule_session_scale()
+            self._announce_session_screens()
             self._schedule_spare_screen_hold()
             self._schedule_seat_layout_restore()
         return resolved
@@ -6698,6 +6705,14 @@ class WebRTCInput:
                 f"Session compositor has {held} screen(s) with no capture output; "
                 f"held at {self.SPARE_SCREEN_SIZE[0]}x{self.SPARE_SCREEN_SIZE[1]}.")
 
+    def _announce_session_screens(self) -> None:
+        """Hand the transport's `on_session_screens_changed` the change, so a
+        page offered a second display before the session came up is told what
+        it can do now."""
+        hook = getattr(self, "on_session_screens_changed", None)
+        if hook is not None:
+            self._spawn_task(hook())
+
     def _schedule_session_scale(self) -> None:
         """A session compositor was just adopted: hand it the effective DPI as
         its output scale, through the transport's ladder when it installed
@@ -7150,6 +7165,8 @@ class WebRTCInput:
             monitor = await asyncio.to_thread(self._ensure_x11_clipboard_monitor, display_name)
             if monitor is None:
                 self._x11_monitor_retry_at = time.monotonic() + 10.0
+            elif display_name is not None:
+                self._announce_session_screens()
             return monitor
 
     @staticmethod

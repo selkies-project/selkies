@@ -1253,6 +1253,7 @@ class DataStreamingServer(BaseStreamingService):
             )
         self.input_handler.on_mouse_pointer_visible = self.set_native_cursor_rendering
         self.input_handler.on_session_compositor_adopted = self._resync_wayland_session_scale
+        self.input_handler.on_session_screens_changed = self._republish_second_screen
         self.input_handler.on_scaling_ratio = self._handle_scaling
 
         if ENABLE_RESIZE:
@@ -4616,6 +4617,13 @@ class DataStreamingServer(BaseStreamingService):
         )
         await self._start_backpressure_task_if_needed(display_id)
         await self._sync_wayland_realized_geometry(display_id)
+
+    async def _republish_second_screen(self) -> None:
+        """Re-read what backs a second display and re-announce the server
+        settings, so every page shows the second-display offer the session
+        allows now rather than the one it allowed when the page connected."""
+        await self._refresh_second_screen_capacity()
+        await self._broadcast_live_server_settings('primary')
 
     async def _resync_wayland_session_scale(self, dpi: Any) -> None:
         """A session compositor was adopted after captures started: run the
