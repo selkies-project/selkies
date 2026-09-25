@@ -93,7 +93,7 @@ from .display_utils import (
     wayland_output_id,
 )
 from .settings import RateControlMode
-from .settings import settings
+from .settings import sanitize_client_setting, settings
 from . import audit
 try:
     from pixelflux import VirtualKeyboardUnavailable as PixelfluxVkUnavailable
@@ -8421,8 +8421,9 @@ class WebRTCInput:
             except Exception as e: logger_webrtc_input.warning(f"Error with co,end type: {e}")
         elif msg_type == "_ebc":
             try:
-                enable = toks[1].lower() == "true"
-                self._spawn_task(self.update_binary_clipboard_setting(enable))
+                enable = sanitize_client_setting("enable_binary_clipboard", toks[1].lower() == "true",
+                                                 settings, logger_webrtc_input)
+                self._spawn_task(self.update_binary_clipboard_setting(bool(enable)))
             except Exception as e:
                 logger_webrtc_input.error(f"Error updating binary clipboard setting: {e}")
         elif msg_type == "_rc":
