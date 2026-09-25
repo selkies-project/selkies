@@ -37,7 +37,7 @@ import enum
 import hmac
 import ipaddress
 from collections.abc import Callable
-from struct import pack, unpack
+from struct import pack, unpack, error as StructError
 from typing import Optional, Protocol
 
 from .utils import random_transaction_id
@@ -405,10 +405,15 @@ def parse_message(data: bytes, integrity_key: Optional[bytes] = None) -> Message
         pad_len = padding_length(attr_len)
         if attr_type in ATTRIBUTES_BY_TYPE:
             _, attr_name, attr_pack, attr_unpack = ATTRIBUTES_BY_TYPE[attr_type]
-            if attr_unpack == unpack_xor_address:
-                attributes[attr_name] = attr_unpack(v, transaction_id=transaction_id)
-            else:
-                attributes[attr_name] = attr_unpack(v)
+            try:
+                if attr_unpack == unpack_xor_address:
+                    attributes[attr_name] = attr_unpack(v, transaction_id=transaction_id)
+                else:
+                    attributes[attr_name] = attr_unpack(v)
+            except StructError as e:
+                # A fixed-width attribute shorter than its type is a malformed message like
+                # any other, which every receive path rejects as a ValueError.
+                raise ValueError(f"STUN attribute {attr_name} is truncated") from e
 
             if attr_name == "FINGERPRINT":
                 if attributes[attr_name] != message_fingerprint(data[0:pos]):

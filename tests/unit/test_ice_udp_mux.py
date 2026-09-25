@@ -17,6 +17,7 @@ import asyncio
 import errno
 import os
 import socket
+import struct
 import sys
 
 sys.path.insert(0, os.path.join(
@@ -207,6 +208,29 @@ async def srflx_through_the_mux() -> None:
         transport.close()
 
 
+async def truncated_attribute_is_dropped() -> None:
+    """A STUN request whose fixed-width attribute is short is refused like any malformed
+    datagram, not raised into the event loop's exception handler."""
+    loop = asyncio.get_running_loop()
+    escaped: list = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: escaped.append(ctx.get("exception")))
+    port = free_udp_port()
+    mux = UdpMux(port)
+    await mux.open([LOOPBACK])
+    attr = struct.pack("!HH", 0x0024, 2) + b"\x00\x01\x00\x00"
+    datagram = struct.pack("!HHI12s", 0x0001, len(attr), 0x2112A442, os.urandom(12)) + attr
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sender.sendto(datagram, (LOOPBACK, port))
+        await asyncio.sleep(0.3)
+        check("a truncated attribute is dropped, not raised", not escaped, escaped)
+    finally:
+        sender.close()
+        loop.set_exception_handler(previous)
+        await mux.close()
+
+
 async def port_in_use_fails_open() -> None:
     blocker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     blocker.bind((LOOPBACK, 0))
@@ -248,6 +272,7 @@ async def late_address_nat1to1_and_port_range() -> None:
 async def main_async() -> None:
     await two_sessions_one_port()
     await srflx_through_the_mux()
+    await truncated_attribute_is_dropped()
     await port_in_use_fails_open()
     await late_address_nat1to1_and_port_range()
 
