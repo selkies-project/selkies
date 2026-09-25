@@ -16,8 +16,10 @@
  * software encoding somebody selected, or on a host exposed no GPU, is neutral,
  * and software encoding on a session that asked for hardware where there is a
  * GPU is a warning and carries pixelflux's reason.
- * Technical values (`NVENC`, `zero-copy`, `renderD128`) are not translated; the
- * words a dashboard does translate arrive in `words`.
+ * Every value opens with a capital, and names the system reports (`nvidia`,
+ * `renderD128`, a decoder's own) are kept as reported. Technical values (`NVENC`,
+ * `Zero-copy`, `renderD128`) are not translated; the words a dashboard does
+ * translate arrive in `words`.
  *
  * @module
  */
@@ -53,6 +55,8 @@ const codecName = (codec) => CODEC_NAMES[String(codec || '').toLowerCase()] || S
 const nodeName = (path) => String(path || '').split('/').pop() || '';
 /** @param {Array<string|undefined|null|false>} parts @returns {string} */
 const joined = (parts) => parts.filter(Boolean).join(' · ');
+/** @param {string|undefined} text Prose the server or an engine phrased. @returns {string} */
+const sentence = (text) => (text ? text[0].toUpperCase() + text.slice(1) : '');
 
 /**
  * @param {StreamInfo|null} info
@@ -66,10 +70,10 @@ function encoderRow(info) {
     key: 'encoder',
     status: info.hardware ? 'good' : fell ? 'warn' : 'neutral',
     value: joined([info.encoder, `${codecName(info.codec)}${video ? (info.fullcolor ? ' 4:4:4' : ' 4:2:0') : ''}`,
-      info.striped && 'striped']),
+      info.striped && 'Striped']),
     detail: info.hardware ? joined([info.gpu, nodeName(info.encode_node), info.driver])
-      : info.gpu_present === false ? 'no GPU exposed to the server' : '',
-    reason: fell ? info.encoder_reason : '',
+      : info.gpu_present === false ? 'No GPU exposed to the server' : '',
+    reason: fell ? sentence(info.encoder_reason) : '',
   };
 }
 
@@ -81,7 +85,7 @@ function captureRow(info) {
   if (!info) return { key: 'capture', status: 'neutral', value: '', detail: '', reason: '' };
   const wayland = info.backend === 'wayland';
   const software = wayland && info.renderer === 'pixman';
-  const path = info.zero_copy ? `zero-copy${wayland ? '' : ` (${info.capture})`}` : `readback${wayland ? '' : ` (${info.capture})`}`;
+  const path = info.zero_copy ? `Zero-copy${wayland ? '' : ` (${info.capture})`}` : `Readback${wayland ? '' : ` (${info.capture})`}`;
   const readbackToGpu = !info.zero_copy && info.hardware;
   const renderedInSoftware = software && info.hardware_expected;
   return {
@@ -90,7 +94,7 @@ function captureRow(info) {
     value: joined([wayland ? 'Wayland' : 'X11', path]),
     detail: !wayland ? '' : software ? 'Pixman (software rendering)'
       : joined([`GL on ${nodeName(info.render_node)}`, info.render_gpu]),
-    reason: renderedInSoftware ? (info.renderer_reason || '') : readbackToGpu ? info.capture_reason : '',
+    reason: sentence(renderedInSoftware ? info.renderer_reason : readbackToGpu ? info.capture_reason : ''),
   };
 }
 
@@ -127,7 +131,7 @@ function connectionRow(client, latest, words) {
   return {
     key: 'connection',
     status: throttled || indirect ? 'warn' : webrtc && path ? 'good' : 'neutral',
-    value: joined([webrtc ? 'WebRTC' : 'WebSockets', path]),
+    value: joined([webrtc ? 'WebRTC' : 'WebSockets', sentence(path.replace(/\b(udp|tcp|tls)\b/g, (p) => p.toUpperCase()))]),
     detail: '',
     reason: throttled ? words.throttled : '',
   };
@@ -265,7 +269,7 @@ export function graphPath(values, width, height, max) {
  * @returns {string}
  */
 export function streamReport(info, client, latest) {
-  const words = { hardware: 'hardware', software: 'software', unknown: 'unknown', throttled: 'the server is holding frames back' };
+  const words = { hardware: 'Hardware', software: 'Software', unknown: 'Unknown', throttled: 'The server is holding frames back' };
   const rows = streamRows(info, client, latest, words);
   const lines = rows.map((row) => `${row.key}: ${joined([row.value, row.detail])}${row.status === 'warn' ? ' [!]' : ''}`);
   lines.push(...rows.map((row) => row.reason).filter(Boolean).map((reason) => `  ${reason}`));

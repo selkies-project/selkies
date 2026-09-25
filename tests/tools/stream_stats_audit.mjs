@@ -110,7 +110,7 @@ const noGpu = {
 };
 rows = streamRows(noGpu, client, null, words);
 check('a server with no GPU warns on nothing and says so', rowOf(rows, 'encoder').status === 'neutral'
-  && rowOf(rows, 'capture').status === 'neutral' && rowOf(rows, 'encoder').detail === 'no GPU exposed to the server'
+  && rowOf(rows, 'capture').status === 'neutral' && rowOf(rows, 'encoder').detail === 'No GPU exposed to the server'
   && rows.every((row) => row.key === 'decoder' || row.reason === ''));
 check('and its report carries no reason for it', !streamReport(noGpu, client, null).includes('libcuda'));
 
@@ -123,12 +123,12 @@ check('the encoder row names the GPU and its node', rowOf(rows, 'encoder').detai
   && rowOf(rows, 'encoder').detail.includes('renderD128'));
 
 rows = streamRows({ ...hardware, zero_copy: true, capture: 'DRI3', capture_reason: '' }, client, null, words);
-check('zero-copy is good', rowOf(rows, 'capture').status === 'good' && rowOf(rows, 'capture').value.includes('zero-copy'));
+check('zero-copy is good', rowOf(rows, 'capture').status === 'good' && rowOf(rows, 'capture').value.includes('Zero-copy'));
 
 rows = streamRows({ ...info, backend: 'wayland', capture: 'readback', renderer: 'pixman', renderer_reason: 'no render node' },
   client, null, words);
 check('a Wayland session rendering in software that asked for hardware warns', rowOf(rows, 'capture').status === 'warn'
-  && rowOf(rows, 'capture').reason === 'no render node');
+  && rowOf(rows, 'capture').reason === 'No render node');
 
 rows = streamRows(hardware, { ...client, transport: 'webrtc', path: 'relay udp relay' }, null, words);
 check('a relayed WebRTC path warns', rowOf(rows, 'connection').status === 'warn');

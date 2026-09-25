@@ -105,11 +105,11 @@ export function decoderOfFormat(format) {
  * @returns {{decoder: ('hardware'|'software'|'unknown'), decoder_evidence: string}}
  */
 export function webcodecsDecoder({ forcedSoftware, hardwareSupported, format }) {
-  if (forcedSoftware) return { decoder: 'software', decoder_evidence: 'prefer-software after a decoder fallback' };
-  if (hardwareSupported === false) return { decoder: 'software', decoder_evidence: 'no hardware decoder for this stream' };
+  if (forcedSoftware) return { decoder: 'software', decoder_evidence: 'Software preferred after a decoder fallback' };
+  if (hardwareSupported === false) return { decoder: 'software', decoder_evidence: 'No hardware decoder for this stream' };
   const seen = decoderOfFormat(format);
   if (seen === 'unknown') return { decoder: 'unknown', decoder_evidence: format ? `${format} frames` : '' };
-  return { decoder: seen, decoder_evidence: `${format === null ? 'opaque' : format} frames` };
+  return { decoder: seen, decoder_evidence: `${format === null ? 'Opaque' : format} frames` };
 }
 
 /**
@@ -130,8 +130,8 @@ export function webrtcDecoder({ implementation, powerEfficient, capable }) {
     const software = /libvpx|ffmpeg|dav1d|openh264|libaom/i.test(named);
     return { decoder: software ? 'software' : 'hardware', decoder_evidence: named };
   }
-  if (capable === true) return { decoder: 'unknown', decoder_evidence: 'a hardware decoder is available' };
-  if (capable === false) return { decoder: 'software', decoder_evidence: 'no hardware decoder for this stream' };
+  if (capable === true) return { decoder: 'unknown', decoder_evidence: 'A hardware decoder is available' };
+  if (capable === false) return { decoder: 'software', decoder_evidence: 'No hardware decoder for this stream' };
   return { decoder: 'unknown', decoder_evidence: '' };
 }
 
