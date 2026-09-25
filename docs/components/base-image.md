@@ -9,7 +9,7 @@ The [Base Container](https://github.com/selkies-project/selkies/tree/main/addons
 
 | Part | What it is |
 | --- | --- |
-| X11 backend | [XLibre](https://github.com/X11Libre/xserver)'s `Xvfb`, built from a release archive pinned by checksum with the two patches under `addons/base/patches`: the screen pixmap lives on the GPU so glamor renders and DRI3 presents there, and the server starts with spare outputs Selkies plugs a second display into |
+| X11 backend | [XLibre](https://github.com/X11Libre/xserver)'s `Xvfb`, built from a release archive pinned by checksum with the three patches under `addons/base/patches`: the screen pixmap lives on the GPU so glamor renders and DRI3 presents there, the server starts with spare outputs Selkies plugs a second display into, and a DRI3 client can synchronize its presents explicitly |
 | Wayland backend | Selkies' own headless capture compositor, and a nested [labwc](https://labwc.github.io) session compositor built from source with `addons/base/build-labwc.sh` (window management, decorations, XWayland, and a control socket a second screen is asked over) |
 | Audio | PipeWire, WirePlumber, and `pipewire-pulse`, which `pcmflux` captures from and the microphone plays into |
 | GPU runtime | NVIDIA's EGL platform libraries for GBM, Wayland, and X11 (`egl-x11`, pinned by checksum), Mesa with Zink, the VA-API and Vulkan loaders, and `selkies-gpu-probe`, which measures what the session can render on |

@@ -1,0 +1,411 @@
+xvfb: synchronize DRI3 presents explicitly with timeline syncobjs
+
+A DRI3 client's frame reaches this server's screen only as a Present copy
+that glamor queues on its own context, and the server learns nothing of when
+the client's rendering into the pixmap completes or tells the client when
+the copy has read it. Implicit fences on the dmabuf close both gaps where a
+driver attaches them; the NVIDIA driver attaches none, and presents from its
+Vulkan driver land out of order: a frame shows a swapchain image as it was
+one cycle before or after.
+
+- glamor imports DRI3 1.4 timeline syncobjs on its render node where the
+  kernel has them and the eventfd ioctl to wait on them with, and EGL can
+  fence the work glamor queues (EGL_ANDROID_native_fence_sync).
+- Present's screen mode takes explicitly synchronized pixmaps, and reports
+  PresentCapabilitySyncobj, on a screen whose renderer fences its copies:
+  the copy waits for the acquire point and its fence signals the release
+  point, through the code the window mode shares. A screen without a driver
+  of its own answers for its windows, which sit on no CRTC.
+- Xvfb gives Present the fenced flush once the extension has set up the
+  screen.
+
+diff --git a/Xext/present/present.c b/Xext/present/present.c
+index fd9e8f2..f4d5045 100644
+--- a/Xext/present/present.c
++++ b/Xext/present/present.c
+@@ -42,6 +42,21 @@ present_query_capabilities(RRCrtcPtr crtc)
+     return screen_priv->query_capabilities(screen_priv);
+ }
+ 
++/*
++ * A screen without a driver of its own has no CRTC to ask, so its windows'
++ * capabilities are the screen's.
++ */
++uint32_t
++present_screen_query_capabilities(ScreenPtr screen)
++{
++    present_screen_priv_ptr screen_priv = present_screen_priv(screen);
++
++    if (!screen_priv || screen_priv->info)
++        return 0;
++
++    return screen_priv->query_capabilities(screen_priv);
++}
++
+ RRCrtcPtr
+ present_get_crtc(WindowPtr window)
+ {
+diff --git a/Xext/present/present_priv.h b/Xext/present/present_priv.h
+index cfd9b2f..fe1a471 100644
+--- a/Xext/present/present_priv.h
++++ b/Xext/present/present_priv.h
+@@ -271,6 +271,9 @@ msc_is_after(uint64_t test, uint64_t reference)
+ uint32_t
+ present_query_capabilities(RRCrtcPtr crtc);
+ 
++uint32_t
++present_screen_query_capabilities(ScreenPtr screen);
++
+ RRCrtcPtr
+ present_get_crtc(WindowPtr window);
+ 
+diff --git a/Xext/present/present_request.c b/Xext/present/present_request.c
+index cf8dbb3..0053c9e 100644
+--- a/Xext/present/present_request.c
++++ b/Xext/present/present_request.c
+@@ -251,7 +251,7 @@ static int
+ proc_present_query_capabilities (ClientPtr client)
+ {
+     REQUEST(xPresentQueryCapabilitiesReq);
+-    WindowPtr   window;
++    WindowPtr   window = NULL;
+     RRCrtcPtr   crtc = NULL;
+     int         r;
+ 
+@@ -269,7 +269,8 @@ proc_present_query_capabilities (ClientPtr client)
+     }
+ 
+     xPresentQueryCapabilitiesReply reply = {
+-        .capabilities = present_query_capabilities(crtc)
++        .capabilities = (crtc || !window) ? present_query_capabilities(crtc) :
++                        present_screen_query_capabilities(window->drawable.pScreen)
+     };
+ 
+     if (client->swapped) {
+diff --git a/Xext/present/present_scmd.c b/Xext/present/present_scmd.c
+index 53a5bf5..8f01bb0 100644
+--- a/Xext/present/present_scmd.c
++++ b/Xext/present/present_scmd.c
+@@ -181,10 +181,15 @@ present_scmd_get_crtc(present_screen_priv_ptr screen_priv, WindowPtr window)
+ static uint32_t
+ present_scmd_query_capabilities(present_screen_priv_ptr screen_priv)
+ {
+-    if (!screen_priv->info)
+-        return 0;
++    uint32_t capabilities = screen_priv->info ? screen_priv->info->capabilities : 0;
+ 
+-    return screen_priv->info->capabilities;
++#ifdef DRI3
++    /* A screen whose renderer fences the copies it queues can release a
++     * pixmap at the point its copy completes. */
++    if (screen_priv->flush_fenced)
++        capabilities |= PresentCapabilitySyncobj;
++#endif /* DRI3 */
++    return capabilities;
+ }
+ 
+ static int
+@@ -758,7 +763,7 @@ present_scmd_pixmap(WindowPtr window,
+     present_screen_priv_ptr     screen_priv = present_screen_priv(screen);
+ 
+ #ifdef DRI3
+-    if (acquire_syncobj || release_syncobj)
++    if ((acquire_syncobj || release_syncobj) && !screen_priv->flush_fenced)
+         return BadValue;
+ #endif /* DRI3 */
+ 
+diff --git a/glamor/glamor_egl.c b/glamor/glamor_egl.c
+index 79331ca..082e794 100644
+--- a/glamor/glamor_egl.c
++++ b/glamor/glamor_egl.c
+@@ -1593,6 +1593,196 @@ glamor_dri3_open_client(ClientPtr client,
+     return Success;
+ }
+ 
++/*
++ * DRI3 1.4 timeline syncobjs on the render node glamor draws with, for
++ * clients that synchronize explicitly: a present waits for the client's
++ * acquire point and hands back a release point the copy's fence signals.
++ * The NVIDIA driver attaches no implicit fence to a dmabuf, so without
++ * these its presents race glamor's copy in both directions.
++ */
++struct glamor_dri3_syncobj {
++    struct dri3_syncobj base;
++    uint32_t handle;
++};
++
++static int
++glamor_syncobj_drm_fd(struct dri3_syncobj *syncobj)
++{
++    return glamor_egl_get_screen_private(syncobj->screen)->fd;
++}
++
++static Bool
++glamor_syncobj_check(struct dri3_syncobj *syncobj, uint64_t point, uint32_t flags)
++{
++    struct glamor_dri3_syncobj *gs = (struct glamor_dri3_syncobj *) syncobj;
++
++    return !drmSyncobjTimelineWait(glamor_syncobj_drm_fd(syncobj), &gs->handle,
++                                   &point, 1, 0, flags, NULL);
++}
++
++static Bool
++glamor_syncobj_has_fence(struct dri3_syncobj *syncobj, uint64_t point)
++{
++    return glamor_syncobj_check(syncobj, point, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE);
++}
++
++static Bool
++glamor_syncobj_is_signaled(struct dri3_syncobj *syncobj, uint64_t point)
++{
++    return glamor_syncobj_check(syncobj, point, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT);
++}
++
++static int
++glamor_syncobj_export_fence(struct dri3_syncobj *syncobj, uint64_t point)
++{
++    struct glamor_dri3_syncobj *gs = (struct glamor_dri3_syncobj *) syncobj;
++    int drm_fd = glamor_syncobj_drm_fd(syncobj);
++    uint32_t temp;
++    int fd = -1;
++
++    if (drmSyncobjCreate(drm_fd, 0, &temp))
++        return -1;
++    if (!drmSyncobjTransfer(drm_fd, temp, 0, gs->handle, point, 0))
++        drmSyncobjExportSyncFile(drm_fd, temp, &fd);
++    drmSyncobjDestroy(drm_fd, temp);
++    return fd;
++}
++
++static void
++glamor_syncobj_signal(struct dri3_syncobj *syncobj, uint64_t point)
++{
++    struct glamor_dri3_syncobj *gs = (struct glamor_dri3_syncobj *) syncobj;
++
++    drmSyncobjTimelineSignal(glamor_syncobj_drm_fd(syncobj), &gs->handle, &point, 1);
++}
++
++static void
++glamor_syncobj_import_fence(struct dri3_syncobj *syncobj, uint64_t point, int fd)
++{
++    struct glamor_dri3_syncobj *gs = (struct glamor_dri3_syncobj *) syncobj;
++    int drm_fd = glamor_syncobj_drm_fd(syncobj);
++    Bool imported = FALSE;
++    uint32_t temp;
++
++    if (fd >= 0 && !drmSyncobjCreate(drm_fd, 0, &temp)) {
++        imported = !drmSyncobjImportSyncFile(drm_fd, temp, fd) &&
++                   !drmSyncobjTransfer(drm_fd, gs->handle, point, temp, 0, 0);
++        drmSyncobjDestroy(drm_fd, temp);
++    }
++    if (fd >= 0)
++        close(fd);
++    /* A release point nothing signals would leave the client waiting on its
++     * buffer forever; glamor_egl_flush_fenced() already waited for the copy. */
++    if (!imported)
++        glamor_syncobj_signal(syncobj, point);
++}
++
++static void
++glamor_syncobj_submitted_eventfd(struct dri3_syncobj *syncobj, uint64_t point, int efd)
++{
++    struct glamor_dri3_syncobj *gs = (struct glamor_dri3_syncobj *) syncobj;
++
++    drmSyncobjEventfd(glamor_syncobj_drm_fd(syncobj), gs->handle, point, efd,
++                      DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE);
++}
++
++static void
++glamor_syncobj_signaled_eventfd(struct dri3_syncobj *syncobj, uint64_t point, int efd)
++{
++    struct glamor_dri3_syncobj *gs = (struct glamor_dri3_syncobj *) syncobj;
++
++    drmSyncobjEventfd(glamor_syncobj_drm_fd(syncobj), gs->handle, point, efd, 0);
++}
++
++static void
++glamor_syncobj_free(struct dri3_syncobj *syncobj)
++{
++    struct glamor_dri3_syncobj *gs = (struct glamor_dri3_syncobj *) syncobj;
++
++    drmSyncobjDestroy(glamor_syncobj_drm_fd(syncobj), gs->handle);
++    free(gs);
++}
++
++static struct dri3_syncobj *
++glamor_dri3_import_syncobj(ClientPtr client, ScreenPtr screen, XID id, int fd)
++{
++    struct glamor_dri3_syncobj *gs = calloc(1, sizeof(*gs));
++
++    if (!gs)
++        return NULL;
++    if (drmSyncobjFDToHandle(glamor_egl_get_screen_private(screen)->fd, fd, &gs->handle)) {
++        free(gs);
++        return NULL;
++    }
++    gs->base.id = id;
++    gs->base.screen = screen;
++    gs->base.refcount = 1;
++    gs->base.free = glamor_syncobj_free;
++    gs->base.has_fence = glamor_syncobj_has_fence;
++    gs->base.is_signaled = glamor_syncobj_is_signaled;
++    gs->base.export_fence = glamor_syncobj_export_fence;
++    gs->base.import_fence = glamor_syncobj_import_fence;
++    gs->base.signal = glamor_syncobj_signal;
++    gs->base.submitted_eventfd = glamor_syncobj_submitted_eventfd;
++    gs->base.signaled_eventfd = glamor_syncobj_signaled_eventfd;
++    return &gs->base;
++}
++
++/*
++ * Timeline syncobjs, the eventfd ioctl a present waits on them with (Linux
++ * 6.6; an invalid handle is what it refuses where it exists), and native
++ * fences for the copies glamor queues.
++ */
++static Bool
++glamor_egl_supports_syncobjs(glamor_egl_priv_t *glamor_egl)
++{
++    uint64_t cap = 0;
++
++    if (drmGetCap(glamor_egl->fd, DRM_CAP_SYNCOBJ_TIMELINE, &cap) || !cap)
++        return FALSE;
++    drmSyncobjEventfd(glamor_egl->fd, 0, 0, -1, 0);
++    if (errno != ENOENT)
++        return FALSE;
++    return epoxy_has_egl_extension(glamor_egl->display, "EGL_ANDROID_native_fence_sync");
++}
++
++Bool
++glamor_egl_syncobj_capable(ScreenPtr screen)
++{
++    return glamor_egl_get_screen_private(screen)->syncobj_capable;
++}
++
++int
++glamor_egl_flush_fenced(ScreenPtr screen)
++{
++    static const EGLint attribs[] = {
++        EGL_SYNC_NATIVE_FENCE_FD_ANDROID, EGL_NO_NATIVE_FENCE_FD_ANDROID, EGL_NONE
++    };
++    glamor_egl_priv_t *glamor_egl = glamor_egl_get_screen_private(screen);
++    EGLSyncKHR sync;
++    uint32_t signaled;
++    int fd = -1;
++
++    glamor_make_current(glamor_get_screen_private(screen));
++    sync = eglCreateSyncKHR(glamor_egl->display, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
++    glFlush();
++    if (sync != EGL_NO_SYNC_KHR) {
++        fd = eglDupNativeFenceFDANDROID(glamor_egl->display, sync);
++        eglDestroySyncKHR(glamor_egl->display, sync);
++    }
++    if (fd >= 0)
++        return fd;
++
++    /* No fence to hand out: the work is waited for here and a signaled
++     * one stands in. */
++    glFinish();
++    if (!drmSyncobjCreate(glamor_egl->fd, DRM_SYNCOBJ_CREATE_SIGNALED, &signaled)) {
++        drmSyncobjExportSyncFile(glamor_egl->fd, signaled, &fd);
++        drmSyncobjDestroy(glamor_egl->fd, signaled);
++    }
++    return fd;
++}
++
+ static dri3_screen_info_rec glamor_dri3_info = {
+     .version = 2,
+ 
+@@ -1725,6 +1915,12 @@ glamor_egl_screen_init(ScreenPtr screen, struct glamor_context *glamor_ctx)
+             if (!glamor_egl->device_path)
+                 glamor_egl->device_path = drmGetDeviceNameFromFd2(glamor_egl->fd);
+ 
++            if (glamor_egl_supports_syncobjs(glamor_egl)) {
++                glamor_dri3_info.version = 4;
++                glamor_dri3_info.import_syncobj = glamor_dri3_import_syncobj;
++                glamor_egl->syncobj_capable = TRUE;
++            }
++
+             if (!dri3_screen_init(screen, &glamor_dri3_info)) {
+                 GLAMOR_LOG_STR(screen->myNum, X_ERROR,
+                                "Failed to initialize DRI3.\n");
+diff --git a/glamor/glamor_egl.h b/glamor/glamor_egl.h
+index 4337b3a..dcc5cb9 100644
+--- a/glamor/glamor_egl.h
++++ b/glamor/glamor_egl.h
+@@ -79,6 +79,18 @@ typedef struct {
+  */
+ Bool glamor_egl_init_internal(glamor_egl_conf_t* glamor_egl_conf, int *caps);
+ 
++/**
++ * Whether the screen imports DRI3 timeline syncobjs, so its presents can be
++ * synchronized explicitly.
++ */
++Bool glamor_egl_syncobj_capable(ScreenPtr screen);
++
++/**
++ * Flush the rendering glamor has queued and return a sync file that signals
++ * when it completes.
++ */
++int glamor_egl_flush_fenced(ScreenPtr screen);
++
+ /*
+  * Create an EGLDisplay from a native display type. This is a little quirky
+  * for a few reasons.
+diff --git a/glamor/glamor_egl_priv.h b/glamor/glamor_egl_priv.h
+index 31e6c7e..ee9a578 100644
+--- a/glamor/glamor_egl_priv.h
++++ b/glamor/glamor_egl_priv.h
+@@ -44,6 +44,7 @@ typedef struct glamor_egl_screen_private {
+ 
+     int fd;
+     int dmabuf_capable;
++    int syncobj_capable;
+ } glamor_egl_priv_t;
+ 
+ /**
+diff --git a/hw/vfb/InitOutput.c b/hw/vfb/InitOutput.c
+index 0bb6088..779be96 100644
+--- a/hw/vfb/InitOutput.c
++++ b/hw/vfb/InitOutput.c
+@@ -82,6 +82,9 @@ from The Open Group.
+ #include "glamor.h"
+ #include "glamor_egl.h"
+ #include "glamor_priv.h"
++#ifdef DRI3
++#include "Xext/present/present_priv.h"
++#endif
+ 
+ #include <unistd.h>
+ #include <fcntl.h>
+@@ -863,6 +866,14 @@ vfbCloseScreen(ScreenPtr pScreen)
+  * XShmGetImage). No GBM buffer is involved, so this holds on every EGL vendor
+  * glamor itself came up on.
+  */
++#ifdef DRI3
++static int
++vfbPresentFlushFenced(WindowPtr pWin)
++{
++    return glamor_egl_flush_fenced(pWin->drawable.pScreen);
++}
++#endif
++
+ static Bool
+ vfbCreateScreenResources(ScreenPtr pScreen)
+ {
+@@ -874,6 +885,16 @@ vfbCreateScreenResources(ScreenPtr pScreen)
+         return FALSE;
+     pScreen->CreateScreenResources = vfbCreateScreenResources;
+ 
++#ifdef DRI3
++    /* A DRI3 client's frame reaches the screen only as a Present copy, so
++     * fencing that copy is what explicit synchronization needs here. The
++     * extension set up the screen's Present state before its resources. */
++    if (glamor_egl_syncobj_capable(pScreen) && present_screen_priv(pScreen)) {
++        present_screen_priv(pScreen)->flush_fenced = vfbPresentFlushFenced;
++        LogMessage(X_INFO, "vfb: presents synchronize explicitly (DRI3 syncobjs)\n");
++    }
++#endif
++
+     old_pixmap = pScreen->GetScreenPixmap(pScreen);
+ 
+     gpu_pixmap = pScreen->CreatePixmap(pScreen,
