@@ -72,7 +72,7 @@ from .settings import (settings, AppSettings, SETTING_DEFINITIONS, RateControlMo
                        build_client_settings_payload, sanitize_client_setting)
 from types import SimpleNamespace
 from .webrtc_ice_config import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
-from .stream_server import BaseStreamingService, CentralizedStreamServer
+from .stream_server import BaseStreamingService, CentralizedStreamServer, CongestionSteer
 from .audio_control import AudioControl
 
 logger = logging.getLogger("webrtc")
@@ -152,43 +152,6 @@ IS_WAYLAND: bool = bool(settings.wayland[0])
 def get_server_settings() -> Dict[str, Any]:
     """The server-settings payload every client is greeted with."""
     return {"settings": build_client_settings_payload()}
-
-
-class CongestionSteer:
-    """The steer of one display's CBR target over the congestion loop's one-second
-    ticks. A tick whose loss fraction passes LOSS is a strike, and only two strikes
-    in a row back the target off, by BACKOFF: one window is a few tens of packets,
-    too few for its loss to mean anything on its own. A backoff then holds the
-    target for HOLD_S, so the recovery does not climb straight back onto the loss
-    that caused it. A clean tick clears the strikes and, outside a hold, raises the
-    target by STEP, or to HEADROOM of the measured goodput where that is higher,
-    never past the ceiling.
-    """
-
-    LOSS = 0.10
-    BACKOFF = 0.7
-    HOLD_S = 2.0
-    STEP = 1.15
-    HEADROOM = 0.85
-
-    def __init__(self) -> None:
-        self.strikes = 0
-        self.hold_until = 0.0
-
-    def target(self, current: float, ceiling: float, floor: float,
-               goodput_bps: float, loss: float, now: float) -> float:
-        """The next target in kbps for a tick that measured `goodput_bps` and `loss`."""
-        if loss > self.LOSS:
-            self.strikes += 1
-            if self.strikes < 2:
-                return current
-            self.strikes = 0
-            self.hold_until = now + self.HOLD_S
-            return max(floor, min(ceiling, current * self.BACKOFF))
-        self.strikes = 0
-        if now < self.hold_until:
-            return current
-        return max(floor, min(ceiling, max(current * self.STEP, goodput_bps * self.HEADROOM / 1_000)))
 
 
 class WebRTCService(BaseStreamingService):

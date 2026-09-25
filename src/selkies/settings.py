@@ -1049,7 +1049,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "congestion_control",
         "type": "bool",
         "default": False,
-        "help": "Adapt the video bitrate to the transport-wide-cc (GCC-style) bandwidth estimate from WebRTC receiver feedback. Effective in CBR rate-control mode; may trade quality/stability for congestion responsiveness.",
+        "help": "Adapt the video bitrate to what the path carries: over WebRTC to the transport-wide-cc (GCC-style) bandwidth estimate from receiver feedback, over WebSockets to the queue a display's frame round trip shows. Effective in CBR rate-control mode; may trade quality/stability for congestion responsiveness.",
     },
     {
         "name": "audio_channels",

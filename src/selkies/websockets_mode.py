@@ -125,8 +125,8 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
-from .stream_server import (BaseStreamingService, TransferPacer, UplinkGauge, _uplink_session_state, note_pong, uplink_rtt_ms,
-                            socket_gauge)
+from .stream_server import (BaseStreamingService, CongestionSteer, TransferPacer, UplinkGauge, _uplink_session_state,
+                            note_pong, uplink_rtt_ms, socket_gauge)
 from .metrics import Metrics
 
 BACKPRESSURE_ALLOWED_DESYNC_MS = 2000
@@ -139,6 +139,9 @@ BACKPRESSURE_LATENCY_FORGIVENESS_MAX_MS = 1000
 # link; one such sample would skew the flat smoothing window for its lifetime.
 RTT_SAMPLE_SANE_MAX_MS = 10000
 BACKPRESSURE_CHECK_INTERVAL_S = 0.5
+# How far past its floor a display's frame round trip stands before
+# congestion control reads a queue on the path (_steer_bitrate_to_link).
+LINK_QUEUE_MS = 40.0
 MAX_UINT16_FRAME_ID = 65535
 FRAME_ID_SUSPICIOUS_GAP_THRESHOLD = (
     MAX_UINT16_FRAME_ID // 2
@@ -1415,7 +1418,7 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.debug(f"Session default video_bitrate updated to {int(sanitized)} kbps for new displays.")
         module = self._opcode_display_module(display_id)
         if module is not None:
-            kbps = int(round(float(sanitized)))
+            kbps = int(round(self._video_bitrate_kbps(display_state) if display_state else float(sanitized)))
             try:
                 module.update_video_bitrate(kbps)
                 self._track_capture_settings(display_id, video_bitrate_kbps=kbps)
@@ -2566,6 +2569,9 @@ class DataStreamingServer(BaseStreamingService):
                     if not display_state.get('backpressure_enabled', True):
                         data_logger.info(f"Backpressure LIFTED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f <= Allowed:{allowed_desync_frames:.1f}f).")
                     self._set_backpressure_enabled(display_id, display_state, True)
+                if (self.cli_args.congestion_control[0] and display_state.get(
+                        'rate_control_mode', self.rc_mode.value) == RateControlMode.CBR.value):
+                    self._steer_bitrate_to_link(display_id, display_state, now)
 
         except asyncio.CancelledError:
             data_logger.debug(f"Backpressure logic task for '{display_id}' canceled.")
@@ -2573,6 +2579,64 @@ class DataStreamingServer(BaseStreamingService):
             if display_state:
                 display_state['backpressure_enabled'] = True
             data_logger.debug(f"Backpressure logic task for '{display_id}' finished.")
+
+    def _video_bitrate_kbps(self, display_state: dict) -> float:
+        """The CBR rate a display's encoder runs at: its target, held down to
+        what its path carries while congestion control steers it."""
+        target = float(display_state.get('video_bitrate', self._initial_video_bitrate) or 0)
+        link = display_state.get('link_kbps')
+        return min(target, link) if link else target
+
+    def _steer_bitrate_to_link(self, display_id: str, display_state: dict, now: float) -> None:
+        """Hold a CBR display to the rate its path carries (`congestion_control`
+        over WebSockets, where no receiver estimate exists).
+
+        A queue on the path shows as the display's frame round trip standing
+        `LINK_QUEUE_MS` past its floor, the least round trip of the last ten
+        minutes in minute buckets, so a queue that stands a while is not taken
+        for the path itself; a display the backpressure gate holds counts as
+        queued too. Each second of that is a strike for the transports' shared
+        `CongestionSteer`, whose back-off, hold, and step apply here as they do
+        to WebRTC's loss. Every display behind one bottleneck sees the same
+        queue and settles on a share of it, where the backpressure gate alone
+        pauses whichever falls behind first while the other keeps its whole
+        rate, and the paused one resumes on a key frame its share cannot carry.
+        """
+        rtt = float(display_state.get('smoothed_rtt') or 0.0)
+        floors = display_state.setdefault('rtt_floors', deque(maxlen=10))
+        minute = int(now // 60)
+        if rtt > 0:
+            if floors and floors[-1][0] == minute:
+                floors[-1] = (minute, min(floors[-1][1], rtt))
+            else:
+                floors.append((minute, rtt))
+        floor_ms = min((v for _, v in floors), default=rtt)
+        display_state['link_queued'] = (display_state.get('link_queued', False)
+                                        or rtt > floor_ms + LINK_QUEUE_MS
+                                        or not display_state.get('backpressure_enabled', True))
+        display_state['link_peak_ms'] = max(display_state.get('link_peak_ms', 0.0), rtt)
+        if now - display_state.get('link_tick_at', 0.0) < 1.0:
+            return
+        display_state['link_tick_at'] = now
+        queued, display_state['link_queued'] = display_state['link_queued'], False
+        peak_ms, display_state['link_peak_ms'] = display_state['link_peak_ms'], 0.0
+        target = float(display_state.get('video_bitrate') or 0)
+        module = self.capture_instances.get(display_id, {}).get('module')
+        if target <= 0 or module is None:
+            return
+        lo_kbps, _ = app_settings.video_bitrate
+        current = self._video_bitrate_kbps(display_state)
+        steer = display_state.setdefault('link_steer', CongestionSteer())
+        rate = round(steer.target(current, target, float(lo_kbps), 0.0, 1.0 if queued else 0.0, now))
+        display_state['link_kbps'] = rate
+        if rate != round(current):
+            data_logger.info(
+                f"Congestion control[{display_id}]: video bitrate {current:.0f} -> {rate} kbps "
+                f"(round trip up to {peak_ms:.0f} ms over a {floor_ms:.0f} ms floor)")
+            try:
+                module.update_video_bitrate(rate)
+            except Exception as e:
+                data_logger.warning(f"Congestion control could not retarget '{display_id}' ({e}).")
 
     def _estimate_client_fps(self, display_state: dict, acked_id: int,
                              configured_fps: Union[int, float], now: float) -> float:
@@ -3250,7 +3314,7 @@ class DataStreamingServer(BaseStreamingService):
                                 display_id, layout['w'], layout['h'], layout['x'], layout['y']
                             )
                             module.update_framerate(float(display_state.get('framerate') or self.app.framerate))
-                            module.update_video_bitrate(int(round(float(display_state.get('video_bitrate') or 0))))
+                            module.update_video_bitrate(int(round(self._video_bitrate_kbps(display_state))))
                             module.update_tunables(fresh)
                             self._track_capture_settings(display_id, fresh=fresh)
                         except Exception as e:
@@ -5831,7 +5895,7 @@ class DataStreamingServer(BaseStreamingService):
             use_cpu=display_state.get(
                 'use_cpu', effective_use_cpu(encoder, None, self._initial_use_cpu)),
             cbr=display_state.get('rate_control_mode', self.rc_mode.value) == 'cbr',
-            bitrate_kbps=display_state.get('video_bitrate', self._initial_video_bitrate),
+            bitrate_kbps=self._video_bitrate_kbps(display_state),
             crf=display_state.get('video_crf', self._initial_video_crf),
             paintover_crf=display_state.get('video_paintover_crf', self._initial_video_paintover_crf),
             paintover_burst=display_state.get('video_paintover_burst_frames', self._initial_video_paintover_burst_frames),
