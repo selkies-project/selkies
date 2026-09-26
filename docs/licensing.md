@@ -46,7 +46,7 @@ come in.
 
 | Package | License | Category | How used | Notes |
 | --- | --- | --- | --- | --- |
-| `pixelflux` | MPL-2.0 | weak copyleft | PyO3 extension; links libvpx, SVT-AV1, dav1d (BSD), libde265 (LGPL-3.0-or-later), libgbm, libpixman, libxkbcommon (MIT); libx264 and x265 (GPL) in the default build, OpenH264 and kvazaar (BSD) otherwise | see [pixelflux LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md) |
+| `pixelflux` | MPL-2.0 | weak copyleft | PyO3 extension; links libvpx, SVT-AV1, dav1d, OpenH264 (BSD), libde265 (LGPL-3.0-or-later), libgbm, libpixman, libxkbcommon (MIT); libx264 and x265 (GPL) in the default build, kvazaar (BSD) otherwise | see [pixelflux LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md) |
 | `pcmflux` | MPL-2.0 | weak copyleft | PyO3 extension; links libpulse (LGPL-2.1-or-later) and libopus (BSD-3-Clause), bundled into its wheels with libpulse's LGPL/permissive dependency tree | see [pcmflux LICENSES.md](https://github.com/selkies-project/pcmflux/blob/main/LICENSES.md) |
 | `aiohttp` | Apache-2.0 AND MIT | permissive | HTTP and WebSocket server | bundles llhttp (MIT); pulls `aiohappyeyeballs` (PSF-2.0), `aiosignal`, `frozenlist`, `multidict`, `propcache`, `yarl` (Apache-2.0), `attrs` (MIT), `idna` (BSD-3-Clause) |
 | `aiofiles` | Apache-2.0 | permissive | file uploads and downloads | |
