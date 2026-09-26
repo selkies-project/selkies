@@ -581,10 +581,10 @@ def uinput_shim_env(tag: str) -> tuple:
         `(env, stream_path, log_path)`, both files truncated.
 
     Raises:
-        RuntimeError: The shim library has not been built.
+        subprocess.CalledProcessError: The shim library does not build.
     """
     if not os.path.exists(UINPUT_SHIM):
-        raise RuntimeError(f"{UINPUT_SHIM} is missing; run make -C tests/tools")
+        subprocess.run(["make", "-s", "-C", TOOLS, "uinput_shim.so"], check=True)
     stream = os.path.join(WORKDIR, f"uinput-{tag}-stream.bin")
     log = os.path.join(WORKDIR, f"uinput-{tag}-shim.log")
     for path in (stream, log):
