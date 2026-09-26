@@ -16,6 +16,8 @@ import subprocess
 import sys
 import time
 
+import psutil
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
@@ -54,8 +56,9 @@ for _ in range(600):
 
 res = H.Results("webrtc-unix")
 try:
-    listeners = [l for l in subprocess.run(["ss", "-tlnp"], capture_output=True, text=True).stdout.splitlines()
-                 if f"pid={server.pid}," in l]
+    owner = psutil.Process(server.pid)
+    sockets = (owner.net_connections if hasattr(owner, "net_connections") else owner.connections)(kind="tcp")
+    listeners = [c.laddr for c in sockets if c.status == psutil.CONN_LISTEN]
     res.check("server owns no TCP listener", not listeners, listeners[:1])
     res.check("unix socket bound", os.path.exists(SOCK), SOCK)
 
