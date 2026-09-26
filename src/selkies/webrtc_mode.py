@@ -435,13 +435,17 @@ class WebRTCService(BaseStreamingService):
         prefix = self.settings.subfolder
         username = self.settings.basic_auth_user
         password = self.settings.basic_auth_password
+        # A server bound to a Unix socket has no TCP port to dial.
+        sock_path = (self.args.unix_socket or "").strip()
+        host = "localhost" if sock_path else f"localhost:{self.args.port}"
         client = WebRTCSignalingClient(
-            f"{ws_protocol}//localhost:{self.args.port}{prefix}/api/ws",
+            f"{ws_protocol}//{host}{prefix}/api/ws",
             enable_https=using_https,
             enable_basic_auth=using_basic_auth,
             basic_auth_user=username,
             basic_auth_password=password,
             server_token=getattr(self.settings, "master_token", None),
+            unix_socket=sock_path or None,
         )
         return client
 

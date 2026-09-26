@@ -83,6 +83,7 @@ class WebRTCSignalingClient:
         basic_auth_user: Optional[str] = None,
         basic_auth_password: Optional[str] = None,
         server_token: Optional[str] = None,
+        unix_socket: Optional[str] = None,
     ) -> None:
         """Initialize the signaling client.
 
@@ -90,8 +91,12 @@ class WebRTCSignalingClient:
             server: WebSocket server URL (e.g., 'ws://localhost:8080/ws').
             server_token: Master token proving this peer may claim the server
                 role; required by the signaling server in secure mode.
+            unix_socket: Path of the Unix domain socket the signaling server
+                listens on instead of a TCP port; the connection goes there and
+                `server` supplies only the scheme, host, and path.
         """
         self.server = server
+        self.unix_socket = unix_socket
         self.peer_type = "server"
         self.enable_https = enable_https
         self.enable_basic_auth = enable_basic_auth
@@ -168,7 +173,8 @@ class WebRTCSignalingClient:
         while not self._stop_event.is_set():
             try:
                 logger.debug("Connecting to signaling server")
-                self._session = aiohttp.ClientSession()
+                connector = aiohttp.UnixConnector(path=self.unix_socket) if self.unix_socket else None
+                self._session = aiohttp.ClientSession(connector=connector)
                 self._ws = await self._session.ws_connect(
                     self.server,
                     headers=headers,
