@@ -59,6 +59,7 @@ NEEDED = [
     "libgbm.so.1",
     "libpulse.so.0",
     "libva.so.2",
+    "libva-drm.so.2",
     "libdrm.so.2",
     "libxkbcommon.so.0",
     "libpixman-1.so.0",

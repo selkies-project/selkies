@@ -635,7 +635,7 @@ RUN --mount=type=bind,source=addons/base/wheels,target=/tmp/wheels \
 RUN set -e; \
     selkies --help > /dev/null; \
     python3 -c "import selkies, pixelflux, pcmflux"; \
-    python3 -c "import ctypes; [ctypes.CDLL(name) for name in ('libwayland-server.so.0', 'libEGL.so.1', 'libgbm.so.1', 'libpulse.so.0', 'libva.so.2', 'libdrm.so.2', 'libxkbcommon.so.0', 'libpixman-1.so.0')]"
+    python3 -c "import ctypes; [ctypes.CDLL(name) for name in ('libwayland-server.so.0', 'libEGL.so.1', 'libgbm.so.1', 'libpulse.so.0', 'libva.so.2', 'libva-drm.so.2', 'libdrm.so.2', 'libxkbcommon.so.0', 'libpixman-1.so.0')]"
 
 # XLibre's server replaces the distribution's /usr/bin/Xvfb; chowned
 # to the session user like the rest of the image so fakeroot-sudo apt can
