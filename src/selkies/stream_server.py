@@ -712,6 +712,23 @@ async def _bind_listen_sockets(addr: str, port: int) -> List[socket.socket]:
     return socks
 
 
+def _frame_ancestors_directive(value: str) -> str:
+    """The Content-Security-Policy that `frame_ancestors` asks for, "" when it names none.
+
+    Entries are comma- or space-separated; `self` and `none` become the quoted
+    keywords, and an entry carrying a quote or a semicolon, which would end the
+    directive, is dropped.
+    """
+    sources = []
+    for item in (value or "").replace(",", " ").split():
+        keyword = item.strip("'").lower()
+        if keyword in ("self", "none"):
+            sources.append(f"'{keyword}'")
+        elif "'" not in item and ";" not in item:
+            sources.append(item)
+    return f"frame-ancestors {' '.join(sources)}" if sources else ""
+
+
 def _unix_socket_is_live(path: str) -> bool:
     """Return True when something accepts a connection on ``path``, i.e. the
     socket file belongs to a running listener rather than being a leftover from
@@ -2908,6 +2925,11 @@ class CentralizedStreamServer:
         self.app = web.Application(middlewares=[self._auth_middleware])
         self.app["supervisor"] = self
         self.app["settings"] = self.settings
+        frame_policy = _frame_ancestors_directive(self.settings.frame_ancestors)
+        if frame_policy:
+            async def _send_frame_policy(request: web.Request, response: web.StreamResponse) -> None:
+                response.headers["Content-Security-Policy"] = frame_policy
+            self.app.on_response_prepare.append(_send_frame_policy)
 
         api_prefix = self.settings.subfolder
         if api_prefix:

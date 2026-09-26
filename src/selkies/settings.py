@@ -1121,6 +1121,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "default": "",
         "help": "Comma-separated browser Origins allowed to open the streaming WebSocket (cross-site WebSocket-hijacking guard). Empty (default) allows only same-origin plus non-browser clients that send no Origin; use '*' to allow any origin.",
     },
+    {
+        "name": "frame_ancestors",
+        "type": "str",
+        "default": "",
+        "help": "Comma-separated pages allowed to show the client in a frame: origins such as https://portal.example.com, 'self' for this server's own pages, or 'none' for no frame at all, sent as the Content-Security-Policy frame-ancestors directive. Empty (default) lets any page frame it, as a platform embedding the desktop in its own UI needs.",
+    },
 ]
 
 # Secrets, flagged sensitive so consumers keep them out of client broadcasts.

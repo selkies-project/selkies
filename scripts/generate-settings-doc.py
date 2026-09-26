@@ -92,7 +92,7 @@ SECTIONS = [
     ]),
     ("Server", "The transport, the listening address, TLS, the login, and the master token.", [
         "mode", "enable_dual_mode", "addr", "public", "port", "unix_socket", "subfolder", "web_root",
-        "allowed_origins", "enable_https", "https_cert", "https_key", "cert_reload_interval",
+        "allowed_origins", "frame_ancestors", "enable_https", "https_cert", "https_key", "cert_reload_interval",
         "enable_basic_auth", "basic_auth_user", "basic_auth_password", "basic_auth_viewonly_password",
         "master_token", "command_enabled", "debug",
     ]),

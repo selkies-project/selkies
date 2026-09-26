@@ -71,7 +71,7 @@ Both can be on. Basic authentication then guards the page load and anything that
 
 ## Origin Checks
 
-Independent of the mode: `--allowed-origins` (`SELKIES_ALLOWED_ORIGINS`) is the cross-site WebSocket-hijacking guard on the streaming socket. Empty, the default, admits same-origin browsers and non-browser clients that send no `Origin` at all; a comma-separated list admits exactly those origins, which is what an embedding page on another host needs, and `*` admits any.
+Independent of the mode: `--allowed-origins` (`SELKIES_ALLOWED_ORIGINS`) is the cross-site WebSocket-hijacking guard on the streaming socket. Empty, the default, admits same-origin browsers and non-browser clients that send no `Origin` at all; a comma-separated list admits exactly those origins, which is what an embedding page on another host needs, and `*` admits any. Which pages may show the client in a frame at all is `--frame-ancestors` (`SELKIES_FRAME_ANCESTORS`): unset, any page may, as a platform embedding the desktop in its own UI needs; set, it is sent as the Content-Security-Policy `frame-ancestors` directive, so `'self'` refuses every other origin's frame and a list of origins admits those pages alone.
 
 ## Without a Master Token
 
