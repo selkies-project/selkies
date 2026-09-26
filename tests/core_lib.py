@@ -25,6 +25,17 @@ CHROME_PATH: Optional[str] = os.environ.get("E2E_CHROME") or None
 FIREFOX_PATH: Optional[str] = os.environ.get("E2E_FIREFOX") or None
 
 
+def installed_firefox(kwargs: dict) -> dict:
+    """``kwargs`` of a Playwright Firefox launch, pointed at FIREFOX_PATH when one is named.
+
+    A release Firefox has no Juggler, the protocol Playwright's own Firefox build speaks, so
+    it is driven over WebDriver BiDi, which the ``moz-firefox`` channel selects.
+    """
+    if FIREFOX_PATH:
+        kwargs.update(executable_path=FIREFOX_PATH, channel="moz-firefox")
+    return kwargs
+
+
 # The socket lives in a worker on the websockets transport, so wrapping
 # `WebSocket.prototype.send` on the page sees nothing of the wire. Every
 # page-side send goes through the transport handle the core publishes as
@@ -148,9 +159,7 @@ def launch_browser(pw: Any, engine: str = "chromium") -> Any:
             "media.autoplay.blocking_policy": 0,
             "media.autoplay.block-webaudio": False,
         }}
-        if FIREFOX_PATH:
-            kwargs["executable_path"] = FIREFOX_PATH
-        return pw.firefox.launch(**kwargs)
+        return pw.firefox.launch(**installed_firefox(kwargs))
     if engine == "webkit":
         if not webkit_gl_sink_ready():
             raise RuntimeError("GStreamer has no opengl plugin, so WebKit would paint through its "
@@ -247,9 +256,7 @@ def firefox_persistent_context(pw: Any, viewport: Optional[dict] = None,
               "firefox_user_prefs": user_prefs}
     if viewport:
         kwargs["viewport"] = viewport
-    if FIREFOX_PATH:
-        kwargs["executable_path"] = FIREFOX_PATH
-    return pw.firefox.launch_persistent_context(**kwargs)
+    return pw.firefox.launch_persistent_context(**installed_firefox(kwargs))
 
 
 def launch_chrome(pw: Any, url_hash: str = "", mode: Optional[str] = None,
