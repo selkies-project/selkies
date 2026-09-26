@@ -80,8 +80,9 @@ export OUTPUT="selkies-${SELKIES_VERSION:-0.0.0}-${ARCH}.AppImage"
 # root, the directory holding noarch/
 CONDA_CHANNELS="${WORK}/conda-output;conda-forge"
 CONDA_PYTHON_VERSION="3.12"
-# libva is what pixelflux's VA-API session opens at run time
-CONDA_PACKAGES="selkies;libxcb;pulseaudio;libva;libxkbcommon;zlib"
+# libva is what pixelflux's VA-API session opens at run time, and pixman is
+# what its wheel links but does not carry
+CONDA_PACKAGES="selkies;libxcb;pulseaudio;libva;libxkbcommon;pixman;zlib"
 # Runtime dependencies with no conda-forge package. pixelflux and pcmflux come
 # from the wheels the run resolved (the AppImage env always runs Python 3.12,
 # see CONDA_PYTHON_VERSION above); the index only where the run chose it.
