@@ -29,10 +29,13 @@ def installed_firefox(kwargs: dict) -> dict:
     """``kwargs`` of a Playwright Firefox launch, pointed at FIREFOX_PATH when one is named.
 
     A release Firefox has no Juggler, the protocol Playwright's own Firefox build speaks, so
-    it is driven over WebDriver BiDi, which the ``moz-firefox`` channel selects.
+    it is driven over WebDriver BiDi, which the ``moz-firefox`` channel selects. The
+    persistent profile may last have been opened by a newer build, Playwright's, which a
+    release Firefox refuses to open without ``--allow-downgrade``.
     """
     if FIREFOX_PATH:
-        kwargs.update(executable_path=FIREFOX_PATH, channel="moz-firefox")
+        kwargs.update(executable_path=FIREFOX_PATH, channel="moz-firefox",
+                      args=[*kwargs.get("args", []), "--allow-downgrade"])
     return kwargs
 
 
