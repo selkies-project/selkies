@@ -26,16 +26,16 @@ GPL-licensed libraries into an installation made from the release wheels:
 
 | Source | GPL component | How it gets in | How to leave it out |
 | --- | --- | --- | --- |
-| `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), which encodes H.264 in software wherever no GPU encoder is used: the `h264enc` fallback and `h264enc-striped` alike; and x265 (GPL-2.0-or-later), reached through FFmpeg, behind `h265enc` in the same case | the default `gpl` Cargo feature of pixelflux; the published wheels are built with it and bundle `libx264.so`, `libx265.so`, and a GPL-built FFmpeg | build pixelflux with `PIXELFLUX_ENABLE_GPL=0` (`--no-default-features --features openh264`): BSD-licensed Cisco OpenH264 and kvazaar take the places of libx264 and x265; VP8/VP9 (libvpx) and AV1 (SVT-AV1) are BSD-licensed in every build. The inventory and the check that keeps that build copyleft-free live in [pixelflux's LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md); pixelflux's musllinux wheels additionally bundle Alpine's GPL-built FFmpeg, see there. |
+| `pixelflux` (screen capture and video encoding) | libx264 (GPL-2.0-or-later), which encodes H.264 in software wherever no GPU encoder is used: the `h264enc` fallback and `h264enc-striped` alike; and x265 (GPL-2.0-or-later) behind `h265enc` in the same case | the default `gpl` Cargo feature of pixelflux; the published wheels are built with it and bundle `libx264.so` and `libx265.so` | build pixelflux with `PIXELFLUX_ENABLE_GPL=0` (`--no-default-features --features openh264`): BSD-licensed Cisco OpenH264 and kvazaar take the places of libx264 and x265; VP8/VP9 (libvpx) and AV1 (SVT-AV1) are BSD-licensed in every build. The inventory and the check that keeps that build copyleft-free live in [pixelflux's LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md). |
 
-The WebRTC stack adds no FFmpeg of its own: pixelflux and pcmflux encode and
-decode the video and audio, and the RTP layer packetizes their output through
-a libav-free `EncodedPacket` container.
+pixelflux and pcmflux encode and decode the video and audio through the codec
+libraries they link, and the RTP layer packetizes their output through an
+`EncodedPacket` container of its own, so the stack carries no FFmpeg library.
 
 Everything else a Selkies installation links or loads is LGPL or permissive.
-The container images also install the distribution's `ffmpeg` and `x264`
-packages, which are GPL builds on Debian and Ubuntu; pixelflux links that
-libavcodec for VA-API.
+The container images also install the distribution's `ffmpeg`, a GPL build on
+Debian and Ubuntu, for the desktop's own players and browsers, so an image is
+distributed under GPL terms for that part as well.
 
 ## Python dependencies
 
@@ -46,7 +46,7 @@ come in.
 
 | Package | License | Category | How used | Notes |
 | --- | --- | --- | --- | --- |
-| `pixelflux` | MPL-2.0 | weak copyleft | PyO3 extension; links FFmpeg (LGPL-2.1-or-later as built for its manylinux wheels), libgbm, libpixman, libxkbcommon (MIT); libx264 (GPL) in the default build | see [pixelflux LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md) |
+| `pixelflux` | MPL-2.0 | weak copyleft | PyO3 extension; links libvpx, SVT-AV1, dav1d (BSD), libde265 (LGPL-3.0-or-later), libgbm, libpixman, libxkbcommon (MIT); libx264 and x265 (GPL) in the default build, OpenH264 and kvazaar (BSD) otherwise | see [pixelflux LICENSES.md](https://github.com/selkies-project/pixelflux/blob/main/LICENSES.md) |
 | `pcmflux` | MPL-2.0 | weak copyleft | PyO3 extension; links libpulse (LGPL-2.1-or-later) and libopus (BSD-3-Clause), bundled into its wheels with libpulse's LGPL/permissive dependency tree | see [pcmflux LICENSES.md](https://github.com/selkies-project/pcmflux/blob/main/LICENSES.md) |
 | `aiohttp` | Apache-2.0 AND MIT | permissive | HTTP and WebSocket server | bundles llhttp (MIT); pulls `aiohappyeyeballs` (PSF-2.0), `aiosignal`, `frozenlist`, `multidict`, `propcache`, `yarl` (Apache-2.0), `attrs` (MIT), `idna` (BSD-3-Clause) |
 | `aiofiles` | Apache-2.0 | permissive | file uploads and downloads | |
@@ -109,28 +109,26 @@ so it matches the sources.
 ## The default is GPL-enabled
 
 pixelflux builds with its GPL components on by default (libx264 for software
-H.264), and that is the supported default for every deployment — the release wheels,
-the container images, and the AppImage, which may therefore bundle a GPL FFmpeg
-through pixelflux. `PIXELFLUX_ENABLE_GPL=0` is the opt-out for operators who
-need a copyleft-free build; the sections below describe both.
+H.264, x265 for software H.265), and that is the supported default for every
+deployment — the release wheels, the container images, and the AppImage.
+`PIXELFLUX_ENABLE_GPL=0` is the opt-out for operators who need a copyleft-free
+build; the sections below describe both.
 
 ## What a non-GPL deployment contains
 
 With pixelflux built with `PIXELFLUX_ENABLE_GPL=0`: Selkies, pixelflux,
 pcmflux, and the web client under the weak copyleft of MPL-2.0, the permissive
 Python packages above, and the LGPL libraries they load (libpulse through
-pcmflux and pulsectl, python-xlib, glibc, FFmpeg as an LGPL build through
-pixelflux). Nothing GPL, and nothing that reaches beyond its own files. The
-WebRTC stack packetizes pixelflux/pcmflux output and brings in no media
-library of its own.
+pcmflux and pulsectl, python-xlib, glibc, libde265 through pixelflux). Nothing
+GPL, and nothing that reaches beyond its own files. The WebRTC stack
+packetizes pixelflux/pcmflux output and brings in no media library of its own.
 
 ## What the default (GPL-enabled) deployment adds
 
-An installed Selkies adds libx264 through the pixelflux wheel inside it; the
-container images add the distribution's FFmpeg and x264 packages. libx264 is
-GPL-2.0-or-later, and an FFmpeg configured with `--enable-gpl
---enable-version3` (Debian, Ubuntu, Alpine) is GPL-3.0-or-later, so a
-deployment that ships them is distributed under GPL terms for those parts.
+An installed Selkies adds libx264 and x265 through the pixelflux wheel inside
+it, both GPL-2.0-or-later, and the container images add the distribution's
+`ffmpeg` on top, so a deployment that ships them is distributed under GPL terms
+for those parts.
 
 ## How this is kept up to date
 
