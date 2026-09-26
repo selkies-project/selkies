@@ -712,6 +712,10 @@ async def _bind_listen_sockets(addr: str, port: int) -> List[socket.socket]:
     return socks
 
 
+# The login `PASSWD` defaults to in the images this repository builds (addons/base/Dockerfile).
+IMAGE_PLACEHOLDER_PASSWORD = "mypasswd"
+
+
 def _frame_ancestors_directive(value: str) -> str:
     """The Content-Security-Policy that `frame_ancestors` asks for, "" when it names none.
 
@@ -1998,7 +2002,9 @@ class CentralizedStreamServer:
         was supplied, on the command line or in the environment — not what the value is.
         An image that ships its own default is choosing it deliberately, the way most
         container images do, and rejecting known-weak values here would break every one
-        of them while stopping nobody who meant it.
+        of them while stopping nobody who meant it. The placeholder the Selkies images
+        publish is let through with a warning, since anyone who has read the
+        documentation knows it.
 
         Raises:
             SystemExit: With `EXIT_CONFIG_ERROR`, which says the settings are the
@@ -2009,6 +2015,11 @@ class CentralizedStreamServer:
         if not self.settings.enable_basic_auth[0]:
             return
         if self.settings.was_provided("basic_auth_password"):
+            if self.settings.basic_auth_password == IMAGE_PLACEHOLDER_PASSWORD:
+                logger.warning(
+                    "The login password is %r, the placeholder the Selkies images publish: set PASSWD or "
+                    "SELKIES_BASIC_AUTH_PASSWORD before anyone else can reach this server.",
+                    IMAGE_PLACEHOLDER_PASSWORD)
             return
         logger.error(
             "Basic authentication is enabled but no password was set. Set one with "
