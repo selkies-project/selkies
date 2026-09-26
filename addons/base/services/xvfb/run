@@ -30,15 +30,18 @@ unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
 # so the X11 backend and the Wayland compositor answer to the same selection.
 # A node whose renderer did not come up for the entrypoint's probe (a driver
 # whose GBM allocates nothing, say) draws nothing here either: glamor on it
-# reports success and leaves the screen black. Without a usable node the
-# server is the software framebuffer, whose GLX probing is kept on Mesa's EGL:
-# a vendor library's GBM has nothing to offer it and has crashed it before. The
-# session's own EGL selection is untouched either way.
+# reports success and leaves the screen black. A node named but absent is no
+# node at all, which a runtime that passes in the driver's libraries and no DRM
+# device leaves behind. Without a usable node the server is the software
+# framebuffer, whose GLX probing is kept on Mesa's EGL: a vendor library's GBM
+# has nothing to offer it, and NVIDIA's takes the server down where the
+# container has no /dev/dri at all. The session's own EGL selection is
+# untouched either way.
 VFB_DEVICE=""
 RENDER_DRI="${SELKIES_RENDER_DRI:-${DRINODE:-}}"
 if [ "${SELKIES_GPU_ACCELERATED:-}" != "false" ] && /usr/bin/Xvfb -help 2>&1 | grep -q -- '-glamor'; then
   if [ -n "${RENDER_DRI}" ]; then
-    VFB_DEVICE="-glamor -dri ${RENDER_DRI}"
+    [ -e "${RENDER_DRI}" ] && VFB_DEVICE="-glamor -dri ${RENDER_DRI}"
   else
     # shellcheck disable=SC2086  # the resolved node, else every node here
     for node in ${SELKIES_GPU_RENDER_NODE:-/dev/dri/renderD*}; do
