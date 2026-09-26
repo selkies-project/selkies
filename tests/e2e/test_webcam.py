@@ -310,15 +310,12 @@ def launch(p, engine: str, cam_sock: str, mode: str, init_js: Optional[str] = No
         }
         if C.openh264_version():
             # The side-loaded OpenH264 lives in the persistent e2e profile.
-            ctx = p.firefox.launch_persistent_context(user_data_dir=C.FF_E2E_PROFILE, headless=True,
-                                                      viewport={"width": 1280, "height": 720},
-                                                      firefox_user_prefs=prefs, env=env)
+            ctx = p.firefox.launch_persistent_context(**C.installed_firefox({
+                "user_data_dir": C.FF_E2E_PROFILE, "headless": True, "viewport": {"width": 1280, "height": 720},
+                "firefox_user_prefs": prefs, "env": env}))
             browser = ctx.browser or ctx
         else:
-            kw = {"headless": True, "firefox_user_prefs": prefs, "env": env}
-            if C.FIREFOX_PATH:
-                kw["executable_path"] = C.FIREFOX_PATH
-            browser = p.firefox.launch(**kw)
+            browser = p.firefox.launch(**C.installed_firefox({"headless": True, "firefox_user_prefs": prefs, "env": env}))
             ctx = browser.new_context(viewport={"width": 1280, "height": 720})
     elif engine == "webkit":
         # The Safari stand-in. It takes no capture flags, so the grant is the context's
