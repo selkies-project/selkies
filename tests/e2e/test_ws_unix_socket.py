@@ -86,7 +86,7 @@ def spawn_server(log: str) -> subprocess.Popen:
            "XDG_RUNTIME_DIR": H.RUNTIME_DIR,
            "SELKIES_MODE": "websockets", "SELKIES_ENABLE_BASIC_AUTH": "false",
            "SELKIES_ENABLE_HTTPS": "false", "SELKIES_WEB_ROOT": H.CORE_DIST,
-           "SELKIES_PORT": str(H.PORT), "SELKIES_UNIX_SOCKET": SOCK}
+           "SELKIES_PORT": str(H.PORT), "SELKIES_UNIX_SOCKET": SOCK, **H.inherited_env()}
     with open(log, "w") as lf:
         lf.write("")
     return H.spawn([H.PYTHON, "-m", "selkies"], env=env, cwd=H.WORKDIR,

@@ -162,7 +162,7 @@ def block(res: H.Results, tag: str, wayland: bool, session: list, path_env: Opti
     env = {"PATH": path_env or os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"),
            "XDG_RUNTIME_DIR": runtime, "SELKIES_WAYLAND": "true" if wayland else "false",
            "XDG_DATA_DIRS": data_dir(root, "wayland-sessions" if wayland else "xsessions", record),
-           "XDG_DATA_HOME": os.path.join(root, "home-share")}
+           "XDG_DATA_HOME": os.path.join(root, "home-share"), **H.inherited_env()}
     try:
         proc, port, pid = start(session, env, log, detached)
     except RuntimeError as err:
