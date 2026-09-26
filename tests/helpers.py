@@ -364,6 +364,15 @@ def spawn(cmd: Iterable, **kwargs: Any) -> subprocess.Popen:
     return subprocess.Popen(cmd, **kwargs)
 
 
+def inherited_env() -> dict:
+    """What a hermetic child environment still takes from the suite's own: the
+    warnings config, so a deprecation sweep sees server-side hits, and GPU
+    visibility, so ``CUDA_VISIBLE_DEVICES=`` keeps the server's encoders off the
+    host's GPUs."""
+    names = ("PYTHONWARNINGS", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER")
+    return {name: os.environ[name] for name in names if name in os.environ}
+
+
 def server_start(mode: str = "websockets", wayland: bool = False,
                  web_root: str = CORE_DIST,
                  extra_env: Optional[dict] = None,
@@ -405,10 +414,7 @@ def server_start(mode: str = "websockets", wayland: bool = False,
     # endpoint is only wired in when one is offered.
     if os.environ.get("E2E_TURN_REST_URI"):
         env["SELKIES_TURN_REST_URI"] = os.environ["E2E_TURN_REST_URI"]
-    # Warnings config crosses into the server so a deprecation sweep can see
-    # server-side hits; everything else stays hermetic.
-    if os.environ.get("PYTHONWARNINGS"):
-        env["PYTHONWARNINGS"] = os.environ["PYTHONWARNINGS"]
+    env.update(inherited_env())
     if not wayland:
         env["DISPLAY"] = require_display()
     pulse = pulse_server()

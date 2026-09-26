@@ -33,7 +33,7 @@ env = {"PATH": os.environ.get("PATH", ""),
        "XDG_RUNTIME_DIR": H.RUNTIME_DIR,
        "SELKIES_MODE": "webrtc", "SELKIES_ENABLE_BASIC_AUTH": "false",
        "SELKIES_WEB_ROOT": H.CORE_DIST,
-       "SELKIES_TURN_REST_URI": ""}
+       "SELKIES_TURN_REST_URI": "", **H.inherited_env()}
 with socket.socket() as probe:
     probe.bind(("127.0.0.1", 0))
     UNUSED_PORT = probe.getsockname()[1]
