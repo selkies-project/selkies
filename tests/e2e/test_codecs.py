@@ -171,6 +171,11 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
                               "Mode: H264" in line or "Mode: JPEG" in line, TENC.encoder_field(line))
                 fps = 0
                 for _ in range(20):
+                    if "Mode: JPEG" in line:
+                        # JPEG sends only what damage covers, so a still picture presents
+                        # no frames: repaint it so the rate measures the stream.
+                        picture.clear()
+                        picture.paint()
                     fps = page.evaluate("window.fps || 0")
                     if fps > 0:
                         break
