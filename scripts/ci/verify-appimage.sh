@@ -75,9 +75,8 @@ echo "selkies, pixelflux, and pcmflux import"
 # The sound server AppRun starts, started by AppRun: a daemon that finds no
 # module directory exits with "startup without any loaded modules", taking
 # audio out of the AppImage while everything else still streams. The Wayland
-# backend is selected so no X server is started, and the session AppRun goes on
-# to attempt is beside the point -- what is checked is the daemon it leaves
-# listening. Its own runtime directory, never a live session's.
+# backend is selected so no X server is started, and its compositor is checked
+# too. Its own runtime directory, never a live session's.
 RUNTIME="${WORK}/runtime"
 mkdir -p "${RUNTIME}"
 chmod 700 "${RUNTIME}"
@@ -94,6 +93,12 @@ while [ "${i}" -lt 40 ]; do
     sinks="$(env XDG_RUNTIME_DIR="${RUNTIME}" PULSE_SERVER="unix:${RUNTIME}/pulse/native" \
         "${PREFIX}/bin/pactl" list short sinks 2>/dev/null || true)"
     [ -n "${sinks}" ] && break
+    i=$((i + 1))
+    sleep 1
+done
+# The compositor names its socket once up, or says its startup window passed
+i=0
+while ! grep -q "Wayland compositor socket" "${WORK}/apprun.log" && [ "${i}" -lt 30 ]; do
     i=$((i + 1))
     sleep 1
 done
@@ -132,6 +137,14 @@ case "${bus}" in
         ;;
 esac
 echo "AppRun's sound server looks for the system bus at the well-known address"
+# Its keyboard needs the keymaps AppRun points the bundled libxkbcommon at,
+# whose own default is the build path
+if ! grep -q "Wayland compositor socket: " "${WORK}/apprun.log"; then
+    echo "::error::the Wayland compositor AppRun starts never came up; its log:"
+    tail -n 20 "${WORK}/apprun.log"
+    exit 1
+fi
+echo "AppRun's Wayland compositor comes up"
 
 # The mount a user's own run takes: the runtime mounts the image read-only and
 # only extracts itself where FUSE is missing, so the checks above never see it.
