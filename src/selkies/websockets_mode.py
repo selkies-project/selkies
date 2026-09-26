@@ -1311,16 +1311,14 @@ class DataStreamingServer(BaseStreamingService):
             setattr(cs, name, value)
 
     async def _handle_resize(self, res_str: str, display_id: str = 'primary') -> None:
-        """Route a client resize once the display it names has been laid out.
+        """Route a client resize once the displays have been laid out.
 
-        The layout comes from the connection's initial SETTINGS, which this
-        transport's own message loop processes, so the wait is bounded: a
-        client that sends `r,` first would otherwise deadlock it.
+        The layout comes from an initial SETTINGS, and a client's own carries
+        the geometry, so a resize ahead of it is left to it: waited for here,
+        it would hold the message loop that has to read that SETTINGS.
         """
-        try:
-            await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
-        except asyncio.TimeoutError:
-            data_logger.warning("Ignoring resize request received before initial SETTINGS.")
+        if not self.client_settings_received.is_set():
+            data_logger.debug("Ignoring resize request received before initial SETTINGS.")
             return
         await on_resize_handler(res_str, self.app, self, display_id)
 
@@ -1333,12 +1331,11 @@ class DataStreamingServer(BaseStreamingService):
         session; on Wayland the display's own screen takes it, while the cursor
         cap and size stay the primary's. The DPI is stored where SETTINGS
         stores it, or a later partial SETTINGS re-applies one the desktop has
-        moved off. The wait is the one `_handle_resize` documents.
+        moved off. A sync ahead of the initial SETTINGS, which carries the DPI,
+        is left to it, as `_handle_resize` leaves a resize.
         """
-        try:
-            await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
-        except asyncio.TimeoutError:
-            data_logger.warning("Ignoring DPI sync received before initial SETTINGS.")
+        if not self.client_settings_received.is_set():
+            data_logger.debug("Ignoring DPI sync received before initial SETTINGS.")
             return
         try:
             dpi_value = min(SCALING_DPI_MAX,
@@ -4323,11 +4320,8 @@ class DataStreamingServer(BaseStreamingService):
                                 await _broadcast_to_clients(self.clients, "AUDIO_STOPPED", per_client_timeout=2.0)
 
                     elif message.startswith("SET_NATIVE_CURSOR_RENDERING,"):
-                        try:
-                            await asyncio.wait_for(self.client_settings_received.wait(), timeout=15.0)
-                        except asyncio.TimeoutError:
-                            data_logger.warning("Ignoring SET_NATIVE_CURSOR_RENDERING before initial SETTINGS.")
-                            continue
+                        # Taken as it comes: before any capture it is only recorded, for the
+                        # one the initial SETTINGS starts.
                         try:
                             new_capture_cursor_str = message.split(",")[1].strip().lower()
                             new_capture_cursor = new_capture_cursor_str in ("1", "true")
