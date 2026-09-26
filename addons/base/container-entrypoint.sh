@@ -54,6 +54,12 @@ if [ -n "${PASSWD-}" ]; then
     echo "$(id -nu):${PASSWD}" | sudo-root chpasswd 2>/dev/null ||
     echo "selkies: cannot change the password of $(id -nu)" >&2
 fi
+# The login selkies resolves from these variables, in settings.py's order, is one
+# anybody knows while it is still the PASSWD this image publishes.
+if { [ -z "$(setting_value "${SELKIES_ENABLE_BASIC_AUTH-}")" ] || is_true "${SELKIES_ENABLE_BASIC_AUTH-}"; } &&
+  [ "${SELKIES_BASIC_AUTH_PASSWORD-${PASSWORD-${PASSWD-}}}" = "mypasswd" ]; then
+  echo "selkies: the login password is the placeholder this image publishes; set PASSWD or SELKIES_BASIC_AUTH_PASSWORD before anyone else can reach this container" >&2
+fi
 
 # A desktop menu watches the directories it read at startup, and cannot watch one
 # that does not exist yet: the first application installed into a home without

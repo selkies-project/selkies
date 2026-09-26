@@ -7,7 +7,7 @@ description: Run the Selkies desktop container, with or without a GPU, and open 
 
 The container carries a desktop, a browser, and an audio stack, so there is nothing to install and nothing to prepare. Selkies streams over plain WebSockets on a **single port (default `8080`)**; WebRTC is an opt-in transport (`--mode=webrtc`). Open <https://localhost:8080> when it is up, and accept the container's self-signed certificate.
 
-> **The default login is `ubuntu` / `mypasswd`.** Change it with `-e PASSWD=...` (or `-e SELKIES_BASIC_AUTH_PASSWORD=`), and do that before putting a session anywhere others can reach it; the server's log warns while the placeholder is in use.
+> **The default login is `ubuntu` / `mypasswd`.** Change it with `-e PASSWD=...` (or `-e SELKIES_BASIC_AUTH_PASSWORD=`), and do that before putting a session anywhere others can reach it; the container's log warns while the placeholder is in use.
 
 Pick the block for the GPU the session should render on, and copy it whole. Not using containers? [Native Install](native.md) has the packages and the AppImage.
 
