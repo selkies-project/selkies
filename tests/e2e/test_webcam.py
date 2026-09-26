@@ -177,8 +177,15 @@ HALF_TURN_JS = C.wire_hook_js("""
 """)
 
 
+def interposer_env(sock_dir: str) -> dict:
+    """Environment of a process whose /dev/video0 is the camera serving `sock_dir` and no other:
+    the interposer's default source falls back to a PipeWire node named selkies-webcam, which on
+    a shared session daemon may be another suite's camera."""
+    return dict(os.environ, LD_PRELOAD=INTERPOSER, SELKIES_WEBCAM_SOCKET_PATH=sock_dir, SELKIES_WEBCAM_SOURCE="socket")
+
+
 def probe(frames: int, timeout_ms: int = 4000, samples=((320, 240),)) -> dict:
-    env = dict(os.environ, LD_PRELOAD=INTERPOSER, SELKIES_WEBCAM_SOCKET_PATH=os.environ.get("SELKIES_WEBCAM_SOCKET_PATH", H.RUNTIME_DIR))
+    env = interposer_env(os.environ.get("SELKIES_WEBCAM_SOCKET_PATH", H.RUNTIME_DIR))
     cmd = [PROBE, "--timeout", str(timeout_ms)]
     for x, y in samples:
         cmd += ["--sample", f"{x},{y}"]
@@ -223,8 +230,7 @@ def wait_format(fourcc: str, timeout: float = 20) -> bool:
 
 def start_reader() -> subprocess.Popen:
     """An interposer client that holds the device open until it is terminated."""
-    env = dict(os.environ, LD_PRELOAD=INTERPOSER,
-               SELKIES_WEBCAM_SOCKET_PATH=os.environ.get("SELKIES_WEBCAM_SOCKET_PATH", H.RUNTIME_DIR))
+    env = interposer_env(os.environ.get("SELKIES_WEBCAM_SOCKET_PATH", H.RUNTIME_DIR))
     return subprocess.Popen([PROBE, "--timeout", "60000", "/dev/video0", "100000"],
                             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -294,7 +300,7 @@ def launch(p, engine: str, cam_sock: str, mode: str, init_js: Optional[str] = No
     Returns:
         `(browser, page, errors)`, where `errors` collects page errors as they occur.
     """
-    env = dict(os.environ, LD_PRELOAD=INTERPOSER, SELKIES_WEBCAM_SOCKET_PATH=cam_sock)
+    env = interposer_env(cam_sock)
     if engine == "firefox":
         prefs = {
             "media.navigator.permission.disabled": True,
@@ -377,7 +383,7 @@ def nowebcodecs_block() -> "H.Results":
             deadline = time.time() + 25
             while time.time() < deadline and probe(2, timeout_ms=1500).get("rc") != 0:
                 time.sleep(0.5)
-            env = dict(os.environ, LD_PRELOAD=INTERPOSER, SELKIES_WEBCAM_SOCKET_PATH=H.RUNTIME_DIR)
+            env = interposer_env(H.RUNTIME_DIR)
             p2 = subprocess.run([PROBE, "--timeout", "4000", "--dump", dump, "/dev/video0", "30"], env=env,
                                 capture_output=True, text=True, timeout=40)
             r = dict(line.split("=", 1) for line in p2.stdout.splitlines() if "=" in line and not line.startswith("sample"))
