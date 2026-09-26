@@ -93,8 +93,9 @@ def drive_cbr(use_opcode: bool) -> dict:
     return results
 
 
-def main() -> None:
-    """Run the CBR-inheritance check via both the SETTINGS and opcode paths."""
+def main() -> bool:
+    """Run the CBR-inheritance check via both the SETTINGS and opcode paths; True when both passed."""
+    ok = True
     for use_opcode in (False, True):
         H.server_start(mode="websockets", wayland=False, extra_env={"SELKIES_ENABLE_RATE_CONTROL": "true"})
         label = "SETTINGS" if not use_opcode else "_rc-opcode"
@@ -102,7 +103,8 @@ def main() -> None:
         r = drive_cbr(use_opcode)
         seg = r.get('d2', '')
         res.check(f"display2 inherits cbr ({label})", "CBR" in seg, seg)
-        res.summary()
+        ok = res.summary() and ok
+    return ok
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)
