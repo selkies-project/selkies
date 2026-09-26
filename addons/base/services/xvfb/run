@@ -72,7 +72,7 @@ fi
 # screen pixmap is on the GPU; both are startup lines, and both are the first
 # thing to look at when a session renders in software.
 # shellcheck disable=SC2086  # VFB_DEVICE is an option pair or empty
-/usr/bin/Xvfb "${DISPLAY}" -verbose 1 +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -ac -noreset -shmem -s 0 -dpms ${VFB_DEVICE} &
+/usr/bin/Xvfb "${DISPLAY}" -verbose 1 +extension "COMPOSITE" +extension "DAMAGE" +extension "GLX" +extension "RANDR" +extension "RENDER" +extension "MIT-SHM" +extension "XFIXES" +extension "XTEST" +iglx +render -nolisten "tcp" -noreset -shmem -s 0 -dpms ${VFB_DEVICE} &
 XVFB_PID=$!
 trap 'kill "${XVFB_PID}" 2>/dev/null' TERM INT
 
@@ -97,6 +97,13 @@ if [ "${READY}" != "true" ]; then
     kill -9 "${XVFB_PID}" 2>/dev/null
     wait "${XVFB_PID}" 2>/dev/null
     exit 1
+fi
+# The display admits the session's user and root by the uid the kernel reports for
+# each connection, and no other local process: one that changed to another uid in
+# the container would otherwise read every keystroke. There is no cookie file for
+# a client to be told of.
+if ! xhost "+SI:localuser:$(id -un)" +SI:localuser:root -local: > /dev/null 2>&1; then
+    echo "[xvfb] could not limit ${DISPLAY} to $(id -un) and root; it admits every local process" >&2
 fi
 echo "[xvfb] ${DISPLAY} is serving clients"
 wait "${XVFB_PID}"
