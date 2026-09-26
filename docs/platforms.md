@@ -24,7 +24,8 @@ from the command line or `SELKIES_*` variables alike:
   session's own cookie, whatever version the host ships; it renders on the GPU
   where the server offers glamor, and comes up without GLX where its GLX cannot
   load. On the Wayland backend (`SELKIES_WAYLAND=true` or `--wayland`), Selkies'
-  own compositor.
+  own compositor, and the `/tmp/.X11-unix` directory a host's boot would make,
+  where the XWayland of a nested KDE session puts its socket.
 - **Desktop**: a session the host has installed, found as a display manager
   finds one in the `xsessions` or `wayland-sessions` directories of the XDG data
   directories (`~/.local/share` first, so a user adds one without root).

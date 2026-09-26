@@ -35,6 +35,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # The framebuffer bounds the sizes Selkies can resize the screen to; -s 0 -dpms
 # keeps the server from blanking what is streamed.
 XVFB_ARGS = ("-screen", "0", "8192x4096x24", "-nolisten", "tcp", "-noreset", "-s", "0", "-dpms")
+# Where every X server puts its socket; a host's boot creates it.
+X11_SOCKET_DIR = "/tmp/.X11-unix"
 # What a host session leaves in the environment that must not reach this one.
 HOST_SESSION_VARS = ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS",
                      "PIPEWIRE_RUNTIME_DIR", "PULSE_RUNTIME_PATH")
@@ -64,6 +66,20 @@ def answers(path: str) -> bool:
             return True
         except OSError:
             return False
+
+
+def x11_socket_dir(path: str = X11_SOCKET_DIR) -> None:
+    """The directory X servers put their sockets in, world-writable and sticky
+    as a host's boot makes it. An Xvfb creates it itself; the XWayland that
+    kwin_wayland starts does not, and without it Plasma's Wayland session never
+    starts its shell."""
+    try:
+        os.mkdir(path)
+        os.chmod(path, 0o1777)  # mkdir's mode passes through the umask
+    except FileExistsError:
+        pass
+    except OSError as err:
+        log(f"cannot create {path} ({err.strerror}); the session's X11 applications will not start")
 
 
 def join_group(pgid: int) -> None:
@@ -302,6 +318,7 @@ class Session:
         env = dict(self.env, XDG_SESSION_TYPE="wayland" if wayland else "x11")
         if wayland:
             env["WAYLAND_DISPLAY"] = self.capture_socket()
+            x11_socket_dir()
         names = entry.get("DesktopNames", "").strip(";").replace(";", ":")
         if names:
             env["XDG_CURRENT_DESKTOP"] = names

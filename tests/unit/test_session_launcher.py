@@ -193,6 +193,13 @@ def main() -> bool:
           entry_["new_browser_tab"] is True and icon.endswith(os.path.join("selkies", "selkies_web", "selkies.svg"))
           and os.path.isfile(os.path.join(REPO, "addons", "selkies-dashboard", "public", "selkies.svg")), icon)
 
+    with tempfile.TemporaryDirectory() as tmp:
+        sockets = os.path.join(tmp, ".X11-unix")
+        session.x11_socket_dir(sockets)
+        mode = os.stat(sockets).st_mode & 0o7777
+        check("the X11 socket directory a nested XWayland needs is made world-writable and sticky",
+              mode == 0o1777, oct(mode))
+
     text = open(os.path.join(REPO, "pyproject.toml"), encoding="utf-8").read()
     check("the console script is registered", re.search(r'^selkies-session = "selkies\.session:main"$', text, re.M))
     check("the Jupyter server-proxy group names the entry",
