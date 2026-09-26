@@ -63,12 +63,15 @@ async def drain(ws, out: list = None) -> None:
 
 
 async def stream(ws, codec: int, seen: list) -> list:
-    """The frames of `codec` once the switch to it has taken: the switch restarts the capture,
-    so the stream it replaces is not what is measured."""
+    """The frames of `codec` once the switch to it has taken and its newest is a delta frame:
+    the switch restarts the capture, so the stream it replaces is not what is measured, and a
+    key frame reported lost leaves nothing earlier to predict from."""
     deadline = time.time() + 25
-    while time.time() < deadline and not any(c == codec for c, *_ in seen):
+    frames: list = []
+    while time.time() < deadline and (not frames or frames[-1][2]):
         await asyncio.sleep(0.5)
-    return [f for f in seen if f[0] == codec]
+        frames = [f for f in seen if f[0] == codec]
+    return frames
 
 
 async def lost_frame_answers(res: "H.Results") -> None:
@@ -80,7 +83,8 @@ async def lost_frame_answers(res: "H.Results") -> None:
     VP9 session on a render node does the same through its reference slots. Software H.265
     (x265 or kvazaar) offers nothing to steer its references with, names none, and pixelflux
     codes a key frame there instead; on a host whose GPU takes the H.265 session the encoder
-    predicts past the loss as VP9 does, which the server's encoder line tells apart.
+    predicts past the loss as VP9 does. Its delta frames tell the two apart: a session that
+    tracks its references names the frame each predicts from, one that does not repeats its id.
     """
     uri = f"ws://localhost:{H.PORT}/api/websockets"
     async with websockets.connect(uri, max_size=None) as ws:
@@ -89,14 +93,13 @@ async def lost_frame_answers(res: "H.Results") -> None:
         pump = asyncio.create_task(drain(ws, seen))
         for encoder, codec, name in [("vp9enc", VP9, "VP9"), ("h265enc", H265, "H.265")]:
             seen.clear()
-            mark = len(H.server_log())
             await ws.send(settings(encoder=encoder))
             frames = await stream(ws, codec, seen)
             res.check(f"the {name} session streams", bool(frames),
                       f"{len(seen)} frames, codecs {sorted({c for c, *_ in seen})}")
             if not frames:
                 continue
-            tracked = codec == VP9 or "Encoder: software H265" not in H.server_log()[mark:]
+            tracked = codec == VP9 or any(not key and ref != fid for _, fid, key, ref in frames)
             last = frames[-1][1]
             seen.clear()
             await ws.send(f"LOST_FRAME {last}")
