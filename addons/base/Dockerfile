@@ -435,8 +435,6 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then dpkg --add-architectur
         libxfixes3 \
         libxtst6 \
         libxext6 \
-        # opus-tools covers pcmflux's audio encoder
-        opus-tools \
         # Wayland backend: pixelflux opens libwayland-server for the capture
         # compositor, and XWayland serves the X11-only applications running
         # under the nested session compositor installed below
