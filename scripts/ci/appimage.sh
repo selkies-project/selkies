@@ -147,7 +147,9 @@ ln -sf selkies_input_interposer.so AppDir/usr/lib/selkies_joystick_interposer.so
 "${CONDA_CC}" --sysroot="${CONDA_SYSROOT}" -shared -fPIC -O2 \
     -o AppDir/usr/lib/selkies_v4l2_interposer.so \
     addons/v4l2-interposer/v4l2_interposer.c -ldl -lpthread
-rm -rf "${CC_ENV}"
+# The toolchain's packages stay in the cache of the conda that fetched them,
+# which is the AppImage's own
+rm -rf "${CC_ENV}" AppDir/usr/conda/pkgs
 
 # The floor is the whole point of building from conda, and one package built
 # for a newer glibc, or the toolchain fallback above, raises it silently, so

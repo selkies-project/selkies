@@ -68,6 +68,13 @@ if [ -n "${outside}" ]; then
     exit 1
 fi
 echo "every entry point names an interpreter inside this copy"
+# Nothing at run time reads a package cache, and building the interposers
+# leaves one in the prefix
+if [ -e "${PREFIX}/pkgs" ]; then
+    echo "::error::the prefix carries a conda package cache of $(du -sh "${PREFIX}/pkgs" | cut -f1)"
+    exit 1
+fi
+echo "the prefix carries no conda package cache"
 
 "${PREFIX}/bin/python" -c "import selkies, pixelflux, pcmflux"
 echo "selkies, pixelflux, and pcmflux import"
