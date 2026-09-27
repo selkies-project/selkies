@@ -4062,6 +4062,8 @@ class WebRTCInput:
         self._clipboard_reads = set()
         self._bg_tasks = set()
         self.keyboard_queue = asyncio.Queue(maxsize=4096)
+        # Whether the keyboard worker is injecting an entry it has taken off the queue.
+        self._keyboard_busy = False
         self.keyboard_worker_task = None
         self._wl_text_routed = {}
         self.pressed_keys = {}
@@ -5695,7 +5697,7 @@ class WebRTCInput:
                         elif bit_index == 3:
                             if scroll_magnitude > 0:
                                 if is_pressed_now:
-                                    self.wayland_input.inject_mouse_scroll(0.0, 10.0 * mag)
+                                    self._wl_scroll(0.0, 10.0 * mag)
                             else:
                                 if is_pressed_now:
                                     # Queued behind pending keys like any key event:
@@ -5707,7 +5709,7 @@ class WebRTCInput:
                         elif bit_index == 4:
                             if scroll_magnitude > 0:
                                 if is_pressed_now:
-                                    self.wayland_input.inject_mouse_scroll(0.0, -10.0 * mag)
+                                    self._wl_scroll(0.0, -10.0 * mag)
                             else:
                                 if is_pressed_now:
                                     self._keyboard_enqueue_chord((
@@ -5716,10 +5718,10 @@ class WebRTCInput:
 
                         elif bit_index == 6:
                             if scroll_magnitude > 0 and is_pressed_now:
-                                self.wayland_input.inject_mouse_scroll(-10.0 * mag, 0.0)
+                                self._wl_scroll(-10.0 * mag, 0.0)
                         elif bit_index == 7:
                             if scroll_magnitude > 0 and is_pressed_now:
-                                self.wayland_input.inject_mouse_scroll(10.0 * mag, 0.0)
+                                self._wl_scroll(10.0 * mag, 0.0)
 
             self.button_mask = button_mask
             return
@@ -7712,6 +7714,23 @@ class WebRTCInput:
             except asyncio.QueueFull:
                 logger_webrtc_input.warning("keyboard queue full; dropping input event.")
 
+    def _wl_scroll(self, dx: float, dy: float) -> None:
+        """Scroll the Wayland seat, behind any key still waiting in the keyboard worker.
+
+        Keys reach the seat through the worker and pointer events straight
+        from the message, so a modifier and a wheel click sent back to back --
+        a pinch, which arrives as Ctrl+wheel -- would otherwise scroll before
+        the modifier is down. With nothing queued the click goes out at once.
+
+        Args:
+            dx: Horizontal axis value.
+            dy: Vertical axis value.
+        """
+        if self.keyboard_queue.qsize() or self._keyboard_busy:
+            self._keyboard_enqueue(("scroll", (dx, dy)))
+        else:
+            self.wayland_input.inject_mouse_scroll(dx, dy)
+
     def _keyboard_enqueue_chord(self, keys: Iterable[tuple]) -> None:
         """Enqueue a server-synthesized press/release sequence as ONE entry, so
         overflow eviction can only lose it whole.
@@ -7789,6 +7808,7 @@ class WebRTCInput:
                 else:
                     msg_type, data = await self.keyboard_queue.get()
 
+                self._keyboard_busy = True
                 try:
                     keysym = data if msg_type in ("kd", "ku") else None
                     is_unicode_fallback = False
@@ -7847,6 +7867,10 @@ class WebRTCInput:
                         else:
                             await self.send_x11_keypress(keysym, down=False)
 
+                    elif msg_type == "scroll":
+                        await flush_buffer()
+                        self.wayland_input.inject_mouse_scroll(*data)
+
                     elif msg_type == "chord":
                         # Back-to-back, so no other queued key lands inside the chord.
                         await flush_buffer()
@@ -7893,6 +7917,7 @@ class WebRTCInput:
                             unicode_buffer.append(data)
 
                 finally:
+                    self._keyboard_busy = False
                     self.keyboard_queue.task_done()
 
             except asyncio.CancelledError:
