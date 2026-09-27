@@ -53,6 +53,7 @@ SUITES: list = [
     {"path": "unit/test_sdp_munge.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webrtc_secondary_gate.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webrtc_audio_recovery.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_webrtc_audio_pts.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webrtc_reconnect_grace.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_audio_health.py", "tier": "unit", "timeout": 300},
     {"path": "unit/test_media_on_start.py", "tier": "unit", "timeout": 180},

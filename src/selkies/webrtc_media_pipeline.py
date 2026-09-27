@@ -173,8 +173,8 @@ class MediaPipelinePixel(MediaPipeline):
         _video_pts_anchor: Video pts clock origin; pipeline-scoped rather than
             capture-scoped so restarts and fps changes never rewind pts.
         _audio_capture_epoch: Bumped per audio capture start. The callback
-            re-anchors `_audio_pts_offset` one frame step past `_audio_last_pts`
-            when it sees a new epoch, since pcmflux re-zeros its sample clock.
+            re-anchors `_audio_pts_offset` when it sees a new epoch, since
+            pcmflux re-zeros its sample clock (`_audio_rtp_pts`).
         _audio_routing_task: Routing enforcement for the running capture; held
             so it is not garbage-collected mid-flight, canceled on stop.
         _audio_control: Sound-server control connection (sink provisioning,
@@ -263,6 +263,7 @@ class MediaPipelinePixel(MediaPipeline):
         self._audio_cb_epoch = -1
         self._audio_pts_offset = 0
         self._audio_last_pts = -1
+        self._audio_last_wall = 0.0
         self._audio_frame_samples = 480
         self._audio_routing_task: Optional[asyncio.Task] = None
         self._audio_control: Optional[AudioControl] = None
@@ -866,23 +867,13 @@ class MediaPipelinePixel(MediaPipeline):
                 """Deliver one Opus frame; runs on the pcmflux capture thread.
 
                 The frame goes downstream as a zero-copy memoryview that
-                `produce_data` keeps a reference to. pcmflux re-zeros pts on
-                every start, so the per-capture sample clock is mapped onto a
-                continuous one: a backward RTP jump on a live sender plays as
-                a glitch.
+                `produce_data` keeps a reference to, stamped on the
+                pipeline's continuous audio clock (`_audio_rtp_pts`).
                 """
                 try:
                     if len(frame) > 0:
                         data_bytes = memoryview(frame)
-                        raw_pts = int(frame.pts)
-                        if self._audio_cb_epoch != self._audio_capture_epoch:
-                            self._audio_cb_epoch = self._audio_capture_epoch
-                            self._audio_pts_offset = (
-                                self._audio_last_pts + self._audio_frame_samples - raw_pts
-                                if self._audio_last_pts >= 0 else 0
-                            )
-                        pts = self._audio_pts_offset + raw_pts
-                        self._audio_last_pts = pts
+                        pts = self._audio_rtp_pts(int(frame.pts), time.monotonic())
                         # A surround capture's stereo companion shares its frame's pts.
                         kind = ("audio_stereo" if self.audio_channels > 2
                                 and frame.channels < self.audio_channels else "audio")
@@ -916,6 +907,34 @@ class MediaPipelinePixel(MediaPipeline):
             logger.error(f"Failed to start pcmflux audio pipeline: {e}", exc_info=True)
             await self._stop_audio_pipeline()
             return
+
+    def _audio_rtp_pts(self, raw_pts: int, now: float) -> int:
+        """The pts, on the pipeline's continuous 48 kHz audio clock, of a
+        capture frame whose own pts is `raw_pts` and which was delivered at
+        monotonic time `now`.
+
+        pcmflux re-zeros its sample clock on every capture start, so the
+        first frame of a new `_audio_capture_epoch` re-anchors the offset: it
+        lands as far past the last frame as the wall clock moved between the
+        two deliveries, and at least one frame past it. A backward RTP jump on
+        a live sender plays as a glitch, and one that ignores the time the
+        capture was stopped (an audio pause and resume) makes the receiver
+        take the first packet after it for a packet that late: libwebrtc's
+        jitter buffer then holds that much audio, a second for a one-second
+        pause, for about twenty seconds.
+        """
+        if self._audio_cb_epoch != self._audio_capture_epoch:
+            self._audio_cb_epoch = self._audio_capture_epoch
+            if self._audio_last_pts >= 0:
+                elapsed = round((now - self._audio_last_wall) * 48000)
+                self._audio_pts_offset = (
+                    self._audio_last_pts + max(self._audio_frame_samples, elapsed) - raw_pts)
+            else:
+                self._audio_pts_offset = 0
+        pts = self._audio_pts_offset + raw_pts
+        self._audio_last_pts = pts
+        self._audio_last_wall = now
+        return pts
 
     def _get_audio_control(self) -> AudioControl:
         """The sound-server control client, created on the pipeline's loop."""
