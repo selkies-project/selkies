@@ -264,7 +264,7 @@ export default function StreamStats({ t, active, framerate }) {
               <span className="stream-meter-label">{meterLabels[meter.key]}</span>
               {meter.bar && (
                 <span className="stream-meter-track">
-                  <span className="stream-meter-fill" style={{ transform: `scaleX(${meter.percent / 100})` }} />
+                  <span className="stream-meter-fill" style={{ transform: `translateX(${meter.percent - 100}%)` }} />
                 </span>
               )}
               <span className="stream-meter-text">{meter.text}</span>

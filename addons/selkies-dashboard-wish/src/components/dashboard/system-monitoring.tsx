@@ -396,8 +396,8 @@ export function SystemMonitoring() {
 							<span className="text-[11px] uppercase tracking-wide text-muted-foreground">{meterLabels[meter.key]}</span>
 							{meter.bar && (
 								<span className="h-1.5 overflow-hidden rounded-full bg-muted">
-									<span className="block h-full w-full origin-left rounded-full bg-primary transition-transform duration-500"
-										style={{ transform: `scaleX(${meter.percent / 100})` }} />
+									<span className="block h-full w-full rounded-full bg-primary transition-transform duration-500"
+										style={{ transform: `translateX(${meter.percent - 100}%)` }} />
 								</span>
 							)}
 							<span className={meter.bar ? "text-right text-muted-foreground"
