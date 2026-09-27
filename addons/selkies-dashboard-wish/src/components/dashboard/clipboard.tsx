@@ -21,8 +21,40 @@ import { t } from "@/i18n";
  * (an image blob), and `settings` (the `enable_binary_clipboard` toggle, which
  * the core persists). A rejected non-image file is reported through the
  * `fileUpload` warning channel core-emitted clipboard skips use.
+ *
+ * The image picker belongs to the page, not to the panel: the panel lives in a
+ * menu that closes, unmounting everything in it, the moment the browser's file
+ * dialog takes focus, and a picker unmounted with it never reports the pick.
  * @module
  */
+
+/** The page's image picker, created on first use and kept for the page's life. */
+let imagePicker: HTMLInputElement | null = null;
+/** The image picked last, shown again when the panel mounts. */
+let lastPickedImage: File | null = null;
+
+/**
+ * Opens the browser's file dialog for an image and hands the pick to
+ * `onPicked`, whether or not the panel that asked is still mounted.
+ * @param onPicked Receives the chosen file.
+ */
+function pickClipboardImage(onPicked: (file: File) => void): void {
+	if (!imagePicker) {
+		imagePicker = document.createElement('input');
+		imagePicker.type = 'file';
+		imagePicker.accept = 'image/*';
+		imagePicker.style.display = 'none';
+		document.body.appendChild(imagePicker);
+	}
+	const picker = imagePicker;
+	picker.onchange = () => {
+		const file = picker.files?.[0];
+		// Cleared so re-picking the same file fires a change event.
+		picker.value = '';
+		if (file) onPicked(file);
+	};
+	picker.click();
+}
 
 /**
  * Renders the clipboard text area, the binary-clipboard switch, and the image
@@ -42,10 +74,9 @@ export function Clipboard() {
 		() => getLastClipboardContent()?.text ?? '');
 	const [clipboardTruncated, setClipboardTruncated] = useState(
 		() => getLastClipboardContent()?.truncated ?? false);
-	const [clipboardImage, setClipboardImage] = useState<File | null>(null);
+	const [clipboardImage, setClipboardImage] = useState<File | null>(() => lastPickedImage);
 	const previewRef = useRef<HTMLCanvasElement>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
-	const fileInputRef = useRef<HTMLInputElement>(null);
 	const storedBool = (key: string, fallback: boolean) => {
 		const saved = localStorage.getItem(getPrefixedKey(key));
 		return saved !== null ? saved === 'true' : fallback;
@@ -124,11 +155,8 @@ export function Clipboard() {
 		window.postMessage({ type: 'clipboardUpdateFromUI', text: event.target.value }, window.location.origin);
 	};
 
-	const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-		const file = event.target.files?.[0];
-		// Cleared so re-picking the same file fires a change event.
-		event.target.value = '';
-		if (!file) return;
+	/** Sends a picked image to the session clipboard, or reports a non-image. */
+	const handleImagePicked = (file: File) => {
 		if (!file.type.startsWith('image/')) {
 			window.postMessage({
 				type: 'fileUpload',
@@ -143,6 +171,7 @@ export function Clipboard() {
 			}, window.location.origin);
 			return;
 		}
+		lastPickedImage = file;
 		setClipboardImage(file);
 		window.postMessage({
 			type: 'clipboardImageUpdate',
@@ -174,14 +203,12 @@ export function Clipboard() {
 	}, [clipboardImage]);
 
 	const handleImageButtonClick = () => {
-		fileInputRef.current?.click();
+		pickClipboardImage(handleImagePicked);
 	};
 
 	const handleClearImage = () => {
+		lastPickedImage = null;
 		setClipboardImage(null);
-		if (fileInputRef.current) {
-			fileInputRef.current.value = '';
-		}
 	};
 
 	return (
@@ -261,14 +288,6 @@ export function Clipboard() {
 						</Button>
 					)}
 				</div>
-
-				<input
-					ref={fileInputRef}
-					type="file"
-					accept="image/*"
-					onChange={handleImageUpload}
-					className="hidden"
-				/>
 
 				{clipboardImage && (
 					<div className="mt-2">

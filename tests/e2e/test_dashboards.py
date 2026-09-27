@@ -371,13 +371,52 @@ CLIPBOARD_PNG = bytes.fromhex(
     "0000001049444154789c63f8cfc000440c100a001fee03fd8b5f14d40000000049454e44ae426082")
 
 
+def open_clipboard_panel(page, dashboard: str) -> bool:
+    """Open the dashboard's clipboard panel; False when it did not open."""
+    if dashboard == "classic":
+        if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
+            page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+            time.sleep(0.8)
+        if page.locator('#dashboardClipboardTextarea').count() == 0:
+            page.locator('.sidebar-section-header:has-text("Clipboard")').first.click()
+            time.sleep(0.6)
+        return page.locator('#dashboardClipboardTextarea').count() > 0
+    return wish_open_menu_item(page, "Clipboard")
+
+
+def pick_clipboard_image(page, dashboard: str, file: dict) -> bool:
+    """Choose `file` through the panel's Upload Image button, as a user does.
+
+    The browser's file dialog takes the window's focus while it is open, which
+    closes any menu around the button (the Wish panel is a submenu). Playwright
+    answers the dialog without showing it, so the blur the dialog would cause
+    is dispatched between the click and the answer.
+
+    Returns:
+        False when the panel or its button is not there.
+    """
+    if not open_clipboard_panel(page, dashboard):
+        return False
+    button = page.locator('button:has-text("Upload Image")').first
+    if button.count() == 0:
+        return False
+    with page.expect_file_chooser(timeout=5000) as chooser:
+        button.click()
+    page.evaluate("window.dispatchEvent(new Event('blur'))")
+    time.sleep(0.4)
+    chooser.value.set_files(file)
+    time.sleep(0.8)
+    return True
+
+
 def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
-    """A picked image reaches the core as a blob, and anything else is refused.
+    """An image picked through Upload Image reaches the core as a blob, and
+    anything else is refused.
 
     The upload button is the only way binary clipboard content leaves the
-    client, and Wish previews what was picked: a preview showing anything but
-    the `blob:` URL the dashboard minted would be rendering a URL from
-    somewhere else entirely.
+    client unasked, and Wish previews what was picked: a preview showing
+    anything but the pixels of the picked file would be rendering something
+    from somewhere else entirely.
     """
     page.evaluate("""() => {
       window.__clipImages = [];
@@ -394,25 +433,19 @@ def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
       });
     }""")
     was_open = page.evaluate("!!document.querySelector('.sidebar.is-open')")
-    if dashboard == "classic":
-        if not was_open:
-            page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
-            time.sleep(0.8)
-        page.locator('.sidebar-section-header:has-text("Clipboard")').first.click()
-        time.sleep(0.6)
-    elif not wish_open_menu_item(page, "Clipboard"):
-        res.skip(f"{dashboard}: the clipboard image path", "no clipboard panel opened")
+    if not pick_clipboard_image(page, dashboard, {"name": "clip.png", "mimeType": "image/png",
+                                                  "buffer": CLIPBOARD_PNG}):
+        res.skip(f"{dashboard}: the clipboard image path", "no Upload Image button in the panel")
         return
-
-    picker = page.locator('input[type="file"][accept="image/*"]').first
-    if picker.count() == 0:
-        res.skip(f"{dashboard}: the clipboard image path", "no image picker in the panel")
-        return
-    picker.set_input_files({"name": "clip.png", "mimeType": "image/png", "buffer": CLIPBOARD_PNG})
-    time.sleep(0.8)
     res.check(f"{dashboard}: a picked image reaches the core whole",
               page.evaluate("window.__clipImages") == [len(CLIPBOARD_PNG)],
               page.evaluate("window.__clipImages"))
+    if dashboard == "wish":
+        # The dialog closed the menu; the panel shows the pick again when reopened.
+        page.keyboard.press("Escape")
+        time.sleep(0.3)
+        open_clipboard_panel(page, dashboard)
+        time.sleep(0.4)
     # Nothing points at a URL for the picked file: the preview draws its pixels.
     urls = page.locator('img[src^="blob:"], img[src^="data:"]').count()
     drawn = page.evaluate("""() => {
@@ -428,9 +461,13 @@ def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
     else:
         res.check("classic: the panel shows no preview to point anywhere",
                   urls == 0 and drawn is None, drawn)
+    if dashboard == "wish":
+        for _ in range(2):
+            page.keyboard.press("Escape")
+            time.sleep(0.2)
 
-    picker.set_input_files({"name": "clip.txt", "mimeType": "text/plain", "buffer": b"not an image"})
-    time.sleep(0.8)
+    pick_clipboard_image(page, dashboard, {"name": "clip.txt", "mimeType": "text/plain",
+                                           "buffer": b"not an image"})
     res.check(f"{dashboard}: anything but an image is refused, not sent",
               page.evaluate("window.__clipImages") == [len(CLIPBOARD_PNG)]
               and page.evaluate("window.__clipRefusals.length") == 1,

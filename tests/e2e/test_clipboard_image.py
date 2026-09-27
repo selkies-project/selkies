@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """The image clipboard, both directions, against a live session.
 
-The dashboard's upload button is the only way an image the user did not copy
-reaches the session clipboard, and choosing a file blurs the page and refocuses
-it -- which fires the focus-driven local sync. Whether the image survives that
-is the whole feature, so the checks read the session's own clipboard rather
-than the message that carried the image to the core.
+The dashboards' Upload Image button is the only way an image the user did not
+copy reaches the session clipboard. Choosing the file takes the window's focus
+while the dialog is open -- which closes the Wish panel's menu -- and gives it
+back as the dialog closes, which fires the focus-driven local sync. Whether the
+image survives that is the whole feature, so the checks read the session's own
+clipboard rather than the message that carried the image to the core, in both
+dashboards.
 
 Usage: python3 tests/e2e/test_clipboard_image.py [websockets|webrtc|wayland]
 """
@@ -18,11 +20,13 @@ import time
 import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers as H  # noqa: E402
 import core_lib as C  # noqa: E402
+import test_dashboards as TD  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-DASH = os.path.join(H.REPO, "addons/selkies-dashboard/dist")
+DASHES = {"classic": H.CLASSIC_DIST, "wish": H.WISH_DIST}
 WL_SOCKET = "wayland-1"
 
 
@@ -162,25 +166,33 @@ def own_session_image(data: bytes, wayland: bool) -> dict:
     return {"stop": stop}
 
 
-def open_clipboard_panel(page) -> bool:
-    """Open the classic dashboard's clipboard section; False when it is absent."""
-    if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
-        page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
-        time.sleep(0.8)
-    header = page.locator('.sidebar-section-header:has-text("Clipboard")')
-    if header.count() == 0:
-        return False
-    header.first.click()
-    time.sleep(0.6)
-    return page.locator('input[type="file"][accept="image/*"]').count() > 0
+def upload(page, dashboard: str, name: str, mime: str, data: bytes, wayland: bool) -> tuple:
+    """Upload `data` through the dashboard's button and read the session clipboard back.
+
+    The dialog's own refocus as it closes fires the focus read, which is what
+    the upload has to survive.
+    """
+    if not TD.pick_clipboard_image(page, dashboard, {"name": name, "mimeType": mime, "buffer": data}):
+        return None
+    page.evaluate("window.dispatchEvent(new Event('focus'))")
+    time.sleep(5.0)
+    return session_image(wayland)
 
 
-def block(mode: str, wayland: bool) -> "H.Results":
-    """One transport and backend: upload out, session copy in."""
-    tag = f"clipimage-{'wl' if wayland else mode}"
+def block(mode: str, wayland: bool, dashboard: str) -> "H.Results":
+    """One transport, backend, and dashboard: upload out, session copies in."""
+    tag = f"clipimage-{'wl' if wayland else mode}-{dashboard}"
     res = H.Results(tag)
+    checks(res, tag, mode, wayland, dashboard)
+    res.summary()
+    return res
+
+
+def checks(res: "H.Results", tag: str, mode: str, wayland: bool, dashboard: str) -> None:
+    """The checks of one block, each recorded in `res`."""
     uploaded = png(23)
-    H.server_start(mode=mode, wayland=wayland, web_root=DASH, extra_env={"SELKIES_DEBUG": "true"})
+    H.server_start(mode=mode, wayland=wayland, web_root=DASHES[dashboard],
+                   extra_env={"SELKIES_DEBUG": "true"})
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
         ctx = browser.new_context(viewport={"width": 1440, "height": 900},
@@ -192,29 +204,26 @@ def block(mode: str, wayland: bool) -> "H.Results":
             pass
         page = ctx.new_page()
         page.goto(H.BASE_URL, wait_until="load")
-        owner = None
+        owners = []
         try:
             time.sleep(12.0)
             # Something the user copied locally and has not synced: the value
             # the focus read would put back over the upload.
             page.evaluate("navigator.clipboard.writeText('local text, not the image')")
             time.sleep(1.0)
-            if not open_clipboard_panel(page):
-                res.skip(f"{tag}: the upload path", "no clipboard image picker in the panel")
-                return res
-
-            picker = page.locator('input[type="file"][accept="image/*"]').first
-            picker.set_input_files({"name": "clip.png", "mimeType": "image/png",
-                                    "buffer": uploaded})
-            # What the file picker itself does to the page as it closes.
-            page.evaluate("window.dispatchEvent(new Event('focus'))")
-            time.sleep(5.0)
-            targets, mime, got = session_image(wayland)
+            got = upload(page, dashboard, "clip.png", "image/png", uploaded, wayland)
+            if got is None:
+                res.skip(f"{tag}: the upload path", "no Upload Image button in the panel")
+                return
+            targets, mime, data = got
             res.check("an uploaded image reaches the session clipboard",
-                      got == uploaded, f"{mime} {len(got) if got else 0} bytes, offered {targets}")
+                      data == uploaded, f"{mime} {len(data) if data else 0} bytes, offered {targets}")
+
+            if dashboard != "classic":
+                return
 
             copied = png(91)
-            owner = own_session_image(copied, wayland)
+            owners.append(own_session_image(copied, wayland))
             # Two gestures: the write is refused without a user activation, and
             # the payload has to have arrived before the one that lands it.
             for _ in range(2):
@@ -245,27 +254,24 @@ def block(mode: str, wayland: bool) -> "H.Results":
             # one has nothing else to wait for. Counted in the log, since the
             # client suppresses a local write of content it already holds.
             sends = H.server_log().count("Clipboard changed. Sending content")
-            owner["stop"]()
+            owners.pop()["stop"]()
             time.sleep(1.0)
-            owner = own_session_image(copied, wayland)
+            owners.append(own_session_image(copied, wayland))
             time.sleep(4.0)
             again = H.server_log().count("Clipboard changed. Sending content")
             res.check("the same image copied again is sent again",
                       again > sends, f"{sends} sends, then {again}")
+
         finally:
-            if owner:
+            for owner in owners:
                 owner["stop"]()
             browser.close()
-    res.summary()
-    return res
 
 
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "websockets"
-    if which == "wayland":
-        results = [block("websockets", True)]
-    else:
-        results = [block(which, False)]
+    mode, wayland = ("websockets", True) if which == "wayland" else (which, False)
+    results = [block(mode, wayland, dashboard) for dashboard in DASHES]
     H.server_stop()
     failed = sum(len(r.failed()) for r in results)
     print(f"\n=== CLIPBOARD IMAGE: {'FAIL' if failed else 'PASS'} ===")
