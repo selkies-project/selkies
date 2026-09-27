@@ -7,15 +7,16 @@ queue drains, then stepped back up while the round trip stays at its floor. A
 queue still building is read before it stands a whole window, and a gated
 display is measured by the frames still acked from before the gate shut. A
 round trip at its floor never moves the rate, one key frame's burst does not
-either, a window with nothing acked moves nothing, and whatever else applies a
-bitrate applies the steered one.
+either, a window with nothing acked moves nothing, a page taking the display
+over is measured against its own path, and whatever else applies a bitrate
+applies the steered one.
 """
 import os
 import sys
 from collections import deque
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
-from selkies.websockets_mode import DataStreamingServer, _note_round_trip  # noqa: E402
+from selkies.websockets_mode import DataStreamingServer, _forget_path, _note_round_trip  # noqa: E402
 
 passed = failed = 0
 
@@ -129,6 +130,19 @@ t = run(120.0, t, 0.5, delivered_kbps=3000.0)
 n = len(module.rates)
 run(20.0, t, 10, acks=False)
 check("windows with nothing acked move nothing", len(module.rates) == n, module.rates)
+
+state = fresh_state()
+module.rates.clear()
+t = run(2.0, 0.0, 5)
+_forget_path(state)
+run(60.0, t, 5)
+check("a page taking the display over measures its own path: its longer round trip is not a queue",
+      module.rates == [], module.rates)
+state = fresh_state()
+module.rates.clear()
+t = run(2.0, 0.0, 5)
+run(60.0, t, 1)
+check("where the old path's floor stayed, that round trip read as one", module.rates != [], module.rates)
 
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

@@ -386,6 +386,19 @@ def _note_round_trip(display_state: dict, rtt_ms: float, sent_bytes: int, now: f
     display_state.setdefault('link_acks', deque(maxlen=LINK_ACK_HISTORY)).append((now, rtt_ms, sent_bytes))
 
 
+def _forget_path(display_state: dict) -> None:
+    """Drop what a display's link state learned about the path of the page it
+    served, for a new connection taking the display over.
+
+    The floor is the least round trip that path showed: a page on a longer
+    one would read its own propagation delay as a standing queue for the ten
+    minutes the floor remembers, and congestion control would back its rate
+    off on every tick. The steered rate stays as the starting point.
+    """
+    for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer'):
+        display_state.pop(key, None)
+
+
 async def _await_bulk_window(ws: Any, deadline: float) -> None:
     """Hold a bulk sender until this socket's queue is short again.
 
@@ -4022,6 +4035,7 @@ class DataStreamingServer(BaseStreamingService):
                                 # must not resurrect a stream stopped with STOP_VIDEO.
                                 if not initial_settings_processed:
                                     display_state['video_active'] = self._video_start_state(websocket, display_id)
+                                    _forget_path(display_state)
                                 display_state['acknowledged_frame_id'] = -1
                                 display_state['acked_sent_at'] = None
                                 display_state['unacked_since'] = None
