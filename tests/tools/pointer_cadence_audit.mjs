@@ -217,6 +217,57 @@ const move = (type, x, extra = {}) => ({
     check('in the order they were drawn', xs.every((x, i) => i === 0 || x > xs[i - 1]), xs.join(','));
 }
 
+// --- a pen stroke where no pointerrawupdate carries it ----------------------
+// Safari has no pointerrawupdate: an Apple Pencil reports at 240 Hz and the
+// page gets one pointermove per 60 Hz frame, with the three positions before
+// its own coalesced into it. Half a second of handwriting, loops of 15 px at
+// 1 px/ms: how many of the pen's positions reach the wire, and how far the
+// polyline they draw strays from the one the pen drew.
+function penStroke(input, sent) {
+    const t0 = now;
+    const pen = (i) => {
+        const a = (i * 4.1667) / 15;
+        const x = 640 + i * 0.4 + 15 * Math.cos(a);
+        const y = 360 + 15 * Math.sin(a);
+        return move('pointermove', x, { clientY: y, screenY: y, pointerType: 'pen', buttons: 1,
+                                        timeStamp: t0 + i * 4.1667 });
+    };
+    input.buttonMask = 1;
+    const truth = [];
+    for (let frame = 0; frame < 30; frame++) {
+        const samples = [0, 1, 2, 3].map((k) => pen(frame * 4 + k));
+        truth.push(...samples);
+        advance(16.6667);
+        const ev = samples[3];
+        ev.getCoalescedEvents = () => samples;
+        input._handlePointerMove(ev);
+    }
+    advance(50);
+    const pts = motion(sent).map(([, m]) => m.split(',').slice(1, 3).map(Number));
+    const seg = (p, a, b) => {
+        const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+        const len = dx * dx + dy * dy;
+        const t = len ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len)) : 0;
+        return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
+    };
+    let err = 0;
+    for (const s of truth.slice(4)) {
+        const p = [s.clientX, s.clientY];
+        let best = Infinity;
+        for (let i = 1; i < pts.length; i++) best = Math.min(best, seg(p, pts[i - 1], pts[i]));
+        err = Math.max(err, best);
+    }
+    return { perSecond: Math.round(pts.length / 0.5), err };
+}
+{
+    const { input, sent } = makeInput();
+    advance(100);
+    const got = penStroke(input, sent);
+    check('a pen stroke without pointerrawupdate sends every position the pen reported',
+          got.perSecond >= 230, `${got.perSecond} positions/s of 240`);
+    check('and draws the line the pen drew, within a pixel', got.err < 1, `strays ${got.err.toFixed(2)} px`);
+}
+
 // --- a trackpad scroll's notch goes out with the event that completes it --
 {
     const { input, sent } = makeInput();

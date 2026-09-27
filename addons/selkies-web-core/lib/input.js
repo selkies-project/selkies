@@ -2874,11 +2874,8 @@ export class Input {
      * each sample arrives rather than at the next frame the way `mousemove`
      * and `pointermove` are; the engines that fire it (Chromium, Gecko) do so
      * only in a secure context, and elsewhere those events carry the motion
-     * as before. Its movement already sums what it coalesced. While a button
-     * is held, the positions an event coalesced (a busy page thread, a
-     * digitizer faster than the page) go out as well, one per
-     * `MOTION_SEND_INTERVAL_MS` of their own time, so a stroke keeps its shape
-     * through a stall; hovering, only the newest position matters.
+     * as before. Its movement already sums what it coalesced, and a held
+     * button's coalesced positions go out as well (`_sendCoalescedContact`).
      * @param {PointerEvent} event
      */
     _handleRawPointerUpdate(event) {
@@ -2888,18 +2885,31 @@ export class Input {
         }
         if (event.pointerType !== 'mouse' && event.pointerType !== 'pen') return;
         this._rawMotionSeen = true;
-        if (event.buttons !== 0 && typeof event.getCoalescedEvents === 'function' &&
-            !this._isStreamLocked()) {
-            const samples = event.getCoalescedEvents();
-            let last = -Infinity;
-            for (let i = 0; i + 1 < samples.length; i++) {
-                if (samples[i].timeStamp - last < MOTION_SEND_INTERVAL_MS) continue;
-                last = samples[i].timeStamp;
-                this._mouseButtonMovement(samples[i]);
-                this._flushCoalescedMouseMove();
-            }
-        }
+        this._sendCoalescedContact(event);
         this._mouseButtonMovement(event);
+    }
+
+    /**
+     * While a button or a pen's tip is down, sends the positions an event
+     * coalesced ahead of its own (a busy page thread, a digitizer faster than
+     * the page), one per `MOTION_SEND_INTERVAL_MS` of their own time, so a
+     * stroke keeps its shape; hovering, only the newest position matters, and
+     * under pointer lock the event's movement already sums them.
+     * @param {PointerEvent} event
+     */
+    _sendCoalescedContact(event) {
+        if (event.buttons === 0 || typeof event.getCoalescedEvents !== 'function' ||
+            this._isStreamLocked()) {
+            return;
+        }
+        const samples = event.getCoalescedEvents();
+        let last = -Infinity;
+        for (let i = 0; i + 1 < samples.length; i++) {
+            if (samples[i].timeStamp - last < MOTION_SEND_INTERVAL_MS) continue;
+            last = samples[i].timeStamp;
+            this._mouseButtonMovement(samples[i]);
+            this._flushCoalescedMouseMove();
+        }
     }
 
     /**
@@ -2924,11 +2934,17 @@ export class Input {
         this._mouseButtonMovement(event);
     }
 
-    /** Pen pointer motion, see `_handlePointerDown`. */
+    /**
+     * Pen pointer motion, see `_handlePointerDown`. Where no
+     * `pointerrawupdate` carried it (Safari, whose Apple Pencil reports four
+     * times as often as the frames this event is held for), the tip's
+     * coalesced positions go out from here.
+     */
     _handlePointerMove(event) {
         if (event.pointerType !== 'pen') {
            return;
         }
+        if (!this._rawMotionSeen) this._sendCoalescedContact(event);
         this._mouseButtonMovement(event);
     }
  
