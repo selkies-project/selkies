@@ -91,6 +91,7 @@ def provoke(page: Any) -> dict:
     page.evaluate("navigator.clipboard.writeText('pasted text').catch(() => {})")
     time.sleep(0.5)
     page.evaluate("document.getElementById('overlayInput').focus()")
+    page.evaluate("window.__pasteMark = (window.__wireSent || []).length")
     page.keyboard.press("Control+v")
     time.sleep(1.5)
     counts["paste"] = len(reads(page)) - sum(counts.values())
@@ -132,6 +133,17 @@ def drive(res: "H.Results", mode: str, engine: str, clipboard_in: bool) -> None:
                 policy = page.evaluate("[window.clipboard_enabled, document.activeElement && document.activeElement.id]")
                 res.check(f"{tag} a paste event still reaches the session", sent > 0,
                           f"sent={sent} policy/active={policy}")
+                # The paste event comes after its chord's keydown, so the session
+                # would paste before the content arrived; and the text the event
+                # inserts into the stream's input must not be typed as well.
+                tail = page.evaluate("(window.__wireSent || []).slice(window.__pasteMark || 0)")
+                write_at = next((i for i, d in enumerate(tail) if d.startswith("cw")), None)
+                v_at = next((i for i, d in enumerate(tail) if d == "kd,118"), None)
+                typed = [d for d in tail if d.startswith("kd,") and d[3:].isdigit()
+                         and 32 < int(d[3:]) < 127 and d != "kd,118"]
+                res.check(f"{tag} one Ctrl+V sends what it pastes ahead of its V and types none of it",
+                          write_at is not None and v_at is not None and write_at < v_at and not typed,
+                          f"write at {write_at}, V at {v_at}, typed {typed[:8]}")
         finally:
             C.close_browser(closer)
 

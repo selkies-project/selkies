@@ -1224,7 +1224,8 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
  *   still being read or sent would depart the ordered channel before the
  *   clipboard content and paste the previous value on the server. The chord's
  *   key events are swallowed, held until the send flushes (bounded), then
- *   replayed in order for the input stack.
+ *   replayed in order for the input stack; outside Chromium every chord is
+ *   held for the send its own paste event starts.
  * - Non-Chromium Ctrl/Cmd+C: Safari and Firefox reject `navigator.clipboard`
  *   from focus and message handlers, which have no transient activation, so
  *   the server clipboard is written inside the copy gesture through a
@@ -1238,8 +1239,11 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
  *   session's, so the paste sends nothing and the chord pastes the session's.
  *
  * Gestures in page form fields (the settings UI) are left alone; the stream's
- * overlay input is exempt. Consumed gestures are never `preventDefault`ed:
- * the chord must still reach the remote session.
+ * overlay input is exempt. Consumed gestures are never `preventDefault`ed
+ * outside the Chromium hold: the chord must still reach the remote session,
+ * and outside Chromium its default action is the paste event itself. That
+ * paste event is canceled once the stream takes it, so its text is not also
+ * inserted into the stream's input.
  * @param {object} hooks
  * @param {boolean} hooks.isChromium Engine flag.
  * @param {ClipboardSync} hooks.clipboardSync The server-clipboard state.
@@ -1278,6 +1282,13 @@ export function createClipboardGestures({
 
     const heldPasteEvents = [];
     let heldPasteReplayPending = false;
+    /** The send the last paste event started, which its chord's V waits on. */
+    let pasteSendInFlight = null;
+    /** When the last paste event arrived. */
+    let pasteSeenAt = -Infinity;
+    // How long a held chord waits for the paste event its keydown triggers,
+    // which engines dispatch right after the keydown, in the same task.
+    const PASTE_EVENT_WAIT_MS = 100;
     // Outlasts Chromium's first-use clipboard-read prompt, which keeps the read
     // pending well past 2s, yet bounds how long an abandoned prompt can hold V.
     const PASTE_HOLD_MAX_MS = 10000;
@@ -1318,6 +1329,13 @@ export function createClipboardGestures({
      * flushed by this very keydown); replay happens only once nothing is
      * pending, and on failure or an expired bound the paste is dropped rather
      * than injected with stale content.
+     *
+     * Outside Chromium the local clipboard reaches the page only through the
+     * chord's own paste event, which the engine dispatches once this keydown
+     * has been, so every chord is held for it: its V would otherwise reach the
+     * session ahead of what it pastes, and the first paste of every copy would
+     * paste the one before. There the keydown keeps its default action, since
+     * that action is the paste.
      * @param {KeyboardEvent} ev
      */
     function holdPasteWhileClipboardInFlight(ev) {
@@ -1326,19 +1344,27 @@ export function createClipboardGestures({
         if (ev.code !== 'KeyV' && !modHold) return;
         const chord = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
         const writeInFlight = getDeferredWriteLanding ? getDeferredWriteLanding() : null;
+        const awaitsPasteEvent = !isChromium && chord && ev.type === 'keydown' && !ev.isComposing
+            && canSync() && canRead() && !inPageFormField();
         const hold = modHold || (ev.code === 'KeyV' &&
-            ((chord && (getSendInFlight() || writeInFlight)) || heldPasteReplayPending));
+            ((chord && (getSendInFlight() || writeInFlight || awaitsPasteEvent)) || heldPasteReplayPending));
         if (!hold) return;
-        ev.preventDefault();
+        if (isChromium) ev.preventDefault();
         ev.stopImmediatePropagation();
         heldPasteEvents.push(ev);
         if (!heldPasteReplayPending) {
             heldPasteReplayPending = true;
             const holdStart = performance.now();
             const awaitClipboardQuiet = () => {
+                if (awaitsPasteEvent && pasteSeenAt < holdStart
+                    && performance.now() - holdStart < PASTE_EVENT_WAIT_MS) {
+                    setTimeout(awaitClipboardQuiet, 10);
+                    return;
+                }
                 const inflight = [];
                 const send = getSendInFlight();
                 if (send) inflight.push(send);
+                if (pasteSendInFlight) inflight.push(pasteSendInFlight);
                 const dw = getDeferredWriteLanding ? getDeferredWriteLanding() : null;
                 if (dw) inflight.push(dw);
                 if (inflight.length === 0) { replayHeldPasteEvents(); return; }
@@ -1352,7 +1378,9 @@ export function createClipboardGestures({
                     else dropHeldPasteKeydowns();
                 });
             };
-            awaitClipboardQuiet();
+            // A task later: the paste event this keydown triggers has run by then.
+            if (awaitsPasteEvent) setTimeout(awaitClipboardQuiet, 0);
+            else awaitClipboardQuiet();
         }
     }
 
@@ -1397,31 +1425,42 @@ export function createClipboardGestures({
     /**
      * Non-Chromium paste-to-server from the event's synchronous clipboard
      * data, preferring an image when binary clipboard is on and the payload
-     * carries one.
+     * carries one. Only content the page has not seen on the local clipboard
+     * is sent: what it has seen there is older than whatever the session took
+     * since, an upload or a copy made in the session.
      * @param {ClipboardEvent} event
      */
     function onPaste(event) {
+        pasteSeenAt = performance.now();
         if (!canSync() || !canRead()) return;
         if (inPageFormField()) return;
+        // The input stack never saw the held V, so it would take the text this
+        // paste inserts into the stream's input for typing, not for the chord's
+        // echo, and type it under the chord's modifier.
+        event.preventDefault();
         if (hasPendingServerWrite && hasPendingServerWrite()) return;
         const cd = event.clipboardData;
         if (!cd) return;
+        let content = null;
         if (binaryEnabled() && cd.items) {
-            for (let i = 0; i < cd.items.length; i++) {
+            for (let i = 0; i < cd.items.length && !content; i++) {
                 const it = cd.items[i];
-                if (it.kind === 'file' && it.type && it.type.startsWith('image/')) {
-                    const file = it.getAsFile();
-                    if (file) {
-                        file.arrayBuffer()
-                            .then((buf) => sendClipboardData(buf, it.type))
-                            .catch((err) => console.warn(`Paste image read failed: ${err && err.name}`));
-                        return;
-                    }
-                }
+                const file = it.kind === 'file' && it.type && it.type.startsWith('image/') ? it.getAsFile() : null;
+                // Read now: the item is only valid while the event is dispatched.
+                if (file) content = file.arrayBuffer().then((buf) => [buf, file.type || it.type]);
             }
         }
-        const text = cd.getData('text/plain');
-        if (text) sendClipboardData(text);
+        if (!content) {
+            const text = cd.getData('text/plain');
+            if (!text) return;
+            content = Promise.resolve([text, 'text/plain']);
+        }
+        const sending = content.then(async ([data, mime]) => {
+            if (!clipboardSync.noteLocal(await clipboardSync.localSig(data, mime))) return;
+            await sendClipboardData(data, mime);
+        }).catch((err) => console.warn(`Paste could not reach the session: ${err && err.name}`));
+        pasteSendInFlight = sending;
+        sending.finally(() => { if (pasteSendInFlight === sending) pasteSendInFlight = null; });
     }
 
     /** Registers the listeners; called before input attaches so the hold runs first. */
