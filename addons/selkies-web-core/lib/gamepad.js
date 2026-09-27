@@ -95,6 +95,8 @@ export class GamepadManager {
         }, GP_TIMEOUT);
         this._onTouchInput = () => this._poll();
         window.addEventListener('touchgamepadinput', this._onTouchInput);
+        /** Pads play the rumble relayed to them (the dashboards' toggle). */
+        this.rumbleEnabled = true;
         this._rumbling = false;
     }
 
@@ -363,14 +365,14 @@ export class GamepadManager {
      * Plays a rumble on every connected pad that can: both motors for
      * `durationMs`, at most the Gamepad API's 5 s, a new call replacing the
      * one before; 0 on both motors stops it. Gecko's pulse has one motor,
-     * which takes the stronger level. Nothing plays while polling is paused,
-     * and a stop with nothing playing is not sent.
+     * which takes the stronger level. Nothing plays while rumble is off or
+     * polling is paused, and a stop with nothing playing is not sent.
      * @param {number} strong Strong (low-frequency) motor, 0 to 1.
      * @param {number} weak Weak (high-frequency) motor, 0 to 1.
      * @param {number} durationMs
      */
     rumble(strong, weak, durationMs) {
-        const off = !(strong > 0 || weak > 0) || !this._active;
+        const off = !(strong > 0 || weak > 0) || !this.rumbleEnabled || !this._active;
         if (off && !this._rumbling) return;
         this._rumbling = !off;
         durationMs = Math.min(RUMBLE_MAX_MS, Math.max(0, durationMs || 0));
@@ -404,6 +406,15 @@ export class GamepadManager {
     /** Stops a rumble playing on the pads, if one is. */
     stopRumble() {
         this.rumble(0, 0, 0);
+    }
+
+    /**
+     * Turns rumble on or off; off stops one playing.
+     * @param {boolean} on
+     */
+    setRumbleEnabled(on) {
+        this.rumbleEnabled = !!on;
+        if (!this.rumbleEnabled) this.stopRumble();
     }
 
     /** Stops polling and any rumble, and forgets every pad. */

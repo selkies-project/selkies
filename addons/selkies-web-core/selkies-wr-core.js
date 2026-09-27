@@ -64,7 +64,7 @@
  * `gamepadControl`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `audioDeviceSelected`, `requestFullscreen`, `setSynth`,
  * `showVirtualKeyboard`, `setAntiAliasing`, `setUseBrowserCursors`, `setRawPointerMotion`,
- * `touchinput:trackpad`, `touchinput:touch`, `statsOpen`, plus the `requestFileUpload` DOM
+ * `setGamepadRumble`, `touchinput:trackpad`, `touchinput:touch`, `statsOpen`, plus the `requestFileUpload` DOM
  * event. Window messages posted: `sidebarButtonStatusUpdate`,
  * `pipelineStatusUpdate`, `effectiveCursorState`, `scalingDpiFollowed`,
  * `serverSettings`, `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
@@ -675,6 +675,15 @@ export default function webrtc() {
 	function applyRawPointerMotion() {
 		if (input && typeof input.setRawPointerMotion === 'function') {
 			input.setRawPointerMotion(rawPointerMotion);
+		}
+	}
+
+	/** Whether pads play a game's rumble: the dashboards' toggle, persisted here. */
+	let gamepadRumble = true;
+	/** Applies the rumble toggle to the input handler. */
+	function applyGamepadRumble() {
+		if (input && typeof input.setGamepadRumble === 'function') {
+			input.setGamepadRumble(gamepadRumble);
 		}
 	}
 
@@ -1983,6 +1992,15 @@ export default function webrtc() {
 					console.warn("Invalid value received for setRawPointerMotion:", message.value);
 				}
 				break;
+			case 'setGamepadRumble':
+				if (typeof message.value === 'boolean') {
+					gamepadRumble = message.value;
+					setBoolParam('gamepad_rumble', message.value);
+					applyGamepadRumble();
+				} else {
+					console.warn("Invalid value received for setGamepadRumble:", message.value);
+				}
+				break;
 			case 'setMacCmdAsCtrl':
 				if (typeof message.value === 'boolean') {
 					macCmdAsCtrl = message.value;
@@ -2847,6 +2865,7 @@ export default function webrtc() {
 			trackpadMode = getBoolParam('trackpadMode', false);
 			useBrowserCursors = getBoolParam('use_browser_cursors', true);
 			rawPointerMotion = getBoolParam('raw_pointer_motion', Input.rawPointerMotion);
+			gamepadRumble = getBoolParam('gamepad_rumble', true);
 			force_aligned_resolution = getBoolParam('force_aligned_resolution', false);
 
 			if (!isSharedMode) {
@@ -2968,6 +2987,7 @@ export default function webrtc() {
 			applyEffectiveCursorSetting();
 			applyRawPointerMotion();
 			applyMacCmdAsCtrl();
+			applyGamepadRumble();
 			window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
 			window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);
 

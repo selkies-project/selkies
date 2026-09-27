@@ -15,6 +15,8 @@ the transport named on argv:
   is handed it at once rather than at the next renewal, and hears its stop.
 - touch: the on-screen touch gamepad's pad vibrates the device through
   `navigator.vibrate`, stubbed, since a desktop engine has no motor.
+- dashboards: each dashboard's Rumble toggle turns playing off in the core,
+  stopping what plays, and the core keeps the pick over a reload.
 
     python3 tests/e2e/test_gamepad_rumble.py [websockets|webrtc]
 """
@@ -32,6 +34,9 @@ from playwright.sync_api import sync_playwright
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "integration"))
 from test_gamepad_rumble import build_interposer  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_dashboards import wish_open_menu_item  # noqa: E402
 
 # A standard pad whose motors record what they are asked to play, in the
 # shape the engine gives its pads: `vibrationActuator` for Chromium and WebKit,
@@ -339,6 +344,87 @@ def touch(pw, mode: str, preload: str, res: "H.Results", dashboard: str, engines
             C.close_browser(browser)
 
 
+def click_rumble_toggle(page, dashboard: str) -> bool:
+    if dashboard == "classic":
+        try:
+            page.locator('.toggle-handle').first.click()
+            time.sleep(0.8)
+        except Exception:
+            pass
+        toggle = page.locator('#gamepadRumbleToggle')
+        if not toggle.count():
+            header = page.locator('.sidebar-section-header:has-text("Gamepads")').first
+            if not header.count():
+                return False
+            header.scroll_into_view_if_needed()
+            header.click()
+            time.sleep(0.8)
+        if not toggle.count():
+            return False
+        toggle.first.scroll_into_view_if_needed()
+        toggle.first.click()
+        time.sleep(0.5)
+        return True
+    ok = wish_open_menu_item(page, "Rumble")
+    page.keyboard.press("Escape")
+    return ok
+
+
+def dashboards(pw, mode: str, preload: str, res: "H.Results") -> None:
+    stored = """(() => {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k.endsWith('_gamepad_rumble')) return localStorage.getItem(k);
+      }
+      return null;
+    })()"""
+    state = "() => window.webrtcInput ? window.webrtcInput.gamepadRumble : null"
+    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+        tag = f"{dashboard} {mode}"
+        H.server_stop()
+        H.server_start(mode=mode, web_root=dist)
+        browser, _, page = open_page(pw, "chromium", mode, init=PAD_INIT % ("false", "false"))
+        try:
+            wait_video(page, mode)
+            time.sleep(1.0)
+            press(page)
+            res.check(f"{tag}: rumble starts on", page.evaluate(state) is True, page.evaluate(state))
+            app = subprocess.Popen([sys.executable, "-c", ENDLESS_APP], env=app_env(preload), text=True,
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                app.stdout.readline()
+                time.sleep(0.4)
+                clicked = click_rumble_toggle(page, dashboard)
+                res.check(f"{tag}: the dashboard offers a Rumble toggle", clicked, clicked)
+                time.sleep(0.6)
+                calls = page.evaluate("window.__rumble")
+                plays, stops = plays_and_stops(calls)
+                res.check(f"{tag}: turning it off stops what plays",
+                          plays and stops and stops[-1][0] > plays[-1][0] and page.evaluate(state) is False,
+                          calls[-2:])
+                n = len(plays)
+                time.sleep(1.3)
+                plays, _ = plays_and_stops(page.evaluate("window.__rumble"))
+                res.check(f"{tag}: and nothing plays while it is off, renewals included", len(plays) == n,
+                          plays[n:])
+                app.stdin.write("stop\n")
+                app.stdin.flush()
+                app.stdout.readline()
+            finally:
+                try:
+                    app.communicate(input="stop\n", timeout=10)
+                except Exception:
+                    app.kill()
+            res.check(f"{tag}: the core keeps the pick", page.evaluate(stored) == "false", page.evaluate(stored))
+            page.reload(wait_until="load")
+            wait_video(page, mode)
+            time.sleep(1.0)
+            res.check(f"{tag}: a reload comes back with rumble off", page.evaluate(state) is False,
+                      page.evaluate(state))
+        finally:
+            C.close_browser(browser)
+
+
 def run(mode: str, res: "H.Results") -> None:
     work = os.path.join(H.WORKDIR, f"rumble-{mode}")
     os.makedirs(work, exist_ok=True)
@@ -355,6 +441,7 @@ def run(mode: str, res: "H.Results") -> None:
             H.server_stop()
             H.server_start(mode=mode, web_root=H.WISH_DIST)
             touch(pw, mode, preload, res, "wish", ("chromium",))
+            dashboards(pw, mode, preload, res)
     finally:
         H.server_stop()
 

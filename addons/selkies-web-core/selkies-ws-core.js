@@ -63,8 +63,8 @@
  * Dashboards talk to the core over same-origin window messages. The core
  * handles `setVolume`, `setMute`, `setScaleLocally`, `setSynth`,
  * `showVirtualKeyboard`, `setUseCssScaling`, `setAntiAliasing`,
- * `setUseBrowserCursors`, `setRawPointerMotion`, `setManualResolution`,
- * `resetResolutionToWindow`,
+ * `setUseBrowserCursors`, `setRawPointerMotion`, `setGamepadRumble`,
+ * `setManualResolution`, `resetResolutionToWindow`,
  * `settings`, `getStats`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `pipelineStatusUpdate`, `pipelineControl`, `audioDeviceSelected`,
  * `gamepadControl`, `requestFullscreen`, `command`, `touchinput:trackpad`,
@@ -626,6 +626,14 @@ let rawPointerMotion = true;
 function applyRawPointerMotion() {
     if (window.webrtcInput && typeof window.webrtcInput.setRawPointerMotion === 'function') {
         window.webrtcInput.setRawPointerMotion(rawPointerMotion);
+    }
+}
+/** Whether pads play a game's rumble: the dashboards' toggle, persisted here. */
+let gamepadRumble = true;
+/** Applies the rumble toggle to the input handler. */
+function applyGamepadRumble() {
+    if (window.webrtcInput && typeof window.webrtcInput.setGamepadRumble === 'function') {
+        window.webrtcInput.setGamepadRumble(gamepadRumble);
     }
 }
 /**
@@ -1402,6 +1410,7 @@ videoBitrate = getIntParam('video_bitrate', videoBitrate);
 antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 use_browser_cursors = getBoolParam('use_browser_cursors', true);
 rawPointerMotion = getBoolParam('raw_pointer_motion', Input.rawPointerMotion);
+gamepadRumble = getBoolParam('gamepad_rumble', true);
 enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 clipboard_in_enabled = getBoolParam('clipboard_in_enabled', true);
 clipboard_seamless = getBoolParam('clipboard_seamless', true);
@@ -4274,6 +4283,7 @@ const initializeInput = () => {
   applyEffectiveCursorSetting();
   applyRawPointerMotion();
   applyMacCmdAsCtrl();
+  applyGamepadRumble();
 
   if (overlayInput) {
     const handlePointerDown = (e) => {
@@ -4712,6 +4722,15 @@ function receiveMessage(event) {
         applyRawPointerMotion();
       } else {
         console.warn("Invalid value received for setRawPointerMotion:", message.value);
+      }
+      break;
+    case 'setGamepadRumble':
+      if (typeof message.value === 'boolean') {
+        gamepadRumble = message.value;
+        setBoolParam('gamepad_rumble', gamepadRumble);
+        applyGamepadRumble();
+      } else {
+        console.warn("Invalid value received for setGamepadRumble:", message.value);
       }
       break;
     case 'setMacCmdAsCtrl':

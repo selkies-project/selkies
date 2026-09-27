@@ -1465,6 +1465,8 @@ export class Input {
         this._geometryTimer = null;
         this.buttonMask = 0;
         this.gamepadManager = null;
+        /** Pads play the rumble the server relays (`setGamepadRumble`). */
+        this.gamepadRumble = true;
         this.x = 0;
         this.y = 0;
         this._relCarryX = 0;
@@ -4389,6 +4391,7 @@ export class Input {
         if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
         if (!this.gamepadManager) {
             this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this), this._gamepadHeartbeat.bind(this));
+            this.gamepadManager.setRumbleEnabled(this.gamepadRumble);
         }
         const connectMsg = "js,c," + server_gp_index + "," + this._encodeGamepadId(event.gamepad.id) + "," + event.gamepad.axes.length + "," + event.gamepad.buttons.length;
         this.send(connectMsg);
@@ -4425,6 +4428,16 @@ export class Input {
         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
         if (slot !== server_gp_index || !this.gamepadManager) return;
         this.gamepadManager.rumble(strong, weak, durationMs);
+    }
+
+    /**
+     * Turns rumble on this client's pads on or off (the dashboards' toggle,
+     * persisted by the core as `gamepad_rumble`); off stops one playing.
+     * @param {boolean} on
+     */
+    setGamepadRumble(on) {
+        this.gamepadRumble = !!on;
+        if (this.gamepadManager) this.gamepadManager.setRumbleEnabled(this.gamepadRumble);
     }
 
     /** Stops a rumble playing on this client's pads: its connection is gone. */

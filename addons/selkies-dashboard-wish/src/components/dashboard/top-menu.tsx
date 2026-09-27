@@ -12,7 +12,7 @@
  *
  * Reads the `serverSettings` and `trackpadModeUpdate` messages the core posts
  * on `window` and posts `sidebarVisibilityChanged`, `touchinput:trackpad`,
- * `touchinput:touch`, and `setSynth` back; held modifier keys are delivered as
+ * `touchinput:touch`, `setSynth`, and `setGamepadRumble` back; held modifier keys are delivered as
  * synthetic KeyboardEvents on `window`, which the core's input handler consumes
  * like real ones. A secondary display opens as a new window on the
  * `#display2-<direction>` fragment, placed with the Window Management API
@@ -56,7 +56,8 @@ import {
   Touchpad,
   ScreenShare,
   Crosshair,
-  Printer
+  Printer,
+  Vibrate
 } from "lucide-react";
 
 import { Clipboard } from "@/components/dashboard/clipboard";
@@ -69,7 +70,7 @@ import { Gamepad } from "@/components/dashboard/gamepad";
 import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
-import { computeRenderableSettings, getLastServerSettings, getPrintJobs, isMobileClient, isSecondaryDisplay } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, isMobileClient, isSecondaryDisplay } from "@/utils";
 import { t } from "@/i18n";
 
 /**
@@ -125,6 +126,19 @@ export function TopMenu({
   onToggleTouchGamepad }: TopMenuProps) {
 
   const [activePanel, setActivePanel] = React.useState<string | null>(null);
+  // Rumble on this client's pads is client-only; the core persists gamepad_rumble itself.
+  const [gamepadRumble, setGamepadRumble] = React.useState(() => {
+    try {
+      return localStorage.getItem(getPrefixedKey("gamepad_rumble")) !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const toggleGamepadRumble = () => {
+    const next = !gamepadRumble;
+    setGamepadRumble(next);
+    window.postMessage({ type: "setGamepadRumble", value: next }, window.location.origin);
+  };
   const [showAppsModal, setShowAppsModal] = React.useState(false);
   const [showFilesModal, setShowFilesModal] = React.useState(false);
   const [printJobCount, setPrintJobCount] = React.useState(() => getPrintJobs().length);
@@ -651,6 +665,22 @@ export function TopMenu({
                       <span className="flex-1">{t('topMenu.gamepadInput')}</span>
                       <span className="text-xs text-muted-foreground ml-auto">
                         {isGamepadEnabled ? t('common.on') : t('common.off')}
+                      </span>
+                    </MenubarItem>
+                  )}
+                  {!isSecondaryDisplay && isGamepadEnabled && (renderableSettings.gamepads ?? true) && (
+                    <MenubarItem
+                      data-testid="gamepad-rumble-toggle"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        toggleGamepadRumble();
+                      }}
+                    >
+                      <Vibrate className="h-4 w-4 mr-2" />
+                      <span className="flex-1">{t('topMenu.rumble')}</span>
+                      <span className="text-xs text-muted-foreground ml-auto">
+                        {gamepadRumble ? t('common.on') : t('common.off')}
                       </span>
                     </MenubarItem>
                   )}

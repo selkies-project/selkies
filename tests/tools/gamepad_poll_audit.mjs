@@ -11,7 +11,8 @@
 // stick is one point, so its rest noise is cut by its distance from center:
 // cutting each axis on its own pins the minor axis of a push near a cardinal
 // direction to zero and then jumps it. Rumble the server relays plays on every
-// pad that has a motor to play it with, and stops when the manager goes.
+// pad that has a motor to play it with, unless the user turned it off, and
+// stops when the manager goes.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -139,6 +140,13 @@ function makeManager() {
     check('an effect is held at most the 5 s the Gamepad API plays at once',
           calls.length === 2 && calls[0][5] === 5000 && calls[1][3] === 5000, JSON.stringify(calls));
     calls.length = 0;
+    manager.setRumbleEnabled(false);
+    check('turning rumble off stops what plays', JSON.stringify(calls) === JSON.stringify([['chrome', 'reset'], ['gecko', 'pulse', 0, 0]]),
+          JSON.stringify(calls));
+    calls.length = 0;
+    manager.rumble(0.5, 0.5, 300);
+    check('and nothing plays while it is off', calls.length === 0, JSON.stringify(calls));
+    manager.setRumbleEnabled(true);
     manager.rumble(0.5, 0.5, 300);
     manager.destroy();
     check('tearing the manager down stops what plays',

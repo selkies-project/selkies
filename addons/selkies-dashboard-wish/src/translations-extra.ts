@@ -12,6 +12,7 @@ const en = {
     topMenu: {
         gaming: "Gaming",
         gamepadInput: "Gamepad Input",
+        rumble: "Rumble",
         streamControls: "Stream Controls",
         videoStream: "Video Stream",
         audioStream: "Audio Stream",
@@ -72,6 +73,7 @@ const es = {
     topMenu: {
         gaming: "Juegos",
         gamepadInput: "Entrada de mando",
+        rumble: "Vibración",
         streamControls: "Controles de transmisión",
         videoStream: "Transmisión de vídeo",
         audioStream: "Transmisión de audio",
@@ -132,6 +134,7 @@ const zh_cn = {
     topMenu: {
         gaming: "游戏",
         gamepadInput: "手柄输入",
+        rumble: "震动",
         streamControls: "串流控制",
         videoStream: "视频流",
         audioStream: "音频流",
@@ -192,6 +195,7 @@ const hi = {
     topMenu: {
         gaming: "गेमिंग",
         gamepadInput: "गेमपैड इनपुट",
+        rumble: "कंपन",
         streamControls: "स्ट्रीम नियंत्रण",
         videoStream: "वीडियो स्ट्रीम",
         audioStream: "ऑडियो स्ट्रीम",
@@ -252,6 +256,7 @@ const pt = {
     topMenu: {
         gaming: "Jogos",
         gamepadInput: "Entrada de gamepad",
+        rumble: "Vibração",
         streamControls: "Controles de transmissão",
         videoStream: "Transmissão de vídeo",
         audioStream: "Transmissão de áudio",
@@ -312,6 +317,7 @@ const fr = {
     topMenu: {
         gaming: "Jeu",
         gamepadInput: "Entrée manette",
+        rumble: "Vibrations",
         streamControls: "Contrôles du flux",
         videoStream: "Flux vidéo",
         audioStream: "Flux audio",
@@ -372,6 +378,7 @@ const ru = {
     topMenu: {
         gaming: "Игры",
         gamepadInput: "Ввод геймпада",
+        rumble: "Вибрация",
         streamControls: "Управление потоком",
         videoStream: "Видеопоток",
         audioStream: "Аудиопоток",
@@ -432,6 +439,7 @@ const de = {
     topMenu: {
         gaming: "Gaming",
         gamepadInput: "Gamepad-Eingabe",
+        rumble: "Vibration",
         streamControls: "Stream-Steuerung",
         videoStream: "Videostream",
         audioStream: "Audiostream",
@@ -492,6 +500,7 @@ const tr = {
     topMenu: {
         gaming: "Oyun",
         gamepadInput: "Oyun kolu girişi",
+        rumble: "Titreşim",
         streamControls: "Yayın denetimleri",
         videoStream: "Video yayını",
         audioStream: "Ses yayını",
@@ -552,6 +561,7 @@ const it = {
     topMenu: {
         gaming: "Gaming",
         gamepadInput: "Input gamepad",
+        rumble: "Vibrazione",
         streamControls: "Controlli dello stream",
         videoStream: "Stream video",
         audioStream: "Stream audio",
@@ -612,6 +622,7 @@ const nl = {
     topMenu: {
         gaming: "Gaming",
         gamepadInput: "Gamepad-invoer",
+        rumble: "Trillen",
         streamControls: "Streambediening",
         videoStream: "Videostream",
         audioStream: "Audiostream",
@@ -672,6 +683,7 @@ const ar = {
     topMenu: {
         gaming: "الألعاب",
         gamepadInput: "إدخال ذراع التحكم",
+        rumble: "الاهتزاز",
         streamControls: "عناصر تحكم البث",
         videoStream: "بث الفيديو",
         audioStream: "بث الصوت",
@@ -732,6 +744,7 @@ const ko = {
     topMenu: {
         gaming: "게임",
         gamepadInput: "게임패드 입력",
+        rumble: "진동",
         streamControls: "스트림 제어",
         videoStream: "비디오 스트림",
         audioStream: "오디오 스트림",
@@ -792,6 +805,7 @@ const ja = {
     topMenu: {
         gaming: "ゲーム",
         gamepadInput: "ゲームパッド入力",
+        rumble: "振動",
         streamControls: "ストリーム操作",
         videoStream: "映像ストリーム",
         audioStream: "音声ストリーム",
@@ -852,6 +866,7 @@ const vi = {
     topMenu: {
         gaming: "Trò chơi",
         gamepadInput: "Đầu vào tay cầm",
+        rumble: "Rung",
         streamControls: "Điều khiển luồng",
         videoStream: "Luồng video",
         audioStream: "Luồng âm thanh",
@@ -912,6 +927,7 @@ const th = {
     topMenu: {
         gaming: "เกม",
         gamepadInput: "อินพุตเกมแพด",
+        rumble: "การสั่น",
         streamControls: "การควบคุมสตรีม",
         videoStream: "สตรีมวิดีโอ",
         audioStream: "สตรีมเสียง",
@@ -972,6 +988,7 @@ const fil = {
     topMenu: {
         gaming: "Gaming",
         gamepadInput: "Gamepad input",
+        rumble: "Vibration",
         streamControls: "Mga kontrol ng stream",
         videoStream: "Video stream",
         audioStream: "Audio stream",
@@ -1032,6 +1049,7 @@ const da = {
     topMenu: {
         gaming: "Gaming",
         gamepadInput: "Gamepad-input",
+        rumble: "Vibration",
         streamControls: "Streamkontroller",
         videoStream: "Videostream",
         audioStream: "Lydstream",
@@ -1092,6 +1110,7 @@ const zh_tw = {
     topMenu: {
         gaming: "遊戲",
         gamepadInput: "手把輸入",
+        rumble: "震動",
         streamControls: "串流控制",
         videoStream: "視訊串流",
         audioStream: "音訊串流",

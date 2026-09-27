@@ -29,7 +29,7 @@
  *
  * Messages it posts: `settings` (debounced), `pipelineControl`,
  * `gamepadControl`, `setManualResolution`, `resetResolutionToWindow`,
- * `setScaleLocally`, `setAntiAliasing`, `audioDeviceSelected`,
+ * `setScaleLocally`, `setAntiAliasing`, `setGamepadRumble`, `audioDeviceSelected`,
  * `clipboardUpdateFromUI`, `clipboardImageUpdate`, `requestFullscreen`,
  * `requestGamingMode`, `mode`, `setSynth`, `sidebarVisibilityChanged`, `TOUCH_GAMEPAD_SETUP`,
  * `TOUCH_GAMEPAD_VISIBILITY`, `touchinput:trackpad`, and `touchinput:touch`,
@@ -1356,6 +1356,7 @@ function Sidebar() {
   const [clipboardUp, setClipboardUp] = useState(() => storedBool("clipboard_in_enabled", true));
   const [clipboardDown, setClipboardDown] = useState(() => storedBool("clipboard_out_enabled", true));
   const [clipboardSeamless, setClipboardSeamless] = useState(() => storedBool("clipboard_seamless", true));
+  const [gamepadRumble, setGamepadRumble] = useState(() => storedBool("gamepad_rumble", true));
   const [keyboardShortcuts, setKeyboardShortcuts] = useState(() => storedBool("keyboard_shortcuts", true));
   const [printAuto, setPrintAuto] = useState(() => storedBool("print_auto", true));
   const [printJobs, setPrintJobs] = useState([]);
@@ -2223,6 +2224,15 @@ function Sidebar() {
     setAntiAliasing(newState);
     window.postMessage(
       { type: "setAntiAliasing", value: newState },
+      window.location.origin
+    );
+  };
+  /** Rumble on this client's pads is client-only; the core persists gamepad_rumble itself. */
+  const handleGamepadRumbleToggle = () => {
+    const newState = !gamepadRumble;
+    setGamepadRumble(newState);
+    window.postMessage(
+      { type: "setGamepadRumble", value: newState },
       window.location.origin
     );
   };
@@ -4146,6 +4156,32 @@ function Sidebar() {
                             isTouchGamepadActive
                               ? "Touch Gamepad: ON"
                               : "Touch Gamepad: OFF"
+                          )}
+                        </span>
+                      </button>
+                    </div>
+                    <div
+                      className="dev-setting-item"
+                      style={{ marginBottom: "10px" }}
+                    >
+                      <button
+                        id="gamepadRumbleToggle"
+                        className={`resolution-button toggle-button ${
+                          gamepadRumble ? "active" : ""
+                        }`}
+                        onClick={handleGamepadRumbleToggle}
+                        title={t(
+                          "sections.gamepads.rumbleTitle",
+                          "Vibrate your controller when a game rumbles"
+                        )}
+                      >
+                        <GamepadIcon />
+                        <span style={{ marginLeft: "8px" }}>
+                          {t(
+                            gamepadRumble
+                              ? "sections.gamepads.rumbleActiveLabel"
+                              : "sections.gamepads.rumbleInactiveLabel",
+                            gamepadRumble ? "Rumble: ON" : "Rumble: OFF"
                           )}
                         </span>
                       </button>
