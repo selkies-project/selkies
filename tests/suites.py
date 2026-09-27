@@ -268,6 +268,8 @@ SUITES: list = [
     {"path": "e2e/test_subfolder.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_frame_ancestors.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_pointer_motion.py", "tier": "e2e", "timeout": 1800},
+    {"path": "e2e/test_touch.py", "tier": "e2e", "timeout": 1200,
+     "selectors": ["x11", "wl"]},
     {"path": "e2e/test_software_decode.py", "tier": "e2e", "timeout": 900,
      "selectors": ["retry", "persisted", "ladder", "healthy", "striped", "nowebcodecs"]},
     {"path": "e2e/test_software_h264.py", "tier": "e2e", "timeout": 600,

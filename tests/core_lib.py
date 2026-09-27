@@ -240,11 +240,12 @@ def openh264_prefs() -> dict:
 
 
 def firefox_persistent_context(pw: Any, viewport: Optional[dict] = None,
-                               prefs: Optional[dict] = None) -> Any:
+                               prefs: Optional[dict] = None, **context: Any) -> Any:
     """A headless Firefox context on the persistent profile.
 
     Carries the autoplay allowance `launch_browser` gives Firefox, the clipboard
     testing pref, and the OpenH264 prefs; the caller closes the context.
+    `context` adds further context options (`has_touch`).
     """
     user_prefs = {
         "media.gmp-gmpopenh264.enabled": True,
@@ -256,7 +257,7 @@ def firefox_persistent_context(pw: Any, viewport: Optional[dict] = None,
         **(prefs or {}),
     }
     kwargs = {"user_data_dir": FF_E2E_PROFILE, "headless": True,
-              "firefox_user_prefs": user_prefs}
+              "firefox_user_prefs": user_prefs, **context}
     if viewport:
         kwargs["viewport"] = viewport
     return pw.firefox.launch_persistent_context(**installed_firefox(kwargs))
