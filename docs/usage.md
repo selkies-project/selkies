@@ -41,6 +41,7 @@ A laptop touchpad's own pinch, which browsers deliver as a scroll with `Control`
 
 In trackpad mode the pointer moves as far as the finger travels while it moves slowly, for aiming, and up to three times as far the faster it moves, so a flick crosses the desktop. The trackpad speed picker, shown with the touch controls while trackpad mode is on, scales both, and the browser keeps the pick.
 
+Beside the soft `Ctrl`, `Alt`, `Win`, `Tab`, and `Esc` keys, **More keys** opens a palette with what a phone's keyboard lacks: the function keys, the arrows, Home, End, Page Up and Page Down, Insert and Delete, and the chords `Alt+Tab`, `Alt+F4`, `Ctrl+Alt+Del`, and `Ctrl+Shift+Esc`. A chord written into its field as modifiers and a key joined by `+`, like `Ctrl+Shift+T`, is added to the palette and kept by the browser. A key or chord pressed while a soft modifier is held goes out with that modifier too.
 
 ## Clipboard
 

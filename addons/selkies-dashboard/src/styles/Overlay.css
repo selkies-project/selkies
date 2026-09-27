@@ -2057,6 +2057,88 @@ a.cite-link:active {
     border-color: var(--accent);
 }
 
+/* --- Special-key palette, under the soft keys --- */
+.key-palette {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--sidebar-border);
+}
+
+.key-palette-toggle {
+    padding: 6px 8px;
+    border: 1px solid var(--item-border);
+    border-radius: var(--radius-sm);
+    background-color: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+}
+
+.key-palette-toggle.active {
+    border-color: var(--accent-border);
+}
+
+.key-palette-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 6px;
+}
+
+.key-palette-chords {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.key-palette-chords .mobile-key-button {
+    flex: 1 1 auto;
+    padding: 8px 10px;
+}
+
+.key-palette-user-chord {
+    display: flex;
+    flex: 1 1 auto;
+    gap: 2px;
+}
+
+.key-palette-remove {
+    padding: 0 8px;
+    border: 1px solid var(--item-border);
+    border-radius: var(--radius-sm);
+    background-color: var(--surface-alt);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+}
+
+.key-palette-add {
+    display: flex;
+    gap: 6px;
+}
+
+.key-palette-input {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--item-border);
+    border-radius: var(--radius-sm);
+    background-color: var(--surface-alt);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+}
+
+.key-palette-add .mobile-key-button {
+    flex: 0 0 auto;
+    padding: 6px 12px;
+}
+
 .trackpad-speed {
     display: flex;
     align-items: center;
@@ -2076,3 +2158,10 @@ a.cite-link:active {
     color: var(--text);
     font: inherit;
 }
+
+.key-palette-refused {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-muted, var(--text));
+}
+

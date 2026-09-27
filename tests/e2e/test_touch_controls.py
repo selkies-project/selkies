@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
-"""Touch clients' own controls in both dashboards, end to end: the trackpad's
-speed.
+"""Touch clients' own controls in both dashboards: the special-key palette and
+the trackpad's speed, end to end.
+
+The palette, beside the soft modifier keys a touch client gets, holds the keys
+an on-screen keyboard lacks, a few chords, and chords the user adds and keeps.
+Each key or chord has to reach the session as those keys, pressed in order and
+released in reverse, a modifier held on a soft key has to stay held across a
+chord, and a chord the user added has to be there after a reload. The keys are
+read back from the X server, and on Wayland from the seat.
 
 Trackpad travel is accelerated by the finger's speed: a slow drag moves the
 pointer as far as the finger went, a fast one further, and the speed picked in
-the dashboard scales it and is kept. Chromium is driven through CDP touch.
+the dashboard scales it and is kept. Chromium is driven through CDP touch,
+Firefox and WebKit through synthetic touches, which only make the dashboards
+offer their touch controls there.
 
-    python3 tests/e2e/test_touch_controls.py x11
+    python3 tests/e2e/test_touch_controls.py x11|wl
 """
 import os
 import sys
@@ -18,7 +27,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
-from test_touch import FIREFOX_TOUCH_PREFS, Fingers  # noqa: E402
+from test_touch import FIREFOX_TOUCH_PREFS, Fingers, XWatcher  # noqa: E402
+
+XK = {"F5": 0xFFC2, "Tab": 0xFF09, "Alt_L": 0xFFE9, "Control_L": 0xFFE3, "Shift_L": 0xFFE1,
+      "t": 0x74, "Delete": 0xFFFF}
+
 
 def open_client(pw: Any, engine: str, mode: str) -> tuple:
     viewport = {"width": 1280, "height": 720}
@@ -42,6 +55,113 @@ def touch_once(page: Any, engine: str) -> None:
     time.sleep(0.05)
     f.up(1)
     time.sleep(0.8)
+
+
+def open_palette(page: Any, dashboard: str) -> bool:
+    if dashboard == "classic" and not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
+        page.evaluate("window.postMessage({type: 'toggleDashboard'}, window.location.origin)")
+        time.sleep(0.8)
+    toggle = page.locator(".key-palette-toggle").first
+    if not toggle.count():
+        return False
+    if toggle.get_attribute("aria-expanded") != "true":
+        toggle.click()
+        time.sleep(0.4)
+    return page.locator("[data-code='F5']").count() > 0
+
+
+def keys_since(watcher: XWatcher, t: float, codes: dict) -> list:
+    """The key events since `t`, as (press, keysym name) for the keycodes of interest."""
+    by_code = {code: name for name, code in codes.items()}
+    out = []
+    for _, kind, detail, _, _ in watcher.since(t):
+        if kind in ("KeyPress", "KeyRelease") and detail in by_code:
+            out.append((kind == "KeyPress", by_code[detail]))
+    return out
+
+
+def palette_block(res: "H.Results", dashboard: str, dist: str, engine: str, mode: str) -> None:
+    tag = f"{dashboard} {engine} {mode}"
+    H.server_start(mode=mode, web_root=dist)
+    watcher = None
+    try:
+        with sync_playwright() as pw:
+            browser, page = open_client(pw, engine, mode)
+            try:
+                video = C.wait_ws_video(page, 40) if mode == "websockets" else C.wait_wr_video(page, 60)
+                res.check(f"{tag}: video up", video is not None, video)
+                if not video:
+                    return
+                touch_once(page, engine)
+                opened = open_palette(page, dashboard)
+                res.check(f"{tag}: a touch client is offered the key palette", opened)
+                if not opened:
+                    return
+                watcher = XWatcher()
+                codes = {name: watcher.d.keysym_to_keycode(sym) for name, sym in XK.items()}
+                time.sleep(0.3)
+
+                t0 = time.monotonic()
+                page.locator("[data-code='F5']").first.click()
+                time.sleep(0.6)
+                got = keys_since(watcher, t0, codes)
+                res.check(f"{tag}: the palette's F5 reaches the session", got == [(True, "F5"), (False, "F5")], got)
+
+                t0 = time.monotonic()
+                page.locator("[data-chord='Alt+Tab']").first.click()
+                time.sleep(0.6)
+                got = keys_since(watcher, t0, codes)
+                res.check(f"{tag}: Alt+Tab reaches it pressed in order and released in reverse",
+                          got == [(True, "Alt_L"), (True, "Tab"), (False, "Tab"), (False, "Alt_L")], got)
+
+                field = page.locator(".key-palette-input").first
+                t_typed = time.monotonic()
+                field.click()
+                field.press_sequentially("ctrl+shift+t", delay=20)
+                field.press("Enter")
+                time.sleep(0.5)
+                leaked = [e for e in watcher.since(t_typed) if e[1] in ("KeyPress", "KeyRelease")]
+                res.check(f"{tag}: typing a chord into the palette sends nothing to the session", not leaked,
+                          leaked[:4])
+                added = page.locator("[data-chord='Ctrl+Shift+T']")
+                res.check(f"{tag}: a chord the user writes is added, written back one way", added.count() == 1,
+                          added.count())
+                t0 = time.monotonic()
+                if added.count():
+                    added.first.click()
+                time.sleep(0.6)
+                got = keys_since(watcher, t0, codes)
+                res.check(f"{tag}: and plays as its keys", got == [
+                    (True, "Control_L"), (True, "Shift_L"), (True, "t"), (False, "t"), (False, "Shift_L"),
+                    (False, "Control_L")], got)
+
+                # CTL held on its soft key, then the palette's Del: Ctrl+Del, and CTL still held.
+                ctl = page.locator("text=/^CTR?L$/").first
+                t0 = time.monotonic()
+                ctl.click()
+                time.sleep(0.3)
+                page.locator("[data-code='Delete']").first.click()
+                time.sleep(0.6)
+                mid = keys_since(watcher, t0, codes)
+                ctl.click()
+                time.sleep(0.4)
+                got = keys_since(watcher, t0, codes)
+                res.check(f"{tag}: a palette key under a held soft modifier goes out with it",
+                          mid == [(True, "Control_L"), (True, "Delete"), (False, "Delete")]
+                          and got[-1] == (False, "Control_L"), got)
+
+                page.reload(wait_until="load")
+                (C.wait_ws_video(page, 40) if mode == "websockets" else C.wait_wr_video(page, 60))
+                touch_once(page, engine)
+                open_palette(page, dashboard)
+                res.check(f"{tag}: the user's chord is still there after a reload",
+                          page.locator("[data-chord='Ctrl+Shift+T']").count() == 1)
+            finally:
+                C.close_browser(browser)
+    finally:
+        if watcher is not None:
+            watcher.close()
+        H.server_stop()
 
 
 def pointer_x() -> int:
@@ -149,12 +269,56 @@ def speed_block(res: "H.Results", dashboard: str, dist: str, mode: str) -> None:
         H.server_stop()
 
 
+def wayland_block(res: "H.Results", mode: str) -> None:
+    tag = f"classic wayland {mode}"
+    H.server_start(mode=mode, wayland=True, web_root=H.CLASSIC_DIST)
+    obs = None
+    try:
+        with sync_playwright() as pw:
+            browser, page = open_client(pw, "chromium", mode)
+            try:
+                video = C.wait_ws_video(page, 40) if mode == "websockets" else C.wait_wr_video(page, 60)
+                res.check(f"{tag}: video up", video is not None, video)
+                if not video:
+                    return
+                obs = H.WlObs("wayland-1")
+                res.check(f"{tag}: observer mapped", obs.ready())
+                # A tap on the observer gives it the keyboard focus.
+                f = Fingers(page, "chromium")
+                f.down((1, 640, 360))
+                time.sleep(0.06)
+                f.up(1)
+                time.sleep(0.8)
+                if not open_palette(page, "classic"):
+                    res.check(f"{tag}: a touch client is offered the key palette", False)
+                    return
+                mark = len(obs.lines)
+                page.locator("[data-chord='Alt+Tab']").first.click()
+                time.sleep(0.8)
+                keys = [(l.get("state"), l.get("key")) for l in obs.lines[mark:] if l.get("kind") == "kbd_key"]
+                # evdev codes: KEY_LEFTALT 56, KEY_TAB 15.
+                res.check(f"{tag}: Alt+Tab reaches the seat pressed in order and released in reverse",
+                          keys == [(1, 56), (1, 15), (0, 15), (0, 56)], keys)
+            finally:
+                C.close_browser(browser)
+    finally:
+        if obs is not None:
+            obs.stop()
+        H.server_stop()
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "x11"
     res = H.Results(f"touch-controls-{which}")
     if which == "x11":
         for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+            for engine in ("chromium", "firefox", "webkit"):
+                palette_block(res, dashboard, dist, engine, "websockets")
+            palette_block(res, dashboard, dist, "chromium", "webrtc")
             speed_block(res, dashboard, dist, "websockets")
+    elif which == "wl":
+        for mode in ("websockets", "webrtc"):
+            wayland_block(res, mode)
     else:
         raise SystemExit(f"unknown block {which}")
     sys.exit(0 if res.summary() else 1)

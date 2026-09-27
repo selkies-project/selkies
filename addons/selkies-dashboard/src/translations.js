@@ -26,6 +26,14 @@ const en = {
     gamingModeHint: "Fullscreen with the pointer and keyboard locked",
     trackpadModeTitle: "Trackpad Mode",
     trackpadSpeedLabel: "Trackpad speed",
+    keyPalette: {
+        more: "More keys",
+        less: "Fewer keys",
+        add: "Add",
+        addPlaceholder: "A chord, like Ctrl+Shift+T",
+        remove: "Remove {chord}",
+        refused: "Write a chord as modifiers and one key joined by +, like Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Keyboard Button",
     streamingModeTitle: "Streaming Mode",
     buttons: {
@@ -311,6 +319,14 @@ const es = {
     gamingModeHint: "Pantalla completa con el puntero y el teclado bloqueados",
     trackpadModeTitle: "Modo Trackpad",
     trackpadSpeedLabel: "Velocidad del trackpad",
+    keyPalette: {
+        more: "Más teclas",
+        less: "Menos teclas",
+        add: "Añadir",
+        addPlaceholder: "Una combinación, p. ej. Ctrl+Shift+T",
+        remove: "Quitar {chord}",
+        refused: "Escribe una combinación como modificadores y una tecla unidos por +, p. ej. Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Botón de teclado",
     streamingModeTitle: "Modo Streaming",
     buttons: {
@@ -596,6 +612,14 @@ const zh_cn = {
     gamingModeHint: "全屏并锁定指针和键盘",
     trackpadModeTitle: "触控板模式",
     trackpadSpeedLabel: "触控板速度",
+    keyPalette: {
+        more: "更多按键",
+        less: "收起按键",
+        add: "添加",
+        addPlaceholder: "组合键，例如 Ctrl+Shift+T",
+        remove: "移除 {chord}",
+        refused: "组合键写作修饰键加一个按键，以 + 连接，例如 Ctrl+Shift+T。",
+    },
     keyboardButtonToggleTitle: "键盘按钮",
     streamingModeTitle: "串流模式",
     buttons: {
@@ -881,6 +905,14 @@ const hi = {
     gamingModeHint: "पॉइंटर और कीबोर्ड लॉक के साथ फुलस्क्रीन",
     trackpadModeTitle: "ट्रैकपैड मोड",
     trackpadSpeedLabel: "ट्रैकपैड गति",
+    keyPalette: {
+        more: "और कुंजियाँ",
+        less: "कम कुंजियाँ",
+        add: "जोड़ें",
+        addPlaceholder: "कुंजी संयोजन, जैसे Ctrl+Shift+T",
+        remove: "{chord} हटाएँ",
+        refused: "संयोजन को संशोधक कुंजियों और एक कुंजी के रूप में + से जोड़कर लिखें, जैसे Ctrl+Shift+T।",
+    },
     keyboardButtonToggleTitle: "कीबोर्ड बटन",
     streamingModeTitle: "स्ट्रीमिंग मोड",
     buttons: {
@@ -1166,6 +1198,14 @@ const pt = {
     gamingModeHint: "Tela cheia com o ponteiro e o teclado bloqueados",
     trackpadModeTitle: "Modo Trackpad",
     trackpadSpeedLabel: "Velocidade do trackpad",
+    keyPalette: {
+        more: "Mais teclas",
+        less: "Menos teclas",
+        add: "Adicionar",
+        addPlaceholder: "Um atalho, como Ctrl+Shift+T",
+        remove: "Remover {chord}",
+        refused: "Escreva um atalho como modificadores e uma tecla unidos por +, como Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Botão do teclado",
     streamingModeTitle: "Modo Streaming",
     buttons: {
@@ -1451,6 +1491,14 @@ const fr = {
     gamingModeHint: "Plein écran avec le pointeur et le clavier verrouillés",
     trackpadModeTitle: "Mode Trackpad",
     trackpadSpeedLabel: "Vitesse du pavé tactile",
+    keyPalette: {
+        more: "Plus de touches",
+        less: "Moins de touches",
+        add: "Ajouter",
+        addPlaceholder: "Un raccourci, par ex. Ctrl+Shift+T",
+        remove: "Retirer {chord}",
+        refused: "Écrivez un raccourci sous la forme de modificateurs et d'une touche reliés par +, par ex. Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Bouton clavier",
     streamingModeTitle: "Mode Streaming",
     buttons: {
@@ -1737,6 +1785,14 @@ const ru = {
     gamingModeHint: "Полноэкранный режим с блокировкой указателя и клавиатуры",
     trackpadModeTitle: "Режим трекпада",
     trackpadSpeedLabel: "Скорость трекпада",
+    keyPalette: {
+        more: "Ещё клавиши",
+        less: "Меньше клавиш",
+        add: "Добавить",
+        addPlaceholder: "Сочетание, например Ctrl+Shift+T",
+        remove: "Удалить {chord}",
+        refused: "Запишите сочетание как модификаторы и одну клавишу через +, например Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Кнопка клавиатуры",
     streamingModeTitle: "Режим стриминга",
     buttons: {
@@ -2022,6 +2078,14 @@ const de = {
     gamingModeHint: "Vollbild mit gesperrtem Zeiger und gesperrter Tastatur",
     trackpadModeTitle: "Trackpad-Modus",
     trackpadSpeedLabel: "Trackpad-Geschwindigkeit",
+    keyPalette: {
+        more: "Mehr Tasten",
+        less: "Weniger Tasten",
+        add: "Hinzufügen",
+        addPlaceholder: "Eine Tastenkombination, z. B. Ctrl+Shift+T",
+        remove: "{chord} entfernen",
+        refused: "Schreiben Sie eine Tastenkombination als Modifikatortasten und eine Taste, verbunden mit +, z. B. Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Tastatur-Schaltfläche",
     streamingModeTitle: "Streaming-Modus",
     buttons: {
@@ -2307,6 +2371,14 @@ const tr = {
     gamingModeHint: "İşaretçi ve klavye kilitliyken tam ekran",
     trackpadModeTitle: "Dokunmatik Yüzey Modu",
     trackpadSpeedLabel: "Dokunmatik yüzey hızı",
+    keyPalette: {
+        more: "Daha fazla tuş",
+        less: "Daha az tuş",
+        add: "Ekle",
+        addPlaceholder: "Bir kısayol, ör. Ctrl+Shift+T",
+        remove: "{chord} kaldır",
+        refused: "Kısayolu, değiştirici tuşlar ile bir tuşun + ile birleşimi olarak yazın, ör. Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Klavye Düğmesi",
     streamingModeTitle: "Yayın Modu",
     buttons: {
@@ -2592,6 +2664,14 @@ const it = {
     gamingModeHint: "Schermo intero con puntatore e tastiera bloccati",
     trackpadModeTitle: "Modalità Trackpad",
     trackpadSpeedLabel: "Velocità del trackpad",
+    keyPalette: {
+        more: "Altri tasti",
+        less: "Meno tasti",
+        add: "Aggiungi",
+        addPlaceholder: "Una combinazione, ad es. Ctrl+Shift+T",
+        remove: "Rimuovi {chord}",
+        refused: "Scrivi una combinazione come modificatori e un tasto uniti da +, ad es. Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Pulsante tastiera",
     streamingModeTitle: "Modalità Streaming",
     buttons: {
@@ -2877,6 +2957,14 @@ const nl = {
     gamingModeHint: "Volledig scherm met vergrendelde aanwijzer en toetsenbord",
     trackpadModeTitle: "Trackpad-modus",
     trackpadSpeedLabel: "Trackpadsnelheid",
+    keyPalette: {
+        more: "Meer toetsen",
+        less: "Minder toetsen",
+        add: "Toevoegen",
+        addPlaceholder: "Een toetscombinatie, bijv. Ctrl+Shift+T",
+        remove: "{chord} verwijderen",
+        refused: "Schrijf een toetscombinatie als modificatietoetsen en één toets, verbonden door +, bijv. Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Toetsenbordknop",
     streamingModeTitle: "Streamingmodus",
     buttons: {
@@ -3162,6 +3250,14 @@ const ar = {
     gamingModeHint: "ملء الشاشة مع قفل المؤشر ولوحة المفاتيح",
     trackpadModeTitle: "وضع لوحة اللمس",
     trackpadSpeedLabel: "سرعة لوحة اللمس",
+    keyPalette: {
+        more: "مزيد من المفاتيح",
+        less: "مفاتيح أقل",
+        add: "إضافة",
+        addPlaceholder: "اختصار، مثل Ctrl+Shift+T",
+        remove: "إزالة {chord}",
+        refused: "اكتب الاختصار كمفاتيح تعديل ومفتاح واحد تربطها علامة +، مثل Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "زر لوحة المفاتيح",
     streamingModeTitle: "وضع البث",
     buttons: {
@@ -3447,6 +3543,14 @@ const ko = {
     gamingModeHint: "포인터와 키보드를 고정한 전체 화면",
     trackpadModeTitle: "트랙패드 모드",
     trackpadSpeedLabel: "트랙패드 속도",
+    keyPalette: {
+        more: "더 많은 키",
+        less: "키 줄이기",
+        add: "추가",
+        addPlaceholder: "단축키 (예: Ctrl+Shift+T)",
+        remove: "{chord} 제거",
+        refused: "단축키는 보조 키와 키 하나를 +로 이어 씁니다 (예: Ctrl+Shift+T).",
+    },
     keyboardButtonToggleTitle: "키보드 버튼",
     streamingModeTitle: "스트리밍 모드",
     buttons: {
@@ -3732,6 +3836,14 @@ const ja = {
     gamingModeHint: "ポインターとキーボードをロックした全画面",
     trackpadModeTitle: "トラックパッドモード",
     trackpadSpeedLabel: "トラックパッドの速度",
+    keyPalette: {
+        more: "その他のキー",
+        less: "キーを隠す",
+        add: "追加",
+        addPlaceholder: "ショートカット（例: Ctrl+Shift+T）",
+        remove: "{chord} を削除",
+        refused: "ショートカットは修飾キーとキー1つを + でつないで書きます（例: Ctrl+Shift+T）。",
+    },
     keyboardButtonToggleTitle: "キーボードボタン",
     streamingModeTitle: "ストリーミングモード",
     buttons: {
@@ -4017,6 +4129,14 @@ const vi = {
     gamingModeHint: "Toàn màn hình với con trỏ và bàn phím bị khóa",
     trackpadModeTitle: "Chế độ Bàn di chuột",
     trackpadSpeedLabel: "Tốc độ bàn di chuột",
+    keyPalette: {
+        more: "Thêm phím",
+        less: "Bớt phím",
+        add: "Thêm",
+        addPlaceholder: "Tổ hợp phím, ví dụ Ctrl+Shift+T",
+        remove: "Xóa {chord}",
+        refused: "Viết tổ hợp phím gồm các phím bổ trợ và một phím nối bằng +, ví dụ Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Nút bàn phím",
     streamingModeTitle: "Chế độ Truyền phát",
     buttons: {
@@ -4302,6 +4422,14 @@ const th = {
     gamingModeHint: "เต็มหน้าจอโดยล็อกตัวชี้และแป้นพิมพ์",
     trackpadModeTitle: "โหมดแทร็คแพด",
     trackpadSpeedLabel: "ความเร็วแทร็คแพด",
+    keyPalette: {
+        more: "ปุ่มเพิ่มเติม",
+        less: "ซ่อนปุ่ม",
+        add: "เพิ่ม",
+        addPlaceholder: "คีย์ลัด เช่น Ctrl+Shift+T",
+        remove: "ลบ {chord}",
+        refused: "เขียนคีย์ลัดเป็นปุ่มปรับแต่งกับปุ่มหนึ่งปุ่มที่เชื่อมด้วย + เช่น Ctrl+Shift+T",
+    },
     keyboardButtonToggleTitle: "ปุ่มแป้นพิมพ์",
     streamingModeTitle: "โหมดสตรีมมิ่ง",
     buttons: {
@@ -4587,6 +4715,14 @@ const fil = {
     gamingModeHint: "Fullscreen na naka-lock ang pointer at keyboard",
     trackpadModeTitle: "Modo ng Trackpad",
     trackpadSpeedLabel: "Bilis ng trackpad",
+    keyPalette: {
+        more: "Iba pang key",
+        less: "Mas kaunting key",
+        add: "Idagdag",
+        addPlaceholder: "Isang chord, tulad ng Ctrl+Shift+T",
+        remove: "Alisin ang {chord}",
+        refused: "Isulat ang chord bilang mga modifier at isang key na pinagdugtong ng +, tulad ng Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Button ng Keyboard",
     streamingModeTitle: "Modo ng Streaming",
     buttons: {
@@ -4872,6 +5008,14 @@ const da = {
     gamingModeHint: "Fuldskærm med markør og tastatur låst",
     trackpadModeTitle: "Trackpad-tilstand",
     trackpadSpeedLabel: "Trackpad-hastighed",
+    keyPalette: {
+        more: "Flere taster",
+        less: "Færre taster",
+        add: "Tilføj",
+        addPlaceholder: "En tastekombination, f.eks. Ctrl+Shift+T",
+        remove: "Fjern {chord}",
+        refused: "Skriv en tastekombination som modifikatortaster og én tast, forbundet med +, f.eks. Ctrl+Shift+T.",
+    },
     keyboardButtonToggleTitle: "Tastaturknap",
     streamingModeTitle: "Streaming-tilstand",
     buttons: {
@@ -5157,6 +5301,14 @@ const zh_tw = {
     gamingModeHint: "全螢幕且鎖定滑鼠指標與鍵盤",
     trackpadModeTitle: "觸控板模式",
     trackpadSpeedLabel: "觸控板速度",
+    keyPalette: {
+        more: "更多按鍵",
+        less: "收起按鍵",
+        add: "新增",
+        addPlaceholder: "組合鍵，例如 Ctrl+Shift+T",
+        remove: "移除 {chord}",
+        refused: "組合鍵寫作修飾鍵加一個按鍵，以 + 連接，例如 Ctrl+Shift+T。",
+    },
     keyboardButtonToggleTitle: "鍵盤按鈕開關",
     streamingModeTitle: "串流模式",
     buttons: {

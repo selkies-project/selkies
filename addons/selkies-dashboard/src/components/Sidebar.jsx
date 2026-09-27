@@ -55,7 +55,8 @@ import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react"
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, stopIndex, stopsWithin } from "../../../selkies-web-core/lib/slider-stops.js";
-import { TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY } from "../../../selkies-web-core/lib/touch-controls.js";
+import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
+  formatChord, parseChord, readUserChords, writeUserChords } from "../../../selkies-web-core/lib/touch-controls.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
@@ -934,6 +935,11 @@ function Sidebar() {
     Alt: false,
     Meta: false,
   });
+  const [isKeyPaletteOpen, setIsKeyPaletteOpen] = useState(false);
+  const [userChords, setUserChords] = useState(() =>
+    readUserChords(localStorage, getPrefixedKey(USER_CHORDS_KEY)));
+  const [chordDraft, setChordDraft] = useState("");
+  const [chordRefused, setChordRefused] = useState(false);
   const [trackpadSpeed, setTrackpadSpeed] = useState(() => {
     const stored = parseFloat(localStorage.getItem(getPrefixedKey(TRACKPAD_SPEED_KEY)));
     return TRACKPAD_SPEEDS.includes(stored) ? stored : 1;
@@ -1202,6 +1208,7 @@ function Sidebar() {
       ctrlKey: modifierState.Control,
       altKey: modifierState.Alt,
       metaKey: modifierState.Meta,
+      shiftKey: !!modifierState.Shift,
       bubbles: true,
       cancelable: true,
     });
@@ -1240,10 +1247,50 @@ function Sidebar() {
       sendKeyEvent('keyup', key, code, heldKeys);
     }, 50);
   };
+  /**
+   * Plays a palette chord (`lib/touch-controls.js`) as the soft keys do, with
+   * synthetic mode on for its length unless a soft modifier already has it:
+   * its modifiers and key pressed, then after 50 ms released in reverse.
+   * A modifier held on a soft key stays held.
+   */
+  const playChord = (text) => {
+    const chord = parseChord(text);
+    if (!chord) return;
+    const holding = Object.values(heldKeys).some(Boolean);
+    if (!holding) window.postMessage({ type: 'setSynth', value: true }, window.location.origin);
+    const events = chordEvents(chord, heldKeys);
+    const firstUp = events.findIndex((e) => e.type === 'keyup');
+    events.slice(0, firstUp).forEach((e) => sendKeyEvent(e.type, e.key, e.code, e.state));
+    setTimeout(() => {
+      events.slice(firstUp).forEach((e) => sendKeyEvent(e.type, e.key, e.code, e.state));
+      if (!holding) window.postMessage({ type: 'setSynth', value: false }, window.location.origin);
+    }, 50);
+  };
+  /** Adds the chord typed into the palette to the user's own, kept per origin. */
+  const handleAddChord = (event) => {
+    event.preventDefault();
+    const chord = parseChord(chordDraft);
+    if (!chord) {
+      setChordRefused(true);
+      return;
+    }
+    const name = formatChord(chord);
+    const next = userChords.includes(name) ? userChords : [...userChords, name];
+    setUserChords(next);
+    writeUserChords(localStorage, getPrefixedKey(USER_CHORDS_KEY), next);
+    setChordDraft("");
+    setChordRefused(false);
+  };
   /** The trackpad's speed is client-only; the core persists trackpad_speed itself. */
   const handleTrackpadSpeed = (value) => {
     setTrackpadSpeed(value);
     window.postMessage({ type: "setTrackpadSpeed", value }, window.location.origin);
+  };
+  /** Forgets one of the user's own chords. */
+  const handleRemoveChord = (name) => {
+    const next = userChords.filter((c) => c !== name);
+    setUserChords(next);
+    writeUserChords(localStorage, getPrefixedKey(USER_CHORDS_KEY), next);
   };
   const toggleKeyboardButtonVisibility = () => {
     setIsKeyboardButtonVisible(prev => !prev);
@@ -3067,6 +3114,91 @@ function Sidebar() {
                 ESC
               </button>
             </div>
+        )}
+
+        {(isMobile || hasDetectedTouch) && (renderableSettings.softButtons ?? true) && (
+          <div className="key-palette">
+            <button
+              className={`key-palette-toggle ${isKeyPaletteOpen ? "active" : ""}`}
+              aria-expanded={isKeyPaletteOpen}
+              onClick={() => setIsKeyPaletteOpen((open) => !open)}
+              onMouseDown={(e) => e.preventDefault()}
+            >
+              {isKeyPaletteOpen ? t("keyPalette.less", "Fewer keys") : t("keyPalette.more", "More keys")}
+            </button>
+            {isKeyPaletteOpen && (
+              <>
+                <div className="key-palette-grid">
+                  {PALETTE_KEYS.map(([label, key, code]) => (
+                    <button
+                      key={code}
+                      className="mobile-key-button"
+                      data-code={code}
+                      onClick={() => handleOnceKeyClick(key, code)}
+                      onMouseDown={(e) => e.preventDefault()}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div className="key-palette-chords">
+                  {PALETTE_CHORDS.map((chord) => (
+                    <button
+                      key={chord}
+                      className="mobile-key-button"
+                      data-chord={chord}
+                      onClick={() => playChord(chord)}
+                      onMouseDown={(e) => e.preventDefault()}
+                    >
+                      {chord}
+                    </button>
+                  ))}
+                  {userChords.map((chord) => (
+                    <span key={chord} className="key-palette-user-chord">
+                      <button
+                        className="mobile-key-button"
+                        data-chord={chord}
+                        onClick={() => playChord(chord)}
+                        onMouseDown={(e) => e.preventDefault()}
+                      >
+                        {chord}
+                      </button>
+                      <button
+                        className="key-palette-remove"
+                        aria-label={t("keyPalette.remove", { chord })}
+                        title={t("keyPalette.remove", { chord })}
+                        onClick={() => handleRemoveChord(chord)}
+                        onMouseDown={(e) => e.preventDefault()}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+                <form className="key-palette-add" onSubmit={handleAddChord}>
+                  <input
+                    type="text"
+                    className="key-palette-input allow-native-input"
+                    value={chordDraft}
+                    onChange={(e) => { setChordDraft(e.target.value); setChordRefused(false); }}
+                    placeholder={t("keyPalette.addPlaceholder", "A chord, like Ctrl+Shift+T")}
+                    aria-label={t("keyPalette.addPlaceholder", "A chord, like Ctrl+Shift+T")}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                  />
+                  <button type="submit" className="mobile-key-button">
+                    {t("keyPalette.add", "Add")}
+                  </button>
+                </form>
+                {chordRefused && (
+                  <p className="key-palette-refused">
+                    {t("keyPalette.refused", "Write a chord as modifiers and one key joined by +, like Ctrl+Shift+T.")}
+                  </p>
+                )}
+              </>
+            )}
+          </div>
         )}
 
         {(isMobile || hasDetectedTouch) && isTrackpadModeActive && (renderableSettings.trackpad ?? true) && (

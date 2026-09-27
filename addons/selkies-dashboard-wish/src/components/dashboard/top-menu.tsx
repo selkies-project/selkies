@@ -71,7 +71,8 @@ import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, isMobileClient, isSecondaryDisplay } from "@/utils";
-import { TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY } from "../../../../selkies-web-core/lib/touch-controls.js";
+import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
+  formatChord, parseChord, readUserChords, writeUserChords } from "../../../../selkies-web-core/lib/touch-controls.js";
 import { t } from "@/i18n";
 
 /**
@@ -173,6 +174,11 @@ export function TopMenu({
     Alt: false,
     Meta: false,
   });
+  const [isKeyPaletteOpen, setIsKeyPaletteOpen] = React.useState(false);
+  const [userChords, setUserChords] = React.useState<string[]>(() =>
+    readUserChords(localStorage, getPrefixedKey(USER_CHORDS_KEY)));
+  const [chordDraft, setChordDraft] = React.useState("");
+  const [chordRefused, setChordRefused] = React.useState(false);
   const [trackpadSpeed, setTrackpadSpeed] = React.useState<number>(() => {
     const stored = parseFloat(localStorage.getItem(getPrefixedKey(TRACKPAD_SPEED_KEY)) ?? "");
     return TRACKPAD_SPEEDS.includes(stored) ? stored : 1;
@@ -560,6 +566,7 @@ export function TopMenu({
       ctrlKey: modifierState.Control,
       altKey: modifierState.Alt,
       metaKey: modifierState.Meta,
+      shiftKey: !!modifierState.Shift,
       bubbles: true,
       cancelable: true,
     });
@@ -599,6 +606,49 @@ export function TopMenu({
     setTimeout(() => {
       sendKeyEvent('keyup', key, code, heldKeys);
     }, 50);
+  };
+
+  /**
+   * Plays a palette chord (`lib/touch-controls.js`) as the soft keys do, with
+   * synthetic mode on for its length unless a soft modifier already has it:
+   * its modifiers and key pressed, then after 50 ms released in reverse. A
+   * modifier held on a soft key stays held.
+   */
+  const playChord = (text: string) => {
+    const chord = parseChord(text);
+    if (!chord) return;
+    const holding = Object.values(heldKeys).some(Boolean);
+    if (!holding) window.postMessage({ type: 'setSynth', value: true }, window.location.origin);
+    const events = chordEvents(chord, heldKeys);
+    const firstUp = events.findIndex((e: any) => e.type === 'keyup');
+    events.slice(0, firstUp).forEach((e: any) => sendKeyEvent(e.type, e.key, e.code, e.state));
+    setTimeout(() => {
+      events.slice(firstUp).forEach((e: any) => sendKeyEvent(e.type, e.key, e.code, e.state));
+      if (!holding) window.postMessage({ type: 'setSynth', value: false }, window.location.origin);
+    }, 50);
+  };
+
+  /** Adds the chord typed into the palette to the user's own, kept per origin. */
+  const handleAddChord = (event: React.FormEvent) => {
+    event.preventDefault();
+    const chord = parseChord(chordDraft);
+    if (!chord) {
+      setChordRefused(true);
+      return;
+    }
+    const name = formatChord(chord);
+    const next = userChords.includes(name) ? userChords : [...userChords, name];
+    setUserChords(next);
+    writeUserChords(localStorage, getPrefixedKey(USER_CHORDS_KEY), next);
+    setChordDraft("");
+    setChordRefused(false);
+  };
+
+  /** Forgets one of the user's own chords. */
+  const handleRemoveChord = (name: string) => {
+    const next = userChords.filter((c) => c !== name);
+    setUserChords(next);
+    writeUserChords(localStorage, getPrefixedKey(USER_CHORDS_KEY), next);
   };
 
   /** The trackpad's speed is client-only; the core persists trackpad_speed itself. */
@@ -1189,6 +1239,90 @@ export function TopMenu({
                 ))}
               </select>
             </label>
+          )}
+          {(renderableSettings.softButtons ?? true) && (
+            <Button
+              variant={isKeyPaletteOpen ? "default" : "secondary"}
+              size="sm"
+              className="key-palette-toggle"
+              aria-expanded={isKeyPaletteOpen}
+              onClick={() => setIsKeyPaletteOpen((open) => !open)}
+              onMouseDown={(e) => e.preventDefault()}
+            >
+              {isKeyPaletteOpen ? t('keyPalette.less') : t('keyPalette.more')}
+            </Button>
+          )}
+          {(renderableSettings.softButtons ?? true) && isKeyPaletteOpen && (
+            <div className="key-palette flex w-full max-w-[22rem] flex-col gap-2">
+              <div className="grid grid-cols-6 gap-1">
+                {PALETTE_KEYS.map(([label, key, code]: string[]) => (
+                  <Button
+                    key={code}
+                    variant="secondary"
+                    size="sm"
+                    data-code={code}
+                    onClick={() => handleOnceKeyClick(key, code)}
+                    onMouseDown={(e) => e.preventDefault()}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {PALETTE_CHORDS.map((chord: string) => (
+                  <Button
+                    key={chord}
+                    variant="secondary"
+                    size="sm"
+                    data-chord={chord}
+                    onClick={() => playChord(chord)}
+                    onMouseDown={(e) => e.preventDefault()}
+                  >
+                    {chord}
+                  </Button>
+                ))}
+                {userChords.map((chord) => (
+                  <span key={chord} className="flex gap-0.5">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      data-chord={chord}
+                      onClick={() => playChord(chord)}
+                      onMouseDown={(e) => e.preventDefault()}
+                    >
+                      {chord}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      aria-label={t('keyPalette.remove', { chord })}
+                      title={t('keyPalette.remove', { chord })}
+                      onClick={() => handleRemoveChord(chord)}
+                      onMouseDown={(e) => e.preventDefault()}
+                    >
+                      ×
+                    </Button>
+                  </span>
+                ))}
+              </div>
+              <form className="flex gap-1" onSubmit={handleAddChord}>
+                <input
+                  type="text"
+                  className="key-palette-input allow-native-input min-w-0 flex-1 rounded border bg-background px-2 py-1 text-xs"
+                  value={chordDraft}
+                  onChange={(e) => { setChordDraft(e.target.value); setChordRefused(false); }}
+                  placeholder={t('keyPalette.addPlaceholder')}
+                  aria-label={t('keyPalette.addPlaceholder')}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                <Button type="submit" variant="secondary" size="sm">{t('keyPalette.add')}</Button>
+              </form>
+              {chordRefused && (
+                <p className="text-xs text-muted-foreground">{t('keyPalette.refused')}</p>
+              )}
+            </div>
           )}
         </motion.div>
       )}
