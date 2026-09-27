@@ -804,7 +804,7 @@ const manualResolution = (serverSettings) => {
  * Marker written beside a value the user chose explicitly. The cores persist
  * every value they are told to apply, so the stored key alone cannot tell a
  * user's pick from one the dashboard derived (HiDPI from the resolution mode,
- * rate control from the encoder); the settings that are also derived read
+ * paint-over from Turbo); the settings that are also derived read
  * storage through `readExplicitStored`, so a derived write never pins them.
  */
 const EXPLICIT_CHOICE_SUFFIX = "_explicit_choice";
@@ -823,7 +823,7 @@ const readPaintOverStored = readExplicitStored(USE_PAINT_OVER_QUALITY_SPEC);
 /**
  * Drives a conditional setting: lazy init, then a re-resolve whenever the
  * server settings or any dependency in `deps` changes, which covers the
- * server sync and the encoder or manual-resolution re-derivation uniformly.
+ * server sync and a dependency's re-derivation uniformly.
  * The resolver honors explicit choices, so a re-resolve never clobbers a
  * pinned value. A re-resolve writes state rather than deriving during render
  * because the caller edits the value afterwards; deriving would discard that.
@@ -1291,23 +1291,21 @@ function Sidebar() {
   /**
    * State the conditional settings read; rebuilt each render so the hooks
    * below re-resolve against current values when their deps change.
-   * `activeEncoder` is the one encoder knob for both transports, read from
-   * storage first: an out-of-set stored value is ignored by the server's own
-   * fallback and re-seated by the `serverSettings` sync. `softwareEncoders`
-   * and `useCpu` (the client's choice, else the server's) feed the
-   * rate-control default; `encoderBackends` decides whether the software
-   * encoding switch is shown.
+   * `encoderBackends` decides whether the software encoding switch is shown.
+   * Paint-over also reads the encoder and Turbo, Turbo resolved here rather
+   * than taken from its state, which trails the `serverSettings` sync by a
+   * render.
    */
   const conditionalCtx = {
     manualActive: !!readStored("manual_width") || serverSettings?.manual_resolution?.value === true,
-    streamMode,
-    activeEncoder: readStored("encoder") || encoder,
-    softwareEncoders: serverSettings?.software_encoders?.value,
     encoderBackends: serverSettings?.encoder_backends?.value,
-    useCpu: readStored("use_cpu") !== null
-      ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
     allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
     macDesktop: isMacDesktop(),
+  };
+  const paintOverCtx = {
+    ...conditionalCtx,
+    encoder,
+    videoStreamingMode: resolveSpec(VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, readStored),
   };
   /**
    * Each conditional setting is one hook call over a shared spec. The hook
@@ -1318,11 +1316,9 @@ function Sidebar() {
   const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
     HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
   const [rateControlMode, setRateControlMode] = useConditionalSetting(
-    RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings, streamMode], readRateControlStored);
-  /** Paint-over's default tracks rate control, so its context carries the mode just settled on. */
-  const paintOverCtx = { ...conditionalCtx, rateControlMode };
+    RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
   const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
-    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings, rateControlMode], readPaintOverStored);
+    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings], readPaintOverStored);
   const [videoFullColor, setVideoFullColor] = useConditionalSetting(
     VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   // Full color is 4:4:4 H.264; where the decoder has no such profile the core
@@ -1687,15 +1683,14 @@ function Sidebar() {
   }, [serverSettings]);
 
   /**
-   * Paint-over: pushes the default the resolved rate control implies so the
-   * encoder agrees, and drops the unmarked stored echo once the ladder moves
-   * on, the same shape as the rate-control derivation.
+   * Paint-over: pushes the resolved default so the encoder agrees, and drops
+   * the unmarked stored echo once the ladder moves on, the same shape as the
+   * rate-control derivation; a later encoder or Turbo change re-derives it.
    */
   useEffect(() => {
     if (!serverSettings) return;
     const key = USE_PAINT_OVER_QUALITY_SPEC.storageKey;
-    const resolved = resolveSpec(
-      USE_PAINT_OVER_QUALITY_SPEC, serverSettings, { ...conditionalCtx, rateControlMode }, readPaintOverStored);
+    const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
     if (!isExplicitChoice(USE_PAINT_OVER_QUALITY_SPEC)
       && readStored(key) !== null
       && readStored(key) !== String(resolved)) {
@@ -1707,7 +1702,15 @@ function Sidebar() {
       writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverSettings, rateControlMode]);
+  }, [serverSettings]);
+  useEffect(() => {
+    if (!serverSettings || isSettingPinned(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, readPaintOverStored)) return;
+    const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
+    if (resolved !== usePaintOverQuality) {
+      writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [encoder, videoStreamingMode]);
 
   /** UI scaling pick: persisted, so it pins across reloads and stops the startup derived-default post. */
   const handleDpiScalingChange = (event) => {
@@ -2025,34 +2028,14 @@ function Sidebar() {
     }
   };
   /**
-   * Re-derives rate control after an encoder or software-encoding change.
-   * Rate control follows those unless pinned by an explicit client or server
-   * choice, and a derived change is not persisted, so it keeps following.
-   * @param {object} ctxOverrides The value just chosen, ahead of the re-render that would put it in `conditionalCtx`.
-   */
-  const rederiveRateControl = (ctxOverrides) => {
-    if (!rateControlEnabled
-      || isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readRateControlStored)) return;
-    const rcResolved = resolveSpec(
-      RATE_CONTROL_SPEC, serverSettings,
-      { ...conditionalCtx, ...ctxOverrides }, readRateControlStored);
-    if (rcResolved !== rateControlMode) {
-      writeConditional(RATE_CONTROL_SPEC, rcResolved, setRateControlMode, { persist: false });
-    }
-  };
-  /**
    * Encoder pick, one knob for both transports; the server switches the
-   * pipeline encoder on it. The choice is persisted immediately so
-   * `conditionalCtx.activeEncoder`, which reads localStorage, does not lag
-   * during the post debounce and let a `serverSettings` sync re-derive rate
-   * control off the stale encoder.
+   * pipeline encoder on it, and the choice is persisted at once.
    */
   const handleEncoderChange = (event) => {
     const selectedEncoder = event.target.value;
     setEncoder(selectedEncoder);
     localStorage.setItem(getPrefixedKey("encoder"), selectedEncoder);
     debouncedPostSetting({ encoder: selectedEncoder });
-    rederiveRateControl({ activeEncoder: selectedEncoder });
   };
   const handleWebcamEncoderChange = (event) => {
     const preference = event.target.value;
@@ -2120,12 +2103,11 @@ function Sidebar() {
   };
   const handleUseCpuToggle = () => {
     writeConditional(USE_CPU_SPEC, !use_cpu, setUseCpu, { persist: true });
-    rederiveRateControl({ useCpu: !use_cpu });
   };
   const handleH264StreamingModeToggle = () => {
     writeConditional(VIDEO_STREAMING_MODE_SPEC, !videoStreamingMode, setVideoStreamingMode, { persist: true });
   };
-  /** Rate control pick: an explicit choice, persisted so encoder changes stop overriding it. */
+  /** Rate control pick: an explicit choice, persisted so it outranks the server's default. */
   const handleRateControlChange = (event) => {
     writeConditional(RATE_CONTROL_SPEC, event.target.value, setRateControlMode, { persist: true });
   };

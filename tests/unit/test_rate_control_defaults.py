@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""The rate-control default follows the transport and the software encoder.
-Websockets streams resolve per encoder (CRF), except that a session known to
-encode on OpenH264 — the software H.264 encoder of a GPL-free pixelflux build,
-read from pixelflux.SOFTWARE_ENCODERS — resolves to CBR; WebRTC streams
-resolve to CBR regardless of encoder, and an operator-provided rate_control_mode
-or disabled rate control always wins. The same rule must hold at startup for
-either mode and across a live transport switch, which re-resolves through
-resolve_rate_control_default() exactly as the stream server does. The retired
-openh264enc encoder name is accepted as an alias of h264enc wherever an encoder
-name enters.
+"""The rate-control default is CBR on both transports, for every encoder and
+either software H.264 encoder of a pixelflux build (read from
+pixelflux.SOFTWARE_ENCODERS), and paint-over is off while Turbo encodes every
+frame of a video encoder and on otherwise, JPEG included; an operator-provided
+rate_control_mode or use_paint_over_quality, or disabled rate control, always
+wins. The same holds at startup for either mode and across a live transport
+switch, which rewrites the mode, refilters the encoder, and re-derives
+paint-over exactly as the stream server does. The retired openh264enc encoder
+name is accepted as an alias of h264enc wherever an encoder name enters.
 """
 import os
 import subprocess
@@ -56,12 +55,13 @@ def resolved(software_encoder: str = "", **env: str) -> str:
     return probe("print(s.settings.rate_control_mode)", software_encoder, **env)
 
 
-# On the x264 build every websockets encoder is quality-driven; the OpenH264
-# build's software-path exceptions are checked below with that build stubbed.
-for encoder, want in [("h264enc", "crf"), ("h264enc-striped", "crf"), ("jpeg", "crf"),
-                      ("h265enc", "crf"), ("vp8enc", "crf"), ("vp9enc", "crf"), ("av1enc", "crf")]:
-    got = resolved("x264", SELKIES_MODE="websockets", SELKIES_ENCODER=encoder)
-    check(f"websockets {encoder} defaults to {want}", got == want, got)
+for build in ("x264", "openh264"):
+    for encoder in ("h264enc", "h264enc-striped", "jpeg", "h265enc", "vp8enc", "vp9enc", "av1enc"):
+        got = resolved(build, SELKIES_MODE="websockets", SELKIES_ENCODER=encoder)
+        check(f"{build} build: websockets {encoder} defaults to cbr", got == "cbr", got)
+    for extra in ({"SELKIES_USE_CPU": "true"}, {"SELKIES_GPU_ID": "-1"}):
+        got = resolved(build, SELKIES_MODE="websockets", SELKIES_ENCODER="h264enc", **extra)
+        check(f"{build} build: websockets h264enc {extra} defaults to cbr", got == "cbr", got)
 
 got = resolved(SELKIES_MODE="webrtc")
 check("webrtc defaults to cbr", got == "cbr", got)
@@ -77,28 +77,9 @@ got = probe("import importlib.util as iu"
             " s.software_encoders()['h264'] in ('x264', 'openh264'))")
 check("software_encoders() reports the installed pixelflux build", got == "True True", got)
 
-# x264 is quality-driven: the software path keeps the CRF default. OpenH264
-# targets a bandwidth: a session known to be on the software path (the striped
-# encoder, or h264enc with software encoding forced by use_cpu or gpu_id=-1)
-# defaults to CBR, while a hardware-first h264enc — which may still land on the
-# CPU, unknowably — keeps CRF.
-for encoder, extra, want in [("h264enc", {}, "crf"),
-                             ("h264enc", {"SELKIES_USE_CPU": "true"}, "crf"),
-                             ("h264enc-striped", {}, "crf")]:
-    got = resolved("x264", SELKIES_MODE="websockets", SELKIES_ENCODER=encoder, **extra)
-    check(f"x264 build: websockets {encoder} {extra or ''} defaults to {want}", got == want, got)
-for encoder, extra, want in [("h264enc", {}, "crf"),
-                             ("h264enc", {"SELKIES_USE_CPU": "true"}, "cbr"),
-                             ("h264enc", {"SELKIES_GPU_ID": "-1"}, "cbr"),
-                             ("h264enc-striped", {}, "cbr"),
-                             ("av1enc", {"SELKIES_USE_CPU": "true"}, "crf"),
-                             ("vp8enc", {"SELKIES_GPU_ID": "-1"}, "crf"),
-                             ("jpeg", {}, "crf")]:
-    got = resolved("openh264", SELKIES_MODE="websockets", SELKIES_ENCODER=encoder, **extra)
-    check(f"openh264 build: websockets {encoder} {extra or ''} defaults to {want}", got == want, got)
 got = resolved("openh264", SELKIES_MODE="websockets", SELKIES_ENCODER="h264enc-striped",
                SELKIES_RATE_CONTROL_MODE="crf")
-check("openh264 build: an operator crf pin beats the software-path cbr default", got == "crf", got)
+check("openh264 build: an operator crf pin beats the cbr default", got == "crf", got)
 got = probe("p = s.build_client_settings_payload()['software_encoders']['value'];"
             " print(p['h264'], p['av1'], 'h265' in p)", "openh264")
 check("the software encoders are published to clients", got == "openh264 svt-av1 False", got)
@@ -190,17 +171,10 @@ got = probe(
 check("a fresh pick during the webrtc leg wins and never resurrects the stash",
       got == "h264enc|h264enc|h264enc", got)
 
-# The mode comparison runs on the normalized transport name, so an operator's
-# casing must not silently swap which default applies.
-got = resolved(SELKIES_MODE="WebRTC")
-check("mixed-case webrtc mode still defaults to cbr", got == "cbr", got)
-got = resolved(SELKIES_MODE="WebSockets")
-check("mixed-case websockets mode still defaults to crf", got == "crf", got)
-
 got = resolved(SELKIES_MODE="webrtc", SELKIES_RATE_CONTROL_MODE="crf")
 check("operator crf pin beats the webrtc cbr default", got == "crf", got)
-got = resolved(SELKIES_MODE="websockets", SELKIES_RATE_CONTROL_MODE="cbr")
-check("operator cbr pin beats the websockets crf default", got == "cbr", got)
+got = resolved(SELKIES_MODE="websockets", SELKIES_RATE_CONTROL_MODE="crf")
+check("operator crf pin beats the websockets cbr default", got == "crf", got)
 
 got = resolved(SELKIES_MODE="webrtc", SELKIES_ENABLE_RATE_CONTROL="false",
                SELKIES_RATE_CONTROL_MODE="cbr")
@@ -211,49 +185,55 @@ got = probe(
     SELKIES_MODE="webrtc", SELKIES_ENABLE_RATE_CONTROL="false")
 check("disabled rate control publishes a crf-only menu", got == "['crf']", got)
 
-# The live transport switch: the stream server rewrites mode and re-resolves,
-# so an unpinned rate control follows the transport actually streaming.
-got = probe(
-    "s.settings.mode = 'webrtc'; s.settings.resolve_rate_control_default();"
-    " out = [s.settings.rate_control_mode];"
-    " s.settings.mode = 'websockets'; s.settings.resolve_rate_control_default();"
-    " out.append(s.settings.rate_control_mode); print(','.join(out))",
-    SELKIES_MODE="websockets")
-check("a live switch re-resolves cbr then back to crf", got == "cbr,crf", got)
-
-got = probe(
-    "s.settings.mode = 'webrtc'; s.settings.resolve_rate_control_default();"
-    " print(s.settings.rate_control_mode)",
-    SELKIES_MODE="websockets", SELKIES_RATE_CONTROL_MODE="crf")
-check("a live switch never overwrites an operator pin", got == "crf", got)
+# The live transport switch, as the stream server makes it: the mode is
+# rewritten and the encoder refiltered, and the rate control stays what it was.
+SWITCH = ("s.settings.mode = 'webrtc'; s.settings.apply_webrtc_encoder_filter();"
+          " out = [s.settings.rate_control_mode];"
+          " s.settings.mode = 'websockets'; s.settings.apply_webrtc_encoder_filter();"
+          " out.append(s.settings.rate_control_mode); print(','.join(out))")
+got = probe(SWITCH, SELKIES_MODE="websockets")
+check("a live switch keeps cbr both ways", got == "cbr,cbr", got)
+got = probe(SWITCH, SELKIES_MODE="websockets", SELKIES_RATE_CONTROL_MODE="crf")
+check("and never overwrites an operator pin", got == "crf,crf", got)
 
 
-# Paint-over defaults off under resolved CBR and on under CRF; an operator pin
-# of either setting always beats the derivation.
+# Paint-over follows Turbo on either transport, whatever the rate control,
+# except for JPEG, which Turbo leaves damage-driven; an operator's choice
+# always stands.
 def paintover(**env: str) -> str:
     return probe("print(s.settings.use_paint_over_quality[0])", **env)
 
 
-check("websockets crf defaults paint-over on", paintover(SELKIES_MODE="websockets") == "True", "")
-check("webrtc cbr defaults paint-over off", paintover(SELKIES_MODE="webrtc") == "False", "")
-check("operator cbr pin yields paint-over off",
-      paintover(SELKIES_MODE="websockets", SELKIES_RATE_CONTROL_MODE="cbr") == "False", "")
-check("operator crf pin on webrtc yields paint-over on",
-      paintover(SELKIES_MODE="webrtc", SELKIES_RATE_CONTROL_MODE="crf") == "True", "")
-check("operator paint-over pin beats the cbr default",
-      paintover(SELKIES_MODE="webrtc", SELKIES_USE_PAINT_OVER_QUALITY="true") == "True", "")
-check("operator paint-over-off pin survives a crf default",
-      paintover(SELKIES_MODE="websockets", SELKIES_USE_PAINT_OVER_QUALITY="false") == "False", "")
-check("disabled rate control (forced crf) defaults paint-over on",
-      paintover(SELKIES_MODE="webrtc", SELKIES_ENABLE_RATE_CONTROL="false") == "True", "")
+for mode in ("websockets", "webrtc"):
+    check(f"{mode} defaults paint-over off under Turbo", paintover(SELKIES_MODE=mode) == "False", "")
+    check(f"{mode} defaults it on without Turbo",
+          paintover(SELKIES_MODE=mode, SELKIES_VIDEO_STREAMING_MODE="false") == "True", "")
+    check(f"{mode} keeps it off under Turbo and an operator crf pin",
+          paintover(SELKIES_MODE=mode, SELKIES_RATE_CONTROL_MODE="crf") == "False", "")
+    check(f"{mode} keeps an operator's paint-over on under Turbo",
+          paintover(SELKIES_MODE=mode, SELKIES_USE_PAINT_OVER_QUALITY="true") == "True", "")
+    check(f"{mode} keeps an operator's paint-over off without Turbo",
+          paintover(SELKIES_MODE=mode, SELKIES_VIDEO_STREAMING_MODE="false",
+                    SELKIES_USE_PAINT_OVER_QUALITY="false") == "False", "")
+check("jpeg defaults paint-over on under Turbo",
+      paintover(SELKIES_MODE="websockets", SELKIES_ENCODER="jpeg") == "True", "")
+check("disabled rate control (forced crf) leaves paint-over to Turbo",
+      paintover(SELKIES_MODE="webrtc", SELKIES_ENABLE_RATE_CONTROL="false") == "False", "")
 
-got = probe(
-    "s.settings.mode = 'webrtc'; s.settings.resolve_rate_control_default();"
-    " out = [s.settings.use_paint_over_quality[0]];"
-    " s.settings.mode = 'websockets'; s.settings.resolve_rate_control_default();"
-    " out.append(s.settings.use_paint_over_quality[0]); print(','.join(str(v) for v in out))",
-    SELKIES_MODE="websockets")
-check("the live switch flips the paint-over default with the transport", got == "False,True", got)
+# A switch to webrtc clamps jpeg to a video encoder, which Turbo leaves
+# nothing to paint over; the switch back restores jpeg and paint-over with it.
+PAINT_SWITCH = ("out = []"
+                "\nfor mode in ('webrtc', 'websockets'):"
+                "\n    s.settings.mode = mode; s.settings.apply_webrtc_encoder_filter()"
+                "\n    s.settings.resolve_paint_over_default()"
+                "\n    out.append(f'{s.settings.encoder}:{s.settings.use_paint_over_quality[0]}')"
+                "\nprint(','.join(out))")
+got = probe(PAINT_SWITCH, SELKIES_MODE="websockets", SELKIES_ENCODER="jpeg")
+check("a live switch re-derives paint-over from the encoder it leaves",
+      got == "h264enc:False,jpeg:True", got)
+got = probe(PAINT_SWITCH, SELKIES_MODE="websockets", SELKIES_ENCODER="jpeg",
+            SELKIES_USE_PAINT_OVER_QUALITY="true")
+check("and never overwrites an operator's paint-over", got == "h264enc:True,jpeg:True", got)
 
 print(f"[rc-default] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

@@ -1,7 +1,8 @@
 /**
  * Conditional settings: settings whose default depends on other state (HiDPI
- * defers to whether a manual resolution is set, rate control to the encoder,
- * ...).
+ * defers to whether a manual resolution is set, paint-over to Turbo, ...), and
+ * the plain ones that share the ladder so a locked or overridden server value
+ * reaches the UI.
  *
  * Each is a declarative spec, and the precedence ladder, resolution, and
  * (through the dashboards' thin `useConditionalSetting` hook) initialization,
@@ -46,41 +47,6 @@ import { codecOfEncoder } from "./wire-codecs.js";
  */
 
 /**
- * Rate-control default per encoder for WebSocket streams when nothing
- * explicit is chosen: quality-driven (CRF).
- *
- * WebRTC streams default to CBR regardless of encoder (`RATE_CONTROL_SPEC`):
- * a congestion-controlled transport needs the encoder holding a bandwidth
- * target. So does OpenH264, the software H.264 encoder of a GPL-free
- * pixelflux build: an H.264 session known to encode on the CPU defaults to
- * CBR when the server reports that build (`softwareRcDefault`, the same rule
- * as the server's `resolve_rate_control_default`).
- */
-export const ENCODER_RC_DEFAULTS = {
-    "h264enc": "crf",
-    "h265enc": "crf",
-    "vp8enc": "crf",
-    "vp9enc": "crf",
-    "av1enc": "crf",
-    "h264enc-striped": "crf",
-    "jpeg": "crf",
-};
-
-/**
- * Whether a session with this encoder is known to encode video on the CPU:
- * the striped encoder has no hardware path, and a full-frame encoder does when
- * software encoding is forced (without it the session may still land on the
- * CPU, which nothing here can know in advance).
- * @param {string} encoder Encoder wire value.
- * @param {boolean} useCpu Whether software encoding is forced.
- * @returns {boolean}
- */
-export function softwareVideoPath(encoder, useCpu) {
-    if (encoder === "jpeg") return false;
-    return encoder === "h264enc-striped" || !!useCpu;
-}
-
-/**
  * Whether the software-encoding switch changes anything for an encoder: its
  * codec has both a hardware backend on the server's encode node and a
  * software encoder in its pixelflux build, so the switch moves the session
@@ -97,21 +63,6 @@ export function softwareChoiceAvailable(encoder, encoderBackends) {
     if (!encoderBackends) return encoder === "h264enc";
     const backends = encoderBackends[codecOfEncoder(encoder)];
     return !!(backends && backends.hardware && backends.software);
-}
-
-/**
- * The WebSocket rate-control default for an encoder.
- * @param {string} encoder Encoder wire value.
- * @param {Object<string, string>|undefined} softwareEncoders The server's
- *     software encoder per codec from the settings payload (`h264` is `x264`
- *     or `openh264`).
- * @param {boolean} useCpu Whether software encoding is forced.
- * @returns {string|undefined} `cbr` or `crf`; `undefined` for an unknown encoder.
- */
-export function softwareRcDefault(encoder, softwareEncoders, useCpu) {
-    const h264 = encoder === "h264enc" || encoder === "h264enc-striped";
-    if (h264 && softwareEncoders && softwareEncoders.h264 === "openh264" && softwareVideoPath(encoder, useCpu)) return "cbr";
-    return ENCODER_RC_DEFAULTS[encoder];
 }
 
 /**
@@ -191,16 +142,13 @@ export const HIDPI_SPEC = {
     propagate: (cssScaling, _ctx, io) => io.postToCore({ type: "setUseCssScaling", value: cssScaling }),
 };
 
-/** Rate control: CBR on WebRTC, else the per-encoder default. */
+/** Rate control: the server's, CBR unless an operator set it, on both transports. */
 export const RATE_CONTROL_SPEC = {
     id: "rate_control_mode",
     serverKey: "rate_control_mode",
     storageKey: "rate_control_mode",
-    conditional: (ctx) => (ctx.streamMode === "webrtc"
-        ? "cbr"
-        : softwareRcDefault(ctx.activeEncoder, ctx.softwareEncoders, ctx.useCpu)),
     isValid: (v, ctx) => ctx.allowedRateControl.includes(v),
-    fallback: "crf",
+    fallback: "cbr",
     propagate: (mode, _ctx, io) => io.postSetting({ rate_control_mode: mode }),
 };
 
@@ -230,14 +178,14 @@ export const VIDEO_FULLCOLOR_SPEC = boolSpec("video_fullcolor", false,
 export const VIDEO_STREAMING_MODE_SPEC = boolSpec("video_streaming_mode", false,
     (value, _ctx, io) => io.postSetting({ video_streaming_mode: value }));
 /**
- * Paint-over spends encoder effort a bandwidth-targeted stream budgets for
- * motion, so it defaults off under CBR and back on under CRF until someone
- * chooses (the same rule as the server's `resolve_paint_over_default`).
+ * Paint-over refines a static scene, which Turbo never leaves a video encoder
+ * (it encodes every frame), so it defaults off under Turbo and on otherwise,
+ * JPEG included (the same rule as the server's `resolve_paint_over_default`).
  */
 export const USE_PAINT_OVER_QUALITY_SPEC = {
     ...boolSpec("use_paint_over_quality", true,
         (value, _ctx, io) => io.postSetting({ use_paint_over_quality: value })),
-    conditional: (ctx) => (ctx.rateControlMode === "cbr" ? false : ctx.rateControlMode === "crf" ? true : undefined),
+    conditional: (ctx) => ctx.encoder === "jpeg" || !ctx.videoStreamingMode,
 };
 export const USE_CPU_SPEC = boolSpec("use_cpu", false,
     (value, _ctx, io) => io.postSetting({ use_cpu: value }));

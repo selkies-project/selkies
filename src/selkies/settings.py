@@ -263,11 +263,9 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "rate_control_mode",
         "type": "enum",
-        "default": "crf",
-        # "cbr" first is dropdown order only: the default stays "crf" and
-        # allowed[0] is never a fallback here (clients only send crf/cbr).
+        "default": "cbr",
         "meta": {"allowed": ["cbr", "crf"]},
-        "help": "Rate control mode for the video encoders (crf = constant quality/QP, cbr = constant bitrate). Honored for every video encoder when enable_rate_control is true (the default).",
+        "help": "Rate control mode for the video encoders on both transports (cbr = constant bitrate, crf = constant quality/QP). Honored for every video encoder when enable_rate_control is true (the default).",
     },
     {
         "name": "enable_rate_control",
@@ -704,7 +702,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "use_paint_over_quality",
         "type": "bool",
         "default": True,
-        "help": "Enable high-quality paint-over for static scenes.",
+        "help": "Enable high-quality paint-over for static scenes. Unless set, it is off while video_streaming_mode (Turbo) encodes every frame of a video encoder, which leaves no scene static, and on otherwise, JPEG included.",
     },
     {
         "name": "paint_over_jpeg_quality",
@@ -1371,8 +1369,6 @@ class AppSettings:
     `_process_and_set_attributes`.
 
     Attributes:
-        ENCODER_RC_DEFAULTS: Per-encoder websockets rate-control default;
-            resolved by `resolve_rate_control_default`.
         _setting_definitions: The definition list, mutated in place when an
             override narrows a menu.
         _overridden: Setting name to whether CLI/env gave it explicitly; what
@@ -1717,16 +1713,6 @@ class AppSettings:
         """
         return bool(getattr(self, "_overridden", {}).get(name, False))
 
-    ENCODER_RC_DEFAULTS = {
-        "h264enc": "crf",
-        "h265enc": "crf",
-        "vp8enc": "crf",
-        "vp9enc": "crf",
-        "av1enc": "crf",
-        "h264enc-striped": "crf",
-        "jpeg": "crf",
-    }
-
     def encode_node_index(self) -> Optional[int]:
         """The DRI render-node index hardware encoders open, resolved as the
         capture settings resolve it: `encode_dri` names a node, else `gpu_id`
@@ -1852,48 +1838,6 @@ class AppSettings:
         enc_definition["meta"]["allowed"] = list(served)
         self.apply_webrtc_encoder_filter()
 
-    def on_software_video_path(self) -> bool:
-        """Whether the server's own defaults put a session on the software
-        video path: the striped encoder, or a full-frame encoder with software
-        encoding forced by use_cpu or gpu_id=-1."""
-        forced = bool(self.use_cpu[0]) or str(self.gpu_id).strip() == "-1"
-        return software_video_path(self.encoder, forced)
-
-    def software_encoder_in_use(self) -> Optional[str]:
-        """The software encoder a session on the software path encodes with,
-        by the pixelflux build's table; None off that path or without one."""
-        if not self.on_software_video_path():
-            return None
-        return software_encoders().get(codec_for_encoder(self.encoder))
-
-    def resolve_rate_control_default(self) -> None:
-        """Apply the transport's rate-control default for the current mode.
-
-        WebRTC streams default to CBR whatever the encoder: a
-        congestion-controlled transport needs the encoder holding a bandwidth
-        target. Websockets streams are quality-driven (`ENCODER_RC_DEFAULTS`),
-        except that OpenH264 — the software H.264 encoder of a GPL-free
-        pixelflux build — targets a bandwidth, so a session known to be on the
-        software path defaults to CBR; encoders not listed keep their value.
-        The dashboards derive the same default client-side
-        (conditional-settings.js) from the published `software_encoders`.
-
-        A no-op when the operator pinned rate_control_mode or disabled rate
-        control. Called again on a live transport switch so an unpinned mode
-        tracks the transport actually streaming.
-        """
-        if not self.enable_rate_control[0] or self.was_provided("rate_control_mode"):
-            return
-        if self.mode == "webrtc":
-            self.rate_control_mode = "cbr"
-        elif self.software_encoder_in_use() == "openh264":
-            self.rate_control_mode = "cbr"
-        else:
-            self.rate_control_mode = self.ENCODER_RC_DEFAULTS.get(
-                self.encoder, self.rate_control_mode
-            )
-        self.resolve_paint_over_default()
-
     def apply_webrtc_encoder_filter(self) -> None:
         """Bring the `encoder` knob — the published menu and the value — in
         line with the transport.
@@ -1965,19 +1909,19 @@ class AppSettings:
             self._webrtc_encoder_fallback = None
 
     def resolve_paint_over_default(self) -> None:
-        """Default paint-over off on a bandwidth-targeted stream (CBR): the
-        static-scene repaint forces periodic bursts that a bitrate cap pays
-        for in motion quality, and no client has asked for the trade yet.
+        """Default paint-over to where it can act: off while Turbo encodes
+        every frame of a video encoder, since a scene is then never static,
+        and on otherwise, JPEG included, which Turbo leaves damage-driven.
 
-        An explicit operator use_paint_over_quality choice wins via the
-        override check inside; client choices live in per-display state and
-        the dashboards' own precedence ladder, which this default never
-        outranks. Called from anywhere rate control resolves.
+        An operator's use_paint_over_quality wins; a client's choice lives in
+        its display's state and the dashboards' precedence ladder, whose
+        conditional-settings.js derives the same default. Called again on a
+        transport switch, which can change the encoder.
         """
         if self.was_provided("use_paint_over_quality"):
             return
         self.use_paint_over_quality = (
-            self.rate_control_mode != "cbr",
+            self.encoder == "jpeg" or not self.video_streaming_mode[0],
             self.use_paint_over_quality[1],
         )
 
@@ -1995,7 +1939,9 @@ class AppSettings:
         quality on both transports, so the resolved mode and the menu
         published to clients are CRF alone; an encoder-derived "cbr" would
         leave the dashboards showing a bitrate slider the encoder ignores and
-        hiding the CRF slider in force. Microphone forwarding requires audio.
+        hiding the CRF slider in force. Paint-over defaults off where Turbo
+        leaves it nothing to do (`resolve_paint_over_default`). Microphone
+        forwarding requires audio.
         A public listener is the both-family wildcard address, so the server
         binds from `addr` alone.
         The clipboard policy is normalized to exactly one of its four values.
@@ -2036,9 +1982,6 @@ class AppSettings:
             )
             if rc_definition is not None:
                 rc_definition["meta"]["allowed"] = ["crf"]
-        else:
-            self.resolve_rate_control_default()
-        # Keys off the resolved mode whichever branch above produced it.
         self.resolve_paint_over_default()
 
         audio_enabled = self.audio_enabled[0]

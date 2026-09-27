@@ -2064,7 +2064,7 @@ class CentralizedStreamServer:
             logger.info(f"Starting service: {mode_name}")
             self.settings.mode = mode_name
             self.settings.apply_webrtc_encoder_filter()
-            self.settings.resolve_rate_control_default()
+            self.settings.resolve_paint_over_default()
             service = self.services[mode_name]
             task = asyncio.create_task(service.start())
             self.active_task = task

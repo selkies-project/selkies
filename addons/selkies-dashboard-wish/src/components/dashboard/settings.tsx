@@ -24,8 +24,8 @@
  * adds the `_display2` suffix for per-display settings on a secondary display;
  * the cores read the same keys. The cores also persist every value they are
  * told to apply, so a stored key alone cannot tell a user's explicit pick from
- * one the dashboard derived (HiDPI from the resolution mode, rate control from
- * the encoder). Settings that are also derived therefore carry an
+ * one the dashboard derived (HiDPI from the resolution mode, paint-over from
+ * Turbo). Settings that are also derived therefore carry an
  * `_explicit_choice` marker beside their value and resolve through the shared
  * specs of `selkies-web-core/lib/conditional-settings.js`, which honor pinned,
  * locked, and operator-overridden server values: a derived write never pins
@@ -184,8 +184,8 @@ const readExplicitStored = (spec: any) => (key: string) => (
 
 /**
  * Drives a conditional setting: lazy init, then a re-resolve whenever the
- * server settings or any dependency in `deps` changes (server sync and
- * encoder or manual-resolution re-derivation alike). The resolver honors
+ * server settings or any dependency in `deps` changes (server sync and a
+ * dependency's re-derivation alike). The resolver honors
  * explicit choices, so a re-resolve never clobbers a pinned value.
  *
  * Re-resolving writes state rather than deriving during render because the
@@ -335,22 +335,21 @@ export function Settings() {
     /**
      * State the conditional settings read; rebuilt each render so the hooks
      * below re-resolve against current values when their deps change.
-     * `activeEncoder` is the one knob for both transports and reads storage
-     * first: an out-of-set stored value falls to the server's own fallback and
-     * the serverSettings sync re-seats it. `softwareEncoders` and `useCpu`
-     * (client choice, else the server's) feed the rate-control default;
      * `encoderBackends` decides whether the software encoding switch is shown.
+     * Paint-over also reads the encoder and Turbo, Turbo resolved here rather
+     * than taken from its state, which trails the serverSettings sync by a
+     * render.
      */
     const conditionalCtx = {
         manualActive: !!readStored("manual_width") || serverSettings?.manual_resolution?.value === true,
-        streamMode,
-        activeEncoder: readStored("encoder") || encoder,
-        softwareEncoders: serverSettings?.software_encoders?.value,
         encoderBackends: serverSettings?.encoder_backends?.value,
-        useCpu: readStored("use_cpu") !== null
-            ? readStored("use_cpu") === "true" : !!serverSettings?.use_cpu?.value,
         allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
         macDesktop: isMacDesktop(),
+    };
+    const paintOverCtx = {
+        ...conditionalCtx,
+        encoder,
+        videoStreamingMode: resolveSpec(VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, readStored),
     };
     const DEBOUNCE_DELAY = 500;
     const debouncedPostSetting = useMemo(() => settingsPoster(DEBOUNCE_DELAY), []);
@@ -378,7 +377,7 @@ export function Settings() {
     const [hidpiEnabled, setHidpiEnabled] = useConditionalSetting(
         HIDPI_SPEC, serverSettings, conditionalCtx, [serverSettings], readHidpiStored);
     const [rateControlMode, setRateControlMode] = useConditionalSetting(
-        RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings, streamMode], readRateControlStored);
+        RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
     /**
      * With rate control disabled the server ignores rate_control_mode and
      * keeps the encoder's built-in default, so the dashboard neither pushes a
@@ -456,18 +455,15 @@ export function Settings() {
     const [videoPaintoverBurstFrames, setVideoPaintoverBurstFrames] = useState(() =>
         parseInt(localStorage.getItem(getPrefixedKey("video_paintover_burst_frames")) ?? "", 10) || 5
     );
-    // Paint-over's default tracks rate control, so its resolution ctx carries
-    // the mode the rc hook just settled on.
-    const paintOverCtx = { ...conditionalCtx, rateControlMode };
     const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
-        USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings, rateControlMode], readPaintOverStored);
-    // Push the paint-over default the resolved rate control implies so the
-    // encoder agrees (same shape as the rate-control derivation above).
+        USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings], readPaintOverStored);
+    // Push the resolved paint-over default so the encoder agrees (same shape
+    // as the rate-control derivation above); a later encoder or Turbo change
+    // re-derives it.
     useEffect(() => {
         if (!serverSettings) return;
         const key = USE_PAINT_OVER_QUALITY_SPEC.storageKey;
-        const resolved = resolveSpec(
-            USE_PAINT_OVER_QUALITY_SPEC, serverSettings, { ...conditionalCtx, rateControlMode }, readPaintOverStored);
+        const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
         // Same stale-echo rule as rate control.
         if (!isExplicitChoice(USE_PAINT_OVER_QUALITY_SPEC)
             && readStored(key) !== null
@@ -480,7 +476,15 @@ export function Settings() {
             writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [serverSettings, rateControlMode]);
+    }, [serverSettings]);
+    useEffect(() => {
+        if (!serverSettings || isSettingPinned(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, readPaintOverStored)) return;
+        const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
+        if (resolved !== usePaintOverQuality) {
+            writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [encoder, videoStreamingMode]);
     const [useCpu, setUseCpu] = useConditionalSetting(
         USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
 
@@ -807,28 +811,10 @@ export function Settings() {
         }
     };
 
-    /**
-     * Re-derives rate control from the encoder and software encoding unless
-     * it is pinned by an explicit client or server choice. A derived change
-     * is not persisted, so it keeps following. `ctxOverrides` carries the
-     * value just chosen, ahead of the re-render that would put it in
-     * conditionalCtx.
-     */
-    const rederiveRateControl = (ctxOverrides: Record<string, unknown>) => {
-        if (!rateControlEnabled
-            || isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readRateControlStored)) return;
-        const rcResolved = resolveSpec(
-            RATE_CONTROL_SPEC, serverSettings,
-            { ...conditionalCtx, ...ctxOverrides }, readRateControlStored);
-        if (rcResolved !== rateControlMode) {
-            writeConditional(RATE_CONTROL_SPEC, rcResolved, setRateControlMode, { persist: false });
-        }
-    };
     const handleEncoderChange = (selectedEncoder: string) => {
         setEncoder(selectedEncoder);
         localStorage.setItem(getPrefixedKey('encoder'), selectedEncoder);
         debouncedPostSetting({ encoder: selectedEncoder });
-        rederiveRateControl({ activeEncoder: selectedEncoder });
     };
 
     const handleWebcamEncoderChange = (preference: string) => {
@@ -855,7 +841,7 @@ export function Settings() {
         debouncedPostSetting({ video_crf: selectedCRF });
     };
 
-    /** An explicit choice is persisted, which pins it against encoder changes. */
+    /** An explicit choice is persisted, which pins it over the server's default. */
     const handleRateControlChange = (mode: string) => {
         writeConditional(RATE_CONTROL_SPEC, mode, setRateControlMode, { persist: true });
     };
@@ -904,7 +890,6 @@ export function Settings() {
 
     const handleUseCpuToggle = () => {
         writeConditional(USE_CPU_SPEC, !useCpu, setUseCpu, { persist: true });
-        rederiveRateControl({ useCpu: !useCpu });
     };
 
     /** Anti-aliasing is client-only; the core persists antiAliasingEnabled itself. */
