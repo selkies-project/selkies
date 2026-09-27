@@ -26,22 +26,24 @@ from selkies import display_utils as DU  # noqa: E402
 
 res = H.Results("session-density")
 
-res.check("a display's number is read from every local form of its name",
-          [DU._display_number(n) for n in (":20", ":20.0", "unix:20", "localhost:20", "", None)]
-          == ["20", "20", "20", None, None, None])
-elsewhere, here = (subprocess.Popen(["sleep", "30"], env={"PATH": os.environ.get("PATH", ""),
-                                                          "SELKIES_PROBE": "density", "DISPLAY": d})
-                   for d in (":97", ":98.0"))
+res.check("every local form of a display name reaches one server, and a TCP name only its own host's",
+          [DU._display_server(n) for n in (":20", ":20.0", "unix:20", "unix/:20", "localhost:20",
+                                           "tcp/localhost:20", ":20x", "", None)]
+          == [("", "20")] * 4 + [("localhost", "20")] * 2 + [None] * 3)
+sleepers = {d: subprocess.Popen(["sleep", "30"], env={"PATH": os.environ.get("PATH", ""),
+                                                      "SELKIES_PROBE": "density", "DISPLAY": d})
+            for d in (":97", "localhost:98", ":98.0", "unix/:98")}
 suite_display = os.environ.get("DISPLAY")
 try:
     time.sleep(0.2)
-    env = DU._process_environ(here.pid)
+    env = DU._process_environ(sleepers[":98.0"].pid)
     res.check("a process's environment is read back from /proc",
               env.get("SELKIES_PROBE") == "density", str(env))
     os.environ["DISPLAY"] = "unix:98"
     pids = asyncio.run(DU._pids_on_display("sleep"))
-    res.check("the processes running a binary are found on this display alone",
-              here.pid in pids and elsewhere.pid not in pids, str(pids))
+    found = sorted(d for d, p in sleepers.items() if p.pid in pids)
+    res.check("the processes running a binary are found on this display alone, however it is written",
+              found == [":98.0", "unix/:98"], found)
     res.check("a binary nothing is running has no pids",
               asyncio.run(DU._pids_on_display("selkies-no-such-binary")) == [])
 finally:
@@ -49,12 +51,12 @@ finally:
         os.environ.pop("DISPLAY", None)
     else:
         os.environ["DISPLAY"] = suite_display
-    for sleeper in (elsewhere, here):
+    for sleeper in sleepers.values():
         sleeper.kill()
         sleeper.wait()
 
 res.check("a process that is gone has no environment to read",
-          DU._process_environ(here.pid) == {})
+          DU._process_environ(sleepers[":98.0"].pid) == {})
 
 res.check("no density is reported before one is applied", DU.applied_dpi() is None)
 DU._APPLIED_DPI = 192

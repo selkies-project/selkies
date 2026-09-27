@@ -1734,11 +1734,19 @@ def _process_environ(pid: int) -> Dict[str, str]:
     return env
 
 
-def _display_number(name: Optional[str]) -> Optional[str]:
-    """The number a local X display name carries: ``:20``, ``:20.0``, and
-    ``unix:20`` are all 20; None for any other name."""
-    match = re.match(r"(?:unix)?:(\d+)", name or "")
-    return match.group(1) if match else None
+def _display_server(name: Optional[str]) -> Optional[Tuple[str, str]]:
+    """The X server a display name reaches, as its host and display number.
+
+    Names read as Xlib reads them, ``[protocol/][host]:number[.screen]``: every
+    local form (``:20``, ``:20.0``, ``unix:20``, ``unix/:20``) reaches host "",
+    and a name over TCP keeps its host, so it matches only a name of that host.
+    None for anything that is not a display name.
+    """
+    match = re.fullmatch(r"(?:(\w+)/)?(.*):(\d+)(?:\.\d+)?", name or "")
+    if not match:
+        return None
+    protocol, host, number = match.groups()
+    return ("" if protocol == "unix" or host in ("", "unix") else host.lower(), number)
 
 
 async def _pids_on_display(binary: str) -> List[int]:
@@ -1749,14 +1757,14 @@ async def _pids_on_display(binary: str) -> List[int]:
     display, a second session of the same user or a test server, is never acted
     on for this one.
     """
-    display = _display_number(os.environ.get("DISPLAY"))
+    display = _display_server(os.environ.get("DISPLAY"))
     if display is None or not which("pgrep"):
         return []
     proc = await subprocess.create_subprocess_exec(
         "pgrep", "-x", binary, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     stdout, _ = await _communicate_or_kill(proc)
     return [pid for pid in (int(p) for p in stdout.split() if p.isdigit())
-            if _display_number(_process_environ(pid).get("DISPLAY")) == display]
+            if _display_server(_process_environ(pid).get("DISPLAY")) == display]
 
 
 async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
