@@ -83,7 +83,7 @@ import re
 import json
 import aiofiles
 import msgpack
-from PIL import Image
+from PIL import Image, ImageOps
 import urllib.parse
 import urllib.request
 from typing import Any, Callable, Container, Dict, Iterable, List, Optional, Tuple, Union
@@ -1945,6 +1945,43 @@ def clipboard_flavours(payload: bytes) -> List[Tuple[str, bytes]]:
     if not entries:
         raise ValueError(f"no usable clipboard flavour in {sorted(decoded)}")
     return entries
+
+
+def clipboard_png_beside(mime_type: str, data: bytes) -> Optional[bytes]:
+    """A PNG of an image a client sent in another format, to offer beside it.
+
+    Chromium pastes no image type but PNG from either selection, and neither do
+    most other applications, while a picture uploaded from disk arrives as the
+    JPEG or WebP it was saved as. The pixels are decoded as the browser that
+    sent them showed them, EXIF orientation included; a format Pillow cannot
+    decode is offered only as it came.
+
+    Args:
+        mime_type: The payload's type.
+        data: The payload.
+
+    Returns:
+        The PNG, or None for anything but a decodable non-PNG image.
+    """
+    if not mime_type.startswith("image/") or mime_type == "image/png":
+        return None
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            frame = ImageOps.exif_transpose(im)
+            if frame.mode not in ("1", "L", "LA", "I", "P", "RGB", "RGBA"):
+                frame = frame.convert("RGBA" if "A" in frame.getbands() else "RGB")
+            out = io.BytesIO()
+            # The fastest deflate: a clipboard copy is read once, nearby.
+            frame.save(out, "PNG", compress_level=1)
+            return out.getvalue()
+    except Exception as e:
+        logger_webrtc_input.debug(f"clipboard {mime_type} offered without a PNG beside it: {e}")
+        return None
+
+
+# How long a client's clipboard write waits for the PNG of an image sent in
+# another format: the client's later messages, its input among them, wait too.
+CLIPBOARD_PNG_WAIT_S = 0.25
 
 # Re-reads the outbound monitor gives one selection-change edge whose read came
 # back empty, before treating the selection as genuinely empty.
@@ -7327,9 +7364,51 @@ class WebRTCInput:
         the payload is also offered on the unbridged X server (a rootful
         Xwayland sees no Wayland selection) so the X11 desktop can paste it.
 
+        An image in another format is offered as PNG as well, first, since
+        that is what most applications paste (`clipboard_png_beside`), which
+        makes the PNG the flavour read back. The client's messages wait for
+        this write, so the conversion is waited for only briefly: a photo
+        taking longer is offered as it came at once, and the PNG joins it
+        when ready unless something newer took the clipboard meanwhile.
+
         Returns:
             True when the clipboard was set (an empty payload is a no-op True).
         """
+        if flavours is None and data and isinstance(data, bytes) \
+                and mime_type.startswith("image/") and mime_type != "image/png":
+            conversion = asyncio.ensure_future(
+                asyncio.to_thread(clipboard_png_beside, mime_type, data))
+            done, _ = await asyncio.wait({conversion}, timeout=CLIPBOARD_PNG_WAIT_S)
+            if not done:
+                ok = await self._set_clipboard(data, mime_type)
+                if ok:
+                    self._spawn_task(self._add_png_beside(conversion, mime_type, data),
+                                     name="ClipboardPng")
+                return ok
+            png = conversion.result()
+            if png is not None:
+                return await self._set_clipboard(png, "image/png",
+                                                 [("image/png", png), (mime_type, data)])
+        return await self._set_clipboard(data, mime_type, flavours)
+
+    async def _add_png_beside(self, conversion: "asyncio.Future", mime_type: str,
+                              data: bytes) -> None:
+        """Offer a client's image as PNG as well once its conversion is done,
+        if that image is still the session's clipboard: a copy made since, by
+        a client or in the session, is newer and keeps the clipboard."""
+        try:
+            png = await conversion
+        except Exception:
+            return
+        monitor = self._x11_clipboard_monitor
+        if png is None or self._clipboard_last_bytes is not data \
+                or (monitor is not None and not monitor.owns_selection()):
+            return
+        await self._set_clipboard(png, "image/png", [("image/png", png), (mime_type, data)])
+
+    async def _set_clipboard(self, data: Union[str, bytes], mime_type: str = "text/plain",
+                             flavours: Optional[List[Tuple[str, bytes]]] = None) -> bool:
+        """The write `write_clipboard` describes, for content offered as it is."""
         if not data:
             return True
         input_bytes = data if isinstance(data, bytes) else data.encode('utf-8')

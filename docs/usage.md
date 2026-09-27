@@ -49,7 +49,7 @@ Clipboard synchronization works in both directions and is supported across Chrom
 - **Paste into the session:** `Control + V` (`Command + V` on macOS) sends your local clipboard to the remote session.
 - **Copy from the session:** `Control + C` (`Command + C` on macOS) reads the remote session's current clipboard back to your browser. On Firefox and Safari the client requests the latest server clipboard and writes it once it arrives, falling back to a synchronous copy when the browser blocks the asynchronous clipboard API.
 
-Image (binary) clipboard contents can also be transferred when binary clipboard support is enabled (see `enable_binary_clipboard`). Larger contents are sent in multiple parts automatically.
+Image (binary) clipboard contents can also be transferred when binary clipboard support is enabled (see `enable_binary_clipboard`). Larger contents are sent in multiple parts automatically. The side menu's clipboard section also has **Upload Image**, which puts a picture file on the session's clipboard without touching your local one; a JPEG, WebP, or other format is offered to the session's applications as PNG as well, since that is the image type most of them paste.
 
 Formatted content keeps its formatting. A copy that carries markup travels with the plain text its source wrote for it, so pasting into a rich editor keeps the styling and pasting into a terminal or a plain field gets the text rather than a rendering of the markup. Content leaving the session keeps its formatting whatever else is set; sending formatted content from the browser reads the clipboard the same way images are read, so that direction follows `enable_binary_clipboard` and falls back to plain text when it is off.
 

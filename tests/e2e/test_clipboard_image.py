@@ -7,10 +7,12 @@ while the dialog is open -- which closes the Wish panel's menu -- and gives it
 back as the dialog closes, which fires the focus-driven local sync. Whether the
 image survives that is the whole feature, so the checks read the session's own
 clipboard rather than the message that carried the image to the core, in both
-dashboards.
+dashboards; a JPEG has to reach it as a PNG as well, since that is the only
+image type most applications paste.
 
 Usage: python3 tests/e2e/test_clipboard_image.py [websockets|webrtc|wayland]
 """
+import io
 import os
 import struct
 import subprocess
@@ -47,18 +49,36 @@ def png(seed: int) -> bytes:
             + chunk(b"IEND", b""))
 
 
+def jpeg(width: int, height: int) -> bytes:
+    """A JPEG, as a photo picked from disk arrives."""
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), (20, 120, 200)).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+def dims(data: bytes):
+    """An image's size, or None when the bytes are not one."""
+    from PIL import Image
+    try:
+        return Image.open(io.BytesIO(data)).size
+    except Exception:
+        return None
+
+
 def _wl_env() -> dict:
     return {**os.environ, "WAYLAND_DISPLAY": WL_SOCKET,
             "XDG_RUNTIME_DIR": H.RUNTIME_DIR}
 
 
-def session_image(wayland: bool) -> tuple:
-    """The session clipboard's offered targets and its image bytes."""
+def session_image(wayland: bool, want: str = "") -> tuple:
+    """The session clipboard's offered targets and its image bytes: those of
+    `want` when it names a type, else of the first image type offered."""
     if wayland:
         listed = subprocess.run(["wl-paste", "-l"], capture_output=True, text=True,
                                 timeout=8, env=_wl_env())
         targets = [t.strip() for t in listed.stdout.splitlines() if t.strip()]
-        mime = next((t for t in targets if t.startswith("image/")), None)
+        mime = next((t for t in targets if (t == want if want else t.startswith("image/"))), None)
         if mime is None:
             return targets, None, None
         got = subprocess.run(["wl-paste", "-t", mime], capture_output=True,
@@ -95,7 +115,7 @@ def session_image(wayland: bool) -> tuple:
 
         offered = convert(d.get_atom("TARGETS"))
         targets = [d.get_atom_name(a) for a in (offered or [])]
-        mime = next((t for t in targets if t.startswith("image/")), None)
+        mime = next((t for t in targets if (t == want if want else t.startswith("image/"))), None)
         if mime is None:
             return targets, None, None
         return targets, mime, bytes(bytearray(convert(d.get_atom(mime)) or b""))
@@ -166,7 +186,8 @@ def own_session_image(data: bytes, wayland: bool) -> dict:
     return {"stop": stop}
 
 
-def upload(page, dashboard: str, name: str, mime: str, data: bytes, wayland: bool) -> tuple:
+def upload(page, dashboard: str, name: str, mime: str, data: bytes, wayland: bool,
+           want: str = "") -> tuple:
     """Upload `data` through the dashboard's button and read the session clipboard back.
 
     The dialog's own refocus as it closes fires the focus read, which is what
@@ -176,7 +197,7 @@ def upload(page, dashboard: str, name: str, mime: str, data: bytes, wayland: boo
         return None
     page.evaluate("window.dispatchEvent(new Event('focus'))")
     time.sleep(5.0)
-    return session_image(wayland)
+    return session_image(wayland, want)
 
 
 def block(mode: str, wayland: bool, dashboard: str) -> "H.Results":
@@ -219,6 +240,12 @@ def checks(res: "H.Results", tag: str, mode: str, wayland: bool, dashboard: str)
             res.check("an uploaded image reaches the session clipboard",
                       data == uploaded, f"{mime} {len(data) if data else 0} bytes, offered {targets}")
 
+            photo = jpeg(40, 30)
+            targets, mime, data = upload(page, dashboard, "photo.jpg", "image/jpeg", photo, wayland,
+                                         want="image/png") or ([], None, None)
+            res.check("an uploaded JPEG is offered to the session as PNG as well",
+                      mime == "image/png" and dims(data) == (40, 30) and "image/jpeg" in targets,
+                      f"{mime} {dims(data) if data else None}, offered {targets}")
             if dashboard != "classic":
                 return
 
