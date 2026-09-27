@@ -67,6 +67,13 @@ import { Queue, isMacDesktop } from './util.js';
 const WHITELIST_CLASS = 'allow-native-input';
 
 /**
+ * How long a trackpad tap holds the button it pressed before releasing it, in
+ * milliseconds: libinput's tap timeout. A touch landing sooner takes the held
+ * button over as a drag, or makes a double click if it lifts without moving.
+ */
+const TRACKPAD_TAP_HOLD_MS = 180;
+
+/**
  * A `MouseEvent.buttons` bitmask in the wire's numbering, which counts buttons
  * the way `MouseEvent.button` does. The two orders disagree on the middle and
  * secondary buttons alone, so those two bits swap and the rest pass through.
@@ -1508,9 +1515,9 @@ export class Input {
         this._TAP_MAX_DURATION = 250;
         this._trackpadMode = false;
         this._trackpadTouches = new Map();
-        this._trackpadLastTapTime = 0;
         this._trackpadGestureMode = null;
-        this._trackpadTapTimeout = null;
+        /** Pending release of the button a trackpad tap pressed; a touch landing before it fires drags. */
+        this._trackpadReleaseTimer = null;
         this._trackpadLastScrollCentroid = null;
         this._touchScrollLastCentroid = null;
         this.inputAttached = false;
@@ -2763,26 +2770,26 @@ export class Input {
 
     /**
      * Trackpad emulation: one finger moves the pointer relatively, a tap
-     * clicks, a tap then hold drags, two fingers scroll, and a two-finger tap
-     * right-clicks. Every payload is relative motion.
+     * clicks, a tap then a touch that moves drags, two fingers scroll, and a
+     * two-finger tap right-clicks. Every payload is relative motion.
+     *
+     * A tap presses the button as the finger lifts and releases it
+     * `TRACKPAD_TAP_HOLD_MS` later, so only the release waits on the window in
+     * which the next touch decides what the tap was: a touch landing inside
+     * it takes the held button over as a drag, and one that lifts without
+     * moving ends the click and adds a second, a double click. A second
+     * finger landing ends the hold first, so a scroll never runs with the
+     * button down.
      */
     _handleTrackpadEvent(event) {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
         event.preventDefault();
         event.stopPropagation();
 
-        const now = Date.now();
-        const TAP_AND_HOLD_THRESHOLD = 300;
-
         const type = event.type;
         const changedTouches = event.changedTouches;
 
         if (type === 'touchstart') {
-            if (this._trackpadTapTimeout) {
-                clearTimeout(this._trackpadTapTimeout);
-                this._trackpadTapTimeout = null;
-            }
-
             for (const touch of changedTouches) {
                 this._trackpadTouches.set(touch.identifier, {
                     id: touch.identifier,
@@ -2795,18 +2802,17 @@ export class Input {
             const touchCount = this._trackpadTouches.size;
 
             if (touchCount === 1) {
-                if ((now - this._trackpadLastTapTime) < TAP_AND_HOLD_THRESHOLD) {
+                if (this._trackpadReleaseTimer !== null) {
+                    clearTimeout(this._trackpadReleaseTimer);
+                    this._trackpadReleaseTimer = null;
                     this._trackpadGestureMode = 'dragging';
-                    this.buttonMask |= 1;
-                    this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
-                    this._trackpadLastTapTime = 0;
                 } else {
                     this._trackpadGestureMode = 'moving';
                 }
             }
             else if (touchCount === 2) {
+                this._trackpadReleaseButton();
                 this._trackpadGestureMode = 'scrolling';
-                this._trackpadLastTapTime = 0;
                 const touches = Array.from(this._trackpadTouches.values());
                 this._trackpadLastScrollCentroid = {
                     x: (touches[0].lastX + touches[1].lastX) / 2,
@@ -2815,25 +2821,15 @@ export class Input {
             }
         }
         else if (type === 'touchmove') {
-            let hasAnyFingerMovedBeyondThreshold = false;
             for (const touch of this._trackpadTouches.values()) {
                 if (!touch.moved) {
                     const currentTouch = Array.from(changedTouches).find(t => t.identifier === touch.id) || touch;
-                    if (currentTouch) {
-                        const dx = currentTouch.clientX - touch.startX;
-                        const dy = currentTouch.clientY - touch.startY;
-                        if (dx * dx + dy * dy > this._TAP_THRESHOLD_DISTANCE_SQ) {
-                            touch.moved = true;
-                        }
+                    const dx = currentTouch.clientX - touch.startX;
+                    const dy = currentTouch.clientY - touch.startY;
+                    if (dx * dx + dy * dy > this._TAP_THRESHOLD_DISTANCE_SQ) {
+                        touch.moved = true;
                     }
                 }
-                if (touch.moved) {
-                    hasAnyFingerMovedBeyondThreshold = true;
-                }
-            }
-
-            if (hasAnyFingerMovedBeyondThreshold) {
-                this._trackpadLastTapTime = 0;
             }
 
             if (this._trackpadGestureMode === 'moving' || this._trackpadGestureMode === 'dragging') {
@@ -2873,20 +2869,30 @@ export class Input {
         }
         else if (type === 'touchend' || type === 'touchcancel') {
             const touchCountBeforeEnd = this._trackpadTouches.size;
-            const wasTap = !Array.from(this._trackpadTouches.values()).some(t => t.moved);
+            const wasTap = type === 'touchend' &&
+                !Array.from(this._trackpadTouches.values()).some(t => t.moved);
+            const mode = this._trackpadGestureMode;
 
             if (touchCountBeforeEnd === 2 && wasTap) {
                 this.buttonMask |= (1 << 2); this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
                 setTimeout(() => { this.buttonMask &= ~(1 << 2); this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false); }, 50);
                 this._trackpadGestureMode = 'completed';
-                this._trackpadLastTapTime = 0;
             }
-            else if (touchCountBeforeEnd === 1 && wasTap && this._trackpadGestureMode !== 'completed' && this._trackpadGestureMode !== 'dragging') {
-                this._trackpadLastTapTime = now;
-                this._trackpadTapTimeout = setTimeout(() => {
-                    this.buttonMask |= 1; this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
-                    setTimeout(() => { this.buttonMask &= ~1; this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false); }, 50);
-                }, 200);
+            else if (touchCountBeforeEnd === 1 && mode === 'moving' && wasTap) {
+                this.buttonMask |= 1;
+                this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
+                this._trackpadReleaseTimer = setTimeout(() => {
+                    this._trackpadReleaseTimer = null;
+                    this._trackpadReleaseButton();
+                }, TRACKPAD_TAP_HOLD_MS);
+            }
+            else if (touchCountBeforeEnd === 1 && mode === 'dragging') {
+                this._trackpadReleaseButton();
+                if (wasTap) {
+                    this.buttonMask |= 1;
+                    this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
+                    this._trackpadReleaseButton();
+                }
             }
 
             for (const touch of changedTouches) {
@@ -2894,13 +2900,21 @@ export class Input {
             }
 
             if (this._trackpadTouches.size === 0) {
-                if (this._trackpadGestureMode === 'dragging') {
-                    this.buttonMask &= ~1;
-                    this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
-                }
                 this._trackpadGestureMode = null;
                 this._trackpadLastScrollCentroid = null;
             }
+        }
+    }
+
+    /** Releases the left button a trackpad tap or tap-drag holds, and any release still pending for it. */
+    _trackpadReleaseButton() {
+        if (this._trackpadReleaseTimer !== null) {
+            clearTimeout(this._trackpadReleaseTimer);
+            this._trackpadReleaseTimer = null;
+        }
+        if (this.buttonMask & 1) {
+            this.buttonMask &= ~1;
+            this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
         }
     }
 
@@ -3449,6 +3463,10 @@ export class Input {
             this._longPressTimer = null;
             this._longPressTouchIdentifier = null;
         }
+        clearTimeout(this._trackpadReleaseTimer);
+        this._trackpadReleaseTimer = null;
+        this._trackpadTouches.clear();
+        this._trackpadGestureMode = null;
 
         if (this.buttonMask !== 0) {
             this.buttonMask = 0;
@@ -4457,6 +4475,10 @@ export class Input {
         this._activeTouches.clear();
         this._activeTouchIdentifier = null;
         this._isTwoFingerGesture = false;
+        clearTimeout(this._trackpadReleaseTimer);
+        this._trackpadReleaseTimer = null;
+        this._trackpadTouches.clear();
+        this._trackpadGestureMode = null;
         // A queued move must not send after detach; the scheduled flush then no-ops.
         this._pendingMove = null;
         this._relCarryX = 0;
