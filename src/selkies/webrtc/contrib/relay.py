@@ -37,6 +37,13 @@ The relay carries whatever the source track yields opaquely — for Selkies that
 is the pre-encoded `EncodedPacket` from pixelflux/pcmflux — so it needs no libav
 of its own. The libav-backed players and recorders stay in `media.py`, which
 Selkies does not import.
+
+A buffered relay reads the source only once every consumer is waiting for its
+next frame, so a consumer that needs longer per frame than the source takes
+leaves the frames it cannot keep up with in the source, whose own policy drops
+them (Selkies' bridges keep the newest frame and tell the encoder what they
+dropped), instead of queueing all of them behind itself: its latency stays one
+frame's handling rather than growing for as long as it lags.
 """
 
 import asyncio
@@ -64,6 +71,8 @@ class RelayStreamTrack(MediaStreamTrack):
         self._frame: Any = None
         self._queue: Optional[asyncio.Queue] = None
         self._new_frame_event: Optional[asyncio.Event] = None
+        # Waiting in recv() for the next frame, which the relay reads the source for.
+        self._waiting = False
 
         if self._buffered:
             self._queue = asyncio.Queue()
@@ -77,7 +86,12 @@ class RelayStreamTrack(MediaStreamTrack):
         self._relay._start(self)
 
         if self._buffered:
-            self._frame = await self._queue.get()
+            self._waiting = True
+            self._relay._wanted(self)
+            try:
+                self._frame = await self._queue.get()
+            finally:
+                self._waiting = False
         else:
             await self._new_frame_event.wait()
             self._new_frame_event.clear()
@@ -86,6 +100,11 @@ class RelayStreamTrack(MediaStreamTrack):
             self.stop()
             raise MediaStreamError
         return self._frame
+
+    def _idle(self) -> bool:
+        """Whether the relay may read the source for this consumer: it holds no
+        frame it has not taken and waits for the next one."""
+        return not self._buffered or (self._waiting and self._queue.empty())
 
     def stop(self) -> None:
         super().stop()
@@ -106,6 +125,8 @@ class MediaRelay:
     def __init__(self) -> None:
         self.__proxies: dict[MediaStreamTrack, set[RelayStreamTrack]] = {}
         self.__tasks: dict[MediaStreamTrack, asyncio.Future[None]] = {}
+        # Set while every buffered consumer of the source waits for a frame.
+        self.__wanted: dict[MediaStreamTrack, asyncio.Event] = {}
 
     def subscribe(
         self, track: MediaStreamTrack, buffered: bool = True
@@ -143,6 +164,14 @@ class MediaRelay:
             # unregister proxy
             self.__log_debug("Stop proxy %s", id(proxy))
             self.__proxies[track].discard(proxy)
+            self._wanted(proxy)
+
+    def _wanted(self, proxy: RelayStreamTrack) -> None:
+        """Let the source be read once no buffered consumer of it is still busy."""
+        track = proxy._source
+        proxies = self.__proxies.get(track) if track is not None else None
+        if proxies is not None and all(p._idle() for p in proxies):
+            self.__wanted.setdefault(track, asyncio.Event()).set()
 
     async def stop(self) -> None:
         """Cancel and reap every relay worker. __run_track only ends when its
@@ -152,6 +181,7 @@ class MediaRelay:
         tasks = list(self.__tasks.values())
         self.__tasks.clear()
         self.__proxies.clear()
+        self.__wanted.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -166,7 +196,12 @@ class MediaRelay:
     async def __run_track(self, track: MediaStreamTrack) -> None:
         self.__log_debug("Start reading source %s" % id(track))
 
+        wanted = self.__wanted.setdefault(track, asyncio.Event())
         while True:
+            proxies = self.__proxies[track]
+            while not all(p._idle() for p in proxies):
+                wanted.clear()
+                await wanted.wait()
             try:
                 frame = await track.recv()
             except MediaStreamError:
@@ -183,3 +218,4 @@ class MediaRelay:
         self.__log_debug("Stop reading source %s", id(track))
         del self.__proxies[track]
         del self.__tasks[track]
+        self.__wanted.pop(track, None)
