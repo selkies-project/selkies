@@ -9,14 +9,16 @@
  *
  * The pieces are factories the cores compose: `createClipboardSync` owns the
  * server-clipboard cache and the change-only signature (unchanged content
- * never re-crosses the transport in either direction), `createMultipartClipboardState`
- * reassembles multipart server pushes, `createTaggedClipboardFetch` marks the
- * connect-time cache-only fetch, `createLocalClipboardSender` is the
- * focus-driven local-to-server path, `createDeferredClipboardWriter` lands
- * server pushes on engines that reject clipboard writes outside a user
- * activation, `localClipboardBlocker` names what stops a local write at all,
- * and `createClipboardGestures` wires the copy and paste keystrokes. The transports differ only in the hooks they inject: how a
- * request or payload is sent and the enablement gates, which are closures
+ * never re-crosses the transport in either direction), `createIncomingClipboard`
+ * is the server-to-client path (reassembly through `createMultipartClipboardState`,
+ * the cache, and the local write, issued when a payload is announced),
+ * `createTaggedClipboardFetch` marks the connect-time cache-only fetch,
+ * `createLocalClipboardSender` is the focus-driven local-to-server path,
+ * `createDeferredClipboardWriter` keeps a write the engine refused (no focus,
+ * no user activation) for the next gesture, `localClipboardBlocker` names what
+ * stops a local write at all, and `createClipboardGestures` wires the copy and
+ * paste keystrokes. The transports differ only in the hooks they inject: how
+ * a request or payload is sent and the enablement gates, which are closures
  * re-read per event so runtime settings changes apply immediately.
  * @module
  */
@@ -83,32 +85,6 @@ export function localClipboardBlocker() {
 }
 
 /**
- * Writes a server image to the local clipboard, PNG-normalized.
- *
- * The conversion is handed to `toPng` when the caller has a worker to run it
- * on, since decoding and re-encoding a large image costs the better part of a
- * second on the thread that also presents video and dispatches input. The
- * ClipboardItem takes the promise rather than the finished blob, so the write
- * is issued while the gesture that permits it is still current however long
- * the encode runs.
- * @param {Blob} blob The image.
- * @param {string} mime Its type.
- * @param {((blob: Blob) => Promise<Blob>)=} toPng Off-thread converter; the
- *     page's own canvas is used when it is absent or fails.
- * @throws When the type is undecodable or the clipboard write fails.
- */
-export async function writeImageToLocalClipboard(blob, mime, toPng) {
-    if (mime === 'image/png') {
-        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-        return;
-    }
-    const png = toPng
-        ? toPng(blob).catch(() => reencodeBlobAsPng(blob))
-        : reencodeBlobAsPng(blob);
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
-}
-
-/**
  * Wire type for a copy carrying more than one flavour: the markup and the plain
  * text its source wrote for it, as a JSON object of mime to content. It never
  * reaches a clipboard itself; the flavours inside it do.
@@ -129,19 +105,19 @@ export function unpackClipboardFlavours(bytes) {
 }
 
 /**
- * One copy's flavours as a single clipboard item, so pasting into a rich editor
- * takes the markup and pasting into a plain field takes the text the session
- * itself held rather than a rendering of the markup.
+ * The text a markup flavour reads as, for a copy whose source wrote no plain
+ * text beside it: the item's types are declared before its data arrive, so it
+ * carries a plain flavour either way, and an empty one would paste nothing
+ * into a plain field.
+ * @param {string} html The markup.
+ * @returns {string}
  */
-export function clipboardItemForFlavours({ html, text }) {
-    const item = { 'text/html': new Blob([html], { type: 'text/html' }) };
-    if (text) item['text/plain'] = new Blob([text], { type: 'text/plain' });
-    return new ClipboardItem(item);
-}
-
-/** The same flavours, written to the local clipboard. */
-export function writeFlavoursToLocalClipboard(flavours) {
-    return navigator.clipboard.write([clipboardItemForFlavours(flavours)]);
+function textOfMarkup(html) {
+    try {
+        return new DOMParser().parseFromString(html, 'text/html').body.textContent || '';
+    } catch (_) {
+        return '';
+    }
 }
 
 /**
@@ -327,6 +303,16 @@ export function createTaggedClipboardFetch() {
  */
 const EXPLICIT_PRECEDENCE_MS = 1000;
 
+/** Longest a focus read waits for a server value still landing locally. */
+const SERVER_WRITE_WAIT_MS = 10000;
+
+/**
+ * Longest a server payload may go without a chunk before it is dropped: well
+ * past the server's own per-chunk bound, after which it leaves a client out
+ * of the rest of a payload.
+ */
+const INCOMING_STALL_MS = 30000;
+
 /**
  * @typedef {object} LocalClipboardSender
  * @property {() => Promise<void>} readAndSend Reads the local clipboard and
@@ -406,9 +392,10 @@ export function createLocalClipboardSender({
 
     /**
      * A server push still settling through the deferred writer must land
-     * before this read: reading around the flush returns the pre-push
-     * content, which then reads as a change and bounces the stale value back
-     * to the server.
+     * before this read: reading around it returns the pre-push content,
+     * which then reads as a change and bounces the stale value back to the
+     * server. The wait is bounded, since a push whose bytes stopped arriving
+     * never settles.
      */
     async function readAndSend() {
         // navigator.clipboard is undefined on insecure origins.
@@ -416,10 +403,13 @@ export function createLocalClipboardSender({
         if (isSharedMode() || !canSync() || !canRead()) return;
 
         if (getDeferredWriteInFlight) {
+            const giveUpAt = Date.now() + SERVER_WRITE_WAIT_MS;
             for (let i = 0; i < 2; i++) {
                 const w = getDeferredWriteInFlight();
-                if (!w) break;
-                try { await w; } catch (_) { /* write-side errors surface there */ }
+                const remaining = giveUpAt - Date.now();
+                if (!w || remaining <= 0) break;
+                await Promise.race([w.catch(() => {}),
+                    new Promise((r) => setTimeout(r, remaining))]);
                 if (!getDeferredWriteInFlight()) break;
             }
         }
@@ -490,31 +480,38 @@ export function createLocalClipboardSender({
 
 /**
  * @typedef {object} DeferredClipboardWriter
- * @property {(attempt: () => Promise<void>, callbacks?: {onSuccess?: () => void, onFailure?: (err: Error) => void}) => Promise<boolean>} write
+ * @property {(attempt: () => Promise<void>, options?: {onSuccess?: () => (Promise<*>|void), onFailure?: (err: Error) => void, settled?: Promise<*>}) => Promise<boolean>} write
  *     Runs an async clipboard write now, stashing it for the next gesture on
- *     an activation rejection.
+ *     an activation rejection. `settled`, when given, resolves once the
+ *     write's payload is complete.
  * @property {() => void} flush Retries the stashed write.
  * @property {() => (Promise<boolean>|null)} getInFlight The most recent
  *     attempt, immediate or flushed, or `null`.
+ * @property {() => (Promise<boolean>|null)} getLanding The most recent
+ *     attempt once its payload is complete, or `null`.
+ * @property {() => boolean} hasPending Whether a write is stashed or in flight.
  */
 
 /**
  * Deferred local-clipboard writer for server pushes.
  *
- * Firefox and WebKit reject `navigator.clipboard` writes outside a transient
- * user activation, and a server push handler never has one, so on an
- * activation or focus rejection the write is stashed and retried on the next
- * real gesture instead of being lost. Only the newest pending write is kept,
- * since the clipboard is last-value-wins: a monotonic sequence lets a failed
- * newer write replace an older stash while a flushed stash that fails again
- * can never clobber a write that arrived during its attempt. The
- * paste-ordering hold awaits the in-flight attempt so a server-to-client
- * write lands before a paste reads the local clipboard; otherwise the stash
- * flushes on the paste's own keydown and lands just after the read, and the
- * first paste is one behind. The flush rides keydown and pointerdown, which
- * carry a user activation, and focus and visibilitychange, which land the
- * write the instant Chromium accepts it again (it rejects writes from an
- * unfocused document), well before the user's next paste.
+ * Engines decide whether a clipboard write may happen when `write()` is
+ * called: Chromium rejects it from an unfocused document, Firefox and WebKit
+ * without a user activation a few seconds old at most, and a server push
+ * handler holds neither once the user has moved on. On such a rejection the
+ * write is stashed and retried on the next real gesture instead of being
+ * lost. Only the newest write is kept, since the clipboard is
+ * last-value-wins: issuing a write drops any older stash whatever becomes of
+ * it, and a write refused after a newer one was issued is dropped rather than
+ * stashed, so no retry can land an older value over a newer one. An attempt
+ * rejected with `AbortError` was withdrawn by its caller and is neither
+ * stashed nor reported. The paste-ordering hold awaits the landing attempt
+ * (`getLanding`) so a server-to-client write lands before a paste reads the
+ * local clipboard; otherwise the stash flushes on the paste's own keydown and
+ * lands just after the read, and the first paste is one behind. The flush
+ * rides keydown and pointerdown, which carry a user activation, and focus and
+ * visibilitychange, which land the write the instant Chromium accepts it
+ * again, well before the user's next paste.
  * @returns {DeferredClipboardWriter}
  */
 export function createDeferredClipboardWriter() {
@@ -526,15 +523,20 @@ export function createDeferredClipboardWriter() {
         return !!err && (err.name === 'NotAllowedError' || err.name === 'SecurityError');
     }
 
-    function track(promise) {
-        inFlight = promise;
-        promise.finally(() => { if (inFlight === promise) inFlight = null; });
+    function track(promise, w) {
+        const entry = { promise, settled: !w.settled };
+        if (w.settled) w.settled.then(() => { entry.settled = true; }, () => { entry.settled = true; });
+        inFlight = entry;
+        promise.finally(() => { if (inFlight === entry) inFlight = null; });
     }
 
     /**
      * Runs one write. An activation rejection (a synthetic event, or a
-     * blurred tab) stashes it for the next gesture unless something newer
-     * replaced it; any other error reaches `onFailure`.
+     * blurred tab) stashes it for the next gesture unless a newer write was
+     * issued meanwhile, which the stash would otherwise land over once
+     * flushed; any other error but a withdrawal reaches `onFailure`. The
+     * attempt settles only after `onSuccess` has, so whoever waits on it
+     * also waits for what the landing set off.
      *
      * The attempt is started inside a promise chain so that a caller passing
      * a plain expression -- `navigator.clipboard.write(...)`, which throws
@@ -543,13 +545,13 @@ export function createDeferredClipboardWriter() {
      */
     function attemptOnce(w) {
         return Promise.resolve().then(() => w.attempt()).then(
-            () => { if (w.onSuccess) w.onSuccess(); return true; },
+            () => Promise.resolve(w.onSuccess && w.onSuccess()).then(() => true, () => true),
             (err) => {
                 if (isActivationError(err)) {
-                    if (!pending || pending.seq < w.seq) pending = w;
+                    if (w.seq === writeSeq) pending = w;
                     return false;
                 }
-                if (w.onFailure) w.onFailure(err);
+                if (w.onFailure && !(err && err.name === 'AbortError')) w.onFailure(err);
                 return false;
             });
     }
@@ -558,7 +560,7 @@ export function createDeferredClipboardWriter() {
         const w = pending;
         if (!w) return;
         pending = null;
-        track(attemptOnce(w));
+        track(attemptOnce(w), w);
     }
 
     for (const type of ['pointerdown', 'keydown', 'focus']) {
@@ -569,15 +571,306 @@ export function createDeferredClipboardWriter() {
     /**
      * Runs `attempt` now; on an activation or focus rejection queues it for
      * the next gesture. `onSuccess` fires whenever the write eventually lands,
-     * `onFailure` only for non-activation errors.
+     * `onFailure` only for errors that are neither activation nor withdrawal.
      */
-    function write(attempt, { onSuccess, onFailure } = {}) {
-        const p = attemptOnce({ attempt, onSuccess, onFailure, seq: ++writeSeq });
-        track(p);
+    function write(attempt, { onSuccess, onFailure, settled } = {}) {
+        const w = { attempt, onSuccess, onFailure, settled, seq: ++writeSeq };
+        pending = null;
+        const p = attemptOnce(w);
+        track(p, w);
         return p;
     }
 
-    return { write, flush, getInFlight: () => inFlight };
+    return {
+        write,
+        flush,
+        getInFlight: () => (inFlight ? inFlight.promise : null),
+        getLanding: () => (inFlight && inFlight.settled ? inFlight.promise : null),
+        hasPending: () => !!pending || !!inFlight,
+    };
+}
+
+/**
+ * @typedef {object} IncomingClipboard
+ * @property {(mime: string, total: number, cacheOnly: boolean) => void} begin
+ *     Announces a multipart payload of `total` bytes.
+ * @property {(b64: string) => void} push Hands one base64 chunk on.
+ * @property {() => void} finish Ends the multipart payload.
+ * @property {(mime: string, b64: string, cacheOnly: boolean) => void} single
+ *     Takes a whole payload carried by one message.
+ * @property {() => void} reset Drops a payload in progress.
+ */
+
+/**
+ * The server-to-client clipboard, shared by both transports: reassembly, the
+ * cache and preview, and the local write.
+ *
+ * The local write of a multipart payload is issued the moment the payload is
+ * announced, with its bytes still crossing, as a ClipboardItem whose data are
+ * Promises. Engines decide whether a write may happen when `write()` is
+ * called -- Chromium wants the document focused, Firefox and WebKit a user
+ * activation a few seconds old at most -- and let the data settle long
+ * after, while a multi-megabyte image takes seconds to arrive: a write issued
+ * only then finds the user already back in the application they copied for,
+ * is refused, and lands on their next gesture, one copy behind. Whether the
+ * payload repeats what the client already holds is known only once its bytes
+ * are digested, so a repeat, a payload that arrived broken, and one a newer
+ * payload superseded all withdraw the write by rejecting its data, which
+ * leaves the local clipboard as it was. A whole payload in one message is
+ * written as soon as it is decoded. Every write goes through `writer`, which
+ * stashes one the engine refuses until the next gesture, and an older write
+ * still waiting for its data is withdrawn when a newer one is issued, so a
+ * slow conversion can never land an older value over a newer one.
+ *
+ * A payload superseded before it landed is dropped whole, its cache update
+ * included: the newer one carries the session's clipboard, and a repeat of the
+ * dropped content would otherwise read as already held and never land.
+ * `cacheOnly` marks the reply to the connect-time fetch, which fills the cache
+ * and preview but never the local clipboard.
+ * @param {object} hooks
+ * @param {{decode: Function, decodeStream: Function}} hooks.worker The
+ *     clipboard worker bridge.
+ * @param {ClipboardSync} hooks.clipboardSync The server-clipboard state.
+ * @param {DeferredClipboardWriter} hooks.writer The local writer.
+ * @param {(blob: Blob) => Promise<Blob>} hooks.toPng Off-thread PNG conversion.
+ * @param {() => boolean} hooks.canWriteLocal Whether server content may reach
+ *     the local clipboard now.
+ * @param {() => boolean} hooks.binaryEnabled Whether images are taken.
+ * @param {(text: string) => void} hooks.onPreview Shows server text to the dashboards.
+ * @param {(mime: string) => (Promise<*>|void)} hooks.onImageWritten An image landed
+ *     locally; what it returns is awaited before the landing counts as done.
+ * @param {(err: *) => void} hooks.onImageWriteFailed An image write failed for good.
+ * @returns {IncomingClipboard}
+ */
+export function createIncomingClipboard({
+    worker, clipboardSync, writer, toPng, canWriteLocal, binaryEnabled,
+    onPreview, onImageWritten, onImageWriteFailed,
+}) {
+    const multipart = createMultipartClipboardState((mime) => worker.decodeStream(mime));
+    let current = null;
+    let generation = 0;
+    let lastLanding = null;
+    let stallTimer = null;
+
+    /**
+     * A payload whose chunks stopped arriving is dropped, so its write settles
+     * rather than holding every later paste decision on a value that is never
+     * coming.
+     */
+    function armStallTimer() {
+        clearTimeout(stallTimer);
+        stallTimer = setTimeout(() => {
+            if (!current) return;
+            console.warn('Session clipboard transfer stalled; dropping it.');
+            withdraw(current.landing, 'stalled');
+            multipart.reset();
+            current = null;
+        }, INCOMING_STALL_MS);
+    }
+
+    function kindOf(mime) {
+        if (mime === 'text/plain') return 'text';
+        if (mime === CLIPBOARD_FLAVOURS_MIME) return 'flavours';
+        if (typeof mime === 'string' && mime.startsWith('image/')) return 'image';
+        return null;
+    }
+
+    function wanted(kind, cacheOnly) {
+        return !cacheOnly && canWriteLocal() && (kind !== 'image' || binaryEnabled());
+    }
+
+    function canWriteItems() {
+        return typeof ClipboardItem !== 'undefined'
+            && typeof navigator !== 'undefined' && !!navigator.clipboard && !!navigator.clipboard.write;
+    }
+
+    function withdrawal(reason) {
+        return new DOMException(reason, 'AbortError');
+    }
+
+    function settleable() {
+        let resolve;
+        let reject;
+        const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+        // Rejection is how a write is withdrawn, not an error anyone must see.
+        promise.catch(() => {});
+        return { promise, resolve, reject };
+    }
+
+    /** Withdraws a write still waiting for its data; the local clipboard keeps its value. */
+    function withdraw(landing, reason) {
+        if (!landing || landing.settled || landing.withdrawn) return;
+        landing.withdrawn = true;
+        for (const part of Object.values(landing.parts)) part.reject(withdrawal(reason));
+    }
+
+    /**
+     * Issues a local write whose data settle later: one Promise per type the
+     * item carries, declared now because a ClipboardItem cannot add a type.
+     */
+    function issue(kind, mime) {
+        withdraw(lastLanding, 'superseded');
+        const types = kind === 'image' ? ['image/png']
+            : kind === 'text' ? ['text/plain'] : ['text/html', 'text/plain'];
+        const landing = { parts: {}, settled: false, withdrawn: false, failed: null };
+        for (const type of types) landing.parts[type] = settleable();
+        const settled = Promise.all(types.map((t) => landing.parts[t].promise));
+        settled.then(() => { landing.settled = true; }, () => {});
+        lastLanding = landing;
+        writer.write(async () => {
+            const item = {};
+            for (const type of types) item[type] = landing.parts[type].promise;
+            try {
+                await navigator.clipboard.write([new ClipboardItem(item)]);
+            } catch (err) {
+                // Engines report data that never came under names of their own
+                // choosing, an activation error's among them.
+                if (landing.withdrawn) throw withdrawal('withdrawn');
+                if (landing.failed) throw landing.failed;
+                throw err;
+            }
+        }, {
+            settled,
+            onSuccess: kind === 'image' ? () => onImageWritten(mime) : undefined,
+            onFailure: kind === 'image' ? onImageWriteFailed
+                : (err) => console.error(`Could not copy the session clipboard to the local one: ${err && err.name} - ${err && err.message}`),
+        });
+        return landing;
+    }
+
+    /**
+     * Hands a landing its data. A conversion still running when a newer write
+     * withdraws this one resolves nothing: the part was rejected first.
+     */
+    function fulfill(landing, kind, content) {
+        if (kind === 'image') {
+            const part = landing.parts['image/png'];
+            if (content.mime === 'image/png') {
+                part.resolve(content.blob);
+            } else {
+                toPng(content.blob).catch(() => reencodeBlobAsPng(content.blob)).then(part.resolve, (err) => {
+                    landing.failed = err;
+                    part.reject(err);
+                });
+            }
+        } else if (kind === 'text') {
+            landing.parts['text/plain'].resolve(new Blob([content.text], { type: 'text/plain' }));
+        } else {
+            landing.parts['text/html'].resolve(new Blob([content.html], { type: 'text/html' }));
+            landing.parts['text/plain'].resolve(new Blob([content.text || textOfMarkup(content.html)],
+                { type: 'text/plain' }));
+        }
+    }
+
+    /**
+     * Caches a complete payload, shows its preview, and lands it locally
+     * through the write already issued for it or a new one.
+     */
+    function land(t, decoded) {
+        if (t.gen !== generation && t.landing && t.landing.withdrawn) return;
+        let fresh;
+        let content;
+        if (t.kind === 'text') {
+            const text = decoded.result;
+            fresh = clipboardSync.shouldSend(text, 'text/plain');
+            clipboardSync.resolveServer(text, null, 'text/plain');
+            onPreview(text);
+            content = { text };
+        } else {
+            const digest = digestedPayload(decoded.byteLength, decoded.hash);
+            fresh = clipboardSync.shouldSend(digest, t.mime);
+            if (t.kind === 'flavours') {
+                const flavours = unpackClipboardFlavours(decoded.result);
+                clipboardSync.resolveServer(flavours.text || flavours.html, null, t.mime, digest);
+                onPreview(flavours.text || flavours.html);
+                content = flavours;
+            } else {
+                const blob = new Blob([decoded.result], { type: t.mime });
+                clipboardSync.resolveServer(undefined, blob, t.mime, digest);
+                content = { blob, mime: t.mime };
+            }
+        }
+        if (!fresh || !wanted(t.kind, t.cacheOnly)) {
+            withdraw(t.landing, 'unchanged');
+            return;
+        }
+        if (t.landing) {
+            fulfill(t.landing, t.kind, content);
+        } else if (canWriteItems()) {
+            fulfill(issue(t.kind, t.mime), t.kind, content);
+        } else if (t.kind === 'image') {
+            onImageWriteFailed(new Error('the local clipboard takes no images here'));
+        } else if (typeof navigator !== 'undefined' && navigator.clipboard) {
+            const text = t.kind === 'text' ? content.text : (content.text || content.html);
+            writer.write(() => navigator.clipboard.writeText(text), {
+                onFailure: (err) => console.error(`Could not copy the session clipboard to the local one: ${err && err.name}`),
+            });
+        }
+    }
+
+    /** Opens a payload, superseding whatever was still arriving. */
+    function open(mime, cacheOnly) {
+        if (current) {
+            withdraw(current.landing, 'superseded');
+            multipart.reset();
+            current = null;
+        }
+        const kind = kindOf(mime);
+        if (!kind || (kind === 'image' && !binaryEnabled())) return null;
+        return { kind, mime, cacheOnly, gen: ++generation, landing: null };
+    }
+
+    return {
+        begin(mime, total, cacheOnly) {
+            const t = open(mime, cacheOnly);
+            if (!t) return;
+            multipart.begin(mime, total);
+            if (wanted(t.kind, cacheOnly) && canWriteItems()) t.landing = issue(t.kind, mime);
+            current = t;
+            armStallTimer();
+        },
+        push(b64) {
+            if (!current) return;
+            multipart.push(b64);
+            armStallTimer();
+        },
+        finish() {
+            const t = current;
+            current = null;
+            clearTimeout(stallTimer);
+            if (!t || !multipart.inProgress) return;
+            const declared = multipart.totalSize;
+            if (multipart.receivedSize !== declared) {
+                console.error(`Multipart clipboard size mismatch: received ${multipart.receivedSize} of ${declared} bytes.`);
+                multipart.reset();
+                withdraw(t.landing, 'incomplete');
+                return;
+            }
+            multipart.finish().then((decoded) => {
+                if (decoded.byteLength !== declared) {
+                    withdraw(t.landing, 'incomplete');
+                    return;
+                }
+                land(t, decoded);
+            }).catch((err) => {
+                withdraw(t.landing, 'undecodable');
+                console.error('Error assembling final clipboard content:', err);
+            });
+        },
+        single(mime, b64, cacheOnly) {
+            const t = open(mime, cacheOnly);
+            if (!t) return;
+            worker.decode(b64, t.kind === 'text' ? 'text/plain' : mime).then(
+                (decoded) => land(t, decoded),
+                (err) => console.error('Error processing clipboard data from the session:', err));
+        },
+        reset() {
+            if (current) withdraw(current.landing, 'dropped');
+            clearTimeout(stallTimer);
+            multipart.reset();
+            current = null;
+        },
+    };
 }
 
 /** Longest server clipboard text the dashboards are shown, in characters. */
@@ -887,7 +1180,9 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
  * - Non-Chromium paste-to-server: driven by the `paste` event's synchronous
  *   `clipboardData`. There is deliberately no Ctrl/Cmd+V `navigator.clipboard`
  *   read: WebKit rejects it from keydown, Firefox re-raises its paste prompt,
- *   and it would double-send next to the paste event.
+ *   and it would double-send next to the paste event. While a session value is
+ *   still on its way to the local clipboard the local one is older than the
+ *   session's, so the paste sends nothing and the chord pastes the session's.
  *
  * Gestures in page form fields (the settings UI) are left alone; the stream's
  * overlay input is exempt. Consumed gestures are never `preventDefault`ed:
@@ -903,8 +1198,10 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
  * @param {() => boolean} hooks.binaryEnabled Whether images are sent.
  * @param {() => (Promise<*>|null)} hooks.getSendInFlight The local sender's
  *     pending send.
- * @param {(() => (Promise<*>|null))=} hooks.getDeferredWriteInFlight The
- *     deferred writer's pending write.
+ * @param {(() => (Promise<*>|null))=} hooks.getDeferredWriteLanding The
+ *     deferred writer's write whose data are complete, still landing.
+ * @param {(() => boolean)=} hooks.hasPendingServerWrite Whether a session
+ *     value has yet to land in the local clipboard.
  * @returns {{wire: () => void, unwire: () => void}} Listener registration.
  */
 export function createClipboardGestures({
@@ -916,7 +1213,8 @@ export function createClipboardGestures({
     canWrite,
     binaryEnabled,
     getSendInFlight,
-    getDeferredWriteInFlight,
+    getDeferredWriteLanding,
+    hasPendingServerWrite,
 }) {
     function inPageFormField() {
         const ae = document.activeElement;
@@ -974,7 +1272,7 @@ export function createClipboardGestures({
         const modHold = heldPasteReplayPending && ev.type === 'keyup' && PASTE_MOD_CODES.includes(ev.code);
         if (ev.code !== 'KeyV' && !modHold) return;
         const chord = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
-        const writeInFlight = getDeferredWriteInFlight ? getDeferredWriteInFlight() : null;
+        const writeInFlight = getDeferredWriteLanding ? getDeferredWriteLanding() : null;
         const hold = modHold || (ev.code === 'KeyV' &&
             ((chord && (getSendInFlight() || writeInFlight)) || heldPasteReplayPending));
         if (!hold) return;
@@ -988,7 +1286,7 @@ export function createClipboardGestures({
                 const inflight = [];
                 const send = getSendInFlight();
                 if (send) inflight.push(send);
-                const dw = getDeferredWriteInFlight ? getDeferredWriteInFlight() : null;
+                const dw = getDeferredWriteLanding ? getDeferredWriteLanding() : null;
                 if (dw) inflight.push(dw);
                 if (inflight.length === 0) { replayHeldPasteEvents(); return; }
                 const remaining = PASTE_HOLD_MAX_MS - (performance.now() - holdStart);
@@ -1052,6 +1350,7 @@ export function createClipboardGestures({
     function onPaste(event) {
         if (!canSync() || !canRead()) return;
         if (inPageFormField()) return;
+        if (hasPendingServerWrite && hasPendingServerWrite()) return;
         const cd = event.clipboardData;
         if (!cd) return;
         if (binaryEnabled() && cd.items) {

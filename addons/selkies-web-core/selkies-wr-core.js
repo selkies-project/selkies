@@ -79,7 +79,7 @@ import { WebRTCClient } from "./lib/webrtc";
 import { WebRTCSignaling } from "./lib/signaling";
 import { Input } from "./lib/input";
 import { streamDensity as streamDensityOf, autoScalingDpi, resolutionScalingDpi, publishedScale } from "./lib/stream-density.js";
-import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createLocalClipboardSender, createMultipartClipboardState, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, writeImageToLocalClipboard, clipboardItemForFlavours, unpackClipboardFlavours, CLIPBOARD_FLAVOURS_MIME, digestedPayload } from "./lib/clipboard-sync.js";
+import { createClipboardSync, createClipboardGestures, createDeferredClipboardWriter, createIncomingClipboard, createLocalClipboardSender, createTaggedClipboardFetch, clipboardPreviewMessage, reencodeBlobAsPng, localClipboardBlocker, digestedPayload } from "./lib/clipboard-sync.js";
 import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
@@ -463,9 +463,7 @@ export default function webrtc() {
 
 	let enable_binary_clipboard = true;
 	let clipboardWorker = new ClipboardWorkerBridge();
-	/** Multipart download state and connect-time cache-only fetch tracking (`lib/clipboard-sync.js`). */
-	const multipartClipboard = createMultipartClipboardState(
-		(mime) => clipboardWorker.decodeStream(mime));
+	/** Connect-time cache-only fetch tracking (`lib/clipboard-sync.js`). */
 	const taggedClipboardFetch = createTaggedClipboardFetch();
 	const armTaggedClipboardReply = () => taggedClipboardFetch.arm();
 	const consumeInitClipboardFetch = () => taggedClipboardFetch.consume();
@@ -503,11 +501,30 @@ export default function webrtc() {
 		}
 	});
 	/**
-	 * Retry queue for local clipboard writes of server pushes, which carry no
-	 * user activation: Firefox and WebKit reject the write until the next real
+	 * Retry queue for local clipboard writes of server pushes: a write the
+	 * engine refuses (no focus, no user activation) waits for the next real
 	 * gesture.
 	 */
 	const deferredClipboardWriter = createDeferredClipboardWriter();
+	/** The server-to-client clipboard, shared with the WebSocket core (`lib/clipboard-sync.js`). */
+	const incomingClipboard = createIncomingClipboard({
+		worker: clipboardWorker,
+		clipboardSync,
+		writer: deferredClipboardWriter,
+		toPng: reencodePngOffThread,
+		canWriteLocal: () => clipboard_seamless && clipboardStatus === 'enabled' && clipboard_out_enabled,
+		binaryEnabled: () => enable_binary_clipboard,
+		onPreview: (text) => window.postMessage(clipboardPreviewMessage(text), window.location.origin),
+		onImageWritten: (mime) => {
+			console.log(`Successfully wrote image (${mime}) from server to local clipboard.`);
+			window.postMessage({
+				type: 'clipboardContentUpdate',
+				text: `Image (${mime}) received from session and copied to clipboard.`,
+			}, window.location.origin);
+			return clipboardSync.captureLocalImageSig();
+		},
+		onImageWriteFailed: (err) => notifyClipboardImageWriteFailed(err),
+	});
 
 	const hash = window.location.hash;
 	if (hash === '#shared') {
@@ -2558,7 +2575,8 @@ export default function webrtc() {
 		canWrite: () => !!clipboard_out_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
 		getSendInFlight: () => localClipboardSender.getSendInFlight(),
-		getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
+		getDeferredWriteLanding: () => deferredClipboardWriter.getLanding(),
+		hasPendingServerWrite: () => deferredClipboardWriter.hasPending(),
 	});
 
 	/**
@@ -2695,97 +2713,6 @@ export default function webrtc() {
 				'clipboardSkipSendFailed');
 		}
 	}
-
-	/**
-	 * Decodes a server clipboard message, assembling multipart transfers.
-	 * @param {{type: string, data: object}} msg The `clipboard-msg*` message.
-	 * @returns {Promise<{isMultipart: boolean, mimeType: ?string, content: ?(string|ClipboardItem)}>}
-	 *     `content` is null while a multipart transfer is in progress, on
-	 *     failure, and for images on insecure origins, which have no
-	 *     ClipboardItem. `preview` carries a flavour set's text, which the
-	 *     item itself does not hand back synchronously.
-	 */
-	async function handleClipboardData(msg) {
-		if (!msg.data) {
-			console.warn("Received clipboard message with null data");
-			return { isMultipart: false, mimeType: null, content: null };
-		}
-	
-		let mimeType = msg.data.mime_type || multipartClipboard.mimeType;
-		let is_text =  mimeType === 'text/plain' ? true : false;
-		let content = null;
-		let preview = null;
-		let isMultipart = false;
-		switch (msg.type) {
-			case "clipboard-msg":
-				let blob;
-				try {
-					const { result } = await clipboardWorker.decode(msg.data.content, mimeType);
-					if (is_text) {
-						return { isMultipart, mimeType, content: result };
-					}
-					if (mimeType === CLIPBOARD_FLAVOURS_MIME) {
-						if (typeof ClipboardItem === 'undefined') return { isMultipart, mimeType, content: null };
-						const flavours = unpackClipboardFlavours(result);
-						return { isMultipart, mimeType, content: clipboardItemForFlavours(flavours),
-							preview: flavours.text || flavours.html };
-					}
-					blob = new Blob([result], { type: mimeType });
-					if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
-						// ClipboardItem accepts only image/png on write.
-						blob = await reencodePngOffThread(blob);
-						mimeType = 'image/png';
-					}
-				} catch (err) {
-					console.error("Image conversion failed for clipboard message:", err);
-					return { isMultipart, mimeType, content: null };
-				}
-				if (typeof ClipboardItem === 'undefined') return { isMultipart, mimeType, content: null };
-				return { isMultipart, mimeType, content: new ClipboardItem({ [mimeType]: blob }) };
-			case "clipboard-msg-start":
-				multipartClipboard.begin(mimeType, msg.data.total_size);
-				console.log(`Starting multi-part download: ${mimeType}, expected raw size: ${msg.data.total_size}`);
-				return { isMultipart: true, mimeType, content: null };
-			case "clipboard-msg-data":
-				multipartClipboard.push(msg.data.content);
-				return { isMultipart: true, mimeType, content: null };
-			case "clipboard-msg-end":
-				if (!multipartClipboard.inProgress) {
-					return { isMultipart: false, mimeType, content: null };
-				}
-				mimeType = multipartClipboard.mimeType;
-				const declared = multipartClipboard.totalSize;
-				try {
-					const { result, byteLength } = await multipartClipboard.finish();
-					if (byteLength !== declared) {
-						console.warn(`Size mismatch! Expected ${declared}, got ${byteLength}`);
-						return { isMultipart: false, mimeType, content: null };
-					}
-					if (mimeType === 'text/plain') {
-						content = result;
-					} else if (typeof ClipboardItem === 'undefined') {
-						content = null;
-					} else if (mimeType === CLIPBOARD_FLAVOURS_MIME) {
-						const flavours = unpackClipboardFlavours(result);
-						content = clipboardItemForFlavours(flavours);
-						preview = flavours.text || flavours.html;
-					} else {
-						let blob = new Blob([result], { type: mimeType });
-						if (mimeType.startsWith('image/') && mimeType !== 'image/png') {
-							blob = await reencodePngOffThread(blob);
-							mimeType = 'image/png';
-						}
-						content = new ClipboardItem({ [mimeType]: blob });
-					}
-				} catch (err) {
-					console.error("Worker decoding failed:", err);
-				}
-				return { isMultipart: false, mimeType, content, preview };
-			default:
-				console.warn("Unknown clipboard cmd received");
-		}
-	}
-
 
 	return {
 		/**
@@ -3050,6 +2977,7 @@ export default function webrtc() {
 
 			signaling.ondisconnect = (reconnect) => {
 				videoElement.style.cursor = "auto";
+				incomingClipboard.reset();
 				releaseWakeLock();
 				// No renewal will come; a rumble playing stops now rather than at its lease.
 				if (input) input.stopRumble();
@@ -3202,85 +3130,42 @@ export default function webrtc() {
 			}
 
 			/**
-			 * Caches server clipboard content and writes it locally when policy
-			 * allows. A tagging server marks the payload answering this client's
-			 * own `cr` with `reply_to`, which retires the timed heuristic for the
-			 * session; it is armed before the shared-mode return so the state is
-			 * consistent either way. Caching is unconditional, since gating it on
-			 * clipboardStatus made the first payload depend on message ordering;
-			 * only the local write is gated, on enablement, direction policy, and
-			 * the connect-time reply being cache-only. The fetch flag is consumed
-			 * before the decode, so arrival order decides which payload settles
-			 * the init fetch.
+			 * Hands server clipboard messages to the shared receive path
+			 * (`createIncomingClipboard`), which caches them, previews them,
+			 * and writes them locally when policy allows. A tagging server
+			 * marks the payload answering this client's own `cr` with
+			 * `reply_to`, which retires the timed heuristic for the session;
+			 * it is armed before the shared-mode return so the state is
+			 * consistent either way. The fetch flag is consumed once per
+			 * payload, at its first message, so arrival order decides which
+			 * payload settles the init fetch.
 			 */
-			webrtc.onclipboardcontent = async (msg) => {
-				if (msg.data && msg.data.reply_to === 'cr') armTaggedClipboardReply();
+			webrtc.onclipboardcontent = (msg) => {
+				if (!msg.data) {
+					console.warn("Received clipboard message with null data");
+					return;
+				}
+				if (msg.data.reply_to === 'cr') armTaggedClipboardReply();
 				if (isSharedMode) {
 					return;
 				}
-				const isInitClipboardFetch = consumeInitClipboardFetch();
-				const {isMultipart, mimeType, content, preview} = await handleClipboardData(msg);
-				const isText = mimeType === "text/plain";
-				const isFlavours = mimeType === CLIPBOARD_FLAVOURS_MIME;
-				if (isMultipart || content === null) {
-					return;
-				}
-				const canWriteLocal = !isInitClipboardFetch && clipboard_seamless &&
-					clipboardStatus === 'enabled' && clipboard_out_enabled;
-
-				if (isText) {
-					// Freshness is computed before resolveServer records the signature.
-					const isFreshContent = clipboardSync.shouldSend(content, 'text/plain');
-					clipboardSync.resolveServer(content, null, 'text/plain');
-					window.postMessage(clipboardPreviewMessage(content),
-						window.location.origin);
-					if (canWriteLocal && isFreshContent) {
-						deferredClipboardWriter.write(
-							() => navigator.clipboard.writeText(content), {
-								onSuccess: () => console.log('Successfully wrote text from server to local clipboard.'),
-								onFailure: (err) => console.log('Could not copy text to clipboard: ', err),
-							});
-					}
-				} else if (isFlavours) {
-					const digest = digestedPayload(preview.length, preview);
-					const isFresh = clipboardSync.shouldSend(digest, mimeType);
-					clipboardSync.resolveServer(preview, null, mimeType, digest);
-					window.postMessage(clipboardPreviewMessage(preview), window.location.origin);
-					if (canWriteLocal && isFresh) {
-						deferredClipboardWriter.write(
-							() => navigator.clipboard.write([content]), {
-								onFailure: (err) => console.log('Could not copy session markup to clipboard: ', err),
-							});
-					}
-				} else if (enable_binary_clipboard) {
-					let isFreshImage = true;
-					try {
-						const b = await content.getType(mimeType);
-						const { byteLength, hash } = await clipboardWorker.hashBytes(await b.arrayBuffer());
-						const digest = digestedPayload(byteLength, hash);
-						isFreshImage = clipboardSync.shouldSend(digest, mimeType);
-						clipboardSync.resolveServer(undefined, b, mimeType, digest);
-					} catch (_) {}
-					if (canWriteLocal && isFreshImage) {
-						deferredClipboardWriter.write(
-							() => navigator.clipboard.write([content]), {
-								onSuccess: () => {
-									console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
-									clipboardSync.captureLocalImageSig();
-									window.postMessage({
-										type: 'clipboardContentUpdate',
-										text: `Image (${mimeType}) received from session and copied to clipboard.`,
-									}, window.location.origin);
-								},
-								onFailure: notifyClipboardImageWriteFailed,
-							});
-					} else if (isFreshImage && !isInitClipboardFetch && clipboard_out_enabled) {
-						// Everything but the browser allows the write, so this is
-						// a page with no clipboard to write to. An image has no
-						// other way of showing up, and silence reads as the
-						// session never having sent one.
-						notifyClipboardImageWriteFailed(new Error('the local clipboard is unavailable'));
-					}
+				switch (msg.type) {
+					case 'clipboard-msg':
+						incomingClipboard.single(msg.data.mime_type || 'text/plain', msg.data.content,
+							consumeInitClipboardFetch());
+						break;
+					case 'clipboard-msg-start':
+						incomingClipboard.begin(msg.data.mime_type, msg.data.total_size,
+							consumeInitClipboardFetch());
+						break;
+					case 'clipboard-msg-data':
+						incomingClipboard.push(msg.data.content);
+						break;
+					case 'clipboard-msg-end':
+						incomingClipboard.finish();
+						break;
+					default:
+						console.warn("Unknown clipboard cmd received");
 				}
 			}
 
@@ -3738,7 +3623,7 @@ export default function webrtc() {
 			enableWebrtcStatics = false;
 			enable_binary_clipboard = true;
 			serverCommandEnabled = true;
-			multipartClipboard.reset();
+			incomingClipboard.reset();
 
 		}
 	}

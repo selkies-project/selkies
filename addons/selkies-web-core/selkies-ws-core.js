@@ -106,13 +106,9 @@ import {
 import {
   createClipboardSync,
   createClipboardGestures,
+  createIncomingClipboard,
   createLocalClipboardSender,
-  createMultipartClipboardState,
   createTaggedClipboardFetch,
-  writeImageToLocalClipboard,
-  writeFlavoursToLocalClipboard,
-  unpackClipboardFlavours,
-  CLIPBOARD_FLAVOURS_MIME,
   localClipboardBlocker,
   createDeferredClipboardWriter,
   clipboardPreviewMessage,
@@ -718,13 +714,29 @@ const clipboardSync = createClipboardSync({
     }
 });
 /**
- * Retry queue for clipboard writes pushed by the server: they carry no user
- * activation, and Firefox and WebKit reject the write until the next gesture.
+ * Retry queue for clipboard writes pushed by the server: a write the engine
+ * refuses (no focus, no user activation) waits for the next gesture.
  */
 const deferredClipboardWriter = createDeferredClipboardWriter();
-/** Multipart download state and connect-time cache-only fetch (`cr`) tracking, shared with the WebRTC core. */
-const multipartClipboard = createMultipartClipboardState(
-  (mime) => clipboardWorker.decodeStream(mime));
+/** The server-to-client clipboard and connect-time cache-only fetch (`cr`) tracking, shared with the WebRTC core. */
+const incomingClipboard = createIncomingClipboard({
+  worker: clipboardWorker,
+  clipboardSync,
+  writer: deferredClipboardWriter,
+  toPng: reencodePngOffThread,
+  canWriteLocal: () => clipboard_out_enabled && clipboard_seamless,
+  binaryEnabled: () => enable_binary_clipboard,
+  onPreview: (text) => window.postMessage(clipboardPreviewMessage(text), window.location.origin),
+  onImageWritten: (mime) => {
+    console.log(`Successfully wrote image (${mime}) from server to local clipboard.`);
+    window.postMessage({
+      type: 'clipboardContentUpdate',
+      text: `Image (${mime}) received from session and copied to clipboard.`,
+    }, window.location.origin);
+    return clipboardSync.captureLocalImageSig();
+  },
+  onImageWriteFailed: (err) => notifyClipboardImageWriteFailed(err),
+});
 const taggedClipboardFetch = createTaggedClipboardFetch();
 const armTaggedClipboardReply = () => taggedClipboardFetch.arm();
 const consumeInitClipboardFetch = () => taggedClipboardFetch.consume();
@@ -5594,7 +5606,8 @@ function initWebsockets() {
     canWrite: () => !!clipboard_out_enabled,
     binaryEnabled: () => !!enable_binary_clipboard,
     getSendInFlight: () => localClipboardSender.getSendInFlight(),
-    getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
+    getDeferredWriteLanding: () => deferredClipboardWriter.getLanding(),
+    hasPendingServerWrite: () => deferredClipboardWriter.hasPending(),
   });
   clipboardGestures.wire();
 
@@ -8085,147 +8098,22 @@ class WorkerWebSocket {
             if (event.data.substring(16) === 'cr') armTaggedClipboardReply();
         } else if (event.data.startsWith('clipboard_start,')) {
             const parts = event.data.split(',');
-            multipartClipboard.begin(parts[1], parseInt(parts[2], 10));
-            console.log(`Starting multi-part clipboard download: ${multipartClipboard.mimeType}, total size: ${multipartClipboard.totalSize}`);
+            // Consumed at a payload's first frame, so message order decides which payload settles the connect-time fetch.
+            incomingClipboard.begin(parts[1], parseInt(parts[2], 10), consumeInitClipboardFetch());
         } else if (event.data.startsWith('clipboard_data,')) {
-            if (multipartClipboard.inProgress) {
-                try {
-                    // Handed to the worker as it arrives, so the page never
-                    // holds the payload.
-                    multipartClipboard.push(event.data.substring(15));
-                } catch (e) {
-                    console.error('Error processing multi-part clipboard chunk:', e);
-                    multipartClipboard.reset();
-                }
-            }
+            // Handed to the worker as it arrives, so the page never holds the payload.
+            incomingClipboard.push(event.data.substring(15));
         } else if (event.data === 'clipboard_finish') {
-            if (multipartClipboard.inProgress) {
-                console.log(`Finished multi-part clipboard download. Received ${multipartClipboard.receivedSize} of ${multipartClipboard.totalSize} bytes.`);
-                if (multipartClipboard.receivedSize !== multipartClipboard.totalSize) {
-                    console.error('Multipart clipboard size mismatch. Aborting.');
-                    multipartClipboard.reset();
-                } else {
-                    // Consumed before the async decode so message order still
-                    // defines which payload settles the connect-time fetch.
-                    const isInitClipboardFetch = consumeInitClipboardFetch();
-                    const mpMime = multipartClipboard.mimeType;
-                    multipartClipboard.finish().then(({ result, hash, byteLength }) => {
-                        if (mpMime === 'text/plain') {
-                            const text = result;
-                            // Checked before resolveServer records the signature.
-                            const isFreshContent = clipboardSync.shouldSend(text, 'text/plain');
-                            clipboardSync.resolveServer(text, null, 'text/plain');
-                            if (!isInitClipboardFetch && clipboard_out_enabled && isFreshContent) {
-                                deferredClipboardWriter.write(
-                                    () => navigator.clipboard.writeText(text), {
-                                        onFailure: (err) => console.error('Could not copy server clipboard text to local: ' + err),
-                                    });
-                            }
-                            window.postMessage(clipboardPreviewMessage(text), window.location.origin);
-                        } else if (clipboard_out_enabled && enable_binary_clipboard) {
-                            const bytes = result;
-                            const blob = new Blob([bytes], { type: mpMime });
-                            const digest = digestedPayload(byteLength, hash);
-                            const isFreshContent = clipboardSync.shouldSend(digest, mpMime);
-                            clipboardSync.resolveServer(undefined, blob, mpMime, digest);
-                            if (!isInitClipboardFetch && isFreshContent) {
-                                deferredClipboardWriter.write(
-                                    () => writeImageToLocalClipboard(blob, mpMime, reencodePngOffThread), {
-                                        onSuccess: () => {
-                                            console.log(`Successfully wrote multi-part image (${mpMime}) from server to local clipboard.`);
-                                            clipboardSync.captureLocalImageSig();
-                                            const uiText = `Image (${mpMime}) received from session and copied to clipboard.`;
-                                            window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
-                                        },
-                                        onFailure: notifyClipboardImageWriteFailed,
-                                    });
-                            }
-                        }
-                    }).catch((e) => {
-                        console.error('Error assembling final clipboard content:', e);
-                    });
-                }
-            }
+            incomingClipboard.finish();
         } else if (event.data.startsWith('clipboard_binary,')) {
             const parts = event.data.split(',');
             if (parts.length < 3) {
                 console.error('Malformed binary clipboard message from server:', event.data);
                 return;
             }
-            const mimeType = parts[1];
-            // A flavour set is text, so the image switch is not its switch.
-            const isFlavours = mimeType === CLIPBOARD_FLAVOURS_MIME;
-            if (!isFlavours && !enable_binary_clipboard) {
-                console.warn("Received binary clipboard data from server, but feature is disabled on client. Ignoring.");
-                return;
-            }
-            if (!clipboard_out_enabled) {
-                console.warn("Received server clipboard image while server->client sync is disabled. Ignoring.");
-                return;
-            }
-            try {
-                const base64Data = parts[2];
-                // Consumed before the async decode, which runs in the worker.
-                const isInitClipboardFetch = consumeInitClipboardFetch();
-                clipboardWorker.decode(base64Data, mimeType).then(({ result, hash, byteLength }) => {
-                    const bytes = result;
-                    if (isFlavours) {
-                        const flavours = unpackClipboardFlavours(bytes);
-                        const digest = digestedPayload(byteLength, hash);
-                        const isFresh = clipboardSync.shouldSend(digest, mimeType);
-                        clipboardSync.resolveServer(flavours.text || flavours.html, null, mimeType, digest);
-                        window.postMessage(clipboardPreviewMessage(flavours.text || flavours.html),
-                                           window.location.origin);
-                        if (isInitClipboardFetch || !isFresh || !clipboard_seamless) return;
-                        deferredClipboardWriter.write(
-                            () => writeFlavoursToLocalClipboard(flavours), {
-                                onFailure: (err) => console.error('Could not copy session markup to local: ' + err),
-                            });
-                        return;
-                    }
-                    const blob = new Blob([bytes], { type: mimeType });
-                    const digest = digestedPayload(byteLength, hash);
-                    const isFreshContent = clipboardSync.shouldSend(digest, mimeType);
-                    clipboardSync.resolveServer(undefined, blob, mimeType, digest);
-                    if (isInitClipboardFetch || !isFreshContent || !clipboard_seamless) return;
-                    deferredClipboardWriter.write(
-                        () => writeImageToLocalClipboard(blob, mimeType, reencodePngOffThread), {
-                            onSuccess: () => {
-                                console.log(`Successfully wrote image (${mimeType}) from server to local clipboard.`);
-                                clipboardSync.captureLocalImageSig();
-                                const uiText = `Image (${mimeType}) received from session and copied to clipboard.`;
-                                window.postMessage({ type: 'clipboardContentUpdate', text: uiText }, window.location.origin);
-                            },
-                            onFailure: notifyClipboardImageWriteFailed,
-                        });
-                }).catch((e) => {
-                    console.error('Error processing binary clipboard data from server:', e);
-                });
-            } catch (e) {
-                console.error('Error processing binary clipboard data from server:', e);
-            }
+            incomingClipboard.single(parts[1], parts[2], consumeInitClipboardFetch());
         } else if (event.data.startsWith('clipboard,')) {
-          try {
-            const base64Payload = event.data.substring(10);
-            // Gated synchronously, since message order defines the connect-time fetch.
-            const writeLocal = !consumeInitClipboardFetch() && clipboard_out_enabled && clipboard_seamless;
-            clipboardWorker.decode(base64Payload, 'text/plain').then(({ result }) => {
-                const decodedText = result;
-                const isFreshContent = clipboardSync.shouldSend(decodedText, 'text/plain');
-                clipboardSync.resolveServer(decodedText, null, 'text/plain');
-                if (writeLocal && isFreshContent) {
-                    deferredClipboardWriter.write(
-                        () => navigator.clipboard.writeText(decodedText), {
-                            onFailure: (err) => console.error('Could not copy server clipboard to local: ' + err),
-                        });
-                }
-                window.postMessage(clipboardPreviewMessage(decodedText), window.location.origin);
-            }).catch((e) => {
-                console.error('Error processing clipboard data:', e);
-            });
-          } catch (e) {
-            console.error('Error processing clipboard data:', e);
-          }
+            incomingClipboard.single('text/plain', event.data.substring(10), consumeInitClipboardFetch());
         } else if (event.data.startsWith('system,')) {
           try {
             const systemMsg = JSON.parse(event.data.substring(7));
@@ -8442,6 +8330,7 @@ class WorkerWebSocket {
     streamStats.disconnected();
     // No renewal will come; a rumble playing stops now rather than at its lease.
     if (window.webrtcInput && typeof window.webrtcInput.stopRumble === 'function') window.webrtcInput.stopRumble();
+    incomingClipboard.reset();
     // The auth probe reloads the page when the origin now answers 401.
     if (window.__selkiesAuthProbe) window.__selkiesAuthProbe();
     if (event.code === 4001) {

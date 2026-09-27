@@ -47,6 +47,7 @@ SUITES: list = [
     {"path": "unit/test_clipboard_precedence.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_clipboard_stream.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_clipboard_digest.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_clipboard_incoming.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_clipboard_flavours.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_clipboard_png.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_app_session.py", "tier": "unit", "timeout": 120},

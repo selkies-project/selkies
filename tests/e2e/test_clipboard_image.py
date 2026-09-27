@@ -10,10 +10,20 @@ clipboard rather than the message that carried the image to the core, in both
 dashboards; a JPEG has to reach it as a PNG as well, since that is the only
 image type most applications paste.
 
+The other way, a session image has to land on the local clipboard even when
+the user leaves the tab right after copying it, as someone switching to the
+application they copied it for does: the browser refuses a clipboard write from
+a page that has lost focus (Chromium) or its user activation (Firefox, WebKit),
+and a multi-megabyte image is still crossing the link by then. The page under
+test is taken out of Playwright's focus emulation, under which it never loses
+focus, and the local clipboard is read from the tab the user went to, before
+they come back.
+
 Usage: python3 tests/e2e/test_clipboard_image.py [websockets|webrtc|wayland]
 """
 import io
 import os
+import random
 import struct
 import subprocess
 import sys
@@ -30,6 +40,9 @@ from playwright.sync_api import sync_playwright  # noqa: E402
 
 DASHES = {"classic": H.CLASSIC_DIST, "wish": H.WISH_DIST}
 WL_SOCKET = "wayland-1"
+# Stays under python-xlib's request size (it has no BIG-REQUESTS), as the
+# server's own selection owner does.
+X_CHUNK = 240 * 1024
 
 
 def png(seed: int) -> bytes:
@@ -47,6 +60,15 @@ def png(seed: int) -> bytes:
             + chunk(b"IHDR", struct.pack(">IIBBBBB", side, side, 8, 2, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(raw))
             + chunk(b"IEND", b""))
+
+
+def noise_png(width: int, height: int, seed: int) -> bytes:
+    """A PNG of noise: incompressible, so its size is what crosses the link."""
+    from PIL import Image
+    rng = random.Random(seed)
+    buf = io.BytesIO()
+    Image.frombytes("RGB", (width, height), rng.randbytes(width * height * 3)).save(buf, "PNG")
+    return buf.getvalue()
 
 
 def jpeg(width: int, height: int) -> bytes:
@@ -161,7 +183,10 @@ def own_session_image(data: bytes, wayland: bool) -> dict:
                 if ev.target == targets:
                     ev.requestor.change_property(ev.property, targets, 32, [targets, image])
                 elif ev.target == image:
-                    ev.requestor.change_property(ev.property, image, 8, data)
+                    ev.requestor.change_property(ev.property, image, 8, data[:X_CHUNK])
+                    for at in range(X_CHUNK, len(data), X_CHUNK):
+                        ev.requestor.change_property(ev.property, image, 8, data[at:at + X_CHUNK],
+                                                     mode=X.PropModeAppend)
                 else:
                     ev.requestor.send_event(xevent.SelectionNotify(
                         time=ev.time, requestor=ev.requestor, selection=ev.selection,
@@ -186,6 +211,22 @@ def own_session_image(data: bytes, wayland: bool) -> dict:
     return {"stop": stop}
 
 
+READ_LOCAL_IMAGE_JS = """async () => {
+  try {
+    const items = await navigator.clipboard.read();
+    for (const item of items) {
+      for (const type of item.types) {
+        if (!type.startsWith('image/')) continue;
+        const blob = await item.getType(type);
+        const bmp = await createImageBitmap(blob);
+        return { type, size: blob.size, w: bmp.width, h: bmp.height };
+      }
+    }
+    return null;
+  } catch (err) { return 'read failed: ' + err.name; }
+}"""
+
+
 def upload(page, dashboard: str, name: str, mime: str, data: bytes, wayland: bool,
            want: str = "") -> tuple:
     """Upload `data` through the dashboard's button and read the session clipboard back.
@@ -198,6 +239,31 @@ def upload(page, dashboard: str, name: str, mime: str, data: bytes, wayland: boo
     page.evaluate("window.dispatchEvent(new Event('focus'))")
     time.sleep(5.0)
     return session_image(wayland, want)
+
+
+def leave_and_read(ctx, page, cdp, leave_after: float) -> dict:
+    """Switch to another tab `leave_after` seconds from now, wait for the
+    transfer, and read the local clipboard from there, before coming back.
+
+    Coming back would land a write the page stashed for its next focus, which
+    is exactly what the user who pasted meanwhile did not get.
+    """
+    time.sleep(leave_after)
+    other = ctx.new_page()
+    try:
+        # A still image of the same origin: a document to read from that starts no client.
+        other.goto(H.BASE_URL + "/icon-512.png", wait_until="load")
+    except Exception:
+        pass
+    other.bring_to_front()
+    time.sleep(0.3)
+    focused = page.evaluate("document.hasFocus()")
+    time.sleep(6.0)
+    local = other.evaluate(READ_LOCAL_IMAGE_JS)
+    other.close()
+    page.bring_to_front()
+    time.sleep(0.5)
+    return {"image": local, "page kept focus": focused}
 
 
 def block(mode: str, wayland: bool, dashboard: str) -> "H.Results":
@@ -258,19 +324,7 @@ def checks(res: "H.Results", tag: str, mode: str, wayland: bool, dashboard: str)
                 page.mouse.down()
                 page.mouse.up()
                 time.sleep(2.5)
-            local = page.evaluate("""async () => {
-              try {
-                const items = await navigator.clipboard.read();
-                for (const item of items) {
-                  for (const type of item.types) {
-                    if (!type.startsWith('image/')) continue;
-                    const blob = await item.getType(type);
-                    return { type, size: (await blob.arrayBuffer()).byteLength };
-                  }
-                }
-                return null;
-              } catch (err) { return 'read failed: ' + err.name; }
-            }""")
+            local = page.evaluate(READ_LOCAL_IMAGE_JS)
             # The browser re-encodes what it writes, so the size is its own;
             # that an image is there at all is what the push had to achieve.
             res.check("a session image reaches the local clipboard",
@@ -289,6 +343,19 @@ def checks(res: "H.Results", tag: str, mode: str, wayland: bool, dashboard: str)
             res.check("the same image copied again is sent again",
                       again > sends, f"{sends} sends, then {again}")
 
+            # From here the page can lose focus as a real window does.
+            cdp = ctx.new_cdp_session(page)
+            cdp.send("Emulation.setFocusEmulationEnabled", {"enabled": False})
+            page.bring_to_front()
+            time.sleep(0.5)
+            big = noise_png(1000, 700, 7)
+            owners.append(own_session_image(big, wayland))
+            seen = leave_and_read(ctx, page, cdp, 0.4)
+            res.check(f"a {len(big) // 1024} KiB session image lands locally though the user "
+                      "left the tab right after copying it",
+                      isinstance(seen["image"], dict)
+                      and (seen["image"]["w"], seen["image"]["h"]) == (1000, 700)
+                      and seen["page kept focus"] is False, seen)
         finally:
             for owner in owners:
                 owner["stop"]()
