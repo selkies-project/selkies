@@ -362,4 +362,117 @@ function scrollThenLiftOne(input) {
           `middle=${middle} left=${leftTransitions(sent).length} right=${leftTransitions(sent, 4).length}`);
 }
 
+// --- a pinch is Ctrl+wheel ---------------------------------------------------
+
+const CONTROL_L = 0xffe3;
+
+/**
+ * Zoom notches on the wire and whether every one went out under a Control
+ * that went down just before it and up right after.
+ */
+function zooms(sent) {
+    let control = false;
+    let wrapped = true;
+    let prev = 0;
+    const out = { in: 0, out: 0, wrapped: true, bare: 0 };
+    for (const [, msg] of sent) {
+        const p = msg.split(',');
+        if (p[0] === 'kd' && Number(p[1]) === CONTROL_L) control = true;
+        if (p[0] === 'ku' && Number(p[1]) === CONTROL_L) control = false;
+        if (p[0] !== 'm' && p[0] !== 'm2') continue;
+        const mask = Number(p[3]);
+        const rise = (bit) => (mask & bit) && !(prev & bit);
+        if (rise(16) || rise(8)) {
+            if (!control) { wrapped = false; out.bare += Number(p[4]); }
+            if (rise(16)) out.in += Number(p[4]); else out.out += Number(p[4]);
+        }
+        prev = mask;
+    }
+    out.wrapped = wrapped && !control;
+    return out;
+}
+
+/** Two fingers, midpoint fixed, from `from` to `to` px apart in `steps` touchmoves. */
+function pinch(input, from, to, steps) {
+    const cx = 600;
+    const cy = 400;
+    const at = (d) => [touch(1, cx - d / 2, cy), touch(2, cx + d / 2, cy)];
+    const [a0, b0] = at(from);
+    fire(input, 'touchstart', [a0], [a0]);
+    advance(5);
+    fire(input, 'touchstart', [b0], [a0, b0]);
+    for (let i = 1; i <= steps; i++) {
+        advance(16);
+        const pts = at(from + (to - from) * i / steps);
+        fire(input, 'touchmove', pts, pts);
+    }
+    advance(16);
+    const end = at(to);
+    fire(input, 'touchend', end, []);
+    advance(300);
+}
+
+for (const trackpad of [true, false]) {
+    const mode = trackpad ? 'trackpad' : 'direct touch';
+    {
+        const { input, sent } = makeInput(trackpad);
+        pinch(input, 100, 200, 30);
+        const z = zooms(sent);
+        check(`${mode}: spreading two fingers to twice apart zooms in by about five Ctrl+wheel notches`,
+              z.in >= 4 && z.in <= 5 && z.out === 0 && z.wrapped, JSON.stringify(z));
+    }
+    {
+        const { input, sent } = makeInput(trackpad);
+        pinch(input, 300, 150, 30);
+        const z = zooms(sent);
+        check(`${mode}: pinching them to half apart zooms out as far`,
+              z.out >= 4 && z.out <= 5 && z.in === 0 && z.wrapped, JSON.stringify(z));
+    }
+    {
+        const { input, sent } = makeInput(trackpad);
+        swipe(input, 0, -200, 40);
+        const keys = sent.filter(([, m]) => m.startsWith('kd,') || m.startsWith('ku,')).length;
+        check(`${mode}: a two-finger scroll is no pinch`, keys === 0, `${keys} key messages`);
+    }
+}
+
+/** A wheel event as the page receives it. */
+const wheel = (deltaY, ctrlKey, deltaMode = 0) => ({
+    type: 'wheel', deltaY, deltaX: 0, deltaMode, ctrlKey, target: element, preventDefault() {},
+});
+{
+    // Chromium's touchpad pinch: Ctrl+wheel steps of -100 ln(scale).
+    const { input, sent } = makeInput(false);
+    for (let i = 0; i < 20; i++) {
+        advance(16);
+        input._mouseWheelWrapper(wheel(-100 * Math.log(1.035), true));
+    }
+    advance(300);
+    const z = zooms(sent);
+    check('a touchpad pinch to twice the scale zooms in by about five Ctrl+wheel notches',
+          z.in >= 4 && z.in <= 5 && z.out === 0 && z.wrapped, JSON.stringify(z));
+}
+{
+    // A wheel turned under a Control the page never saw go down.
+    const { input, sent } = makeInput(false);
+    advance(2000);
+    input._mouseWheelWrapper(wheel(100, true));
+    advance(300);
+    const z = zooms(sent);
+    check('a wheel notch under an unseen Control is one Ctrl+wheel notch',
+          z.out === 1 && z.in === 0 && z.wrapped, JSON.stringify(z));
+}
+{
+    // Control held through the page: the wheel is the user's own Ctrl+wheel.
+    const { input, sent } = makeInput(false);
+    input._keyDownList.ControlLeft = CONTROL_L;
+    advance(2000);
+    input._mouseWheelWrapper(wheel(100, true));
+    advance(300);
+    const keys = sent.filter(([, m]) => m.startsWith('kd,') || m.startsWith('ku,')).length;
+    const n = notches(sent);
+    check('a wheel under a Control the page holds adds no Control of its own',
+          keys === 0 && n.down >= 1, `keys=${keys} ${JSON.stringify(n)}`);
+}
+
 process.exit(failed === 0 ? 0 : 1);

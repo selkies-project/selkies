@@ -47,9 +47,10 @@
  * Under pointer lock the payload is a relative delta, scaled to server pixels
  * and quantized with a carried remainder. Gaming mode is document fullscreen
  * plus pointer and keyboard lock. Touch is direct (tap, drag, long-press right
- * click, two-finger scroll) or a trackpad emulation. Wheel events are
+ * click, two-finger scroll and pinch) or a trackpad emulation. Wheel events are
  * classified as discrete wheel or trackpad and accumulated in fractional
- * notches so no distance is lost. The server-drawn cursor is painted on a
+ * notches so no distance is lost. A pinch, on the touchscreen or a touchpad,
+ * reaches the session as Ctrl+wheel. The server-drawn cursor is painted on a
  * page canvas or applied as a CSS cursor.
  *
  * Wire messages: `kd,<keysym>`, `ku,<keysym>`, `kh,<keysym>,...`, `kr`;
@@ -83,8 +84,26 @@ const TRACKPAD_HANDOFF_MS = 200;
 /** Finger travel, in CSS pixels, that one wheel notch of a two-finger scroll stands for. */
 const TOUCH_SCROLL_NOTCH_PX = 50;
 
-/** Finger travel, in CSS pixels, after which a two-finger scroll keeps to the axis it is mostly along. */
+/**
+ * Finger travel, in CSS pixels, after which a two-finger gesture is a scroll
+ * or a pinch, and a scroll keeps to the axis it is mostly along.
+ */
 const TWO_FINGER_SLOP_PX = 10;
+
+/**
+ * Change of scale one Ctrl+wheel notch of a pinch stands for, as a ratio: a
+ * pinch that doubles the spread of the fingers is five notches, about what a
+ * desktop application zooms by for a doubling.
+ */
+const PINCH_NOTCH_RATIO = 1.14;
+
+/**
+ * Largest pixel `deltaY` of one wheel event that is taken as a step of a
+ * touchpad pinch rather than a wheel notch turned under a Control the page
+ * never saw: Chromium sends a pinch as -100 ln(scale) per step, under 40 for
+ * any step short of half again the scale, and a wheel notch is 48 or more.
+ */
+const PINCH_STEP_MAX_PX = 40;
 
 /**
  * A `MouseEvent.buttons` bitmask in the wire's numbering, which counts buttons
@@ -1464,6 +1483,8 @@ export class Input {
         this._wheelDirY = null;
         this._wheelAccumX = 0;
         this._wheelDirX = null;
+        /** Fraction of a zoom notch a touchpad pinch has carried (`_pinchWheel`). */
+        this._pinchCarry = 0;
         /**
          * Last wheel event time, driving the idle reset of the learned notch
          * quantums: the smallest-delta learning only holds within one device's
@@ -2780,8 +2801,9 @@ export class Input {
 
     /**
      * Trackpad emulation: one finger moves the pointer relatively, a tap
-     * clicks, a tap then a touch that moves drags, two fingers scroll, and a
-     * two-finger tap right-clicks. Every payload is relative motion.
+     * clicks, a tap then a touch that moves drags, two fingers scroll or
+     * pinch (`_twoFingerMove`), and a two-finger tap right-clicks. Every
+     * payload is relative motion.
      *
      * A tap presses the button as the finger lifts and releases it
      * `TRACKPAD_TAP_HOLD_MS` later, so only the release waits on the window in
@@ -3575,7 +3597,8 @@ export class Input {
     /**
      * Direct touch: a tap clicks at the touch point, a drag beyond the tap
      * threshold holds the left button, a long press right-clicks, two fingers
-     * scroll, and a third finger releases everything.
+     * scroll or pinch (`_twoFingerMove`), and a third finger releases
+     * everything.
      */
     _handleTouchEvent(event) {
         if (this._trackpadMode) {
@@ -3806,33 +3829,54 @@ export class Input {
     _twoFingerStart(ax, ay, bx, by) {
         const x = (ax + bx) / 2;
         const y = (ay + by) / 2;
-        this._twoFinger = { x, y, x0: x, y0: y, rail: null, accX: 0, accY: 0 };
+        const span = Math.hypot(ax - bx, ay - by);
+        this._twoFinger = { x, y, x0: x, y0: y, span, span0: span,
+                            kind: null, rail: null, accX: 0, accY: 0, zoom: 0 };
     }
 
     /**
-     * Moves the two-finger gesture to new touch points: the travel of their
-     * midpoint becomes wheel notches at `TOUCH_SCROLL_NOTCH_PX` each, and the
-     * fraction of a notch carries forward, so a slow scroll goes as far as a
-     * fast one and neither depends on how often the digitizer reports. Once
-     * the fingers have traveled `TWO_FINGER_SLOP_PX` the gesture keeps to an
-     * axis it is mostly along (twice the other), as a touchpad's scroll rails
-     * do, so the drift of a vertical scroll never scrolls sideways; a diagonal
-     * one moves both. The content follows the fingers: up scrolls down, left
-     * scrolls right.
+     * Moves the two-finger gesture to new touch points. Once the fingers have
+     * moved `TWO_FINGER_SLOP_PX` the gesture is a pinch if their spacing
+     * changed more than their midpoint traveled, and a scroll otherwise, until
+     * they lift.
+     *
+     * A scroll turns the midpoint's travel into wheel notches at
+     * `TOUCH_SCROLL_NOTCH_PX` each, carrying the fraction of a notch forward,
+     * so a slow scroll goes as far as a fast one and neither depends on how
+     * often the digitizer reports. It keeps to an axis it is mostly along
+     * (twice the other), as a touchpad's scroll rails do, so the drift of a
+     * vertical scroll never scrolls sideways; a diagonal one moves both. The
+     * content follows the fingers: up scrolls down, left scrolls right.
+     *
+     * A pinch is Ctrl+wheel (`_sendZoomNotches`), one notch per
+     * `PINCH_NOTCH_RATIO` of change in the spacing, the fraction carried.
      */
     _twoFingerMove(ax, ay, bx, by) {
         const g = this._twoFinger;
         if (!g) return;
         const x = (ax + bx) / 2;
         const y = (ay + by) / 2;
-        if (g.rail === null) {
+        const span = Math.hypot(ax - bx, ay - by);
+        if (g.kind === null) {
             const panX = Math.abs(x - g.x0);
             const panY = Math.abs(y - g.y0);
-            if (Math.hypot(panX, panY) >= TWO_FINGER_SLOP_PX) {
+            const pan = Math.hypot(panX, panY);
+            const spread = Math.abs(span - g.span0);
+            if (Math.max(pan, spread) < TWO_FINGER_SLOP_PX) return;
+            if (spread > pan) {
+                g.kind = 'pinch';
+            } else {
+                g.kind = 'scroll';
                 g.rail = panY >= 2 * panX ? 'y' : (panX >= 2 * panY ? 'x' : 'xy');
-                if (g.rail === 'y') g.accX = 0;
-                if (g.rail === 'x') g.accY = 0;
             }
+        }
+        if (g.kind === 'pinch') {
+            if (g.span > 0 && span > 0) g.zoom += Math.log(span / g.span) / Math.log(PINCH_NOTCH_RATIO);
+            g.span = span;
+            const notches = Math.trunc(g.zoom);
+            g.zoom -= notches;
+            this._sendZoomNotches(notches);
+            return;
         }
         if (g.rail !== 'x') g.accY += g.y - y;
         if (g.rail !== 'y') g.accX += g.x - x;
@@ -3862,6 +3906,27 @@ export class Input {
             notches -= burst;
         }
         return rest;
+    }
+
+    /**
+     * Sends zoom notches the way a desktop application reads a pinch, as
+     * Ctrl+wheel; positive zooms in. Control goes down and up around the
+     * clicks unless the page already holds it, since a pinch comes with no
+     * key of its own.
+     * @param {number} notches
+     */
+    _sendZoomNotches(notches) {
+        if (notches === 0) return;
+        const control = KeyTable.XK_Control_L;
+        const wrap = !this._keysymHeld(control, KeyTable.XK_Control_R);
+        if (wrap) this.send('kd,' + control);
+        let left = Math.abs(notches);
+        while (left > 0) {
+            const burst = Math.min(left, this._scrollMagnitude);
+            this._triggerMouseWheel(notches > 0 ? 'up' : 'down', burst);
+            left -= burst;
+        }
+        if (wrap) this.send('ku,' + control);
     }
 
     /**
@@ -3942,6 +4007,7 @@ export class Input {
         this._wheelDirY = null;
         this._wheelAccumX = 0;
         this._wheelDirX = null;
+        this._pinchCarry = 0;
     }
 
     /**
@@ -3953,6 +4019,10 @@ export class Input {
      * no delta: throttled ticks accumulate and flush at the window end. A
      * discrete wheel emits per event, so a fast spin never collapses to the
      * throttle rate.
+     *
+     * A wheel event reporting a Control no held key accounts for is a
+     * touchpad pinch, which the engines deliver as Ctrl+wheel, and goes to
+     * `_pinchWheel` instead.
      */
     _mouseWheelWrapper(event) {
         // One idle second is longer than any intra-gesture gap (momentum
@@ -3962,6 +4032,11 @@ export class Input {
             this._resetWheelLearning();
         }
         this._lastWheelEventTs = nowTs;
+        if (event.ctrlKey && !this._keysymHeld(KeyTable.XK_Control_L, KeyTable.XK_Control_R)) {
+            this._pinchWheel(event);
+            event.preventDefault();
+            return;
+        }
         if (event.deltaMode !== 0) {
             this._mouseWheel(event);
             event.preventDefault();
@@ -4081,6 +4156,27 @@ export class Input {
             this._triggerHorizontalMouseWheel(this._wheelDirX, burst);
             pulses -= burst;
         }
+    }
+
+    /**
+     * A touchpad pinch, as Ctrl+wheel: Chromium reports each step as a pixel
+     * `deltaY` of -100 ln(scale), taken at one notch per `PINCH_NOTCH_RATIO`
+     * of scale with the fraction carried. A line or page delta, or a pixel
+     * one past `PINCH_STEP_MAX_PX`, is a wheel turned under a Control the page
+     * never saw go down, and zooms by the notches it scrolls.
+     * @param {WheelEvent} event
+     */
+    _pinchWheel(event) {
+        let notches;
+        if (event.deltaMode === 0 && Math.abs(event.deltaY) < PINCH_STEP_MAX_PX) {
+            this._pinchCarry += -event.deltaY / (100 * Math.log(PINCH_NOTCH_RATIO));
+            notches = Math.trunc(this._pinchCarry);
+            this._pinchCarry -= notches;
+        } else {
+            const magnitude = this._wheelNotches(event.deltaY, event.deltaMode);
+            notches = -Math.sign(event.deltaY) * Math.max(1, Math.round(magnitude));
+        }
+        this._sendZoomNotches(notches);
     }
 
     /** Accumulates and emits both axes of one wheel event. */
