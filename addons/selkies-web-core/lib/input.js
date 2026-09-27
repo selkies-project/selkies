@@ -2821,6 +2821,10 @@ export class Input {
      * @param {PointerEvent} event
      */
     _handleRawPointerUpdate(event) {
+        if (event.pointerType === 'touch') {
+            this._trackpadRawUpdate(event);
+            return;
+        }
         if (event.pointerType !== 'mouse' && event.pointerType !== 'pen') return;
         this._rawMotionSeen = true;
         if (event.buttons !== 0 && typeof event.getCoalescedEvents === 'function' &&
@@ -2948,20 +2952,10 @@ export class Input {
 
             if (this._trackpadGestureMode === 'moving' || this._trackpadGestureMode === 'dragging') {
                 const touchData = this._trackpadTouches.values().next().value;
-                if (touchData) {
-                    const changedTouch = Array.from(changedTouches).find(t => t.identifier === touchData.id);
-                    if (changedTouch && performance.now() - this._trackpadHandoffAt >= TRACKPAD_HANDOFF_MS) {
-                        const moved = this._relativeToServer(
-                            changedTouch.clientX - touchData.lastX,
-                            changedTouch.clientY - touchData.lastY);
-                        if (moved[0] !== 0 || moved[1] !== 0) {
-                            this._sendPointer([ "m2", moved[0], moved[1], this.buttonMask, 0 ], true);
-                        }
-                    }
-                    if (changedTouch) {
-                        touchData.lastX = changedTouch.clientX;
-                        touchData.lastY = changedTouch.clientY;
-                    }
+                const changedTouch = touchData &&
+                    Array.from(changedTouches).find(t => t.identifier === touchData.id);
+                if (changedTouch) {
+                    this._trackpadMove(touchData, changedTouch.clientX, changedTouch.clientY);
                 }
             } else {
                 for (const changed of changedTouches) {
@@ -3018,6 +3012,38 @@ export class Input {
                 this._twoFinger = null;
             }
         }
+    }
+
+    /**
+     * Trackpad motion from `pointerrawupdate`, for the one finger moving the
+     * pointer: the engine fires it as the digitizer reports, where `touchmove`
+     * waits for the next frame. Both move by the finger's travel since it was
+     * last seen, so the touchmove that follows finds nothing left to send.
+     * @param {PointerEvent} event
+     */
+    _trackpadRawUpdate(event) {
+        const mode = this._trackpadGestureMode;
+        if (!this._trackpadMode || this._trackpadTouches.size !== 1 ||
+            (mode !== 'moving' && mode !== 'dragging')) return;
+        this._trackpadMove(this._trackpadTouches.values().next().value, event.clientX, event.clientY);
+    }
+
+    /**
+     * Moves the pointer by a trackpad finger's travel since it was last seen,
+     * unless the hand-off from a multi-finger gesture is still settling.
+     * @param {{lastX: number, lastY: number}} touchData
+     * @param {number} x
+     * @param {number} y
+     */
+    _trackpadMove(touchData, x, y) {
+        if (performance.now() - this._trackpadHandoffAt >= TRACKPAD_HANDOFF_MS) {
+            const moved = this._relativeToServer(x - touchData.lastX, y - touchData.lastY);
+            if (moved[0] !== 0 || moved[1] !== 0) {
+                this._sendPointer([ "m2", moved[0], moved[1], this.buttonMask, 0 ], true);
+            }
+        }
+        touchData.lastX = x;
+        touchData.lastY = y;
     }
 
     /** Releases the left button a trackpad tap or tap-drag holds, and any release still pending for it. */

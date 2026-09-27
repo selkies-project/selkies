@@ -362,6 +362,34 @@ function scrollThenLiftOne(input) {
           `middle=${middle} left=${leftTransitions(sent).length} right=${leftTransitions(sent, 4).length}`);
 }
 
+// --- trackpad motion goes out as the digitizer reports it -------------------
+{
+    // pointerrawupdate carries each sample as it arrives; the frame-aligned
+    // touchmove that reports the same travel afterwards adds nothing.
+    const { input, sent } = makeInput();
+    let t = touch(1, 300, 300);
+    fire(input, 'touchstart', [t], [t]);
+    const immediate = [];
+    for (let frame = 1; frame <= 5; frame++) {
+        for (let i = 1; i <= 4; i++) {
+            advance(4);
+            const x = 300 + (frame - 1) * 20 + 5 * i;
+            const before = sent.length;
+            input._handleRawPointerUpdate({ type: 'pointerrawupdate', pointerType: 'touch', isPrimary: true,
+                                            clientX: x, clientY: 300, target: element });
+            immediate.push(sent.length > before);
+        }
+        t = touch(1, 300 + frame * 20, 300);
+        fire(input, 'touchmove', [t], [t]);
+    }
+    fire(input, 'touchend', [t], []);
+    advance(500);
+    const [x] = travel(sent);
+    check('trackpad motion from raw pointer updates goes out as each arrives',
+          immediate.every(Boolean), `${immediate.filter(Boolean).length}/${immediate.length}`);
+    check('and the touchmoves reporting the same travel add none', x === 100, `${x} of 100`);
+}
+
 // --- a pinch is Ctrl+wheel ---------------------------------------------------
 
 const CONTROL_L = 0xffe3;
