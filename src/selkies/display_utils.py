@@ -1697,14 +1697,24 @@ def _rewrite_lxqt_font(path: str, dpi_value: int) -> Optional[Tuple[float, int]]
 
 
 async def _run_lxqt_font(dpi_value: int, logger: logging.Logger) -> bool:
-    """Hand the density to a running LXQt session's Qt applications.
+    """Hand the density to the Qt applications of the LXQt session on this display.
 
     The X11 counterpart of the Wayland output scale: there the compositor tells
     clients their scale and they redraw, here the platform theme repolishes them
     from its own configuration. Applications on other toolkits, and any started
     later, take the same density from the Xft resources instead.
+
+    The platform theme of every LXQt application reading that configuration
+    repolishes on the change, whichever display it is on, so the file is
+    rewritten only for a session on this display (`_pids_on_display`), and it
+    is the one the session reads: under its own XDG_CONFIG_HOME, else its home.
     """
-    path = os.path.expanduser("~/.config/lxqt/lxqt.conf")
+    pids = await _pids_on_display("lxqt-session")
+    if not pids:
+        return False
+    env = _process_environ(pids[0])
+    config = env.get("XDG_CONFIG_HOME") or os.path.join(env.get("HOME") or os.path.expanduser("~"), ".config")
+    path = os.path.join(config, "lxqt", "lxqt.conf")
     try:
         resolved = await asyncio.to_thread(_rewrite_lxqt_font, path, dpi_value)
     except OSError as e:

@@ -95,16 +95,9 @@ try:
 
         # Stand-ins named xsettingsd, one serving this display and one another
         # display from this same home, which a SIGHUP ends.
-        standin = [sys.executable, "-c", "import ctypes, time; "
-                   "ctypes.CDLL(None).prctl(15, b'xsettingsd', 0, 0, 0); time.sleep(30)"]
         other = f":{int(display.lstrip(':')) + 1}"
-        daemons = {d: subprocess.Popen(standin, env={"PATH": os.environ.get("PATH", ""), "DISPLAY": d})
-                   for d in (display, other)}
+        daemons = {d: H.named_process("xsettingsd", {"DISPLAY": d}) for d in (display, other)}
         try:
-            deadline = time.time() + 10
-            while time.time() < deadline and not all(
-                    open(f"/proc/{p.pid}/comm").read().strip() == "xsettingsd" for p in daemons.values()):
-                time.sleep(0.05)
             merged = asyncio.run(DU._run_xrdb(144, DU.logger_app_resize))
             time.sleep(0.3)
             with open(os.path.join(home, ".xsettingsd")) as f:
@@ -126,6 +119,33 @@ try:
         res.check("a pixel-only session font resolves at the density the desktop has",
                   DU._rewrite_lxqt_font(lxqt, 96) == (12.0, 16),
                   open(lxqt).read())
+
+        # Every LXQt application of this home watches its configuration from
+        # whichever display it is on, so only the session on this display has
+        # its font retargeted, in the configuration that session reads.
+        in_points = '[Qt]\nfont="Sans,11,-1,5,50,0,0,0,0,0"\n'
+        home_conf = os.path.join(home, ".config", "lxqt", "lxqt.conf")
+        session_config = os.path.join(home, "session-config")
+        session_conf = os.path.join(session_config, "lxqt", "lxqt.conf")
+        for conf in (home_conf, session_conf):
+            os.makedirs(os.path.dirname(conf), exist_ok=True)
+            with open(conf, "w") as f:
+                f.write(in_points)
+        sessions = [H.named_process("lxqt-session", {"HOME": home, "DISPLAY": other})]
+        try:
+            res.check("a session of this home on another display keeps its font",
+                      not asyncio.run(DU._run_lxqt_font(144, DU.logger_app_resize))
+                      and open(home_conf).read() == in_points, open(home_conf).read())
+            sessions.append(H.named_process("lxqt-session", {"HOME": home, "DISPLAY": display,
+                                                             "XDG_CONFIG_HOME": session_config}))
+            res.check("the session on this display has its font resolved where it reads it",
+                      asyncio.run(DU._run_lxqt_font(144, DU.logger_app_resize))
+                      and 'font="Sans,11,22,' in open(session_conf).read()
+                      and open(home_conf).read() == in_points, open(session_conf).read())
+        finally:
+            for session in sessions:
+                session.kill()
+                session.wait()
 
         # An XFCE session keeps its density in xfconf, the one store set_dpi
         # writes there, so a restart reads it before the database and the files.

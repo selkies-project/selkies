@@ -364,6 +364,21 @@ def spawn(cmd: Iterable, **kwargs: Any) -> subprocess.Popen:
     return subprocess.Popen(cmd, **kwargs)
 
 
+def named_process(name: str, env: dict) -> subprocess.Popen:
+    """A sleeping child the kernel names `name`, which `pgrep -x` then finds as
+    that daemon or session, started with `env` and PATH alone."""
+    proc = spawn([sys.executable, "-c", "import ctypes, sys, time; ctypes.CDLL(None).prctl("
+                  "15, sys.argv[1].encode(), 0, 0, 0); time.sleep(120)", name],
+                 env={"PATH": os.environ.get("PATH", ""), **env})
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        with open(f"/proc/{proc.pid}/comm") as f:
+            if f.read().strip() == name:
+                break
+        time.sleep(0.05)
+    return proc
+
+
 def inherited_env() -> dict:
     """What a hermetic child environment still takes from the suite's own: the
     warnings config, so a deprecation sweep sees server-side hits, and GPU

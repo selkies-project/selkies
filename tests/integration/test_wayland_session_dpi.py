@@ -177,6 +177,8 @@ if not shutil.which("Xvfb") or not shutil.which("xrdb"):
     sys.exit(1 if failed else 77 if not failed else 0)
 
 xvfb, DISP = H.private_x_server(640, 480)
+# The LXQt session whose Qt applications the X11 ladder repolishes.
+session = H.named_process("lxqt-session", {"HOME": home, "DISPLAY": DISP})
 try:
     def query() -> dict[str, str]:
         """Read the private X server's resource database as a dict."""
@@ -227,6 +229,8 @@ try:
     check("a later density rescales from the same point size",
           session_font() == 'font="Sans,11,44,5,50,0,0,0,0,0"', session_font())
 finally:
+    session.kill()
+    session.wait()
     H.stop_x_server(xvfb, DISP)
     shutil.rmtree(home, ignore_errors=True)
 
