@@ -55,7 +55,12 @@ DPI handling here is X11-only by design: on the Wayland backend a DPI is an
 output scale on the session compositor (applied in-process through
 wlr-output-management), never Xft resources — XWayland runs in the
 compositor's logical space and is scaled with it, so Xft resources merged
-there would scale applications twice.
+there would scale applications twice. On X11 a density or cursor size
+reaches only the session on this display: the daemons told to reload and
+the settings stores written through a session bus are found by the DISPLAY
+their processes run with (`_pids_on_display`, `_session_env`), never through
+whatever bus Selkies inherited, since another display's session may share
+the home and would apply the change live.
 """
 
 import base64
@@ -1855,29 +1860,32 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
         return False
 
 
-async def _get_xfce_session_env(logger: logging.Logger) -> Optional[Dict[str, str]]:
-    """Environment of the xfce4-session running on this display.
+async def _session_env(binary: str) -> Optional[Dict[str, str]]:
+    """Environment of the ``binary`` session process running on this display.
 
-    xfconf-query must talk to the session's own D-Bus bus, so the variables
-    are lifted from the process's ``/proc/pid/environ``.
+    A desktop keeps its settings behind its own session bus (xfconfd, dconf),
+    so a command writing them runs with the environment read out of that
+    process's ``/proc/pid/environ`` rather than Selkies' own: the bus Selkies
+    inherited may belong to another display's session of the same home,
+    whose settings daemons would apply the change there, live.
 
     Returns:
-        The environment mapping, or None when the session (or its
-        DBUS_SESSION_BUS_ADDRESS) cannot be found.
+        The environment mapping, or None when no such process with a
+        DBUS_SESSION_BUS_ADDRESS runs on this display.
     """
-    pids = await _pids_on_display("xfce4-session")
-    env = _process_environ(pids[0]) if pids else {}
-    if "DBUS_SESSION_BUS_ADDRESS" not in env:
-        logger.debug("No running xfce4-session with a session bus address.")
-        return None
-    return env
+    for pid in await _pids_on_display(binary):
+        env = _process_environ(pid)
+        if "DBUS_SESSION_BUS_ADDRESS" in env:
+            return env
+    return None
 
 
 async def _run_xfconf(dpi_value: int, logger: logging.Logger) -> bool:
     """Apply DPI and a DPI-scaled cursor size via xfconf-query for XFCE.
 
-    Commands run inside the live XFCE session environment when it can be
-    found, so they reach the session's own D-Bus bus.
+    Commands run in the environment of the XFCE session on this display
+    (`_session_env`), so they reach its own bus; without one nothing is
+    written.
 
     Returns:
         True when both settings were applied.
@@ -1886,11 +1894,10 @@ async def _run_xfconf(dpi_value: int, logger: logging.Logger) -> bool:
         logger.debug("xfconf-query not found. Skipping XFCE DPI setting via xfconf-query.")
         return False
 
-    session_env = await _get_xfce_session_env(logger)
-    if session_env:
-        logger.debug("Found active XFCE session environment. Commands will be executed within this context.")
-    else:
-        logger.warning("Could not obtain XFCE session environment. Falling back to direct execution.")
+    session_env = await _session_env("xfce4-session")
+    if session_env is None:
+        logger.warning("No XFCE session with a session bus runs on this display; xfconf is left as it is.")
+        return False
 
     async def run_command(cmd: List[str], success_msg: str, failure_msg: str) -> bool:
         try:
@@ -1941,13 +1948,19 @@ async def _run_mate_gsettings(dpi_value: int, logger: logging.Logger) -> bool:
     """Apply DPI via MATE gsettings (window-scaling-factor and font DPI).
 
     ``window-scaling-factor`` is integer-only, so it carries whole scales and
-    stays 1 otherwise, the fractional part riding on the font DPI.
+    stays 1 otherwise, the fractional part riding on the font DPI. The
+    commands run in the environment of the MATE session on this display
+    (`_session_env`); without one nothing is written.
 
     Returns:
         True when at least one setting was applied.
     """
     if not which("gsettings"):
         logger.debug("gsettings not found. Skipping MATE gsettings.")
+        return False
+    session_env = await _session_env("mate-session")
+    if session_env is None:
+        logger.debug("No MATE session with a session bus runs on this display; gsettings left alone.")
         return False
 
     mate_settings_succeeded_at_least_once = False
@@ -1968,6 +1981,7 @@ async def _run_mate_gsettings(dpi_value: int, logger: logging.Logger) -> bool:
         ]
         result_mate_window_scale = await subprocess.create_subprocess_exec(
             *cmd_gsettings_mate_window_scale,
+            env=session_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
@@ -1992,6 +2006,7 @@ async def _run_mate_gsettings(dpi_value: int, logger: logging.Logger) -> bool:
         ]
         result_mate_font_dpi = await subprocess.create_subprocess_exec(
             *cmd_gsettings_mate_font_dpi,
+            env=session_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
@@ -2227,9 +2242,12 @@ async def set_cursor_size(size: int) -> bool:
     """Set the X cursor size through every applicable settings channel.
 
     Merges Xcursor.size via xrdb, then tries the XFCE and GNOME settings
-    daemons; desktop-aware toolkits follow their daemon while plain X apps
-    follow the Xcursor resource, so daemon success returns immediately and
-    the xrdb merge alone still counts as success.
+    daemons serving this display, each through its session's own
+    environment (`_session_env`: the session manager for XFCE, the xsettings
+    daemon that publishes the GNOME key); desktop-aware toolkits follow
+    their daemon while plain X apps follow the Xcursor resource, so daemon
+    success returns immediately and the xrdb merge alone still counts as
+    success.
 
     Returns:
         True when any channel applied the size.
@@ -2238,7 +2256,8 @@ async def set_cursor_size(size: int) -> bool:
         logger_app_resize.error(f"Invalid cursor size: {size}")
         return False
     xrdb_ok = await _set_xcursor_resource(size)
-    if which("xfconf-query"):
+    xfce_env = await _session_env("xfce4-session") if which("xfconf-query") else None
+    if xfce_env is not None:
         cmd = [
             "xfconf-query",
             "-c",
@@ -2253,6 +2272,7 @@ async def set_cursor_size(size: int) -> bool:
         ]
         process = await subprocess.create_subprocess_exec(
             *cmd,
+            env=xfce_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
@@ -2260,7 +2280,8 @@ async def set_cursor_size(size: int) -> bool:
         if process.returncode == 0:
             return True
         logger_app_resize.warning("Failed to set XFCE cursor size.")
-    if which("gsettings"):
+    gnome_env = await _session_env("gsd-xsettings") if which("gsettings") else None
+    if gnome_env is not None:
         try:
             cmd_set = [
                 "gsettings",
@@ -2271,6 +2292,7 @@ async def set_cursor_size(size: int) -> bool:
             ]
             process_set = await subprocess.create_subprocess_exec(
                 *cmd_set,
+                env=gnome_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )

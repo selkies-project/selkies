@@ -147,6 +147,74 @@ try:
                 session.kill()
                 session.wait()
 
+        # A desktop's settings stores are written through the bus of the session
+        # on this display, never through the one this process inherited, which
+        # may be another display's session of this home. The tools are stand-ins
+        # recording the bus each run was given.
+        stub_bin = os.path.join(home, "stub-bin")
+        written = os.path.join(home, "written")
+        os.makedirs(stub_bin)
+        for tool in ("xfconf-query", "gsettings"):
+            with open(os.path.join(stub_bin, tool), "w") as f:
+                f.write(f'#!/bin/sh\necho "{tool} $DBUS_SESSION_BUS_ADDRESS $*" >> "{written}"\n')
+            os.chmod(os.path.join(stub_bin, tool), 0o755)
+        saved_path, saved_bus = os.environ.get("PATH", ""), os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+        os.environ["PATH"] = stub_bin + os.pathsep + saved_path
+        os.environ["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=inherited"
+
+        def runs() -> list:
+            """The tool runs recorded since the last call, as `tool bus args`."""
+            try:
+                with open(written) as f:
+                    lines = f.read().splitlines()
+                os.unlink(written)
+            except OSError:
+                return []
+            return lines
+
+        def session(binary: str, on: str) -> subprocess.Popen:
+            return H.named_process(binary, {"HOME": home, "DISPLAY": on,
+                                            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={on}"})
+
+        desktops = []
+        try:
+            desktops += [session(b, other) for b in ("xfce4-session", "mate-session", "gsd-xsettings")]
+            applied = (asyncio.run(DU._run_xfconf(144, DU.logger_app_resize)),
+                       asyncio.run(DU._run_mate_gsettings(144, DU.logger_app_resize)),
+                       asyncio.run(DU.set_cursor_size(48)))
+            res.check("sessions of this home on another display have no store written through any bus",
+                      applied == (False, False, True) and not runs(), (applied, runs()))
+            desktops += [session(b, display) for b in ("mate-session", "gsd-xsettings")]
+            cursor = asyncio.run(DU.set_cursor_size(48))
+            res.check("a cursor size reaches the GNOME key through the bus of this display's session",
+                      cursor and runs() == [f"gsettings unix:path={display} set org.gnome.desktop.interface "
+                                            "cursor-size 48"], cursor)
+            mate = asyncio.run(DU._run_mate_gsettings(144, DU.logger_app_resize))
+            got = runs()
+            res.check("a MATE density is written through the bus of this display's session",
+                      mate and len(got) == 2 and all(r.startswith(f"gsettings unix:path={display} set org.mate.")
+                                                     for r in got), got)
+            desktops.append(session("xfce4-session", display))
+            xfconf = asyncio.run(DU._run_xfconf(144, DU.logger_app_resize))
+            got = runs()
+            res.check("an XFCE density is written through the bus of this display's session",
+                      xfconf and len(got) == 2 and all(r.startswith(f"xfconf-query unix:path={display} ")
+                                                       for r in got), got)
+            cursor = asyncio.run(DU.set_cursor_size(48))
+            got = runs()
+            res.check("an XFCE cursor size is written through the bus of this display's session",
+                      cursor and got == [f"xfconf-query unix:path={display} -c xsettings -p "
+                                         "/Gtk/CursorThemeSize -s 48 --create -t int"], got)
+        finally:
+            for desktop in desktops:
+                desktop.kill()
+                desktop.wait()
+            os.environ["PATH"] = saved_path
+            if saved_bus is None:
+                os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+            else:
+                os.environ["DBUS_SESSION_BUS_ADDRESS"] = saved_bus
+
         # An XFCE session keeps its density in xfconf, the one store set_dpi
         # writes there, so a restart reads it before the database and the files.
         channel = os.path.join(home, ".config", "xfce4", "xfconf", "xfce-perchannel-xml")
