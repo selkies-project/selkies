@@ -1533,7 +1533,10 @@ const enterFullscreen = (gaming) => {
   } else if (input && typeof input.enterFullscreen === 'function') {
     input.enterFullscreen();
   } else if (document.fullscreenElement === null) {
-    document.documentElement.requestFullscreen().catch(() => {});
+    // Gaming mode before the input handler exists: the browser's own keyboard
+    // lock, where it has one, is all that can be asked for.
+    document.documentElement.requestFullscreen(gaming ? { keyboardLock: 'browser' } : undefined)
+      .catch(() => {});
   }
 };
 

@@ -19,6 +19,11 @@ A second page withholds the Keyboard Lock API the way Brave's Shields do, and
 there the client has to say so once and a single Escape has to end the mode,
 which is what a user of that browser gets.
 
+Firefox has no Keyboard Lock API; it holds its keys for a fullscreen asked for
+with `keyboardLock: "browser"`. The installed Firefox, where there is one, is
+driven through the same block, and must hold Escape, Ctrl+T, and Ctrl+W for the
+game without a notice.
+
 The `-two` selectors lay a second display beside the locked one and walk the
 remote pointer onto it, since a lock is one page's and the pointer is the whole
 desktop's: what has to hold is that the lock survives the crossing and the
@@ -182,8 +187,9 @@ def game_window(res: "H.Results", desk: Desk, wayland: bool, capture: str, tag: 
     return probe
 
 
-def played(res: "H.Results", desk: Desk, page: Any, probe: Any, tag: str) -> None:
-    """Gaming mode with a keyboard the browser locks: the game is fed, Escape is held."""
+def played(res: "H.Results", desk: Desk, page: Any, probe: Any, tag: str, shortcuts: bool = False) -> None:
+    """Gaming mode with a keyboard the browser locks: the game is fed, Escape is
+    held, and, with `shortcuts`, the browser's own Ctrl+T and Ctrl+W as well."""
     try:
         time.sleep(0.3)
         wire_mark = len(page.evaluate(PL.MOVES_JS))
@@ -216,6 +222,17 @@ def played(res: "H.Results", desk: Desk, page: Any, probe: Any, tag: str) -> Non
         mode = page.evaluate(MODE_JS)
         res.check(f"{tag}: a tap of Escape leaves gaming mode standing",
                   mode["fullscreen"] and mode["locked"] and mode["gaming"], mode)
+        if shortcuts:
+            for letter in ("t", "w"):
+                key_mark = len(probe.lines)
+                desk.chord("Control_L", letter)
+                keys = [(k["down"], k["sym"]) for k in probe.events("key", key_mark, 4, 6)]
+                time.sleep(0.8)
+                mode = page.evaluate(MODE_JS)
+                res.check(f"{tag}: Ctrl+{letter.upper()} reaches the game, and the browser keeps its one tab "
+                          "and gaming mode",
+                          (True, ord(letter)) in keys and len(page.context.pages) == 1
+                          and mode["fullscreen"] and mode["gaming"], f"{keys} {len(page.context.pages)} {mode}")
     finally:
         probe.stop()
 
@@ -410,10 +427,41 @@ def run(wayland: bool, res: "H.Results", two: bool = False) -> None:
                 page.context.close()
             finally:
                 browser.close()
+            if not two:
+                firefox(res, p, desk, wayland, capture)
     finally:
         if desk is not None:
             desk.stop()
         H.server_stop()
+
+
+def firefox(res: "H.Results", p: Any, desk: Desk, wayland: bool, capture: str) -> None:
+    """The same gaming mode in the installed Firefox, which holds the keys only
+    for a fullscreen asked for with `keyboardLock: "browser"`."""
+    binary = C.FIREFOX_PATH or shutil.which("firefox")
+    if not binary:
+        res.skip("firefox", "no installed Firefox (E2E_FIREFOX or firefox on PATH)")
+        return
+    # Playwright takes a bare argument as a page to open, so the window keeps its
+    # default size; the first-run notices would open over the page.
+    browser = p.firefox.launch(**C.installed_firefox({
+        "headless": False, "executable_path": binary,
+        "firefox_user_prefs": {"media.autoplay.default": 0, "full-screen-api.warning.timeout": 0,
+                               "datareporting.policy.dataSubmissionPolicyBypassNotification": True,
+                               "termsofuse.bypassNotification": True},
+        "env": {**os.environ, "DISPLAY": desk.display}}))
+    try:
+        page = open_page(browser, shields=False)
+        video = C.wait_ws_video(page, timeout=30)
+        res.check("firefox: video flowing", bool(video), video)
+        probe = game_window(res, desk, wayland, capture, "firefox")
+        if probe is not None and enter_gaming_mode(res, desk, page, "firefox"):
+            played(res, desk, page, probe, "firefox", shortcuts=True)
+        if probe is not None:
+            probe.stop()
+        page.context.close()
+    finally:
+        browser.close()
 
 
 SELECTORS = ("x11", "wl", "x11-two", "wl-two")

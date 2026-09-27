@@ -1975,7 +1975,10 @@ export default function webrtc() {
 				} else if (input) {
 					input.enterFullscreen();
 				} else if (document.fullscreenElement === null) {
-					document.documentElement.requestFullscreen().catch(() => {});
+					// Gaming mode before the input handler exists: the browser's
+					// own keyboard lock, where it has one, is all that can be asked for.
+					document.documentElement.requestFullscreen(gaming ? { keyboardLock: 'browser' } : undefined)
+						.catch(() => {});
 				}
 				break;
 			}

@@ -1516,6 +1516,8 @@ export class Input {
         this._rawMotionSeen = false;
         this.onmenuhotkey = null;
         this.gamingMode = false;
+        /** The browser holds the keys for this fullscreen (`_gamingFullscreenOptions`). */
+        this._fullscreenKeyboardLock = false;
         this.shortcutsEnabled = true;
         this._escapePresses = 0;
         this._lastEscapeAt = 0;
@@ -4652,6 +4654,7 @@ export class Input {
                 this.requestKeyboardLock();
             }
         } else {
+            this._fullscreenKeyboardLock = false;
             this._setGamingMode(false);
             if (this._isStreamLocked()) document.exitPointerLock();
         }
@@ -4926,7 +4929,7 @@ export class Input {
     enterGamingMode() {
         this._setGamingMode(true);
         if (document.fullscreenElement === null) {
-            document.documentElement.requestFullscreen()
+            document.documentElement.requestFullscreen(this._gamingFullscreenOptions())
                 .catch(err => {
                     console.error("Fullscreen request failed:", err);
                     this._setGamingMode(false);
@@ -4935,6 +4938,25 @@ export class Input {
         }
         this._armPointerLock();
         this.requestKeyboardLock();
+    }
+
+    /**
+     * The fullscreen options gaming mode asks with: `keyboardLock: "browser"`
+     * has the browser itself hold Escape and its own shortcuts for as long as
+     * the fullscreen lasts, where the engine takes the member (Firefox 156,
+     * Safari 26.4). An engine reads only the members it knows, so the getter
+     * records whether this one did (`_fullscreenKeyboardLock`).
+     * @returns {object} Options for `requestFullscreen`.
+     */
+    _gamingFullscreenOptions() {
+        this._fullscreenKeyboardLock = false;
+        const input = this;
+        return {
+            get keyboardLock() {
+                input._fullscreenKeyboardLock = true;
+                return 'browser';
+            },
+        };
     }
 
     /** Publishes the mode to `ongamingmode`, releasing the keyboard as it ends. */
@@ -4949,7 +4971,13 @@ export class Input {
         }
     }
 
-    /** Locks the system keys the browser would otherwise intercept, for gaming mode alone, where the Keyboard Lock API exists. */
+    /**
+     * Locks the system keys the browser would otherwise intercept, for gaming
+     * mode alone: through the Keyboard Lock API where it exists, else by the
+     * fullscreen request's own `keyboardLock` where the engine took it
+     * (`_gamingFullscreenOptions`). Only where neither holds the keys does the
+     * user hear that one Escape leaves the mode.
+     */
     requestKeyboardLock() {
         if (!this.gamingMode || !document.fullscreenElement) return;
         if (navigator.keyboard && 'lock' in navigator.keyboard) {
@@ -4957,6 +4985,7 @@ export class Input {
             navigator.keyboard.lock(keys).catch(() => {});
             return;
         }
+        if (this._fullscreenKeyboardLock) return;
         this._noticeKeyboardLockUnavailable();
     }
 
