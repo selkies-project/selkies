@@ -12,7 +12,7 @@
  *
  * Reads the `serverSettings` and `trackpadModeUpdate` messages the core posts
  * on `window` and posts `sidebarVisibilityChanged`, `touchinput:trackpad`,
- * `touchinput:touch`, `setSynth`, and `setGamepadRumble` back; held modifier keys are delivered as
+ * `touchinput:touch`, `setSynth`, `setTrackpadSpeed`, and `setGamepadRumble` back; held modifier keys are delivered as
  * synthetic KeyboardEvents on `window`, which the core's input handler consumes
  * like real ones. A secondary display opens as a new window on the
  * `#display2-<direction>` fragment, placed with the Window Management API
@@ -71,6 +71,7 @@ import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, isMobileClient, isSecondaryDisplay } from "@/utils";
+import { TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY } from "../../../../selkies-web-core/lib/touch-controls.js";
 import { t } from "@/i18n";
 
 /**
@@ -171,6 +172,10 @@ export function TopMenu({
     Control: false,
     Alt: false,
     Meta: false,
+  });
+  const [trackpadSpeed, setTrackpadSpeed] = React.useState<number>(() => {
+    const stored = parseFloat(localStorage.getItem(getPrefixedKey(TRACKPAD_SPEED_KEY)) ?? "");
+    return TRACKPAD_SPEEDS.includes(stored) ? stored : 1;
   });
 
   const dragRef = React.useRef<HTMLDivElement>(null);
@@ -594,6 +599,12 @@ export function TopMenu({
     setTimeout(() => {
       sendKeyEvent('keyup', key, code, heldKeys);
     }, 50);
+  };
+
+  /** The trackpad's speed is client-only; the core persists trackpad_speed itself. */
+  const handleTrackpadSpeed = (value: number) => {
+    setTrackpadSpeed(value);
+    window.postMessage({ type: 'setTrackpadSpeed', value }, window.location.origin);
   };
 
   /** The panel body for the active panel. */
@@ -1164,6 +1175,20 @@ export function TopMenu({
             >
               <Touchpad className="h-4 w-4" />
             </Button>
+          )}
+          {(renderableSettings.trackpad ?? true) && isTrackpadModeActive && (
+            <label className="flex items-center gap-1 text-xs">
+              <span>{t('trackpadSpeedLabel')}</span>
+              <select
+                className="rounded border bg-background px-1 py-0.5 text-xs"
+                value={trackpadSpeed}
+                onChange={(e) => handleTrackpadSpeed(Number(e.target.value))}
+              >
+                {TRACKPAD_SPEEDS.map((v: number) => (
+                  <option key={v} value={v}>{`${v}\u00d7`}</option>
+                ))}
+              </select>
+            </label>
           )}
         </motion.div>
       )}

@@ -39,6 +39,9 @@ On a touch screen the stream takes the fingers in one of two modes, switched wit
 
 A laptop touchpad's own pinch, which browsers deliver as a scroll with `Control` held, reaches the session the same way.
 
+In trackpad mode the pointer moves as far as the finger travels while it moves slowly, for aiming, and up to three times as far the faster it moves, so a flick crosses the desktop. The trackpad speed picker, shown with the touch controls while trackpad mode is on, scales both, and the browser keeps the pick.
+
+
 ## Clipboard
 
 Clipboard synchronization works in both directions and is supported across Chromium, Firefox, and Safari (a valid HTTPS context, or `localhost`, is still required by browsers).

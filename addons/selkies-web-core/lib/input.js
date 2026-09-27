@@ -100,6 +100,36 @@ const TRACKPAD_TAP_HOLD_MS = 180;
  */
 const TRACKPAD_HANDOFF_MS = 200;
 
+/**
+ * Trackpad pointer acceleration, on the finger's speed in CSS pixels per
+ * millisecond, which does not depend on how often the digitizer reports:
+ * travel at up to TRACKPAD_ACCEL_SLOW goes out as it is, for aiming, and the
+ * gain rises smoothly to TRACKPAD_ACCEL_MAX by TRACKPAD_ACCEL_FAST, so a flick
+ * crosses the desktop (`trackpadGain`); `Input.trackpadSpeed` scales it all.
+ */
+const TRACKPAD_ACCEL_SLOW = 0.15;
+const TRACKPAD_ACCEL_FAST = 1.2;
+const TRACKPAD_ACCEL_MAX = 3;
+
+/** Time constant, in milliseconds, over which a trackpad finger's speed is smoothed. */
+const TRACKPAD_SPEED_TAU_MS = 25;
+
+/** The range `Input.setTrackpadSpeed` takes. */
+const TRACKPAD_SPEED_MIN = 0.25;
+const TRACKPAD_SPEED_MAX = 4;
+
+/**
+ * The trackpad's gain at a finger speed: 1, rising along a smoothstep to
+ * TRACKPAD_ACCEL_MAX between TRACKPAD_ACCEL_SLOW and TRACKPAD_ACCEL_FAST.
+ * @param {number} speed CSS pixels per millisecond.
+ * @returns {number}
+ */
+function trackpadGain(speed) {
+    const t = Math.min(1, Math.max(0,
+        (speed - TRACKPAD_ACCEL_SLOW) / (TRACKPAD_ACCEL_FAST - TRACKPAD_ACCEL_SLOW)));
+    return 1 + (TRACKPAD_ACCEL_MAX - 1) * t * t * (3 - 2 * t);
+}
+
 /** Finger travel, in CSS pixels, that one wheel notch of a two-finger scroll stands for. */
 const TOUCH_SCROLL_NOTCH_PX = 50;
 
@@ -1580,6 +1610,8 @@ export class Input {
         this._trackpadReleaseTimer = null;
         /** When a multi-finger trackpad gesture last dropped to one finger, for `TRACKPAD_HANDOFF_MS`. */
         this._trackpadHandoffAt = -Infinity;
+        /** The dashboards' trackpad speed, scaling the accelerated travel (`setTrackpadSpeed`). */
+        this.trackpadSpeed = 1;
         this.inputAttached = false;
     }
 
@@ -2915,6 +2947,7 @@ export class Input {
                     id: touch.identifier,
                     startX: touch.clientX, startY: touch.clientY,
                     lastX: touch.clientX, lastY: touch.clientY,
+                    lastT: event.timeStamp, speed: null,
                     moved: false
                 });
             }
@@ -2959,7 +2992,8 @@ export class Input {
                 const changedTouch = touchData &&
                     Array.from(changedTouches).find(t => t.identifier === touchData.id);
                 if (changedTouch) {
-                    this._trackpadMove(touchData, changedTouch.clientX, changedTouch.clientY);
+                    this._trackpadMove(touchData, changedTouch.clientX, changedTouch.clientY,
+                                       event.timeStamp);
                 }
             } else {
                 for (const changed of changedTouches) {
@@ -3029,25 +3063,55 @@ export class Input {
         const mode = this._trackpadGestureMode;
         if (!this._trackpadMode || this._trackpadTouches.size !== 1 ||
             (mode !== 'moving' && mode !== 'dragging')) return;
-        this._trackpadMove(this._trackpadTouches.values().next().value, event.clientX, event.clientY);
+        this._trackpadMove(this._trackpadTouches.values().next().value, event.clientX, event.clientY,
+                           event.timeStamp);
     }
 
     /**
      * Moves the pointer by a trackpad finger's travel since it was last seen,
-     * unless the hand-off from a multi-finger gesture is still settling.
-     * @param {{lastX: number, lastY: number}} touchData
+     * accelerated by its speed (`trackpadGain`) and scaled by `trackpadSpeed`,
+     * unless the hand-off from a multi-finger gesture is still settling. The
+     * speed is the travel over the time between the finger's reports that
+     * moved it, smoothed over `TRACKPAD_SPEED_TAU_MS`; the fraction of a pixel
+     * the gain leaves is carried to the next move (`_relativeToServer`).
+     * @param {{lastX: number, lastY: number, lastT: number, speed: ?number}} touchData
      * @param {number} x
      * @param {number} y
+     * @param {number} t The report's timestamp, in milliseconds.
      */
-    _trackpadMove(touchData, x, y) {
+    _trackpadMove(touchData, x, y, t) {
+        const dx = x - touchData.lastX;
+        const dy = y - touchData.lastY;
+        const dt = t - touchData.lastT;
+        // A report that brings no travel (a touchmove after the raw updates
+        // that carried it) says nothing of the speed.
+        if (dt > 0 && (dx !== 0 || dy !== 0)) {
+            const instant = Math.hypot(dx, dy) / dt;
+            touchData.speed = touchData.speed === null ? instant
+                : touchData.speed + (1 - Math.exp(-dt / TRACKPAD_SPEED_TAU_MS)) * (instant - touchData.speed);
+            touchData.lastT = t;
+        }
         if (performance.now() - this._trackpadHandoffAt >= TRACKPAD_HANDOFF_MS) {
-            const moved = this._relativeToServer(x - touchData.lastX, y - touchData.lastY);
+            const gain = trackpadGain(touchData.speed || 0) * this.trackpadSpeed;
+            const moved = this._relativeToServer(dx * gain, dy * gain);
             if (moved[0] !== 0 || moved[1] !== 0) {
                 this._sendPointer([ "m2", moved[0], moved[1], this.buttonMask, 0 ], true);
             }
         }
         touchData.lastX = x;
         touchData.lastY = y;
+    }
+
+    /**
+     * Sets how far the trackpad moves the pointer for a finger's travel, as a
+     * factor on the accelerated gain; the dashboards' setting, persisted by
+     * the core as `trackpad_speed`.
+     * @param {number} speed Clamped to `TRACKPAD_SPEED_MIN`-`TRACKPAD_SPEED_MAX`.
+     */
+    setTrackpadSpeed(speed) {
+        const v = Number(speed);
+        if (!Number.isFinite(v)) return;
+        this.trackpadSpeed = Math.min(TRACKPAD_SPEED_MAX, Math.max(TRACKPAD_SPEED_MIN, v));
     }
 
     /** Releases the left button a trackpad tap or tap-drag holds, and any release still pending for it. */

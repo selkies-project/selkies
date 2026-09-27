@@ -503,4 +503,47 @@ const wheel = (deltaY, ctrlKey, deltaMode = 0) => ({
           keys === 0 && n.down >= 1, `keys=${keys} ${JSON.stringify(n)}`);
 }
 
+// --- trackpad acceleration --------------------------------------------------
+// A finger's travel goes out as it is while it moves slowly, for aiming, and
+// grows with its speed, which is taken from the reports' own timestamps: the
+// same swipe goes as far whether the digitizer reports it in 10 events or 50.
+
+/** One finger's swipe of `px` along x in `n` reports `dt` ms apart, stamped; the x travel sent. */
+function accelSwipe(px, n, dt, speed) {
+    const { input, sent } = makeInput();
+    if (speed !== undefined) {
+        if (typeof input.setTrackpadSpeed !== 'function') return NaN;
+        input.setTrackpadSpeed(speed);
+    }
+    advance(1000);
+    const stamped = (type, t) => ({ type, changedTouches: [t], touches: type === 'touchend' ? [] : [t],
+                                    target: element, timeStamp: now, preventDefault() {}, stopPropagation() {} });
+    let t = touch(1, 100, 300);
+    input._handleTouchEvent(stamped('touchstart', t));
+    for (let i = 1; i <= n; i++) {
+        advance(dt);
+        t = touch(1, 100 + (px * i) / n, 300);
+        input._handleTouchEvent(stamped('touchmove', t));
+    }
+    input._handleTouchEvent(stamped('touchend', t));
+    advance(500);
+    return travel(sent)[0];
+}
+{
+    const slow = accelSwipe(100, 50, 20);
+    check('a slow finger (0.1 px/ms) moves the pointer as far as it travels', slow === 100, `${slow} of 100`);
+    const speeds = [0.1, 0.2, 0.4, 0.8, 1.6, 3.2];
+    const far = speeds.map((v) => accelSwipe(100, 20, 100 / 20 / v));
+    check('faster fingers move it further, up to three times', far.every((d, i) => i === 0 || d >= far[i - 1])
+          && far[0] === 100 && far[far.length - 1] >= 290 && far[far.length - 1] <= 300,
+          speeds.map((v, i) => `${v} px/ms: ${far[i]}`).join(', '));
+    const ten = accelSwipe(200, 10, 20);
+    const fifty = accelSwipe(200, 50, 4);
+    check('the same swipe goes as far in 10 reports as in 50', Math.abs(ten - fifty) <= 1, `${ten} and ${fifty}`);
+    const creep = accelSwipe(90, 300, 3);
+    check('the fraction of a pixel each slow report leaves is carried', creep === 90, `${creep} of 90`);
+    const doubled = accelSwipe(100, 50, 20, 2);
+    check('the trackpad speed setting scales the travel', doubled === 200, `${doubled} of 200`);
+}
+
 process.exit(failed === 0 ? 0 : 1);

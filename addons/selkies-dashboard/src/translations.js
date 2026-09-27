@@ -25,6 +25,7 @@ const en = {
     gamingModeTitle: "Gaming Mode",
     gamingModeHint: "Fullscreen with the pointer and keyboard locked",
     trackpadModeTitle: "Trackpad Mode",
+    trackpadSpeedLabel: "Trackpad speed",
     keyboardButtonToggleTitle: "Keyboard Button",
     streamingModeTitle: "Streaming Mode",
     buttons: {
@@ -307,6 +308,7 @@ const es = {
     gamingModeTitle: "Modo Juego",
     gamingModeHint: "Pantalla completa con el puntero y el teclado bloqueados",
     trackpadModeTitle: "Modo Trackpad",
+    trackpadSpeedLabel: "Velocidad del trackpad",
     keyboardButtonToggleTitle: "Botón de teclado",
     streamingModeTitle: "Modo Streaming",
     buttons: {
@@ -589,6 +591,7 @@ const zh_cn = {
     gamingModeTitle: "游戏模式",
     gamingModeHint: "全屏并锁定指针和键盘",
     trackpadModeTitle: "触控板模式",
+    trackpadSpeedLabel: "触控板速度",
     keyboardButtonToggleTitle: "键盘按钮",
     streamingModeTitle: "串流模式",
     buttons: {
@@ -871,6 +874,7 @@ const hi = {
     gamingModeTitle: "गेमिंग मोड",
     gamingModeHint: "पॉइंटर और कीबोर्ड लॉक के साथ फुलस्क्रीन",
     trackpadModeTitle: "ट्रैकपैड मोड",
+    trackpadSpeedLabel: "ट्रैकपैड गति",
     keyboardButtonToggleTitle: "कीबोर्ड बटन",
     streamingModeTitle: "स्ट्रीमिंग मोड",
     buttons: {
@@ -1153,6 +1157,7 @@ const pt = {
     gamingModeTitle: "Modo de Jogo",
     gamingModeHint: "Tela cheia com o ponteiro e o teclado bloqueados",
     trackpadModeTitle: "Modo Trackpad",
+    trackpadSpeedLabel: "Velocidade do trackpad",
     keyboardButtonToggleTitle: "Botão do teclado",
     streamingModeTitle: "Modo Streaming",
     buttons: {
@@ -1435,6 +1440,7 @@ const fr = {
     gamingModeTitle: "Mode Jeu",
     gamingModeHint: "Plein écran avec le pointeur et le clavier verrouillés",
     trackpadModeTitle: "Mode Trackpad",
+    trackpadSpeedLabel: "Vitesse du pavé tactile",
     keyboardButtonToggleTitle: "Bouton clavier",
     streamingModeTitle: "Mode Streaming",
     buttons: {
@@ -1718,6 +1724,7 @@ const ru = {
     gamingModeTitle: "Игровой режим",
     gamingModeHint: "Полноэкранный режим с блокировкой указателя и клавиатуры",
     trackpadModeTitle: "Режим трекпада",
+    trackpadSpeedLabel: "Скорость трекпада",
     keyboardButtonToggleTitle: "Кнопка клавиатуры",
     streamingModeTitle: "Режим стриминга",
     buttons: {
@@ -2000,6 +2007,7 @@ const de = {
     gamingModeTitle: "Gaming-Modus",
     gamingModeHint: "Vollbild mit gesperrtem Zeiger und gesperrter Tastatur",
     trackpadModeTitle: "Trackpad-Modus",
+    trackpadSpeedLabel: "Trackpad-Geschwindigkeit",
     keyboardButtonToggleTitle: "Tastatur-Schaltfläche",
     streamingModeTitle: "Streaming-Modus",
     buttons: {
@@ -2282,6 +2290,7 @@ const tr = {
     gamingModeTitle: "Oyun Modu",
     gamingModeHint: "İşaretçi ve klavye kilitliyken tam ekran",
     trackpadModeTitle: "Dokunmatik Yüzey Modu",
+    trackpadSpeedLabel: "Dokunmatik yüzey hızı",
     keyboardButtonToggleTitle: "Klavye Düğmesi",
     streamingModeTitle: "Yayın Modu",
     buttons: {
@@ -2564,6 +2573,7 @@ const it = {
     gamingModeTitle: "Modalità Gioco",
     gamingModeHint: "Schermo intero con puntatore e tastiera bloccati",
     trackpadModeTitle: "Modalità Trackpad",
+    trackpadSpeedLabel: "Velocità del trackpad",
     keyboardButtonToggleTitle: "Pulsante tastiera",
     streamingModeTitle: "Modalità Streaming",
     buttons: {
@@ -2846,6 +2856,7 @@ const nl = {
     gamingModeTitle: "Gaming Modus",
     gamingModeHint: "Volledig scherm met vergrendelde aanwijzer en toetsenbord",
     trackpadModeTitle: "Trackpad-modus",
+    trackpadSpeedLabel: "Trackpadsnelheid",
     keyboardButtonToggleTitle: "Toetsenbordknop",
     streamingModeTitle: "Streamingmodus",
     buttons: {
@@ -3128,6 +3139,7 @@ const ar = {
     gamingModeTitle: "وضع الألعاب",
     gamingModeHint: "ملء الشاشة مع قفل المؤشر ولوحة المفاتيح",
     trackpadModeTitle: "وضع لوحة اللمس",
+    trackpadSpeedLabel: "سرعة لوحة اللمس",
     keyboardButtonToggleTitle: "زر لوحة المفاتيح",
     streamingModeTitle: "وضع البث",
     buttons: {
@@ -3410,6 +3422,7 @@ const ko = {
     gamingModeTitle: "게임 모드",
     gamingModeHint: "포인터와 키보드를 고정한 전체 화면",
     trackpadModeTitle: "트랙패드 모드",
+    trackpadSpeedLabel: "트랙패드 속도",
     keyboardButtonToggleTitle: "키보드 버튼",
     streamingModeTitle: "스트리밍 모드",
     buttons: {
@@ -3692,6 +3705,7 @@ const ja = {
     gamingModeTitle: "ゲームモード",
     gamingModeHint: "ポインターとキーボードをロックした全画面",
     trackpadModeTitle: "トラックパッドモード",
+    trackpadSpeedLabel: "トラックパッドの速度",
     keyboardButtonToggleTitle: "キーボードボタン",
     streamingModeTitle: "ストリーミングモード",
     buttons: {
@@ -3974,6 +3988,7 @@ const vi = {
     gamingModeTitle: "Chế độ Chơi game",
     gamingModeHint: "Toàn màn hình với con trỏ và bàn phím bị khóa",
     trackpadModeTitle: "Chế độ Bàn di chuột",
+    trackpadSpeedLabel: "Tốc độ bàn di chuột",
     keyboardButtonToggleTitle: "Nút bàn phím",
     streamingModeTitle: "Chế độ Truyền phát",
     buttons: {
@@ -4256,6 +4271,7 @@ const th = {
     gamingModeTitle: "โหมดเกมมิ่ง",
     gamingModeHint: "เต็มหน้าจอโดยล็อกตัวชี้และแป้นพิมพ์",
     trackpadModeTitle: "โหมดแทร็คแพด",
+    trackpadSpeedLabel: "ความเร็วแทร็คแพด",
     keyboardButtonToggleTitle: "ปุ่มแป้นพิมพ์",
     streamingModeTitle: "โหมดสตรีมมิ่ง",
     buttons: {
@@ -4538,6 +4554,7 @@ const fil = {
     gamingModeTitle: "Modo ng Paglalaro",
     gamingModeHint: "Fullscreen na naka-lock ang pointer at keyboard",
     trackpadModeTitle: "Modo ng Trackpad",
+    trackpadSpeedLabel: "Bilis ng trackpad",
     keyboardButtonToggleTitle: "Button ng Keyboard",
     streamingModeTitle: "Modo ng Streaming",
     buttons: {
@@ -4820,6 +4837,7 @@ const da = {
     gamingModeTitle: "Spiltilstand",
     gamingModeHint: "Fuldskærm med markør og tastatur låst",
     trackpadModeTitle: "Trackpad-tilstand",
+    trackpadSpeedLabel: "Trackpad-hastighed",
     keyboardButtonToggleTitle: "Tastaturknap",
     streamingModeTitle: "Streaming-tilstand",
     buttons: {
@@ -5102,6 +5120,7 @@ const zh_tw = {
     gamingModeTitle: "遊戲模式",
     gamingModeHint: "全螢幕且鎖定滑鼠指標與鍵盤",
     trackpadModeTitle: "觸控板模式",
+    trackpadSpeedLabel: "觸控板速度",
     keyboardButtonToggleTitle: "鍵盤按鈕開關",
     streamingModeTitle: "串流模式",
     buttons: {

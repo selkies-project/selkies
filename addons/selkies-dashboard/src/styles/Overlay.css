@@ -2058,3 +2058,22 @@ a.cite-link:active {
     border-color: var(--accent);
 }
 
+.trackpad-speed {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--sidebar-border);
+    font-size: 13px;
+}
+
+.trackpad-speed select {
+    padding: 4px 8px;
+    border: 1px solid var(--item-border);
+    border-radius: var(--radius-sm);
+    background-color: var(--surface-alt);
+    color: var(--text);
+    font: inherit;
+}

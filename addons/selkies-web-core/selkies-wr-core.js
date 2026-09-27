@@ -64,7 +64,7 @@
  * `gamepadControl`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `audioDeviceSelected`, `requestFullscreen`, `setSynth`,
  * `showVirtualKeyboard`, `setAntiAliasing`, `setUseBrowserCursors`, `setRawPointerMotion`,
- * `setGamepadRumble`, `touchinput:trackpad`, `touchinput:touch`, `statsOpen`, plus the `requestFileUpload` DOM
+ * `setTrackpadSpeed`, `setGamepadRumble`, `touchinput:trackpad`, `touchinput:touch`, `statsOpen`, plus the `requestFileUpload` DOM
  * event. Window messages posted: `sidebarButtonStatusUpdate`,
  * `pipelineStatusUpdate`, `effectiveCursorState`, `scalingDpiFollowed`,
  * `serverSettings`, `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
@@ -675,6 +675,15 @@ export default function webrtc() {
 	function applyRawPointerMotion() {
 		if (input && typeof input.setRawPointerMotion === 'function') {
 			input.setRawPointerMotion(rawPointerMotion);
+		}
+	}
+
+	/** How far the trackpad moves the pointer: the dashboards' pick, persisted here. */
+	let trackpadSpeed = 1;
+	/** Applies the trackpad speed to the input handler. */
+	function applyTrackpadSpeed() {
+		if (input && typeof input.setTrackpadSpeed === 'function') {
+			input.setTrackpadSpeed(trackpadSpeed);
 		}
 	}
 
@@ -1992,6 +2001,15 @@ export default function webrtc() {
 					console.warn("Invalid value received for setRawPointerMotion:", message.value);
 				}
 				break;
+			case 'setTrackpadSpeed':
+				if (typeof message.value === 'number' && Number.isFinite(message.value)) {
+					trackpadSpeed = message.value;
+					setStringParam('trackpad_speed', String(message.value));
+					applyTrackpadSpeed();
+				} else {
+					console.warn("Invalid value received for setTrackpadSpeed:", message.value);
+				}
+				break;
 			case 'setGamepadRumble':
 				if (typeof message.value === 'boolean') {
 					gamepadRumble = message.value;
@@ -2865,6 +2883,7 @@ export default function webrtc() {
 			trackpadMode = getBoolParam('trackpadMode', false);
 			useBrowserCursors = getBoolParam('use_browser_cursors', true);
 			rawPointerMotion = getBoolParam('raw_pointer_motion', Input.rawPointerMotion);
+			trackpadSpeed = getFloatParam('trackpad_speed', 1);
 			gamepadRumble = getBoolParam('gamepad_rumble', true);
 			force_aligned_resolution = getBoolParam('force_aligned_resolution', false);
 
@@ -2987,6 +3006,7 @@ export default function webrtc() {
 			applyEffectiveCursorSetting();
 			applyRawPointerMotion();
 			applyMacCmdAsCtrl();
+			applyTrackpadSpeed();
 			applyGamepadRumble();
 			window.postMessage({ type: 'trackpadModeUpdate', enabled: trackpadMode }, window.location.origin);
 			window.postMessage({ type: 'clientRoleUpdate', role: clientRole }, window.location.origin);

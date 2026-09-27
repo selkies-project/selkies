@@ -29,7 +29,8 @@
  *
  * Messages it posts: `settings` (debounced), `pipelineControl`,
  * `gamepadControl`, `setManualResolution`, `resetResolutionToWindow`,
- * `setScaleLocally`, `setAntiAliasing`, `setGamepadRumble`, `audioDeviceSelected`,
+ * `setScaleLocally`, `setAntiAliasing`, `setTrackpadSpeed`, `setGamepadRumble`,
+ * `audioDeviceSelected`,
  * `clipboardUpdateFromUI`, `clipboardImageUpdate`, `requestFullscreen`,
  * `requestGamingMode`, `mode`, `setSynth`, `sidebarVisibilityChanged`, `TOUCH_GAMEPAD_SETUP`,
  * `TOUCH_GAMEPAD_VISIBILITY`, `touchinput:trackpad`, and `touchinput:touch`,
@@ -54,6 +55,7 @@ import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react"
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, stopIndex, stopsWithin } from "../../../selkies-web-core/lib/slider-stops.js";
+import { TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY } from "../../../selkies-web-core/lib/touch-controls.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
@@ -932,6 +934,10 @@ function Sidebar() {
     Alt: false,
     Meta: false,
   });
+  const [trackpadSpeed, setTrackpadSpeed] = useState(() => {
+    const stored = parseFloat(localStorage.getItem(getPrefixedKey(TRACKPAD_SPEED_KEY)));
+    return TRACKPAD_SPEEDS.includes(stored) ? stored : 1;
+  });
   const [isKeyboardButtonVisible, setIsKeyboardButtonVisible] = useState(true);
   const [isTouchGamepadActive, setIsTouchGamepadActive] = useState(false);
   const [isTouchGamepadSetup, setIsTouchGamepadSetup] = useState(false);
@@ -1233,6 +1239,11 @@ function Sidebar() {
     setTimeout(() => {
       sendKeyEvent('keyup', key, code, heldKeys);
     }, 50);
+  };
+  /** The trackpad's speed is client-only; the core persists trackpad_speed itself. */
+  const handleTrackpadSpeed = (value) => {
+    setTrackpadSpeed(value);
+    window.postMessage({ type: "setTrackpadSpeed", value }, window.location.origin);
   };
   const toggleKeyboardButtonVisibility = () => {
     setIsKeyboardButtonVisible(prev => !prev);
@@ -3056,6 +3067,21 @@ function Sidebar() {
                 ESC
               </button>
             </div>
+        )}
+
+        {(isMobile || hasDetectedTouch) && isTrackpadModeActive && (renderableSettings.trackpad ?? true) && (
+          <div className="trackpad-speed">
+            <label htmlFor="trackpadSpeedSelect">{t("trackpadSpeedLabel", "Trackpad speed")}</label>
+            <select
+              id="trackpadSpeedSelect"
+              value={trackpadSpeed}
+              onChange={(e) => handleTrackpadSpeed(Number(e.target.value))}
+            >
+              {TRACKPAD_SPEEDS.map((v) => (
+                <option key={v} value={v}>{`${v}\u00d7`}</option>
+              ))}
+            </select>
+          </div>
         )}
 
         {/* Viewers can't apply stream settings (the server ignores their

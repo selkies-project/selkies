@@ -63,8 +63,8 @@
  * Dashboards talk to the core over same-origin window messages. The core
  * handles `setVolume`, `setMute`, `setScaleLocally`, `setSynth`,
  * `showVirtualKeyboard`, `setUseCssScaling`, `setAntiAliasing`,
- * `setUseBrowserCursors`, `setRawPointerMotion`, `setGamepadRumble`,
- * `setManualResolution`, `resetResolutionToWindow`,
+ * `setUseBrowserCursors`, `setRawPointerMotion`, `setTrackpadSpeed`,
+ * `setGamepadRumble`, `setManualResolution`, `resetResolutionToWindow`,
  * `settings`, `getStats`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `pipelineStatusUpdate`, `pipelineControl`, `audioDeviceSelected`,
  * `gamepadControl`, `requestFullscreen`, `command`, `touchinput:trackpad`,
@@ -626,6 +626,14 @@ let rawPointerMotion = true;
 function applyRawPointerMotion() {
     if (window.webrtcInput && typeof window.webrtcInput.setRawPointerMotion === 'function') {
         window.webrtcInput.setRawPointerMotion(rawPointerMotion);
+    }
+}
+/** How far the trackpad moves the pointer: the dashboards' pick, persisted here. */
+let trackpadSpeed = 1;
+/** Applies the trackpad speed to the input handler. */
+function applyTrackpadSpeed() {
+    if (window.webrtcInput && typeof window.webrtcInput.setTrackpadSpeed === 'function') {
+        window.webrtcInput.setTrackpadSpeed(trackpadSpeed);
     }
 }
 /** Whether pads play a game's rumble: the dashboards' toggle, persisted here. */
@@ -1410,6 +1418,7 @@ videoBitrate = getIntParam('video_bitrate', videoBitrate);
 antiAliasingEnabled = getBoolParam('antiAliasingEnabled', true);
 use_browser_cursors = getBoolParam('use_browser_cursors', true);
 rawPointerMotion = getBoolParam('raw_pointer_motion', Input.rawPointerMotion);
+trackpadSpeed = getFloatParam('trackpad_speed', 1);
 gamepadRumble = getBoolParam('gamepad_rumble', true);
 enable_binary_clipboard = getBoolParam('enable_binary_clipboard', enable_binary_clipboard);
 clipboard_in_enabled = getBoolParam('clipboard_in_enabled', true);
@@ -4283,6 +4292,7 @@ const initializeInput = () => {
   applyEffectiveCursorSetting();
   applyRawPointerMotion();
   applyMacCmdAsCtrl();
+  applyTrackpadSpeed();
   applyGamepadRumble();
 
   if (overlayInput) {
@@ -4722,6 +4732,15 @@ function receiveMessage(event) {
         applyRawPointerMotion();
       } else {
         console.warn("Invalid value received for setRawPointerMotion:", message.value);
+      }
+      break;
+    case 'setTrackpadSpeed':
+      if (typeof message.value === 'number' && Number.isFinite(message.value)) {
+        trackpadSpeed = message.value;
+        setStringParam('trackpad_speed', String(trackpadSpeed));
+        applyTrackpadSpeed();
+      } else {
+        console.warn("Invalid value received for setTrackpadSpeed:", message.value);
       }
       break;
     case 'setGamepadRumble':
