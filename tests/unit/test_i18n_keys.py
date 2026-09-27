@@ -3,8 +3,9 @@
 
 Both translators return the key itself when a lookup misses, so a misspelled or
 absent key ships looking fine and renders as "clipboard.uploadImage" to the
-user. The resolution itself lives in tests/tools/i18n_audit.mjs, because the
-dictionaries are JavaScript.
+user. The stats figures are worded by their key at render time, so each figure
+either transport shows is checked for a label of its own. The resolution itself
+lives in tests/tools/i18n_audit.mjs, because the dictionaries are JavaScript.
 """
 import json
 import os
@@ -64,6 +65,11 @@ for name, res in report.items():
     ) or f"{res['enKeys']} keys x {res['locales']} locales"
     check(f"{name}: a label ends in a colon in every locale or in none",
           not punctuation, detail)
+
+    if "tiles" in res:
+        unlabeled = res["tiles"]["unlabeled"]
+        check(f"{name}: every stats figure has a label to translate", not unlabeled,
+              ", ".join(unlabeled[:4]) or f"{res['tiles']['shown']} figures")
 
     if "misrouted" in res:
         misrouted = res["misrouted"]

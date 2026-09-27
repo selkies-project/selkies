@@ -169,6 +169,8 @@ export default function StreamStats({ t, active, framerate }) {
     software: t("sections.stats.software"),
     unknown: t("sections.stats.tooltipMemoryNA"),
     throttled: t("sections.stats.throttled"),
+    hardware_available: t("sections.stats.hardwareAvailable"),
+    software_preferred: t("sections.stats.softwarePreferred"),
   }), [t]);
 
   const graphs = useMemo(() => {
@@ -248,7 +250,7 @@ export default function StreamStats({ t, active, framerate }) {
           {tiles.map((tile) => (
             <div key={tile.key} className="stream-tile">
               <b>{tile.value}</b>
-              <span>{tile.label}</span>
+              <span>{t(`sections.stats.tiles.${tile.key}`, tile.label)}</span>
             </div>
           ))}
         </div>

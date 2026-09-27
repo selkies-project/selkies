@@ -74,8 +74,10 @@ export const SERVER_FRESH_MS = 3000;
  * @property {string} decoder_evidence What that verdict rests on.
  * @property {boolean} hardware_expected Whether a hardware decoder was there to
  *     take the stream, so a software verdict fell short of it.
- * @property {string} decoder_reason Why a software decode fell short, empty
- *     where it did not.
+ * @property {string} decoder_reason Why a software decode fell short, a word
+ *     the dashboards translate: `hardware_available` (the engine has an
+ *     efficient decoder for the stream) or `software_preferred` (this client
+ *     left a hardware decoder after it failed); empty where it did not.
  * @property {string} codec
  * @property {string} resolution `1920x1080`.
  * @property {string} path WebRTC only: the candidate pair, as `host udp`.
@@ -120,7 +122,7 @@ const framesOf = (format) => `${format === null ? 'Opaque' : format} frames`;
  * @param {string} [shortfall] Why software fell short; said only where it did.
  * @returns {Pick<StreamClient, 'decoder'|'decoder_evidence'|'hardware_expected'|'decoder_reason'>}
  */
-function verdict(decoder, evidence, expected, shortfall = 'A hardware decoder is available for this stream') {
+function verdict(decoder, evidence, expected, shortfall = 'hardware_available') {
   return { decoder, decoder_evidence: evidence, hardware_expected: expected,
     decoder_reason: decoder === 'software' && expected ? shortfall : '' };
 }
@@ -184,7 +186,7 @@ export class DecodeCapability {
  * @returns {Pick<StreamClient, 'decoder'|'decoder_evidence'|'hardware_expected'|'decoder_reason'>}
  */
 export function webcodecsDecoder({ forcedSoftware, hardwareSupported, format, capable }) {
-  if (forcedSoftware) return verdict('software', '', true, 'Software preferred after a decoder fallback');
+  if (forcedSoftware) return verdict('software', '', true, 'software_preferred');
   if (hardwareSupported === false) return verdict('software', 'No hardware decoder for this stream', false);
   const seen = decoderOfFormat(format);
   if (seen !== 'unknown') return verdict(seen, framesOf(format), false);

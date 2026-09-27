@@ -108,7 +108,8 @@ const info = {
 stats.setInfo(info);
 check('the description is published', window.stream_info === info);
 
-const words = { hardware: 'hardware', software: 'software', unknown: 'n/a', throttled: 'held back' };
+const words = { hardware: 'hardware', software: 'software', unknown: 'n/a', throttled: 'held back',
+  hardware_available: 'engine has one', software_preferred: 'left after a failure' };
 const client = { transport: 'websockets', decoder: 'hardware', decoder_evidence: 'NV12 frames', codec: 'h264', resolution: '1920x1080', path: '' };
 const rowOf = (rows, key) => rows.find((row) => row.key === key);
 
@@ -161,7 +162,7 @@ check('a server holding frames back warns on the connection', rowOf(rows, 'conne
 
 const fallback = webcodecsDecoder({ forcedSoftware: true, hardwareSupported: true, format: 'NV12' });
 check('a software preference after a fallback is software that fell short', fallback.decoder === 'software'
-  && fallback.hardware_expected && fallback.decoder_reason === 'Software preferred after a decoder fallback');
+  && fallback.hardware_expected && fallback.decoder_reason === 'software_preferred');
 const noHardware = webcodecsDecoder({ forcedSoftware: false, hardwareSupported: false, format: undefined });
 check('no hardware decoder for the stream is software that fell short of nothing', noHardware.decoder === 'software'
   && !noHardware.hardware_expected && noHardware.decoder_reason === '');
@@ -172,13 +173,15 @@ rows = streamRows(null, { ...client, ...hinted }, null, words);
 check('planar frames mark nothing even where the engine accepts a hardware preference, a hint to some',
   hinted.decoder === 'software' && rowOf(rows, 'decoder').status === 'neutral');
 rows = streamRows(null, { ...client, ...fallback }, null, words);
-check('the fallback warns, with why', rowOf(rows, 'decoder').status === 'warn'
-  && rowOf(rows, 'decoder').reason === 'Software preferred after a decoder fallback');
+check('the fallback warns, with why, in the dashboard\'s words', rowOf(rows, 'decoder').status === 'warn'
+  && rowOf(rows, 'decoder').reason === 'left after a failure');
+check('and the report a user pastes words it in English',
+  streamReport(null, { ...client, ...fallback }, null).includes('Software preferred after a decoder fallback'));
 const unused = webrtcDecoder({ trackFormat: 'I420', capable: true });
 rows = streamRows(null, { ...client, transport: 'webrtc', ...unused }, null, words);
 check('a WebRTC stream decoding in software where the engine has an efficient decoder for it warns, with why',
   unused.decoder === 'software' && rowOf(rows, 'decoder').status === 'warn'
-  && rowOf(rows, 'decoder').reason === 'A hardware decoder is available for this stream');
+  && rowOf(rows, 'decoder').reason === 'engine has one');
 check('NV12 and opaque frames are hardware', webcodecsDecoder({ forcedSoftware: false, hardwareSupported: true, format: 'NV12' }).decoder === 'hardware'
   && webcodecsDecoder({ forcedSoftware: false, hardwareSupported: null, format: null }).decoder === 'hardware');
 check('planar frames are software', webcodecsDecoder({ forcedSoftware: false, hardwareSupported: true, format: 'I420' }).decoder === 'software');

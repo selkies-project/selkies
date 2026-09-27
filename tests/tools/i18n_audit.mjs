@@ -45,6 +45,7 @@ function literal(src, name) {
   return end < 0 ? null : eval("(" + src.slice(open, end) + ")");
 }
 
+const statsView = await import(pathToFileURL(resolve(`${ADDONS}/selkies-web-core/lib/stream-stats-view.js`)).href);
 const classicSrc = readFileSync(`${CLASSIC}/src/translations.js`, "utf8");
 const { resolveLocale } = await import(pathToFileURL(resolve(`${CLASSIC}/src/translations.js`)).href);
 const extraSrc = readFileSync(`${WISH}/src/translations-extra.ts`, "utf8");
@@ -123,6 +124,12 @@ for (const [name, dir, dicts] of [
   report[name] = { keys, locales: LOCALES.length, enKeys: enKeys.length, unresolved, gaps,
                    punctuation };
   if (name === "classic") {
+    // The stats figures are worded by their key at render time, which the scan
+    // above cannot see, so every figure either transport shows needs its label.
+    const shown = new Set(["websockets", "webrtc"].flatMap((transport) =>
+      statsView.streamTiles(null, transport).map((tile) => tile.key)));
+    report[name].tiles = { shown: shown.size,
+                           unlabeled: [...shown].filter((key) => !has(dict.en, `sections.stats.tiles.${key}`)) };
     // Both dashboards read the classic resolver, and a key it names must exist.
     const misrouted = {};
     for (const [tag, want] of Object.entries(ROUTES)) {

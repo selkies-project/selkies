@@ -24,7 +24,8 @@
  * Every value opens with a capital, and names the system reports (`nvidia`,
  * `renderD128`, a decoder's own) are kept as reported. Technical values (`NVENC`,
  * `Zero-copy`, `renderD128`) are not translated; the words a dashboard does
- * translate arrive in `words`.
+ * translate arrive in `words`, and a figure's label is the dashboard's to word
+ * by the figure's key, the English here being the report's and the fallback.
  *
  * @module
  */
@@ -50,6 +51,10 @@
  * @property {string} software
  * @property {string} unknown
  * @property {string} throttled Said when the server holds frames back.
+ * @property {string} hardware_available Why a software decode fell short
+ *     where the engine has an efficient decoder for the stream.
+ * @property {string} software_preferred Why it fell short where this client
+ *     left a hardware decoder after it failed.
  */
 
 const CODEC_NAMES = { h264: 'H.264', h265: 'H.265', hevc: 'H.265', av1: 'AV1', vp8: 'VP8', vp9: 'VP9', jpeg: 'JPEG' };
@@ -119,7 +124,7 @@ function decoderRow(client, words) {
       ? joined([client.decoder_evidence, codecName(client.codec), client.resolution,
         client.decode_path, client.sink])
       : '',
-    reason: fell ? sentence(client.decoder_reason) : '',
+    reason: fell ? words[client.decoder_reason] || sentence(client.decoder_reason) : '',
   };
 }
 
@@ -280,7 +285,9 @@ export function graphPath(values, width, height, max) {
  * @returns {string}
  */
 export function streamReport(info, client, latest) {
-  const words = { hardware: 'Hardware', software: 'Software', unknown: 'Unknown', throttled: 'The server is holding frames back' };
+  const words = { hardware: 'Hardware', software: 'Software', unknown: 'Unknown', throttled: 'The server is holding frames back',
+    hardware_available: 'A hardware decoder is available for this stream',
+    software_preferred: 'Software preferred after a decoder fallback' };
   const rows = streamRows(info, client, latest, words);
   const lines = rows.map((row) => `${row.key}: ${joined([row.value, row.detail])}${row.status === 'warn' ? ' [!]' : ''}`);
   lines.push(...rows.map((row) => row.reason).filter(Boolean).map((reason) => `  ${reason}`));

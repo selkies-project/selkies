@@ -30,11 +30,13 @@ const interpolate = (text: string, vars?: Record<string, unknown>): string =>
 /**
  * Translates a dotted key, wish extras first, then the classic dictionary.
  * @param key Dotted lookup key.
- * @param vars Values for `{name}` placeholders in the string.
+ * @param vars Values for `{name}` placeholders in the string, or, as the
+ *     classic translator takes it, a literal to show where no dictionary has
+ *     the key.
  */
-export const t = (key: string, vars?: Record<string, unknown>): string => {
+export const t = (key: string, vars?: Record<string, unknown> | string): string => {
     const hit = lookup(extra, key) ?? lookup(extras.en, key);
-    if (typeof hit === "string") return interpolate(hit, vars);
+    if (typeof hit === "string") return interpolate(hit, typeof vars === "string" ? undefined : vars);
     return base.t(key, vars);
 };
 

@@ -271,6 +271,8 @@ export function SystemMonitoring() {
 		software: t('sections.stats.software'),
 		unknown: t('sections.stats.tooltipMemoryNA'),
 		throttled: t('sections.stats.throttled'),
+		hardware_available: t('sections.stats.hardwareAvailable'),
+		software_preferred: t('sections.stats.softwarePreferred'),
 	});
 	const number = (key: string): number => (latest && typeof latest[key] === 'number' ? (latest[key] as number) : 0);
 
@@ -380,7 +382,7 @@ export function SystemMonitoring() {
 					{tiles.map((tile) => (
 						<div key={tile.key} className="flex flex-col rounded-md border bg-muted/40 px-1.5 py-1">
 							<b className="text-[13px]">{tile.value}</b>
-							<span className="text-[10.5px] text-muted-foreground">{tile.label}</span>
+							<span className="text-[10.5px] text-muted-foreground">{t(`sections.stats.tiles.${tile.key}`, tile.label)}</span>
 						</div>
 					))}
 				</div>
