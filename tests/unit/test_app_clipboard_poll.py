@@ -90,6 +90,7 @@ def make_handler() -> WebRTCInput:
     h._clipboard_monitor_active = False
     h.clipboard_running = False
     h._clipboard_last_bytes = None
+    h._bg_tasks = set()
     h._app_watch_failure = None
     h._app_clip_read_failure = None
     h._x11_clipboard_monitor = None

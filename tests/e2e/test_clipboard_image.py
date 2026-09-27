@@ -14,10 +14,11 @@ The other way, a session image has to land on the local clipboard even when
 the user leaves the tab right after copying it, as someone switching to the
 application they copied it for does: the browser refuses a clipboard write from
 a page that has lost focus (Chromium) or its user activation (Firefox, WebKit),
-and a multi-megabyte image is still crossing the link by then. The page under
-test is taken out of Playwright's focus emulation, under which it never loses
-focus, and the local clipboard is read from the tab the user went to, before
-they come back.
+and a multi-megabyte image is still crossing the link by then; and a copy made
+while a larger one is still crossing has to be the one that lands. The page
+under test is taken out of Playwright's focus emulation, under which it never
+loses focus, and the local clipboard is read from the tab the user went to,
+before they come back.
 
 Usage: python3 tests/e2e/test_clipboard_image.py [websockets|webrtc|wayland]
 """
@@ -356,6 +357,17 @@ def checks(res: "H.Results", tag: str, mode: str, wayland: bool, dashboard: str)
                       isinstance(seen["image"], dict)
                       and (seen["image"]["w"], seen["image"]["h"]) == (1000, 700)
                       and seen["page kept focus"] is False, seen)
+
+            bigger = noise_png(1200, 800, 11)
+            owners.append(own_session_image(bigger, wayland))
+            time.sleep(0.25)
+            small = png(57)
+            owners.append(own_session_image(small, wayland))
+            seen = leave_and_read(ctx, page, cdp, 0.4)
+            res.check("a copy made while a larger one is still crossing the link is the one "
+                      "that lands, though the user left right after it",
+                      isinstance(seen["image"], dict)
+                      and (seen["image"]["w"], seen["image"]["h"]) == (8, 8), seen)
         finally:
             for owner in owners:
                 owner["stop"]()

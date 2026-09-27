@@ -7677,10 +7677,15 @@ class WebRTCInput:
         compositor callback, app-compositor data-control watch), with xclip
         polling as the last X11 fallback; each pass reads the selection,
         compares against the echo baseline, and broadcasts real changes to
-        clients. The first consumer after a consumer-less stretch gets the
-        current selection once, since change events during that stretch were
-        skipped and a copy made before any client connected would otherwise
-        never arrive.
+        clients. A broadcast runs beside the loop rather than inside it: a
+        multi-megabyte payload takes seconds to cross a link, and a copy made
+        meanwhile has to reach the clients as it happens, superseding the one
+        still in flight (each transport's sender drops the older payload),
+        rather than queue behind it, since a client writes its local clipboard
+        only while the user is still there to allow it. The first consumer
+        after a consumer-less stretch gets the current selection once, since
+        change events during that stretch were skipped and a copy made before
+        any client connected would otherwise never arrive.
 
         The compositor callback watches the capture compositor's selection;
         with a separate app compositor the apps' copies land on its selection
@@ -7873,7 +7878,8 @@ class WebRTCInput:
                             recopied or curr_data_bytes != self._clipboard_last_bytes):
                         logger_webrtc_input.debug(f"Clipboard changed. Sending content ({curr_mime})")
                         self._clipboard_last_bytes = curr_data_bytes
-                        await self.on_clipboard_read(curr_data, curr_mime)
+                        self._spawn_task(self.on_clipboard_read(curr_data, curr_mime),
+                                         name="ClipboardBroadcast")
                 except asyncio.CancelledError:
                     logger_webrtc_input.debug("Clipboard monitor task canceled.")
                     break

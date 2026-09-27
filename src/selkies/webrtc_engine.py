@@ -681,7 +681,14 @@ class RTCApp:
         and shared by every channel; an entry is dropped once the slowest
         channel has passed it, so the cache holds what is in flight, not the
         whole payload. An empty payload is sent only as a tagged reply,
-        settling a client fetch against an empty server clipboard.
+        settling a client fetch against an empty server clipboard. Every
+        payload, one message or many, takes its turn on a channel, and a newer
+        announcement supersedes an older one still queued or in flight there,
+        which then gets no further chunks: the clipboard is last-value-wins, and
+        a small copy made during a large transfer would otherwise reach the
+        client first and be overwritten when the older payload completes. A
+        tagged reply is neither superseded nor supersedes, since its payload is
+        only cached and never pasted.
 
         Args:
             data: Clipboard payload; str is UTF-8 encoded before sending.
@@ -716,11 +723,25 @@ class RTCApp:
                            or next(self._iter_open_data_channels(), None) is not None):
             audit.emit("clipboard.send", mime_type=mime_type, size_bytes=len(data_bytes))
 
-        def send_typed(msg_type: str, payload: Any) -> None:
-            if requester is not None:
-                self.send_message_to_channel(requester, msg_type, payload)
-            else:
-                self.__send_data_channel_message(msg_type, payload)
+        channels = ([requester] if requester is not None
+                    else list(self._iter_open_data_channels()))
+        # One payload at a time per channel: start/data/end carry no transfer
+        # id, so a send racing another would interleave two payloads' chunks
+        # into one assembly.
+        locks = self.__dict__.setdefault("_clipboard_send_locks", {})
+        latest = self.__dict__.setdefault("_clipboard_send_latest", {})
+        live = {id(c) for c in self._iter_open_data_channels()}
+        live.update(id(c) for c in channels)
+        for table in (locks, latest):
+            for gone in [k for k in table if k not in live]:
+                del table[gone]
+        announcement = object()
+        if not reply_to:
+            for c in channels:
+                latest[id(c)] = announcement
+
+        def superseded(channel: Any) -> bool:
+            return not reply_to and latest.get(id(channel)) is not announcement
 
         if len(data_bytes) <= clipboard_chunk_size:
             b64data = base64.b64encode(data_bytes).decode('utf-8')
@@ -732,7 +753,13 @@ class RTCApp:
             }
             if reply_to:
                 payload["reply_to"] = reply_to
-            send_typed("clipboard-msg", payload)
+
+            async def deliver_whole(channel: Any) -> None:
+                async with locks.setdefault(id(channel), asyncio.Lock()):
+                    if not superseded(channel):
+                        self.send_message_to_channel(channel, "clipboard-msg", payload)
+
+            await asyncio.gather(*(deliver_whole(c) for c in channels), return_exceptions=True)
         else:
             start_payload = {
                 "mime_type": mime_type,
@@ -741,16 +768,6 @@ class RTCApp:
             }
             if reply_to:
                 start_payload["reply_to"] = reply_to
-            channels = ([requester] if requester is not None
-                        else list(self._iter_open_data_channels()))
-            # One payload at a time per channel: start/data/end carry no
-            # transfer id, so a send racing another would interleave two
-            # payloads' chunks into one assembly.
-            locks = self.__dict__.setdefault("_clipboard_send_locks", {})
-            live = {id(c) for c in self._iter_open_data_channels()}
-            live.update(id(c) for c in channels)
-            for gone in [k for k in locks if k not in live]:
-                del locks[gone]
             offsets = list(range(0, len(data_bytes), clipboard_chunk_size))
             prepared: dict = {}
             prepare_lock = asyncio.Lock()
@@ -780,9 +797,12 @@ class RTCApp:
             async def deliver(channel: Any) -> None:
                 want_gz = bool(getattr(channel, "_selkies_gz_tx", False))
                 async with locks.setdefault(id(channel), asyncio.Lock()):
+                    if superseded(channel):
+                        progress.pop(id(channel), None)
+                        return
                     self.send_message_to_channel(channel, "clipboard-msg-start", start_payload)
                     for offset in offsets:
-                        if channel.readyState != "open":
+                        if channel.readyState != "open" or superseded(channel):
                             progress.pop(id(channel), None)
                             return
                         payload, gz_payload = await chunk_for(offset, want_gz)

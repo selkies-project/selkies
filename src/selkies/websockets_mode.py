@@ -846,7 +846,11 @@ class SelkiesStreamingApp:
         Payload frames get the bulk tolerance the data channel's drain allows
         (a slow link is not a dead client); control frames keep the liveness
         bound, since one stalled client must not wedge clipboard delivery for
-        all.
+        all. A newer announcement supersedes an older one still queued or in
+        flight to the same client, which then gets no further chunks: the
+        clipboard is last-value-wins, and the client drops a payload whose
+        chunks stop at the next start. A tagged reply is neither superseded nor
+        supersedes, since its payload is only cached and never pasted.
         """
         if not (self.data_streaming_server and self.data_streaming_server.clients):
             data_logger.warning("Cannot send clipboard: no clients or server not ready.")
@@ -873,9 +877,20 @@ class SelkiesStreamingApp:
             # chunks into one assembly -- and a reply tag must precede its own
             # payload, nothing else's.
             locks = self.__dict__.setdefault("_clipboard_send_locks", {})
+            latest = self.__dict__.setdefault("_clipboard_send_latest", {})
             live = {id(c) for c in list(clients)}
-            for gone in [k for k in locks if k not in live]:
-                del locks[gone]
+            for table in (locks, latest):
+                for gone in [k for k in table if k not in live]:
+                    del table[gone]
+            recipients = [c for c in list(clients) if conn_id is None or id(c) == conn_id]
+            announcement = object()
+            if not reply_to:
+                for c in recipients:
+                    latest[id(c)] = announcement
+
+            def superseded(cid: int) -> bool:
+                return not reply_to and latest.get(cid) is not announcement
+
             small = total_size < CLIPBOARD_CHUNK_SIZE
             if small:
                 encoded_data = base64.b64encode(data_bytes).decode('ascii')
@@ -898,6 +913,8 @@ class SelkiesStreamingApp:
                 is the only one of the two a buffer in front can hide."""
                 cid = id(client)
                 async with locks.setdefault(cid, asyncio.Lock()):
+                    if superseded(cid):
+                        return
                     if reply_to:
                         await _broadcast_to_clients(clients, f"clipboard_reply,{reply_to}",
                                                     per_client_timeout=2.0, only=cid)
@@ -918,6 +935,8 @@ class SelkiesStreamingApp:
                         data_message = "clipboard_data," + base64.b64encode(chunk).decode('ascii')
                         await _bulk_pace(gauge, pacer, len(data_message))
                         await _await_bulk_window(client, loop.time() + BULK_DRAIN_TIMEOUT_S)
+                        if superseded(cid):
+                            return
                         if await _broadcast_to_clients(clients, data_message,
                                                        per_client_timeout=BULK_DRAIN_TIMEOUT_S, only=cid):
                             return
@@ -926,7 +945,6 @@ class SelkiesStreamingApp:
                     await _broadcast_to_clients(clients, "clipboard_finish",
                                                 per_client_timeout=2.0, only=cid)
 
-            recipients = [c for c in list(clients) if conn_id is None or id(c) == conn_id]
             await asyncio.gather(*(deliver(c) for c in recipients))
             if not small:
                 data_logger.debug("Finished sending multi-part clipboard data.")

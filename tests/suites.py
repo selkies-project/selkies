@@ -50,6 +50,7 @@ SUITES: list = [
     {"path": "unit/test_clipboard_incoming.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_clipboard_flavours.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_clipboard_png.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_clipboard_supersede.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_app_session.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rtc_peer_lifecycle.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_sdp_munge.py", "tier": "unit", "timeout": 120},
