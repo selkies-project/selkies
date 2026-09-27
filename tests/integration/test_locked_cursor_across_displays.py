@@ -75,25 +75,28 @@ async def collect(ws, seconds: float) -> list:
     return out
 
 
+def band_box(jpeg: bytes, y: int, bg: tuple) -> Optional[tuple]:
+    """The sprite's box within one delivered band, in the display's own pixels."""
+    from PIL import Image, ImageChops
+
+    img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    diff = ImageChops.difference(img, Image.new("RGB", img.size, bg)).convert("L")
+    found = diff.point(lambda v: 255 if v > SPRITE_TOL else 0).getbbox()
+    return (found[0], y + found[1], found[2], y + found[3]) if found else None
+
+
+def merge(a: Optional[tuple], b: Optional[tuple]) -> Optional[tuple]:
+    if a is None or b is None:
+        return a or b
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
 def frame_boxes(frames: list, bg: tuple) -> list:
     """`(frame id, sprite box or None)` per delivered frame, oldest first, the
     bands of one frame merged into a single box in the display's own pixels."""
-    from PIL import Image, ImageChops
-
-    def band(jpeg: bytes, y: int):
-        img = Image.open(io.BytesIO(jpeg)).convert("RGB")
-        diff = ImageChops.difference(img, Image.new("RGB", img.size, bg)).convert("L")
-        found = diff.point(lambda v: 255 if v > SPRITE_TOL else 0).getbbox()
-        return (found[0], y + found[1], found[2], y + found[3]) if found else None
-
-    def merge(a, b):
-        if a is None or b is None:
-            return a or b
-        return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
-
     out: list = []
     for fid, y, jpeg in frames:
-        box = band(jpeg, y)
+        box = band_box(jpeg, y, bg)
         if out and out[-1][0] == fid:
             out[-1] = (fid, merge(out[-1][1], box))
         else:
@@ -102,12 +105,19 @@ def frame_boxes(frames: list, bg: tuple) -> list:
 
 
 def sprite_box(frames: list, bg: tuple) -> Optional[tuple]:
-    """Where the sprite is, from the newest frame that carries it.
+    """Where the sprite is on the picture the client composes: each band as the
+    newest frame that carried it left it.
 
     Newest, not largest: a frame still in flight shows the sprite where it was,
-    and only the newest one says where it is now.
+    and only a band's newest content says where it is now. By band rather than
+    by frame, because a still screen's cleanup re-sends its bands a few at a
+    time: the newest frame can carry one band of a sprite that spans two.
     """
-    return next((box for _, box in reversed(frame_boxes(frames, bg)) if box), None)
+    latest = {y: jpeg for _, y, jpeg in frames}
+    box = None
+    for y, jpeg in latest.items():
+        box = merge(box, band_box(jpeg, y, bg))
+    return box
 
 
 def still_drawn(frames: list, bg: tuple) -> bool:
