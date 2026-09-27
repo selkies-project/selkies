@@ -42,6 +42,12 @@ const STANDARD_LAYOUT = {
 export const GP_TIMEOUT = 4;
 const MAX_GAMEPADS = 4;
 
+/** Distance from center, in axis units, a stick rests within (`GamepadManager._deadzone`). */
+const STICK_DEADZONE = 0.05;
+
+/** The standard-layout axis pairs that are one stick each. */
+const STICK_AXES = [[0, 1], [2, 3]];
+
 /** The remap database platform this browser's pads are looked up under. */
 const JSDB_PLATFORM = (() => {
     const ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
@@ -219,11 +225,11 @@ export class GamepadManager {
                     }
                 }
 
+                const axes = this._deadzone(currentGp, gpState);
                 for (let x = 0; x < currentGp.axes.length; x++) {
                     if (currentGp.axes[x] === undefined) continue;
 
-                    let val = currentGp.axes[x];
-                    if (Math.abs(val) < 0.05) val = 0;
+                    const val = axes[x];
 
                     if (gpState.axes[x] !== val) {
                         const isUniversalDpadAxis = (currentGp.mapping !== 'standard' && (x === 4 || x === 5));
@@ -279,6 +285,54 @@ export class GamepadManager {
                 this.onHeld();
             }
         }
+    }
+
+    /**
+     * The pad's axes with the rest noise of its sticks cut. A stick is one
+     * point, so it rests while that point is within `STICK_DEADZONE` of center
+     * and reads as reported past it: cutting each axis on its own pins the
+     * minor axis of a push near a cardinal direction to zero, and then jumps
+     * it. Only axes known to pair as a stick are taken together, a
+     * standard-mapped pad's first four or what its remap profile names;
+     * any other axis is cut on its own. The values past the cut are left
+     * as they are, since the game applies its own deadzone to them.
+     * @param {Gamepad} gp
+     * @param {object} state The pad's entry in `this.state`.
+     * @returns {number[]}
+     */
+    _deadzone(gp, state) {
+        const out = state.deadzoned || (state.deadzoned = []);
+        out.length = gp.axes.length;
+        for (let x = 0; x < gp.axes.length; x++) {
+            const v = gp.axes[x];
+            out[x] = (v === undefined || Math.abs(v) < STICK_DEADZONE) ? 0 : v;
+        }
+        for (const [a, b] of STICK_AXES) {
+            const ra = this._rawAxis(gp, state, a);
+            const rb = this._rawAxis(gp, state, b);
+            if (ra < 0 || rb < 0) continue;
+            const rest = Math.hypot(gp.axes[ra] || 0, gp.axes[rb] || 0) < STICK_DEADZONE;
+            out[ra] = rest ? 0 : (gp.axes[ra] || 0);
+            out[rb] = rest ? 0 : (gp.axes[rb] || 0);
+        }
+        return out;
+    }
+
+    /**
+     * The raw index of a standard-layout axis on this pad, or -1 where the
+     * pad's layout does not say which it is.
+     * @param {Gamepad} gp
+     * @param {object} state
+     * @param {number} standard
+     * @returns {number}
+     */
+    _rawAxis(gp, state, standard) {
+        if (gp.mapping === 'standard') return standard < gp.axes.length ? standard : -1;
+        if (!state.remapProfile) return -1;
+        for (const raw in state.remapProfile.axes) {
+            if (state.remapProfile.axes[raw] === standard) return Number(raw);
+        }
+        return -1;
     }
 
     /**
