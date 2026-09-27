@@ -120,8 +120,8 @@ def recovery(res: H.Results) -> None:
 
 
 def layouts(res: H.Results) -> None:
-    """Padding, CSRCs, unknown IDs, and RTP padding stay; a truncated packet or
-    extension raises."""
+    """Padding, CSRCs, unknown IDs, and RTP padding stay; the walk stops where
+    libwebrtc's parser stops."""
     one = raw_packet(0xBEDE, b"\x00\x22\x31\x41\x59\x71\x12\x34\x90\xab\x00\x00")
     res.check("one-byte form: absolute send time and transmission offset zeroed, the rest kept",
               configured().for_fec(one) == zeroed(one, (26, 29), (30, 32))
@@ -134,22 +134,20 @@ def layouts(res: H.Results) -> None:
                  raw_packet(0xBEDE, b"\x90\xab\x00\x00"),
                  raw_packet(0x4321, b"\x22\x31\x41\x59"),
                  raw_packet(0xBEDE, b"\xf0\x22\x31\x41"),
-                 raw_packet(0xBEDE, b"")]
+                 raw_packet(0xBEDE, b"\x01\x00\x22\x31\x41\x59\x00\x00"),
+                 raw_packet(0xBEDE, b""),
+                 b"\x80", b"\x90" + bytes(11),
+                 raw_packet(0xBEDE, b"\x22\x31\x41\x59")[:27]]
     kept = [mapping.for_fec(data) == data for data in unchanged]
-    res.check("no extension, no mutable ID, another profile, a one-byte ID of 15 first, "
-              "or an empty block: left as it is", all(kept), kept)
-    raised = []
-    for data in (b"\x80", b"\x90" + bytes(11),
-                 raw_packet(0xBEDE, b"\x22\x31\x41\x59")[:27],
-                 raw_packet(0xBEDE, b"\x2f\x00\x00\x00"),
-                 raw_packet(0x1000, b"\x00\x00\x00\x16"),
-                 raw_packet(0x1000, b"\x16\x03\x31\x41")):
-        try:
-            configured().for_fec(data)
-            raised.append(False)
-        except ValueError:
-            raised.append(True)
-    res.check("a truncated packet, header, or extension raises", all(raised), raised)
+    res.check("no extension, no mutable ID, another profile, a one-byte ID of 15 or of 0 with "
+              "a length first, an empty block, or a header that does not parse: left as it is",
+              all(kept), kept)
+    overrun = raw_packet(0xBEDE, b"\x22\x31\x41\x59\x3c\x00\x00\x00")
+    orphan = raw_packet(0x1000, b"\x16\x03\x31\x41\x59\x00\x00\x16")
+    res.check("an element running past the block, or an ID with no length byte, ends the "
+              "walk after what came before it",
+              mapping.for_fec(overrun) == zeroed(overrun, (25, 28))
+              and configured(True).for_fec(orphan) == zeroed(orphan, (26, 29)))
 
 
 async def run_sender(fec_enabled: bool) -> tuple:
