@@ -197,27 +197,27 @@ class HeaderExtensionsMap:
     def for_fec(self, packet: bytes) -> bytes:
         """Copy an RTP packet for FlexFEC with mutable extension values zeroed.
 
-        libwebrtc zeroes these values on received media before XOR recovery.
-        With unequal header lengths, an unnormalized extension value can XOR
-        into another packet's media payload. Keep the wire/history packet,
-        extension layout, and payload unchanged.
-        Video timing preserves its first seven bytes; its pacer/network legs
-        are mutable. Both RFC 8285 extension forms are supported.
-
-        Raises:
-            ValueError: The packet or a recognized extension is truncated.
+        libwebrtc zeroes these values on received media before XOR recovery
+        (`RtpPacket::ZeroMutableExtensions`). With unequal header lengths, as
+        video timing on a frame's last packet makes them, an unnormalized value
+        XORs into another packet's payload. Transport-wide sequence, absolute
+        send time, and transmission offset are zeroed whole, and video timing
+        from its pacer-exit leg (byte 7) on; the packet sent and kept for
+        retransmission is left as it is. Both RFC 8285 forms are walked as
+        libwebrtc parses them, and the walk ends where its parser does: at a
+        one-byte ID of 15, or of 0 with a length, and at an element running
+        past the block. A packet whose header does not parse comes back as it
+        is, as the receiver drops it, so nothing raises into the RTP task.
         """
-        if len(packet) < 12:
-            raise ValueError("RTP packet is truncated")
-        if not packet[0] & 0x10:
+        if len(packet) < 12 or not packet[0] & 0x10:
             return packet
         start = 12 + 4 * (packet[0] & 15)
         if start + 4 > len(packet):
-            raise ValueError("RTP extension header is truncated")
+            return packet
         profile, words = unpack_from("!HH", packet, start)
         pos, end = start + 4, start + 4 + 4 * words
         if end > len(packet):
-            raise ValueError("RTP extensions are truncated")
+            return packet
         if profile != 0xBEDE and profile & 0xFFF0 != 0x1000:
             return packet
         mutable = {
@@ -235,16 +235,16 @@ class HeaderExtensionsMap:
                 continue
             if profile == 0xBEDE:
                 ext_id, length = head >> 4, (head & 15) + 1
-                if ext_id == 15:
+                if ext_id in (0, 15):
                     break
             else:
                 ext_id = head
                 if pos >= end:
-                    raise ValueError("RTP extension length is truncated")
+                    break
                 length = packet[pos]
                 pos += 1
             if pos + length > end:
-                raise ValueError("RTP extension value is truncated")
+                break
             skip = (
                 0 if ext_id in mutable else
                 7 if ext_id == self.__ids.video_timing else length
