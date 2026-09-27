@@ -500,6 +500,7 @@ async def ensure_mode(res_str: str, refresh: Optional[float] = None) -> bool:
 
 def _sync_resize_randr(
     res_str: str, refresh: Optional[float] = None,
+    output_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[int, int, float]:
     """Blocking RandR resize on the module connection (`_resize_on_display`).
 
@@ -513,7 +514,8 @@ def _sync_resize_randr(
         raise ValueError(f"invalid resolution '{res_str}'")
     with _x11_lock:
         try:
-            return _resize_on_display(_module_display(), res_str, w_req, h_req, refresh)
+            return _resize_on_display(
+                _module_display(), res_str, w_req, h_req, refresh, output_size)
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
@@ -522,7 +524,7 @@ def _sync_resize_randr(
 
 def _resize_on_display(
     d: x11_display.Display, res_str: str, w_req: int, h_req: int,
-    refresh: Optional[float] = None,
+    refresh: Optional[float] = None, output_size: Optional[Tuple[int, int]] = None,
 ) -> Tuple[int, int, float]:
     """The RandR mode-create/activate/screen-size sequence on connection ``d``.
 
@@ -531,19 +533,32 @@ def _resize_on_display(
     because a name that disagrees with the pixel size breaks later xrandr calls
     that derive framebuffer dimensions from it. The mode is chosen or made at
     the refresh `_target_refresh` makes of ``refresh``, the stream's frame
-    rate (`_mode_at`). The physical size follows the DPI the last ``set_dpi``
-    stamped (96 when never retargeted): xdpyinfo and the toolkit paths reading
-    RandR's physical size would otherwise un-scale after every resize. The
-    screen may not shrink under an active CRTC, so a CRTC that would poke out
-    of the new screen is disabled first, as xrandr does.
+    rate (`_mode_at`). ``output_size``, the one display of a logical-monitor
+    layout, has the output show exactly that rectangle from the origin instead
+    of the whole screen: Qt takes a monitor's geometry from its CRTC and
+    announces a change only where the two agree, so a monitor narrower than its
+    CRTC leaves a Qt desktop at the size it had (`display_utils_xrandr`). The
+    physical size follows the DPI the last ``set_dpi`` stamped (96 when never
+    retargeted): xdpyinfo and the toolkit paths reading RandR's physical size
+    would otherwise un-scale after every resize. The screen may not shrink
+    under an active CRTC, so a CRTC that would poke out of the new screen is
+    disabled first, as xrandr does.
 
     Returns:
         The screen's ``(width, height)`` and the refresh of the mode set.
     """
     root, res, out_id, oi, names = _connected_output_state(d)
     screen_w, screen_h = -(-w_req // 8) * 8, h_req
-    mode_id, rate = _mode_at(d, root, res, oi, out_id, names, screen_w, screen_h,
-                             _target_refresh(refresh), f"{screen_w}x{screen_h}")
+    target = _target_refresh(refresh)
+    out_w, out_h = output_size or (screen_w, screen_h)
+    if out_w > screen_w or out_h > screen_h:
+        out_w, out_h = screen_w, screen_h
+    if (out_w, out_h) == (screen_w, screen_h):
+        mode_id, rate = _mode_at(d, root, res, oi, out_id, names, screen_w, screen_h,
+                                 target, f"{screen_w}x{screen_h}")
+    else:
+        mode_id, rate = _mode_at(d, root, res, oi, out_id, names, out_w, out_h,
+                                 target, f"selkies-{out_w}x{out_h}")
     crtc = oi.crtc or (oi.crtcs[0] if oi.crtcs else 0)
     if not crtc:
         raise RuntimeError("output has no usable CRTC")
@@ -554,6 +569,7 @@ def _resize_on_display(
     mm_w = max(1, round(screen_w * 25.4 / dpi_hint))
     mm_h = max(1, round(screen_h * 25.4 / dpi_hint))
     rotation = ci.rotation or randr.Rotate_0
+    crtc_x, crtc_y = (ci.x, ci.y) if output_size is None else (0, 0)
     crtc_fits = ci.x + ci.width <= screen_w and ci.y + ci.height <= screen_h
     d.grab_server()
     try:
@@ -566,7 +582,7 @@ def _resize_on_display(
         if (geom.width, geom.height) != (screen_w, screen_h):
             randr.set_screen_size(root, screen_w, screen_h, mm_w, mm_h)
         status = randr.set_crtc_config(
-            d, crtc, res.config_timestamp, ci.x, ci.y, mode_id,
+            d, crtc, res.config_timestamp, crtc_x, crtc_y, mode_id,
             rotation, outputs,
         ).status
         if status != randr.SetConfigSuccess:
@@ -1640,12 +1656,15 @@ async def get_new_res(res_str: str) -> Tuple[str, str, List[str], str, Optional[
 
 async def resize_display(
     res_str: str, refresh: Optional[float] = None,
+    output_size: Optional[Tuple[int, int]] = None,
 ) -> Optional[Tuple[int, int]]:
     """Resize the display to ``res_str`` (e.g. "2560x1280").
 
     Native RandR first (`_resize_on_display`: the mode chosen by geometry and
     refresh, ``refresh`` being the stream's frame rate, and made from CVT-RB
     timings when absent), with the xrandr/cvt subprocess chain as fallback.
+    ``output_size`` is the rectangle the output shows when it is narrower than
+    the screen, which only the logical-monitor layout asks for.
 
     Returns:
         The realized ``(width, height)`` — CVT cell alignment may make it
@@ -1653,7 +1672,7 @@ async def resize_display(
         report the realized size, not the request.
     """
     try:
-        w, h, rate = await asyncio.to_thread(_sync_resize_randr, res_str, refresh)
+        w, h, rate = await asyncio.to_thread(_sync_resize_randr, res_str, refresh, output_size)
     except RuntimeError as e:
         if "no connected RandR output" in str(e):
             # No mode to set, but the framebuffer itself may still be sized.

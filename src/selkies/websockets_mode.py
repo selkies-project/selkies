@@ -5362,9 +5362,13 @@ class DataStreamingServer(BaseStreamingService):
                 # every client repaints), so a same-size reload skips it. A live
                 # re-target that grew the framebuffer above still shrinks here.
                 curr_norm = (curr_res or "").lower().replace(" ", "")
+                # One display is shown whole by the output: Qt announces a monitor's
+                # new geometry only where the monitor is exactly its CRTC.
+                output_size = ((layouts['primary']['w'], layouts['primary']['h'])
+                               if len(layouts) == 1 and 'primary' in layouts else None)
                 if curr_norm == total_mode_str:
                     data_logger.debug(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
-                elif not await resize_display(total_mode_str, stream_fps):
+                elif not await resize_display(total_mode_str, stream_fps, output_size):
                     # Some servers refuse runtime modes but honor a plain framebuffer
                     # grow (RRSetScreenSize); captures and pointer warps address the root.
                     if await grow_framebuffer(total_width, total_height):

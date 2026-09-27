@@ -15,7 +15,13 @@ nothing here runs on a server where it is:
   physical output because GTK realizes a monitor only where one is listed,
   whether the server lets them share it is read back rather than assumed, and
   the swap is announced on an output property because RRSetMonitor emits no
-  RandR event of its own.
+  RandR event of its own. A single display is shown whole by the output, its
+  CRTC exactly the monitor rather than the framebuffer rounded up to the CVT
+  cell (`resize_display`'s ``output_size``): Qt re-reads the monitors on the
+  root's ConfigureNotify but announces a new geometry only for a monitor
+  that is exactly its one CRTC, so a monitor narrower than its CRTC leaves a
+  Qt desktop at the size it had until the work area happens to change, which
+  a shrink that puts its panel off screen never does.
 - The window-manager restart that layout needs (`MultiMonitorWindowManager`):
   a manager that reads the monitor set only as it starts has to be restarted
   once to tile against it. A display that arrives as an output is a hotplug,
