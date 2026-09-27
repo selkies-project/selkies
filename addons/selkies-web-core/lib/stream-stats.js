@@ -176,9 +176,10 @@ export class DecodeCapability {
  * an engine that refuses the stream's configuration with hardware preferred has
  * none, the frames say which kind made them where their format tells, and an
  * engine whose frames are all one format whatever decodes them (Gecko hands out
- * BGRX) is left to `capabilityVerdict`. An engine that accepts the preference
- * promises no hardware decoder, since some take it as a hint and decode in
- * software, so only the fallback falls short.
+ * BGRX) is left to `capabilityVerdict`. Software falls short, as over WebRTC,
+ * where the engine says it decodes this configuration efficiently; that it
+ * accepts the hardware preference says nothing, since some engines take it as
+ * a hint and decode in software.
  * @param {{forcedSoftware: boolean, hardwareSupported: (boolean|null|undefined),
  *     format: (string|null|undefined), capable: (boolean|null|undefined)}} evidence
  *     `hardwareSupported` is `VideoDecoder.isConfigSupported` with
@@ -189,9 +190,8 @@ export function webcodecsDecoder({ forcedSoftware, hardwareSupported, format, ca
   if (forcedSoftware) return verdict('software', '', true, 'software_preferred');
   if (hardwareSupported === false) return verdict('software', 'No hardware decoder for this stream', false);
   const seen = decoderOfFormat(format);
-  if (seen !== 'unknown') return verdict(seen, framesOf(format), false);
-  const told = capabilityVerdict(capable, format === undefined ? '' : framesOf(format));
-  return { ...told, hardware_expected: false, decoder_reason: '' };
+  if (seen !== 'unknown') return verdict(seen, framesOf(format), capable === true);
+  return capabilityVerdict(capable, format === undefined ? '' : framesOf(format));
 }
 
 /**

@@ -191,7 +191,25 @@ check('frames of one format whatever decodes them leave it to the engine\'s capa
   && webcodecsDecoder({ format: 'BGRX' }).decoder === 'unknown'
   && webcodecsDecoder({ format: 'BGRX', capable: false }).decoder === 'software'
   && webcodecsDecoder({ format: 'BGRX', capable: true }).decoder === 'unknown'
-  && !webcodecsDecoder({ format: 'BGRX', capable: true }).hardware_expected);
+  && rowOf(streamRows(null, { ...client, ...webcodecsDecoder({ format: 'BGRX', capable: true }) }, null, words),
+    'decoder').status === 'neutral');
+// One rule on both transports: software falls short where the engine says it
+// decodes the stream efficiently, whichever rung named the decoder.
+const efficient = webcodecsDecoder({ forcedSoftware: false, hardwareSupported: true, format: 'I420', capable: true });
+rows = streamRows(null, { ...client, ...efficient }, null, words);
+check('WebSockets planar frames where the engine decodes the stream efficiently warn, with why, as WebRTC\'s do',
+  efficient.decoder === 'software' && rowOf(rows, 'decoder').status === 'warn'
+  && rowOf(rows, 'decoder').reason === 'engine has one');
+const same = [];
+for (const format of ['I420', 'I444', 'NV12', null, undefined]) {
+  for (const capable of [true, false, null]) {
+    const ws = webcodecsDecoder({ forcedSoftware: false, hardwareSupported: null, format, capable });
+    const wr = webrtcDecoder({ trackFormat: format, capable });
+    if (ws.decoder !== wr.decoder || ws.hardware_expected !== wr.hardware_expected
+        || ws.decoder_reason !== wr.decoder_reason) same.push(`${format}/${capable}`);
+  }
+}
+check('the same frames and engine answer give both transports the same verdict', same.length === 0, same.join(', '));
 check('WebRTC takes the engine at its word', webrtcDecoder({ implementation: 'ExternalDecoder', powerEfficient: true }).decoder === 'hardware'
   && webrtcDecoder({ implementation: 'FFmpeg' }).decoder === 'software');
 check('and claims nothing where the engine withholds the decoder',
