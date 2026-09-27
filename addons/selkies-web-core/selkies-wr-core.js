@@ -2275,11 +2275,15 @@ export default function webrtc() {
 	 * One sample of this page's figures for lib/stream-stats.js, from the same
 	 * `getStats()` snapshot the stat watch took: a rate is the change in a
 	 * cumulative counter since the last sample, a count is counted from the
-	 * opening, and the first tick after an opening only takes the baseline.
+	 * opening, and the first tick after an opening only takes the baseline. A
+	 * reconnect that replaced the peer connection starts its counters again
+	 * from zero, so what the old one counted since the opening is carried
+	 * into the baseline and its first tick only takes the rates' baseline.
 	 * @param {Object} stats `WebRTCClient.getConnectionStats`'s result.
 	 * @param {number} rtt Round trip in ms.
+	 * @param {RTCPeerConnection} pc The peer connection `stats` was read from.
 	 */
-	function sampleStreamStats(stats, rtt) {
+	function sampleStreamStats(stats, rtt, pc) {
 		const video = stats.reports.videoRTP || {};
 		const audio = stats.reports.audioRTP || {};
 		const now = {
@@ -2303,10 +2307,13 @@ export default function webrtc() {
 			lost: (video.packetsLost || 0) + (audio.packetsLost || 0),
 		};
 		const last = statsBaseline;
-		statsBaseline = Object.assign({ opened: last ? last.opened : counts }, now);
+		const replaced = !!last && last.pc !== pc;
+		const opened = !last ? counts : !replaced ? last.opened
+			: Object.fromEntries(Object.keys(counts).map((key) => [key, last.opened[key] - last.counts[key]]));
+		statsBaseline = Object.assign({ pc, counts, opened }, now);
 		if (!last) return;
-		streamStats.noteBytes(Math.max(0, now.bytes - last.bytes));
-		const opened = statsBaseline.opened;
+		streamStats.noteBytes(replaced ? now.bytes : Math.max(0, now.bytes - last.bytes));
+		if (replaced) return;
 		const seconds = (now.at - last.at) / 1000;
 		const per = (total, count) => (count > 0 ? Math.round((1000 * total / count) * 100) / 100 : 0);
 		const share = (part, whole) => (whole > 0 ? Math.round((100 * part / whole) * 100) / 100 : 0);
@@ -2379,6 +2386,7 @@ export default function webrtc() {
 			let tookBaseline = false;
 			var now = new Date().getTime() / 1000;
 			try {
+				const pc = webrtc.peerConnection;
 				const stats = await webrtc.getConnectionStats();
 				connectionStat = {};
 
@@ -2422,7 +2430,7 @@ export default function webrtc() {
 				describeClient(stats);
 				if (streamStats.open) {
 					tookBaseline = statsBaseline === null;
-					sampleStreamStats(stats, rtt);
+					sampleStreamStats(stats, rtt, pc);
 				}
 				if (enableWebrtcStatics) webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
 			} catch (e) {
