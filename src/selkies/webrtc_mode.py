@@ -3038,6 +3038,12 @@ class WebRTCService(BaseStreamingService):
                 logger.exception(
                     "Unexpected error during concurrent component shutdown"
                 )
+        if self.peer_manager is not None:
+            # A page that registered before the stop's refusal took effect would
+            # hold the listener's shutdown open on its socket until a kill.
+            await _await_with_timeout(
+                self.peer_manager.close_clients(), "signaling clients", 3.0
+            )
         if self.metrics:
             try:
                 # unregister() drains the CSV executor with shutdown(wait=True).
@@ -3110,13 +3116,15 @@ class WebRTCService(BaseStreamingService):
     async def rtc_ws_handler(
         self, request: web.Request
     ) -> Union[web.Response, web.WebSocketResponse]:
-        """Accept a signaling WebSocket, refusing with 409/503 while the WebRTC
-        mode is inactive or still starting."""
+        """Accept a signaling WebSocket, refusing with 409 while the WebRTC mode
+        is inactive and 503 while it is starting or going away: a page its
+        stopping server closed reconnects at once, and a session registered
+        then would find no server peer and keep the shutdown waiting on it."""
         if self.supervisor.current_mode != self.mode:
             return web.Response(status=409, text="WebRTC mode is inactive")
-        if self.peer_manager is None:
+        if self.peer_manager is None or self._shutdown_called or self.shutdown_event.is_set():
             return web.Response(status=503, headers={"Retry-After": "1"},
-                                text="WebRTC service is still starting")
+                                text="WebRTC service is starting or stopping")
         # autoping=False so the signaling loop sees PONG frames and can feed
         # the upload uplink gauge's clock; the loop answers PING itself.
         ws = web.WebSocketResponse(autoping=False)

@@ -58,7 +58,7 @@ declare global {
 		currentAudioBufferSize?: number;
 		/**
 		 * Set by the dashboard around a transport switch so the active core
-		 * suppresses the expected "Server disconnected" alert from the old peer.
+		 * leaves the old peer's teardown to the reload the switch makes.
 		 */
 		__selkiesModeSwitching?: boolean;
 	}

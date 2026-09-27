@@ -244,7 +244,7 @@ function settingsPoster(delay: number) {
 
 /**
  * Sets the cross-script flag the cores read around a transport switch, so the
- * old peer's teardown does not surface a "Server disconnected" alert. Kept
+ * old peer's teardown does not set off the core's own recovery reloads. Kept
  * outside the component: it is a signal to the runtime core, not component
  * state.
  */
@@ -744,8 +744,8 @@ export function Settings() {
      */
     const handleStreamModeChange = async (mode: string) => {
         if (mode === streamMode) return;
-        // /api/switch tears down the old peer (WS close 4000) before responding, so
-        // the flag must precede the request or the core alerts "Server disconnected".
+        // /api/switch tears down the old peer before responding, so the flag must
+        // precede the request or the core starts recovering the old connection.
         setModeSwitching(true);
         try {
             const MASTER_TOKEN_KEY = "selkies_master_token";

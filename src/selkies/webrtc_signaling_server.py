@@ -330,8 +330,12 @@ class WebRTCPeerManagement:
 
         A server peer leaving closes every client connection, since the server
         owns the media graph they all stream from; a client peer leaving
-        closes only its own socket. Closes are collected under the lock and
-        awaited after it, bounded per socket and best-effort.
+        closes only its own socket. The server peer leaves when the process
+        stops or restarts or the transport switches, none of them a verdict on
+        the client, so its clients are closed as going away (1001), which
+        they reconnect from, and never with the fatal 4000 the handshake's
+        refusals carry. Closes are collected under the lock and awaited after
+        it, bounded per socket and best-effort.
 
         Args:
             uid: Peer ID to remove.
@@ -355,8 +359,8 @@ class WebRTCPeerManagement:
                         if p.peer_type == "client":
                             deferred_closes.append(
                                 lambda cws=p.ws: cws.close(
-                                    code=4000,
-                                    message=b"Server disconnected, closing connection.",
+                                    code=1001,
+                                    message=b"Server going away.",
                                 )
                             )
                 else:
@@ -376,6 +380,18 @@ class WebRTCPeerManagement:
                 await asyncio.wait_for(make_coro(), timeout=5)
             except Exception as exc:
                 logger.debug("Deferred peer close failed/timed out: {}".format(exc))
+
+    async def close_clients(self) -> None:
+        """Close every client socket still registered, as going away (1001),
+        for a service that is shutting down: its server peer may already be
+        gone, and an open socket keeps the listener's shutdown waiting on it."""
+        async with self.lock:
+            sockets = [p.ws for p in self.peers.values()
+                       if p.peer_type == "client" and not p.ws.closed]
+        await asyncio.gather(
+            *(asyncio.wait_for(ws.close(code=1001, message=b"Server going away."), timeout=2)
+              for ws in sockets),
+            return_exceptions=True)
 
     async def peer_connection_handler(
         self,

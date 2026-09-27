@@ -2412,9 +2412,9 @@ function Sidebar() {
   /**
    * Switches the transport through `/api/switch`, then posts `mode` so the
    * core reloads into it. `window.__selkiesModeSwitching` is set before the
-   * request because the server tears down the old peer (WebSocket close code
-   * 4000) before it responds, and without the flag the active core would
-   * surface a spurious "Server disconnected" alert. The request carries this
+   * request because the server tears down the old peer before it responds,
+   * and without the flag the active core would start recovering the
+   * connection the switch replaces, reloading on its own. The request carries this
    * client's own session token, which a controller's is enough for; a stored
    * master token overrides it, and where neither is accepted a 401 prompts for
    * the master token once, keeps it in sessionStorage and retries, dropping one

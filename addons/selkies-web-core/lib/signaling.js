@@ -323,11 +323,13 @@ export class WebRTCSignaling {
      * Socket closed. A close during the handshake (the upgrade was rejected,
      * say) schedules the retry itself, since the paired `error` event is not
      * guaranteed to observe `readyState` CLOSED. Afterwards the close code
-     * decides: 4000 shows the server's reason; 4001 means another live
-     * connection superseded this session, and auto-reconnecting would make
-     * the two pages evict each other forever, so it stays down and tells the
-     * user; a clean close that `disconnect` requested reports
-     * `ondisconnect(false)`; any other server-initiated close reports
+     * decides: 4000 is a verdict on this client and shows the server's
+     * reason; 4001 means another live connection superseded this session,
+     * and auto-reconnecting would make the two pages evict each other
+     * forever, so it stays down and tells the user; a clean close that
+     * `disconnect` requested reports `ondisconnect(false)`; any other close
+     * the server made, the 1001 of a server going away (stopping,
+     * restarting, or switching transport) among them, reports
      * `ondisconnect(true)` so the app recovers like the WebSocket transport
      * (reconnect, and repeated failures reload for re-authentication).
      * @param {CloseEvent} event

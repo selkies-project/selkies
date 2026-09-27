@@ -69,8 +69,8 @@
  * `pipelineStatusUpdate`, `effectiveCursorState`, `scalingDpiFollowed`,
  * `serverSettings`, `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
  * `clientRoleUpdate`, `toggleDashboard`, `toggleTouchGamepad`. Flags read:
- * `window.__selkiesModeSwitching` (a mode switch in progress suppresses
- * alerts and recovery reloads), `window.__selkiesAuthProbe` (re-presents the
+ * `window.__selkiesModeSwitching` (a mode switch in progress suppresses the
+ * recovery reloads), `window.__selkiesAuthProbe` (re-presents the
  * login after an auth drop), `window.clipboard_enabled`.
  * @module
  */
@@ -3001,13 +3001,12 @@ export default function webrtc() {
 			/**
 			 * A fatal server verdict (invalid slot, superseded takeover): stay
 			 * down. The peer connection goes `failed` shortly after, and the
-			 * recovery timer must not reload into an eviction ping-pong. The
-			 * alert is suppressed during a mode switch, which closes the peer
-			 * (code 4000) before the page reloads.
+			 * recovery timer must not reload into an eviction ping-pong. A
+			 * server going away, a mode switch included, is no verdict: it
+			 * closes as 1001 and takes the reconnect path.
 			 */
 			signaling.onshowalert = (msg) => {
 				fatalConnectionHalt = true;
-				if (typeof window !== 'undefined' && window.__selkiesModeSwitching) return;
 				alert("Disconnected: " + msg + " Please try again.");
 			}
 
