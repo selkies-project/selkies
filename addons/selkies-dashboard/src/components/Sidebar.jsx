@@ -206,18 +206,22 @@ const roundDownToEven = (num) => {
 };
 
 /**
- * Trailing debounce: only the last call within `delay` milliseconds runs.
- * @param {Function} func
+ * Trailing debounce of settings posts: a burst coalesces into one post
+ * carrying every setting changed in it, each at its last value, so a derived
+ * change never drops the one that caused it.
  * @param {number} delay
- * @returns {Function}
+ * @returns {(setting: object) => void}
  */
-function debounce(func, delay) {
+function settingsPoster(delay) {
+  let pending = {};
   let timeoutId;
-  return function (...args) {
-    const context = this;
+  return (setting) => {
+    Object.assign(pending, setting);
     clearTimeout(timeoutId);
     timeoutId = setTimeout(() => {
-      func.apply(context, args);
+      const settings = pending;
+      pending = {};
+      window.postMessage({ type: "settings", settings }, window.location.origin);
     }, delay);
   };
 }
@@ -1464,16 +1468,8 @@ function Sidebar() {
 
   const DEBOUNCE_DELAY = 500;
 
-  /** One debounced poster for the component's lifetime, so a burst of slider moves coalesces into a single post. */
-  const debouncedPostSetting = useMemo(
-    () => debounce((setting) => {
-      window.postMessage(
-        { type: "settings", settings: setting },
-        window.location.origin
-      );
-    }, DEBOUNCE_DELAY),
-    []
-  );
+  /** One settings poster for the component's lifetime, so a burst coalesces into a single post. */
+  const debouncedPostSetting = useMemo(() => settingsPoster(DEBOUNCE_DELAY), []);
 
   /** The two push channels a spec can propagate through; each spec decides which. */
   const conditionalIo = {

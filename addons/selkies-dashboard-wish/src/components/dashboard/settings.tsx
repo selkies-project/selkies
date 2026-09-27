@@ -223,12 +223,22 @@ const roundDownToEven = (num: number) => {
     return Math.floor(n / 2) * 2;
 };
 
-/** Trailing-edge debounce: the last call within `delay` wins. */
-function debounce<A extends unknown[]>(func: (...args: A) => void, delay: number) {
+/**
+ * Trailing debounce of settings posts: a burst coalesces into one post
+ * carrying every setting changed in it, each at its last value, so a derived
+ * change never drops the one that caused it.
+ */
+function settingsPoster(delay: number) {
+    let pending: Record<string, unknown> = {};
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    return (...args: A) => {
+    return (setting: Record<string, unknown>) => {
+        Object.assign(pending, setting);
         clearTimeout(timeoutId);
-        timeoutId = setTimeout(() => func(...args), delay);
+        timeoutId = setTimeout(() => {
+            const settings = pending;
+            pending = {};
+            window.postMessage({ type: "settings", settings }, window.location.origin);
+        }, delay);
     };
 }
 
@@ -343,12 +353,7 @@ export function Settings() {
         macDesktop: isMacDesktop(),
     };
     const DEBOUNCE_DELAY = 500;
-    const debouncedPostSetting = useMemo(() => debounce((setting: any) => {
-        window.postMessage(
-            { type: "settings", settings: setting },
-            window.location.origin
-        );
-    }, DEBOUNCE_DELAY), []);
+    const debouncedPostSetting = useMemo(() => settingsPoster(DEBOUNCE_DELAY), []);
 
     /** The two push channels a spec's `propagate` may use. */
     const conditionalIo = {
