@@ -43,7 +43,9 @@
  *
  * Pointer: absolute positions map through the presenting sink (the canvas or
  * `<video>` box) where the stream has a fixed size, and through the element's
- * window math otherwise; motion is coalesced to one send per animation frame.
+ * window math otherwise; motion goes out as it arrives, from
+ * `pointerrawupdate` where the engine fires it, no closer together than
+ * `MOTION_SEND_INTERVAL_MS` apart.
  * Under pointer lock the payload is a relative delta, scaled to server pixels
  * and quantized with a carried remainder. Gaming mode is document fullscreen
  * plus pointer and keyboard lock. Touch is direct (tap, drag, long-press right
@@ -66,6 +68,21 @@ import { Queue, isMacDesktop } from './util.js';
 
 /** CSS class on elements (and their descendants) whose input stays native. */
 const WHITELIST_CLASS = 'allow-native-input';
+
+/**
+ * Shortest spacing of two pointer motion messages, in milliseconds. Motion
+ * arriving sooner waits out the rest of it, the newest position replacing an
+ * older one and deltas summing, so a 1000 Hz mouse sends at most this often
+ * while a slower device's every sample goes out the moment it arrives.
+ */
+const MOTION_SEND_INTERVAL_MS = 2;
+
+/**
+ * Bytes the motion path's transport may hold unsent before motion goes back
+ * to one message per animation frame: past it the link is not draining, and
+ * each further message only queues behind what it holds.
+ */
+const MOTION_BACKLOG_BYTES = 16 * 1024;
 
 /**
  * How long a trackpad tap holds the button it pressed before releasing it, in
@@ -1402,6 +1419,12 @@ export class Input {
          * @type {((message: string) => void)|null}
          */
         this.sendMotion = null;
+        /**
+         * Bytes the transport still holds ahead of the next pointer motion
+         * message, or null where it cannot say.
+         * @type {(() => number)|null}
+         */
+        this.motionBacklog = null;
         this._pointerSeq = 0;
         this._isSidebarOpen = false;
         this.isSharedMode = isSharedMode;
@@ -1447,6 +1470,10 @@ export class Input {
         this._pointerScaleFrame = null;
         this._pendingMove = null;
         this._moveFlushScheduled = false;
+        /** When the last pointer motion message went out (`performance.now()`). */
+        this._lastMotionSend = -Infinity;
+        /** Whether a `pointerrawupdate` has sent motion the next frame-aligned move event also reports. */
+        this._rawMotionSeen = false;
         this.onmenuhotkey = null;
         this.gamingMode = false;
         this.shortcutsEnabled = true;
@@ -2576,40 +2603,50 @@ export class Input {
      * Mouse and pen handler: moves the page-drawn cursor (to the predicted
      * position where the engine offers one), maps the position through the
      * sink or the window math, keeps the button mask, and sends motion
-     * coalesced to one message per animation frame, button events flushing
-     * what is pending first. Button events map their own coordinates too: a
+     * through `_queueCoalescedMouseMove`, button events flushing what is
+     * pending first. Button events map their own coordinates too: a
      * non-hovering stylus emits no pointermove before contact, and a press
      * right after a pointer lock ends has only seen deltas. Under pointer
      * lock the payload is the movement delta instead, in CSS pixels, scaled
-     * and quantized where the motion is sent so a frame's worth rounds once.
+     * and quantized where the motion is sent so what is sent at once rounds
+     * once. Where the engine delivers motion as `pointerrawupdate`
+     * (`_handleRawPointerUpdate`), that sends it, and the frame-aligned
+     * `mousemove` or pen `pointermove` reporting the same motion only moves
+     * the page-drawn cursor.
      * Ctrl+Shift+Click takes pointer lock, and in gaming mode a click re-arms
      * it after an Escape unlock while the click still goes to the server.
      */
     _mouseButtonMovement(event) {
+        const raw = event.type === 'pointerrawupdate';
+        const sentRaw = !raw && this._rawMotionSeen &&
+            (event.type === 'mousemove' || event.type === 'pointermove');
+        if (event.type === 'mousemove') this._rawMotionSeen = false;
         if (this.buttonMask === 0 && event.target !== this.element) {
             return;
         }
-        if (this.inputAttached && !this.use_browser_cursors) {
-            this.cursorDiv.style.display = 'block';
-            this.element.style.setProperty('cursor', 'none', 'important');
-        }
         this._noteScreenAnchor(event);
-        let visualClientX = event.clientX;
-        let visualClientY = event.clientY;
-        if (event.getPredictedEvents && typeof event.getPredictedEvents === 'function') {
-            const predictedEvents = event.getPredictedEvents();
-            if (predictedEvents.length > 0) {
-                const lastPredictedEvent = predictedEvents[predictedEvents.length - 1];
-                visualClientX = lastPredictedEvent.clientX;
-                visualClientY = lastPredictedEvent.clientY;
+        if (!raw) {
+            if (this.inputAttached && !this.use_browser_cursors) {
+                this.cursorDiv.style.display = 'block';
+                this.element.style.setProperty('cursor', 'none', 'important');
             }
+            let visualClientX = event.clientX;
+            let visualClientY = event.clientY;
+            if (event.getPredictedEvents && typeof event.getPredictedEvents === 'function') {
+                const predictedEvents = event.getPredictedEvents();
+                if (predictedEvents.length > 0) {
+                    const lastPredictedEvent = predictedEvents[predictedEvents.length - 1];
+                    visualClientX = lastPredictedEvent.clientX;
+                    visualClientY = lastPredictedEvent.clientY;
+                }
+            }
+            if (this.inputAttached && !this.use_browser_cursors) {
+                this._updateCursorPosition(visualClientX, visualClientY);
+            }
+            this._latestMouseX = visualClientX;
+            this._latestMouseY = visualClientY;
         }
-        if (this.inputAttached && !this.use_browser_cursors) {
-            this._updateCursorPosition(visualClientX, visualClientY);
-        }
-        this._latestMouseX = visualClientX;
-        this._latestMouseY = visualClientY;
-        if (this._trackpadMode) return;
+        if (this._trackpadMode || sentRaw) return;
         const dpr_for_input_coords = this._inputDpr();
         const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
         if (down) {
@@ -2649,7 +2686,7 @@ export class Input {
             mtype = "m2";
             relX = event.movementX || 0;
             relY = event.movementY || 0;
-        } else if (event.type === 'mousemove' || event.type === 'pointermove' ||
+        } else if (event.type === 'mousemove' || event.type === 'pointermove' || raw ||
                    event.type === 'mousedown' || event.type === 'mouseup' ||
                    event.type === 'pointerdown' || event.type === 'pointerup') {
             if (this._applySinkCoordinates(event.clientX, event.clientY, canvas, videoEle,
@@ -2696,7 +2733,7 @@ export class Input {
         }
         const outX = (mtype === "m2") ? relX : this.x;
         const outY = (mtype === "m2") ? relY : this.y;
-        if (event.type === 'mousemove' || event.type === 'pointermove') {
+        if (event.type === 'mousemove' || event.type === 'pointermove' || raw) {
             this._queueCoalescedMouseMove(mtype, outX, outY, this.buttonMask);
         } else {
             this._flushCoalescedMouseMove();
@@ -2710,10 +2747,13 @@ export class Input {
     }
 
     /**
-     * Queues motion for the next animation frame, so a 1000 Hz mouse cannot
-     * congest the uplink and the server's input loop: relative deltas sum,
-     * absolute positions keep only the latest, and a mode change flushes
-     * first.
+     * Sends motion now, or holds it for the rest of `MOTION_SEND_INTERVAL_MS`
+     * after the last motion message, so a 1000 Hz mouse cannot congest the
+     * uplink and the server's input loop while a sample is never held longer
+     * than that: relative deltas held together sum, an absolute position
+     * replaces the one held, and a mode change flushes first. A transport
+     * holding more than `MOTION_BACKLOG_BYTES` (`motionBacklog`) is not
+     * draining, so motion then waits for the next animation frame instead.
      * @param {'m'|'m2'} mtype
      * @param {number} x CSS-pixel delta under lock, else the mapped position.
      * @param {number} y
@@ -2735,19 +2775,27 @@ export class Input {
             }
             this._pendingMove = { mtype: "m", x: x, y: y, buttonMask: buttonMask };
         }
-        if (!this._moveFlushScheduled) {
-            this._moveFlushScheduled = true;
-            const raf = window.requestAnimationFrame
-                ? window.requestAnimationFrame.bind(window)
-                : (cb) => setTimeout(cb, 16);
-            raf(() => {
-                this._moveFlushScheduled = false;
-                this._flushCoalescedMouseMove();
-            });
+        if (this._moveFlushScheduled) return;
+        const wait = MOTION_SEND_INTERVAL_MS - (performance.now() - (this._lastMotionSend || 0));
+        const backedUp = typeof this.motionBacklog === 'function' &&
+            this.motionBacklog() > MOTION_BACKLOG_BYTES;
+        if (wait <= 0 && !backedUp) {
+            this._flushCoalescedMouseMove();
+            return;
+        }
+        this._moveFlushScheduled = true;
+        const flush = () => {
+            this._moveFlushScheduled = false;
+            this._flushCoalescedMouseMove();
+        };
+        if (backedUp && window.requestAnimationFrame) {
+            window.requestAnimationFrame(flush);
+        } else {
+            setTimeout(flush, Math.max(0, wait));
         }
     }
 
-    /** Sends the queued motion; a relative move that quantizes to (0, 0) is dropped and its remainder stays for the next frame. */
+    /** Sends the queued motion; a relative move that quantizes to (0, 0) is dropped and its remainder stays for the next send. */
     _flushCoalescedMouseMove() {
         const m = this._pendingMove;
         if (!m) return;
@@ -2756,9 +2804,39 @@ export class Input {
             const moved = this._relativeToServer(m.x, m.y);
             if (moved[0] === 0 && moved[1] === 0) return;
             this._sendPointer([ m.mtype, moved[0], moved[1], m.buttonMask, 0 ], true);
-            return;
+        } else {
+            this._sendPointer([ m.mtype, m.x, m.y, m.buttonMask, 0 ], true);
         }
-        this._sendPointer([ m.mtype, m.x, m.y, m.buttonMask, 0 ], true);
+        this._lastMotionSend = performance.now();
+    }
+
+    /**
+     * Pointer motion from `pointerrawupdate`, which the engine dispatches as
+     * each sample arrives rather than at the next frame the way `mousemove`
+     * and `pointermove` are; the engines that fire it (Chromium, Gecko) do so
+     * only in a secure context, and elsewhere those events carry the motion
+     * as before. Its movement already sums what it coalesced. While a button
+     * is held, the positions an event coalesced (a busy page thread, a
+     * digitizer faster than the page) go out as well, one per
+     * `MOTION_SEND_INTERVAL_MS` of their own time, so a stroke keeps its shape
+     * through a stall; hovering, only the newest position matters.
+     * @param {PointerEvent} event
+     */
+    _handleRawPointerUpdate(event) {
+        if (event.pointerType !== 'mouse' && event.pointerType !== 'pen') return;
+        this._rawMotionSeen = true;
+        if (event.buttons !== 0 && typeof event.getCoalescedEvents === 'function' &&
+            !this._isStreamLocked()) {
+            const samples = event.getCoalescedEvents();
+            let last = -Infinity;
+            for (let i = 0; i + 1 < samples.length; i++) {
+                if (samples[i].timeStamp - last < MOTION_SEND_INTERVAL_MS) continue;
+                last = samples[i].timeStamp;
+                this._mouseButtonMovement(samples[i]);
+                this._flushCoalescedMouseMove();
+            }
+        }
+        this._mouseButtonMovement(event);
     }
 
     /**
@@ -4573,6 +4651,9 @@ export class Input {
             this.listeners_context.push(addListener(this.element, 'touchcancel', this._handleTouchEvent, this, false));
         }
         this.listeners_context.push(addListener(this.element, 'mousedown', this._mouseButtonMovement, this));
+        if ('onpointerrawupdate' in window) {
+            this.listeners_context.push(addListener(window, 'pointerrawupdate', this._handleRawPointerUpdate, this));
+        }
         this.listeners_context.push(addListener(window, 'mousemove', this._mouseButtonMovement, this));
         this.listeners_context.push(addListener(window, 'mouseup', this._mouseButtonMovement, this));
         // Set before the locks below, which take it as the grant to hold the pointer.
@@ -4643,6 +4724,7 @@ export class Input {
         this._trackpadGestureMode = null;
         // A queued move must not send after detach; the scheduled flush then no-ops.
         this._pendingMove = null;
+        this._rawMotionSeen = false;
         this._relCarryX = 0;
         this._relCarryY = 0;
         if ((this.buttonMask & 1) === 1) {

@@ -240,10 +240,10 @@ for (const dpr of [1, 1.25, 1.5, 2]) {
     const input = makeInput({ dpr: 2 });
     input._mouseButtonMovement({ type: 'mousemove', target: input.element,
                                  clientX: 100.3, clientY: 0 });
-    const queued = input._pendingMove;
+    input._flushCoalescedMouseMove();
+    const last = input.sent[input.sent.length - 1];
     check('absolute motion reaches every server pixel at dpr 2',
-          queued !== null && queued.mtype === 'm' && queued.x === 201,
-          `${queued && `${queued.mtype},${queued.x}`}`);
+          typeof last === 'string' && last.startsWith('m,201,'), `${last}`);
 }
 
 // --- a button event maps its own position ---------------------------------

@@ -47,8 +47,13 @@ input.send = (msg) => {
     T.travelY += Number(parts[2]);
 };
 
-document.addEventListener('mousemove', (event) => {
+// Motion comes the way the client takes it: from pointerrawupdate where the
+// engine fires it, else from mousemove.
+const motionEvent = ('onpointerrawupdate' in window) ? 'pointerrawupdate' : 'mousemove';
+T.motionEvent = motionEvent;
+document.addEventListener(motionEvent, (event) => {
     if (!document.pointerLockElement) return;
+    if (event.pointerType && event.pointerType !== 'mouse') return;
     T.moves++;
     T.sumMX += (event.movementX || 0);
     input._queueCoalescedMouseMove('m2', event.movementX || 0, event.movementY || 0, 0);

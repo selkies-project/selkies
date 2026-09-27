@@ -72,6 +72,7 @@ SUITES: list = [
     {"path": "unit/test_app_commands.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_relative_motion.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_touch_gestures.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_pointer_cadence.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_wheel_order.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_tracking.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_gpu_fallback.py", "tier": "unit", "timeout": 180},

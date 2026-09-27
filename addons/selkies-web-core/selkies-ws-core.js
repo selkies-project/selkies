@@ -4201,6 +4201,7 @@ const initializeInput = () => {
 
   const initialSlot = clientSlot;
   inputInstance = new Input(overlayInput, sendInputFunction, isSharedMode, playerInputTargetIndex, useCssScaling, initialSlot);
+  inputInstance.motionBacklog = () => (websocket ? websocket.bufferedAmount : 0);
   inputInstance.setShortcutsEnabled(keyboardShortcuts);
 
   inputInstance.onmenuhotkey = () => {

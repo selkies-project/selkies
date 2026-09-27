@@ -284,7 +284,8 @@ def measure(res, browser: str, dpr: float) -> None:
         root = d.screen().root
         # Raw movement is refused by every engine on Linux, so the fallback to a
         # plain lock is the path this runs on; a lock is what matters either way.
-        res.check(f"{label}: the pointer locks", True, LATEST.get("lockPath", ""))
+        res.check(f"{label}: the pointer locks", True,
+                  f"{LATEST.get('lockPath', '')}, motion from {LATEST.get('motionEvent', '')}")
 
         for name, count, delta, gap in PATTERNS:
             root.warp_pointer(700, 450)

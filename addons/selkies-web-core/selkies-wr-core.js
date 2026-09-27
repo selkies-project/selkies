@@ -2919,6 +2919,7 @@ export default function webrtc() {
 				if (isSharedMode && isStrictViewer && !collabInputGranted) return;
 				webrtc.sendMotionMessage(data);
 			};
+			input.motionBacklog = () => webrtc.motionBufferedAmount();
 			input.setShortcutsEnabled(keyboardShortcuts);
 			input.setDisplayLayouts(latestDisplayLayouts, displayId);
 			/**

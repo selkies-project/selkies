@@ -834,6 +834,17 @@ export class WebRTCClient {
 	}
 
 	/**
+	 * Outbound queue depth of the channel pointer motion goes out on
+	 * (`sendMotionMessage`), which the motion sender slows down on.
+	 * @returns {number}
+	 */
+	motionBufferedAmount() {
+		const channel = this._motion_channel;
+		if (channel !== null && channel.readyState === 'open') return channel.bufferedAmount;
+		return this.dataChannelBufferedAmount();
+	}
+
+	/**
 	 * Sends coalesced pointer motion on the unordered `pointer` channel while it
 	 * is open, so a lost sample holds nothing behind it, else on the input channel.
 	 * @param {string} message
