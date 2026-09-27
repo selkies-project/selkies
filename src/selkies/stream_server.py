@@ -253,43 +253,120 @@ def _observe_rtt_floor(state: Dict[str, Any], rtt_us: int, now: float) -> int:
 
 
 class CongestionSteer:
-    """The steer of one display's CBR target over one-second congestion ticks, for
-    both transports: WebRTC's loop hands it the receiver-reported loss, and the
-    WebSockets backpressure loop a loss of 1.0 for a second in which the display's
-    frame round trip stood a queue (`DataStreamingServer._steer_bitrate_to_link`).
-    A tick whose loss fraction passes LOSS is a strike, and only two strikes in a
-    row back the target off, by BACKOFF: one window is a few tens of packets, too
-    few for its loss to mean anything on its own. A backoff then holds the target
-    for HOLD_S, so the recovery does not climb straight back onto the loss that
-    caused it. A clean tick clears the strikes and, outside a hold, raises the
-    target by STEP, or to HEADROOM of the measured goodput where that is higher,
-    never past the ceiling.
+    """The steer of one display's CBR target over congestion ticks, for both
+    transports. A tick carries two kinds of evidence: the queue standing on the
+    path (the WebSockets backpressure loop measures it from the display's frame
+    round trip, `DataStreamingServer._steer_bitrate_to_link`) and the loss the
+    receiver reported (WebRTC's loop, from transport-wide-cc feedback).
+
+    A standing queue backs the target off on the first tick that shows it: a
+    delay verdict fires at a queue that is still small, where waiting a second
+    tick lets it grow by the whole overshoot. The rate the path delivered while
+    the queue stood is its capacity, so the target drops to HEADROOM of that
+    rather than by a blind fraction, and lower still while the queue already
+    written ahead drains: at the depth that empties it in DRAIN_S, never under
+    DRAIN_FLOOR of the capacity, for as long as that takes at that rate. No cut
+    follows until the drain and SETTLE_S more have passed, because the queue the
+    cut is emptying reads as a queue meanwhile; cutting again on it would take
+    the target to the floor while the path only drains. Without a measured
+    delivery the backoff is BACKOFF of the target, held for HOLD_S.
+
+    Loss backs the target off only on the second lossy tick in a row: one tick
+    of a thin stream is too few packets for its loss fraction to mean anything.
+    That backoff is BACKOFF of the target, held for HOLD_S, so the recovery does
+    not climb straight back onto the loss that caused it.
+
+    A clean tick outside a hold raises the target, by STEP a second while what
+    the path delivers is far from the last capacity it showed and by STEP_NEAR
+    once it is within NEAR of it, where the next queue waits: probing there
+    slowly keeps the overshoot that finds it small. Delivered rates rather than
+    targets are compared, since an encoder need not emit what it is asked for
+    (a CBR encoder with a small buffer runs under its target, and content it
+    cannot compress that far runs over). A path that delivers clear past the
+    old capacity with no queue forgets it, since it now carries more. A raise
+    also follows HEADROOM of the measured goodput where that is higher, never
+    past the ceiling.
     """
 
     LOSS = 0.10
     BACKOFF = 0.7
     HOLD_S = 2.0
     STEP = 1.15
+    STEP_NEAR = 1.05
+    NEAR = 0.9
     HEADROOM = 0.85
+    DRAIN_S = 1.0
+    DRAIN_FLOOR = 0.5
+    SETTLE_S = 0.5
 
     def __init__(self) -> None:
         self.strikes = 0
         self.hold_until = 0.0
+        self.capacity_kbps: Optional[float] = None
+        self._cruise_kbps: Optional[float] = None
+        self._drain_until = 0.0
+        self._tick_at: Optional[float] = None
 
     def target(self, current: float, ceiling: float, floor: float,
-               goodput_bps: float, loss: float, now: float) -> float:
-        """The next target in kbps for a tick that measured `goodput_bps` and `loss`."""
+               goodput_bps: float, loss: float, now: float,
+               queue_s: Optional[float] = None) -> float:
+        """The next target in kbps for one tick.
+
+        Args:
+            current: The target in force, in kbps.
+            ceiling: The configured target, which the steer never exceeds.
+            floor: The lowest target allowed.
+            goodput_bps: What the path delivered over the tick, or 0 when unmeasured.
+            loss: The loss fraction the receiver reported over the tick.
+            now: Monotonic time of the tick.
+            queue_s: The queue standing on the path through the tick, in seconds:
+                0 for a clean tick, None where the transport measures no delay.
+        """
+        dt = 1.0 if self._tick_at is None else min(max(now - self._tick_at, 0.0), 2.0)
+        self._tick_at = now
+        drained = self._cruise_kbps is not None and now >= self._drain_until
+        if drained:
+            current, self._cruise_kbps = self._cruise_kbps, None
+        if queue_s:
+            self.strikes = 0
+            if now >= self.hold_until:
+                current = self._queue_backoff(current, goodput_bps / 1_000, queue_s, now)
+            return max(floor, min(ceiling, current))
+        if drained:
+            return max(floor, min(ceiling, current))
         if loss > self.LOSS:
             self.strikes += 1
             if self.strikes < 2:
-                return current
+                return max(floor, min(ceiling, current))
             self.strikes = 0
+            self._cruise_kbps = None
             self.hold_until = now + self.HOLD_S
             return max(floor, min(ceiling, current * self.BACKOFF))
         self.strikes = 0
         if now < self.hold_until:
-            return current
-        return max(floor, min(ceiling, max(current * self.STEP, goodput_bps * self.HEADROOM / 1_000)))
+            return max(floor, min(ceiling, current))
+        step = self.STEP
+        capacity = self.capacity_kbps
+        delivered = goodput_bps / 1_000
+        if capacity is not None:
+            if delivered * self.NEAR > capacity:
+                self.capacity_kbps = None
+            elif delivered >= capacity * self.NEAR:
+                step = self.STEP_NEAR
+        return max(floor, min(ceiling, max(current * step ** dt, delivered * self.HEADROOM)))
+
+    def _queue_backoff(self, current: float, delivered_kbps: float, queue_s: float, now: float) -> float:
+        """The target a standing queue of `queue_s` backs off to, with the drain it plans."""
+        if delivered_kbps <= 0:
+            self._cruise_kbps = None
+            self.hold_until = now + self.HOLD_S
+            return current * self.BACKOFF
+        self.capacity_kbps = delivered_kbps
+        fraction = max(self.DRAIN_FLOOR, self.HEADROOM - queue_s / self.DRAIN_S)
+        self._drain_until = now + queue_s / (1.0 - fraction)
+        self._cruise_kbps = delivered_kbps * self.HEADROOM
+        self.hold_until = self._drain_until + self.SETTLE_S
+        return min(current, delivered_kbps * fraction)
 
 
 class UplinkGauge:

@@ -125,8 +125,8 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
-from .stream_server import (BaseStreamingService, CongestionSteer, TransferPacer, UplinkGauge, _uplink_session_state,
-                            note_pong, uplink_rtt_ms, socket_gauge)
+from .stream_server import (BaseStreamingService, CongestionSteer, TransferPacer, UplinkGauge, _observe_rtt_floor,
+                            _uplink_session_state, note_pong, uplink_rtt_ms, socket_gauge)
 from .metrics import Metrics
 
 BACKPRESSURE_ALLOWED_DESYNC_MS = 2000
@@ -142,6 +142,12 @@ BACKPRESSURE_CHECK_INTERVAL_S = 0.5
 # How far past its floor a display's frame round trip stands before
 # congestion control reads a queue on the path (_steer_bitrate_to_link).
 LINK_QUEUE_MS = 40.0
+# Acked frames kept for the link steer's windows: a few seconds at the
+# client's 50 ms ack cadence.
+LINK_ACK_HISTORY = 64
+# Consecutive acks whose round trips each grow on the last that read as a
+# queue building, before the whole window stands over the floor.
+LINK_RISE_ACKS = 4
 MAX_UINT16_FRAME_ID = 65535
 FRAME_ID_SUSPICIOUS_GAP_THRESHOLD = (
     MAX_UINT16_FRAME_ID // 2
@@ -360,6 +366,24 @@ def _ws_write_backlog(ws: Any) -> Optional[int]:
         except Exception:
             pass
     return pending
+
+
+def _note_round_trip(display_state: dict, rtt_ms: float, sent_bytes: int, now: float) -> None:
+    """Fold one acked frame's round trip into its display's link state.
+
+    Three readers take it: the smoothed round trip the stats and gauges
+    report; the floor, the least round trip of the last ten minutes in minute
+    buckets (`_observe_rtt_floor`), which the link steer measures a queue
+    from; and the acked history the link steer takes its windows from, each
+    entry carrying the bytes sent through the acked frame.
+    """
+    rtt_samples = display_state.get('rtt_samples')
+    if rtt_samples is not None:
+        rtt_samples.append(rtt_ms)
+        display_state['smoothed_rtt'] = sum(rtt_samples) / len(rtt_samples)
+    floors = display_state.setdefault('rtt_floors', {"buckets": deque(maxlen=UplinkGauge.FLOOR_BUCKETS)})
+    display_state['rtt_floor_ms'] = _observe_rtt_floor(floors, rtt_ms, now)
+    display_state.setdefault('link_acks', deque(maxlen=LINK_ACK_HISTORY)).append((now, rtt_ms, sent_bytes))
 
 
 async def _await_bulk_window(ws: Any, deadline: float) -> None:
@@ -687,12 +711,14 @@ class _VideoRelay:
                 data = item['data']
                 self.backlog_bytes -= len(data)
                 # Stamped before the await, and only for the display's
-                # registered client: that is what the ACK RTT math measures.
+                # registered client: that is what the ACK RTT math measures,
+                # with the bytes sent through this chunk for the delivery rate.
                 ds = self.server.display_clients.get(self.display_id)
                 if ds is not None and ds.get('ws') is self.ws:
                     fid = item['frame_id']
                     now = time.monotonic()
-                    ds['sent_timestamps'][fid] = now
+                    ds['sent_bytes'] = ds.get('sent_bytes', 0) + len(data)
+                    ds['sent_timestamps'][fid] = (now, ds['sent_bytes'])
                     ds['last_sent_frame_id'] = fid
                     ds['has_sent_any_frame'] = True
                     if ds.get('unacked_since') is None:
@@ -2538,7 +2564,7 @@ class DataStreamingServer(BaseStreamingService):
                 acked_sent_at = display_state.get('acked_sent_at')
                 sent_ts = display_state.get('sent_timestamps') or {}
                 frame_desync = (wrapped if acked_sent_at is None
-                                else sum(1 for t in sent_ts.values() if t > acked_sent_at))
+                                else sum(1 for t, _ in sent_ts.values() if t > acked_sent_at))
                 allowed_desync_frames = (self.allowed_desync_ms / 1000.0) * client_fps
                 # Capped: the RTT estimate rides the queue this loop bounds and must
                 # not out-grow the trigger it feeds.
@@ -2595,50 +2621,69 @@ class DataStreamingServer(BaseStreamingService):
 
     def _steer_bitrate_to_link(self, display_id: str, display_state: dict, now: float) -> None:
         """Hold a CBR display to the rate its path carries (`congestion_control`
-        over WebSockets, where no receiver estimate exists).
+        over WebSockets, where no receiver estimate exists), once per
+        backpressure check.
 
-        A queue on the path shows as the display's frame round trip standing
-        `LINK_QUEUE_MS` past its floor, the least round trip of the last ten
-        minutes in minute buckets, so a queue that stands a while is not taken
-        for the path itself; a display the backpressure gate holds counts as
-        queued too. Each second of that is a strike for the transports' shared
-        `CongestionSteer`, whose back-off, hold, and step apply here as they do
-        to WebRTC's loss. Every display behind one bottleneck sees the same
-        queue and settles on a share of it, where the backpressure gate alone
-        pauses whichever falls behind first while the other keeps its whole
-        rate, and the paused one resumes on a key frame its share cannot carry.
+        The frames the client acked since the last check are the window. A
+        queue on the path shows as the least round trip among them standing
+        `LINK_QUEUE_MS` past the floor, the least round trip of the last ten
+        minutes (`_note_round_trip`), so a queue that stands a while is not
+        taken for the path itself. The least rather than the mean: a key
+        frame's burst delays the frames behind it for a moment on any link,
+        while a queue the rate has outgrown delays every one of them. A queue
+        still building shows sooner, as the last `LINK_RISE_ACKS` round trips
+        each longer than the one before and past `LINK_QUEUE_MS`; the frames
+        behind a key frame's burst arrive ever sooner, so it never reads that
+        way. The queue's depth is read from the newest round trip, which a
+        growing queue has grown into. The window's delivery rate, the bytes of
+        the frames it acked over the time they took to be acked, is the path's
+        capacity while that queue stands. Both go to the transports' shared
+        `CongestionSteer`, which backs off on the first such window. A display
+        the backpressure gate holds counts as queued, measured by the frames
+        still acked from before the gate shut, or as a queue of unknown depth
+        once none are. A window with nothing acked otherwise moves nothing: a
+        still screen sends no frames, and a verdict from a round trip measured
+        before it would steer an idle stream on stale evidence.
+
+        Every display behind one bottleneck sees the same queue and settles on a
+        share of it, where the backpressure gate alone pauses whichever falls
+        behind first while the other keeps its whole rate, and the paused one
+        resumes on a key frame its share cannot carry.
         """
-        rtt = float(display_state.get('smoothed_rtt') or 0.0)
-        floors = display_state.setdefault('rtt_floors', deque(maxlen=10))
-        minute = int(now // 60)
-        if rtt > 0:
-            if floors and floors[-1][0] == minute:
-                floors[-1] = (minute, min(floors[-1][1], rtt))
-            else:
-                floors.append((minute, rtt))
-        floor_ms = min((v for _, v in floors), default=rtt)
-        display_state['link_queued'] = (display_state.get('link_queued', False)
-                                        or rtt > floor_ms + LINK_QUEUE_MS
-                                        or not display_state.get('backpressure_enabled', True))
-        display_state['link_peak_ms'] = max(display_state.get('link_peak_ms', 0.0), rtt)
-        if now - display_state.get('link_tick_at', 0.0) < 1.0:
-            return
+        last_tick = display_state.get('link_tick_at', 0.0)
         display_state['link_tick_at'] = now
-        queued, display_state['link_queued'] = display_state['link_queued'], False
-        peak_ms, display_state['link_peak_ms'] = display_state['link_peak_ms'], 0.0
+        window = [a for a in display_state.get('link_acks', ()) if a[0] > last_tick]
+        gated = not display_state.get('backpressure_enabled', True)
+        if not window and not gated:
+            return
         target = float(display_state.get('video_bitrate') or 0)
         module = self.capture_instances.get(display_id, {}).get('module')
         if target <= 0 or module is None:
             return
+        floor_ms = display_state.get('rtt_floor_ms') or 0.0
+        least_ms = min((a[1] for a in window), default=0.0)
+        if not window:
+            delivered_bps, queue_s = 0.0, LINK_QUEUE_MS / 1000.0
+        else:
+            span = window[-1][0] - window[0][0]
+            delivered_bps = (window[-1][2] - window[0][2]) * 8 / span if span > 0 else 0.0
+            newest_ms = window[-1][1] - floor_ms
+            recent = [a[1] for a in window[-LINK_RISE_ACKS:]]
+            rising = (len(recent) == LINK_RISE_ACKS
+                      and all(b > a for a, b in zip(recent, recent[1:])))
+            queued = (gated or least_ms - floor_ms > LINK_QUEUE_MS
+                      or (rising and newest_ms > LINK_QUEUE_MS))
+            queue_s = max(newest_ms, LINK_QUEUE_MS) / 1000.0 if queued else 0.0
         lo_kbps, _ = app_settings.video_bitrate
         current = self._video_bitrate_kbps(display_state)
         steer = display_state.setdefault('link_steer', CongestionSteer())
-        rate = round(steer.target(current, target, float(lo_kbps), 0.0, 1.0 if queued else 0.0, now))
+        rate = round(steer.target(current, target, float(lo_kbps), delivered_bps, 0.0, now, queue_s))
         display_state['link_kbps'] = rate
         if rate != round(current):
-            data_logger.info(
+            (data_logger.info if rate < current else data_logger.debug)(
                 f"Congestion control[{display_id}]: video bitrate {current:.0f} -> {rate} kbps "
-                f"(round trip up to {peak_ms:.0f} ms over a {floor_ms:.0f} ms floor)")
+                f"(round trip {least_ms:.0f} ms over a {floor_ms:.0f} ms floor, "
+                f"{delivered_bps / 1000:.0f} kbps delivered)")
             try:
                 module.update_video_bitrate(rate)
             except Exception as e:
@@ -4061,19 +4106,16 @@ class DataStreamingServer(BaseStreamingService):
                                 
                                 sent_ts = display_state.get('sent_timestamps')
                                 if sent_ts and acked_frame_id in sent_ts:
-                                    send_time = sent_ts.pop(acked_frame_id)
+                                    send_time, sent_bytes = sent_ts.pop(acked_frame_id)
                                     display_state['acked_sent_at'] = send_time
+                                    now = time.monotonic()
                                     rtt_sample_ms = max(
                                         0.0,
-                                        (time.monotonic() - send_time) * 1000.0 - held_ms)
+                                        (now - send_time) * 1000.0 - held_ms)
                                     # An id collision (uint16, reset on restarts) is not a
                                     # round trip.
                                     if 0 <= rtt_sample_ms <= RTT_SAMPLE_SANE_MAX_MS:
-                                        rtt_samples = display_state.get('rtt_samples')
-                                        if rtt_samples is not None:
-                                            rtt_samples.append(rtt_sample_ms)
-                                            if rtt_samples:
-                                                display_state['smoothed_rtt'] = sum(rtt_samples) / len(rtt_samples)
+                                        _note_round_trip(display_state, rtt_sample_ms, sent_bytes, now)
                         except (IndexError, ValueError):
                             data_logger.warning(f"Malformed CLIENT_FRAME_ACK from {raddr}: {message}")
 
