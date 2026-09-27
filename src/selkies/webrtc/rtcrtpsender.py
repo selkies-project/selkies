@@ -674,7 +674,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     if self.__fec_payload_type is not None:
                         if not fec_group:
                             fec_first_seq = packet.sequence_number
-                        fec_group.append(packet_bytes)
+                        fec_group.append(
+                            self.__rtp_header_extensions_map.for_fec(packet_bytes)
+                        )
                         if packet.marker or len(fec_group) == 10:
                             repairs = min(self.fec_repair_packets, len(fec_group))
                             for repair in range(repairs):

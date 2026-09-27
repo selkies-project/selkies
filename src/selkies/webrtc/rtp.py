@@ -194,6 +194,66 @@ class HeaderExtensionsMap:
                 values.dependency_descriptor = bytes(x_value)
         return values
 
+    def for_fec(self, packet: bytes) -> bytes:
+        """Copy an RTP packet for FlexFEC with mutable extension values zeroed.
+
+        libwebrtc zeroes these values on received media before XOR recovery.
+        With unequal header lengths, an unnormalized extension value can XOR
+        into another packet's media payload. Keep the wire/history packet,
+        extension layout, and payload unchanged.
+        Video timing preserves its first seven bytes; its pacer/network legs
+        are mutable. Both RFC 8285 extension forms are supported.
+
+        Raises:
+            ValueError: The packet or a recognized extension is truncated.
+        """
+        if len(packet) < 12:
+            raise ValueError("RTP packet is truncated")
+        if not packet[0] & 0x10:
+            return packet
+        start = 12 + 4 * (packet[0] & 15)
+        if start + 4 > len(packet):
+            raise ValueError("RTP extension header is truncated")
+        profile, words = unpack_from("!HH", packet, start)
+        pos, end = start + 4, start + 4 + 4 * words
+        if end > len(packet):
+            raise ValueError("RTP extensions are truncated")
+        if profile != 0xBEDE and profile & 0xFFF0 != 0x1000:
+            return packet
+        mutable = {
+            value for value in (
+                self.__ids.abs_send_time,
+                self.__ids.transmission_offset,
+                self.__ids.transport_sequence_number,
+            ) if value is not None
+        }
+        result = bytearray(packet)
+        while pos < end:
+            head = packet[pos]
+            pos += 1
+            if head == 0:
+                continue
+            if profile == 0xBEDE:
+                ext_id, length = head >> 4, (head & 15) + 1
+                if ext_id == 15:
+                    break
+            else:
+                ext_id = head
+                if pos >= end:
+                    raise ValueError("RTP extension length is truncated")
+                length = packet[pos]
+                pos += 1
+            if pos + length > end:
+                raise ValueError("RTP extension value is truncated")
+            skip = (
+                0 if ext_id in mutable else
+                7 if ext_id == self.__ids.video_timing else length
+            )
+            if skip < length:
+                result[pos + skip:pos + length] = bytes(length - skip)
+            pos += length
+        return bytes(result)
+
     def set(self, values: HeaderExtensions) -> tuple[int, bytes]:
         extensions = []
         if values.mid is not None and self.__ids.mid:
