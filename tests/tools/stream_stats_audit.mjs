@@ -7,16 +7,19 @@
 // What a dashboard is told of the session, and when. The collector asks the
 // server for the moving figures only while a dashboard has its stats open, never
 // for a viewer, and again on a fresh connection; the history it publishes starts
-// empty at each opening and grows a second at a time. A row warns where the
-// session fell short of what it asked for, never for a choice and never for a
-// server with no GPU, and the decoder is called hardware or software only on
-// evidence.
+// empty at each opening and grows a sample at a time, and every change is
+// announced once. A row warns where the session fell short of what it asked for,
+// never for a choice, for a server with no GPU, for a client with no hardware
+// decoder, or for the path the network gave it, and the decoder is called
+// hardware or software only on evidence.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-globalThis.window = {};
+let announced = 0;
+globalThis.window = { dispatchEvent: () => { announced++; } };
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-const { StreamStats, HISTORY_MAX, webcodecsDecoder, webrtcDecoder } =
+const { StreamStats, HISTORY_MAX, FIRST_SAMPLE_MS, webcodecsDecoder, webrtcDecoder } =
   await import('../../addons/selkies-web-core/lib/stream-stats.js');
 const { streamRows, streamTiles, streamMeters, streamReport, seriesOf, graphPath, GRAPH_POINTS } =
   await import('../../addons/selkies-web-core/lib/stream-stats-view.js');
@@ -58,6 +61,21 @@ check('a sample merges the server and the page', first.cpu_percent === 12 && fir
 check('bandwidth is what arrived', first.mbps > 0, String(first.mbps));
 check('the round trip the latency graph plots comes straight from the server', first.rtt_ms === 8,
   String(first.rtt_ms));
+check('what arrived since the opening is counted as received', first.received_mb === 0.13, String(first.received_mb));
+stats.noteBytes(875000);
+stats.clientSample({ fps: 58 });
+check('and the received count keeps growing from the opening', window.stream_stats.latest.received_mb === 1,
+  String(window.stream_stats.latest.received_mb));
+await settle();
+announced = 0;
+stats.setClient({ codec: 'h264', resolution: '1920x1080' });
+stats.clientSample({ fps: 60 });
+await settle();
+check('changes made together are announced once', announced === 1, String(announced));
+stats.setClient({ codec: 'h264', resolution: '1920x1080' });
+await settle();
+check('and a description that did not change is not announced', announced === 1, String(announced));
+check('the first sample follows the opening within a second', FIRST_SAMPLE_MS > 0 && FIRST_SAMPLE_MS < 1000);
 for (let i = 0; i < HISTORY_MAX + 5; i++) stats.clientSample({ fps: i });
 check('the history grows to its cap and no further', window.stream_stats.history.length === HISTORY_MAX);
 
@@ -130,24 +148,59 @@ rows = streamRows({ ...info, backend: 'wayland', capture: 'readback', renderer: 
 check('a Wayland session rendering in software that asked for hardware warns', rowOf(rows, 'capture').status === 'warn'
   && rowOf(rows, 'capture').reason === 'No render node');
 
-rows = streamRows(hardware, { ...client, transport: 'webrtc', path: 'relay udp relay' }, null, words);
-check('a relayed WebRTC path warns', rowOf(rows, 'connection').status === 'warn');
+rows = streamRows(hardware, { ...client, transport: 'webrtc', path: 'relay udp' }, null, words);
+check('a relayed WebRTC path marks nothing', rowOf(rows, 'connection').status === 'neutral'
+  && rowOf(rows, 'connection').value === 'WebRTC \u00b7 Relay UDP', rowOf(rows, 'connection').value);
+rows = streamRows(hardware, { ...client, transport: 'webrtc', path: 'host tcp' }, null, words);
+check('nor does one over TCP', rowOf(rows, 'connection').status === 'neutral');
 rows = streamRows(hardware, { ...client, transport: 'webrtc', path: 'host udp' }, null, words);
-check('a direct one is good', rowOf(rows, 'connection').status === 'good');
+check('a direct UDP one is good', rowOf(rows, 'connection').status === 'good');
 rows = streamRows(hardware, client, { throttled: true }, words);
 check('a server holding frames back warns on the connection', rowOf(rows, 'connection').status === 'warn'
   && rowOf(rows, 'connection').reason === 'held back');
 
-check('a software preference is software', webcodecsDecoder({ forcedSoftware: true, hardwareSupported: true, format: 'NV12' }).decoder === 'software');
-check('no hardware decoder for the stream is software', webcodecsDecoder({ forcedSoftware: false, hardwareSupported: false, format: undefined }).decoder === 'software');
+const fallback = webcodecsDecoder({ forcedSoftware: true, hardwareSupported: true, format: 'NV12' });
+check('a software preference after a fallback is software that fell short', fallback.decoder === 'software'
+  && fallback.hardware_expected && fallback.decoder_reason === 'Software preferred after a decoder fallback');
+const noHardware = webcodecsDecoder({ forcedSoftware: false, hardwareSupported: false, format: undefined });
+check('no hardware decoder for the stream is software that fell short of nothing', noHardware.decoder === 'software'
+  && !noHardware.hardware_expected && noHardware.decoder_reason === '');
+rows = streamRows(null, { ...client, ...noHardware }, null, words);
+check('and its row marks nothing', rowOf(rows, 'decoder').status === 'neutral' && rowOf(rows, 'decoder').reason === '');
+const hinted = webcodecsDecoder({ forcedSoftware: false, hardwareSupported: true, format: 'I420' });
+rows = streamRows(null, { ...client, ...hinted }, null, words);
+check('planar frames mark nothing even where the engine accepts a hardware preference, a hint to some',
+  hinted.decoder === 'software' && rowOf(rows, 'decoder').status === 'neutral');
+rows = streamRows(null, { ...client, ...fallback }, null, words);
+check('the fallback warns, with why', rowOf(rows, 'decoder').status === 'warn'
+  && rowOf(rows, 'decoder').reason === 'Software preferred after a decoder fallback');
+const unused = webrtcDecoder({ trackFormat: 'I420', capable: true });
+rows = streamRows(null, { ...client, transport: 'webrtc', ...unused }, null, words);
+check('a WebRTC stream decoding in software where the engine has an efficient decoder for it warns, with why',
+  unused.decoder === 'software' && rowOf(rows, 'decoder').status === 'warn'
+  && rowOf(rows, 'decoder').reason === 'A hardware decoder is available for this stream');
 check('NV12 and opaque frames are hardware', webcodecsDecoder({ forcedSoftware: false, hardwareSupported: true, format: 'NV12' }).decoder === 'hardware'
   && webcodecsDecoder({ forcedSoftware: false, hardwareSupported: null, format: null }).decoder === 'hardware');
 check('planar frames are software', webcodecsDecoder({ forcedSoftware: false, hardwareSupported: true, format: 'I420' }).decoder === 'software');
 check('no frame seen is unknown', webcodecsDecoder({ forcedSoftware: false, hardwareSupported: true, format: undefined }).decoder === 'unknown');
+check('frames of one format whatever decodes them leave it to the engine\'s capability',
+  webcodecsDecoder({ format: 'BGRX' }).decoder_evidence === 'BGRX frames'
+  && webcodecsDecoder({ format: 'BGRX' }).decoder === 'unknown'
+  && webcodecsDecoder({ format: 'BGRX', capable: false }).decoder === 'software'
+  && webcodecsDecoder({ format: 'BGRX', capable: true }).decoder === 'unknown'
+  && !webcodecsDecoder({ format: 'BGRX', capable: true }).hardware_expected);
 check('WebRTC takes the engine at its word', webrtcDecoder({ implementation: 'ExternalDecoder', powerEfficient: true }).decoder === 'hardware'
   && webrtcDecoder({ implementation: 'FFmpeg' }).decoder === 'software');
 check('and claims nothing where the engine withholds the decoder',
   webrtcDecoder({ implementation: 'unknown', capable: true }).decoder === 'unknown');
+check('a frame read from the track is the decoder\'s own',
+  webrtcDecoder({ trackFormat: 'NV12', capable: true }).decoder === 'hardware'
+  && webrtcDecoder({ trackFormat: null }).decoder === 'hardware'
+  && webrtcDecoder({ trackFormat: 'I420', capable: false }).decoder === 'software');
+check('the element\'s picture proves software alone, a GPU copy of it proving nothing',
+  webrtcDecoder({ elementFormat: 'I420' }).decoder === 'software'
+  && webrtcDecoder({ elementFormat: 'NV12' }).decoder === 'unknown'
+  && webrtcDecoder({ elementFormat: null, capable: true }).decoder === 'unknown');
 
 // What presents the picture is troubleshooting data in its own right: two engines
 // decoding the same stream can differ only in the sink they allowed.
@@ -168,11 +221,12 @@ check('and how a JPEG stripe was decoded, with where it ran',
 
 const latest = { encode_ms: 1.2, decode_ms: 2, encoded_kbps: 900, audio_dropped: 0, cpu_percent: 20, mem_used: 2 ** 30, mem_total: 2 ** 32, fps: 60 };
 const tiles = streamTiles(latest, 'websockets');
-check('the tiles are a fixed set that repeats no graph', tiles.map((tile) => tile.key).join() === 'encode_ms,pipeline_ms,decode_ms,audio_buffer_ms');
+check('the tiles are a fixed set that repeats no graph', tiles.map((tile) => tile.key).join()
+  === 'encode_ms,pipeline_ms,decode_ms,audio_buffer_ms,received_mb,lost_frames,keyframe_requests');
 check('the round trip is not also a tile, the latency graph being where it is read',
   !tiles.some((tile) => tile.key === 'rtt_ms'));
 check('a figure not measured this second reads as a dash', tiles[0].value === '1.2 ms' && tiles[1].value === '\u2013');
-check('the same set stands before any sample', streamTiles(null, 'websockets').length === 4
+check('the same set stands before any sample', streamTiles(null, 'websockets').length === 7
   && streamTiles(null, 'websockets').every((tile) => tile.value === '\u2013'));
 check('WebRTC adds what it measures of the link', streamTiles(null, 'webrtc').some((tile) => tile.key === 'packet_loss_percent'));
 check('a memory meter reads as its amounts and carries no bar, the share going to the hover',
@@ -193,5 +247,21 @@ const series = seriesOf(long, 'fps');
 check('a long history is bucketed down and keeps its peak', series.length === GRAPH_POINTS && Math.max(...series) === 144);
 const path = graphPath([0, 30, 60], 240, 44, 60);
 check('a graph grows from the left edge', path.xs[0] === 0 && path.xs[2] < 240 && path.ys[2] < path.ys[0], JSON.stringify(path.xs));
+
+// The server's figures after an opening: the first reach the sample on screen,
+// the later ones ride the next sample, so a dashboard reads once a sample.
+const opening = new StreamStats({ transport: 'webrtc', send: () => {}, isViewer: () => false });
+opening.setOpen(true);
+opening.clientSample({ fps: 30 });
+check('a sample taken before the server said anything carries none of its figures',
+  !window.stream_stats.latest.server && window.stream_stats.latest.cpu_percent === undefined);
+opening.serverSample({ cpu_percent: 40, encoded_fps: 30 });
+check('the server\'s first figures after an opening reach the sample on screen at once',
+  window.stream_stats.latest.cpu_percent === 40 && window.stream_stats.history.length === 1);
+opening.serverSample({ cpu_percent: 50 });
+check('and later ones wait for the next sample, which is the one read a dashboard pays for',
+  window.stream_stats.latest.cpu_percent === 40);
+opening.clientSample({ fps: 30 });
+check('which carries them', window.stream_stats.latest.cpu_percent === 50 && window.stream_stats.latest.server);
 
 process.exit(failed ? 1 : 0);

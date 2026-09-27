@@ -90,7 +90,7 @@ import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncode
 import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
-import { StreamStats, webrtcDecoder } from './lib/stream-stats.js';
+import { StreamStats, DecodeCapability, webrtcDecoder, FIRST_SAMPLE_MS } from './lib/stream-stats.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -327,7 +327,13 @@ export default function webrtc() {
 	/** The cumulative counters of the last stats tick, null until one ran with the stats open. */
 	let statsBaseline = null;
 	/** `MediaCapabilities` on the stream's configuration, asked once per configuration. */
-	let decodeCapable = { key: '', efficient: null };
+	const decodeCapable = new DecodeCapability();
+	/**
+	 * What the received video decodes to (`readDecodedFrame`): the format of a
+	 * frame read from the track or of the element's picture, undefined until
+	 * one is read, and whether it was read since the stats last opened.
+	 */
+	let decodedFrame = { key: '', track: undefined, element: undefined, current: false, reading: false };
 	const streamStats = new StreamStats({
 		transport: 'webrtc',
 		send: (message) => {
@@ -336,11 +342,22 @@ export default function webrtc() {
 			webrtc.sendDataChannelMessage(message);
 		},
 		isViewer: () => isSharedMode,
-		onOpenChange: () => { statsBaseline = null; },
+		onOpenChange: (open) => {
+			statsBaseline = null;
+			if (!open) return;
+			decodedFrame.current = false;
+			tickStatsNow();
+		},
 	});
 	var input = null;
-	/** Interval ids, cleared on cleanup so a reconnect never double-starts a loop. */
-	let statsLoopId = null;
+	/** How often the stats loop reads the peer connection while the stats are shut, in ms. */
+	const STATS_SHUT_MS = 5000;
+	/**
+	 * The stats loop's next tick and the tick itself, and the metrics loop's
+	 * interval, cleared on cleanup so a reconnect never double-starts a loop.
+	 */
+	let statsTimer = null;
+	let statsTick = null;
 	let metricsLoopId = null;
 	/**
 	 * CSS scaling on means dpr 1 everywhere; off, the resolution senders and the
@@ -2166,112 +2183,141 @@ export default function webrtc() {
 	const handleDrop = fileUploader.handleDrop;
 
 	/**
-	 * Starts the once-a-second stats loop: the essentials are published on
-	 * `window` (`fps`, `currentAudioBufferSize`) for the dashboards, a tick
-	 * with the stats open feeds lib/stream-stats.js (`sampleStreamStats`),
-	 * the full `connectionStat` stays readable here, and
-	 * `enableWebrtcStatics` streams the raw reports to the server as
-	 * `_stats_video`.
-	 *
-	 * A tick whose predecessor still awaits `getStats()` is skipped, since
-	 * overlapping ticks would double-update the byte baselines, and the time
-	 * window is re-anchored only on success, alongside those baselines, so
-	 * both cover the same interval. The bandwidth reported is the received
-	 * throughput (video plus audio), matching the WebSocket server's stat:
-	 * `availableReceiveBandwidth` is only the congestion-control estimate and
-	 * reads far below the real rate on a relay. The audio-buffer gauge is a
-	 * proxy: the de-jitter depth over the 20 ms Opus frame approximates the
-	 * frames buffered ahead of playout, since browser-managed audio exposes no
-	 * frame count. The audio concealment counters (NetEQ) are the RED
-	 * acceptance metric.
+	 * Reads the pixel format the received video decodes to (`webrtcDecoder`):
+	 * a `VideoFrame` of the element's current picture at once, and where the
+	 * page has `MediaStreamTrackProcessor`, one frame of a clone of the track,
+	 * the decoder's own. Once per configuration and again at each opening of
+	 * the stats, since a decoder can fall back mid-stream; a still screen
+	 * delivers no frame to the track, so its read is bounded and retried on the
+	 * next tick.
+	 * @param {string} key The configuration, `codec:WxH`.
 	 */
-	/**
-	 * Whether the engine decodes the stream's configuration efficiently, which
-	 * stands in for the decoder's name where the engine withholds it.
-	 * @param {string} codec
-	 * @param {number} width
-	 * @param {number} height
-	 * @param {number} fps
-	 */
-	function askDecodeCapable(codec, width, height, fps) {
-		const key = `${codec}:${width}x${height}`;
-		if (key === decodeCapable.key || !codec || codec === 'NA' || !(width > 0)) return;
-		decodeCapable = { key, efficient: null };
-		if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) return;
-		navigator.mediaCapabilities.decodingInfo({
-			type: 'webrtc',
-			video: { contentType: `video/${codec}`, width, height, bitrate: 8000000, framerate: fps > 0 ? fps : 60 },
-		}).then((info) => {
-			if (decodeCapable.key === key) decodeCapable.efficient = info.supported ? !!info.powerEfficient : null;
-		}).catch(() => {});
+	function readDecodedFrame(key) {
+		if (decodedFrame.reading || (decodedFrame.current && decodedFrame.key === key)) return;
+		const element = webrtc && webrtc.element;
+		const track = element && element.srcObject && element.srcObject.getVideoTracks()[0];
+		if (!track || track.readyState !== 'live') return;
+		if (key !== decodedFrame.key) decodedFrame = { key, track: undefined, element: undefined, current: false, reading: false };
+		try {
+			const frame = new VideoFrame(element);
+			decodedFrame.element = frame.format;
+			frame.close();
+		} catch (_) { /* no picture yet, or no WebCodecs */ }
+		if (typeof MediaStreamTrackProcessor !== 'function') {
+			decodedFrame.current = decodedFrame.element !== undefined;
+			return;
+		}
+		const clone = track.clone();
+		const reader = new MediaStreamTrackProcessor({ track: clone }).readable.getReader();
+		decodedFrame.reading = true;
+		Promise.race([reader.read(), new Promise((resolve) => setTimeout(resolve, 2000))]).then((got) => {
+			const frame = got && got.value;
+			if (!frame) return;
+			if (decodedFrame.key === key) {
+				decodedFrame.track = frame.format;
+				decodedFrame.current = true;
+			}
+			frame.close();
+		}).catch(() => {}).finally(() => {
+			decodedFrame.reading = false;
+			reader.cancel().catch(() => {});
+			clone.stop();
+		});
 	}
 
 	/**
-	 * One second of this page's figures for lib/stream-stats.js, from the same
-	 * `getStats()` snapshot the stat watch took: rates are the change in a
-	 * cumulative counter since the last tick, and the repair counters read
-	 * from zero at the moment the stats opened.
+	 * This page's half of the stream (`window.stream_client`) from one
+	 * `getStats()` snapshot. It moves only with the stream and costs a few
+	 * reads, so every tick keeps it current, shut stats included, and a
+	 * dashboard opening them draws it at once. The path is the pair's kind,
+	 * `relay` where either end relays and else the server's candidate type,
+	 * with the protocol this page reaches its peer or its relay over.
 	 * @param {Object} stats `WebRTCClient.getConnectionStats`'s result.
-	 * @param {number} rtt Round trip in ms.
-	 * @param {number} mbps Received video and audio.
 	 */
-	function sampleStreamStats(stats, rtt, mbps) {
+	function describeClient(stats) {
 		const video = stats.reports.videoRTP || {};
-		const audio = stats.reports.audioRTP || {};
 		const pair = stats.reports.candidatePairs[stats.reports.selectedCandidatePairId] || {};
 		const local = stats.reports.localCandidates[pair.localCandidateId] || {};
+		const remote = stats.reports.remoteCandidates[pair.remoteCandidateId] || {};
+		const codec = stats.video.codecName === 'NA' ? '' : stats.video.codecName;
+		const width = stats.video.frameWidth, height = stats.video.frameHeight;
+		const key = `${codec}:${width}x${height}`;
+		if (codec && width > 0) {
+			const fps = stats.video.framesPerSecond;
+			decodeCapable.ask({ type: 'webrtc', video: { contentType: `video/${codec}`, width, height,
+				bitrate: 8000000, framerate: fps > 0 ? fps : 60 } }, key);
+			readDecodedFrame(key);
+		}
+		const read = decodedFrame.key === key ? decodedFrame : {};
+		const kind = local.candidateType === 'relay' || remote.candidateType === 'relay' ? 'relay' : remote.candidateType;
+		streamStats.setClient(Object.assign({
+			// The engine decodes the remote track and composites the element itself;
+			// there is no sink ladder here, which is the WebSockets path's own.
+			sink: '<video> element',
+			codec,
+			resolution: width > 0 ? `${width}x${height}` : '',
+			path: kind ? `${kind} ${local.relayProtocol || local.protocol || ''}`.trim() : '',
+		}, webrtcDecoder({
+			implementation: video.decoderImplementation,
+			powerEfficient: video.powerEfficientDecoder,
+			trackFormat: read.track,
+			elementFormat: read.element,
+			capable: decodeCapable.efficient,
+		})));
+	}
+
+	/**
+	 * One sample of this page's figures for lib/stream-stats.js, from the same
+	 * `getStats()` snapshot the stat watch took: a rate is the change in a
+	 * cumulative counter since the last sample, a count is counted from the
+	 * opening, and the first tick after an opening only takes the baseline.
+	 * @param {Object} stats `WebRTCClient.getConnectionStats`'s result.
+	 * @param {number} rtt Round trip in ms.
+	 */
+	function sampleStreamStats(stats, rtt) {
+		const video = stats.reports.videoRTP || {};
+		const audio = stats.reports.audioRTP || {};
 		const now = {
 			at: performance.now(),
+			bytes: (video.bytesReceived || 0) + (audio.bytesReceived || 0),
 			framesDecoded: video.framesDecoded || 0,
 			totalDecodeTime: video.totalDecodeTime || 0,
 			jitterBufferDelay: video.jitterBufferDelay || 0,
 			jitterBufferEmittedCount: video.jitterBufferEmittedCount || 0,
 			audioJitterBufferDelay: audio.jitterBufferDelay || 0,
 			audioJitterBufferEmittedCount: audio.jitterBufferEmittedCount || 0,
-			received: (video.packetsReceived || 0) + (audio.packetsReceived || 0),
-			lost: (video.packetsLost || 0) + (audio.packetsLost || 0),
 			micBytes: (stats.reports.outbound.audio || {}).bytesSent || 0,
 			webcamBytes: (stats.reports.outbound.video || {}).bytesSent || 0,
 		};
-		const opened = {
+		const counts = {
 			framesDropped: video.framesDropped || 0,
 			nack: video.nackCount || 0,
 			pli: video.pliCount || 0,
 			freezes: video.freezeCount || 0,
+			received: (video.packetsReceived || 0) + (audio.packetsReceived || 0),
+			lost: (video.packetsLost || 0) + (audio.packetsLost || 0),
 		};
 		const last = statsBaseline;
-		statsBaseline = Object.assign({ opened: last ? last.opened : opened }, now);
-		askDecodeCapable(stats.video.codecName, stats.video.frameWidth, stats.video.frameHeight, stats.video.framesPerSecond);
-		streamStats.setClient(Object.assign({
-			// The engine decodes the remote track and composites the element itself;
-			// there is no sink ladder here, which is the WebSockets path's own.
-			sink: '<video> element',
-			codec: stats.video.codecName === 'NA' ? '' : stats.video.codecName,
-			resolution: stats.video.frameWidth > 0 ? `${stats.video.frameWidth}x${stats.video.frameHeight}` : '',
-			path: [stats.general.connectionType === 'NA' ? '' : stats.general.connectionType,
-				local.relayProtocol ? `${local.relayProtocol} relay` : (local.protocol || '')].filter(Boolean).join(' '),
-		}, webrtcDecoder({
-			implementation: video.decoderImplementation,
-			powerEfficient: video.powerEfficientDecoder,
-			capable: decodeCapable.efficient,
-		})));
+		statsBaseline = Object.assign({ opened: last ? last.opened : counts }, now);
 		if (!last) return;
+		streamStats.noteBytes(Math.max(0, now.bytes - last.bytes));
+		const opened = statsBaseline.opened;
 		const seconds = (now.at - last.at) / 1000;
 		const per = (total, count) => (count > 0 ? Math.round((1000 * total / count) * 100) / 100 : 0);
 		const share = (part, whole) => (whole > 0 ? Math.round((100 * part / whole) * 100) / 100 : 0);
 		const kbps = (bytes) => (seconds > 0 ? Math.round(bytes * 8 / 1000 / seconds) : 0);
+		const lost = counts.lost - opened.lost;
 		const figures = {
 			fps: stats.video.framesPerSecond || 0,
-			mbps: Math.round(mbps * 100) / 100,
 			rtt_ms: Math.round(rtt * 10) / 10,
 			decode_ms: per(now.totalDecodeTime - last.totalDecodeTime, now.framesDecoded - last.framesDecoded),
 			jitter_buffer_ms: per(now.jitterBufferDelay - last.jitterBufferDelay, now.jitterBufferEmittedCount - last.jitterBufferEmittedCount),
 			audio_buffer_ms: per(now.audioJitterBufferDelay - last.audioJitterBufferDelay, now.audioJitterBufferEmittedCount - last.audioJitterBufferEmittedCount),
-			packet_loss_percent: share(now.lost - last.lost, (now.received - last.received) + (now.lost - last.lost)),
-			frames_dropped: opened.framesDropped - statsBaseline.opened.framesDropped,
-			nacks: opened.nack - statsBaseline.opened.nack,
-			keyframe_requests: opened.pli - statsBaseline.opened.pli,
-			freezes: opened.freezes - statsBaseline.opened.freezes,
+			packet_loss_percent: share(lost, counts.received - opened.received + lost),
+			frames_dropped: counts.framesDropped - opened.framesDropped,
+			nacks: counts.nack - opened.nack,
+			keyframe_requests: counts.pli - opened.pli,
+			freezes: counts.freezes - opened.freezes,
 		};
 		const mic = stats.reports.outbound.audio;
 		if (mic && now.micBytes > last.micBytes) figures.mic = `Opus, ${kbps(now.micBytes - last.micBytes)} kbps`;
@@ -2285,6 +2331,27 @@ export default function webrtc() {
 		streamStats.clientSample(figures);
 	}
 
+	/**
+	 * Starts the stats loop, which reads the peer connection once a second
+	 * while a dashboard has its stats open or `enableWebrtcStatics` streams the
+	 * raw reports to the server as `_stats_video`, and every `STATS_SHUT_MS`
+	 * otherwise, for what it keeps without them: `window.fps` and
+	 * `currentAudioBufferSize`, the figures the metrics loop reports (`_f`,
+	 * `_l`), and `window.stream_client` (`describeClient`). An opening is read
+	 * at once (`tickStatsNow`) for the baseline, and its first sample follows
+	 * `FIRST_SAMPLE_MS` later (`sampleStreamStats`).
+	 *
+	 * Each tick schedules the next when it ends, so ticks never overlap and
+	 * double-update the byte baselines; the time window is re-anchored only on
+	 * success, alongside those baselines, so both cover the same interval. The
+	 * bandwidth reported is the received throughput (video plus audio),
+	 * matching the WebSocket server's stat: `availableReceiveBandwidth` is only
+	 * the congestion-control estimate and reads far below the real rate on a
+	 * relay. The audio-buffer gauge is a proxy: the de-jitter depth over the
+	 * 20 ms Opus frame approximates the frames buffered ahead of playout, since
+	 * browser-managed audio exposes no frame count. The audio concealment
+	 * counters (NetEQ) are the RED acceptance metric.
+	 */
 	function enableStatWatch() {
 		if (isSharedMode) {
 			console.log("Shared mode detected, skipping stats watch setup.");
@@ -2297,12 +2364,14 @@ export default function webrtc() {
 		var previousAudioJitterBufferDelay = 0.0;
 		var previousAudioJitterBufferEmittedCount = 0;
 		var statsStart = new Date().getTime() / 1000;
-		if (statsLoopId !== null) return;
+		if (statsTick !== null) return;
 		statWatchEnabled = true;
-		let statsTickBusy = false;
-		statsLoopId = setInterval(async () => {
-			if (statsTickBusy) return;
-			statsTickBusy = true;
+		let busy = false;
+		const tick = async () => {
+			statsTimer = null;
+			if (busy) return;
+			busy = true;
+			let tookBaseline = false;
 			var now = new Date().getTime() / 1000;
 			try {
 				const stats = await webrtc.getConnectionStats();
@@ -2345,17 +2414,35 @@ export default function webrtc() {
 				connectionStat.connectionLatency =  Math.max(connectionStat.connectionVideoLatency, connectionStat.connectionAudioLatency);
 
 				window.fps = connectionStat.connectionFrameRate;
+				describeClient(stats);
 				if (streamStats.open) {
-					sampleStreamStats(stats, rtt, (parseFloat(connectionStat.connectionVideoBitrate) || 0)
-						+ (parseFloat(connectionStat.connectionAudioBitrate) || 0) / 1000);
+					tookBaseline = statsBaseline === null;
+					sampleStreamStats(stats, rtt);
 				}
 				if (enableWebrtcStatics) webrtc.sendDataChannelMessage(`_stats_video,${JSON.stringify(stats.allReports)}`);
 			} catch (e) {
 				if (webrtc !== null) console.warn("Error collecting connection stats:", e);
 			} finally {
-				statsTickBusy = false;
+				busy = false;
+				if (statsTick === tick && statsTimer === null) {
+					let next = enableWebrtcStatics ? 1000 : STATS_SHUT_MS;
+					if (streamStats.open) next = statsBaseline === null ? 0 : tookBaseline ? FIRST_SAMPLE_MS : 1000;
+					statsTimer = setTimeout(tick, next);
+				}
 			}
-		}, 1000);
+		};
+		statsTick = tick;
+		statsTimer = setTimeout(tick, 1000);
+	}
+
+	/** Reads the peer connection now, for a dashboard that just opened its stats. */
+	function tickStatsNow() {
+		if (statsTick === null) return;
+		if (statsTimer !== null) {
+			clearTimeout(statsTimer);
+			statsTimer = null;
+		}
+		statsTick();
 	}
 
 	/**
@@ -3532,7 +3619,8 @@ export default function webrtc() {
 			statWatchEnabled = false;
 			streamStats.disconnected();
 			statsBaseline = null;
-			if (statsLoopId !== null) { clearInterval(statsLoopId); statsLoopId = null; }
+			statsTick = null;
+			if (statsTimer !== null) { clearTimeout(statsTimer); statsTimer = null; }
 			if (metricsLoopId !== null) { clearInterval(metricsLoopId); metricsLoopId = null; }
 			clearResumeWatchdog();
 			webrtc = null;

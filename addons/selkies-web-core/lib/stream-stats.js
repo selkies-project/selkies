@@ -14,22 +14,31 @@
  * It arrives once and again on a change, whether or not anybody looks.
  * `window.stream_client` is this page's half: the transport and the path it
  * took, the codec and resolution, and the decoder with the evidence for calling
- * it hardware or software.
+ * it hardware or software. It changes only with the stream, so the core keeps
+ * it current whether or not anybody looks, and a dashboard that opens its stats
+ * draws it at once.
  *
  * Everything that moves is gathered only while a dashboard has its stats on
  * screen. It says so with a `statsOpen` window message; the collector then asks
  * the server for `stream_stats` (the `_stats` verb), the core samples its own
- * side once a second, and each second's figures land in
- * `window.stream_stats`: `latest`, and `history`, which starts empty when the
- * stats open and grows while they stay open, up to `HISTORY_MAX` seconds. Shut,
- * nothing is sampled, nothing is sent, and the server sends nothing. A shared
- * viewer never subscribes.
+ * side `FIRST_SAMPLE_MS` after the opening and once a second after that, and
+ * each sample lands in `window.stream_stats`: `latest`, and `history`, which
+ * starts empty when the stats open and grows while they stay open, up to
+ * `HISTORY_MAX` seconds. What a sample counts (data received, frames dropped,
+ * repairs asked for) is counted from the opening. Shut, nothing is sampled,
+ * nothing is sent, and the server sends nothing. A shared viewer never
+ * subscribes. Every change to the three is announced with a `STATS_EVENT`
+ * event on `window`, which is when a dashboard reads them.
  *
  * @module
  */
 
 /** Seconds of history kept for the graphs. */
 export const HISTORY_MAX = 600;
+/** How long after the stats open the first sample is taken, in ms. */
+export const FIRST_SAMPLE_MS = 500;
+/** The event on `window` that announces a change to what the stats show. */
+export const STATS_EVENT = 'selkies-stream-stats';
 /** Server figures older than this are left out of a sample, in ms. */
 export const SERVER_FRESH_MS = 3000;
 
@@ -63,6 +72,10 @@ export const SERVER_FRESH_MS = 3000;
  * @property {'websockets'|'webrtc'} transport
  * @property {'hardware'|'software'|'unknown'} decoder
  * @property {string} decoder_evidence What that verdict rests on.
+ * @property {boolean} hardware_expected Whether a hardware decoder was there to
+ *     take the stream, so a software verdict fell short of it.
+ * @property {string} decoder_reason Why a software decode fell short, empty
+ *     where it did not.
  * @property {string} codec
  * @property {string} resolution `1920x1080`.
  * @property {string} path WebRTC only: the candidate pair, as `host udp`.
@@ -78,9 +91,9 @@ export const SERVER_FRESH_MS = 3000;
  * @typedef {Object<string, (number|boolean|string)>} StreamSample One second's
  *     figures: the server's (`cpu_percent`, `mem_used`, `mem_total`,
  *     `gpu_percent`, `gpu_mem_used`, `gpu_mem_total`, `encoded_fps`,
- *     `encode_ms`, `pipeline_ms`, `rtt_ms`, `throttled`) where it sent them, this
- *     page's (`fps`, `mbps`, and whatever else its core measures), and `t`, the
- *     time in ms.
+ *     `encode_ms`, `pipeline_ms`, `rtt_ms`, `throttled`) where it sent them, and
+ *     `server`, whether it did, this page's (`fps`, `mbps`, `received_mb` since
+ *     the opening, and whatever else its core measures), and `t`, the time in ms.
  */
 
 /**
@@ -95,44 +108,115 @@ export function decoderOfFormat(format) {
   return /^I4/.test(format) ? 'software' : 'unknown';
 }
 
+/** What a decoded frame's pixel format is called in the evidence. */
+const framesOf = (format) => `${format === null ? 'Opaque' : format} frames`;
+
 /**
- * The WebCodecs decoder verdict from everything the page can know: a software
- * preference is certain, an engine that refuses the stream's configuration with
- * hardware required has none, and otherwise the frames say which kind made them.
- * @param {{forcedSoftware: boolean, hardwareSupported: (boolean|null|undefined),
- *     format: (string|null|undefined)}} evidence `hardwareSupported` is
- *     `VideoDecoder.isConfigSupported` with `prefer-hardware`, null where unasked.
- * @returns {{decoder: ('hardware'|'software'|'unknown'), decoder_evidence: string}}
+ * A decoder verdict and what it rests on, with whether it fell short: software
+ * where a hardware decoder was there to take the stream.
+ * @param {'hardware'|'software'|'unknown'} decoder
+ * @param {string} evidence
+ * @param {boolean} expected Whether a hardware decoder was there.
+ * @param {string} [shortfall] Why software fell short; said only where it did.
+ * @returns {Pick<StreamClient, 'decoder'|'decoder_evidence'|'hardware_expected'|'decoder_reason'>}
  */
-export function webcodecsDecoder({ forcedSoftware, hardwareSupported, format }) {
-  if (forcedSoftware) return { decoder: 'software', decoder_evidence: 'Software preferred after a decoder fallback' };
-  if (hardwareSupported === false) return { decoder: 'software', decoder_evidence: 'No hardware decoder for this stream' };
-  const seen = decoderOfFormat(format);
-  if (seen === 'unknown') return { decoder: 'unknown', decoder_evidence: format ? `${format} frames` : '' };
-  return { decoder: seen, decoder_evidence: `${format === null ? 'Opaque' : format} frames` };
+function verdict(decoder, evidence, expected, shortfall = 'A hardware decoder is available for this stream') {
+  return { decoder, decoder_evidence: evidence, hardware_expected: expected,
+    decoder_reason: decoder === 'software' && expected ? shortfall : '' };
 }
 
 /**
- * The WebRTC decoder verdict from the inbound video report. Engines name the
- * decoder only to a page that holds a capture permission, so without one the
- * verdict falls back to whether the engine has an efficient decoder at all.
- * @param {{implementation: (string|undefined), powerEfficient: (boolean|undefined),
- *     capable: (boolean|null|undefined)}} evidence `capable` is
- *     `MediaCapabilities.decodingInfo().powerEfficient` for the stream.
- * @returns {{decoder: ('hardware'|'software'|'unknown'), decoder_evidence: string}}
+ * The last word where nothing names the decoder: whether the engine has an
+ * efficient one for the stream at all (`DecodeCapability`), which falls short of
+ * naming the one it took.
+ * @param {boolean|null|undefined} capable
+ * @param {string} evidence What little there is otherwise.
+ * @returns {Pick<StreamClient, 'decoder'|'decoder_evidence'|'hardware_expected'|'decoder_reason'>}
  */
-export function webrtcDecoder({ implementation, powerEfficient, capable }) {
+function capabilityVerdict(capable, evidence) {
+  if (capable === true) return verdict('unknown', 'A hardware decoder is available', true);
+  if (capable === false) return verdict('software', 'No hardware decoder for this stream', false);
+  return verdict('unknown', evidence, false);
+}
+
+/**
+ * Whether the engine decodes a configuration efficiently, from
+ * `MediaCapabilities`: what stands in for the decoder's own word where neither
+ * the engine nor its frames say which decoder took the stream. Asked once per
+ * configuration; `efficient` is null until the engine answers, and where it
+ * cannot.
+ */
+export class DecodeCapability {
+  constructor() {
+    this.key = '';
+    /** @type {?boolean} */
+    this.efficient = null;
+  }
+
+  /**
+   * @param {MediaDecodingConfiguration} configuration What `decodingInfo` is asked.
+   * @param {string} key The configuration the answer is kept for.
+   */
+  ask(configuration, key) {
+    if (key === this.key) return;
+    this.key = key;
+    this.efficient = null;
+    if (!navigator.mediaCapabilities || !navigator.mediaCapabilities.decodingInfo) return;
+    navigator.mediaCapabilities.decodingInfo(configuration).then((info) => {
+      if (this.key === key) this.efficient = info.supported ? !!info.powerEfficient : null;
+    }).catch(() => {});
+  }
+}
+
+/**
+ * The WebCodecs decoder verdict from everything the page can know: a software
+ * preference after a fallback is certain and falls short of the hardware it left,
+ * an engine that refuses the stream's configuration with hardware preferred has
+ * none, the frames say which kind made them where their format tells, and an
+ * engine whose frames are all one format whatever decodes them (Gecko hands out
+ * BGRX) is left to `capabilityVerdict`. An engine that accepts the preference
+ * promises no hardware decoder, since some take it as a hint and decode in
+ * software, so only the fallback falls short.
+ * @param {{forcedSoftware: boolean, hardwareSupported: (boolean|null|undefined),
+ *     format: (string|null|undefined), capable: (boolean|null|undefined)}} evidence
+ *     `hardwareSupported` is `VideoDecoder.isConfigSupported` with
+ *     `prefer-hardware`, null where unasked; `capable` is `DecodeCapability.efficient`.
+ * @returns {Pick<StreamClient, 'decoder'|'decoder_evidence'|'hardware_expected'|'decoder_reason'>}
+ */
+export function webcodecsDecoder({ forcedSoftware, hardwareSupported, format, capable }) {
+  if (forcedSoftware) return verdict('software', '', true, 'Software preferred after a decoder fallback');
+  if (hardwareSupported === false) return verdict('software', 'No hardware decoder for this stream', false);
+  const seen = decoderOfFormat(format);
+  if (seen !== 'unknown') return verdict(seen, framesOf(format), false);
+  const told = capabilityVerdict(capable, format === undefined ? '' : framesOf(format));
+  return { ...told, hardware_expected: false, decoder_reason: '' };
+}
+
+/**
+ * The WebRTC decoder verdict. Engines name the decoder in the inbound video
+ * report only to a page that holds a capture permission. Without one, a frame
+ * read from the received track is the decoder's own, as the WebCodecs verdict
+ * reads it; the element's current frame is not, since an engine may copy a
+ * software picture into GPU memory to composite it, so only a planar one says
+ * anything (software). Last is whether the engine has an efficient decoder for
+ * the stream at all, which falls short of naming the one it took.
+ * @param {{implementation: (string|undefined), powerEfficient: (boolean|undefined),
+ *     trackFormat: (string|null|undefined), elementFormat: (string|null|undefined),
+ *     capable: (boolean|null|undefined)}} evidence `trackFormat` is a
+ *     `MediaStreamTrackProcessor` frame's format and `elementFormat` a
+ *     `VideoFrame` of the `<video>`'s, undefined where none was read;
+ *     `capable` is `DecodeCapability.efficient`.
+ * @returns {Pick<StreamClient, 'decoder'|'decoder_evidence'|'hardware_expected'|'decoder_reason'>}
+ */
+export function webrtcDecoder({ implementation, powerEfficient, trackFormat, elementFormat, capable }) {
   const named = implementation && implementation !== 'unknown' ? implementation : '';
-  if (typeof powerEfficient === 'boolean') {
-    return { decoder: powerEfficient ? 'hardware' : 'software', decoder_evidence: named };
-  }
-  if (named) {
-    const software = /libvpx|ffmpeg|dav1d|openh264|libaom/i.test(named);
-    return { decoder: software ? 'software' : 'hardware', decoder_evidence: named };
-  }
-  if (capable === true) return { decoder: 'unknown', decoder_evidence: 'A hardware decoder is available' };
-  if (capable === false) return { decoder: 'software', decoder_evidence: 'No hardware decoder for this stream' };
-  return { decoder: 'unknown', decoder_evidence: '' };
+  const expected = capable === true;
+  if (typeof powerEfficient === 'boolean') return verdict(powerEfficient ? 'hardware' : 'software', named, expected);
+  if (named) return verdict(/libvpx|ffmpeg|dav1d|openh264|libaom/i.test(named) ? 'software' : 'hardware', named, expected);
+  const fromTrack = decoderOfFormat(trackFormat);
+  if (fromTrack !== 'unknown') return verdict(fromTrack, framesOf(trackFormat), expected);
+  if (decoderOfFormat(elementFormat) === 'software') return verdict('software', framesOf(elementFormat), expected);
+  return capabilityVerdict(capable, '');
 }
 
 export class StreamStats {
@@ -150,12 +234,14 @@ export class StreamStats {
     this._subscribed = false;
     /** @type {StreamSample} */
     this._server = {};
-    this._serverAt = 0;
+    this._serverAt = -Infinity;
     this._bytes = 0;
     this._bytesAt = performance.now();
+    this._received = 0;
+    this._announcing = false;
     /** @type {StreamClient} */
-    this._client = { transport, decoder: 'unknown', decoder_evidence: '', codec: '', resolution: '', path: '',
-      sink: '', decode_path: '' };
+    this._client = { transport, decoder: 'unknown', decoder_evidence: '', hardware_expected: false,
+      decoder_reason: '', codec: '', resolution: '', path: '', sink: '', decode_path: '' };
     window.stream_info = null;
     window.stream_client = this._client;
     window.stream_stats = { open: false, latest: null, history: [] };
@@ -164,6 +250,16 @@ export class StreamStats {
   /** Whether a dashboard has its stats on screen. */
   get open() {
     return this._open;
+  }
+
+  /** Announces a change, once for everything that changed in the same task. */
+  _changed() {
+    if (this._announcing || typeof window.dispatchEvent !== 'function') return;
+    this._announcing = true;
+    queueMicrotask(() => {
+      this._announcing = false;
+      window.dispatchEvent(new Event(STATS_EVENT));
+    });
   }
 
   /**
@@ -176,9 +272,11 @@ export class StreamStats {
     this._open = open;
     this._bytes = 0;
     this._bytesAt = performance.now();
+    this._received = 0;
     window.stream_stats = { open, latest: null, history: [] };
     this.subscribe();
     this._onOpenChange(open);
+    this._changed();
   }
 
   /** Tells the server what this page wants; a fresh connection has to be told again. */
@@ -201,43 +299,62 @@ export class StreamStats {
   /** @param {StreamInfo|null} info The server's `stream_info`. */
   setInfo(info) {
     window.stream_info = info || null;
+    this._changed();
   }
 
   /** @param {Partial<StreamClient>} description What the core learned of its own side. */
   setClient(description) {
-    Object.assign(this._client, description);
+    const client = this._client;
+    if (Object.keys(description).every((key) => client[key] === description[key])) return;
+    Object.assign(client, description);
+    this._changed();
   }
 
-  /** @param {StreamSample} stats The server's `stream_stats`. */
+  /**
+   * The server's `stream_stats`, which the next sample carries. A sample on
+   * screen that has none of the server's figures yet, the first after an
+   * opening, takes them at once, so the first reading waits for neither side
+   * and every later one costs a dashboard a single read.
+   * @param {StreamSample} stats
+   */
   serverSample(stats) {
     this._server = stats || {};
     this._serverAt = performance.now();
+    const latest = window.stream_stats.latest;
+    if (this._open && latest && !latest.server) {
+      Object.assign(latest, this._server, { server: true });
+      this._changed();
+    }
   }
 
-  /** @param {number} bytes Stream bytes that arrived, for the bandwidth figure. */
+  /** @param {number} bytes Stream bytes that arrived, for the bandwidth and received figures. */
   noteBytes(bytes) {
     this._bytes += bytes;
+    this._received += bytes;
   }
 
   /**
    * One second's figures from the core, merged with the server's and appended
-   * to the history. `mbps` comes from `noteBytes` unless the core measured it.
+   * to the history. `mbps` comes from `noteBytes` unless the core measured it,
+   * and `received_mb` is what `noteBytes` counted since the opening.
    * @param {StreamSample} figures
    */
   clientSample(figures) {
     if (!this._open) return;
     const now = performance.now();
     const elapsed = (now - this._bytesAt) / 1000;
-    const server = now - this._serverAt <= SERVER_FRESH_MS ? this._server : {};
-    const sample = Object.assign({ t: Date.now() }, server, figures);
+    const fresh = now - this._serverAt <= SERVER_FRESH_MS;
+    const sample = Object.assign({ t: Date.now(), server: fresh }, fresh ? this._server : {}, figures);
     if (sample.mbps === undefined && elapsed > 0) {
       sample.mbps = Math.round((this._bytes * 8 / 1e6 / elapsed) * 100) / 100;
     }
+    sample.received_mb = Math.round(this._received / 1e4) / 100;
     this._bytes = 0;
     this._bytesAt = now;
     const stats = window.stream_stats;
     stats.latest = sample;
     stats.history.push(sample);
     if (stats.history.length > HISTORY_MAX) stats.history.shift();
+    this._changed();
   }
 }

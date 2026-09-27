@@ -15,7 +15,12 @@
  * choice and never for a server with no GPU, which is an ordinary deployment:
  * software encoding somebody selected, or on a host exposed no GPU, is neutral,
  * and software encoding on a session that asked for hardware where there is a
- * GPU is a warning and carries pixelflux's reason.
+ * GPU is a warning and carries pixelflux's reason. The client's side reads the
+ * same way: software decoding warns only where a hardware decoder was there to
+ * take the stream, since a client without one is as ordinary as a server
+ * without a GPU, and a path through a relay or over TCP is how the network
+ * connects this client, which marks nothing either way, while a direct UDP
+ * path is good.
  * Every value opens with a capital, and names the system reports (`nvidia`,
  * `renderD128`, a decoder's own) are kept as reported. Technical values (`NVENC`,
  * `Zero-copy`, `renderD128`) are not translated; the words a dashboard does
@@ -105,15 +110,16 @@ function captureRow(info) {
  */
 function decoderRow(client, words) {
   const decoder = client ? client.decoder : 'unknown';
+  const fell = decoder === 'software' && !!client.hardware_expected;
   return {
     key: 'decoder',
-    status: decoder === 'hardware' ? 'good' : decoder === 'software' ? 'warn' : 'neutral',
+    status: decoder === 'hardware' ? 'good' : fell ? 'warn' : 'neutral',
     value: words[decoder] || words.unknown,
     detail: client
       ? joined([client.decoder_evidence, codecName(client.codec), client.resolution,
         client.decode_path, client.sink])
       : '',
-    reason: '',
+    reason: fell ? sentence(client.decoder_reason) : '',
   };
 }
 
@@ -126,11 +132,11 @@ function decoderRow(client, words) {
 function connectionRow(client, latest, words) {
   const webrtc = !!client && client.transport === 'webrtc';
   const path = (client && client.path) || '';
-  const indirect = /relay|tcp/.test(path);
+  const direct = /^(host|srflx|prflx) udp$/.test(path);
   const throttled = !!(latest && latest.throttled);
   return {
     key: 'connection',
-    status: throttled || indirect ? 'warn' : webrtc && path ? 'good' : 'neutral',
+    status: throttled ? 'warn' : webrtc && direct ? 'good' : 'neutral',
     value: joined([webrtc ? 'WebRTC' : 'WebSockets', sentence(path.replace(/\b(udp|tcp|tls)\b/g, (p) => p.toUpperCase()))]),
     detail: '',
     reason: throttled ? words.throttled : '',
@@ -157,7 +163,9 @@ const TILES = {
   jitter_buffer_ms: ['Jitter buffer', 'ms'],
   audio_buffer_ms: ['Audio buffer', 'ms'],
   packet_loss_percent: ['Packet loss', '%'],
+  received_mb: ['Received', 'MB'],
   frames_dropped: ['Frames dropped', ''],
+  lost_frames: ['Lost frames', ''],
   freezes: ['Freezes', ''],
   nacks: ['NACKs', ''],
   keyframe_requests: ['Key frame requests', ''],
@@ -165,16 +173,19 @@ const TILES = {
 
 /** The figures each transport shows, in order. */
 const TRANSPORT_TILES = {
-  websockets: ['encode_ms', 'pipeline_ms', 'decode_ms', 'audio_buffer_ms'],
+  websockets: ['encode_ms', 'pipeline_ms', 'decode_ms', 'audio_buffer_ms',
+    'received_mb', 'lost_frames', 'keyframe_requests'],
   webrtc: ['encode_ms', 'pipeline_ms', 'decode_ms', 'jitter_buffer_ms', 'audio_buffer_ms',
-    'packet_loss_percent',
+    'received_mb', 'packet_loss_percent',
     'frames_dropped', 'freezes', 'nacks', 'keyframe_requests'],
 };
 
 /**
  * The figures under the graphs: one fixed set per transport, so the layout
- * holds still. A figure with nothing measured this second, an encode time on
- * an idle screen, reads as a dash rather than leaving.
+ * holds still. A time is the last second's, and everything else counts from
+ * the opening: the data received, the packet loss, and each drop and repair. A
+ * figure with nothing measured this second, an encode time on an idle screen,
+ * reads as a dash rather than leaving.
  * @param {StreamSample|null} latest
  * @param {'websockets'|'webrtc'} transport
  * @returns {Array<{key: string, label: string, value: string}>}
