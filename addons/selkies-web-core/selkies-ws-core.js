@@ -1117,7 +1117,7 @@ let lastFpsUpdateTime = performance.now();
 let statusDisplayElement;
 let playButtonElement;
 let overlayInput;
-let rateControlMode = 'crf';
+let rateControlMode = 'cbr';
 
 /**
  * Reads an integer setting from localStorage under the app prefix; keys in
@@ -3119,7 +3119,7 @@ function getCurrentSettingsPayload() {
         ['use_paint_over_quality', () => getBoolParam('use_paint_over_quality', true)],
         ['scaling_dpi', () => getIntParam('scaling_dpi', 96)],
         ['enable_binary_clipboard', () => getBoolParam('enable_binary_clipboard', false)],
-        ['rate_control_mode', () => getStringParam('rate_control_mode', 'crf')],
+        ['rate_control_mode', () => getStringParam('rate_control_mode', 'cbr')],
         ['video_bitrate', () => getIntParam('video_bitrate', 8000)],
         ['force_aligned_resolution', () => getBoolParam('force_aligned_resolution', false)],
     ];
