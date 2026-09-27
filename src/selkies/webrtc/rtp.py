@@ -83,6 +83,10 @@ RTCP_PSFB_APP = 15
 # decodes as soon as it arrives.
 DEPENDENCY_DESCRIPTOR_URI = "https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension"
 
+# When a frame was captured, in the NTP clock the sender reports: 64-bit UQ32.32, the
+# estimated capture clock offset left out, as the sender is the capture system.
+ABS_CAPTURE_TIME_URI = "http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time"
+
 
 @dataclass
 class HeaderExtensions:
@@ -102,6 +106,8 @@ class HeaderExtensions:
     color_space: Any = None
     # The packet's dependency descriptor, packed as `dependency_descriptor` builds it.
     dependency_descriptor: Any = None
+    # The capture instant of the packet's frame as a 64-bit NTP timestamp.
+    abs_capture_time: Optional[int] = None
 
 
 class HeaderExtensionsMap:
@@ -138,6 +144,8 @@ class HeaderExtensionsMap:
                 self.__ids.color_space = ext.id
             elif ext.uri == DEPENDENCY_DESCRIPTOR_URI:
                 self.__ids.dependency_descriptor = ext.id
+            elif ext.uri == ABS_CAPTURE_TIME_URI:
+                self.__ids.abs_capture_time = ext.id
         # What `for_fec` zeroes: each mutable extension's ID and the byte its mutable part starts at.
         self.__mutable = {
             ext_id: first
@@ -204,6 +212,11 @@ class HeaderExtensionsMap:
                 values.color_space = (primaries, transfer, matrix, (siting >> 4) & 0x03)
             elif x_id == self.__ids.dependency_descriptor:
                 values.dependency_descriptor = bytes(x_value)
+            elif x_id == self.__ids.abs_capture_time:
+                if len(x_value) < 8:
+                    # Malformed length: skip rather than raise struct.error.
+                    continue
+                values.abs_capture_time = unpack("!Q", x_value[:8])[0]
         return values
 
     def for_fec(self, packet: bytes) -> bytes:
@@ -333,6 +346,8 @@ class HeaderExtensionsMap:
             )
         if values.dependency_descriptor is not None and self.__ids.dependency_descriptor:
             extensions.append((self.__ids.dependency_descriptor, values.dependency_descriptor))
+        if values.abs_capture_time is not None and self.__ids.abs_capture_time:
+            extensions.append((self.__ids.abs_capture_time, pack("!Q", values.abs_capture_time)))
         return pack_header_extensions(extensions)
 
 

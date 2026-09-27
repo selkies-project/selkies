@@ -574,6 +574,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         timestamp_origin = random32()
         # Timer-triggered video-timing diagnostics (~5 flagged frames/s, like libwebrtc).
         last_video_timing = 0.0
+        last_abs_capture_ns = 0
         # FlexFEC group: serialized media packets awaiting their XOR repair
         # packets (flushed per frame, or every 10 packets within a large frame).
         fec_group: list[bytes] = []
@@ -621,6 +622,16 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         self._emit_pli_event()
                         continue
 
+                # abs-capture-time rides the first packet of a key frame and of a
+                # frame a second after the last one, as libwebrtc paces it: the RTP
+                # clock follows the capture, so a receiver extrapolates between them.
+                abs_capture_time = None
+                if self.__kind == "video" and (
+                    enc_frame.keyframe or instant_ns - last_abs_capture_ns >= 1_000_000_000
+                ):
+                    last_abs_capture_ns = instant_ns
+                    abs_capture_time = clock.ntp_from_monotonic_ns(instant_ns)
+
                 for i, payload in enumerate(enc_frame.payloads):
                     packet = RtpPacket(
                         payload_type=codec.payloadType,
@@ -663,6 +674,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     if described is not None:
                         packet.extensions.dependency_descriptor = dependency_descriptor(
                             i == 0, bool(packet.marker), described[0], described[1], enc_frame.keyframe)
+                    if i == 0 and abs_capture_time is not None:
+                        packet.extensions.abs_capture_time = abs_capture_time
                     # send packet
                     self.__log_debug("> %s", packet)
                     self.__rtp_history.add(

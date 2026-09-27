@@ -42,7 +42,7 @@ from ..rtcrtpparameters import (
     RTCRtpHeaderExtensionCapability,
     RTCRtpHeaderExtensionParameters,
 )
-from ..rtp import DEPENDENCY_DESCRIPTOR_URI
+from ..rtp import ABS_CAPTURE_TIME_URI, DEPENDENCY_DESCRIPTOR_URI
 from .base import Decoder, Encoder
 from .g711 import PcmaDecoder, PcmaEncoder, PcmuDecoder, PcmuEncoder
 from .g722 import G722Decoder, G722Encoder
@@ -164,6 +164,7 @@ HEADER_EXTENSIONS: dict[str, list[RTCRtpHeaderExtensionParameters]] = {
             id=7, uri="http://www.webrtc.org/experiments/rtp-hdrext/color-space"
         ),
         RTCRtpHeaderExtensionParameters(id=8, uri=DEPENDENCY_DESCRIPTOR_URI),
+        RTCRtpHeaderExtensionParameters(id=9, uri=ABS_CAPTURE_TIME_URI),
     ],
 }
 

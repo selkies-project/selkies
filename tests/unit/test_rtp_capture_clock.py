@@ -6,7 +6,9 @@ so the encode's varying duration never enters the RTP clock, and pts keeps risin
 across capture restarts and frame-rate changes. The sender's reports pair the NTP
 time they are sent at with the RTP clock at that same instant, so a receiver
 mapping a frame's RTP timestamp through them reads its capture time to well under
-a millisecond.
+a millisecond; and a peer that negotiated abs-capture-time is told a key frame's
+capture instant, and a frame's about once a second, on the NTP clock of those
+reports.
 """
 import asyncio
 import os
@@ -22,6 +24,7 @@ from selkies.webrtc.mediastreams import MediaStreamTrack  # noqa: E402
 from selkies.webrtc.rtcrtpparameters import (  # noqa: E402
     RTCRtcpParameters,
     RTCRtpCodecParameters,
+    RTCRtpHeaderExtensionParameters,
     RTCRtpSendParameters,
 )
 from selkies.webrtc.rtcrtpsender import RTCRtpSender  # noqa: E402
@@ -29,6 +32,7 @@ from selkies.webrtc_media_pipeline import MediaPipelinePixel  # noqa: E402
 
 passed = failed = 0
 MS = 1_000_000
+ABS_CAPTURE_TIME = "http://www.webrtc.org/experiments/rtp-hdrext/abs-capture-time"
 
 
 def check(label: str, ok, detail="") -> None:
@@ -146,10 +150,11 @@ class QueueTrack(MediaStreamTrack):
         return await self.queue.get()
 
 
-def send_parameters() -> RTCRtpSendParameters:
+def send_parameters(with_abs_capture_time: bool) -> RTCRtpSendParameters:
     codec = RTCRtpCodecParameters(mimeType="video/H264", clockRate=90000, payloadType=102,
                                   parameters={"packetization-mode": "1", "profile-level-id": "42e01f"})
-    return RTCRtpSendParameters(codecs=[codec], headerExtensions=HEADER_EXTENSIONS["video"], muxId="0",
+    extensions = [e for e in HEADER_EXTENSIONS["video"] if with_abs_capture_time or e.uri != ABS_CAPTURE_TIME]
+    return RTCRtpSendParameters(codecs=[codec], headerExtensions=extensions, muxId="0",
                                 rtcp=RTCRtcpParameters(cname="capture-clock"))
 
 
@@ -162,9 +167,9 @@ async def sender_reports() -> None:
     track = QueueTrack()
     transport = FakeTransport()
     sender = RTCRtpSender(track, transport)
-    await sender.send(send_parameters())
+    await sender.send(send_parameters(True))
     ext_map = rtp.HeaderExtensionsMap()
-    ext_map.configure(send_parameters())
+    ext_map.configure(send_parameters(True))
     captures = {}
     start = time.monotonic_ns()
     # 60 fps for 2.2 s; each frame reaches the sender 25 ms after its capture, as an
@@ -198,15 +203,59 @@ async def sender_reports() -> None:
     check("a report maps every frame's RTP timestamp to its capture within 1 ms", worst < 0.001,
           f"worst {worst * 1000:.3f} ms")
 
+    firsts = {}
+    for _, packet in packets:
+        firsts.setdefault(packet.timestamp, packet)
+    stamped = [p for p in firsts.values() if p.extensions.abs_capture_time is not None]
+    check("abs-capture-time on the key frame and about once a second",
+          2 <= len(stamped) <= 4 and stamped[0].timestamp == packets[0][1].timestamp, len(stamped))
+    error = max(abs(p.extensions.abs_capture_time / (1 << 32)
+                    - wall_ntp(captures[(p.timestamp - origin) & 0xFFFFFFFF])) for p in stamped)
+    check("abs-capture-time is the capture instant on the reports' NTP clock", error < 0.001,
+          f"{error * 1e6:.1f} us")
+    others = [p for _, p in packets if p.extensions.abs_capture_time is not None and firsts[p.timestamp] is not p]
+    check("only a frame's first packet carries it", not others, len(others))
 
-def ntp_clock() -> None:
+
+async def not_negotiated() -> None:
+    track = QueueTrack()
+    transport = FakeTransport()
+    sender = RTCRtpSender(track, transport)
+    await sender.send(send_parameters(False))
+    now = time.monotonic_ns()
+    track.queue.put_nowait(EncodedPacket(b"\x00\x00\x00\x01\x65" + b"\x88" * 40, 0, Fraction(1, 90000),
+                                         True, (now, now, now), None))
+    await asyncio.sleep(0.05)
+    await sender.stop()
+    ext_map = rtp.HeaderExtensionsMap()
+    ext_map.configure(send_parameters(True))
+    parsed = [rtp.RtpPacket.parse(d, ext_map) for _, d in transport.rtp]
+    check("a peer that did not negotiate it is sent none",
+          parsed and all(p.extensions.abs_capture_time is None for p in parsed), len(parsed))
+
+
+def offer() -> None:
+    video = [e for e in HEADER_EXTENSIONS["video"] if e.uri == ABS_CAPTURE_TIME]
+    ids = [e.id for kind in HEADER_EXTENSIONS.values() for e in kind if e.uri != ABS_CAPTURE_TIME]
+    check("offered on video, with an id no other extension holds", len(video) == 1 and video[0].id not in ids,
+          [e.id for e in video])
+    check("not offered on audio", not any(e.uri == ABS_CAPTURE_TIME for e in HEADER_EXTENSIONS["audio"]))
+    ext_map = rtp.HeaderExtensionsMap()
+    ext_map.configure(RTCRtpSendParameters(headerExtensions=[RTCRtpHeaderExtensionParameters(id=9, uri=ABS_CAPTURE_TIME)]))
+    packet = rtp.RtpPacket(payload_type=102, sequence_number=1, timestamp=0)
+    packet.payload = b"\x00"
+    packet.extensions.abs_capture_time = 0xE9C2_1234_8000_0000
+    data = packet.serialize(ext_map)
+    check("8-byte wire form round-trips", b"\x97\xe9\xc2\x12\x34\x80\x00\x00\x00" in data
+          and rtp.RtpPacket.parse(data, ext_map).extensions.abs_capture_time == 0xE9C2_1234_8000_0000)
     a = clock.ntp_from_monotonic_ns(10**15)
     b = clock.ntp_from_monotonic_ns(10**15 + 1_500_000_000)
     check("the NTP clock runs with CLOCK_MONOTONIC", abs((b - a) / (1 << 32) - 1.5) < 1e-8, (b - a) / (1 << 32))
 
 
 pipeline_pts()
-ntp_clock()
+offer()
 asyncio.run(sender_reports())
+asyncio.run(not_negotiated())
 print(f"[capture-clock] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)
