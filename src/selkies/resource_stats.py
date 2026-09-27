@@ -668,7 +668,8 @@ class ResourceMonitor:
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=self.period)
                 except asyncio.TimeoutError:
-                    pass
+                    if self._rushed is not None:
+                        await self._wake.wait()
                 self._wake.clear()
         except asyncio.CancelledError:
             pass
@@ -689,15 +690,19 @@ class ResourceMonitor:
 
         The CPU is differenced from now, so the first figures describe the
         moment rather than the spell nobody watched, and they follow `RUSH_S`
-        later instead of up to a period; a period that ends sooner serves the
-        page itself.
+        later instead of up to a period. A period that would end sooner waits
+        for them, since a sample right behind the baseline is differenced over
+        next to nothing; a sample already under way is the baseline itself, and
+        a later rush restarts the wait.
         """
         if self._task is None or self._task.done() or self._wake is None:
             return
-        async with self._sampling:
-            await asyncio.to_thread(self._usage.sample)
-        if self._rushed is None:
-            self._rushed = asyncio.get_running_loop().call_later(RUSH_S, self._wake.set)
+        if self._rushed is not None:
+            self._rushed.cancel()
+        self._rushed = asyncio.get_running_loop().call_later(RUSH_S, self._wake.set)
+        if not self._sampling.locked():
+            async with self._sampling:
+                await asyncio.to_thread(self._usage.sample)
 
     async def stop(self) -> None:
         """Ends the loop at once and waits for it."""

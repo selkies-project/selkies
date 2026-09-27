@@ -42,6 +42,8 @@ SETTLE_S = 1.0
 WATCH_S = 3.0
 # Two counter reads further apart than this span a time nobody watched, not a rate.
 RATE_WINDOW_MAX_S = 5.0
+# Two closer than this hold too few frames to be one: a rate needs frames to count.
+RATE_WINDOW_MIN_S = 0.25
 
 
 def stats_request(message: str) -> Optional[bool]:
@@ -137,8 +139,9 @@ class StreamWatch:
     def rates(self) -> Dict[str, float]:
         """The encode's rate and cost since the last call: frames a second, and the
         milliseconds a frame spent encoding and from capture to the end of its
-        encode. Empty without a capture that counts, and on the
-        first call after a start or a spell unwatched, which only takes the baseline."""
+        encode. Empty without a capture that counts, on the first call after a
+        start or a spell unwatched, which only takes the baseline, and within
+        `RATE_WINDOW_MIN_S` of the last call, which leaves the window growing."""
         module = self._module
         if module is None or not hasattr(module, "stream_stats"):
             return {}
@@ -148,8 +151,10 @@ class StreamWatch:
             return {}
         now = time.monotonic()
         last, last_at = self._totals, self._totals_at
-        self._totals, self._totals_at = totals, now
         elapsed = now - last_at
+        if totals and last and totals["frames"] >= last["frames"] and elapsed < RATE_WINDOW_MIN_S:
+            return {}
+        self._totals, self._totals_at = totals, now
         if not totals or not last or totals["frames"] < last["frames"] or not 0 < elapsed <= RATE_WINDOW_MAX_S:
             return {}
         frames = totals["frames"] - last["frames"]

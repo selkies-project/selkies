@@ -7,10 +7,14 @@ samples only while some page has asked: unwatched it keeps ticking, for what
 else rides its cadence, and holds no reading rather than a stale one. Whether a
 session asked for a hardware encoder at all is what lets a page tell a software
 session somebody chose, or one on a host with no GPU, from one that fell back.
+A page that opens its stats has its first figures soon, and differenced over
+the rush's window rather than whatever was left of a period: a rate taken over
+a few milliseconds is one frame more or less, read as a hundred fps.
 """
 import asyncio
 import os
 import sys
+import time
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, TESTS)
@@ -70,5 +74,62 @@ monitor, ticks = asyncio.run(sampled(True))
 host = SS.host_stats(monitor)
 res.check("watched, it samples the host", monitor.system is not None
           and 0 <= host["cpu_percent"] <= 100 and 0 < host["mem_used"] <= host["mem_total"], host)
+
+
+async def rushed_before_the_period_ends():
+    """How long after a rush's CPU baseline the next sample comes, for a page that
+    opens its stats just before a period would end."""
+    monitor = RS.ResourceMonitor()
+    monitor.watched = lambda: True
+    stamps, ticks = [], []
+    usage = monitor._usage.sample
+
+    def stamped():
+        stamps.append(time.monotonic())
+        return usage()
+
+    async def on_tick(now):
+        ticks.append(time.monotonic())
+
+    monitor._usage.sample = stamped
+    monitor.on_tick = on_tick
+    monitor.start()
+    while not ticks:
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(max(0.0, ticks[0] + monitor.period - 0.05 - time.monotonic()))
+    await monitor.rush()
+    baseline = stamps[-1]
+    while not any(t > baseline for t in ticks):
+        await asyncio.sleep(0.01)
+    await monitor.stop()
+    return min(s for s in stamps if s > baseline) - baseline
+
+
+window = asyncio.run(rushed_before_the_period_ends())
+res.check("a page that opens its stats as a period ends still has its first CPU figure differenced "
+          "over the rush's window", window >= RS.RUSH_S / 2, f"{window:.3f} s")
+
+
+class Counting:
+    """A capture whose encode counters the test advances by hand."""
+
+    def __init__(self):
+        self.frames = 0
+
+    def stream_stats(self):
+        return {"frames": self.frames, "encode_ns": self.frames * 2_000_000, "pipeline_ns": self.frames * 3_000_000}
+
+
+watch = SS.StreamWatch("primary", None)
+watch._module = capture = Counting()
+res.check("the first call only takes the baseline", watch.rates() == {})
+capture.frames += 1
+res.check("a window too short to hold a rate reports none rather than one frame over a few microseconds",
+          watch.rates() == {})
+time.sleep(SS.RATE_WINDOW_MIN_S)
+capture.frames += 29
+rates = watch.rates()
+res.check("and keeps growing, so the next call covers both", 0 < rates.get("encoded_fps", 0) <= 30 / SS.RATE_WINDOW_MIN_S
+          and rates.get("encode_ms") == 2.0, rates)
 
 sys.exit(0 if res.summary() else 1)
