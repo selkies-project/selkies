@@ -384,32 +384,26 @@ export function Settings() {
      * mode nor lets its own pick decide which quality slider is shown.
      */
     const rateControlEnabled = renderableSettings.enableRateControl ?? true;
-    // The hook only sets UI state; when the resolved default diverges from
-    // what the server applies (a transport switch seeds the previous mode's
-    // value), push it so the encoder follows. Pinned values post nothing.
+    // Stale-echo rule (module docblock): a stored mode without an explicit
+    // pick echoes a value a dashboard derived, and is dropped once it stops
+    // matching the ladder, which resolves to the server's own value; kept, it
+    // would hold the session to it and outlive an operator override.
     useEffect(() => {
         if (!serverSettings) return;
         if (serverSettings.enable_rate_control?.value === false) return;
         const rcKey = RATE_CONTROL_SPEC.storageKey;
         const resolved = resolveSpec(
             RATE_CONTROL_SPEC, serverSettings, conditionalCtx, readRateControlStored);
-        // Stale-echo rule (module docblock): an unmarked stored value that no
-        // longer matches the ladder is dropped, or it outlives the derivation.
         if (!isExplicitChoice(RATE_CONTROL_SPEC)
             && readStored(rcKey) !== null && readStored(rcKey) !== resolved) {
             localStorage.removeItem(getPrefixedKey(rcKey));
         }
-        if (isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readRateControlStored)) return;
-        const serverValue = serverSettings[RATE_CONTROL_SPEC.serverKey]?.value;
-        if (resolved && serverValue !== undefined && resolved !== serverValue) {
-            writeConditional(RATE_CONTROL_SPEC, resolved, setRateControlMode, { persist: false });
-        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [serverSettings]);
     // Same stale-echo rule for HiDPI, or a derived pick outlives its resolution
-    // mode, and the same push: the core starts from its own stored default, so
-    // a deployment that configures a resolution would stream pixel-perfect on
-    // every load with the toggle reading off.
+    // mode, and a push of the resolved value: the core starts from its own
+    // stored default, so a deployment that configures a resolution would stream
+    // pixel-perfect on every load with the toggle reading off.
     useEffect(() => {
         if (!serverSettings) return;
         const key = HIDPI_SPEC.storageKey;
@@ -457,9 +451,8 @@ export function Settings() {
     );
     const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
         USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings], readPaintOverStored);
-    // Push the resolved paint-over default so the encoder agrees (same shape
-    // as the rate-control derivation above); a later encoder or Turbo change
-    // re-derives it.
+    // Push the resolved paint-over default so the encoder agrees; a later
+    // encoder or Turbo change re-derives it.
     useEffect(() => {
         if (!serverSettings) return;
         const key = USE_PAINT_OVER_QUALITY_SPEC.storageKey;

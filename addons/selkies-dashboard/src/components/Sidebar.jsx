@@ -1627,15 +1627,12 @@ function Sidebar() {
   /* eslint-enable react-hooks/set-state-in-effect */
 
   /**
-   * Rate control: the hook only sets local state, so when the resolved
-   * default diverges from what the server is applying (a transport switch
-   * seeds the session with the previous mode's value) this pushes it so the
-   * encoder follows. Pinned, locked, or operator-overridden values resolve to
-   * the server's value and post nothing. The core persists every mode it is
-   * told to apply and resends it on the next connect, so without an explicit
-   * pick the stored value is an echo, not a choice: it is dropped once it
-   * stops matching what the ladder resolves, or it would outlive the
-   * derivation, and an operator override with it.
+   * Rate control: the core persists every mode it is told to apply and
+   * resends it on the next connect, so a stored mode without an explicit pick
+   * is an echo of a value a dashboard derived, not a choice. It is dropped
+   * once it stops matching what the ladder resolves, which is the server's own
+   * value; kept, it would hold the session to it and outlive an operator
+   * override.
    */
   useEffect(() => {
     if (!serverSettings) return;
@@ -1647,11 +1644,6 @@ function Sidebar() {
       && readStored(rcKey) !== null && readStored(rcKey) !== resolved) {
       localStorage.removeItem(getPrefixedKey(rcKey));
     }
-    if (isSettingPinned(RATE_CONTROL_SPEC, serverSettings, readRateControlStored)) return;
-    const serverValue = serverSettings[RATE_CONTROL_SPEC.serverKey]?.value;
-    if (resolved && serverValue !== undefined && resolved !== serverValue) {
-      writeConditional(RATE_CONTROL_SPEC, resolved, setRateControlMode, { persist: false });
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverSettings]);
 
@@ -1660,8 +1652,8 @@ function Sidebar() {
    * says, since the hook only sets local state and the core otherwise starts
    * from its own stored default -- a deployment that configures a resolution
    * would stream pixel-perfect on every load with the toggle reading off. And
-   * drops the unmarked stored echo once the ladder moves on, the same shape as
-   * the rate-control derivation.
+   * drops the unmarked stored echo once the ladder moves on, as rate control
+   * does.
    */
   useEffect(() => {
     if (!serverSettings) return;
@@ -1684,8 +1676,8 @@ function Sidebar() {
 
   /**
    * Paint-over: pushes the resolved default so the encoder agrees, and drops
-   * the unmarked stored echo once the ladder moves on, the same shape as the
-   * rate-control derivation; a later encoder or Turbo change re-derives it.
+   * the unmarked stored echo once the ladder moves on, as rate control does;
+   * a later encoder or Turbo change re-derives it.
    */
   useEffect(() => {
     if (!serverSettings) return;
