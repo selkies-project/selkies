@@ -231,7 +231,7 @@ function InitUI() {
  */
 export default function webrtc() {
 	let appName;
-	let crf = 23;
+	let crf = 25;
 	/** Video bitrate in kbps. */
 	let videoBitRate = 8000;
 	let videoFramerate = 60;
@@ -3418,7 +3418,11 @@ export default function webrtc() {
 			 * choice governs unless locked), applies the session's start policy on
 			 * a connection's first payload, pushes the pre-copied local clipboard
 			 * once the gates are in place, and switches between the manual and
-			 * auto resize handlers.
+			 * auto resize handlers. The CRF and bitrate a rate-control switch
+			 * restates (`sendRespectiveRCvalue`) are taken from the sanitized
+			 * values, the stored pick else the operator's default, which the
+			 * dashboards show and the server already applies; the core's own
+			 * defaults would move the stream off both.
 			 */
 			webrtc.onserversettings = (obj) => {
 				if (obj.settings === undefined || obj.settings === null) {
@@ -3427,6 +3431,8 @@ export default function webrtc() {
 				}
 				console.log("Received server settings payload:", obj.settings);
 				const changes = sanitizeAndStoreSettings(obj.settings);
+				if (Number.isFinite(window.video_crf)) crf = Math.round(window.video_crf);
+				if (Number.isFinite(window.video_bitrate)) videoBitRate = Math.round(window.video_bitrate);
 				const fcEntry = obj.settings && obj.settings.video_fullcolor;
 				fullColorLocked = !!(fcEntry && fcEntry.locked);
 				if (fcEntry) declineUndecodableFullColor();

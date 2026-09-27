@@ -1135,6 +1135,85 @@ def raw_pointer_motion_block(dashboard: str, dist: str, mode: str = "websockets"
     return res
 
 
+def pick_rate_control(page, dashboard: str, mode: str) -> bool:
+    """Pick `mode` ("cbr" or "crf") in either dashboard's rate-control menu,
+    opening the video settings first where they are closed.
+
+    Returns:
+        True when the menu was found and the pick made.
+    """
+    try:
+        if dashboard == "classic":
+            if not page.locator('#rateControlSelect').count():
+                classic_open_video(page)
+            page.select_option('#rateControlSelect', mode, timeout=5000)
+            return True
+        box = page.locator("div.space-y-2:has(> label:text-is('Encoder Rate Control Mode'))")
+        if not box.count():
+            open_wish_settings_tab(page, "Video")
+        box.first.locator("button").first.click(timeout=5000)
+        item = "CRF (Constant Quality)" if mode == "crf" else "CBR (Constant Bitrate)"
+        page.locator(f"[role='menuitem']:has-text('{item}')").first.click(timeout=5000)
+        return True
+    except Exception:
+        return False
+
+
+def rate_control_block(dashboard: str, dist: str, mode: str = "websockets") -> "H.Results":
+    """A rate-control pick streams at the quality the dashboard shows.
+
+    The operator sets a CRF and a bitrate of its own. Picking CRF, then CBR
+    again, the dashboard shows the operator's value for the mode picked, and
+    the stream has to run at it: the server never moves off it, and the capture
+    the switch restarts comes up at it. Over WebRTC the core restates the value
+    the new mode reads after the mode itself, so a value of the core's own
+    would move the stream off what the page shows.
+    """
+    res = H.Results(f"rate-control-{dashboard}-{mode}")
+    H.server_start(mode=mode, wayland=False, web_root=dist,
+                   extra_env={"SELKIES_VIDEO_CRF": "30", "SELKIES_VIDEO_BITRATE": "4000"})
+    steps = (
+        {"pick": "crf", "label": "Video CRF (", "shown": "(30)", "line": "CRF: 30",
+         "moved": r"Updated CRF live: \d+ -> (\d+)", "value": "30"},
+        {"pick": "cbr", "label": "Video Bitrate (", "shown": "(4 Mbps)", "line": "CBR 4000",
+         "moved": r"Updated video bitrate: \d+ -> (\d+)", "value": "4000"},
+    )
+    try:
+        with sync_playwright() as p:
+            browser = C.chromium_launch(p)
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+            ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+            page = ctx.new_page()
+            page.goto(H.BASE_URL, wait_until="load")
+            if mode == "webrtc":
+                C.wait_wr_video(page, timeout=60)
+            else:
+                C.wait_ws_video(page, timeout=45)
+            time.sleep(2.0)
+            for step in steps:
+                pick = step["pick"]
+                mark = len(H.server_log())
+                res.check(f"{pick}: the menu takes the pick", pick_rate_control(page, dashboard, pick), "")
+                deadline = time.time() + 15
+                while time.time() < deadline and "Stream settings active" not in H.server_log()[mark:]:
+                    time.sleep(0.5)
+                time.sleep(2.0)
+                log = H.server_log()[mark:]
+                lines = [ln for ln in log.splitlines() if "Stream settings active" in ln]
+                text = page.locator("label", has_text=step["label"]).first.inner_text(timeout=3000)
+                res.check(f"{pick}: the dashboard shows the operator's value", step["shown"] in text, text)
+                targets = re.findall(step["moved"], log)
+                res.check(f"{pick}: the server keeps the value the dashboard shows",
+                          all(t == step["value"] for t in targets), targets)
+                res.check(f"{pick}: the restarted capture runs at it",
+                          bool(lines) and step["line"] in lines[-1], lines[-1:] or "no stream line")
+            C.close_browser(browser)
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
 def wait_second_display(timeout: float = 15.0) -> bool:
     """Whether the server logs a second display client joining."""
     deadline = time.time() + timeout
@@ -1168,6 +1247,12 @@ def main() -> None:
     if which in ("all", "raw-motion-webrtc"):
         blocks.append(raw_pointer_motion_block("classic", H.CLASSIC_DIST, "webrtc"))
         blocks.append(raw_pointer_motion_block("wish", H.WISH_DIST, "webrtc"))
+    if which in ("all", "rate-control"):
+        blocks.append(rate_control_block("classic", H.CLASSIC_DIST))
+        blocks.append(rate_control_block("wish", H.WISH_DIST))
+    if which in ("all", "rate-control-webrtc"):
+        blocks.append(rate_control_block("classic", H.CLASSIC_DIST, "webrtc"))
+        blocks.append(rate_control_block("wish", H.WISH_DIST, "webrtc"))
     if which in ("all", "dpi-resolution"):
         blocks.append(dpi_for_resolution_block("classic", H.CLASSIC_DIST))
     if which in ("all", "second-screen"):
