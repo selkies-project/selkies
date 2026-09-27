@@ -33,7 +33,7 @@ On X11 the Plasma shell lays its panels and wallpaper out for the DPI it started
 
 ## Configuration
 
-Everything Selkies reads is a variable of the [Settings Reference](../settings.md); each README's configuration table lists the ones the image adds (`PASSWD`, `TZ`, `START_PLASMA`, and for the GLX image the X server's initial mode `DISPLAY_SIZEW`, `DISPLAY_SIZEH`, `DISPLAY_REFRESH`, `DISPLAY_CDEPTH`, the NVIDIA `VIDEO_PORT`, and `NVIDIA_DRIVER_VERSION` where the host's cannot be read). The video encoder, the bitrates, the frame rate, and the UI scaling are chosen from the web interface and are not set in the environment; a single value in `SELKIES_ENCODER` or `SELKIES_SCALING_DPI` locks that choice.
+Everything Selkies reads is a variable of the [Settings Reference](../settings.md); each README's configuration table lists the ones the image adds (`PASSWD`, `TZ`, `START_PLASMA`, and for the GLX image the X server's initial mode `DISPLAY_SIZEW`, `DISPLAY_SIZEH`, `DISPLAY_REFRESH`, the NVIDIA `VIDEO_PORT`, and `NVIDIA_DRIVER_VERSION` where the host's cannot be read). The video encoder, the bitrates, the frame rate, and the UI scaling are chosen from the web interface and are not set in the environment; a single value in `SELKIES_ENCODER` or `SELKIES_SCALING_DPI` locks that choice.
 
 The GLX image's NVIDIA X server modules (`nvidia_drv.so` and the GLX server module) come in with the driver's libraries from the NVIDIA Container Toolkit v1.20.1 or higher; under a runtime that injects the libraries alone, the first start lifts the two out of the driver installer matching the host's version, and a container that keeps its filesystem keeps them across restarts.
 
