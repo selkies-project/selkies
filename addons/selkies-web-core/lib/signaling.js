@@ -241,6 +241,16 @@ export class WebRTCSignaling {
         }, 3000);
     }
 
+    /**
+     * Starts the retry cycle over, for an app whose `onfatalretry` found the
+     * server not answering: the next connect three seconds out, and the next
+     * cycle ending in `onfatalretry` again.
+     */
+    retry() {
+        this.retry_count = 0;
+        this._scheduleRetry();
+    }
+
     /** Socket error: retries when the socket is already closed, else the close event does. */
     _onServerError() {
         this._setStatus("Connection error, retry in 3 seconds.");

@@ -127,7 +127,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, displayLabel } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, displayLabel, serverAnswers } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS,
@@ -8187,27 +8187,25 @@ class WorkerWebSocket {
 let wsEverOpened = false;
 
 /**
- * Reloads the page, first switching the stored stream mode to WebRTC when the
- * server is serving that transport: a plain GET on the transport endpoint
- * answers 409 exactly then. One attempt per connect cycle, and only if this
- * session never connected, so a client whose stored mode disagrees with the
- * server converges instead of loop-reloading.
+ * Reloads the page once the server answers a plain GET on the transport
+ * endpoint (`serverAnswers`), leaving it for the next tick while nothing does;
+ * a 409 there means the server is serving WebRTC, and the stored stream mode
+ * is switched first. The switch is tried once per connect cycle, and only if
+ * this session never connected, so a client whose stored mode disagrees with
+ * the server converges instead of loop-reloading.
  */
 async function reloadPossiblyFlippingMode() {
+  // The same path derivation as the data socket, so the probe hits its route.
+  const probeURL = new URL(window.location.href);
+  probeURL.pathname = getRoutePrefix() + '/api/websockets';
+  const res = await serverAnswers(probeURL.href, sessionAuthHeaders());
+  if (!res) return;
   let flipGuard = null;
   try { flipGuard = sessionStorage.getItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
-  if (!wsEverOpened && !flipGuard) {
-    try {
-      // The same path derivation as the data socket, so the probe hits its route.
-      const probeURL = new URL(window.location.href);
-      probeURL.pathname = getRoutePrefix() + '/api/websockets';
-      const res = await fetch(probeURL.href, { cache: 'no-store', headers: sessionAuthHeaders() });
-      if (res.status === 409) {
-        try { sessionStorage.setItem('selkies_mode_flip', '1'); } catch (e) { /* ignore */ }
-        safeSetItem(`${storageAppName}_stream_mode`, 'webrtc');
-        console.warn('[websockets] Server is serving WebRTC (endpoint 409); switching stored mode.');
-      }
-    } catch (e) { /* unreachable server: plain reload below keeps retrying */ }
+  if (!wsEverOpened && !flipGuard && res.status === 409) {
+    try { sessionStorage.setItem('selkies_mode_flip', '1'); } catch (e) { /* ignore */ }
+    safeSetItem(`${storageAppName}_stream_mode`, 'webrtc');
+    console.warn('[websockets] Server is serving WebRTC (endpoint 409); switching stored mode.');
   }
   location.reload();
 }

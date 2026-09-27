@@ -86,7 +86,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, serverAnswers } from './lib/util.js';
 import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
@@ -2876,24 +2876,27 @@ export default function webrtc() {
 				return codecs;
 			};
 			/**
-			 * A plain GET on the signaling endpoint returns 409 exactly when the
-			 * server is serving WebSockets: after repeated connect failures, probe
-			 * once and converge the stored mode instead of reload-looping.
+			 * After repeated connect failures the signaling endpoint is probed with
+			 * a plain GET before the page reloads. No answer (`serverAnswers`) is a
+			 * server stopping or starting, and a reload would land on the browser's
+			 * error page with nothing left to retry, so the retries go on instead.
+			 * A 409 means the server is serving WebSockets, and the stored mode
+			 * converges on it rather than reload-looping.
 			 */
 			signaling.onfatalretry = async () => {
+				const probeURL = new URL(url.href);
+				probeURL.protocol = (location.protocol === 'http:' ? 'http:' : 'https:');
+				const res = await serverAnswers(probeURL.href, sessionAuthHeaders());
+				if (!res) {
+					signaling.retry();
+					return;
+				}
 				let flipGuard = null;
 				try { flipGuard = sessionStorage.getItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
-				if (!flipGuard) {
-					try {
-						const probeURL = new URL(url.href);
-						probeURL.protocol = (location.protocol === 'http:' ? 'http:' : 'https:');
-						const res = await fetch(probeURL.href, { cache: 'no-store', headers: sessionAuthHeaders() });
-						if (res.status === 409) {
-							try { sessionStorage.setItem('selkies_mode_flip', '1'); } catch (e) { /* ignore */ }
-							setStringParam('stream_mode', 'websockets');
-							console.warn('[signaling] Server is serving WebSockets (endpoint 409); switching stored mode.');
-						}
-					} catch (e) { /* unreachable server: plain reload keeps retrying */ }
+				if (!flipGuard && res.status === 409) {
+					try { sessionStorage.setItem('selkies_mode_flip', '1'); } catch (e) { /* ignore */ }
+					setStringParam('stream_mode', 'websockets');
+					console.warn('[signaling] Server is serving WebSockets (endpoint 409); switching stored mode.');
 				}
 				location.reload();
 			};

@@ -7,8 +7,9 @@
 /**
  * Helpers shared by the streaming cores and both dashboards: a small FIFO
  * queue, the human-readable labels for wire values, the decodability checks
- * that keep a client from asking for a stream it cannot play, and the route
- * prefix and localStorage namespace every caller derives the same way.
+ * that keep a client from asking for a stream it cannot play, the route
+ * prefix and localStorage namespace every caller derives the same way, and
+ * whether the server answers at all before a page reloads into it.
  * @module
  */
 
@@ -318,6 +319,26 @@ export function getRoutePrefix() {
     const pathname = window.location.pathname;
     const dirPath = pathname.substring(0, pathname.lastIndexOf('/') + 1);
     return dirPath.replace(/\/$/, '');
+}
+
+/**
+ * The server's answer to a plain GET on one of its endpoints, or null where it
+ * gave none: nothing answered, or the answer says it is not up (502, 503, 504:
+ * a gateway in front of a stopped server, or the server itself still
+ * starting). A page reloaded into a server stopping or starting lands on an
+ * error page with nothing left to retry, so a core reloads only once this
+ * returns an answer.
+ * @param {string} url
+ * @param {Object<string, string>=} headers
+ * @returns {Promise<?Response>}
+ */
+export async function serverAnswers(url, headers) {
+    try {
+        const res = await fetch(url, { cache: 'no-store', headers });
+        return [502, 503, 504].includes(res.status) ? null : res;
+    } catch (e) {
+        return null;
+    }
 }
 
 /**
