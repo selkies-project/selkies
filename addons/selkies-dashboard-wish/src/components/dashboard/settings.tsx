@@ -1051,7 +1051,7 @@ export function Settings() {
     }
 
     return (
-        <Card className="w-[300px] p-0 pb-4 bg-background/95 border shadow-sm">
+        <Card className="w-[300px] p-0 pb-4 bg-background border shadow-sm">
             <Tabs
                 defaultValue={defaultTab}
                 onValueChange={(value) => { if (value === "audio") ensureAudioDevices(); }}

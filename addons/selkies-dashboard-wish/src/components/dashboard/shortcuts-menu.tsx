@@ -44,7 +44,7 @@ export function ShortcutsMenu() {
 			window.location.origin);
 	};
 	return (
-		<Card className="w-[320px] bg-background/95 border shadow-sm">
+		<Card className="w-[320px] bg-background border shadow-sm">
 			<CardContent className="p-4">
 				{(renderableSettings.keyboardShortcuts ?? true) && (
 					<div className="flex items-center justify-between mb-3">

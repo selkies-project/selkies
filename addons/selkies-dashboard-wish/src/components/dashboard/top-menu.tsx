@@ -625,7 +625,7 @@ export function TopMenu({
     <>
       {((renderableSettings.gamingMode ?? true) || (!isSecondaryDisplay && (renderableSettings.gamepadToggle ?? true))) && (
         <motion.div
-          className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background/95 shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
+          className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
           style={{
             transform: `translate(${position.x - 84}px, ${position.y}px)`,
           }}
@@ -707,7 +707,7 @@ export function TopMenu({
 
       <motion.div
         ref={ellipsisRef}
-        className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background/95 shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
+        className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
         style={{
           transform: `translate(${position.x - 42}px, ${position.y}px)`,
         }}
@@ -951,7 +951,7 @@ export function TopMenu({
 
       <motion.div
         ref={dragRef}
-        className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background/95 shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
+        className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
         style={{
           transform: `translate(${position.x}px, ${position.y}px)`,
         }}
@@ -1111,7 +1111,7 @@ export function TopMenu({
       {(isMobile || hasDetectedTouch) &&
         ((renderableSettings.softButtons ?? true) || (renderableSettings.trackpad ?? true)) && (
         <motion.div
-          className="fixed bottom-4 left-4 z-40 flex flex-wrap gap-2 p-2 rounded-lg border bg-card/95 shadow-lg"
+          className="fixed bottom-4 left-4 z-40 flex flex-wrap gap-2 p-2 rounded-lg border bg-card shadow-lg"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
         >
