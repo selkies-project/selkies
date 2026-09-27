@@ -43,6 +43,7 @@ from enum import Enum
 import argparse
 import os
 import logging
+import math
 import re
 import zlib
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -1149,8 +1150,16 @@ for _setting_def in SETTING_DEFINITIONS:
 
 def _range_number(text: str) -> Union[int, float]:
     """Parse a range-setting number: int when integral, float otherwise, so a
-    fractional span bound stays representable."""
+    fractional span bound stays representable.
+
+    Raises:
+        ValueError: `text` is not a finite number (`inf`, `nan`, or a numeral
+            past the float range), which no span or rate can be and which the
+            settings JSON a page receives cannot carry.
+    """
     value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"{text!r} is not a finite number")
     return int(value) if value.is_integer() else value
 
 

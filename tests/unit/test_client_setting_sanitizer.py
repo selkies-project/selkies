@@ -9,10 +9,14 @@ enum outside the allowed stops falls back to the server's resolved value rather
 than to the first stop, so a stale stored choice cannot land a client on the
 cheapest or slowest option; a locked bool keeps the server's value; a missing
 value asks for the server's; and unparsable input (JSON infinity included)
-resolves to a default instead of raising through the settings path.
+resolves to a default instead of raising through the settings path. The bounds
+a client is clamped into come from the operator, whose range that is not a
+finite number is refused like any other malformed one: no rate can be infinite,
+and the settings JSON a page is sent could not carry it.
 
 Usage: python3 tests/unit/test_client_setting_sanitizer.py
 """
+import copy
 import logging
 import os
 import sys
@@ -21,7 +25,7 @@ import types
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(TESTS), "src"))
 
-from selkies.settings import sanitize_client_setting  # noqa: E402
+from selkies.settings import SETTING_DEFINITIONS, AppSettings, sanitize_client_setting  # noqa: E402
 
 passed = failed = 0
 logger = logging.getLogger("client-setting-sanitizer")
@@ -79,6 +83,31 @@ def ranges() -> None:
     check("no value asks for the built-in default", sanitize("framerate", None, src) == 60)
     check("a range pinned to one value answers with it",
           sanitize("framerate", None, server(framerate=(24, 24))) == 24)
+
+
+def operator_range(value: str) -> tuple:
+    """The span and initial value the server parses `SELKIES_FRAMERATE=value` into."""
+    definitions = copy.deepcopy(SETTING_DEFINITIONS)
+    saved = os.environ.get("SELKIES_FRAMERATE")
+    os.environ["SELKIES_FRAMERATE"] = value
+    try:
+        parsed = AppSettings(definitions)
+    finally:
+        if saved is None:
+            os.environ.pop("SELKIES_FRAMERATE", None)
+        else:
+            os.environ["SELKIES_FRAMERATE"] = saved
+    spec = next(d for d in definitions if d["name"] == "framerate")
+    return parsed.framerate, spec["meta"]["default_value"]
+
+
+def operator_ranges() -> None:
+    check("an operator's span and initial value parse from the environment",
+          operator_range("60,8-120") == ((8, 120), 60), operator_range("60,8-120"))
+    for value in ("inf", "nan", "-inf", "1e309", "8-" + "9" * 400):
+        got = operator_range(value)
+        check(f"a range of {value[:8]!r} is not a number and keeps the built-in span and value",
+              got == ((8, 240), 60), got)
 
 
 def enums() -> None:
@@ -140,6 +169,7 @@ def unknown() -> None:
 
 def main() -> bool:
     ranges()
+    operator_ranges()
     enums()
     numbers()
     bools()
