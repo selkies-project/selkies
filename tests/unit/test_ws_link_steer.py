@@ -6,7 +6,8 @@ delivered through that window less the queue's drain; it is held while that
 queue drains, then stepped back up while the round trip stays at its floor. A
 queue still building is read before it stands a whole window, and a gated
 display is measured by the frames still acked from before the gate shut. A
-round trip at its floor never moves the rate, one key frame's burst does not
+window a stall acked late backs off from what the path delivered just before.
+A round trip at its floor never moves the rate, one key frame's burst does not
 either, a window with nothing acked moves nothing, a page taking the display
 over is measured against its own path, and whatever else applies a bitrate
 applies the steered one.
@@ -72,10 +73,10 @@ def run(rtt_ms, start, seconds, delivered_kbps=None, acks=True, spike_at=None):
     return t
 
 
-t = run(20.0, 0.0, 10)
+t = run(20.0, 0.0, 10, delivered_kbps=3000.0)
 check("a round trip at its floor leaves the target alone", module.rates == [] and
       server._video_bitrate_kbps(state) == 4000, module.rates)
-t = run(20.0, t, 2, spike_at=t + 0.3)
+t = run(20.0, t, 2, delivered_kbps=3000.0, spike_at=t + 0.3)
 check("one key frame's burst inside a window moves nothing", module.rates == [], module.rates)
 t = run(320.0, t, 0.5, delivered_kbps=3000.0)
 check("the first queued window backs the target off to the headroom less the 300 ms drain",
@@ -101,7 +102,7 @@ check("a gated display with nothing acked counts as a queue of unknown depth", m
 
 state = fresh_state()
 module.rates.clear()
-t = run(20.0, 0.0, 5)
+t = run(20.0, 0.0, 5, delivered_kbps=3000.0)
 state["backpressure_enabled"] = False
 run(220.0, t, 0.5, delivered_kbps=3000.0)
 check("one whose frames from before the gate shut still arrive is measured by them",
@@ -109,7 +110,7 @@ check("one whose frames from before the gate shut still arrive is measured by th
 
 state = fresh_state()
 module.rates.clear()
-t = run(20.0, 0.0, 5)
+t = run(20.0, 0.0, 5, delivered_kbps=3000.0)
 start = t
 run(lambda at: 20.0 if at < start + 0.3 else 20.0 + (at - start - 0.3) * 1000.0, t, 0.5, delivered_kbps=3000.0)
 check("a queue still building reads as one before the whole window stands over the floor",
@@ -130,6 +131,13 @@ t = run(120.0, t, 0.5, delivered_kbps=3000.0)
 n = len(module.rates)
 run(20.0, t, 10, acks=False)
 check("windows with nothing acked move nothing", len(module.rates) == n, module.rates)
+
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5)
+run(320.0, t, 0.5, delivered_kbps=1000.0)
+check("a window whose frames a stall acked late and together backs off from what the path just "
+      "delivered, not from the stall's trickle", module.rates == [2200], module.rates)
 
 state = fresh_state()
 module.rates.clear()

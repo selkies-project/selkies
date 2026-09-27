@@ -395,7 +395,7 @@ def _forget_path(display_state: dict) -> None:
     minutes the floor remembers, and congestion control would back its rate
     off on every tick. The steered rate stays as the starting point.
     """
-    for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer'):
+    for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer', 'link_delivered_bps'):
         display_state.pop(key, None)
 
 
@@ -2650,7 +2650,12 @@ class DataStreamingServer(BaseStreamingService):
         way. The queue's depth is read from the newest round trip, which a
         growing queue has grown into. The window's delivery rate, the bytes of
         the frames it acked over the time they took to be acked, is the path's
-        capacity while that queue stands. Both go to the transports' shared
+        capacity while that queue stands, or the rate the window before it
+        delivered where that is higher: a path that stalls for a moment acks
+        a window's frames late and together, which reads as a queue over a
+        slow path, and a path carries at least what it just delivered unless
+        it is losing capacity, which the next window then shows. Both go to
+        the transports' shared
         `CongestionSteer`, which backs off on the first such window. A display
         the backpressure gate holds counts as queued, measured by the frames
         still acked from before the gate shut, or as a queue of unknown depth
@@ -2687,6 +2692,10 @@ class DataStreamingServer(BaseStreamingService):
             queued = (gated or least_ms - floor_ms > LINK_QUEUE_MS
                       or (rising and newest_ms > LINK_QUEUE_MS))
             queue_s = max(newest_ms, LINK_QUEUE_MS) / 1000.0 if queued else 0.0
+            previous_bps = display_state.get('link_delivered_bps', 0.0)
+            display_state['link_delivered_bps'] = delivered_bps
+            if queued:
+                delivered_bps = max(delivered_bps, previous_bps)
         lo_kbps, _ = app_settings.video_bitrate
         current = self._video_bitrate_kbps(display_state)
         steer = display_state.setdefault('link_steer', CongestionSteer())
