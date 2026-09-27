@@ -6,8 +6,8 @@ with a stub AudioWorkletProcessor, so priming, an underrun re-priming one
 packet deeper once a late packet ends it, the server's quiet mark playing a
 sound shorter than the priming depth at once and making the silence after it
 no underrun (also when the mark trails the queue running dry), the
-standing-depth trim, the clean-stretch decay, and the drop-oldest ceiling are
-pinned without a browser.
+standing-depth trim, the clean-stretch decay, the drop-oldest ceiling, and the
+depths sized from the frame duration are pinned without a browser.
 """
 import os
 import re
@@ -46,7 +46,7 @@ global.sampleRate = 48000;
 __WORKLET__
 
 const p = new cls({ processorOptions: { channels: 1 } });
-const PKT = 960;
+const PKT = 480;
 const feed = (v) => p.enqueue(new Float32Array(PKT).fill(v).buffer);
 const run = () => {
   const buf = new Float32Array(128);
@@ -96,14 +96,14 @@ out.markAfterDryKeepsDepth = (!p.underrunPending && p.target === quietTarget && 
 
 // Standing depth above target trims away and the deepened target decays
 // over proven slack, under arrival exactly rate-matched to consumption
-// (2 packets per 15 calls = 128 samples per call) -- with no audible
+// (4 packets per 15 calls = 128 samples per call) -- with no audible
 // probe: reclaiming latency must not itself conceal.
 for (let v = 1; v <= 8; v++) feed(v / 10);
 const before = p.audioBufferQueue.length;
 const underBefore = p.underrunSamples;
 for (let i = 0; i < 4600; i++) {
   run();
-  if (i % 15 === 7 || i % 15 === 14) feed(0.9);
+  if (i % 15 === 3 || i % 15 === 7 || i % 15 === 11 || i % 15 === 14) feed(0.9);
 }
 out.trimmed = (p.audioBufferQueue.length <= p.target + 1);
 out.trimStats = `before=${before} after=${p.audioBufferQueue.length} ` +
@@ -124,6 +124,18 @@ out.portFeeds = Math.abs(
   p.audioBufferQueue[p.audioBufferQueue.length - 1][0] - 0.7) < 1e-6;
 fakePort.onmessage({ data: { quiet: true } });
 out.portMarksQuiet = p.senderQuiet === true;
+
+// The depths follow the frame duration: the default 10 ms frame keeps two to
+// six packets under a ceiling of eight, 2.5 ms frames reach the same 50 ms of
+// slack in twenty-one, and 60 ms frames stop at two.
+const sized = (frames) => {
+  const q = new cls({ processorOptions: { channels: 1 } });
+  q.enqueue(new Float32Array(frames).buffer);
+  return [q.TARGET_MIN, q.TARGET_MAX, q.STEP, q.MAX_BUFFER_PACKETS].join(',');
+};
+out.sized10ms = sized(480) === '2,6,1,8';
+out.sized2_5ms = sized(120) === '2,21,2,29';
+out.sized60ms = sized(2880) === '2,2,1,3';
 
 console.log(JSON.stringify(out));
 """

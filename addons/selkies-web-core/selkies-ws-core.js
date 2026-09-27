@@ -423,6 +423,12 @@ let sharedStallNextRecoveryTime = 0;
 const SHARED_STALL_TIMEOUT_MS = 3000;
 const SHARED_STALL_MAX_BACKOFF_MS = 30000;
 const METRICS_INTERVAL_MS = 500;
+/**
+ * Worklet depth past which the page's own audio relay drops packets: the
+ * playback worklet's drop-oldest ceiling, so the relay never holds the queue
+ * under a target the worklet deepens to.
+ */
+const AUDIO_RELAY_CEILING_MS = 80;
 const BACKPRESSURE_INTERVAL_MS = 50;
 /**
  * How often an unchanged frame id is re-acked. The server reads a frame left
@@ -6378,10 +6384,11 @@ class WorkerWebSocket {
                 // smallest depth the delivery path has recently proven to
                 // hold, and a jittery one (a stall upstream, Gecko routing
                 // the socket through the page's thread) buys the depth it
-                // demonstrably needs.
-                this.TARGET_MIN = 2;
-                this.TARGET_MAX = 6;
-                this.MAX_BUFFER_PACKETS = 8;
+                // demonstrably needs. The depths are durations counted in
+                // packets of the frame duration the stream carries (see
+                // _learnFrame), so they mean the same at every setting.
+                this.frameSamples = 0;
+                this._learnFrame(480);
                 this.target = this.TARGET_MIN;
                 this.priming = true;
                 this.overCount = 0;
@@ -6415,9 +6422,10 @@ class WorkerWebSocket {
 
                 this.enqueue = (buffer) => {
                     const pcmData = new Float32Array(buffer);
+                    this._learnFrame(pcmData.length / this.channels);
                     if (this.underrunPending) {
                         this.underrunPending = false;
-                        this.target = Math.min(this.target + 1, this.TARGET_MAX);
+                        this.target = Math.min(this.target + this.STEP, this.TARGET_MAX);
                         this.underrunSamples += this.pendingUnderrunSamples;
                         this.pendingUnderrunSamples = 0;
                         this.cleanCount = 0;
@@ -6546,7 +6554,9 @@ class WorkerWebSocket {
                     // Decay only over proven slack: a whole packet must have
                     // stayed spare at every pull, else a shallower target is
                     // a periodic audible probe rather than a reclaim.
-                    if (this.target > this.TARGET_MIN && this.shiftSlackMin >= 2) this.target--;
+                    if (this.target > this.TARGET_MIN && this.shiftSlackMin >= 2 * this.STEP) {
+                        this.target = Math.max(this.TARGET_MIN, this.target - this.STEP);
+                    }
                     this.shiftSlackMin = Infinity;
                 }
 
@@ -6565,6 +6575,31 @@ class WorkerWebSocket {
                 if (this.senderQuiet) return;
                 this.underrunPending = true;
                 this.pendingUnderrunSamples += samples;
+            }
+
+            /**
+             * Sizes the depths for packets of \`frames\` samples per
+             * channel. A target of N packets starts output once N are
+             * queued, which leaves N - 1 packets of arrival slack behind the
+             * one playing, so the durations are slack: the target keeps its
+             * floor of two packets, deepens and decays in steps of 5 ms, and
+             * stops once 50 ms of slack is reached, with the drop-oldest
+             * ceiling 20 ms above that, each rounded up to whole packets --
+             * two, six, one, and eight at the default 10 ms frame.
+             * @param {number} frames Samples per channel in one packet.
+             */
+            _learnFrame(frames) {
+                if (!(frames > 0) || frames === this.frameSamples) return;
+                this.frameSamples = frames;
+                const ms = frames * 1000 / sampleRate;
+                const packets = (d) => Math.max(1, Math.ceil(d / ms - 1e-9));
+                this.TARGET_MIN = 2;
+                this.TARGET_MAX = 1 + packets(50);
+                this.STEP = packets(5);
+                this.MAX_BUFFER_PACKETS = this.TARGET_MAX + packets(20);
+                if (this.target !== undefined) {
+                    this.target = Math.min(Math.max(this.target, this.TARGET_MIN), this.TARGET_MAX);
+                }
             }
         }
         registerProcessor('audio-frame-processor', AudioFrameProcessor);
@@ -6637,7 +6672,7 @@ class WorkerWebSocket {
         } else if (type === 'decodedAudioData') {
           const pcmBufferFromWorker = event.data.pcmBuffer;
           if (pcmBufferFromWorker && audioWorkletProcessorPort && audioContext && audioContext.state === 'running') {
-            if (window.currentAudioBufferSize < 10) {
+            if (window.currentAudioBufferDuration < AUDIO_RELAY_CEILING_MS) {
               audioWorkletProcessorPort.postMessage({
                 audioData: pcmBufferFromWorker
               }, [pcmBufferFromWorker]);
@@ -7064,7 +7099,7 @@ class WorkerWebSocket {
             const opusFrames = extractOpusFrames(arrayBuffer);
             for (const opusDataArrayBuffer of opusFrames) {
               if (opusDataArrayBuffer.byteLength === 0) continue;
-              if (!isSharedMode && window.currentAudioBufferSize >= 5) {
+              if (!isSharedMode && window.currentAudioBufferDuration >= AUDIO_RELAY_CEILING_MS) {
                 window.currentAudioDropped++;
                 break;
               }
@@ -7083,7 +7118,7 @@ class WorkerWebSocket {
                 const opusFrames = extractOpusFrames(arrayBuffer);
                 for (const opusDataArrayBuffer of opusFrames) {
                   if (opusDataArrayBuffer.byteLength === 0) continue;
-                  if (!isSharedMode && window.currentAudioBufferSize >= 5) { window.currentAudioDropped++; break; }
+                  if (!isSharedMode && window.currentAudioBufferDuration >= AUDIO_RELAY_CEILING_MS) { window.currentAudioDropped++; break; }
                   audioDecoderWorker.postMessage({
                     type: 'decode',
                     data: { opusBuffer: opusDataArrayBuffer, timestamp: performance.now() * 1000 }
