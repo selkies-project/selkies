@@ -746,8 +746,9 @@ async def ensure_capture_sink(audio_device_name: Optional[str],
 def opus_capture_settings(audio_device_name: Optional[str], channels: int, bitrate: int,
                           frame_ms: float) -> Any:
     """pcmflux settings for an Opus capture of the session's sink: 48 kHz,
-    VBR, no silence gate, and the sound server's fragments kept no larger
-    than one frame, so the frame duration is the latency floor."""
+    VBR, digital silence gated so it is sent as nothing, and the sound
+    server's fragments kept no larger than one frame, so the frame duration
+    is the latency floor."""
     from pcmflux import AudioCaptureSettings
     capture = AudioCaptureSettings()
     capture.device_name = audio_device_name.encode("utf-8") if audio_device_name else None
