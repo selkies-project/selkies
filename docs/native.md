@@ -17,9 +17,9 @@ Installs a private Python environment at `/opt/selkies`, puts `selkies`, `selkie
 
 ```bash
 # Ubuntu and Debian. The suffix names the distribution the package was built in
-# (ubuntu24.04, ubuntu26.04, bookworm, trixie); this reads yours from os-release
+# (ubuntu24.04, ubuntu26.04, debianbookworm, debiantrixie); this reads yours from os-release
 . /etc/os-release
-DISTRO="$([ "${ID}" = "ubuntu" ] && echo "ubuntu${VERSION_ID}" || echo "${VERSION_CODENAME}")"
+DISTRO="${ID}$([ "${ID}" = "ubuntu" ] && echo "${VERSION_ID}" || echo "${VERSION_CODENAME}")"
 PKG="selkies-${SELKIES_VERSION}-${DISTRO}-$(dpkg --print-architecture).deb"
 curl -O -fsSL "https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/${PKG}"
 sudo apt-get install -y "./${PKG}"

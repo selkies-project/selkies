@@ -76,13 +76,13 @@ jobs:
             image: ubuntu:26.04
             script: infra/packaging/deb.sh
             install: apt-get update -qq && apt-get install -y -qq /out/*.deb
-          - name: deb-bookworm
-            tag: bookworm
+          - name: deb-debianbookworm
+            tag: debianbookworm
             image: debian:bookworm
             script: infra/packaging/deb.sh
             install: apt-get update -qq && apt-get install -y -qq /out/*.deb
-          - name: deb-trixie
-            tag: trixie
+          - name: deb-debiantrixie
+            tag: debiantrixie
             image: debian:trixie
             script: infra/packaging/deb.sh
             install: apt-get update -qq && apt-get install -y -qq /out/*.deb
