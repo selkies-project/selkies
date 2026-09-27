@@ -2,9 +2,12 @@
 """The playback worklet's adaptive jitter depth, driven as plain logic.
 
 AudioFrameProcessor is extracted from the websockets core and run under node
-with a stub AudioWorkletProcessor, so priming, underrun re-priming one packet
-deeper, the standing-depth trim, the clean-stretch decay, and the drop-oldest
-ceiling are pinned without a browser.
+with a stub AudioWorkletProcessor, so priming, an underrun re-priming one
+packet deeper once a late packet ends it, the server's quiet mark playing a
+sound shorter than the priming depth at once and making the silence after it
+no underrun (also when the mark trails the queue running dry), the
+standing-depth trim, the clean-stretch decay, and the drop-oldest ceiling are
+pinned without a browser.
 """
 import os
 import re
@@ -59,14 +62,37 @@ out.onePacketHolds = silent(run());
 feed(0.5);
 out.minTargetPlays = !silent(run());
 
-// Drain to a mid-stream underrun: the target must deepen by one and re-prime.
+// Drain to a mid-stream underrun: the late packet that ends it deepens the
+// target by one, and output re-primes at the new depth.
 for (let i = 0; i < 30; i++) run();
 out.underrunSilent = silent(run());
-out.deepened = (p.target === 3);
-feed(0.25); feed(0.25);
+out.judgedOnArrival = (p.target === 2 && p.underrunPending);
+feed(0.25);
+out.deepened = (p.target === 3 && p.underrunSamples > 0);
+feed(0.25);
 out.reprimeHolds = silent(run());
 feed(0.25);
 out.reprimePlays = !silent(run());
+
+// The server's quiet mark: a one-packet sound, short of the priming depth,
+// plays as soon as the mark says nothing more is coming, and running dry
+// after it neither deepens the target nor counts as concealment; nor does
+// running dry just before a mark that trails the last packet.
+p.port.onmessage({ data: { quiet: true } });
+for (let i = 0; i < 40; i++) run();
+const quietTarget = p.target, quietUnder = p.underrunSamples;
+feed(0.3);
+out.shortSoundHeld = silent(run());
+p.port.onmessage({ data: { quiet: true } });
+out.quietPlaysShortSound = !silent(run());
+for (let i = 0; i < 40; i++) run();
+out.quietKeepsDepth = (p.priming && p.target === quietTarget && p.underrunSamples === quietUnder);
+for (let i = 0; i < quietTarget; i++) feed(0.3);
+out.nextSoundPrimesAgain = p.senderQuiet === false && !silent(run());
+for (let i = 0; i < 40; i++) run();
+out.dryBeforeMarkPending = p.underrunPending === true;
+p.port.onmessage({ data: { quiet: true } });
+out.markAfterDryKeepsDepth = (!p.underrunPending && p.target === quietTarget && p.underrunSamples === quietUnder);
 
 // Standing depth above target trims away and the deepened target decays
 // over proven slack, under arrival exactly rate-matched to consumption
@@ -90,12 +116,14 @@ for (let v = 0; v < 12; v++) feed(v);
 out.ringCapped = (p.audioBufferQueue.length === p.MAX_BUFFER_PACKETS);
 out.droppedCounted = (p.droppedOldest > 0);
 
-// The direct port line feeds the same queue.
+// The direct port line feeds the same queue and carries the quiet mark.
 const fakePort = { onmessage: null };
 p.port.onmessage({ data: { type: 'pcmPort', port: fakePort } });
 fakePort.onmessage({ data: { audioData: new Float32Array(PKT).fill(0.7).buffer } });
 out.portFeeds = Math.abs(
   p.audioBufferQueue[p.audioBufferQueue.length - 1][0] - 0.7) < 1e-6;
+fakePort.onmessage({ data: { quiet: true } });
+out.portMarksQuiet = p.senderQuiet === true;
 
 console.log(JSON.stringify(out));
 """
