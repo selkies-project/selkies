@@ -607,6 +607,24 @@ def _carry_destination_mode(staging: str, dest: str) -> None:
         logger.debug(f"Could not carry the mode of {dest} onto the staged upload: {e}")
 
 
+def _finalize_upload(staging: str, dest: str) -> None:
+    """Rename a complete staged upload onto ``dest``, carrying its mode over.
+
+    Raises:
+        OSError: The rename failed; the staged file is left for the caller.
+    """
+    _carry_destination_mode(staging, dest)
+    os.replace(staging, dest)
+
+
+def _remove_quietly(path: str) -> None:
+    """Remove ``path``, ignoring a file that is already gone or cannot go."""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _ipv6_loopback_redirect(request: web.Request, path: str) -> Optional[str]:
     """Where to serve a page that arrived on the IPv6 loopback from, or ``None``.
 
@@ -2218,7 +2236,8 @@ class CentralizedStreamServer:
         return UplinkGauge(entries) if entries else None
 
     async def _stream_upload_body(self, request: web.Request, path: str, append: bool) -> int:
-        """Stream a request body to ``path`` with executor-thread writes.
+        """Stream a request body to ``path``, opening, writing, and closing it
+        on the executor.
 
         Creates/truncates the file when ``append`` is False, appends when True;
         O_NOFOLLOW blocks a planted symlink either way. Enforces the declared
@@ -2253,8 +2272,7 @@ class CentralizedStreamServer:
             if (declared or 0) >= TRANSFER_MIN_GAUGED_BYTES
             else None)
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_TRUNC)
-        fd = os.open(path, flags, 0o644)
-        fh = os.fdopen(fd, "wb")
+        fh = await loop.run_in_executor(None, lambda: os.fdopen(os.open(path, flags, 0o644), "wb"))
         written = 0
         try:
             while True:
@@ -2279,30 +2297,29 @@ class CentralizedStreamServer:
             await loop.run_in_executor(None, fh.close)
         except Exception:
             try:
-                fh.close()
+                await loop.run_in_executor(None, fh.close)
             except Exception:
                 pass
             raise
         return written
 
     def _discard_chunked_upload(self, dest: str, part_path: str) -> None:
-        """Drop a chunked transfer's tracking entry and its on-disk .part file."""
+        """Drop a chunked transfer's tracking entry and its on-disk .part file.
+
+        The entry and the file it names go together with nothing awaited
+        between, so a restart on the same path never has the .part it just
+        created removed under it; the removal blocks the loop the once a
+        discard costs, which a transfer's slices do not.
+        """
         self._chunked_uploads.pop(dest, None)
-        try:
-            os.remove(part_path)
-        except OSError:
-            pass
+        _remove_quietly(part_path)
 
     def _expire_stale_chunked_uploads(self) -> None:
         """Reap transfers idle past UPLOAD_PART_TTL_SECONDS (entry + .part file)."""
         now = time.monotonic()
         for key in [k for k, s in self._chunked_uploads.items()
                     if now - s["ts"] > UPLOAD_PART_TTL_SECONDS and not s["busy"]]:
-            stale = self._chunked_uploads.pop(key)
-            try:
-                os.remove(stale["part"])
-            except OSError:
-                pass
+            self._discard_chunked_upload(key, self._chunked_uploads[key]["part"])
             logger.debug(f"Expired stale chunked upload: {key}")
 
     async def handle_upload(self, request: web.Request) -> web.Response:
@@ -2311,10 +2328,17 @@ class CentralizedStreamServer:
         Available in every streaming mode and not bounded by the data-channel /
         WebSocket per-message size, so it saturates the link where the per-chunk
         SCTP path cannot. The destination path (relative to the file-manager
-        root) arrives URL-encoded in the X-Upload-Path header; the body streams
-        straight to disk on the executor, so the event loop keeps serving the
-        stream during the transfer. Path safety mirrors the data-channel path:
-        no traversal outside the root, and O_NOFOLLOW blocks a planted symlink.
+        root) arrives URL-encoded in the X-Upload-Path header. The body streams
+        to disk on the executor, and so do the directory creation, the staging
+        open, and the plain path's rename onto the destination, since a network
+        filesystem takes tens of milliseconds over each and a directory of
+        small files pays it once per file, which the event loop would otherwise
+        take from the stream it serves. The chunked path's staging is one file
+        per destination, so its finalize and its discards stay synchronous to
+        keep the rename and the removal atomic against a restart on the same
+        path; each is a once-per-transfer cost, not a per-slice one. Path safety
+        mirrors the data-channel path: no traversal outside the root, and
+        O_NOFOLLOW blocks a planted symlink.
 
         Two request shapes share the endpoint:
 
@@ -2365,8 +2389,8 @@ class CentralizedStreamServer:
             return failed("invalid upload path")
         dest = os.path.join(root, *parts)
         name = "/".join(parts)
-        real_root = os.path.realpath(root)
-        parent = os.path.realpath(os.path.dirname(dest))
+        real_root, parent = await asyncio.to_thread(
+            lambda: (os.path.realpath(root), os.path.realpath(os.path.dirname(dest))))
         try:
             within = os.path.commonpath([real_root, parent]) == real_root
         except ValueError:
@@ -2374,7 +2398,7 @@ class CentralizedStreamServer:
         if not within:
             return failed("path escape rejected")
         try:
-            os.makedirs(parent, exist_ok=True)
+            await asyncio.to_thread(os.makedirs, parent, exist_ok=True)
         except OSError as e:
             return failed(f"mkdir failed: {e}", 500)
 
@@ -2388,19 +2412,12 @@ class CentralizedStreamServer:
             try:
                 written = await self._stream_upload_body(request, staging, append=False)
             except Exception as e:
-                try:
-                    os.remove(staging)
-                except OSError:
-                    pass
+                await asyncio.to_thread(_remove_quietly, staging)
                 return failed(str(e))
-            _carry_destination_mode(staging, dest)
             try:
-                os.replace(staging, dest)
+                await asyncio.to_thread(_finalize_upload, staging, dest)
             except OSError as e:
-                try:
-                    os.remove(staging)
-                except OSError:
-                    pass
+                await asyncio.to_thread(_remove_quietly, staging)
                 return failed(f"finalize failed: {e}", 500)
             logger.info(f"HTTP upload finished: {dest} ({written} bytes)")
             audit.emit("file.upload.end", filename=name, size_bytes=written)
@@ -2444,6 +2461,8 @@ class CentralizedStreamServer:
                 self._discard_chunked_upload(dest, part_path)
                 return failed(f"chunk sequence mismatch at offset {offset}; transfer discarded", 409)
 
+        # Claimed before the body's awaits so a slice for this path that arrives
+        # meanwhile is refused, not interleaved onto the shared .part.
         state["busy"] = True
         try:
             written = await self._stream_upload_body(request, part_path, append=offset > 0)
@@ -2461,9 +2480,10 @@ class CentralizedStreamServer:
         if total >= 0 and received != total:
             self._discard_chunked_upload(dest, part_path)
             return failed(f"size mismatch: received {received}, expected {total}")
-        _carry_destination_mode(part_path, dest)
+        # Synchronous, like the removal: the staged path is one per destination,
+        # so the rename onto it stays atomic against a restart with no await between.
         try:
-            os.replace(part_path, dest)
+            _finalize_upload(part_path, dest)
         except OSError as e:
             self._discard_chunked_upload(dest, part_path)
             return failed(f"finalize failed: {e}", 500)
