@@ -70,8 +70,20 @@ if [ "${wayland}" != "true" ] && [ "${wayland}" != "1" ]; then
   until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done
   echo 'X Server is ready'
   # Preset the resolution, which dynamic resizing (SELKIES_ENABLE_RESIZE, on by
-  # default) replaces with the client window's as soon as a client connects
-  selkies-resize 1920x1080
+  # default) replaces with the client window's as soon as a client connects: the
+  # size a manual resolution locks the stream to, as settings.py resolves it from
+  # what selkies is started with below, else DISPLAY_SIZEW by DISPLAY_SIZEH. A
+  # display already that size keeps the mode its X server came up in.
+  size="$(python3 - "$@" 2>/dev/null <<'EOF'
+from selkies.settings import settings
+if settings.manual_resolution[0]:
+    print(f"{settings.manual_width}x{settings.manual_height}")
+EOF
+)" || size=""
+  size="${size:-${DISPLAY_SIZEW:-1920}x${DISPLAY_SIZEH:-1080}}"
+  if [ "$(xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2; exit}')" != "${size}" ]; then
+    selkies-resize "${size}"
+  fi
 fi
 
 # The published port is the container's boundary, so listen on every interface
