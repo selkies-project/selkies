@@ -216,6 +216,16 @@ async def scenario(res: H.Results, log: LogCapture) -> None:
               ok and len(server.log) == calls_before + 1 and len(server.modules) == 1, server.log[calls_before:])
     res.check("capture sink: default name when unset",
               await ctl.ensure_capture_sink(None) and len(server.modules) == 1, server.modules)
+    channels = AC.capture_channels
+    try:
+        AC.capture_channels = lambda: 6
+        await ctl.ensure_capture_sink("surround.monitor")
+        res.check("capture sink: a 5.1 session creates it with the positions pcmflux records",
+                  "module-null-sink sink_name=surround rate=48000 channels=6 channel_map="
+                  "front-left,front-right,front-center,lfe,rear-left,rear-right" in server.modules.values(),
+                  server.modules)
+    finally:
+        AC.capture_channels = channels
     res.check("backend reported as pulsectl", ctl.backend == "pulsectl", ctl.backend)
     await ctl.aclose()
     res.check("aclose closes the client", StubPulse.instances[-1].closed, "")

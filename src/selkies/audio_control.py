@@ -42,6 +42,8 @@ except (ImportError, OSError):
     pulsectl_asyncio = None
     PULSE_AVAILABLE = False
 
+from .settings import settings as app_settings
+
 logger = logging.getLogger("audio")
 
 T = TypeVar("T")
@@ -56,6 +58,14 @@ PIPEWIRE_NULL_MONITOR = "auto_null.monitor"
 # PipeWire prepends "output." to the name of a virtual source.
 VIRTUAL_MIC_SOURCE_NAMES: Tuple[str, ...] = (VIRTUAL_MIC_SOURCE, f"output.{VIRTUAL_MIC_SOURCE}")
 PCMFLUX_APP_NAME = "pcmflux"
+# The speaker positions pcmflux opens a surround capture with, which the sink
+# it records is given too, so the sound server has nothing to remix between
+# them: applications see a 5.1 or 7.1 device rather than a stereo one whose
+# two channels the capture would only spread over six or eight.
+SURROUND_SINK_MAPS: Dict[int, str] = {
+    6: "front-left,front-right,front-center,lfe,rear-left,rear-right",
+    8: "front-left,front-right,front-center,lfe,rear-left,rear-right,side-left,side-right",
+}
 
 _fallback_announced = False
 
@@ -89,6 +99,15 @@ def capture_sink_name(audio_device_name: Optional[str]) -> str:
     """The sink whose monitor `audio_device_name` names; ``output`` when unset."""
     name = (audio_device_name or "").strip().split(".monitor")[0]
     return name or DEFAULT_CAPTURE_SINK
+
+
+def capture_channels() -> int:
+    """The session's capture channel count (`audio_channels`), which the
+    capture sink is created with; 2 when unset or unreadable."""
+    try:
+        return int(app_settings.audio_channels)
+    except (AttributeError, TypeError, ValueError):
+        return 2
 
 
 def _retrieve(task: "asyncio.Future[Any]") -> None:
@@ -534,12 +553,21 @@ class AudioControl:
                 return None
             await asyncio.sleep(0.1)
 
-    async def ensure_null_sink(self, name: str) -> bool:
-        """Make sure a null sink called `name` exists, loading it if needed."""
+    async def ensure_null_sink(self, name: str, channels: int = 2) -> bool:
+        """Make sure a null sink called `name` exists, loading it if needed.
+
+        A surround `channels` count creates it at 48 kHz with that many
+        channels in the positions of `SURROUND_SINK_MAPS`; any other count
+        leaves the server's default layout. An existing sink is left as it
+        is, since recreating it would move the streams playing into it.
+        """
         if any(s.name == name for s in await self.sinks()):
             return True
         logger.info(f"Sink '{name}' not found. Creating it...")
-        if await self.load_module("module-null-sink", f"sink_name={name}") is None:
+        args = f"sink_name={name}"
+        if channels in SURROUND_SINK_MAPS:
+            args += f" rate=48000 channels={channels} channel_map={SURROUND_SINK_MAPS[channels]}"
+        if await self.load_module("module-null-sink", args) is None:
             return False
         if await self._wait_for(self.sinks, [name]) is not None:
             logger.info(f"Created sink '{name}'.")
@@ -555,7 +583,9 @@ class AudioControl:
         configured audio device is missing and pcmflux gives up after its retry
         budget. The microphone control plane creates the same sink, but only
         once a client sends mic data, which server-to-client audio must not
-        wait for.
+        wait for. A surround session creates it with its channel count
+        (`capture_channels`), so the capture records the channels applications
+        play rather than an upmix of stereo.
 
         Args:
             audio_device_name: The configured capture device (a ``.monitor``
@@ -567,7 +597,7 @@ class AudioControl:
             means the capture will fail for the usual reasons, so callers
             proceed and let pcmflux report.
         """
-        return await self.ensure_null_sink(capture_sink_name(audio_device_name))
+        return await self.ensure_null_sink(capture_sink_name(audio_device_name), capture_channels())
 
     async def resolve_capture_source(self, audio_device_name: Optional[str]) -> Optional[str]:
         """The source to capture: the configured one if it exists, else a monitor.
@@ -694,8 +724,8 @@ class AudioControl:
             not be verified.
         """
         output_sink = capture_sink_name(audio_device_name)
-        for sink_name in (VIRTUAL_MIC_SINK, output_sink):
-            await self.ensure_null_sink(sink_name)
+        await self.ensure_null_sink(VIRTUAL_MIC_SINK)
+        await self.ensure_null_sink(output_sink, capture_channels())
         if await self.set_default_sink(output_sink):
             logger.debug(f"Set system default sink to '{output_sink}'.")
 
