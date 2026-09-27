@@ -1734,14 +1734,29 @@ def _process_environ(pid: int) -> Dict[str, str]:
     return env
 
 
-async def _pids_of(binary: str) -> List[int]:
-    """PIDs of the processes running ``binary``, in PID order."""
-    if not which("pgrep"):
+def _display_number(name: Optional[str]) -> Optional[str]:
+    """The number a local X display name carries: ``:20``, ``:20.0``, and
+    ``unix:20`` are all 20; None for any other name."""
+    match = re.match(r"(?:unix)?:(\d+)", name or "")
+    return match.group(1) if match else None
+
+
+async def _pids_on_display(binary: str) -> List[int]:
+    """PIDs running ``binary`` on this process's X display, in PID order.
+
+    A process belongs to a display by the DISPLAY it was started with, which is
+    the only way xsettingsd or a session learns its display: one serving another
+    display, a second session of the same user or a test server, is never acted
+    on for this one.
+    """
+    display = _display_number(os.environ.get("DISPLAY"))
+    if display is None or not which("pgrep"):
         return []
     proc = await subprocess.create_subprocess_exec(
         "pgrep", "-x", binary, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     stdout, _ = await _communicate_or_kill(proc)
-    return [int(p) for p in stdout.split() if p.isdigit()]
+    return [pid for pid in (int(p) for p in stdout.split() if p.isdigit())
+            if _display_number(_process_environ(pid).get("DISPLAY")) == display]
 
 
 async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
@@ -1750,10 +1765,10 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
     Writes ``Xft.dpi`` into ~/.Xresources and merges it into the running
     resource database — merged, never loaded wholesale, so the database keeps
     every resource the file does not define — then rewrites ~/.xsettingsd
-    with the matching Xft/DPI value (in 1024ths) and SIGHUPs every running
-    xsettingsd: the one serving this display is not necessarily the oldest,
-    and a daemon that is not ours only re-reads a configuration this write
-    did not touch.
+    with the matching Xft/DPI value (in 1024ths) and SIGHUPs every xsettingsd
+    serving this display (`_pids_on_display`): the one serving it is not
+    necessarily the oldest, and one serving another display from the same
+    home would re-read this file and hand that display this density.
 
     Returns:
         True when the xrdb merge succeeded.
@@ -1800,30 +1815,20 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
         )
         logger.debug(f"Wrote font and DPI settings to {xsettingsd_config_path}.")
 
-        if not which("pgrep"):
-            logger.debug("pgrep not found. Skipping xsettingsd reload.")
+        pids = await _pids_on_display("xsettingsd")
+        signaled = []
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGHUP)
+                signaled.append(str(pid))
+            except OSError as e:
+                logger.debug(f"Failed to send SIGHUP to xsettingsd process {pid}: {e}")
+        if signaled:
+            logger.debug(f"Sent SIGHUP to xsettingsd to reload config ({', '.join(signaled)}).")
+        elif pids:
+            logger.warning("No xsettingsd process could be signaled to reload.")
         else:
-            pgrep_proc = await subprocess.create_subprocess_exec(
-                "pgrep", "xsettingsd",
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            pgrep_stdout, _ = await _communicate_or_kill(pgrep_proc)
-
-            if pgrep_proc.returncode == 0:
-                signaled = []
-                for line in pgrep_stdout.decode().split():
-                    try:
-                        os.kill(int(line), signal.SIGHUP)
-                        signaled.append(line)
-                    except (OSError, ValueError) as e:
-                        logger.debug(f"Failed to send SIGHUP to xsettingsd process {line}: {e}")
-                if signaled:
-                    logger.debug(
-                        f"Sent SIGHUP to xsettingsd to reload config ({', '.join(signaled)}).")
-                else:
-                    logger.warning("No xsettingsd process could be signaled to reload.")
-            else:
-                logger.debug("xsettingsd process not found. Skipping reload.")
+            logger.debug("No xsettingsd serves this display. Skipping reload.")
         
         return xrdb_success
 
@@ -1833,7 +1838,7 @@ async def _run_xrdb(dpi_value: int, logger: logging.Logger) -> bool:
 
 
 async def _get_xfce_session_env(logger: logging.Logger) -> Optional[Dict[str, str]]:
-    """Environment of the running xfce4-session process.
+    """Environment of the xfce4-session running on this display.
 
     xfconf-query must talk to the session's own D-Bus bus, so the variables
     are lifted from the process's ``/proc/pid/environ``.
@@ -1842,7 +1847,7 @@ async def _get_xfce_session_env(logger: logging.Logger) -> Optional[Dict[str, st
         The environment mapping, or None when the session (or its
         DBUS_SESSION_BUS_ADDRESS) cannot be found.
     """
-    pids = await _pids_of("xfce4-session")
+    pids = await _pids_on_display("xfce4-session")
     env = _process_environ(pids[0]) if pids else {}
     if "DBUS_SESSION_BUS_ADDRESS" not in env:
         logger.debug("No running xfce4-session with a session bus address.")

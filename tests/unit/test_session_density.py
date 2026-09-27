@@ -11,6 +11,7 @@ processes.
 import asyncio
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,24 +26,35 @@ from selkies import display_utils as DU  # noqa: E402
 
 res = H.Results("session-density")
 
-sleeper = subprocess.Popen(["sleep", "30"], env={"PATH": os.environ.get("PATH", ""),
-                                                 "SELKIES_PROBE": "density"})
+res.check("a display's number is read from every local form of its name",
+          [DU._display_number(n) for n in (":20", ":20.0", "unix:20", "localhost:20", "", None)]
+          == ["20", "20", "20", None, None, None])
+elsewhere, here = (subprocess.Popen(["sleep", "30"], env={"PATH": os.environ.get("PATH", ""),
+                                                          "SELKIES_PROBE": "density", "DISPLAY": d})
+                   for d in (":97", ":98.0"))
+suite_display = os.environ.get("DISPLAY")
 try:
     time.sleep(0.2)
-    env = DU._process_environ(sleeper.pid)
+    env = DU._process_environ(here.pid)
     res.check("a process's environment is read back from /proc",
               env.get("SELKIES_PROBE") == "density", str(env))
-    pids = asyncio.run(DU._pids_of("sleep"))
-    res.check("the processes running a binary are found by name",
-              sleeper.pid in pids, str(pids))
+    os.environ["DISPLAY"] = "unix:98"
+    pids = asyncio.run(DU._pids_on_display("sleep"))
+    res.check("the processes running a binary are found on this display alone",
+              here.pid in pids and elsewhere.pid not in pids, str(pids))
+    res.check("a binary nothing is running has no pids",
+              asyncio.run(DU._pids_on_display("selkies-no-such-binary")) == [])
 finally:
-    sleeper.kill()
-    sleeper.wait()
+    if suite_display is None:
+        os.environ.pop("DISPLAY", None)
+    else:
+        os.environ["DISPLAY"] = suite_display
+    for sleeper in (elsewhere, here):
+        sleeper.kill()
+        sleeper.wait()
 
 res.check("a process that is gone has no environment to read",
-          DU._process_environ(sleeper.pid) == {})
-res.check("a binary nothing is running has no pids",
-          asyncio.run(DU._pids_of("selkies-no-such-binary")) == [])
+          DU._process_environ(here.pid) == {})
 
 res.check("no density is reported before one is applied", DU.applied_dpi() is None)
 DU._APPLIED_DPI = 192
@@ -78,6 +90,34 @@ try:
                        env=dict(os.environ), check=True)
         res.check("the server's resource database is read over the files",
                   DU.desktop_dpi() == 120, DU.desktop_dpi())
+
+        # Stand-ins named xsettingsd, one serving this display and one another
+        # display from this same home, which a SIGHUP ends.
+        standin = [sys.executable, "-c", "import ctypes, time; "
+                   "ctypes.CDLL(None).prctl(15, b'xsettingsd', 0, 0, 0); time.sleep(30)"]
+        other = f":{int(display.lstrip(':')) + 1}"
+        daemons = {d: subprocess.Popen(standin, env={"PATH": os.environ.get("PATH", ""), "DISPLAY": d})
+                   for d in (display, other)}
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline and not all(
+                    open(f"/proc/{p.pid}/comm").read().strip() == "xsettingsd" for p in daemons.values()):
+                time.sleep(0.05)
+            merged = asyncio.run(DU._run_xrdb(144, DU.logger_app_resize))
+            time.sleep(0.3)
+            with open(os.path.join(home, ".xsettingsd")) as f:
+                served = f.read()
+            res.check("a density reaches the resource database and the xsettingsd file",
+                      merged and DU.desktop_dpi() == 144 and "Xft/DPI 147456" in served, served)
+            res.check("only the xsettingsd serving this display is told to reload",
+                      daemons[display].poll() == -signal.SIGHUP and daemons[other].poll() is None,
+                      {d: p.poll() for d, p in daemons.items()})
+        finally:
+            for daemon in daemons.values():
+                daemon.kill()
+                daemon.wait()
+            subprocess.run(["xrdb", "-merge", "-"], input="Xft.dpi: 120\n", text=True,
+                           env=dict(os.environ), check=True)
         lxqt = os.path.join(home, "lxqt.conf")
         with open(lxqt, "w") as f:
             f.write('[General]\nicon_theme=x\n[Qt]\nfont="Sans,-1,20,5,50,0,0,0,0,0"\n')
