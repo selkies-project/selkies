@@ -9,7 +9,10 @@
  *
  * `navigator.getGamepads` is wrapped so the synthetic pad occupies the first
  * free slot beside the physical pads, and `gamepadconnected` fires on the
- * first touch after the overlay is shown. The page drives it over
+ * first touch after the overlay is shown. Every touch event that changes the
+ * pad dispatches one `touchgamepadinput` event on `window` once its handler
+ * is done, so a poller can read the change then rather than on its next
+ * tick; the standard API has no event for input. The page drives it over
  * `window.postMessage`: `TOUCH_GAMEPAD_SETUP` (`targetDivId`, optional
  * `initialProfileName`, `visible`) names the host element and may show the
  * overlay; `TOUCH_GAMEPAD_VISIBILITY` (`visible`, optional `targetDivId`)
@@ -146,6 +149,22 @@
         window.dispatchEvent(event);
     }
 
+    let inputChangePending = false;
+
+    /**
+     * Announces a state change as `touchgamepadinput`, once per microtask
+     * checkpoint: a stick moves two axes in one touch event, and one read
+     * after the handler sees both.
+     */
+    function announceInputChange() {
+        if (inputChangePending) return;
+        inputChangePending = true;
+        queueMicrotask(() => {
+            inputChangePending = false;
+            if (gamepadState.connected) dispatchGamepadEvent('touchgamepadinput');
+        });
+    }
+
     /**
      * Sets a button's state; an analog trigger's `pressed` follows its value
      * past 0.05. The first change while visible connects the pad.
@@ -173,6 +192,7 @@
             buttonState.value = newValue;
             gamepadState.timestamp = Date.now();
             if (isGamepadVisible && !gamepadState.connected) connectGamepad();
+            announceInputChange();
         }
     }
 
@@ -184,6 +204,7 @@
             gamepadState.axes[index] = clampedValue;
             gamepadState.timestamp = Date.now();
             if (isGamepadVisible && !gamepadState.connected) connectGamepad();
+            announceInputChange();
         }
     }
 

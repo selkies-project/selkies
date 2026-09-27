@@ -6,6 +6,10 @@
 /**
  * Gamepad polling for the streaming cores: reads `navigator.getGamepads()` on
  * a fixed interval and reports button and axis changes in the standard layout.
+ * The interval is the rate Chromium samples pads at, so a change waits on the
+ * page no longer than it already waited in the browser. The on-screen touch
+ * gamepad announces its own changes (`touchgamepadinput`), and is read the
+ * moment it does rather than on the next tick.
  *
  * Pads the browser could not map to the standard layout are remapped through
  * the per-platform profile database that gendb.js generates: raw button and
@@ -34,8 +38,8 @@ const STANDARD_LAYOUT = {
 };
 
 /*eslint no-unused-vars: ["error", { "vars": "local" }]*/
-/** Poll interval in milliseconds. */
-export const GP_TIMEOUT = 16;
+/** Poll interval in milliseconds: Chromium samples pads every 4 ms. */
+export const GP_TIMEOUT = 4;
 const MAX_GAMEPADS = 4;
 
 /** The remap database platform this browser's pads are looked up under. */
@@ -76,6 +80,8 @@ export class GamepadManager {
         this.interval = setInterval(() => {
             this._poll();
         }, GP_TIMEOUT);
+        this._onTouchInput = () => this._poll();
+        window.addEventListener('touchgamepadinput', this._onTouchInput);
     }
 
     /** Resumes polling. */
@@ -293,6 +299,7 @@ export class GamepadManager {
     /** Stops polling and forgets every pad. */
     destroy() {
         clearInterval(this.interval);
+        window.removeEventListener('touchgamepadinput', this._onTouchInput);
         this.state = {};
         console.log("GamepadManager destroyed.");
     }

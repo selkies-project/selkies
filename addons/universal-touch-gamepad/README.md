@@ -110,6 +110,7 @@ Use `window.postMessage` to communicate with the library.
 *   **Settings Icon (⚙️):** When the gamepad is visible, a settings icon typically appears at the top-right corner. Tapping this icon opens a profile selector.
 *   **Profile Selection:** Users can choose from available controller layouts (e.g., "8-bit", "Modern"). The selected profile is saved in their browser's `localStorage` and will be loaded automatically on subsequent visits.
 *   **Gamepad Simulation:** The `universalTouchGamepad.js` library overrides the standard `navigator.getGamepads()` browser function. When the touch overlay is active and interacted with, it populates one of the gamepad slots with a virtual "Universal Touch Gamepad". This virtual gamepad reports button presses, joystick movements, and trigger pressure derived from the touch interactions, adhering to the standard Gamepad API. This makes it **universally compatible** with web games and applications that expect standard gamepad input, without requiring any changes to the game's input handling code.
+*   **Input Events:** The Gamepad API has no event for input, so a page reads the pad on a timer. The library also dispatches a `touchgamepadinput` event on `window` (its `gamepad` property is the virtual pad) after every touch that changes the pad, so a page that listens can read the change at once instead of on its next poll.
 
 ## Developer Section
 
