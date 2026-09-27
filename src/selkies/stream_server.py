@@ -2061,8 +2061,8 @@ class CentralizedStreamServer:
         transport first (a websockets-only encoder such as jpeg or striped
         h264enc cannot ride the WebRTC pipeline, and a switch back restores
         the operator's menu and value) and only then does an unpinned
-        rate-control mode resolve, since its websockets default depends on
-        the resolved encoder, the same order as `_post_process_settings`.
+        paint-over resolve, since its default depends on the resolved encoder
+        (JPEG keeps it under Turbo), the same order as `_post_process_settings`.
 
         Args:
             mode_name: Registered service name ("websockets" or "webrtc").

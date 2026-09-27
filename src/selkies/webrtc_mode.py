@@ -312,7 +312,7 @@ class WebRTCService(BaseStreamingService):
 
         The settings are re-snapshotted first: the service is constructed once
         at boot, but a live transport switch lands here with the settings
-        singleton already re-resolved for webrtc (encoder filter, rate-control
+        singleton already re-resolved for webrtc (encoder filter, paint-over
         default). Metrics backs both the Prometheus endpoint and the WebRTC
         CSV statistics, so it is built when either flag is on. A configured
         manual resolution is applied before the pipeline is sized: on X11 the

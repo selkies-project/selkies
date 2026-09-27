@@ -1946,9 +1946,9 @@ class AppSettings:
         one would abort the server at startup rather than select the transport
         it names. With rate control locked off the engine runs constant
         quality on both transports, so the resolved mode and the menu
-        published to clients are CRF alone; an encoder-derived "cbr" would
-        leave the dashboards showing a bitrate slider the encoder ignores and
-        hiding the CRF slider in force. Paint-over defaults off where Turbo
+        published to clients are CRF alone; the "cbr" default would leave the
+        dashboards showing a bitrate slider the encoder ignores and hiding the
+        CRF slider in force. Paint-over defaults off where Turbo
         leaves it nothing to do (`resolve_paint_over_default`). Microphone
         forwarding requires audio.
         A public listener is the both-family wildcard address, so the server
