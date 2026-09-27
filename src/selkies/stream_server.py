@@ -256,8 +256,9 @@ class CongestionSteer:
     """The steer of one display's CBR target over congestion ticks, for both
     transports. A tick carries two kinds of evidence: the queue standing on the
     path (the WebSockets backpressure loop measures it from the display's frame
-    round trip, `DataStreamingServer._steer_bitrate_to_link`) and the loss the
-    receiver reported (WebRTC's loop, from transport-wide-cc feedback).
+    round trip, `DataStreamingServer._steer_bitrate_to_link`, and WebRTC's loop
+    from one-way delay, `RTCDtlsTransport.take_twcc_window`) and the loss the
+    receiver reported (WebRTC's loop, from the same transport-wide-cc feedback).
 
     A standing queue backs the target off on the first tick that shows it: a
     delay verdict fires at a queue that is still small, where waiting a second

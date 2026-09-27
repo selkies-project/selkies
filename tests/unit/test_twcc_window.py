@@ -14,7 +14,14 @@ climbed back.
 A control interval's worth of feedback is the measurement, and an interval
 that carried none steers nothing. A link that really is losing packets must
 still be backed off exactly as before.
+
+The same interval measures the queue standing on the path from one-way delay:
+the feedback's reference time puts every arrival on the receiver's one clock,
+so a queue that grows a little with every frame, with nothing lost, reads as a
+queue, while delay that only jitters, or one key frame's burst, does not, and
+the 24-bit reference time wrapping changes nothing.
 """
+from collections import deque
 import os
 import struct
 from types import SimpleNamespace
@@ -50,6 +57,8 @@ def transport() -> RTCDtlsTransport:
     tr.twcc_estimate = None
     tr._pacer = None
     tr._twcc_window = RTCDtlsTransport._twcc_window_zero()
+    tr._twcc_reference = None
+    tr._twcc_delay_floor = deque()
     return tr
 
 
@@ -202,6 +211,55 @@ def main() -> int:
               round(tr.twcc_estimate["recv_span_s"], 6) == 0.009 and tr.twcc_estimate["goodput_bps"] == 9_600_000
               and tr.twcc_estimate["bytes_acked"] == 10 * PACKET_BYTES and tr.twcc_estimate["lost"] == 0
               and len(tr._twcc_history) == 0, tr.twcc_estimate)
+
+    # One-way delay: a frame of 10 packets every 16.7 ms, sent at `t`, arriving
+    # `delay(t)` later on a receiver clock 5000 s ahead of the sender's, fed back
+    # every 50 ms and drained every second.
+    def run_delay(delay, seconds: float, tr=None, start: float = 0.0, offset_ms: float = 5_000_000.0) -> list:
+        tr = tr or transport()
+        seq, queues, fb, t = 0, [], [], start
+        depths.clear()
+        rising.clear()
+        while t < start + seconds - 1e-9:
+            for i in range(10):
+                tr._twcc_history[seq & 0xFFFF] = (PACKET_BYTES, t + i * 0.0005)
+                fb.append((seq, offset_ms + (t + i * 0.0005 + delay(t)) * 1000.0))
+                seq += 1
+            t = round(t + 1 / 60, 6)
+            if len(fb) >= 30:
+                tr._twcc_process_feedback(pack_twcc_fci(fb[0][0] & 0xFFFF, [a for _, a in fb], 0))
+                fb = []
+            if int(t * 60) % 60 == 0:
+                window = tr.take_twcc_window()
+                if window is not None:
+                    queues.append(window["queue_ms"])
+                    depths.append(window["queue_depth_ms"])
+                    rising.append(window["queue_rising_ms"])
+        return queues
+
+    depths: list = []
+    rising: list = []
+
+    queues = run_delay(lambda t: 0.020 + 0.002 * (t - 3.0) * 60 if t > 3 else 0.020, 6.0)
+    res.check("a queue growing 2 ms a frame with nothing lost reads as one once it stood a whole interval",
+              queues[2] < 25 and queues[4] > 100, [round(q or 0, 1) for q in queues])
+    res.check("and its depth is the newest arrival's, which the growing queue has grown into",
+              round(depths[4]) > round(queues[4]) + 100, [round(d or 0, 1) for d in depths])
+    res.check("while it builds, before it stands a whole interval, it reads as rising",
+              rising[2] is None and rising[3] is not None and rising[3] > 25, [r and round(r, 1) for r in rising])
+    import random
+    rng = random.Random(7)
+    queues = run_delay(lambda t: 0.020 + rng.uniform(0.0, 0.015), 10.0)
+    res.check("delay that only jitters never reads as a standing queue, or a rising one",
+              max(queues) < 25 and max((r or 0.0) for r in rising) < 25, ([round(q, 1) for q in queues], rising))
+    queues = run_delay(lambda t: 0.020 + (0.120 if 4.0 <= t < 4.05 else 0.0), 8.0)
+    res.check("one key frame's burst does not either", max(queues) < 25 and not any(rising),
+              ([round(q, 1) for q in queues], rising))
+    tr = transport()
+    run_delay(lambda t: 0.020, 3.0, tr=tr, offset_ms=(0xFFFFFF - 20) * 64.0)
+    queues = run_delay(lambda t: 0.020, 3.0, tr=tr, start=3.0, offset_ms=(0xFFFFFF - 20) * 64.0)
+    res.check("the reference time wrapping at 24 bits moves nothing",
+              tr._twcc_reference > 0xFFFFFF and max(abs(q) for q in queues) < 1, (tr._twcc_reference, queues))
 
     return 0 if res.summary() else 1
 

@@ -40,6 +40,7 @@ import os
 import struct
 import time
 import traceback
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Protocol, Type, TypeVar, Union
 
@@ -86,6 +87,12 @@ V = TypeVar("V")
 TWCC_IDLE_US = 250_000
 # How long a sent packet waits in the transport-cc history for its feedback.
 TWCC_HISTORY_S = 2.0
+# How far back the least one-way delay is the path's own: short enough that
+# the drift between the two ends' clocks stays a few milliseconds inside it.
+TWCC_DELAY_FLOOR_S = 30.0
+# Consecutive feedback packets whose least delays each grow on the last that
+# read as a queue building.
+TWCC_RISE_FEEDBACKS = 4
 
 logger = logging.getLogger(__name__)
 
@@ -433,6 +440,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_pruned_at = 0.0
         self.twcc_estimate: Optional[dict] = None
         self._twcc_window = self._twcc_window_zero()
+        self._twcc_reference: Optional[int] = None
+        self._twcc_delay_floor: deque = deque()
         # Receive side of transport-wide congestion control: a sender that
         # negotiates transport-cc runs its bandwidth estimation on this
         # feedback alone and starves at its floor bitrate without it.
@@ -914,7 +923,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         size and send time for matching against the receiver's transport-cc feedback."""
         seq = self._twcc_seq
         self._twcc_seq = (self._twcc_seq + 1) & 0xFFFF
-        now = time.time()
+        now = time.monotonic()
         self._twcc_history[seq] = (size, now)
         # Bounded by age, not count: a retransmission storm allocates thousands
         # of numbers a second, and one let go before its feedback arrives would
@@ -936,13 +945,18 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
     def _twcc_process_feedback(self, fci: bytes) -> None:
         """Decode a transport-cc feedback FCI (draft-holmer-rmcat-transport-wide-cc):
         walk the packet-status chunks and receive deltas, join them against the send
-        history, and publish a loss / throughput estimate.
+        history, and publish a loss / throughput / delay estimate.
 
         The deltas chain arrival times: the first is the first arrival's offset
         from the feedback's reference time, each later one the gap from the
         arrival before, so the interval the bytes were delivered over runs from
         the earliest arrival to the latest, and the earliest packet's bytes were
-        not delivered inside it. Only arrivals still in the send history take
+        not delivered inside it. The reference time, 64 ms units on the
+        receiver's clock that wrap at 24 bits, puts every feedback's arrivals on
+        that one clock, so an arrival less its send time is the packet's one-way
+        delay plus a constant offset between the two clocks, comparable across
+        feedback packets; the least of those in a control interval is what
+        `take_twcc_window` measures a standing queue from. Only arrivals still in the send history take
         part: a receiver that moved its window back over a late packet reports
         packets it already reported, which would stretch the interval and add
         nothing to it. A silence of TWCC_IDLE_US or more between two arrivals
@@ -954,6 +968,10 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         if len(fci) < 8:
             return
         base_seq, status_count = struct.unpack("!HH", fci[0:4])
+        reference = int.from_bytes(fci[4:7], "big")
+        if self._twcc_reference is not None:
+            step = (reference - self._twcc_reference) & 0xFFFFFF
+            reference = self._twcc_reference + (step - 0x1000000 if step & 0x800000 else step)
         pos = 8
         statuses: list[int] = []
         while len(statuses) < status_count and pos + 2 <= len(fci):
@@ -975,7 +993,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
 
         arrivals: list[tuple[int, float]] = []
         missing: list[int] = []
-        at_us = 0.0
+        at_us = reference * 64_000.0
         for i, symbol in enumerate(statuses):
             if symbol == 1:
                 if pos >= len(fci):
@@ -993,6 +1011,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             arrivals.append(((base_seq + i) & 0xFFFF, at_us))
         if not statuses:
             return
+        self._twcc_reference = reference
         received = len(arrivals)
         # A packet the pacer dropped was never on the wire to lose. Loss the
         # wire spread through the window says it is short of room; one run of
@@ -1012,11 +1031,15 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         # delivered inside it.
         bytes_acked = spanned = 0
         matched: list[tuple[float, int]] = []
+        delay_min = delay_last = None
         for seq, at in arrivals:
             sent = self._twcc_history.pop(seq, None)
             if sent is not None:
                 bytes_acked += sent[0]
                 matched.append((at, sent[0]))
+                delay_last = at / 1e6 - sent[1]
+                if delay_min is None or delay_last < delay_min:
+                    delay_min = delay_last
         matched.sort(key=lambda m: m[0])
         span_us = 0.0
         for (t0, _size), (t1, size) in zip(matched, matched[1:]):
@@ -1039,6 +1062,11 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         window["bytes_acked"] += bytes_acked
         window["bytes_spanned"] += spanned
         window["span_s"] += span_s
+        if delay_min is not None:
+            if window["delay_min"] is None or delay_min < window["delay_min"]:
+                window["delay_min"] = delay_min
+            window["delay_last"] = delay_last
+            window["feedback_mins"].append(delay_min)
         # A brake sizes itself from a rate the wire limited. A window the wire
         # delivered whole, or one carrying almost no data, measured the pacer's
         # own output instead, which a braked pacer can only ever read back.
@@ -1054,7 +1082,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
 
     @staticmethod
     def _twcc_window_zero() -> dict:
-        return {"received": 0, "lost": 0, "bytes_acked": 0, "bytes_spanned": 0, "span_s": 0.0}
+        return {"received": 0, "lost": 0, "bytes_acked": 0, "bytes_spanned": 0, "span_s": 0.0,
+                "delay_min": None, "delay_last": None, "feedback_mins": []}
 
     def take_twcc_window(self) -> Optional[dict]:
         """Drain the transport-cc feedback accumulated since the last call.
@@ -1067,15 +1096,41 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         carried no feedback yields nothing to steer from, rather than the last
         window to apply again.
 
+        The interval's least one-way delay over the least of the last
+        `TWCC_DELAY_FLOOR_S` is the queue that stood through all of it: a key
+        frame's burst delays the packets behind it for a moment, while a queue
+        the rate has outgrown delays every one of them. A queue still building
+        shows before it stands a whole interval as the least delay of each of
+        the last `TWCC_RISE_FEEDBACKS` feedback packets growing on the one
+        before; the packets behind a burst arrive ever sooner, so a burst never
+        reads that way. The newest arrival's delay over that floor is how deep
+        the queue is by the interval's end, which a growing one has grown into.
+
         Returns:
-            Loss and goodput over the drained interval, or None when no feedback
-            arrived in it.
+            Loss and goodput over the drained interval, with the standing queue,
+            the queue still building (None unless it rose through the last
+            feedback packets), and the depth, in milliseconds (None without a
+            delay measured), or None when no feedback arrived in it.
         """
         window = self._twcc_window
         packets = window["received"] + window["lost"]
         if not packets:
             return None
         self._twcc_window = self._twcc_window_zero()
+        queue_ms = rising_ms = depth_ms = None
+        if window["delay_min"] is not None:
+            now = time.monotonic()
+            floor = self._twcc_delay_floor
+            floor.append((now, window["delay_min"]))
+            while floor[0][0] < now - TWCC_DELAY_FLOOR_S:
+                floor.popleft()
+            least = min(d for _, d in floor)
+            queue_ms = (window["delay_min"] - least) * 1000.0
+            depth_ms = (window["delay_last"] - least) * 1000.0
+            recent = window["feedback_mins"][-TWCC_RISE_FEEDBACKS:]
+            if (len(recent) == TWCC_RISE_FEEDBACKS
+                    and all(b > a for a, b in zip(recent, recent[1:]))):
+                rising_ms = (recent[-1] - least) * 1000.0
         return {
             "received": window["received"],
             "lost": window["lost"],
@@ -1083,6 +1138,9 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             "bytes_acked": window["bytes_acked"],
             "goodput_bps": (int(window["bytes_spanned"] * 8 / window["span_s"])
                             if window["span_s"] > 0 else 0),
+            "queue_ms": queue_ms,
+            "queue_rising_ms": rising_ms,
+            "queue_depth_ms": depth_ms,
         }
 
     def _set_role(self, role: str) -> None:

@@ -77,6 +77,10 @@ from .audio_control import AudioControl
 
 logger = logging.getLogger("webrtc")
 
+# How far a tick's least one-way delay stands past the path's own before
+# congestion control reads a queue on it (`take_twcc_window`).
+PATH_QUEUE_MS = 25.0
+
 
 def _selkies_is_aioice_frame_chain(exc: BaseException) -> bool:
     """Return True when the exception's traceback passes through the vendored
@@ -2695,12 +2699,17 @@ class WebRTCService(BaseStreamingService):
     async def _congestion_control_loop(self) -> None:
         """GCC-style bitrate adaptation from transport-wide-cc receiver feedback:
         per display, follow the slowest of ITS peers' goodput estimates with
-        headroom, back off multiplicatively on two ticks of loss in a row and
-        hold there before recovering (`CongestionSteer`), and retarget that
-        display's encoder within the allowed video_bitrate range — one display's
-        congested link never steers another's stream. Only CBR mode has a target
-        to steer. Each peer's own loss also sets how many FlexFEC repair packets
-        its sender adds per group (`RTCRtpSender.steer_fec`).
+        headroom, back off on the first tick whose one-way delay shows a queue
+        standing, or still building, `PATH_QUEUE_MS` past the path's own
+        (`take_twcc_window`), to what the path delivered meanwhile, or
+        multiplicatively on two ticks of loss in a
+        row, and hold there before recovering (`CongestionSteer`), and retarget
+        that display's encoder within the allowed video_bitrate range — one
+        display's congested link never steers another's stream. The queue is
+        the deepest any of its peers shows, so a deep buffer is found before it
+        overflows into loss. Only CBR mode has a target to steer. Each peer's
+        own loss also sets how many FlexFEC repair packets its sender adds per
+        group (`RTCRtpSender.steer_fec`).
 
         Each peer's feedback is drained per tick, so a decision is taken over a
         tick's worth of it rather than whichever window landed last: a single
@@ -2752,10 +2761,14 @@ class WebRTCService(BaseStreamingService):
                 if sender is not None:
                     sender.steer_fec(window["loss_fraction"])
                 bucket = per_display.setdefault(
-                    did, {"goodputs": [], "worst_loss": 0.0})
+                    did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0})
                 if window["goodput_bps"]:
                     bucket["goodputs"].append(window["goodput_bps"])
                 bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
+                if window["queue_ms"] is not None:
+                    standing = max(window["queue_ms"], window["queue_rising_ms"] or 0.0)
+                    bucket["queue_ms"] = max(bucket["queue_ms"] or 0.0, standing)
+                    bucket["depth_ms"] = max(bucket["depth_ms"], window["queue_depth_ms"])
             if self.metrics is not None:
                 self.metrics.set_bridge_drops(rtc_app.bridge_drops())
             for did, bucket in per_display.items():
@@ -2773,14 +2786,18 @@ class WebRTCService(BaseStreamingService):
                 current = float(pipeline.video_bitrate)
                 ceiling = float(self._display_setting(did, "video_bitrate") or hi_kbps)
                 ceiling = max(lo_kbps, min(hi_kbps, ceiling))
+                queue_ms = bucket["queue_ms"]
+                queue_s = None if queue_ms is None else (
+                    max(queue_ms, bucket["depth_ms"]) / 1000.0 if queue_ms > PATH_QUEUE_MS else 0.0)
                 # Goodput may lift the target, never drag it down (see docstring).
                 steer = self._congestion_steer.setdefault(did, CongestionSteer())
                 target = round(steer.target(
-                    current, ceiling, lo_kbps, min(goodputs), worst_loss, time.monotonic()))
+                    current, ceiling, lo_kbps, min(goodputs), worst_loss, time.monotonic(), queue_s))
                 if target != round(current):
-                    logger.info(
+                    (logger.info if target < current else logger.debug)(
                         f"Congestion control[{did}]: video bitrate {current:.0f} -> {target:.0f} kbps "
-                        f"(goodput {min(goodputs) / 1e3:.1f} kbps, loss {worst_loss:.1%})"
+                        f"(goodput {min(goodputs) / 1e3:.1f} kbps, loss {worst_loss:.1%}, "
+                        f"queue {queue_ms or 0.0:.0f} ms)"
                     )
                     await pipeline.set_video_bitrate(target)
 
