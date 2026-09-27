@@ -80,9 +80,6 @@ check("software_encoders() reports the installed pixelflux build", got == "True 
 got = resolved("openh264", SELKIES_MODE="websockets", SELKIES_ENCODER="h264enc-striped",
                SELKIES_RATE_CONTROL_MODE="crf")
 check("openh264 build: an operator crf pin beats the cbr default", got == "crf", got)
-got = probe("p = s.build_client_settings_payload()['software_encoders']['value'];"
-            " print(p['h264'], p['av1'], 'h265' in p)", "openh264")
-check("the software encoders are published to clients", got == "openh264 svt-av1 False", got)
 
 # openh264enc and x264enc are aliases of h264enc for an operator's env/CLI and
 # for a client's stored setting; neither is a published encoder.

@@ -2148,13 +2148,12 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
     off under a manual resolution, say) applies or defers to the operator.
     Adds the clipboard gate booleans derived from the single
     `enable_clipboard` policy, the start and on-demand booleans derived from
-    the microphone and webcam policies, the pixelflux build's `software_encoders`
-    (the software encoder behind each codec, "x264" or "openh264" for H.264),
-    which the dashboards' rate-control default reads, and once the startup
-    probe has run, `encoder_backends`: the hardware and software backend of
-    each codec on this host and whether each encodes 4:4:4, from which the
-    dashboards show the software encoding switch only where it switches
-    something and the client walks its codec ladder.
+    the microphone and webcam policies, and once the startup probe has run,
+    `encoder_backends`: the hardware and software backend of each codec on
+    this host (the software one the pixelflux build's, "x264" or "openh264"
+    for H.264) and whether each encodes 4:4:4, from which the dashboards show
+    the software encoding switch only where it switches something and the
+    client walks its codec ladder.
     """
     out = {}
     for setting_def in SETTING_DEFINITIONS:
@@ -2190,7 +2189,6 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
         mode = getattr(settings, f"{pipeline}_on_start")
         out[f"{pipeline}_on_start"]['value'] = mode == 'true'
         out[f"{pipeline}_on_demand"] = {'value': mode == 'demand'}
-    out['software_encoders'] = {'value': software_encoders()}
     backends = settings.encoder_backends()
     if backends is not None:
         out['encoder_backends'] = {'value': backends}
