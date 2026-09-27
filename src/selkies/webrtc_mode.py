@@ -1612,17 +1612,22 @@ class WebRTCService(BaseStreamingService):
         peer["audio_paused"] = not active
         sender = peer.get("audio_sender")
         if sender is not None:
-            sender._enabled = active
+            sender._enabled = active and not peer.get("audio_declined")
         await self._settle_primary_audio()
 
     async def _settle_primary_audio(self) -> None:
         """Pause the primary's audio capture once every peer is audio-paused,
         and resume it while any peer receives audio; a no-op on a pipeline
-        that is not running (start_display_media decides what starts)."""
+        that is not running (start_display_media decides what starts). A
+        surround capture encodes its stereo companion exactly while a peer
+        whose answer took stereo receives audio (`RTCApp._settle_audio_codec`)."""
         pipeline = self.media_pipeline
         if pipeline is None or not pipeline.is_media_pipeline_running():
             return
         consumers = self._display_consumers("primary")
+        if int(self.args.audio_channels) > 2:
+            pipeline.set_stereo_companion(any(
+                p.get("audio_layout") == "stereo" and not p.get("audio_paused", False) for p in consumers))
         if consumers and all(p.get("audio_paused", False) for p in consumers):
             if await pipeline.pause_audio_capture():
                 logger.info("No peer receives audio; audio capture stopped.")

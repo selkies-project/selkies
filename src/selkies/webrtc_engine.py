@@ -520,7 +520,8 @@ class RTCApp:
             the input dispatcher, which ignores them.
         on_audio_consumer_active: Per-peer audio pause (the side menu's
             STOP_AUDIO / START_AUDIO); left None the verbs are dropped.
-        on_consumers_changed: A display's consumer set changed (join, close).
+        on_consumers_changed: A display's consumer set changed (join, close,
+            or a peer's audio settling on the surround or stereo stream).
         on_stats_open: A controller's page opened its stats, called with its
             display id so the first figures need not wait for the next period.
         provision_virtual_mic: Brings up the shared SelkiesVirtualMic (null
@@ -613,6 +614,7 @@ class RTCApp:
         desc = RTCSessionDescription(sdp=sdp, type=sdp_type)
         await peer_conn.setRemoteDescription(desc)
         await self._settle_video_codec(client_peer_id, peer_obj)
+        await self._settle_audio_codec(client_peer_id, peer_obj)
 
     async def set_ice(self, ice: Dict, client_peer_id: str) -> None:
         """Add an ICE candidate received from the signaling server.
@@ -1325,11 +1327,11 @@ class RTCApp:
                         bridge.set_data(packet, keyframe)
                 except Exception as e:
                     logger.error(f"error processing video sample: {e}")
-        elif kind == "audio":
+        elif kind in ("audio", "audio_stereo"):
             if buf:
                 try:
                     packet = EncodedPacket(buf, pts, Fraction(1, 48000))
-                    bridge = graph.get("audio_bridge")
+                    bridge = graph.get("audio_bridge" if kind == "audio" else "audio_stereo_bridge")
                     if bridge is not None:
                         bridge.set_data(packet)
                 except Exception as e:
@@ -1723,6 +1725,48 @@ class RTCApp:
             sender._enabled = False
             peer_obj["video_declined"] = wanted
             self._send_video_declined(peer_obj["data_channel"], client_peer_id)
+
+    async def _settle_audio_codec(self, client_peer_id: str, peer_obj: Dict[str, Any]) -> None:
+        """Take the audio codec a peer's answer settled on.
+
+        A surround session offers `multiopus` ahead of stereo RED and opus
+        (`configure_multiopus`), and a page whose engine decodes it takes it
+        (`takeMultiopus` in lib/webrtc.js) and receives the surround stream. A
+        page that answers with opus or RED is moved onto the stereo companion,
+        which the pipeline encodes while such a page receives audio
+        (`audio_layout`, read where the captures are settled); a sender reads
+        its track only once ICE and DTLS connect, so nothing of the surround
+        stream goes out under the stereo codec. A page whose answer holds no
+        Opus at all gets no audio, since one codec's bitstream must never be
+        packed as another's.
+        """
+        sender = peer_obj.get("audio_sender")
+        if sender is None:
+            return
+        transceiver = next(
+            (t for t in peer_obj["peer_conn"].getTransceivers() if t.sender is sender), None)
+        if transceiver is None or not transceiver._codecs:
+            return
+        taken = transceiver._codecs[0].mimeType.lower()
+        graph = self.displays.get(peer_obj.get("display_id") or "primary") or {}
+        if taken == "audio/multiopus":
+            peer_obj["audio_layout"] = "surround"
+        elif taken in ("audio/opus", "audio/red") and graph.get("audio_stereo_media") is not None:
+            peer_obj["audio_layout"] = "stereo"
+            first = sender.track
+            sender.replaceTrack(graph["relay"].subscribe(graph["audio_stereo_media"]))
+            if first is not None:
+                first.stop()
+        elif taken not in ("audio/opus", "audio/red"):
+            peer_obj["audio_declined"] = taken
+            sender._enabled = False
+            logger.error(f"Peer {client_peer_id} answered the audio with {taken}, which is not Opus: "
+                         "it gets no audio.")
+            return
+        else:
+            return
+        logger.info(f"Audio for peer {client_peer_id} negotiated {taken} ({peer_obj['audio_layout']}).")
+        await self._notify_consumers_changed("primary")
 
     def _send_video_declined(self, channel: RTCDataChannel, client_peer_id: str) -> None:
         """Tell a page that no video comes because its answer declined the codec
@@ -2172,6 +2216,11 @@ class RTCApp:
             if display_id == "primary":
                 graph["audio_bridge"] = PipelineBridge(maxsize=8)
                 graph["audio_media"] = AudioMedia(graph["audio_bridge"])
+                if int(app_settings.audio_channels) > 2:
+                    # The stereo companion of the surround stream, for pages whose
+                    # engine decodes no multiopus (`_settle_audio_codec`).
+                    graph["audio_stereo_bridge"] = PipelineBridge(maxsize=8)
+                    graph["audio_stereo_media"] = AudioMedia(graph["audio_stereo_bridge"])
             self.displays[display_id] = graph
             logger.debug(f"Media relay and pipeline bridges created for display '{display_id}' ({client_type.value} peer)")
         if graph is None:

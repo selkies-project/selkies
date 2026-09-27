@@ -106,24 +106,27 @@ MULTIOPUS_LAYOUTS: dict[int, dict[str, str]] = {
 
 
 def configure_multiopus(channels: int) -> None:
-    """Offer surround audio as Chromium's non-standard `multiopus` codec instead of
-    stereo opus/RED (browsers do not RED multiopus). No-op for unknown layouts."""
+    """Offer surround audio as Chromium's non-standard `multiopus` codec, ahead of the
+    stereo RED and opus a peer without it answers with instead (browsers do not RED
+    multiopus). No engine lists multiopus in an answer of its own, so the client puts
+    it there where its engine decodes it. The payload type is the first dynamic one no
+    other codec of either kind holds, since bundled sections share the space. No-op for
+    unknown layouts."""
     layout = MULTIOPUS_LAYOUTS.get(channels)
     if layout is None:
         return
+    stereo = [c for c in CODECS["audio"] if c.mimeType.lower() != "audio/multiopus"]
+    taken = {c.payloadType for c in stereo + CODECS["video"]}
     CODECS["audio"] = [
         RTCRtpCodecParameters(
             mimeType="audio/multiopus",
             clockRate=48000,
             channels=channels,
-            payloadType=96,
+            payloadType=next(pt for pt in range(96, 128) if pt not in taken),
             rtcpFeedback=[RTCRtcpFeedback(type="transport-cc")],
             parameters=dict(layout),
         ),
-        G722_CODEC,
-        PCMU_CODEC,
-        PCMA_CODEC,
-    ]
+    ] + stereo
 # Note, the id space for these extensions is shared across media types when BUNDLE
 # is negotiated. If you add a audio- or video-specific extension, make sure it has
 # a unique id.

@@ -182,6 +182,8 @@ class MediaPipelinePixel(MediaPipeline):
             start and closed with the capture.
         _audio_recover_last_attempt: Monotonic time of the last audio-recovery
             restart; floors the retry rate when a device keeps failing.
+        stereo_companion: Whether a surround capture also encodes its stereo
+            fold (`set_stereo_companion`), delivered as `audio_stereo`.
     """
 
     def __init__(
@@ -265,6 +267,15 @@ class MediaPipelinePixel(MediaPipeline):
         self._audio_routing_task: Optional[asyncio.Task] = None
         self._audio_control: Optional[AudioControl] = None
         self._audio_recover_last_attempt = 0.0
+        self.stereo_companion = False
+
+    def set_stereo_companion(self, wanted: bool) -> None:
+        """Have a surround capture encode its stereo companion, live, for the
+        peers whose engine decodes no multiopus; stored first, so a capture
+        started later takes it too. Nothing for a stereo capture."""
+        self.stereo_companion = wanted
+        if self.pcmflux_module is not None and self.audio_channels > 2:
+            self.pcmflux_module.set_stereo_companion(wanted)
 
     async def set_pointer_visible(self, visible: bool) -> None:
         """Toggle pixelflux cursor capture, live (the capture thread re-reads
@@ -872,14 +883,19 @@ class MediaPipelinePixel(MediaPipeline):
                             )
                         pts = self._audio_pts_offset + raw_pts
                         self._audio_last_pts = pts
+                        # A surround capture's stereo companion shares its frame's pts.
+                        kind = ("audio_stereo" if self.audio_channels > 2
+                                and frame.channels < self.audio_channels else "audio")
 
                         self.async_event_loop.call_soon_threadsafe(
-                            self.produce_data, data_bytes, pts, "audio"
+                            self.produce_data, data_bytes, pts, kind
                         )
                 except Exception as e:
                     logger.info(f"Error audio capture callback: {e}")
 
             self.pcmflux_module = AudioCapture()
+            if self.audio_channels > 2:
+                self.pcmflux_module.set_stereo_companion(self.stereo_companion)
             # Before start_capture, so the first frame re-anchors on the new epoch.
             self._audio_capture_epoch += 1
             await asyncio.to_thread(

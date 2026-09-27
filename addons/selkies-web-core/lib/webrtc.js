@@ -29,9 +29,10 @@
  *
  * The server offers and the client answers. The offer arrives through
  * lib/signaling.js; the answer is munged before it becomes the local
- * description (`sps-pps-idr-in-keyframe=1` on the H.264 line, and on the
+ * description (`sps-pps-idr-in-keyframe=1` on the H.264 line, on the
  * Opus line `stereo=1` plus a `minptime` matching the server's `a=ptime`,
- * which is how audio frames shorter than 10 ms get through) and ICE
+ * which is how audio frames shorter than 10 ms get through, and the
+ * surround `multiopus` taken where it is offered, `takeMultiopus`) and ICE
  * candidates are exchanged the same way, non-relay ones dropped when
  * `forceTurn` is set. The server's video and audio arrive as media tracks
  * on the given element; the audio and video m-lines it offers recvonly are
@@ -53,6 +54,44 @@
  */
 
 import { Input } from "./input";
+
+/**
+ * Answers the server's surround stream with the codec it is offered as.
+ *
+ * With more than two audio channels the server offers Chromium's `multiopus`
+ * ahead of stereo RED and Opus. No engine lists it in an answer of its own,
+ * so its payload type is put first on each audio line the server sends on,
+ * with the offer's `rtpmap`, `fmtp`, and `rtcp-fb` for it. An engine that
+ * decodes it lists it on its receivers and gets the surround stream; for one
+ * that does not, `_onSDP` sends the answer the engine created itself, and
+ * the server streams that page stereo.
+ * @param {string} offer The server's offer SDP.
+ * @param {string} answer The answer SDP the engine created.
+ * @returns {string} The answer, taking multiopus wherever the offer carries it.
+ */
+export function takeMultiopus(offer, answer) {
+	const split = (sdp) => sdp.split(/(?=^m=)/m);
+	const offered = split(offer);
+	const answered = split(answer);
+	if (offered.length !== answered.length) return answer;
+	for (let i = 1; i < offered.length; i++) {
+		const section = offered[i];
+		if (!section.startsWith('m=audio') || /^a=recvonly/m.test(section)) continue;
+		const rtpmap = section.match(/^a=rtpmap:(\d+) multiopus\//m);
+		if (!rtpmap) continue;
+		const pt = rtpmap[1];
+		const own = new RegExp(`^a=(rtpmap|fmtp|rtcp-fb):${pt} `);
+		const attrs = section.split(/\r?\n/).filter((l) => own.test(l));
+		const lines = answered[i].split('\r\n');
+		const mline = lines[0].split(' ');
+		if (mline[1] === '0' || mline.slice(3).includes(pt)) continue;
+		lines[0] = [...mline.slice(0, 3), pt, ...mline.slice(3)].join(' ');
+		const at = lines.findIndex((l) => l.startsWith('a=rtpmap:'));
+		lines.splice(at < 0 ? lines.length - 1 : at, 0, ...attrs);
+		answered[i] = lines.join('\r\n');
+	}
+	return answered.join('');
+}
 
 /**
  * WebRTC client: one peer connection plus its data channel.
@@ -288,9 +327,19 @@ export class WebRTCClient {
 					}
 				}
 				console.log("Created local SDP", local_sdp);
-				this.peerConnection.setLocalDescription(local_sdp).then(() => {
+				const plain = local_sdp.sdp;
+				const surround = takeMultiopus(sdp.sdp, plain);
+				const apply = (text) => this.peerConnection.setLocalDescription({ type: 'answer', sdp: text });
+				// Gecko sets a surround answer and keeps multiopus in its local
+				// description but not in its receivers: the server is told the
+				// answer the engine would have sent, and streams it stereo.
+				const decodesSurround = () => this.peerConnection.getReceivers().some((r) => r.track && r.track.kind === 'audio'
+					&& r.getParameters().codecs.some((c) => /multiopus/i.test(c.mimeType)));
+				(surround === plain ? apply(plain) : apply(surround).catch(() => apply(plain))).then(() => {
 					this._setDebug("Sending SDP answer");
-					this.signaling.sendSDP(this.peerConnection.localDescription);
+					const local = this.peerConnection.localDescription;
+					const surroundTaken = local.sdp !== plain && local.sdp.indexOf('multiopus') !== -1;
+					this.signaling.sendSDP(surroundTaken && !decodesSurround() ? { type: 'answer', sdp: plain } : local);
 				}).catch((e) => {
 					this._setError("Error setting local description: " + e);
 				});
