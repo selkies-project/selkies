@@ -210,7 +210,7 @@ jobs:
           path: /tmp/digests/desktop/*
           if-no-files-found: error
           retention-days: 1
-      # What the images were built from and hold, for the release to attach.
+      # What the images were built from and hold, kept with the run.
       # The distribution image is a moving tag, so its digest is read from the
       # provenance the push attached; each package list is read out of the
       # builder's cache rather than a pull of the image it describes.

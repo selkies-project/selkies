@@ -52,7 +52,7 @@ Every image is multi-architecture (`x86_64` and `aarch64`). When instructed to i
 docker run --rm --privileged tonistiigi/binfmt:latest --install all
 ```
 
-Each release attaches, per flavor and architecture, the digest of every image, the digest of the distribution image it was built from, and the list of packages it holds, which is what a downstream qualification build pins.
+The run that builds each release keeps, per flavor and architecture, the digest of every image, the digest of the distribution image it was built from, and the list of packages it holds as its artifact `images-<flavor>-<architecture>`, which is what a downstream qualification build pins.
 
 ## Encoders and Interfaces
 
