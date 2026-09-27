@@ -6,6 +6,8 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-ubuntu}"
 until [ -f "${XDG_RUNTIME_DIR}/container-env" ]; do sleep 0.5; done
 # shellcheck disable=SC1091  # written by container-entrypoint.sh at startup
 . "${XDG_RUNTIME_DIR}/container-env"
+# What the session launches starts in its directory: the home, not this service's.
+cd "${HOME}" || true
 shopt -s nullglob
 
 # Canonicalized by container-entrypoint.sh, so one spelling is enough here.
