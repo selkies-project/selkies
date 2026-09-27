@@ -1,6 +1,6 @@
 ---
 title: Gamepads
-description: The Input Interposer and fake-udev, which give a container's applications gamepads with no kernel device, and the kernel gamepads Selkies registers where /dev/uinput is writable.
+description: The Input Interposer and fake-udev, which give a container's applications gamepads with no kernel device, the kernel gamepads Selkies registers where /dev/uinput is writable, and how a game's rumble reaches the controller in the browser.
 ---
 
 ## Input Interposer
@@ -81,3 +81,7 @@ This needs the `uinput` module and write access to `/dev/uinput` for the account
 sudo modprobe uinput
 sudo usermod -aG input "$(whoami)"
 ```
+
+## Rumble
+
+Both backends take a game's force feedback the way the kernel takes it from an Xbox pad: the evdev node reports rumble, the periodic waveforms such a pad plays as rumble, and gain, sixteen effects at a time, and a game uploads effects, plays them, and stops them with the usual `EVIOCSFF`, `EV_FF` writes, and `EVIOCRMFF` (SDL's `SDL_JoystickRumble` among them). Selkies mixes what each slot's games play and sends it to the one client driving that slot, which plays it on its own controller through the browser: a `dual-rumble` effect where the browser offers one (Chromium and Safari), the single-motor pulse Firefox offers otherwise, and the phone's own vibrator for the on-screen touch gamepad where the browser has `navigator.vibrate` (Android). A client that stops hearing from the server stops shaking within two seconds, and one that takes over a slot mid-effect gets it at once.

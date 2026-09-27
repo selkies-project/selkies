@@ -112,6 +112,26 @@ def main() -> bool:
         declared(f"the {label} axis value survives the joydev event", value,
               ih.normalize_axis_value(client_value, False, False))
 
+    # Force feedback: the kernel hands an application's effect uploads and
+    # erasures to the device's owner through these, and the effect layout is
+    # what the backend reads the magnitudes out of.
+    for name in ("UI_SET_FFBIT", "UI_BEGIN_FF_UPLOAD", "UI_END_FF_UPLOAD",
+                 "UI_BEGIN_FF_ERASE", "UI_END_FF_ERASE", "EV_UINPUT", "UI_FF_UPLOAD",
+                 "UI_FF_ERASE", "EV_FF", "FF_RUMBLE", "FF_PERIODIC", "FF_SQUARE",
+                 "FF_TRIANGLE", "FF_SINE", "FF_GAIN"):
+        check(name, getattr(ih, name), truth[name])
+    check("sizeof(struct ff_effect)", ih.FF_EFFECT_SIZE, truth["sizeof_ff_effect"])
+    check("offsetof(ff_effect, replay)", struct.calcsize("=HhHHH"), truth["off_ff_replay"])
+    check("offsetof(ff_effect, u)", struct.calcsize(ih.FF_EFFECT_HEAD_FMT), truth["off_ff_u"])
+    check("offsetof(ff_periodic_effect, magnitude)", struct.calcsize("=HH"),
+          truth["off_periodic_magnitude"])
+    check("sizeof(struct uinput_ff_upload)", ih.UINPUT_FF_UPLOAD_SIZE,
+          truth["sizeof_uinput_ff_upload"])
+    check("offsetof(uinput_ff_upload, effect)", struct.calcsize("=Ii"),
+          truth["off_ff_upload_effect"])
+    check("sizeof(struct uinput_ff_erase)", struct.calcsize(ih.UINPUT_FF_ERASE_FMT),
+          truth["sizeof_uinput_ff_erase"])
+
     print("RESULT", "all passed" if not fails else f"FAILED: {fails}")
     return not fails
 

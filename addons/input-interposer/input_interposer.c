@@ -39,6 +39,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
     signal handler that reads or closes runs on whichever thread the signal
     lands on, possibly one inside a lookup, and must be able to re-enter it.
 
+    Force feedback is a memless pad's (xpad's): the handle keeps the effects
+    uploaded through it, and a play, stop, or gain written to it goes to the
+    server as a 16-byte record on the same socket, the direction the event
+    stream leaves free; the server mixes and relays them to the browser.
+
     Device identity (name, VID/PID, uniq) answered through the ioctls is hard
     coded to the same values the sibling fake-udev library publishes, so udev,
     joydev, and evdev consumers agree on one device. stat()/fstat() families
@@ -332,19 +337,53 @@ typedef struct {
 /* Largest event read in one go (input_event > js_event); bounds the partial stash. */
 #define SJI_MAX_EVENT_SIZE (sizeof(struct input_event))
 
+/* Force-feedback effects one evdev handle may hold at once: what the kernel's
+ * memless pads (xpad among them) take. */
+#define SJI_FF_EFFECTS 16
+
 /**
  * One application open() handle: its own socket connection (fd) and open()
  * flags. `partial` holds the leading bytes of an event a non-blocking read
  * dequeued but could not complete within its budget: recv() removed them from
  * the kernel buffer, so they cannot be re-peeked and are prepended on this
- * handle's next read(). Accessed only under interposers_mutex.
+ * handle's next read(). `ff` holds the force-feedback effects uploaded through
+ * this handle, as the kernel keeps them per open file, `ff_used` which are
+ * live, and `ff_unheard` is set while its records cannot be sent
+ * (sji_ff_send). Accessed only under interposers_mutex.
  */
 typedef struct {
     int fd;
     int open_flags;
     unsigned char partial[SJI_MAX_EVENT_SIZE];
     size_t partial_len;
+    struct ff_effect ff[SJI_FF_EFFECTS];
+    uint16_t ff_used;
+    int ff_unheard;
 } sji_handle_t;
+
+/**
+ * A force-feedback request an evdev handle sends the backend over its own
+ * socket, the one direction the event stream leaves free: play (an effect's
+ * rumble magnitudes as the kernel's memless pads resolve them, its replay
+ * length and delay in ms, and the repeat count; a count of 0 stops it), stop
+ * (an effect erased), or gain (`count` carries it, 0 to 0xffff).
+ */
+typedef struct {
+    uint8_t kind;
+    uint8_t reserved;
+    int16_t id;
+    uint16_t strong;
+    uint16_t weak;
+    uint16_t length_ms;
+    uint16_t delay_ms;
+    uint16_t count;
+    uint16_t reserved2;
+} sji_ff_record_t;
+_Static_assert(sizeof(sji_ff_record_t) == 16, "the backend reads force-feedback records as 16 bytes");
+
+#define SJI_FF_PLAY 1
+#define SJI_FF_STOP 2
+#define SJI_FF_GAIN 3
 
 /**
  * One interposed device: its type (DEV_TYPE_JS/DEV_TYPE_EV), device path, socket
@@ -433,6 +472,182 @@ static js_interposer_t *find_interposer_for_fd_locked(int fd, int *open_flags_ou
         }
     }
     return NULL;
+}
+
+/**
+ * Sends one force-feedback record on a handle's socket. A record is 16 bytes of
+ * a stream the backend reads in 16-byte steps, so a send cut short by a full
+ * buffer is finished rather than dropped halfway. A buffer that stays full is
+ * a backend that is not reading: the record is dropped after 100 ms, and until
+ * a send goes through again, later ones are dropped at once rather than
+ * holding the game up on every rumble.
+ */
+static void sji_ff_send(int fd, const sji_ff_record_t *rec) {
+    int h = -1, patient = 0;
+    pthread_mutex_lock(&interposers_mutex);
+    js_interposer_t *it = find_interposer_for_fd_locked(fd, NULL, &h);
+    if (it != NULL && h >= 0) patient = !it->handles[h].ff_unheard;
+    pthread_mutex_unlock(&interposers_mutex);
+    const char *p = (const char *)rec;
+    size_t left = sizeof(*rec);
+    while (left > 0) {
+        ssize_t n = send(fd, p, left, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n > 0) {
+            p += n;
+            left -= (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) && (patient || left < sizeof(*rec))) {
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+            if (poll(&pfd, 1, 100) > 0) continue;
+        }
+        if (left < sizeof(*rec)) {
+            sji_log_error("FF: record for fd %d cut short after %zu bytes; the stream is out of step.",
+                          fd, sizeof(*rec) - left);
+        } else if (patient) {
+            sji_log_warn("FF: record for fd %d dropped, the backend not reading: %s",
+                         fd, n < 0 ? strerror(errno) : "no progress");
+        }
+        break;
+    }
+    int unheard = left > 0;
+    if (unheard == patient) {
+        pthread_mutex_lock(&interposers_mutex);
+        it = find_interposer_for_fd_locked(fd, NULL, &h);
+        if (it != NULL && h >= 0) it->handles[h].ff_unheard = unheard;
+        pthread_mutex_unlock(&interposers_mutex);
+    }
+}
+
+/**
+ * The motor magnitudes an effect plays at, as the kernel's memless pads
+ * resolve them: a rumble effect names its two, and a periodic one drives both
+ * at its magnitude, scaled from 0x7fff to 0xffff.
+ */
+static void sji_ff_magnitudes(const struct ff_effect *e, uint16_t *strong, uint16_t *weak) {
+    if (e->type == FF_RUMBLE) {
+        *strong = e->u.rumble.strong_magnitude;
+        *weak = e->u.rumble.weak_magnitude;
+        return;
+    }
+    int m = abs((int)e->u.periodic.magnitude) * 2;
+    *strong = *weak = (uint16_t)(m > 0xffff ? 0xffff : m);
+}
+
+/**
+ * EVIOCSFF: keeps the effect on the handle, as the kernel keeps effects per
+ * open file, a new one (id -1) taking the first free id. Rumble and the
+ * periodic waveforms a memless pad plays as rumble are taken; anything else
+ * is EINVAL, as on such a pad.
+ */
+static int sji_ff_upload(int fd, struct ff_effect *e) {
+    if (e->type != FF_RUMBLE &&
+        !(e->type == FF_PERIODIC && (e->u.periodic.waveform == FF_SQUARE ||
+                                     e->u.periodic.waveform == FF_TRIANGLE ||
+                                     e->u.periodic.waveform == FF_SINE))) {
+        errno = EINVAL;
+        return -1;
+    }
+    int ret = 0, h = -1;
+    pthread_mutex_lock(&interposers_mutex);
+    js_interposer_t *it = find_interposer_for_fd_locked(fd, NULL, &h);
+    if (it == NULL || h < 0) {
+        errno = EBADF;
+        ret = -1;
+    } else {
+        sji_handle_t *hd = &it->handles[h];
+        int id = e->id;
+        if (id == -1) {
+            for (id = 0; id < SJI_FF_EFFECTS && (hd->ff_used & (1u << id)); id++) {}
+            if (id == SJI_FF_EFFECTS) {
+                errno = ENOSPC;
+                ret = -1;
+            }
+        } else if (id < 0 || id >= SJI_FF_EFFECTS || !(hd->ff_used & (1u << id))) {
+            errno = EINVAL;
+            ret = -1;
+        }
+        if (ret == 0) {
+            e->id = (int16_t)id;
+            hd->ff[id] = *e;
+            hd->ff_used |= (uint16_t)(1u << id);
+        }
+    }
+    pthread_mutex_unlock(&interposers_mutex);
+    return ret;
+}
+
+/** EVIOCRMFF: forgets the handle's effect, stopping it if it plays. */
+static int sji_ff_erase(int fd, int id) {
+    int ret = 0, h = -1;
+    pthread_mutex_lock(&interposers_mutex);
+    js_interposer_t *it = find_interposer_for_fd_locked(fd, NULL, &h);
+    if (it == NULL || h < 0) {
+        errno = EBADF;
+        ret = -1;
+    } else if (id < 0 || id >= SJI_FF_EFFECTS || !(it->handles[h].ff_used & (1u << id))) {
+        errno = EINVAL;
+        ret = -1;
+    } else {
+        it->handles[h].ff_used &= (uint16_t)~(1u << id);
+    }
+    pthread_mutex_unlock(&interposers_mutex);
+    if (ret == 0) {
+        sji_ff_record_t rec = { .kind = SJI_FF_STOP, .id = (int16_t)id };
+        sji_ff_send(fd, &rec);
+    }
+    return ret;
+}
+
+/**
+ * write() on an evdev pad handle, which takes whole events as evdev_write()
+ * does: EV_FF plays or stops an uploaded effect (value is the repeat count, 0
+ * stops) or sets the gain, each going to the backend as one record, and every
+ * other event is accepted and dropped, as the kernel drops what a device does
+ * not take.
+ */
+static ssize_t sji_ev_write(int fd, const void *buf, size_t count) {
+    const size_t size = sizeof(struct input_event);
+    if (count != 0 && count < size) {
+        errno = EINVAL;
+        return -1;
+    }
+    size_t n = count / size;
+    for (size_t i = 0; i < n; i++) {
+        struct input_event ev;
+        memcpy(&ev, (const char *)buf + i * size, size);
+        if (ev.type != EV_FF) continue;
+        sji_ff_record_t rec;
+        memset(&rec, 0, sizeof(rec));
+        uint16_t value = (uint16_t)(ev.value < 0 ? 0 : (ev.value > 0xffff ? 0xffff : ev.value));
+        if (ev.code == FF_GAIN) {
+            rec.kind = SJI_FF_GAIN;
+            rec.count = value;
+        } else {
+            struct ff_effect effect;
+            int h = -1, known = 0;
+            pthread_mutex_lock(&interposers_mutex);
+            js_interposer_t *it = find_interposer_for_fd_locked(fd, NULL, &h);
+            if (it != NULL && h >= 0 && ev.code < SJI_FF_EFFECTS &&
+                (it->handles[h].ff_used & (1u << ev.code))) {
+                effect = it->handles[h].ff[ev.code];
+                known = 1;
+            }
+            pthread_mutex_unlock(&interposers_mutex);
+            if (!known) continue;
+            rec.id = (int16_t)ev.code;
+            rec.kind = value > 0 ? SJI_FF_PLAY : SJI_FF_STOP;
+            if (value > 0) {
+                sji_ff_magnitudes(&effect, &rec.strong, &rec.weak);
+                rec.length_ms = effect.replay.length;
+                rec.delay_ms = effect.replay.delay;
+                rec.count = value;
+            }
+        }
+        sji_ff_send(fd, &rec);
+    }
+    return (ssize_t)(n * size);
 }
 
 /* Defined with the inotify shadow watches below, and made recursive with the other. */
@@ -1954,6 +2169,9 @@ static int common_open_logic(const char *pathname, int flags, js_interposer_t **
         errno = EMFILE;
         return -1;
     }
+    /* The entry may hold a copy of a handle moved out of it at a close; a new
+     * handle starts with no stash and no effects. */
+    memset(&interposer->handles[interposer->handle_count], 0, sizeof(sji_handle_t));
     interposer->handles[interposer->handle_count].fd = new_fd;
     interposer->handles[interposer->handle_count].open_flags = flags;
     interposer->handle_count++;
@@ -2561,9 +2779,10 @@ static int recv_event_rest_blocking(int fd, void *buf, size_t *consumed, size_t 
  * completed by its next read(). Blocking mode follows the socket's actual
  * O_NONBLOCK flag, the handle's open() flags being the fallback.
  */
-/* Event writes to a created uinput device fan out to its readers; every other
- * write passes straight through, and an app that never opened /dev/uinput pays
- * nothing (udyn_active stays zero). */
+/* Event writes to a created uinput device fan out to its readers, and those to
+ * an evdev pad handle carry its force feedback (sji_ev_write); every other
+ * write passes straight through, and an app that opened neither pays nothing
+ * (udyn_active and the open-handle count stay zero). */
 ssize_t write(int fd, const void *buf, size_t count) {
     if (!real_write && load_real_func((void *)&real_write, "write") < 0) {
         errno = EFAULT;
@@ -2578,6 +2797,13 @@ ssize_t write(int fd, const void *buf, size_t count) {
             return r;
         }
         pthread_mutex_unlock(&udyn_mutex);
+    }
+    if (!no_interposed_handles()) {
+        pthread_mutex_lock(&interposers_mutex);
+        js_interposer_t *it = find_interposer_for_fd_locked(fd, NULL, NULL);
+        int evdev = it != NULL && it->type == DEV_TYPE_EV;
+        pthread_mutex_unlock(&interposers_mutex);
+        if (evdev) return sji_ev_write(fd, buf, count);
     }
     return real_write(fd, buf, count);
 }
@@ -2935,13 +3161,13 @@ exit_js_ioctl:
 /**
  * evdev (EVIOC*) ioctls for an event node: identity from the FAKE_UDEV_*
  * values, key and abs capability bits from the server config, fixed absinfo
- * ranges, no input properties, and force feedback accepted as a no-op.
- * `array_idx` is the slot's index in interposers[], from which the pad number
- * for EVIOCGPHYS/EVIOCGUNIQ derives. Anything else, including joydev ioctls,
- * is ENOTTY.
+ * ranges, no input properties, and the force feedback of a memless pad,
+ * whose effects the handle keeps (sji_ff_upload). `array_idx` is the slot's
+ * index in interposers[], from which the pad number for
+ * EVIOCGPHYS/EVIOCGUNIQ derives. Anything else, including joydev ioctls, is
+ * ENOTTY.
  *
- * @return 0, a string length, the buffer length, or an effect id, or -1 with
- *         errno set.
+ * @return 0, a string length, or the buffer length, or -1 with errno set.
  */
 int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd, ioctl_request_t request, void *arg) {
     struct input_absinfo *absinfo_ptr;
@@ -3174,7 +3400,13 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
                 ret_val = len;
                 goto exit_ev_ioctl;
             } else if (ev_type_query == EV_FF) {
-                sji_log_info("IOCTL_EV(%s): EVIOCGBIT(type 0x%02x - EV_FF, len %d) -> Reporting NO FF capabilities",
+                /* What a memless pad (xpad) reports: rumble, the periodic
+                 * waveforms it plays as rumble, and gain. */
+                static const int ff_bits[] = { FF_RUMBLE, FF_PERIODIC, FF_SQUARE, FF_TRIANGLE, FF_SINE, FF_GAIN };
+                for (i = 0; i < sizeof(ff_bits) / sizeof(ff_bits[0]); i++) {
+                    if (ff_bits[i] / 8 < len) ((unsigned char *)arg)[ff_bits[i] / 8] |= (1 << (ff_bits[i] % 8));
+                }
+                sji_log_info("IOCTL_EV(%s): EVIOCGBIT(type 0x%02x - EV_FF, len %d) -> rumble, periodic, gain",
                 interposer->open_dev_name, ev_type_query, len);
                 ret_val = len;
                 goto exit_ev_ioctl;
@@ -3209,19 +3441,19 @@ int intercept_ev_ioctl(js_interposer_t *interposer, ptrdiff_t array_idx, int fd,
             case EVIOCSFF:
                 if (!arg || ioctl_size < sizeof(struct ff_effect)) { errno = EFAULT; ret_val = -1; break; }
                 effect_s_ptr = (struct ff_effect *)arg;
-                sji_log_info("IOCTL_EV(%s): EVIOCSFF (type: 0x%x, id_in: %d) (noop, returns id)",
-                               interposer->open_dev_name, effect_s_ptr->type, effect_s_ptr->id);
-                effect_s_ptr->id = (effect_s_ptr->id == -1) ? 1 : effect_s_ptr->id;
-                ret_val = effect_s_ptr->id;
+                ret_val = sji_ff_upload(fd, effect_s_ptr);
+                sji_log_info("IOCTL_EV(%s): EVIOCSFF (type: 0x%x) -> id %d, %d",
+                               interposer->open_dev_name, effect_s_ptr->type, effect_s_ptr->id, ret_val);
                 break;
             case EVIOCRMFF:
                 effect_id_val = (int)(intptr_t)arg;
-                sji_log_info("IOCTL_EV(%s): EVIOCRMFF (id: %d) (noop, success reported)", interposer->open_dev_name, effect_id_val);
+                ret_val = sji_ff_erase(fd, effect_id_val);
+                sji_log_info("IOCTL_EV(%s): EVIOCRMFF (id: %d) -> %d", interposer->open_dev_name, effect_id_val, ret_val);
                 break;
             case EVIOCGEFFECTS:
                 if (!arg || ioctl_size < sizeof(int)) { errno = EFAULT; ret_val = -1; break; }
-                *(int *)arg = 0;
-                sji_log_info("IOCTL_EV(%s): EVIOCGEFFECTS -> %d (Reporting NO FF)", interposer->open_dev_name, *(int *)arg);
+                *(int *)arg = SJI_FF_EFFECTS;
+                sji_log_info("IOCTL_EV(%s): EVIOCGEFFECTS -> %d", interposer->open_dev_name, *(int *)arg);
                 break;
             default:
                 sji_log_warn("IOCTL_EV(%s): Unhandled EVDEV ioctl request 0x%lx (Type 'E', NR 0x%02x, Size %u). Setting ENOTTY.",

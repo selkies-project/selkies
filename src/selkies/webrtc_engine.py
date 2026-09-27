@@ -845,13 +845,16 @@ class RTCApp:
         for _, channel in self._controller_channels(display_id, subscribed=True):
             self.send_message_to_channel(channel, "stream_stats", stats)
 
-    def send_system_action(self, action: str, peer_id: Optional[str] = None) -> None:
+    def send_system_action(self, action: str, peer_id: Optional[str] = None,
+                           only: bool = False) -> None:
         """Send a system action (e.g. ``command_error,<text>``) to clients.
 
         With a `peer_id` whose channel is still open, only that peer is
         addressed (requester-scoped feedback); otherwise — including a
         requester that reconnected under a new peer id — the action is
-        broadcast, and shared-mode viewers suppress it client-side.
+        broadcast, and shared-mode viewers suppress it client-side. `only`
+        drops it instead of broadcasting, for an action that means something
+        to that peer alone.
         """
         if peer_id is not None:
             peer_obj = self.peer_connections.get(peer_id)
@@ -859,6 +862,8 @@ class RTCApp:
             if channel is not None and channel.readyState == "open":
                 self.send_message_to_channel(channel, "system", {"action": action})
                 return
+        if only:
+            return
         self.__send_data_channel_message("system", {"action": action})
 
     def send_print_document(self, name: str, size: int,

@@ -63,6 +63,7 @@ stalls behind a slow display server.
 """
 
 import ctypes
+import errno
 import fcntl
 from collections import deque
 import functools
@@ -1966,7 +1967,18 @@ EV_KEY = 0x01
 EV_REL = 0x02
 EV_ABS = 0x03
 EV_MSC = 0x04
+EV_FF = 0x15
 SYN_REPORT = 0
+# The force-feedback types and bits a memless pad (xpad) reports: rumble, the
+# periodic waveforms it plays as rumble, and gain.
+FF_RUMBLE = 0x50
+FF_PERIODIC = 0x51
+FF_SQUARE = 0x58
+FF_TRIANGLE = 0x59
+FF_SINE = 0x5a
+FF_GAIN = 0x60
+FF_MEMLESS_BITS = (FF_RUMBLE, FF_PERIODIC, FF_SQUARE, FF_TRIANGLE, FF_SINE, FF_GAIN)
+FF_EFFECTS_MAX = 16
 
 BTN_MOUSE = 0x110
 BTN_LEFT = 0x110
@@ -2479,6 +2491,20 @@ UINPUT_SETUP_FMT = "=HHHH80sI"
 UINPUT_ABS_SETUP_FMT = "=H2x6i"
 UINPUT_SYSNAME_LEN = 64
 
+# struct ff_effect: type, id, direction, trigger {button, interval}, replay
+# {length, delay}, then the effect union, aligned to the pointer in
+# ff_periodic_effect: 32 bytes on a 64-bit ABI, 28 on a 32-bit one.
+FF_EFFECT_HEAD_FMT = "=HhHHHHH2x"
+FF_EFFECT_SIZE = 16 + (32 if struct.calcsize("P") == 8 else 28)
+# struct uinput_ff_upload { __u32 request_id; __s32 retval; struct ff_effect effect, old; }
+UINPUT_FF_UPLOAD_SIZE = 8 + 2 * FF_EFFECT_SIZE
+# struct uinput_ff_erase { __u32 request_id; __s32 retval; __u32 effect_id; }
+UINPUT_FF_ERASE_FMT = "=IiI"
+# The uinput device's own events: an application uploaded or erased an effect.
+EV_UINPUT = 0x0101
+UI_FF_UPLOAD = 1
+UI_FF_ERASE = 2
+
 UI_DEV_CREATE = _uinput_ioc(0, 1, 0)
 UI_DEV_DESTROY = _uinput_ioc(0, 2, 0)
 UI_DEV_SETUP = _uinput_ioc(_IOC_WRITE, 3, struct.calcsize(UINPUT_SETUP_FMT))
@@ -2486,7 +2512,12 @@ UI_ABS_SETUP = _uinput_ioc(_IOC_WRITE, 4, struct.calcsize(UINPUT_ABS_SETUP_FMT))
 UI_SET_EVBIT = _uinput_ioc(_IOC_WRITE, 100, 4)
 UI_SET_KEYBIT = _uinput_ioc(_IOC_WRITE, 101, 4)
 UI_SET_ABSBIT = _uinput_ioc(_IOC_WRITE, 103, 4)
+UI_SET_FFBIT = _uinput_ioc(_IOC_WRITE, 107, 4)
 UI_GET_SYSNAME = _uinput_ioc(_IOC_READ, 44, UINPUT_SYSNAME_LEN)
+UI_BEGIN_FF_UPLOAD = _uinput_ioc(_IOC_READ | _IOC_WRITE, 200, UINPUT_FF_UPLOAD_SIZE)
+UI_END_FF_UPLOAD = _uinput_ioc(_IOC_WRITE, 201, UINPUT_FF_UPLOAD_SIZE)
+UI_BEGIN_FF_ERASE = _uinput_ioc(_IOC_READ | _IOC_WRITE, 202, struct.calcsize(UINPUT_FF_ERASE_FMT))
+UI_END_FF_ERASE = _uinput_ioc(_IOC_WRITE, 203, struct.calcsize(UINPUT_FF_ERASE_FMT))
 
 # (min, max, fuzz, flat, resolution) per axis, matching the interposer's
 # EVIOCGABS answer so an application cannot tell the two backends apart.
@@ -2497,6 +2528,21 @@ UINPUT_ABS_INFO = {
 }
 
 LOCAL_ARCH_BITS = 64 if struct.calcsize("P") == 8 else 32
+# struct input_event in this process's own ABI.
+LOCAL_EVDEV_EVENT_FMT = "=qqHHi" if LOCAL_ARCH_BITS == 64 else "=llHHi"
+
+# A force-feedback record: what an interposer handle writes to its socket and
+# UInputGamepad.service_ff returns (kind, reserved, effect id, strong, weak,
+# length ms, delay ms, repeat count or gain, reserved). The interposer's
+# sji_ff_record_t is the same 16 bytes.
+FF_RECORD_FMT = "=BBhHHHHHH"
+FF_RECORD_SIZE = struct.calcsize(FF_RECORD_FMT)
+FF_RECORD_PLAY = 1
+FF_RECORD_STOP = 2
+FF_RECORD_GAIN = 3
+# How long a rumble without its own end is played for at a time; it is renewed
+# at half this while it plays, so a client that stops hearing stops shaking.
+FF_LEASE_MS = 2000
 
 
 def uinput_writable() -> bool:
@@ -2551,13 +2597,19 @@ class UInputGamepad:
 
     Applications discover it as an ordinary controller, so neither the Joystick
     Interposer nor fake-udev is involved. It carries the evdev event stream the
-    interposer socket carries, presented as the same Xbox pad.
+    interposer socket carries, presented as the same Xbox pad, force feedback
+    included: the kernel hands an application's effect uploads and erasures to
+    this device's owner to answer, and its plays arrive as EV_FF events
+    (`service_ff`).
     """
 
     def __init__(self, label: str) -> None:
         self.label = label
         self.fd: Optional[int] = None
         self.device_nodes: list = []
+        # Effect id -> (strong, weak, length_ms, delay_ms), the magnitudes as
+        # the interposer resolves them (FF_RECORD_FMT).
+        self.effects: dict = {}
 
     def create(self) -> list:
         """Register the kernel device and return its /dev/input node paths.
@@ -2565,10 +2617,13 @@ class UInputGamepad:
         Raises:
             OSError: The uinput setup ioctls failed; the fd is closed first.
         """
-        fd = os.open(UINPUT_PATH, os.O_WRONLY | os.O_NONBLOCK)
+        fd = os.open(UINPUT_PATH, os.O_RDWR | os.O_NONBLOCK)
         try:
             fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
             fcntl.ioctl(fd, UI_SET_EVBIT, EV_ABS)
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_FF)
+            for code in FF_MEMLESS_BITS:
+                fcntl.ioctl(fd, UI_SET_FFBIT, code)
             for code in STANDARD_XPAD_CONFIG["btn_map"]:
                 fcntl.ioctl(fd, UI_SET_KEYBIT, code)
             for code in STANDARD_XPAD_CONFIG["axes_map"]:
@@ -2586,7 +2641,7 @@ class UInputGamepad:
                 STANDARD_XPAD_CONFIG["product_id"],
                 STANDARD_XPAD_CONFIG["version"],
                 STANDARD_XPAD_CONFIG["name"].encode("utf-8")[:UINPUT_MAX_NAME_SIZE - 1],
-                0,
+                FF_EFFECTS_MAX,
             ))
             fcntl.ioctl(fd, UI_DEV_CREATE)
         except OSError:
@@ -2620,6 +2675,74 @@ class UInputGamepad:
 
     def emit(self, ev_type: int, ev_code: int, ev_value: float) -> None:
         os.write(self.fd, get_evdev_events_packed(ev_type, ev_code, ev_value, LOCAL_ARCH_BITS))
+
+    def service_ff(self) -> list:
+        """Answer the effect uploads and erasures queued on the device, and
+        return what applications played, stopped, and set the gain to since,
+        as FF_RECORD_FMT tuples.
+
+        The kernel holds an application's EVIOCSFF or EVIOCRMFF until this
+        device's owner ends the request, so every one is answered as it is
+        read: a rumble effect keeps its two magnitudes and a periodic one
+        drives both at its own, scaled from 0x7fff to 0xffff, as a memless pad
+        plays them.
+        """
+        size = struct.calcsize(LOCAL_EVDEV_EVENT_FMT)
+        out = []
+        while self.fd is not None:
+            try:
+                data = os.read(self.fd, size * 64)
+            except (BlockingIOError, InterruptedError):
+                break
+            if not data:
+                break
+            for off in range(0, len(data) - size + 1, size):
+                _, _, etype, code, value = struct.unpack_from(LOCAL_EVDEV_EVENT_FMT, data, off)
+                if etype == EV_UINPUT and code == UI_FF_UPLOAD:
+                    self._answer_upload(value)
+                elif etype == EV_UINPUT and code == UI_FF_ERASE:
+                    effect_id = self._answer_erase(value)
+                    if effect_id is not None:
+                        out.append((FF_RECORD_STOP, 0, effect_id, 0, 0, 0, 0, 0, 0))
+                elif etype == EV_FF and code == FF_GAIN:
+                    out.append((FF_RECORD_GAIN, 0, 0, 0, 0, 0, 0, max(0, min(value, 0xffff)), 0))
+                elif etype == EV_FF and code in self.effects and value > 0:
+                    strong, weak, length, delay = self.effects[code]
+                    out.append((FF_RECORD_PLAY, 0, code, strong, weak, length, delay,
+                                min(value, 0xffff), 0))
+                elif etype == EV_FF and code in self.effects:
+                    out.append((FF_RECORD_STOP, 0, code, 0, 0, 0, 0, 0, 0))
+        return out
+
+    def _answer_upload(self, request_id: int) -> None:
+        """End one upload request: keep a rumble or periodic effect, refuse anything else."""
+        buf = bytearray(UINPUT_FF_UPLOAD_SIZE)
+        struct.pack_into("=Ii", buf, 0, request_id, 0)
+        fcntl.ioctl(self.fd, UI_BEGIN_FF_UPLOAD, buf, True)
+        etype, effect_id, _, _, _, length, delay = struct.unpack_from(FF_EFFECT_HEAD_FMT, buf, 8)
+        union = 8 + struct.calcsize(FF_EFFECT_HEAD_FMT)
+        retval = 0
+        if etype == FF_RUMBLE:
+            strong, weak = struct.unpack_from("=HH", buf, union)
+        elif etype == FF_PERIODIC:
+            magnitude = struct.unpack_from("=h", buf, union + 4)[0]
+            strong = weak = min(0xffff, abs(magnitude) * 2)
+        else:
+            retval = -errno.EINVAL
+        if retval == 0:
+            self.effects[effect_id] = (strong, weak, length, delay)
+        struct.pack_into("=i", buf, 4, retval)
+        fcntl.ioctl(self.fd, UI_END_FF_UPLOAD, buf)
+
+    def _answer_erase(self, request_id: int) -> Optional[int]:
+        """End one erase request; the id of the effect it forgets."""
+        buf = bytearray(struct.pack(UINPUT_FF_ERASE_FMT, request_id, 0, 0))
+        fcntl.ioctl(self.fd, UI_BEGIN_FF_ERASE, buf, True)
+        effect_id = struct.unpack(UINPUT_FF_ERASE_FMT, bytes(buf))[2]
+        known = self.effects.pop(effect_id, None) is not None
+        struct.pack_into("=i", buf, 4, 0)
+        fcntl.ioctl(self.fd, UI_END_FF_ERASE, buf)
+        return effect_id if known else None
 
     def destroy(self) -> None:
         if self.fd is None:
@@ -2902,6 +3025,14 @@ class SelkiesGamepad:
         _js_state: Last queued js value per (ev_type, number), the source for
             init_state_burst; updated at queue time so the snapshot stays
             truthful even for events the bounded queue drops.
+        on_rumble: Called with the strong and weak motor levels (0 to 1) and
+            how long to hold them in ms whenever the mix of the effects
+            applications play on this pad changes, and again while an effect
+            without an end plays (`_ff_update`); the handler relays it to the
+            client driving the slot.
+        _ff_playing: `(source, effect id) -> [strong, weak, start, end]`, the
+            effects playing or waiting out their delay, in loop time; a source
+            is an interposer connection's writer or the kernel device.
     """
 
     def __init__(self, js_interposer_socket_path: str,
@@ -2929,6 +3060,13 @@ class SelkiesGamepad:
 
         self._held_controls = set()
         self._js_state = {}
+
+        self.on_rumble: Optional[Callable[[float, float, int], None]] = None
+        self._ff_playing: dict = {}
+        self._ff_gain = 0xffff
+        self._ff_timer: Optional[asyncio.TimerHandle] = None
+        self._ff_sent: Optional[tuple] = (0, 0)
+        self._ff_renew_at: Optional[float] = None
 
     def set_config(self, client_input_name: str, client_num_btns: int,
                    client_num_axes: int) -> None:
@@ -2978,6 +3116,14 @@ class SelkiesGamepad:
             )
             return
         self.uinput = device
+        try:
+            self.loop.add_reader(device.fd, self._service_uinput_ff)
+        except (OSError, ValueError) as e:
+            # Only an emulated /dev/uinput (tests/tools/uinput_shim.c) is a
+            # file the loop cannot watch; a kernel device always can be.
+            logger_selkies_gamepad.warning(
+                f"Gamepad {self.js_sock_path}: force feedback requests cannot be watched ({e})."
+            )
         logger_selkies_gamepad.info(
             f"Gamepad {self.js_sock_path}: kernel device ready ({', '.join(nodes) or 'node path unknown'})."
         )
@@ -2999,9 +3145,116 @@ class SelkiesGamepad:
             logger_selkies_gamepad.error(
                 f"Gamepad {self.js_sock_path}: kernel device write failed ({e}); tearing it down."
             )
-            self.uinput.destroy()
-            self.uinput = None
+            self._drop_uinput()
             self.uinput_enabled = False
+
+    def _drop_uinput(self) -> None:
+        """Destroy the kernel device, and forget the effects applications played on it."""
+        if self.uinput is None:
+            return
+        if self.uinput.fd is not None:
+            self.loop.remove_reader(self.uinput.fd)
+        self.uinput.destroy()
+        self.uinput = None
+        self.ff_forget("uinput")
+
+    def _service_uinput_ff(self) -> None:
+        """Answer the kernel device's queued effect requests and mix what they played."""
+        if self.uinput is None:
+            return
+        try:
+            records = self.uinput.service_ff()
+        except OSError as e:
+            logger_selkies_gamepad.warning(f"Gamepad {self.js_sock_path}: force feedback request failed: {e}")
+            return
+        for record in records:
+            self.ff_record("uinput", record)
+
+    def ff_record(self, source: Any, record: tuple) -> None:
+        """Apply one FF_RECORD_FMT record an application's handle produced.
+
+        A play starts after its delay and lasts its length times its repeat
+        count, or until stopped when its length is 0; a play of an effect
+        already playing replaces it, as a replay does on a kernel pad.
+        """
+        kind, _, effect_id, strong, weak, length, delay, count, _ = record
+        key = (source, effect_id)
+        if kind == FF_RECORD_PLAY and count:
+            start = self.loop.time() + delay / 1000.0
+            end = start + count * length / 1000.0 if length else None
+            self._ff_playing[key] = [strong, weak, start, end]
+        elif kind in (FF_RECORD_PLAY, FF_RECORD_STOP):
+            self._ff_playing.pop(key, None)
+        elif kind == FF_RECORD_GAIN:
+            self._ff_gain = count
+        self._ff_update()
+
+    def ff_replay(self) -> None:
+        """Hand the mix playing now to `on_rumble` again, for a client that has
+        just taken the slot: an unchanged mix is otherwise not sent until its
+        renewal."""
+        if any(self._ff_sent):
+            self._ff_sent = None
+            self._ff_update()
+
+    def ff_forget(self, source: Any) -> None:
+        """Stop every effect one source played: its handle closed, or its device went."""
+        for key in [k for k in self._ff_playing if k[0] == source]:
+            del self._ff_playing[key]
+        self._ff_update()
+
+    def _ff_update(self) -> None:
+        """Mix the effects playing now and hand the result to `on_rumble`.
+
+        The motors take the sum of every playing effect's magnitudes, scaled
+        by the gain and capped, as a memless pad mixes them. The client is told
+        how long to hold the mix: until the next effect starts or ends, or,
+        where that is further off than FF_LEASE_MS or never (an effect without
+        an end), for FF_LEASE_MS at a time, renewed at half that; the Gamepad
+        API plays at most 5 s at once, and a client that stops hearing stops
+        shaking. A mix that did not change is not sent again until a renewal
+        is due, and the timer wakes at the next start, end, or renewal.
+        """
+        if self._ff_timer is not None:
+            self._ff_timer.cancel()
+            self._ff_timer = None
+        now = self.loop.time()
+        for key in [k for k, v in self._ff_playing.items() if v[3] is not None and v[3] <= now]:
+            del self._ff_playing[key]
+        strong = weak = 0
+        boundaries = []
+        endless = False
+        for s_mag, w_mag, start, end in self._ff_playing.values():
+            if start > now:
+                boundaries.append(start)
+                continue
+            strong += s_mag
+            weak += w_mag
+            if end is None:
+                endless = True
+            else:
+                boundaries.append(end)
+        strong = min(0xffff, strong * self._ff_gain // 0xffff)
+        weak = min(0xffff, weak * self._ff_gain // 0xffff)
+        mix = (strong, weak)
+        lease = FF_LEASE_MS / 1000.0
+        change = min((t for t in boundaries if t > now), default=None)
+        leased = any(mix) and (endless or change is None or change - now > lease)
+        hold = lease if leased else (change - now if any(mix) and change is not None else 0.0)
+        renew = self._ff_renew_at is not None and now >= self._ff_renew_at
+        if mix != self._ff_sent or renew:
+            self._ff_sent = mix
+            self._ff_renew_at = now + lease / 2 if leased else None
+            if self.on_rumble is not None:
+                try:
+                    self.on_rumble(strong / 0xffff, weak / 0xffff, int(round(hold * 1000)))
+                except Exception:
+                    logger_selkies_gamepad.debug("rumble relay failed", exc_info=True)
+        wake = [t for t in boundaries if t > now]
+        if self._ff_renew_at is not None:
+            wake.append(self._ff_renew_at)
+        if wake:
+            self._ff_timer = self.loop.call_at(min(wake), self._ff_update)
 
     def _make_interposer_config_payload(self, js_index: int, controller_config: dict) -> bytes:
         """Create the js_config_t payload sent to the C interposer.
@@ -3173,8 +3426,15 @@ class SelkiesGamepad:
             await writer.drain()
             logger_selkies_gamepad.debug(f"{log_prefix} Added to active list. Total {socket_type_str} clients: {len(clients_dict)}.")
 
+            # An evdev handle writes its force feedback back as FF_RECORD_FMT
+            # records; a joydev one has none, and what it writes is dropped.
+            # Either way the read is what notices the application closing it.
             while self.running and not writer.is_closing():
-                await asyncio.sleep(0.1) 
+                if is_evdev_socket:
+                    record = await reader.readexactly(FF_RECORD_SIZE)
+                    self.ff_record(writer, struct.unpack(FF_RECORD_FMT, record))
+                elif not await reader.read(4096):
+                    break
             
             if not self.running:
                 logger_selkies_gamepad.debug(f"{log_prefix} Exiting handler normally because self.running is False.")
@@ -3187,10 +3447,11 @@ class SelkiesGamepad:
             logger_selkies_gamepad.error(f"{log_prefix} Unhandled error in handler: {e}", exc_info=True)
         finally:
             logger_selkies_gamepad.debug(f"{log_prefix} Entering finally block.")
+            self.ff_forget(writer)
             if writer in clients_dict:
                 del clients_dict[writer]
                 logger_selkies_gamepad.debug(f"{log_prefix} Removed from active list. Total {socket_type_str} clients now: {len(clients_dict)}.")
-            else:
+            elif self.running:
                 logger_selkies_gamepad.warning(f"{log_prefix} Writer not found in active list during finally block.")
 
             if not writer.is_closing():
@@ -3405,6 +3666,12 @@ class SelkiesGamepad:
         logger_selkies_gamepad.debug(f"Closing gamepad services for JS:{self.js_sock_path}, EVDEV:{self.evdev_sock_path}")
         self.running = False
 
+        # A client handler waits in a read of its connection, and a server's
+        # wait_closed() waits for every connection to close, so the clients go
+        # first.
+        for writer in list(self.js_clients.keys()) + list(self.evdev_clients.keys()):
+            if not writer.is_closing(): writer.close()
+
         if self.js_server:
             self.js_server.close()
             await self.js_server.wait_closed()
@@ -3444,9 +3711,7 @@ class SelkiesGamepad:
                 except OSError as e:
                     logger_selkies_gamepad.warning(f"Could not remove socket file {sock_path} on close: {e}")
 
-        if self.uinput is not None:
-            self.uinput.destroy()
-            self.uinput = None
+        self._drop_uinput()
 
         logger_selkies_gamepad.debug("Gamepad services fully closed.")
 
@@ -4336,7 +4601,8 @@ class WebRTCInput:
         A fresh association starts with no heartbeat, so the previous client's
         last beat cannot date-stamp it into an immediate sweep, and the kernel
         device is brought up before the first input so applications see a
-        plug event rather than a controller appearing mid-press.
+        plug event rather than a controller appearing mid-press. A rumble
+        playing on the slot goes to the new client at once (ff_replay).
         """
         if not (0 <= gamepad_idx < self.num_gamepads):
             logger_webrtc_input.error(f"Client association: Gamepad index {gamepad_idx} out of range (0-{self.num_gamepads-1}).")
@@ -4365,6 +4631,30 @@ class WebRTCInput:
         self.gamepad_heartbeats.pop(gamepad_idx, None)
 
         self.gamepad_instances[gamepad_idx].ensure_uinput()
+        self.gamepad_instances[gamepad_idx].ff_replay()
+
+    def _relay_rumble(self, gamepad_idx: int, strong: float, weak: float, duration_ms: int) -> None:
+        """Send a pad's rumble to the one client driving its slot, as the
+        system action `rumble,<slot>,<strong>,<weak>,<ms>`; with no client
+        driving it, to nobody.
+
+        Args:
+            gamepad_idx: The slot whose applications' effects changed.
+            strong: Strong (low-frequency) motor level, 0 to 1.
+            weak: Weak (high-frequency) motor level, 0 to 1.
+            duration_ms: How long to hold it; 0 with both levels 0 stops it.
+        """
+        conn_id = (self.client_gamepad_associations.get(gamepad_idx) or {}).get("conn_id")
+        if conn_id is None:
+            return
+        action = f"rumble,{gamepad_idx},{strong:.3f},{weak:.3f},{duration_ms}"
+        try:
+            if self._ws_transport():
+                self.rtc_app.send_system_action(action, conn_id=conn_id)
+            else:
+                self.rtc_app.send_system_action(action, peer_id=conn_id, only=True)
+        except Exception:
+            logger_webrtc_input.debug("rumble relay failed", exc_info=True)
 
     async def release_gamepads_for_conn(self, conn_id: Any) -> None:
         """Disassociate (and neutralize, via reset_state) every gamepad slot whose
@@ -4584,6 +4874,7 @@ class WebRTCInput:
             existing = _persistent_gamepads.get(i)
             if existing is not None and existing.running:
                 self.gamepad_instances[i] = existing
+                existing.on_rumble = functools.partial(self._relay_rumble, i)
                 logger_webrtc_input.debug(
                     f"Adopted live persistent gamepad instance for index {i} (JS: {existing.js_sock_path})."
                 )
@@ -4602,6 +4893,7 @@ class WebRTCInput:
             std_num_axes = len(STANDARD_XPAD_CONFIG["axes_map"])
 
             gamepad.set_config(gamepad_name_for_interposer, std_num_btns, std_num_axes)
+            gamepad.on_rumble = functools.partial(self._relay_rumble, i)
 
             self._spawn_task(gamepad.run_servers())
             _persistent_gamepads[i] = gamepad

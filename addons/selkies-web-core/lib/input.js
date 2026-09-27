@@ -59,7 +59,9 @@
  * `m,<x>,<y>,<mask>,<magnitude>` (absolute) and
  * `m2,<dx>,<dy>,<mask>,<magnitude>` (relative; scroll pulses ride mask bits
  * 3 to 7); `p,<0|1>` and `SET_NATIVE_CURSOR_RENDERING,<0|1>` on pointer lock
- * changes; `js,c`, `js,d`, `js,b`, `js,a`, and `js,h` for gamepads.
+ * changes; `js,c`, `js,d`, `js,b`, `js,a`, and `js,h` for gamepads, whose
+ * rumble comes back as the system action `rumble,<slot>,<strong>,<weak>,<ms>`
+ * (`rumble`).
  * @module
  */
 
@@ -4409,6 +4411,25 @@ export class Input {
         if (this._isSidebarOpen) {
             window.postMessage({ type: 'gamepadButtonUpdate', gamepadIndex: server_gp_index, buttonIndex: btn_num, value: val }, window.location.origin);
         }
+    }
+
+    /**
+     * Plays the rumble the server relays for a pad slot, on this client's
+     * pads when the slot is the one they drive (`GamepadManager.rumble`).
+     * @param {number} slot Zero-based server slot.
+     * @param {number} strong Strong motor level, 0 to 1.
+     * @param {number} weak Weak motor level, 0 to 1.
+     * @param {number} durationMs How long to hold it.
+     */
+    rumble(slot, strong, weak, durationMs) {
+        const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
+        if (slot !== server_gp_index || !this.gamepadManager) return;
+        this.gamepadManager.rumble(strong, weak, durationMs);
+    }
+
+    /** Stops a rumble playing on this client's pads: its connection is gone. */
+    stopRumble() {
+        if (this.gamepadManager) this.gamepadManager.stopRumble();
     }
 
     /** Sends the held-pad heartbeat (`js,h`). */

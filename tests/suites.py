@@ -74,6 +74,7 @@ SUITES: list = [
     {"path": "unit/test_touch_gestures.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_cadence.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gamepad_poll.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_gamepad_rumble.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_wheel_order.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_tracking.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_gpu_fallback.py", "tier": "unit", "timeout": 180},
@@ -163,6 +164,10 @@ SUITES: list = [
     {"path": "integration/test_stall_recovery.py", "tier": "integration", "timeout": 900,
      "selectors": ["h264enc", "jpeg"]},
     {"path": "integration/test_gamepad_enumeration.py", "tier": "integration", "timeout": 300},
+    # The kernel block needs a writable /dev/uinput, which CI does not have:
+    # run it by hand (`test_gamepad_rumble.py kernel`) where one is.
+    {"path": "integration/test_gamepad_rumble.py", "tier": "integration", "timeout": 300,
+     "selectors": ["interposer"]},
     {"path": "integration/test_uinput_interposer.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_virtual_input_devices.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_ack_latency.py", "tier": "integration", "timeout": 300},
@@ -259,6 +264,8 @@ SUITES: list = [
     {"path": "e2e/test_vblank_rate.py", "tier": "e2e", "timeout": 600,
      "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_gamepad_uinput.py", "tier": "e2e", "timeout": 900},
+    {"path": "e2e/test_gamepad_rumble.py", "tier": "e2e", "timeout": 900,
+     "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_dpi_accuracy.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_dpi_restart.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc"]},

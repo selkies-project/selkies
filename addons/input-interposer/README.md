@@ -141,6 +141,24 @@ struct input_event { struct timeval time; __u16 type; __u16 code; __s32 value; }
 
 Each event is written together with a `SYN_REPORT` (`type` `EV_SYN` = 0, `code` `SYN_REPORT` = 0, `value` 0) immediately after it, so one button press or axis motion is always two records.
 
+### Force feedback
+
+The evdev node answers as a memless Xbox pad does: `EVIOCGBIT(EV_FF)` reports `FF_RUMBLE`, `FF_PERIODIC` with `FF_SQUARE`, `FF_TRIANGLE`, and `FF_SINE`, and `FF_GAIN`; `EVIOCGEFFECTS` is 16. The effects an application uploads with `EVIOCSFF` are kept per handle, as the kernel keeps them per open file (a new one, id `-1`, takes the first free id; any other type, or an id the handle does not hold, is `EINVAL`; a seventeenth is `ENOSPC`), and `EVIOCRMFF` forgets one. The events an application `write()`s to the node are taken whole, as `evdev_write()` takes them (`EINVAL` under one event's size): each `EV_FF` play, stop, or gain goes to the server as one record on the handle's own socket, the direction the event stream leaves free, and every other event is accepted and dropped. The record is 16 bytes, packed `=BBhHHHHHH`:
+
+| offset | field | meaning |
+|---|---|---|
+| 0 | `kind` | `1` play, `2` stop, `3` gain |
+| 1 | reserved | 0 |
+| 2 | `id` | the effect |
+| 4 | `strong` | play: strong motor, 0-0xffff (a rumble effect's `strong_magnitude`; a periodic one's magnitude, doubled, on both motors) |
+| 6 | `weak` | play: weak motor, likewise |
+| 8 | `length_ms` | play: the effect's `replay.length`, 0 until stopped |
+| 10 | `delay_ms` | play: its `replay.delay` |
+| 12 | `count` | play: the repeat count; gain: the gain, 0-0xffff |
+| 14 | reserved | 0 |
+
+The server mixes every playing effect of a slot and relays the result to the client driving it. The joydev node has no force feedback, and what an application writes to it is read and dropped.
+
 ### Closing
 
-Closing a handle is per handle: the interposer retires the fd that was closed, leaves this device's other handles alone, and clears the cached `js_config_t` only when the last one goes. The server drops the writer from its fan-out list when the connection ends, and unlinks the socket files when the gamepad is shut down.
+Closing a handle is per handle: the interposer retires the fd that was closed, leaves this device's other handles alone, and clears the cached `js_config_t` only when the last one goes. The server drops the writer from its fan-out list when the connection ends, stops the effects that handle played, and unlinks the socket files when the gamepad is shut down.

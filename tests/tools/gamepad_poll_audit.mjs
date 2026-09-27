@@ -10,7 +10,8 @@
 // touch gamepad, which knows when it changes, is read the moment it says so. A
 // stick is one point, so its rest noise is cut by its distance from center:
 // cutting each axis on its own pins the minor axis of a push near a cardinal
-// direction to zero and then jumps it.
+// direction to zero and then jumps it. Rumble the server relays plays on every
+// pad that has a motor to play it with, and stops when the manager goes.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -107,6 +108,41 @@ function makeManager() {
     manager._poll();
     const ax = sent.find(([k, a]) => k === 'a' && a === 0);
     check('an unmapped pad keeps the per-axis cut', ax === undefined, JSON.stringify(sent));
+}
+
+// --- rumble plays on every pad that can -------------------------------------
+{
+    const calls = [];
+    const actuator = (name) => ({
+        playEffect: (type, p) => { calls.push([name, 'play', type, p.strongMagnitude, p.weakMagnitude, p.duration]); return Promise.resolve('complete'); },
+        reset: () => { calls.push([name, 'reset']); return Promise.resolve('complete'); },
+    });
+    const chromePad = pad('standard', [0, 0, 0, 0]);
+    chromePad.vibrationActuator = actuator('chrome');
+    const geckoPad = pad('standard', [0, 0, 0, 0]);
+    geckoPad.hapticActuators = [{ pulse: (v, ms) => { calls.push(['gecko', 'pulse', v, ms]); return Promise.resolve(true); } }];
+    const plainPad = pad('standard', [0, 0, 0, 0]);
+    pads = [chromePad, geckoPad, plainPad, null];
+    const { manager } = makeManager();
+    manager.rumble(0.5, 0.25, 300);
+    check('a rumble plays dual-rumble on a pad with a vibration actuator, and a pulse of the stronger level on Gecko\'s',
+          JSON.stringify(calls) === JSON.stringify([['chrome', 'play', 'dual-rumble', 0.5, 0.25, 300], ['gecko', 'pulse', 0.5, 300]]),
+          JSON.stringify(calls));
+    calls.length = 0;
+    manager.rumble(0, 0, 0);
+    check('and a rumble of nothing stops both', JSON.stringify(calls) === JSON.stringify([['chrome', 'reset'], ['gecko', 'pulse', 0, 0]]),
+          JSON.stringify(calls));
+    calls.length = 0;
+    manager.rumble(0, 0, 0);
+    check('a stop with nothing playing is not sent', calls.length === 0, JSON.stringify(calls));
+    manager.rumble(1, 1, 60000);
+    check('an effect is held at most the 5 s the Gamepad API plays at once',
+          calls.length === 2 && calls[0][5] === 5000 && calls[1][3] === 5000, JSON.stringify(calls));
+    calls.length = 0;
+    manager.rumble(0.5, 0.5, 300);
+    manager.destroy();
+    check('tearing the manager down stops what plays',
+          calls.length === 4 && calls[2][1] === 'reset' && calls[3][2] === 0, JSON.stringify(calls));
 }
 
 process.exit(failed === 0 ? 0 : 1);

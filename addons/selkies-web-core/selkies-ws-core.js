@@ -8094,6 +8094,11 @@ class WorkerWebSocket {
                 apps: JSON.parse(systemMsg.action.slice('apps_installed,'.length)),
               }, window.location.origin);
             }
+            else if (typeof systemMsg.action === 'string' &&
+                systemMsg.action.startsWith('rumble,') && window.webrtcInput) {
+              const [slot, strong, weak, ms] = systemMsg.action.split(',').slice(1).map(Number);
+              window.webrtcInput.rumble(slot, strong, weak, ms);
+            }
           } catch (e) {
             console.error('Error parsing system data:', e);
           }
@@ -8268,6 +8273,8 @@ class WorkerWebSocket {
   websocket.onclose = (event) => {
     console.log('[websockets] Connection closed', event);
     streamStats.disconnected();
+    // No renewal will come; a rumble playing stops now rather than at its lease.
+    if (window.webrtcInput && typeof window.webrtcInput.stopRumble === 'function') window.webrtcInput.stopRumble();
     // The auth probe reloads the page when the origin now answers 401.
     if (window.__selkiesAuthProbe) window.__selkiesAuthProbe();
     if (event.code === 4001) {

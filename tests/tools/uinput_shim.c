@@ -1,6 +1,7 @@
 /* Test-only emulator for /dev/uinput: records the device setup ioctls and lets
    the event writes land in a file, so the real server code path can be run on a
-   host whose /dev/uinput is unavailable. */
+   host whose /dev/uinput is unavailable. Nothing is ever read back, so the
+   force-feedback requests a kernel device queues for its owner never arrive. */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -92,6 +93,7 @@ int ioctl(int fd, unsigned long request, ...) {
     if (request == UI_SET_EVBIT) fprintf(logf, "SET_EVBIT 0x%02lx\n", (unsigned long)arg);
     else if (request == UI_SET_KEYBIT) fprintf(logf, "SET_KEYBIT 0x%03lx\n", (unsigned long)arg);
     else if (request == UI_SET_ABSBIT) fprintf(logf, "SET_ABSBIT 0x%02lx\n", (unsigned long)arg);
+    else if (request == UI_SET_FFBIT) fprintf(logf, "SET_FFBIT 0x%02lx\n", (unsigned long)arg);
     else if (request == UI_ABS_SETUP) {
         struct uinput_abs_setup *s = arg;
         fprintf(logf, "ABS_SETUP code=0x%02x value=%d min=%d max=%d fuzz=%d flat=%d res=%d\n",

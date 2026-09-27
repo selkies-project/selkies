@@ -12,7 +12,9 @@
  * first touch after the overlay is shown. Every touch event that changes the
  * pad dispatches one `touchgamepadinput` event on `window` once its handler
  * is done, so a poller can read the change then rather than on its next
- * tick; the standard API has no event for input. The page drives it over
+ * tick; the standard API has no event for input. Its `vibrationActuator`
+ * plays a rumble on the device's own vibrator where the browser has one
+ * (`navigator.vibrate`). The page drives it over
  * `window.postMessage`: `TOUCH_GAMEPAD_SETUP` (`targetDivId`, optional
  * `initialProfileName`, `visible`) names the host element and may show the
  * overlay; `TOUCH_GAMEPAD_VISIBILITY` (`visible`, optional `targetDivId`)
@@ -107,7 +109,32 @@
         axes: new Array(MAX_AXES).fill(0.0),
         buttons: Array.from({ length: MAX_BUTTONS }, () => ({ pressed: false, touched: false, value: 0.0 })),
         timestamp: Date.now(),
+        vibrationActuator: makeVibrationActuator(),
     };
+
+    /**
+     * A dual-rumble actuator for the virtual pad, played on the device itself
+     * through `navigator.vibrate` where the browser has it (Android): it has
+     * one motor and no strength, so any level on either motor vibrates for
+     * the effect's duration. Null elsewhere, like a pad without motors.
+     * @returns {object|null}
+     */
+    function makeVibrationActuator() {
+        if (typeof navigator === 'undefined' || typeof navigator.vibrate !== 'function') return null;
+        return {
+            type: 'dual-rumble',
+            effects: ['dual-rumble'],
+            playEffect(type, params = {}) {
+                const on = (params.strongMagnitude || 0) > 0 || (params.weakMagnitude || 0) > 0;
+                navigator.vibrate(on ? Math.max(0, params.duration || 0) : 0);
+                return Promise.resolve('complete');
+            },
+            reset() {
+                navigator.vibrate(0);
+                return Promise.resolve('complete');
+            },
+        };
+    }
 
     const originalGetGamepads = navigator.getGamepads ? navigator.getGamepads.bind(navigator) : () => [];
 

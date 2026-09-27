@@ -2983,6 +2983,8 @@ export default function webrtc() {
 			signaling.ondisconnect = (reconnect) => {
 				videoElement.style.cursor = "auto";
 				releaseWakeLock();
+				// No renewal will come; a rumble playing stops now rather than at its lease.
+				if (input) input.stopRumble();
 				if (window.__selkiesAuthProbe) window.__selkiesAuthProbe();
 				if (reconnect) {
 					status = 'connecting';
@@ -3051,6 +3053,7 @@ export default function webrtc() {
 					requestWakeLock();
 					applyOutputDevice();
 				} else if (state === "failed" || state === "disconnected") {
+					if (input) input.stopRumble();
 					if (!fatalConnectionHalt && pcRecoveryTimer === null) {
 						const graceMs = state === "failed" ? 1500 : 8000;
 						pcRecoveryTimer = setTimeout(() => {
@@ -3246,6 +3249,11 @@ export default function webrtc() {
 				if (printJobs && !window.location.hash.startsWith('#display2')) printJobs.announce(doc.name, doc.size_bytes);
 			};
 			webrtc.onsystemaction = (action) => {
+				if (action.startsWith('rumble,')) {
+					const [slot, strong, weak, ms] = action.split(',').slice(1).map(Number);
+					if (input) input.rumble(slot, strong, weak, ms);
+					return;
+				}
 				if (action.startsWith('video_declined,')) {
 					const codec = action.slice('video_declined,'.length).split('/').pop().toLowerCase();
 					videoDeclined = true;

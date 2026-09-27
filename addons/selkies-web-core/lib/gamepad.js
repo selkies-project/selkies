@@ -11,6 +11,10 @@
  * gamepad announces its own changes (`touchgamepadinput`), and is read the
  * moment it does rather than on the next tick.
  *
+ * Rumble goes the other way (`rumble`): the dual-rumble effect of the
+ * Gamepad API's `vibrationActuator` (Chromium, WebKit), else Gecko's
+ * `hapticActuators` pulse.
+ *
  * Pads the browser could not map to the standard layout are remapped through
  * the per-platform profile database that gendb.js generates: raw button and
  * axis indices differ across platforms for the same pad, so the lookup is
@@ -47,6 +51,9 @@ const STICK_DEADZONE = 0.05;
 
 /** The standard-layout axis pairs that are one stick each. */
 const STICK_AXES = [[0, 1], [2, 3]];
+
+/** The longest effect the Gamepad API plays at once, in milliseconds. */
+const RUMBLE_MAX_MS = 5000;
 
 /** The remap database platform this browser's pads are looked up under. */
 const JSDB_PLATFORM = (() => {
@@ -88,6 +95,7 @@ export class GamepadManager {
         }, GP_TIMEOUT);
         this._onTouchInput = () => this._poll();
         window.addEventListener('touchgamepadinput', this._onTouchInput);
+        this._rumbling = false;
     }
 
     /** Resumes polling. */
@@ -98,10 +106,11 @@ export class GamepadManager {
         }
     }
 
-    /** Pauses polling; the per-pad state is kept. */
+    /** Pauses polling, and stops a rumble playing; the per-pad state is kept. */
     disable() {
         if (this._active) {
             this._active = false;
+            this.stopRumble();
             console.log("GamepadManager polling deactivated.");
         }
     }
@@ -350,8 +359,56 @@ export class GamepadManager {
         return false;
     }
 
-    /** Stops polling and forgets every pad. */
+    /**
+     * Plays a rumble on every connected pad that can: both motors for
+     * `durationMs`, at most the Gamepad API's 5 s, a new call replacing the
+     * one before; 0 on both motors stops it. Gecko's pulse has one motor,
+     * which takes the stronger level. Nothing plays while polling is paused,
+     * and a stop with nothing playing is not sent.
+     * @param {number} strong Strong (low-frequency) motor, 0 to 1.
+     * @param {number} weak Weak (high-frequency) motor, 0 to 1.
+     * @param {number} durationMs
+     */
+    rumble(strong, weak, durationMs) {
+        const off = !(strong > 0 || weak > 0) || !this._active;
+        if (off && !this._rumbling) return;
+        this._rumbling = !off;
+        durationMs = Math.min(RUMBLE_MAX_MS, Math.max(0, durationMs || 0));
+        let pads = [];
+        try {
+            pads = Array.from(navigator.getGamepads());
+        } catch (e) {
+            return;
+        }
+        for (const pad of pads) {
+            if (!pad || !pad.connected) continue;
+            const actuator = pad.vibrationActuator;
+            if (actuator && typeof actuator.playEffect === 'function') {
+                const done = (off && typeof actuator.reset === 'function')
+                    ? actuator.reset()
+                    : actuator.playEffect('dual-rumble', {
+                        startDelay: 0, duration: off ? 0 : durationMs,
+                        strongMagnitude: off ? 0 : strong, weakMagnitude: off ? 0 : weak,
+                    });
+                if (done && typeof done.catch === 'function') done.catch(() => {});
+                continue;
+            }
+            const haptic = pad.hapticActuators && pad.hapticActuators[0];
+            if (haptic && typeof haptic.pulse === 'function') {
+                const done = haptic.pulse(off ? 0 : Math.max(strong, weak), off ? 0 : durationMs);
+                if (done && typeof done.catch === 'function') done.catch(() => {});
+            }
+        }
+    }
+
+    /** Stops a rumble playing on the pads, if one is. */
+    stopRumble() {
+        this.rumble(0, 0, 0);
+    }
+
+    /** Stops polling and any rumble, and forgets every pad. */
     destroy() {
+        this.stopRumble();
         clearInterval(this.interval);
         window.removeEventListener('touchgamepadinput', this._onTouchInput);
         this.state = {};
