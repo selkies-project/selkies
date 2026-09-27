@@ -6416,6 +6416,15 @@ class WorkerWebSocket {
                 // packets dropped by the drop-oldest ring when the queue overflows.
                 this.underrunSamples = 0;
                 this.droppedOldest = 0;
+                // Every seam is smoothed over 2 ms: output fades in when priming
+                // ends, the last sample decays to silence when the queue runs
+                // dry, and a dropped packet's head is blended into the head of
+                // the one after it -- a step at any of them is a click on tonal
+                // content.
+                this.FADE = Math.round(sampleRate * 0.002);
+                this.fadeIn = 0;
+                this.fadeOut = 0;
+                this.lastOut = new Float32Array(Math.max(this.channels, 8));
                 // Output RMS accumulator (channel 0), reported with each stats reply.
                 this._levelAcc = 0;
                 this._levelCount = 0;
@@ -6435,10 +6444,7 @@ class WorkerWebSocket {
                     if (this.senderQuiet) this.senderQuiet = false;
                     else if (this.drainSlackMin < this.shiftSlackMin) this.shiftSlackMin = this.drainSlackMin;
                     this.drainSlackMin = Infinity;
-                    if (this.audioBufferQueue.length >= this.MAX_BUFFER_PACKETS) {
-                        this.audioBufferQueue.shift();
-                        this.droppedOldest++;
-                    }
+                    if (this.audioBufferQueue.length >= this.MAX_BUFFER_PACKETS) this._dropHead();
                     this.audioBufferQueue.push(pcmData);
                 };
                 const receive = (data) => {
@@ -6483,21 +6489,21 @@ class WorkerWebSocket {
                 // de-interleave into however many output channels were configured.
                 const chans = output.length;
                 const samplesPerBuffer = output[0].length;
-                const zeroFill = (from) => {
-                    for (let c = 0; c < chans; c++) output[c].fill(0, from);
-                };
 
                 if (this.priming) {
                     const held = this.audioBufferQueue.length;
                     if (held < this.target && !(this.senderQuiet && held > 0)) {
-                        zeroFill(0);
+                        this._silence(output, 0);
                         return true;
                     }
                     this.priming = false;
+                    this.fadeIn = this.FADE;
+                    this.fadeOut = 0;
                 }
 
                 if (this.audioBufferQueue.length === 0 && this.currentAudioData === null) {
-                    zeroFill(0);
+                    this.fadeOut = this.FADE;
+                    this._silence(output, 0);
                     // Full-buffer concealment.
                     this._reprime(samplesPerBuffer);
                     return true;
@@ -6516,15 +6522,19 @@ class WorkerWebSocket {
                         } else {
                             this.currentAudioData = null;
                             this.currentDataOffset = 0;
-                            zeroFill(sampleIndex);
+                            this.fadeOut = this.FADE;
+                            this._silence(output, sampleIndex);
                             // Partial concealment.
                             this._reprime(samplesPerBuffer - sampleIndex);
                             return true;
                         }
                     }
 
+                    const gain = this.fadeIn > 0 ? (this.FADE - this.fadeIn-- + 1) / (this.FADE + 1) : 1;
                     for (let c = 0; c < chans; c++) {
-                        output[c][sampleIndex] = offset < data.length ? data[offset++] : output[0][sampleIndex];
+                        const v = offset < data.length ? data[offset++] * gain : output[0][sampleIndex];
+                        output[c][sampleIndex] = v;
+                        this.lastOut[c] = v;
                     }
                     const s0 = output[0][sampleIndex];
                     this._levelAcc += s0 * s0;
@@ -6542,8 +6552,7 @@ class WorkerWebSocket {
                 // shrink the target.
                 if (this.audioBufferQueue.length > this.target) {
                     if (++this.overCount >= 250) {
-                        this.audioBufferQueue.shift();
-                        this.droppedOldest++;
+                        this._dropHead();
                         this.overCount = 0;
                     }
                 } else {
@@ -6561,6 +6570,43 @@ class WorkerWebSocket {
                 }
 
                 return true;
+            }
+
+            /**
+             * Writes silence from \`from\` on, after the rest of a fade-out:
+             * the last sample output decaying to zero over the fade.
+             * @param {Float32Array[]} output The quantum's output channels.
+             * @param {number} from First sample to write.
+             */
+            _silence(output, from) {
+                const n = output[0].length;
+                let k = from;
+                for (; k < n && this.fadeOut > 0; k++, this.fadeOut--) {
+                    const g = this.fadeOut / (this.FADE + 1);
+                    for (let c = 0; c < output.length; c++) output[c][k] = this.lastOut[c] * g;
+                }
+                for (let c = 0; c < output.length; c++) output[c].fill(0, k);
+            }
+
+            /**
+             * Drops the oldest queued packet, blending its head into the head
+             * of the packet after it: the dropped head continues whatever
+             * played before it, so the seam starts where the audio left off.
+             */
+            _dropHead() {
+                const gone = this.audioBufferQueue.shift();
+                this.droppedOldest++;
+                const next = this.audioBufferQueue[0];
+                if (!gone || !next) return;
+                const ch = this.channels;
+                const frames = Math.min(this.FADE, gone.length / ch, next.length / ch);
+                for (let f = 0; f < frames; f++) {
+                    const w = (f + 1) / (frames + 1);
+                    for (let c = 0; c < ch; c++) {
+                        const i = f * ch + c;
+                        next[i] = gone[i] + (next[i] - gone[i]) * w;
+                    }
+                }
             }
 
             /**

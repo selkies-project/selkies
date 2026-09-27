@@ -7,7 +7,9 @@ packet deeper once a late packet ends it, the server's quiet mark playing a
 sound shorter than the priming depth at once and making the silence after it
 no underrun (also when the mark trails the queue running dry), the
 standing-depth trim, the clean-stretch decay, the drop-oldest ceiling, and the
-depths sized from the frame duration are pinned without a browser.
+depths sized from the frame duration are pinned without a browser, and so is
+the smoothing of every seam: a continuous tone stays continuous through a
+trim, a ceiling drop, running dry, and the re-prime after it.
 """
 import os
 import re
@@ -137,6 +139,39 @@ out.sized10ms = sized(480) === '2,6,1,8';
 out.sized2_5ms = sized(120) === '2,21,2,29';
 out.sized60ms = sized(2880) === '2,2,1,3';
 
+// Seams on tonal content: a 1037 Hz tone (10 ms is not a whole number of its
+// periods, so every dropped packet shifts its phase) must step from sample to
+// sample no more than about its own slope, 0.068 at half scale, through a
+// trim, a ceiling drop, running dry, and the fade back in.
+{
+  const q = new cls({ processorOptions: { channels: 1 } });
+  let n = 0;
+  const tone = () => {
+    const a = new Float32Array(PKT);
+    for (let i = 0; i < PKT; i++, n++) a[i] = 0.5 * Math.sin(2 * Math.PI * 1037 * n / 48000);
+    return a.buffer;
+  };
+  let prev = 0, maxStep = 0, samples = 0;
+  const step = () => {
+    const buf = new Float32Array(128);
+    q.process([], [[buf]], {});
+    for (const x of buf) { maxStep = Math.max(maxStep, Math.abs(x - prev)); prev = x; samples++; }
+  };
+  for (let i = 0; i < 12; i++) q.enqueue(tone());
+  const droppedBefore = q.droppedOldest;
+  for (let i = 0; i < 1200; i++) {
+    step();
+    if (i % 15 === 3 || i % 15 === 7 || i % 15 === 11 || i % 15 === 14) q.enqueue(tone());
+  }
+  out.seamsDropped = q.droppedOldest - droppedBefore >= 2;
+  for (let i = 0; i < 60; i++) step();
+  out.seamsRanDry = q.priming === true;
+  for (let i = 0; i < 3; i++) q.enqueue(tone());
+  for (let i = 0; i < 20; i++) step();
+  out.seamsStepSmall = maxStep < 0.08;
+  out.seamStats = `dropped=${q.droppedOldest - droppedBefore} maxStep=${maxStep.toFixed(4)}`;
+}
+
 console.log(JSON.stringify(out));
 """
 
@@ -152,8 +187,9 @@ def run() -> int:
     import json
     results = json.loads(proof.stdout.strip().splitlines()[-1])
     detail = results.pop("trimStats", "")
+    seams = results.pop("seamStats", "")
     for name, ok in results.items():
-        check(name, bool(ok), detail if name == "trimmed" else "")
+        check(name, bool(ok), detail if name == "trimmed" else seams if name == "seamsStepSmall" else "")
     print(f"[audio-worklet] {passed} passed, {failed} failed", flush=True)
     return 1 if failed else 0
 
