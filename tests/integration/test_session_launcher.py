@@ -9,7 +9,8 @@ an Xvfb of its own that admits its cookie alone, on the Wayland backend the
 session nests in Selkies' compositor, and a nested compositor from the host
 (labwc) runs there as it would on a desktop. Proved with a raw WebSocket
 client: the handshake completes and video frames arrive on the launcher's
-port. The stock Xvfb a distribution ships runs it as well as the images'.
+port, painting every row of the display. The stock Xvfb a distribution ships
+runs it as well as the images'.
 SIGTERM ends everything the launcher started and removes its runtime
 directory, and a start script that exits leaves the session running, as a
 Coder workspace's does.
@@ -91,22 +92,56 @@ def start(args: list, env: dict, log: str, detached: bool = False) -> Tuple[subp
     raise RuntimeError(f"no answer on the launcher's port within 90 s; see {log}")
 
 
+def jpeg_height(data: bytes) -> int:
+    """The height a JPEG's frame header declares, walking its segments from the
+    start of image; 0 when it has none."""
+    at = 2
+    while at + 9 <= len(data) and data[at] == 0xFF:
+        marker = data[at + 1]
+        if marker in (0xC0, 0xC1, 0xC2):
+            return int.from_bytes(data[at + 5:at + 7], "big")
+        at += 2 + int.from_bytes(data[at + 2:at + 4], "big")
+    return 0
+
+
+def rows_covered(spans: set, height: int) -> int:
+    """How many of a display's `height` rows the `(y, rows)` stripes cover."""
+    covered = [False] * height
+    for y, rows in spans:
+        for row in range(max(0, y), min(height, y + rows)):
+            covered[row] = True
+    return sum(covered)
+
+
 async def stream(port: int, seconds: float = 10.0) -> dict:
-    """The data WebSocket on the launcher's port: its first message and the video frames of a primary display."""
-    out = {"first": None, "frames": 0, "error": None}
+    """The data WebSocket on the launcher's port: its first message, the video
+    messages of a primary display, and how many of its rows they paint (the
+    stripe's row from its header, its height from the JPEG or the header)."""
+    height = SETTINGS["initialClientHeight"]
+    out = {"first": None, "frames": 0, "rows": 0, "error": None}
+    spans = set()
     try:
         async with websockets.connect(f"ws://127.0.0.1:{port}/api/websockets", max_size=None) as ws:
             first = await asyncio.wait_for(ws.recv(), timeout=10)
             out["first"] = first if isinstance(first, str) else repr(first[:20])
             await ws.send("SETTINGS," + json.dumps(SETTINGS))
             deadline = time.monotonic() + seconds
-            while time.monotonic() < deadline and out["frames"] < 30:
+            while time.monotonic() < deadline and out["rows"] < height:
                 try:
                     message = await asyncio.wait_for(ws.recv(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
-                if isinstance(message, (bytes, bytearray)) and message and message[0] in (0x03, 0x04):
-                    out["frames"] += 1
+                if not isinstance(message, (bytes, bytearray)) or len(message) < 7:
+                    continue
+                if message[0] == 0x03:
+                    rows = jpeg_height(bytes(message[6:]))
+                elif message[0] == 0x04 and len(message) >= 12:
+                    rows = int.from_bytes(message[8:10], "big")
+                else:
+                    continue
+                out["frames"] += 1
+                spans.add((int.from_bytes(message[4:6], "big"), rows))
+                out["rows"] = rows_covered(spans, height)
     except Exception as err:
         out["error"] = repr(err)[:120]
     return out
@@ -222,8 +257,10 @@ def block(res: H.Results, tag: str, wayland: bool, session: list, path_env: Opti
         got = asyncio.run(stream(port))
         res.check(f"{tag} the data WebSocket handshake completes on the launcher's port",
                   got["first"] is not None and got["first"].startswith("MODE"), got)
-        # A still screen streams its first paint and then nothing, a few stripes
-        res.check(f"{tag} video frames flow", got["frames"] >= 5, got)
+        # A still screen streams its first paint and then nothing: as many
+        # stripes as the host has cores to cut, and a paint-over pass only where
+        # one is on, so it is the rows painted that say the picture arrived.
+        res.check(f"{tag} video frames flow", got["rows"] == SETTINGS["initialClientHeight"], got)
     finally:
         code = stop(proc, pid, detached)
         left = leftovers(session_dir)
