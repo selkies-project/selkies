@@ -75,8 +75,12 @@ SCTP_MAX_BURST = 4
 SCTP_MAX_INIT_RETRANS = 8
 SCTP_RTO_ALPHA = 1 / 8
 SCTP_RTO_BETA = 1 / 4
-SCTP_RTO_INITIAL = 3.0
-SCTP_RTO_MIN = 1
+# A lost message nothing follows (a cursor, a clipboard, a control reply) is
+# repaired by T3 alone, so the floor is its whole cost. Chrome's dcSCTP floor:
+# it stays above a peer's delayed SACK (200 ms in dcSCTP) plus a round trip, so
+# a peer that ignores the I-bit is not sent spurious retransmissions.
+SCTP_RTO_INITIAL = 1.0
+SCTP_RTO_MIN = 0.4
 SCTP_RTO_MAX = 60
 SCTP_TSN_MODULO = 2**32
 
@@ -1779,10 +1783,14 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             chunk._sent_count += 1
             chunk._sent_time = time.time()
 
-            # RFC 7053: once this send makes us cwnd-limited, ask the receiver to
-            # acknowledge immediately (I-bit) so cwnd reopens without waiting a
-            # delayed-ack interval — the throughput fix for high-RTT links.
-            if self._flight_size + USERDATA_MAX_LENGTH >= self._cwnd:
+            # RFC 7053: ask the receiver to acknowledge at once (I-bit) when
+            # nothing follows this chunk until its SACK: once this send makes us
+            # cwnd-limited, so cwnd reopens without waiting a delayed-ack
+            # interval, and when it empties the queue, so the round trip the
+            # lone message's timer is set from is the path's, not the peer's
+            # ack delay.
+            if (self._flight_size + USERDATA_MAX_LENGTH >= self._cwnd
+                    or not self._outbound_queue):
                 chunk.flags |= SCTP_DATA_SACK_IMMEDIATELY
 
             await self._send_chunk(chunk)
