@@ -35,7 +35,7 @@ interface GamepadVisualizerProps {
 export function GamepadVisualizer({ gamepadState, gamepadIndex }: GamepadVisualizerProps) {
   if (!gamepadState) {
     return (
-      <Card className="w-full bg-background/95 backdrop-blur-sm">
+      <Card className="w-full bg-background/95">
         <CardHeader>
           <CardTitle>{t('sections.gamepads.loadingGamepad', { index: gamepadIndex })}</CardTitle>
         </CardHeader>
@@ -76,7 +76,7 @@ export function GamepadVisualizer({ gamepadState, gamepadIndex }: GamepadVisuali
   const rightStickTransform = getStickTransform(2, 3);
 
   return (
-    <Card className="w-full bg-background/95 backdrop-blur-sm">
+    <Card className="w-full bg-background/95">
       <CardHeader>
         <CardTitle>{t('sections.gamepads.gamepadTitle', { index: gamepadIndex })}</CardTitle>
       </CardHeader>

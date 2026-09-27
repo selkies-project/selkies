@@ -294,7 +294,7 @@ export function SystemMonitoring() {
 
 	if (!isDetailedView) {
 		return (
-			<div className="flex items-center gap-3 rounded-lg border bg-card px-3 py-1.5 text-xs shadow-sm backdrop-blur-sm tabular-nums cursor-grab active:cursor-grabbing">
+			<div className="flex items-center gap-3 rounded-lg border bg-card px-3 py-1.5 text-xs shadow-sm tabular-nums cursor-grab active:cursor-grabbing">
 				<div className="flex items-center gap-1 pointer-events-none">
 					{rows.map((row) => <StatusMark key={row.key} status={row.status} />)}
 				</div>
@@ -334,7 +334,7 @@ export function SystemMonitoring() {
 	};
 
 	return (
-		<div className="flex w-80 flex-col gap-2.5 rounded-lg border bg-background/95 p-3 text-xs shadow-lg backdrop-blur-sm tabular-nums cursor-grab active:cursor-grabbing">
+		<div className="flex w-80 flex-col gap-2.5 rounded-lg border bg-background/95 p-3 text-xs shadow-lg tabular-nums cursor-grab active:cursor-grabbing">
 			<div className="flex items-center justify-between">
 				<h3 className="text-sm font-semibold text-card-foreground pointer-events-none">{t('stats.monitorTitle')}</h3>
 				<div className="flex items-center gap-1">
