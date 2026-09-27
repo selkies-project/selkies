@@ -2231,7 +2231,10 @@ export default function webrtc() {
 	 * reads, so every tick keeps it current, shut stats included, and a
 	 * dashboard opening them draws it at once. The path is the pair's kind,
 	 * `relay` where either end relays and else the server's candidate type,
-	 * with the protocol this page reaches its peer or its relay over.
+	 * with the protocol this page reaches its peer or its relay over. The
+	 * engine is asked about the stream as negotiated, its fmtp line included:
+	 * its answer for the codec's default profile says nothing of a 4:4:4
+	 * profile, which no hardware decoder takes.
 	 * @param {Object} stats `WebRTCClient.getConnectionStats`'s result.
 	 */
 	function describeClient(stats) {
@@ -2241,10 +2244,12 @@ export default function webrtc() {
 		const remote = stats.reports.remoteCandidates[pair.remoteCandidateId] || {};
 		const codec = stats.video.codecName === 'NA' ? '' : stats.video.codecName;
 		const width = stats.video.frameWidth, height = stats.video.frameHeight;
-		const key = `${codec}:${width}x${height}`;
+		const fmtp = ((stats.reports.codecs[video.codecId] || {}).sdpFmtpLine || '').replace(/\s/g, '');
+		const contentType = `video/${codec}${fmtp ? `;${fmtp}` : ''}`;
+		const key = `${contentType}:${width}x${height}`;
 		if (codec && width > 0) {
 			const fps = stats.video.framesPerSecond;
-			decodeCapable.ask({ type: 'webrtc', video: { contentType: `video/${codec}`, width, height,
+			decodeCapable.ask({ type: 'webrtc', video: { contentType, width, height,
 				bitrate: 8000000, framerate: fps > 0 ? fps : 60 } }, key);
 			readDecodedFrame(key);
 		}
