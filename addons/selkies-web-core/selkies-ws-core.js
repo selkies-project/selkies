@@ -2403,6 +2403,8 @@ function wireSocketToVideoWorker() {
  * @returns {void}
  */
 function updateVideoDivert(force) {
+  // The next paint tick spawns the striped modes' worker and takes down the sink a mode left.
+  wakePaintLoop();
   const striped = currentEncoderMode === 'h264enc-striped' || currentEncoderMode === 'jpeg';
   const stripedReady = USE_OFFSCREEN_WORKER && videoWorkerReady &&
     (currentEncoderMode === 'jpeg' ? videoWorkerJpegDecode : videoWorkerStripedDecode);
@@ -3910,6 +3912,8 @@ function processPendingChunksForStripe(stripe_y_start) {
 }
 
 let decodedStripesQueue = [];
+/** Asks the paint loop for a tick; `schedulePaintVideoFrame` once the connection code is up. */
+let wakePaintLoop = () => {};
 /**
  * Main-thread back-buffer of the striped paths (h264enc-striped, jpeg).
  * Stripes accumulate here so damage-gated undamaged rows persist, and the
@@ -4227,6 +4231,7 @@ function handleDecodedVncStripeFrame(yPos, frame) {
     frameId: frame.timestamp,
     at: streamStats.open ? pageDecode.arrivals.get(frame.timestamp) : NaN,
   });
+  wakePaintLoop();
 }
 
 /** HTTP uploads and the drag-drop/file-picker plumbing (lib/file-upload.js); shared viewers never upload. */
@@ -5866,6 +5871,7 @@ function initWebsockets() {
         }
       }
       jpegStripeRenderQueue.push({ image: await JPEG_ROUTES[route](jpegData), startY, frameId, at: arrival });
+      schedulePaintVideoFrame();
     } catch (error) {
       console.error('Error decoding JPEG stripe:', error, 'startY:', startY, 'dataLength:', jpegData.byteLength);
     } finally {
@@ -5875,8 +5881,11 @@ function initWebsockets() {
 
   let paintScheduled = false;
   /**
-   * Schedules the next paint tick on one rAF chain; starting the loop again
-   * (a reconnect) must never create a second permanent chain.
+   * Schedules the next paint tick, at most one at a time. The chain runs only
+   * while the page's own path holds a stripe to composite or a composite to
+   * present: a frame the track generator or the video worker takes never waits
+   * on it, and a chain kept alive with nothing to do would still wake the page
+   * at every display refresh.
    */
   function schedulePaintVideoFrame() {
     if (paintScheduled) return;
@@ -5886,9 +5895,10 @@ function initWebsockets() {
       paintVideoFrame();
     });
   }
+  wakePaintLoop = schedulePaintVideoFrame;
 
   /**
-   * The per-rAF paint tick. Full-frame h264enc presents only the newest queued
+   * The paint tick. Full-frame h264enc presents only the newest queued
    * frame; the striped modes composite their stripes and present the whole
    * frame as soon as its last row lands (the server emits a frame's stripes
    * in ascending order, so the last row proves it complete) or the socket and
@@ -6070,7 +6080,9 @@ function initWebsockets() {
     }
     // What this tick drew goes out with this frame, not the next.
     if (streamStats.open) pageShown.land();
-    schedulePaintVideoFrame();
+    if (decodedStripesQueue.length > 0 || jpegStripeRenderQueue.length > 0 || stripePendingDirty) {
+      schedulePaintVideoFrame();
+    }
   }
 
   /**
