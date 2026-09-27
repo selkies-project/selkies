@@ -5904,11 +5904,8 @@ function initWebsockets() {
    * in ascending order, so the last row proves it complete) or the socket and
    * the decoders go quiet (the stripe clock), falling back to presenting at
    * frame-id boundaries while stripes still flow; JPEG skips stripes that
-   * decoded out of order; the shared main decoder path keeps the adaptive
-   * jitter cushion, closing everything older than it in one tick because
-   * draining one per rAF would let a burst back up the decoder's bounded
-   * output pool. Leaving a full-frame mode tears both video sinks down
-   * symmetrically, or a worker canvas would stay shown over the striped
+   * decoded out of order. Leaving a full-frame mode tears both video sinks
+   * down symmetrically, or a worker canvas would stay shown over the striped
    * content.
    */
   function paintVideoFrame() {
