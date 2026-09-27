@@ -96,8 +96,12 @@ export const SERVER_FRESH_MS = 3000;
  *     figures: the server's (`cpu_percent`, `mem_used`, `mem_total`,
  *     `gpu_percent`, `gpu_mem_used`, `gpu_mem_total`, `encoded_fps`,
  *     `encode_ms`, `pipeline_ms`, `rtt_ms`, `throttled`) where it sent them, and
- *     `server`, whether it did, this page's (`fps`, `mbps`, `received_mb` since
- *     the opening, and whatever else its core measures), and `t`, the time in ms.
+ *     `server`, whether it did, this page's (`fps`, the frames the screen was
+ *     handed, where the sink says so; `present_ms`, how long a frame took from
+ *     its arrival to that; `frames_not_shown` since the opening, those decoded
+ *     but never shown; `mbps`, `received_mb` since the opening, and whatever
+ *     else its core measures, `lib/present-meter.js` for the three), and `t`,
+ *     the time in ms.
  */
 
 /**

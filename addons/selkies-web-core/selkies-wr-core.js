@@ -91,6 +91,7 @@ import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 import { StreamStats, DecodeCapability, webrtcDecoder, FIRST_SAMPLE_MS } from './lib/stream-stats.js';
+import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -334,6 +335,13 @@ export default function webrtc() {
 	 * one is read, and whether it was read since the stats last opened.
 	 */
 	let decodedFrame = { key: '', track: undefined, element: undefined, current: false, reading: false };
+	/**
+	 * What reaches the screen, counted off the `<video>` from the stats'
+	 * baseline tick until they shut (`lib/present-meter.js`), each frame dated
+	 * by the engine's own `receiveTime` where it has one.
+	 */
+	const presentMeter = createPresentMeter(null);
+	let presentWatch = null, videoNotShown = 0;
 	const streamStats = new StreamStats({
 		transport: 'webrtc',
 		send: (message) => {
@@ -344,6 +352,8 @@ export default function webrtc() {
 		isViewer: () => isSharedMode,
 		onOpenChange: (open) => {
 			statsBaseline = null;
+			if (presentWatch) presentWatch.stop();
+			presentWatch = null;
 			if (!open) return;
 			decodedFrame.current = false;
 			tickStatsNow();
@@ -2354,26 +2364,44 @@ export default function webrtc() {
 		const opened = !last ? counts : !replaced ? last.opened
 			: Object.fromEntries(Object.keys(counts).map((key) => [key, last.opened[key] - last.counts[key]]));
 		statsBaseline = Object.assign({ pc, counts, opened }, now);
-		if (!last) return;
+		if (!last) {
+			if (!presentWatch && videoElement) {
+				presentMeter.reset();
+				videoNotShown = 0;
+				presentWatch = watchVideo(videoElement, presentMeter,
+					(frame) => (typeof frame.receiveTime === 'number' ? frame.presentationTime - frame.receiveTime : NaN));
+			}
+			return;
+		}
 		streamStats.noteBytes(replaced ? now.bytes : Math.max(0, now.bytes - last.bytes));
-		if (replaced) return;
+		if (replaced) {
+			presentMeter.take();
+			if (presentWatch) videoNotShown += presentWatch.read().dropped;
+			return;
+		}
 		const seconds = (now.at - last.at) / 1000;
 		const per = (total, count) => (count > 0 ? Math.round((1000 * total / count) * 100) / 100 : 0);
 		const share = (part, whole) => (whole > 0 ? Math.round((100 * part / whole) * 100) / 100 : 0);
 		const kbps = (bytes) => (seconds > 0 ? Math.round(bytes * 8 / 1000 / seconds) : 0);
 		const lost = counts.lost - opened.lost;
+		const shown = presentMeter.take();
+		const onScreen = presentWatch ? presentWatch.read() : { shown: 0, dropped: 0 };
+		videoNotShown += onScreen.dropped;
 		const figures = {
-			fps: stats.video.framesPerSecond || 0,
+			fps: presentWatch && presentWatch.reported() && seconds > 0
+				? Math.round(onScreen.shown / seconds * 10) / 10 : stats.video.framesPerSecond || 0,
 			rtt_ms: Math.round(rtt * 10) / 10,
 			decode_ms: per(now.totalDecodeTime - last.totalDecodeTime, now.framesDecoded - last.framesDecoded),
 			jitter_buffer_ms: per(now.jitterBufferDelay - last.jitterBufferDelay, now.jitterBufferEmittedCount - last.jitterBufferEmittedCount),
 			audio_buffer_ms: per(now.audioJitterBufferDelay - last.audioJitterBufferDelay, now.audioJitterBufferEmittedCount - last.audioJitterBufferEmittedCount),
 			packet_loss_percent: share(lost, counts.received - opened.received + lost),
 			frames_dropped: counts.framesDropped - opened.framesDropped,
+			frames_not_shown: videoNotShown,
 			nacks: counts.nack - opened.nack,
 			keyframe_requests: counts.pli - opened.pli,
 			freezes: counts.freezes - opened.freezes,
 		};
+		if (shown.delays > 0) figures.present_ms = Math.round(shown.delaySum / shown.delays * 100) / 100;
 		const mic = stats.reports.outbound.audio;
 		if (mic && now.micBytes > last.micBytes) figures.mic = `Opus, ${kbps(now.micBytes - last.micBytes)} kbps`;
 		const webcam = stats.reports.outbound.video;

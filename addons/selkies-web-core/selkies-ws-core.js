@@ -138,6 +138,7 @@ import { StreamStats, DecodeCapability, webcodecsDecoder, FIRST_SAMPLE_MS } from
 // The decode gate, likewise by source, for the worker's own copy of it.
 import decodeGateSource from './lib/decode-gate.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
+import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 
@@ -1007,11 +1008,44 @@ const workerDecode = { format: undefined, hardware: null };
  * where the worker does not decode, with its decode figures, gathered only
  * while the stats are open.
  */
-const pageDecode = { starts: new Map(), decodeMs: 0, frames: 0, format: undefined, hardware: null, probed: '', config: null };
+const pageDecode = { starts: new Map(), arrivals: new Map(), decodeMs: 0, frames: 0, format: undefined, hardware: null, probed: '', config: null };
 /** `MediaCapabilities` on the stream's codec and size, asked once per configuration. */
 const decodeCapable = new DecodeCapability();
 /** The key frames and lost frames this page asked the server for, and where they stood when the stats opened. */
 const requests = { keyframes: 0, lost: 0, keyframesAtOpen: 0, lostAtOpen: 0 };
+
+/**
+ * What reaches the screen from the page's own sinks while the stats are open
+ * (lib/present-meter.js): the `<video>` a track generator feeds, which
+ * `videoWatch` follows, and the page canvas, whose draws land at the page's
+ * next animation frame. `pageDecode.arrivals` holds, by chunk timestamp, when
+ * each chunk the page decodes arrived; `notShown` counts from the opening what
+ * the page's and the video worker's sinks never showed.
+ */
+const pageShown = createPresentMeter((land) => requestAnimationFrame(land));
+let videoWatch = null;
+let shownSampledAt = 0, notShown = 0;
+
+/**
+ * When a chunk the page decoded arrived, by the timestamp its frame carries,
+ * forgotten once read.
+ * @param {number} timestamp
+ * @returns {number} Epoch ms, NaN where unknown.
+ */
+function takeArrival(timestamp) {
+  const at = pageDecode.arrivals.get(timestamp);
+  pageDecode.arrivals.delete(timestamp);
+  return at > 0 ? at : NaN;
+}
+
+/**
+ * The receive-to-present delay of the frame the page's `<video>` reports,
+ * found by the media time a track generator keeps from the frame's timestamp.
+ * @param {VideoFrameCallbackMetadata} frame
+ * @returns {number} ms, NaN where the frame's arrival is unknown.
+ */
+const videoDelay = (frame) =>
+  performance.timeOrigin + frame.presentationTime - takeArrival(Math.round(frame.mediaTime * 1e6));
 
 /** Times one frame out of the page's decoder. */
 function notePageDecoded(frame) {
@@ -1045,6 +1079,7 @@ const streamStats = new StreamStats({
   isViewer: () => isSharedMode || clientRole === 'viewer',
   onOpenChange: (open) => {
     pageDecode.starts.clear();
+    pageDecode.arrivals.clear();
     pageDecode.decodeMs = 0;
     pageDecode.frames = 0;
     requests.keyframesAtOpen = requests.keyframes;
@@ -1052,9 +1087,16 @@ const streamStats = new StreamStats({
     if (videoWorker) {
       try { videoWorker.postMessage({ type: 'statsOpen', open }); } catch (e) { /* respawns fresh */ }
     }
+    if (websocket && typeof websocket.setStats === 'function') websocket.setStats(open);
+    pageShown.reset();
+    notShown = 0;
+    if (videoWatch) videoWatch.stop();
+    videoWatch = null;
     clearTimeout(streamStatsTimer);
     streamStatsTimer = null;
     if (!open) return;
+    shownSampledAt = performance.now();
+    if (videoElement) videoWatch = watchVideo(videoElement, pageShown, videoDelay);
     describeClient();
     const sampleIn = (delay) => {
       streamStatsTimer = setTimeout(() => {
@@ -1103,7 +1145,7 @@ function describeClient() {
  * when they arrive, so both sides cover the same interval.
  */
 function sampleStreamStats() {
-  if (videoDivertOn && videoWorker) {
+  if (videoWorker && videoWorkerReady) {
     try {
       videoWorker.postMessage({ type: 'decodeStats' });
       return;
@@ -1113,21 +1155,37 @@ function sampleStreamStats() {
 }
 
 /**
- * @param {?{bytes: number, decodeMs: number, frames: number}} worker The video
- *     worker's figures since the last sample, or null where it does not decode.
+ * The sample's `fps` is the frames the screen was handed a second, where a
+ * sink says so: every canvas does, and a `<video>` once it has reported a
+ * frame through requestVideoFrameCallback; until then the rate `window.fps`
+ * measures stands in.
+ * @param {?{bytes: number, decodeMs: number, frames: number,
+ *     shown: import('./lib/present-meter.js').PresentFigures}} worker The video
+ *     worker's figures since the last sample, or null where there is no worker.
  */
 function takeStreamSample(worker) {
   const decode = worker && (worker.frames > 0 || worker.bytes > 0) ? worker : { ...pageDecode };
   pageDecode.decodeMs = 0;
   pageDecode.frames = 0;
   if (pageDecode.starts.size > 64) pageDecode.starts.clear();
+  if (pageDecode.arrivals.size > 256) pageDecode.arrivals.clear();
   if (decode.bytes) streamStats.noteBytes(decode.bytes);
   describeClient();
+  const now = performance.now();
+  const seconds = (now - shownSampledAt) / 1000;
+  shownSampledAt = now;
+  const shown = [pageShown.take(), worker && worker.shown].filter(Boolean);
+  const sum = (key) => shown.reduce((total, figures) => total + figures[key], 0);
+  const video = videoWatch ? videoWatch.read() : { shown: 0, dropped: 0 };
+  notShown += sum('superseded') + sum('refused') + video.dropped;
+  const unobserved = !!videoWatch && !videoWatch.reported() && (mstgActive || videoWorkerMode === 'vtg');
   const figures = {
-    fps: window.fps,
+    fps: unobserved || !(seconds > 0) ? window.fps : Math.round((sum('presented') + video.shown) / seconds * 10) / 10,
     lost_frames: requests.lost - requests.lostAtOpen,
+    frames_not_shown: notShown,
     keyframe_requests: requests.keyframes - requests.keyframesAtOpen,
   };
+  if (sum('delays') > 0) figures.present_ms = Math.round(sum('delaySum') / sum('delays') * 100) / 100;
   if (isAudioPipelineActive) figures.audio_buffer_ms = Math.round(window.currentAudioBufferDuration || 0);
   if (isMicrophoneActive) figures.mic = `Opus, ${Math.round(MIC_BITRATE / 1000)} kbps`;
   if (isWebcamActive && webcamCapture) {
@@ -1613,6 +1671,18 @@ let dec = null;
 const gate = new DecodeGate();
 // Decode figures, gathered only while the page has its stats open and posted as it samples.
 let statsOpen = false, statsBytes = 0, statsDecodeMs = 0, statsFrames = 0;
+// What reaches the screen from here (lib/present-meter.js): a canvas draw lands
+// at this thread's next animation frame, and the arrival the socket's thread
+// dated a frame with is kept by its decode timestamp until then.
+const createPresentMeter = ${createPresentMeter.toString()};
+const shown = createPresentMeter(typeof requestAnimationFrame === 'function' ? (land) => requestAnimationFrame(land) : null);
+const arrivedAt = new Map();
+let compositeArrival = -Infinity;
+const arrivalOf = (timestamp) => {
+  const at = arrivedAt.get(timestamp);
+  arrivedAt.delete(timestamp);
+  return at > 0 ? at : NaN;
+};
 // What the decoder turns out, told to the page whenever it changes (tellFacts).
 let statsFormat, statsHardware = null, statsProbed = null, toldFormat, toldHardware = null;
 const decodeStarts = new Map();
@@ -1643,12 +1713,14 @@ function setStatsOpen(open) {
   statsOpen = open;
   decodeStarts.clear();
   statsBytes = 0; statsDecodeMs = 0; statsFrames = 0;
+  shown.reset(); arrivedAt.clear(); compositeArrival = -Infinity;
 }
 // The figures since the page's last sample, posted when it takes the next.
 function postDecodeStats() {
-  self.postMessage({ type: 'decodeStats', bytes: statsBytes, decodeMs: statsDecodeMs, frames: statsFrames });
+  self.postMessage({ type: 'decodeStats', bytes: statsBytes, decodeMs: statsDecodeMs, frames: statsFrames, shown: shown.take() });
   statsBytes = 0; statsDecodeMs = 0; statsFrames = 0;
   if (decodeStarts.size > 64) decodeStarts.clear();
+  if (arrivedAt.size > 64) arrivedAt.clear();
 }
 // Consecutive backpressure drops; a stalled consumer never resumes on its own.
 let sinkDrops = 0;
@@ -1662,14 +1734,16 @@ const sendNeedKey = (reason) => {
 };
 const ack = () => self.postMessage({ ack: true });
 
-// Present one decoded VideoFrame on the active sink. Consumes/closes the frame.
-function present(f) {
+// Present one decoded VideoFrame on the active sink, which consumes it; at is
+// when it arrived, NaN where unknown.
+function present(f, at) {
   presentedFrames++;
   if (statsOpen) noteDecoded(f);
   if (mode === 'vtg' && writer && !closed) {
     // Drop on sink backpressure.
     if (writer.desiredSize !== null && writer.desiredSize <= 0) {
       f.close();
+      if (statsOpen) shown.refused();
       if (++sinkDrops >= 30) { closed = true; self.postMessage({ type: 'error' }); }
       return;
     }
@@ -1682,6 +1756,7 @@ function present(f) {
     if (ctx) {
       if (oc.width !== f.displayWidth || oc.height !== f.displayHeight) { oc.width = f.displayWidth; oc.height = f.displayHeight; }
       ctx.drawImage(f, 0, 0);
+      if (statsOpen) shown.drawn(at);
       // Tell the page the OffscreenCanvas has real content so it can hide the
       // main canvas (hiding it before this point flashes black).
       if (!presented) { presented = true; self.postMessage({ type: 'presented' }); }
@@ -1698,7 +1773,7 @@ function closeDecoder() {
 function configureDecoder(codec, w, h, software, description) {
   closeDecoder();
   try {
-    dec = new VideoDecoder({ output: (f) => { statsFormat = f.format; tellFacts(); present(f); },
+    dec = new VideoDecoder({ output: (f) => { statsFormat = f.format; tellFacts(); present(f, statsOpen ? arrivalOf(f.timestamp) : NaN); },
                              error: () => { closeDecoder(); self.postMessage({ type: 'decoderError' }); } });
     // configure() is synchronous, so the next chunk decodes without an async gap and
     // an unsupported config surfaces via error(). The page owns the acceleration
@@ -1718,12 +1793,15 @@ function configureDecoder(codec, w, h, software, description) {
 
 // frameId and reference come off the wire header; a frame that names itself
 // predicts from nothing the encoder can say (DecodeGate).
-function decodeChunk(key, data, timestamp, frameId, reference) {
+function decodeChunk(key, data, timestamp, frameId, reference, at) {
   if (!dec || dec.state !== 'configured') return;
   const decision = gate.decide(key, frameId, reference, dec.decodeQueueSize);
   if (decision === 'lost') { self.postMessage({ type: 'lostFrame', id: frameId }); return; }
   if (decision !== 'decode') { sendNeedKey(decision); return; }
-  if (statsOpen) decodeStarts.set(timestamp, performance.now());
+  if (statsOpen) {
+    decodeStarts.set(timestamp, performance.now());
+    if (at > 0) arrivedAt.set(Math.trunc(timestamp), at);
+  }
   try { dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: timestamp, data: data })); }
   catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); }
 }
@@ -1804,6 +1882,8 @@ function stripePresent() {
   if (!stripeBack || !stripeDirty) return;
   stripeDirty = false; stripeBottom = false;
   presentedFrames++;
+  const at = compositeArrival > 0 ? compositeArrival : NaN;
+  compositeArrival = -Infinity;
   if (stripePendingId !== null && wirePort) {
     try { wirePort.postMessage({ presentedId: stripePendingId }); } catch (err) {}
   }
@@ -1816,7 +1896,7 @@ function stripePresent() {
     let f = null;
     try { f = new VideoFrame(stripeBack, { timestamp: performance.now() * 1000 }); }
     catch (err) { return; }
-    present(f);
+    present(f, at);
     return;
   }
   if (ctx) {
@@ -1824,6 +1904,7 @@ function stripePresent() {
       oc.width = stripeBack.width; oc.height = stripeBack.height;
     }
     try { ctx.drawImage(stripeBack, 0, 0); } catch (err) {}
+    if (statsOpen) shown.drawn(at);
     if (!presented) { presented = true; self.postMessage({ type: 'presented' }); }
   }
 }
@@ -1855,11 +1936,13 @@ function stripeMaybePresent() {
   stripeScheduleSettle();
 }
 
-// Draws one decoded stripe at its row offset; always consumes the image.
-function stripeCompose(image, y, h, frameId) {
+// Draws one decoded stripe at its row offset; always consumes the image. at is
+// when the stripe arrived; the composite dates from its newest.
+function stripeCompose(image, y, h, frameId, at) {
   const w = image.displayWidth !== undefined ? image.displayWidth : image.width;
   if (!stripeEnsureBack(w, y + h)) { try { image.close(); } catch (err) {} return; }
   stripeBoundary(frameId);
+  if (at > compositeArrival) compositeArrival = at;
   try { stripeBackCtx.drawImage(image, 0, y); stripeDirty = true; } catch (err) {}
   try { image.close(); } catch (err) {}
   if (stripeGeomKnown && y + h >= stripeGeomH) stripeBottom = true;
@@ -1879,7 +1962,7 @@ function onStripeError(y) {
   sendNeedKey('stripe_error');
 }
 
-function onH264Stripe(buffer) {
+function onH264Stripe(buffer, at) {
   if (buffer.byteLength < 13) return;
   const head = new Uint8Array(buffer, 0, 12);
   const key = wireFrameIsKey(head[1]);
@@ -1913,7 +1996,7 @@ function onH264Stripe(buffer) {
         tellFacts();
         const rowInfo = stripeDecs[rowY];
         const meta = rowInfo && rowInfo.meta.length ? rowInfo.meta.shift() : null;
-        stripeCompose(f, rowY, f.displayHeight, meta ? meta.frameId : wireLastId);
+        stripeCompose(f, rowY, f.displayHeight, meta ? meta.frameId : wireLastId, meta ? meta.at : NaN);
       },
       error: () => onStripeError(rowY),
     });
@@ -1940,7 +2023,7 @@ function onH264Stripe(buffer) {
     return;
   }
   try {
-    info.meta.push({ frameId: frameId });
+    info.meta.push({ frameId: frameId, at: at });
     const data = framed ? annexbToAvcc(bytes) : payload;
     info.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: performance.now() * 1000, data: data }));
     if (key) info.gotKey = true;
@@ -1950,7 +2033,7 @@ function onH264Stripe(buffer) {
   }
 }
 
-function onJpegStripe(buffer) {
+function onJpegStripe(buffer, at) {
   if (buffer.byteLength < 7) return;
   const head = new Uint8Array(buffer, 0, 6);
   const frameId = (head[2] << 8) | head[3];
@@ -1975,7 +2058,7 @@ function onJpegStripe(buffer) {
     jpegLastRowId[y] = frameId;
     const h = image.displayHeight !== undefined ? image.displayHeight : image.height;
     jpegRowHeights[y] = h;
-    stripeCompose(image, y, h, frameId);
+    stripeCompose(image, y, h, frameId, at);
   };
   if (typeof ImageDecoder !== 'undefined') {
     let d = null;
@@ -1990,13 +2073,17 @@ function onJpegStripe(buffer) {
   }
 }
 
-function onWire(buffer) {
+// A wire message is the bytes, or while the page has its stats open, the bytes
+// with the arrival the socket's thread dated them with.
+function onWire(message) {
+  const buffer = message instanceof ArrayBuffer ? message : message && message.buffer;
+  const at = message instanceof ArrayBuffer ? NaN : message && message.at;
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 1) return;
   statsBytes += buffer.byteLength;
   if (stripedOn) {
     const type = new Uint8Array(buffer, 0, 1)[0];
-    if (type === 0x03) onJpegStripe(buffer);
-    else if (type === 0x04) onH264Stripe(buffer);
+    if (type === 0x03) onJpegStripe(buffer, at);
+    else if (type === 0x04) onH264Stripe(buffer, at);
     return;
   }
   if (buffer.byteLength < 13) return;
@@ -2025,7 +2112,7 @@ function onWire(buffer) {
     wireCodec = codec; wireW = w; wireH = h; wireDesc = desc; wireRange = wireFullRange;
     self.postMessage({ type: 'wireDims', w: w, h: h });
   }
-  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, performance.now() * 1000, frameId, reference);
+  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, performance.now() * 1000, frameId, reference, at);
 }
 
 const stripedCaps = {
@@ -2052,7 +2139,7 @@ self.onmessage = (e) => {
   if (m.type === 'decodeStats') { postDecodeStats(); return; }
   if (m.type === 'chunk') {
     // Not ready yet; the page will resend a keyframe.
-    decodeChunk(m.key, m.data, m.timestamp, m.frameId, m.reference);
+    decodeChunk(m.key, m.data, m.timestamp, m.frameId, m.reference, m.at);
     return;
   }
   if (m.type === 'wireIn') {
@@ -2118,7 +2205,7 @@ self.onmessage = (e) => {
   }
   // Fallback: a main-thread-decoded frame transferred in.
   if (m.frame) {
-    present(m.frame);
+    present(m.frame, m.at);
     ack();
   }
 };`;
@@ -2231,6 +2318,7 @@ function presentFrameToVideo(frame) {
   }
   if (videoFrameWriter.desiredSize !== null && videoFrameWriter.desiredSize <= 0) {
     frame.close();
+    if (streamStats.open) pageShown.refused();
     if (++mstgConsecutiveDrops >= SINK_STALL_DROP_LIMIT) {
       console.warn(`Video track sink stalled (${mstgConsecutiveDrops} consecutive drops); rebuilding it.`);
       deactivateMstg();
@@ -2635,10 +2723,11 @@ function presentFrameToWorker(frame) {
   if (videoWorkerSinkInert) return false;
   if (videoWorkerInFlight >= VIDEO_WORKER_MAX_IN_FLIGHT) {
     try { frame.close(); } catch (_) {}
+    if (streamStats.open) pageShown.refused();
     return true;
   }
   try {
-    videoWorker.postMessage({ frame }, [frame]);
+    videoWorker.postMessage({ frame, at: streamStats.open ? takeArrival(frame.timestamp) : NaN }, [frame]);
     videoWorkerInFlight++;
   }
   catch (e) { try { frame.close(); } catch (_) {} deactivateVideoWorker(); return true; }
@@ -2677,9 +2766,12 @@ function logWorkerDecoderConfig(codec, w, h) {
  * @param {number} w Coded width.
  * @param {number} h Coded height.
  * @param {string} codec The `avc1.PPCCLL` codec string.
+ * @param {number} frameId
+ * @param {number} reference The id of the frame it predicts from.
+ * @param {number} arrival When it arrived, in epoch ms; NaN while the stats are shut.
  * @returns {boolean} True when handled there, false to fall back to main-thread decode.
  */
-function feedWorkerDecoder(isKey, dataBuf, w, h, codec, frameId, reference) {
+function feedWorkerDecoder(isKey, dataBuf, w, h, codec, frameId, reference, arrival) {
   if (workerDecodeFailed) return false;
   if (!ensureVideoWorker()) return false;
   if (!activateWorkerSinkDisplay()) return false;
@@ -2696,7 +2788,7 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec, frameId, reference) {
     requestKeyframe();
   }
   const data = framed ? annexbToAvcc(new Uint8Array(dataBuf)).buffer : dataBuf;
-  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: performance.now() * 1000, frameId: frameId, reference: reference }, [data]); }
+  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: performance.now() * 1000, frameId: frameId, reference: reference, at: arrival }, [data]); }
   catch (e) { return false; }
   return true;
 }
@@ -3871,7 +3963,7 @@ self.onmessage = (e) => {
   }
   if (m.type === 'commit') {
     if (!back) return;
-    createImageBitmap(back).then((bitmap) => { self.postMessage({ type: 'frame', bitmap: bitmap }, [bitmap]); }).catch(() => {});
+    createImageBitmap(back).then((bitmap) => { self.postMessage({ type: 'frame', bitmap: bitmap, at: m.at }, [bitmap]); }).catch(() => {});
     return;
   }
 };
@@ -3910,6 +4002,7 @@ function ensureStripeWorker() {
     if (!m || m.type !== 'frame') return;
     if (canvasContext && canvas && canvas.width > 0 && canvas.height > 0) {
       try { canvasContext.drawImage(m.bitmap, 0, 0); } catch (err) { /* ignore */ }
+      if (streamStats.open) pageShown.drawn(m.at);
     }
     try { m.bitmap.close(); } catch (err) { /* ignore */ }
   };
@@ -3955,19 +4048,25 @@ function stripeCompositeDraw(stripe, yPos) {
 /**
  * Presents the composited frame: the worker commits an ImageBitmap, the main
  * thread blits its back-buffer. Counted as the striped modes' displayed frame,
- * which is what `window.fps` reports for them.
+ * which is what `window.fps` reports for them. While the stats are open the
+ * composite is dated by the arrival of its newest stripe (`compositeArrival`).
  */
 function stripeCompositePresent() {
   frameCount++;
   lastVideoOutputAt = performance.now();
   lastPresentedVideoFrameId = stripePendingFrameId;
   lastPresentedVideoFrameAt = performance.now();
+  const at = compositeArrival > 0 ? compositeArrival : NaN;
+  compositeArrival = -Infinity;
   if (stripeWorkerActive && stripeWorker) {
-    try { stripeWorker.postMessage({ type: 'commit' }); } catch (e) { /* ignore */ }
+    try { stripeWorker.postMessage({ type: 'commit', at }); } catch (e) { /* ignore */ }
   } else if (canvasContext && canvas.width > 0 && canvas.height > 0) {
     canvasContext.drawImage(stripeBackCanvas, 0, 0);
+    if (streamStats.open) pageShown.drawn(at);
   }
 }
+/** The arrival of the newest stripe in the composite being built, in epoch ms. */
+let compositeArrival = -Infinity;
 /** Newest JPEG-stripe frame id drawn per row offset, so older out-of-order stripes are skipped. */
 let lastDrawnJpegStripeFrameId = {};
 
@@ -4092,6 +4191,7 @@ function handleDecodedVncStripeFrame(yPos, frame) {
     }
     if (decodedStripesQueue.length > 0) {
       for (const stale of decodedStripesQueue) { try { stale.frame.close(); } catch (e) {} }
+      if (streamStats.open) pageShown.superseded(decodedStripesQueue.length);
       decodedStripesQueue.length = 0;
     }
     if (supportsWindowMSTG && presentFrameToVideo(frame)) {
@@ -4101,6 +4201,7 @@ function handleDecodedVncStripeFrame(yPos, frame) {
     } else {
       if (canvas && canvasContext && canvas.width > 0 && canvas.height > 0) {
         canvasContext.drawImage(frame, 0, 0);
+        if (streamStats.open) pageShown.drawn(takeArrival(frame.timestamp));
       }
       try { frame.close(); } catch (e) {}
     }
@@ -4111,7 +4212,8 @@ function handleDecodedVncStripeFrame(yPos, frame) {
   decodedStripesQueue.push({
     yPos,
     frame,
-    frameId: frame.timestamp
+    frameId: frame.timestamp,
+    at: streamStats.open ? pageDecode.arrivals.get(frame.timestamp) : NaN,
   });
 }
 
@@ -5727,8 +5829,9 @@ function initWebsockets() {
    * @param {number} startY
    * @param {ArrayBuffer} jpegData
    * @param {number} frameId
+   * @param {number} arrival When it arrived, in epoch ms; NaN while the stats are shut.
    */
-  async function decodeAndQueueJpegStripe(startY, jpegData, frameId) {
+  async function decodeAndQueueJpegStripe(startY, jpegData, frameId, arrival) {
     jpegStripeDecodesPending++;
     try {
       let route = jpegRoute;
@@ -5748,7 +5851,7 @@ function initWebsockets() {
           return;
         }
       }
-      jpegStripeRenderQueue.push({ image: await JPEG_ROUTES[route](jpegData), startY, frameId });
+      jpegStripeRenderQueue.push({ image: await JPEG_ROUTES[route](jpegData), startY, frameId, at: arrival });
     } catch (error) {
       console.error('Error decoding JPEG stripe:', error, 'startY:', startY, 'dataLength:', jpegData.byteLength);
     } finally {
@@ -5821,6 +5924,7 @@ function initWebsockets() {
         for (let i = 0; i < lastIdx; i++) {
           try { decodedStripesQueue[i].frame.close(); } catch (e) {}
         }
+        if (streamStats.open) pageShown.superseded(lastIdx);
         const frame = decodedStripesQueue[lastIdx].frame;
         decodedStripesQueue.length = 0;
         lastVideoOutputAt = performance.now();
@@ -5831,6 +5935,7 @@ function initWebsockets() {
         } else {
           if (canvas.width > 0 && canvas.height > 0) {
             canvasContext.drawImage(frame, 0, 0);
+            if (streamStats.open) pageShown.drawn(takeArrival(frame.timestamp));
           }
           try { frame.close(); } catch (e) {}
         }
@@ -5859,6 +5964,7 @@ function initWebsockets() {
           stripePendingFrameId = fid;
           if (stripeData.yPos + stripeData.frame.displayHeight >= canvas.height) bottomDrawn = true;
           stripeCompositeDraw(stripeData.frame, stripeData.yPos);
+          if (stripeData.at > compositeArrival) compositeArrival = stripeData.at;
           stripePendingDirty = true;
         }
       } else {
@@ -5918,6 +6024,7 @@ function initWebsockets() {
                 const stripeHeight = segment.image.displayHeight ?? segment.image.height;
                 if (segment.startY + stripeHeight >= canvas.height) bottomDrawn = true;
                 stripeCompositeDraw(segment.image, segment.startY);
+                if (segment.at > compositeArrival) compositeArrival = segment.at;
                 stripePendingDirty = true;
               } else {
                 try { segment.image.close(); } catch (closeError) { /* ignore */ }
@@ -5947,6 +6054,8 @@ function initWebsockets() {
         stripePendingDirty = false;
       }
     }
+    // What this tick drew goes out with this frame, not the next.
+    if (streamStats.open) pageShown.land();
     schedulePaintVideoFrame();
   }
 
@@ -6021,6 +6130,9 @@ let webcamChainBroken = false;
 // id is repeated on the heartbeat cadence, as the page path does.
 let videoPort = null, videoDivert = false, videoAck = false, videoAckSource = 'receive';
 let videoLastId = -1, videoLastIdAt = 0, videoAckedId = -1, videoAckSentAt = 0, videoAckTimer = null;
+// While the page has its stats open, each message is dated with its arrival
+// (epoch ms), which the thread that shows a frame measures its delay from.
+let statsOn = false;
 
 // The page gates its own sends on what this reports, so a socket left holding
 // bytes has to be reported as it drains: reporting only on send would freeze
@@ -6079,6 +6191,7 @@ self.onmessage = (e) => {
     syncVideoAckTimer();
     return;
   }
+  if (m.type === 'stats') { statsOn = !!m.on; return; }
   if (m.type === 'videoAckReset') {
     // The server's ids restart; the heartbeat must not repeat the old one.
     videoLastId = -1; videoAckedId = -1; videoAckSentAt = 0;
@@ -6124,6 +6237,7 @@ self.onmessage = (e) => {
     };
     ws.onmessage = (ev) => {
       const d = ev.data;
+      const at = statsOn ? performance.timeOrigin + performance.now() : 0;
       if (audioPort && audioOn && primary && d instanceof ArrayBuffer &&
           d.byteLength > 2 && new Uint8Array(d, 0, 1)[0] === 0x01) {
         // The page still owns the AudioContext, which only it can resume, so it
@@ -6141,11 +6255,12 @@ self.onmessage = (e) => {
             videoLastId = (head[0] << 8) | head[1];
             videoLastIdAt = performance.now();
           }
-          videoPort.postMessage(d, [d]);
+          if (at) videoPort.postMessage({ buffer: d, at }, [d]);
+          else videoPort.postMessage(d, [d]);
           return;
         }
       }
-      if (d instanceof ArrayBuffer) self.postMessage({ type: 'message', data: d }, [d]);
+      if (d instanceof ArrayBuffer) self.postMessage({ type: 'message', data: d, at }, [d]);
       else self.postMessage({ type: 'message', data: d });
     };
     return;
@@ -6188,7 +6303,7 @@ class WorkerWebSocket {
     this._worker.onmessage = (e) => {
       const m = e.data;
       if (m.type === 'message') {
-        const ev = { data: m.data };
+        const ev = { data: m.data, at: m.at };
         if (this.onmessage) this.onmessage(ev);
         this._emit('message', ev);
         return;
@@ -6321,6 +6436,16 @@ class WorkerWebSocket {
   setVideoDivert(divert, ackSource) {
     const ack = !!divert && displayId === 'primary' && !isSharedMode;
     try { this._worker.postMessage({ type: 'videoState', divert: !!divert, ack, ackSource: ackSource || 'receive' }); } catch (e) { /* closing */ }
+  }
+
+  /**
+   * Dates every message with its arrival while `on`, for the stats' measure
+   * of how long a frame takes from the socket to the screen.
+   * @param {boolean} on
+   * @returns {void}
+   */
+  setStats(on) {
+    try { this._worker.postMessage({ type: 'stats', on: !!on }); } catch (e) { /* closing */ }
   }
 
   /**
@@ -6858,6 +6983,7 @@ class WorkerWebSocket {
   try {
     if (!socketWorkerEnabled) throw new Error('socket_worker=false');
     websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary');
+    if (streamStats.open) websocket.setStats(true);
   } catch (e) {
     // No worker to be had (a policy forbidding blob workers, say). The socket
     // then runs here, where a busy thread costs audio its cadence, which is
@@ -7168,6 +7294,8 @@ class WorkerWebSocket {
       if (arrayBuffer.byteLength < 1) return;
       streamStats.noteBytes(arrayBuffer.byteLength);
       const dataTypeByte = dataView.getUint8(0);
+      // When the socket's thread took the message, or failing that now.
+      const arrival = !streamStats.open ? NaN : event.at > 0 ? event.at : performance.timeOrigin + performance.now();
 
       if (dataTypeByte === 0x03 || dataTypeByte === 0x04) {
         window.videoChunksReceived++;
@@ -7248,7 +7376,7 @@ class WorkerWebSocket {
 
         if (canProcessJpeg) {
           if (jpegDataBuffer.byteLength === 0) return;
-          decodeAndQueueJpegStripe(stripe_y_start, jpegDataBuffer, jpegFrameId);
+          decodeAndQueueJpegStripe(stripe_y_start, jpegDataBuffer, jpegFrameId, arrival);
         }
 
       } else if (dataTypeByte === 0x04) {
@@ -7314,7 +7442,7 @@ class WorkerWebSocket {
                 }
             }
             const workerCodec = workerKeyframeCodec || wireCodecString(video_frame_type_byte, null, stripeWidth, stripeHeight);
-            if (feedWorkerDecoder(isKeyFrame, h264Payload, stripeWidth, stripeHeight, workerCodec, vncFrameID, referenceFrameId)) {
+            if (feedWorkerDecoder(isKeyFrame, h264Payload, stripeWidth, stripeHeight, workerCodec, vncFrameID, referenceFrameId, arrival)) {
                 return;
             }
         }
@@ -7420,8 +7548,9 @@ class WorkerWebSocket {
                 };
                 if (decoderInfo.decoder.state === "configured") {
                     const chunk = new EncodedVideoChunk(chunkData);
-                    if (streamStats.open && isFullFrameVideo(currentEncoderMode)) {
-                        pageDecode.starts.set(chunkTimestamp, performance.now());
+                    if (streamStats.open) {
+                        if (isFullFrameVideo(currentEncoderMode)) pageDecode.starts.set(chunkTimestamp, performance.now());
+                        pageDecode.arrivals.set(Math.trunc(chunkTimestamp), arrival);
                     }
                     try {
                         decoderInfo.decoder.decode(chunk);

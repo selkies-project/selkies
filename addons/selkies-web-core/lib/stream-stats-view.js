@@ -169,11 +169,13 @@ const TILES = {
   encode_ms: ['Encode', 'ms'],
   pipeline_ms: ['Capture to encoded', 'ms'],
   decode_ms: ['Decode', 'ms'],
+  present_ms: ['Arrival to screen', 'ms'],
   jitter_buffer_ms: ['Jitter buffer', 'ms'],
   audio_buffer_ms: ['Audio buffer', 'ms'],
   packet_loss_percent: ['Packet loss', '%'],
   received_mb: ['Received', 'MB'],
   frames_dropped: ['Frames dropped', ''],
+  frames_not_shown: ['Frames not shown', ''],
   lost_frames: ['Lost frames', ''],
   freezes: ['Freezes', ''],
   nacks: ['NACKs', ''],
@@ -182,11 +184,11 @@ const TILES = {
 
 /** The figures each transport shows, in order. */
 const TRANSPORT_TILES = {
-  websockets: ['encode_ms', 'pipeline_ms', 'decode_ms', 'audio_buffer_ms',
-    'received_mb', 'lost_frames', 'keyframe_requests'],
-  webrtc: ['encode_ms', 'pipeline_ms', 'decode_ms', 'jitter_buffer_ms', 'audio_buffer_ms',
+  websockets: ['encode_ms', 'pipeline_ms', 'decode_ms', 'present_ms', 'audio_buffer_ms',
+    'received_mb', 'lost_frames', 'frames_not_shown', 'keyframe_requests'],
+  webrtc: ['encode_ms', 'pipeline_ms', 'decode_ms', 'jitter_buffer_ms', 'present_ms', 'audio_buffer_ms',
     'received_mb', 'packet_loss_percent',
-    'frames_dropped', 'freezes', 'nacks', 'keyframe_requests'],
+    'frames_dropped', 'frames_not_shown', 'freezes', 'nacks', 'keyframe_requests'],
 };
 
 /**

@@ -23,6 +23,7 @@ const { StreamStats, HISTORY_MAX, FIRST_SAMPLE_MS, webcodecsDecoder, webrtcDecod
   await import('../../addons/selkies-web-core/lib/stream-stats.js');
 const { streamRows, streamTiles, streamMeters, streamReport, seriesOf, graphPath, GRAPH_POINTS } =
   await import('../../addons/selkies-web-core/lib/stream-stats-view.js');
+const { createPresentMeter, watchVideo } = await import('../../addons/selkies-web-core/lib/present-meter.js');
 
 let failed = 0;
 
@@ -248,12 +249,15 @@ check('and how a JPEG stripe was decoded, with where it ran',
 const latest = { encode_ms: 1.2, decode_ms: 2, encoded_kbps: 900, audio_dropped: 0, cpu_percent: 20, mem_used: 2 ** 30, mem_total: 2 ** 32, fps: 60 };
 const tiles = streamTiles(latest, 'websockets');
 check('the tiles are a fixed set that repeats no graph', tiles.map((tile) => tile.key).join()
-  === 'encode_ms,pipeline_ms,decode_ms,audio_buffer_ms,received_mb,lost_frames,keyframe_requests');
+  === 'encode_ms,pipeline_ms,decode_ms,present_ms,audio_buffer_ms,received_mb,lost_frames,frames_not_shown,keyframe_requests');
 check('the round trip is not also a tile, the latency graph being where it is read',
   !tiles.some((tile) => tile.key === 'rtt_ms'));
 check('a figure not measured this second reads as a dash', tiles[0].value === '1.2 ms' && tiles[1].value === '\u2013');
-check('the same set stands before any sample', streamTiles(null, 'websockets').length === 7
+check('the same set stands before any sample', streamTiles(null, 'websockets').length === 9
   && streamTiles(null, 'websockets').every((tile) => tile.value === '\u2013'));
+check('both transports show how long a frame took to the screen and how many never got there',
+  ['websockets', 'webrtc'].every((transport) => ['present_ms', 'frames_not_shown']
+    .every((key) => streamTiles(null, transport).some((tile) => tile.key === key))));
 check('WebRTC adds what it measures of the link', streamTiles(null, 'webrtc').some((tile) => tile.key === 'packet_loss_percent'));
 check('a memory meter reads as its amounts and carries no bar, the share going to the hover',
   streamMeters(latest)[1].text === '1.0 GiB / 4.0 GiB' && streamMeters(latest)[1].detail === '25%'
@@ -289,5 +293,77 @@ check('and later ones wait for the next sample, which is the one read a dashboar
   window.stream_stats.latest.cpu_percent === 40);
 opening.clientSample({ fps: 30 });
 check('which carries them', window.stream_stats.latest.cpu_percent === 50 && window.stream_stats.latest.server);
+
+// What reaches the screen: a canvas draw lands at its thread's next animation
+// frame, and every draw ahead of the last one before that frame was replaced
+// unseen; a <video> reports its own frames and drops.
+const frames = [];
+const meter = createPresentMeter((land) => frames.push(land));
+const epoch = () => performance.timeOrigin + performance.now();
+const arrived = epoch() - 5;
+meter.drawn(arrived - 10);
+meter.drawn(arrived);
+check('draws wait for the next animation frame, asked for once', frames.length === 1
+  && meter.take().presented === 0, String(frames.length));
+frames.shift()();
+let figures = meter.take();
+check('which hands on the newest draw and counts the one before it as replaced', figures.presented === 1
+  && figures.superseded === 1 && figures.delays === 1 && figures.delaySum >= 5 && figures.delaySum < 1000,
+  JSON.stringify(figures));
+check('a take starts the next count afresh', JSON.stringify(meter.take())
+  === JSON.stringify({ presented: 0, delaySum: 0, delays: 0, superseded: 0, refused: 0 }));
+meter.drawn(NaN);
+meter.land();
+figures = meter.take();
+check('a draw landed by its own frame counts at once, and one of unknown arrival carries no delay',
+  figures.presented === 1 && figures.delays === 0, JSON.stringify(figures));
+frames.shift()();
+check('and the frame asked for before it then finds nothing to count', meter.take().presented === 0);
+meter.drawn(arrived);
+meter.reset();
+frames.shift()();
+check('a reset forgets draws still waiting for their frame', meter.take().presented === 0);
+const eager = createPresentMeter(null);
+eager.drawn(arrived);
+eager.drawn(arrived);
+eager.refused();
+figures = eager.take();
+check('a thread without animation frames counts each draw as it is made', figures.presented === 2
+  && figures.superseded === 0 && figures.refused === 1, JSON.stringify(figures));
+
+const callbacks = [];
+let cancelled = 0;
+let quality = { totalVideoFrames: 10, droppedVideoFrames: 3 };
+const video = {
+  requestVideoFrameCallback: (cb) => { callbacks.push(cb); return callbacks.length; },
+  cancelVideoFrameCallback: () => { cancelled++; },
+  getVideoPlaybackQuality: () => quality,
+};
+const followed = createPresentMeter(null);
+const watch = watchVideo(video, followed, (frame) => frame.presentationTime - frame.receiveTime);
+callbacks.shift()(0, { presentedFrames: 10, presentationTime: 100, receiveTime: 90 });
+callbacks.shift()(0, { presentedFrames: 13, presentationTime: 150, receiveTime: 146 });
+figures = followed.take();
+check('a <video> reports each frame\'s delay as it hands it on', figures.delays === 2 && figures.delaySum === 14
+  && figures.presented === 0, JSON.stringify(figures));
+quality = { totalVideoFrames: 130, droppedVideoFrames: 63 };
+let read = watch.read();
+check('what it showed is what it took less what a newer frame replaced, as Chromium counts both',
+  read.shown === 60 && read.dropped === 60, JSON.stringify(read));
+quality = { totalVideoFrames: 5, droppedVideoFrames: 1 };
+read = watch.read();
+check('a new source restarting the counters is read as a restart', read.shown === 4 && read.dropped === 1,
+  JSON.stringify(read));
+const liveOnly = { ...video, getVideoPlaybackQuality: () => ({ totalVideoFrames: 0, droppedVideoFrames: 0 }) };
+const firefoxWatch = watchVideo(liveOnly, followed, () => NaN);
+callbacks.shift();
+callbacks.shift()(0, { presentedFrames: 40, presentationTime: 0 });
+callbacks.shift()(0, { presentedFrames: 42, presentationTime: 0 });
+check('an engine that keeps no playback quality for a live stream counts the frames the callback reports',
+  firefoxWatch.read().shown === 3);
+watch.stop();
+check('stopping cancels the callback it had asked for', cancelled === 1 && watch.reported());
+check('an engine without the callback never reports a frame',
+  !watchVideo({}, followed, () => NaN).reported());
 
 process.exit(failed ? 1 : 0);

@@ -25,6 +25,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { createStripeClock } from '../../addons/selkies-web-core/lib/stripe-clock.js';
+import { createPresentMeter } from '../../addons/selkies-web-core/lib/present-meter.js';
 
 const TOOLS = dirname(fileURLToPath(import.meta.url));
 const WEB = join(TOOLS, '..', '..', 'addons', 'selkies-web-core');
@@ -73,7 +74,7 @@ function literal(text, name) {
 }
 
 /** Helpers a worker source splices in that its own module imports. */
-const IMPORTED = { createStripeClock };
+const IMPORTED = { createStripeClock, createPresentMeter };
 
 /** Module sources a worker splices in whole, by their `?raw` import name. */
 const RAW_SOURCES = {
