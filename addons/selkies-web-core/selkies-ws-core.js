@@ -8440,6 +8440,14 @@ function buildMultiopusDescription(channels) {
  * `decoderInitialized`, `decoderInitFailed`, and `decoderError`; a fatal
  * decoder error is never re-initialized from inside, since a persistent
  * failure would spin, the page drives recovery.
+ *
+ * Surround is decoded one elementary stream at a time (`surroundDecoder`):
+ * the engines' own multistream decoding either fails outright (WebKit) or
+ * reorders the channels as if they were in Vorbis order (Chromium and
+ * Gecko), while plain mono and stereo Opus decode alike everywhere, and the
+ * stream table of the description puts each channel back where the server's
+ * encoder read it -- the order the worklet's output takes as the speaker
+ * layout.
  */
 const audioDecoderWorkerCode = `
   let decoderAudio;
@@ -8514,25 +8522,145 @@ const audioDecoderWorkerCode = `
     sampleRate: 48000,
   };
 
+  // An Opus frame length field at pos (RFC 6716 3.2.1): [bytes it takes, length].
+  function frameLength(u8, pos) {
+    const b = u8[pos];
+    return b < 252 ? [1, b] : [2, b + 4 * u8[pos + 1]];
+  }
+
+  // The elementary packets of a multistream packet. Every stream but the last
+  // is self-delimited (RFC 6716 Appendix B): a plain packet with one more
+  // length field in front of its last frame's data, which is cut out here.
+  function splitStreams(buf, streams) {
+    const u8 = new Uint8Array(buf);
+    const out = [];
+    let pos = 0;
+    for (let s = 0; s < streams - 1; s++) {
+      if (pos >= u8.length) return null;
+      const start = pos;
+      const code = u8[pos++] & 3;
+      let pad = 0, data = 0, sdAt, sdSize, n, len;
+      if (code === 2) {
+        [n, len] = frameLength(u8, pos); pos += n; data = len;
+      } else if (code === 3) {
+        const count = u8[pos++];
+        if (count & 0x40) {
+          let p;
+          do { p = u8[pos++]; pad += p === 255 ? 254 : p; } while (p === 255);
+        }
+        if (count & 0x80) {
+          for (let i = 0; i < (count & 0x3f) - 1; i++) { [n, len] = frameLength(u8, pos); pos += n; data += len; }
+        }
+      }
+      sdAt = pos;
+      [sdSize, len] = frameLength(u8, pos);
+      pos += sdSize;
+      data = code === 1 ? 2 * len : code === 3 && !(u8[start + 1] & 0x80) ? (u8[start + 1] & 0x3f) * len : data + len;
+      const end = pos + data + pad;
+      if (end > u8.length) return null;
+      const plain = new Uint8Array(end - start - sdSize);
+      plain.set(u8.subarray(start, sdAt), 0);
+      plain.set(u8.subarray(sdAt + sdSize, end), sdAt - start);
+      out.push(plain.buffer);
+      pos = end;
+    }
+    out.push(buf.slice(pos));
+    return out;
+  }
+
+  // A decoder for the surround layout of an OpusHead description: one mono or
+  // stereo decoder per elementary stream, whose outputs are reassembled into
+  // interleaved frames of the channels the mapping table names, in order.
+  function surroundDecoder(description, channels, onPcm, onError) {
+    const head = new Uint8Array(description);
+    const streams = head[19], coupled = head[20];
+    const mapping = Array.from(head.subarray(21, 21 + channels));
+    const decoders = [], held = [];
+    const assemble = () => {
+      while (held.every((q) => q.length > 0)) {
+        const parts = held.map((q) => q.shift());
+        const frames = parts[0].frames;
+        const pcm = new Float32Array(frames * channels);
+        mapping.forEach((coded, c) => {
+          if (coded === 255) return;
+          const stream = coded < 2 * coupled ? coded >> 1 : coupled + coded - 2 * coupled;
+          const plane = parts[stream].planes[coded < 2 * coupled ? coded & 1 : 0];
+          for (let f = 0; f < frames && f < plane.length; f++) pcm[f * channels + c] = plane[f];
+        });
+        onPcm(pcm.buffer);
+      }
+    };
+    for (let k = 0; k < streams; k++) {
+      held.push([]);
+      decoders.push(new AudioDecoder({
+        output: (d) => {
+          const planes = [];
+          for (let c = 0; c < d.numberOfChannels; c++) {
+            const plane = new Float32Array(d.numberOfFrames);
+            d.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
+            planes.push(plane);
+          }
+          held[k].push({ frames: d.numberOfFrames, planes });
+          d.close();
+          assemble();
+        },
+        error: onError,
+      }));
+    }
+    return {
+      get state() {
+        return decoders.some((d) => d.state === 'closed') ? 'closed'
+          : decoders.every((d) => d.state === 'configured') ? 'configured' : 'unconfigured';
+      },
+      async configure() {
+        for (let k = 0; k < streams; k++) {
+          decoders[k].configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: k < coupled ? 2 : 1 });
+        }
+      },
+      decode(chunk) {
+        const bytes = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(bytes);
+        const parts = splitStreams(bytes.buffer, streams);
+        if (!parts) throw new Error('malformed multistream packet');
+        parts.forEach((part, k) => decoders[k].decode(
+          new EncodedAudioChunk({ type: 'key', timestamp: chunk.timestamp, data: part })));
+      },
+      close() {
+        for (const d of decoders) { try { d.close(); } catch (e) { /* closed */ } }
+      },
+    };
+  }
+
+  function postPcm(pcm) {
+    if (pcmPort) pcmPort.postMessage({ audioData: pcm }, [pcm]);
+    else self.postMessage({ type: 'decodedAudioData', pcmBuffer: pcm }, [pcm]);
+  }
+
   async function initializeDecoderInWorker() {
     if (decoderAudio && decoderAudio.state !== 'closed') {
       try { decoderAudio.close(); } catch (e) { /* ignore */ }
     }
     currentDecodeQueueSize = 0;
     quietWaiting = false;
-    decoderAudio = new AudioDecoder({
-      output: handleDecodedAudioFrameInWorker,
-      error: (e) => {
-        // A fatal decoder error is not re-initialized from here: a persistent
-        // failure would spin. The page drives recovery with its 'reinitialize'
-        // message, which also re-checks the codec configuration.
-        console.error('[AudioWorker] AudioDecoder error:', e.message, e);
-        currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize -1);
-        if (quietWaiting) forwardQuiet();
-      },
-    });
+    const onError = (e) => {
+      // A fatal decoder error is not re-initialized from here: a persistent
+      // failure would spin. The page drives recovery with its 'reinitialize'
+      // message, which also re-checks the codec configuration.
+      console.error('[AudioWorker] AudioDecoder error:', e.message, e);
+      currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize -1);
+      if (quietWaiting) forwardQuiet();
+    };
+    const surround = decoderConfig.numberOfChannels > 2 && decoderConfig.description;
+    decoderAudio = surround
+      ? surroundDecoder(decoderConfig.description, decoderConfig.numberOfChannels, (pcm) => {
+          currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize - 1);
+          postPcm(pcm);
+          if (quietWaiting) forwardQuiet();
+        }, onError)
+      : new AudioDecoder({ output: handleDecodedAudioFrameInWorker, error: onError });
     try {
-      const support = await AudioDecoder.isConfigSupported(decoderConfig);
+      const support = await AudioDecoder.isConfigSupported(
+        surround ? { codec: 'opus', sampleRate: 48000, numberOfChannels: 2 } : decoderConfig);
       if (support.supported) {
         await decoderAudio.configure(decoderConfig);
         self.postMessage({ type: 'decoderInitialized' });
@@ -8562,8 +8690,7 @@ const audioDecoderWorkerCode = `
       pcmDataArrayBuffer = new ArrayBuffer(requiredByteLength);
       const pcmDataView = new Float32Array(pcmDataArrayBuffer);
       await frame.copyTo(pcmDataView, { planeIndex: 0, format: 'f32' });
-      if (pcmPort) pcmPort.postMessage({ audioData: pcmDataArrayBuffer }, [pcmDataArrayBuffer]);
-      else self.postMessage({ type: 'decodedAudioData', pcmBuffer: pcmDataArrayBuffer }, [pcmDataArrayBuffer]);
+      postPcm(pcmDataArrayBuffer);
       pcmDataArrayBuffer = null;
     } catch (error) { /* console.error */ }
     finally {
