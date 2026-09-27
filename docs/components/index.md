@@ -52,7 +52,7 @@ Every image is multi-architecture (`x86_64` and `aarch64`). When instructed to i
 docker run --rm --privileged tonistiigi/binfmt:latest --install all
 ```
 
-The run that builds each release keeps, per flavor and architecture, the digest of every image, the digest of the distribution image it was built from, and the list of packages it holds as its artifact `images-<flavor>-<architecture>`, which is what a downstream qualification build pins.
+The run that builds each release records, per flavor and architecture, the digest of every image, the digest of the distribution image it was built from, and the list of packages it holds as its artifact `images-<flavor>-<architecture>`, which is what a downstream qualification build pins. GitHub deletes a run's artifacts 90 days after the run, the most this repository can keep them, so a build that pins one copies it before then; the published images carry the same facts afterwards, the distribution image in their build provenance and the packages in their own package database.
 
 ## Encoders and Interfaces
 
