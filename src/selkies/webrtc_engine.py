@@ -521,6 +521,8 @@ class RTCApp:
         on_audio_consumer_active: Per-peer audio pause (the side menu's
             STOP_AUDIO / START_AUDIO); left None the verbs are dropped.
         on_consumers_changed: A display's consumer set changed (join, close).
+        on_stats_open: A controller's page opened its stats, called with its
+            display id so the first figures need not wait for the next period.
         provision_virtual_mic: Brings up the shared SelkiesVirtualMic (null
             sinks, module-virtual-source, default source) before a mic
             playback opens its `input` stream, so an app recording the default
@@ -570,6 +572,7 @@ class RTCApp:
         self.on_video_consumer_active = None
         self.on_audio_consumer_active = None
         self.on_consumers_changed = None
+        self.on_stats_open = None
 
         self.provision_virtual_mic = None
 
@@ -1980,7 +1983,10 @@ class RTCApp:
         if stats_wanted is not None:
             peer_obj = self.peer_connections.get(peer_id)
             if peer_obj is not None and client_type == ClientType.CONTROLLER:
+                opened = stats_wanted and not peer_obj.get("stats")
                 peer_obj["stats"] = stats_wanted
+                if opened and self.on_stats_open is not None:
+                    self.on_stats_open(peer_obj.get("display_id") or "primary")
             return
         if msg in ("STOP_AUDIO", "START_AUDIO"):
             # Per peer, so ahead of the viewer gate: the websockets verb is

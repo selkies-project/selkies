@@ -565,6 +565,11 @@ class SystemUsage:
         return round(percent, 1), mem[0], mem[1]
 
 
+#: How soon after a page opens its stats its first figures follow, in seconds:
+#: long enough for the CPU and the encode to be differenced over something.
+RUSH_S = 0.5
+
+
 class ResourceMonitor:
     """Samples the session's CPU and memory, and the GPU its pipeline encodes
     on, once a period off the event loop, and keeps the latest sample in the
@@ -578,8 +583,9 @@ class ResourceMonitor:
     period is sampled only for someone: `watched`, when set, says whether a
     page has its stats open, and without one and without `metrics` the period
     passes unsampled and `system` and `gpu` read None rather than go stale.
-    The GPU is `dri_node`'s card when that narrows the list to one, else the
-    `gpu_id`th of the unfiltered list.
+    A page that opens its stats is not kept waiting for the period to come
+    round (`rush`). The GPU is `dri_node`'s card when that narrows the list to
+    one, else the `gpu_id`th of the unfiltered list.
     """
 
     def __init__(self, period: float = 1.0, gpu_id: int = 0, dri_node: str = "",
@@ -596,6 +602,9 @@ class ResourceMonitor:
         self._probe_gpu = True
         self._gpu_seen = False
         self._stop: Optional[asyncio.Event] = None
+        self._wake: Optional[asyncio.Event] = None
+        self._rushed: Optional[asyncio.TimerHandle] = None
+        self._sampling: Optional[asyncio.Lock] = None
         self._task: Optional[asyncio.Task] = None
 
     def _gpu_sample(self) -> Optional[Dict[str, Any]]:
@@ -644,8 +653,12 @@ class ResourceMonitor:
     async def _loop(self) -> None:
         try:
             while self._stop is not None and not self._stop.is_set():
+                if self._rushed is not None:
+                    self._rushed.cancel()
+                    self._rushed = None
                 if self.metrics is not None or self.watched is None or self.watched():
-                    self.system, self.gpu = await asyncio.to_thread(self._sample)
+                    async with self._sampling:
+                        self.system, self.gpu = await asyncio.to_thread(self._sample)
                 else:
                     self.system = self.gpu = None
                 if self.metrics is not None and self.gpu is not None:
@@ -653,9 +666,10 @@ class ResourceMonitor:
                 if self.on_tick is not None:
                     await self.on_tick(time.time())
                 try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=self.period)
+                    await asyncio.wait_for(self._wake.wait(), timeout=self.period)
                 except asyncio.TimeoutError:
                     pass
+                self._wake.clear()
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -666,12 +680,30 @@ class ResourceMonitor:
         if self._task is not None and not self._task.done():
             return
         self._stop = asyncio.Event()
+        self._wake = asyncio.Event()
+        self._sampling = asyncio.Lock()
         self._task = asyncio.create_task(self._loop())
+
+    async def rush(self) -> None:
+        """Brings the next period forward for a page that just opened its stats.
+
+        The CPU is differenced from now, so the first figures describe the
+        moment rather than the spell nobody watched, and they follow `RUSH_S`
+        later instead of up to a period; a period that ends sooner serves the
+        page itself.
+        """
+        if self._task is None or self._task.done() or self._wake is None:
+            return
+        async with self._sampling:
+            await asyncio.to_thread(self._usage.sample)
+        if self._rushed is None:
+            self._rushed = asyncio.get_running_loop().call_later(RUSH_S, self._wake.set)
 
     async def stop(self) -> None:
         """Ends the loop at once and waits for it."""
         if self._stop is not None:
             self._stop.set()
+            self._wake.set()
         if self._task is not None:
             await self._task
             self._task = None

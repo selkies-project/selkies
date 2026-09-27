@@ -2148,6 +2148,15 @@ class DataStreamingServer(BaseStreamingService):
         entry = self.display_clients.get(display_id) or {}
         watch.follow(module, entry.get('encoder') or self.app.encoder, bool(entry.get('use_cpu')))
 
+    def _rush_stream_stats(self, display_id: Optional[str]) -> None:
+        """A page just opened its stats: its display's encode is differenced from
+        now, and its first figures follow soon (`ResourceMonitor.rush`)."""
+        watch = self._stream_watches.get(display_id) if display_id else None
+        if watch is not None:
+            watch.rates()
+        if self._resource_monitor is not None:
+            asyncio.ensure_future(self._resource_monitor.rush())
+
     async def _send_stream_stats(self, _now: float) -> None:
         """Resource-monitor tick: one `stream_stats` to every subscribed controller,
         with its own display's encode figures, round trip, and throttle state."""
@@ -4013,10 +4022,11 @@ class DataStreamingServer(BaseStreamingService):
                             )
 
                     elif stream_stats.stats_request(message) is not None:
-                        if stream_stats.stats_request(message):
-                            self._stats_subscribers.add(websocket)
-                        else:
+                        if not stream_stats.stats_request(message):
                             self._stats_subscribers.discard(websocket)
+                        elif websocket not in self._stats_subscribers:
+                            self._stats_subscribers.add(websocket)
+                            self._rush_stream_stats(client_display_id)
 
                     elif message.startswith("CLIENT_FRAME_ACK"):
                         try:

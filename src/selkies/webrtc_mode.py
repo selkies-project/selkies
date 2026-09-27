@@ -654,6 +654,7 @@ class WebRTCService(BaseStreamingService):
 
         self.resource_monitor.on_tick = self.handle_resource_tick
         self.resource_monitor.watched = lambda: bool(self.rtc_app and self.rtc_app.stats_displays())
+        self.rtc_app.on_stats_open = self._rush_stream_stats
 
     def _second_screen_availability(self) -> Tuple[bool, str]:
         """Whether this session can actually attach a second display, and the
@@ -2313,6 +2314,15 @@ class WebRTCService(BaseStreamingService):
         """Tell a display's controllers what its capture streams and how."""
         if self.rtc_app:
             self.rtc_app.send_stream_info(display_id, info)
+
+    def _rush_stream_stats(self, display_id: str) -> None:
+        """A controller just opened its stats: its display's encode is differenced
+        from now, and its first figures follow soon (`ResourceMonitor.rush`)."""
+        watch = getattr(self.display_pipelines.get(display_id), "stream_watch", None)
+        if watch is not None:
+            watch.rates()
+        if self.resource_monitor is not None:
+            asyncio.ensure_future(self.resource_monitor.rush())
 
     def _send_stream_stats(self) -> None:
         """One `stream_stats` to the controllers with their stats open: the host's
