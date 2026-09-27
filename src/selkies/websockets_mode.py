@@ -129,12 +129,13 @@ from .stream_server import (BaseStreamingService, CongestionSteer, TransferPacer
                             _uplink_session_state, note_pong, uplink_rtt_ms, socket_gauge)
 from .metrics import Metrics
 
-BACKPRESSURE_ALLOWED_DESYNC_MS = 2000
-BACKPRESSURE_LATENCY_THRESHOLD_MS = 50
-# Cap on RTT-based desync forgiveness: RTT rides the send->ack path backpressure
-# bounds, so uncapped, a growing queue would loosen its own trigger. Real
-# propagation delay is under a second; the rest is self-inflicted queue delay.
-BACKPRESSURE_LATENCY_FORGIVENESS_MAX_MS = 1000
+# How much stream may stand queued past the path's own round trip before the
+# backpressure gate stops sending a display's delta frames.
+BACKPRESSURE_ALLOWED_DESYNC_MS = 250
+# A capture that produced nothing for this long was a still screen; the
+# backpressure gate leaves the stream it resumes unjudged for the grace after.
+STILL_SCREEN_GAP_SECONDS = 1.0
+STILL_RESUME_GRACE_SECONDS = 1.0
 # Ack round trips above this measure a stalled path or an id collision, not the
 # link; one such sample would skew the flat smoothing window for its lifetime.
 RTT_SAMPLE_SANE_MAX_MS = 10000
@@ -373,9 +374,10 @@ def _note_round_trip(display_state: dict, rtt_ms: float, sent_bytes: int, now: f
 
     Three readers take it: the smoothed round trip the stats and gauges
     report; the floor, the least round trip of the last ten minutes in minute
-    buckets (`_observe_rtt_floor`), which the link steer measures a queue
-    from; and the acked history the link steer takes its windows from, each
-    entry carrying the bytes sent through the acked frame.
+    buckets (`_observe_rtt_floor`), which the backpressure gate forgives and
+    the link steer measures a queue from; and the acked history the link
+    steer takes its windows from, each entry carrying the bytes sent through
+    the acked frame.
     """
     rtt_samples = display_state.get('rtt_samples')
     if rtt_samples is not None:
@@ -1181,7 +1183,6 @@ class DataStreamingServer(BaseStreamingService):
         self.video_paused_clients = set()
         self._deferred_viewer_rejoins = {}
         self.allowed_desync_ms = BACKPRESSURE_ALLOWED_DESYNC_MS
-        self.latency_threshold_for_adjustment_ms = BACKPRESSURE_LATENCY_THRESHOLD_MS
         self.backpressure_check_interval_s = BACKPRESSURE_CHECK_INTERVAL_S
         self.BACKPRESSURE_QUEUE_SIZE = getattr(settings, 'backpressure_queue_size', 120)
         self._last_client_frame_id_report_time = 0.0
@@ -2514,10 +2515,22 @@ class DataStreamingServer(BaseStreamingService):
 
         Every BACKPRESSURE_CHECK_INTERVAL_S it counts the frames sent after
         the one the client last acked, sized by the client's measured
-        consumption rate and forgiving capped propagation delay, and flips
-        the display's backpressure flag: a stalled or lagging client
-        stops receiving delta frames, and the lift requests an IDR resync.
-        Also feeds the Prometheus fps/latency gauges for the primary display.
+        consumption rate, and flips the display's backpressure flag when more
+        than BACKPRESSURE_ALLOWED_DESYNC_MS of them stand past the path's own
+        round trip, its floor (`_note_round_trip`): a stalled or lagging
+        client stops receiving delta frames, and the lift requests an IDR
+        resync. The frames in flight over the floor are forgiven, the queue
+        standing behind them is not: a queue the gate lets grow is latency the
+        viewer sees, however long the path. A stream resuming after a still
+        screen (a capture that produced nothing for STILL_SCREEN_GAP_SECONDS)
+        is left unjudged for STILL_RESUME_GRACE_SECONDS: every frame it sends
+        counts against the client until the client's first ack of them comes
+        back, which after an idle spell can take a quarter of a second, and
+        the gate would answer that with a freeze and a key frame on every
+        resume. A queue a slow path builds under motion that continues has no
+        such pause and is judged throughout; the gate's own pauses stop the
+        sends, not the capture, so they grant no grace. Also feeds the
+        Prometheus fps/latency gauges for the primary display.
 
         A stall is a frame that has gone unanswered by any ack for
         STALLED_CLIENT_TIMEOUT_SECONDS, timed from the first send after the
@@ -2597,14 +2610,11 @@ class DataStreamingServer(BaseStreamingService):
                 frame_desync = (wrapped if acked_sent_at is None
                                 else sum(1 for t, _ in sent_ts.values() if t > acked_sent_at))
                 allowed_desync_frames = (self.allowed_desync_ms / 1000.0) * client_fps
-                # Capped: the RTT estimate rides the queue this loop bounds and must
-                # not out-grow the trigger it feeds.
-                current_rtt_ms = min(
-                    display_state.get('smoothed_rtt', 0.0),
-                    BACKPRESSURE_LATENCY_FORGIVENESS_MAX_MS,
-                )
-                latency_adjustment_frames = (current_rtt_ms / 1000.0) * client_fps if current_rtt_ms > self.latency_threshold_for_adjustment_ms else 0
-                effective_desync_frames = frame_desync - latency_adjustment_frames
+                # The path's own round trip is forgiven, never the queue this
+                # loop bounds: a round trip measured through that queue would
+                # loosen its own trigger as the queue grew.
+                floor_ms = display_state.get('rtt_floor_ms') or 0.0
+                effective_desync_frames = frame_desync - (floor_ms / 1000.0) * client_fps
 
                 now = time.monotonic()
                 unacked_since = display_state.get('unacked_since')
@@ -2622,7 +2632,8 @@ class DataStreamingServer(BaseStreamingService):
                         display_state['stall_gated_at'] = None
                         display_state['unacked_since'] = None
                         self._set_backpressure_enabled(display_id, display_state, True)
-                elif effective_desync_frames > allowed_desync_frames:
+                elif (effective_desync_frames > allowed_desync_frames
+                      and now - display_state.get('resumed_at', 0.0) >= STILL_RESUME_GRACE_SECONDS):
                     display_state['stall_gated_at'] = None
                     if display_state.get('backpressure_enabled', True):
                         data_logger.warning(f"Backpressure TRIGGERED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f > Allowed:{allowed_desync_frames:.1f}f).")
@@ -5733,6 +5744,12 @@ class DataStreamingServer(BaseStreamingService):
                         # No group means the capture is stopping; the buffer frees with the frame.
                         if group is None:
                             return
+                        owner = self.display_clients.get(display_id)
+                        if owner is not None:
+                            produced = time.monotonic()
+                            if produced - owner.get('produced_at', 0.0) > STILL_SCREEN_GAP_SECONDS:
+                                owner['resumed_at'] = produced
+                            owner['produced_at'] = produced
                         pc_ws = None
                         if display_id == 'primary':
                             secondary_ws = {
