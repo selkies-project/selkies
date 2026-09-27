@@ -659,6 +659,9 @@ COPY --from=add-ons --chown=1000:1000 /opt/add-ons/lib/ /usr/lib/
 # applications
 COPY --chown=1000:1000 addons/base/labwc-rc.xml /etc/xdg/labwc/rc.xml
 
+# A PulseAudio client that leaves its buffer to pipewire-pulse gets 40 ms, not 2 s
+COPY --chown=1000:1000 addons/base/pipewire-pulse.conf.d/ /etc/pipewire/pipewire-pulse.conf.d/
+
 # Copy the startup scripts and s6 service definitions (same /etc/service/<svc>/run layout as runit, supervised by s6-supervise)
 COPY --chown=1000:1000 addons/base/container-entrypoint.sh /etc/container-entrypoint.sh
 COPY --chown=1000:1000 addons/base/selkies-entrypoint.sh /etc/selkies-entrypoint.sh

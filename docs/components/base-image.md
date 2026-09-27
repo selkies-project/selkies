@@ -11,7 +11,7 @@ The [Base Container](https://github.com/selkies-project/selkies/tree/main/addons
 | --- | --- |
 | X11 backend | [XLibre](https://github.com/X11Libre/xserver)'s `Xvfb`, built from a release archive pinned by checksum with the four patches under `addons/base/patches`: the screen pixmap lives on the GPU so glamor renders and DRI3 presents there, the server starts with spare outputs Selkies plugs a second display into, a DRI3 client can synchronize its presents explicitly, and the vblank the server fakes runs at the rate the session is captured at |
 | Wayland backend | Selkies' own headless capture compositor, and a nested [labwc](https://labwc.github.io) session compositor built from source with `addons/base/build-labwc.sh` (window management, decorations, XWayland, and a control socket a second screen is asked over) |
-| Audio | PipeWire, WirePlumber, and `pipewire-pulse`, which `pcmflux` captures from and the microphone plays into |
+| Audio | PipeWire, WirePlumber, and `pipewire-pulse`, which `pcmflux` captures from and the microphone plays into; a PulseAudio client that leaves its buffer size to the server gets a 40 ms target (`addons/base/pipewire-pulse.conf.d`) rather than pipewire-pulse's 2 s |
 | GPU runtime | NVIDIA's EGL platform libraries for GBM, Wayland, and X11 (`egl-x11`, pinned by checksum), Mesa with Zink, the VA-API and Vulkan loaders, and `selkies-gpu-probe`, which measures what the session can render on |
 | Printing | A CUPS scheduler Selkies runs its own print queue on, so a document printed in the session reaches the browser |
 | Supervision | The [s6](https://skarnet.org/software/s6/) supervision suite from the distribution's packages, one service directory per daemon under `/etc/service` |
