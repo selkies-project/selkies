@@ -32,7 +32,7 @@ import os
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from .settings import canonical_encoder, software_video_path
+from .settings import canonical_encoder, codec_for_encoder, settings, software_video_path
 
 logger = logging.getLogger("stats")
 
@@ -60,11 +60,21 @@ def gpu_present() -> bool:
     return bool(glob.glob("/dev/dri/renderD*")) or os.path.exists("/dev/nvidiactl")
 
 
-def hardware_expected(encoder: str, use_cpu: bool, gpu: bool) -> bool:
+def hardware_expected(encoder: str, use_cpu: bool, gpu: bool,
+                      backends: Optional[Dict[str, Dict[str, Any]]] = None) -> bool:
     """Whether a session with this encoder should be encoding on a GPU: there is one,
-    and the session asked for it, which JPEG and the striped encoder never do and any
-    other does unless software encoding is on."""
-    return gpu and canonical_encoder(encoder) != "jpeg" and not software_video_path(encoder, use_cpu)
+    it has an engine for the codec, and the session asked for it, which JPEG and the
+    striped encoder never do and any other does unless software encoding is on.
+
+    Args:
+        backends: The startup probe's `AppSettings.encoder_backends`. A codec the
+            probe found no hardware backend for is encoded in software by the codec's
+            choice, as a server with no GPU is; None, a probe that has not run,
+            leaves the engine assumed.
+    """
+    if not gpu or canonical_encoder(encoder) == "jpeg" or software_video_path(encoder, use_cpu):
+        return False
+    return backends is None or bool((backends.get(codec_for_encoder(encoder)) or {}).get("hardware"))
 
 
 class StreamWatch:
@@ -117,7 +127,7 @@ class StreamWatch:
                 continue
             delay = WATCH_S
             info["gpu_present"] = gpu
-            info["hardware_expected"] = hardware_expected(encoder, use_cpu, gpu)
+            info["hardware_expected"] = hardware_expected(encoder, use_cpu, gpu, settings.encoder_backends())
             if info == self.info:
                 continue
             self.info = info

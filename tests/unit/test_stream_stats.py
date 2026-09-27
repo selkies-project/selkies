@@ -35,6 +35,10 @@ res.check("unless software encoding is on", not SS.hardware_expected("h264enc", 
 res.check("the striped encoder never does", not SS.hardware_expected("h264enc-striped", False, True))
 res.check("nor does JPEG", not SS.hardware_expected("jpeg", False, True))
 res.check("and a host with no GPU expects none", not SS.hardware_expected("h264enc", False, False))
+probed = {"h264": {"hardware": "nvenc"}, "av1": {"hardware": None}}
+res.check("nor a codec the GPU has no engine for, as the startup probe found",
+          not SS.hardware_expected("av1enc", False, True, probed) and SS.hardware_expected("h264enc", False, True, probed))
+res.check("an unknown probe leaves the engine assumed", SS.hardware_expected("av1enc", False, True, None))
 res.check("GPU presence is what the device nodes say",
           SS.gpu_present() == (any(n.startswith("renderD") for n in (os.listdir("/dev/dri") if os.path.isdir("/dev/dri") else []))
                                or os.path.exists("/dev/nvidiactl")))
