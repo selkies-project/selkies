@@ -107,6 +107,7 @@ class HeaderExtensions:
 class HeaderExtensionsMap:
     def __init__(self) -> None:
         self.__ids = HeaderExtensions()
+        self.__mutable: dict[int, int] = {}
 
     def configure(self, parameters: RTCRtpParameters) -> None:
         for ext in parameters.headerExtensions:
@@ -137,6 +138,17 @@ class HeaderExtensionsMap:
                 self.__ids.color_space = ext.id
             elif ext.uri == DEPENDENCY_DESCRIPTOR_URI:
                 self.__ids.dependency_descriptor = ext.id
+        # What `for_fec` zeroes: each mutable extension's ID and the byte its mutable part starts at.
+        self.__mutable = {
+            ext_id: first
+            for ext_id, first in (
+                (self.__ids.abs_send_time, 0),
+                (self.__ids.transmission_offset, 0),
+                (self.__ids.transport_sequence_number, 0),
+                (self.__ids.video_timing, 7),
+            )
+            if ext_id
+        }
 
     def has_dependency_descriptor(self) -> bool:
         """Whether the peer negotiated the dependency descriptor."""
@@ -220,13 +232,7 @@ class HeaderExtensionsMap:
             return packet
         if profile != 0xBEDE and profile & 0xFFF0 != 0x1000:
             return packet
-        mutable = {
-            value for value in (
-                self.__ids.abs_send_time,
-                self.__ids.transmission_offset,
-                self.__ids.transport_sequence_number,
-            ) if value is not None
-        }
+        mutable = self.__mutable
         result = bytearray(packet)
         while pos < end:
             head = packet[pos]
@@ -245,10 +251,7 @@ class HeaderExtensionsMap:
                 pos += 1
             if pos + length > end:
                 break
-            skip = (
-                0 if ext_id in mutable else
-                7 if ext_id == self.__ids.video_timing else length
-            )
+            skip = mutable.get(ext_id, length)
             if skip < length:
                 result[pos + skip:pos + length] = bytes(length - skip)
             pos += length
