@@ -156,18 +156,18 @@ def run() -> "H.Results":
             ok = wait_log_from(st, "3912", 6)
             res.check("F5: 'vb,3912' live bitrate applied", ok, "")
 
-            # websockets defaults h264enc to CRF, so CBR is the structural change.
-            st = loglen()
-            await ws.send("_rc,cbr")
-            ok = wait_log_from(st, "Applied rate-control via '_rc'", 8) or \
-                 wait_log_from(st, "Restarting its capture stream", 8)
-            res.check("F5: '_rc,cbr' triggers structural restart", ok, "")
-            # Back to CRF so the run ends in the transport's default mode.
+            # Both transports default to CBR, so CRF is the structural change.
             st = loglen()
             await ws.send("_rc,crf")
+            ok = wait_log_from(st, "Applied rate-control via '_rc'", 8) or \
+                 wait_log_from(st, "Restarting its capture stream", 8)
+            res.check("F5: '_rc,crf' triggers structural restart", ok, "")
+            # Back to CBR so the run ends in the transport's default mode.
+            st = loglen()
+            await ws.send("_rc,cbr")
             await asyncio.sleep(5)
-            res.check("F5: '_rc,crf' toggles back to CRF",
-                      wait_log_from(st, "Applied rate-control via '_rc': crf", 8), "")
+            res.check("F5: '_rc,cbr' toggles back to CBR",
+                      wait_log_from(st, "Applied rate-control via '_rc': cbr", 8), "")
 
             await ws.send("cmd,selkies-proot install demo-app")
             deadline = time.time() + 10

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""D4b: after a client switches rate_control_mode to 'cbr' via SETTINGS or the
-'_rc' verb on the primary, a newly-seeded display2 must inherit cbr, not the
-server default (crf). Verifies via the display2 capture's CBR-mode log line."""
+"""D4b: after a client switches rate_control_mode to 'crf' via SETTINGS or the
+'_rc' verb on the primary, a newly-seeded display2 must inherit crf, not the
+server default (cbr). Verifies via the display2 capture's CRF-mode log line."""
 import asyncio
 import json
 import os
@@ -52,8 +52,8 @@ async def read_ws(ws, seconds: float) -> None:
             return
 
 
-def drive_cbr(use_opcode: bool) -> dict:
-    """Switch the primary to CBR, then seed display2 and capture its log line.
+def drive_crf(use_opcode: bool) -> dict:
+    """Switch the primary to CRF, then seed display2 and capture its log line.
 
     Args:
         use_opcode: True to switch via the ``_rc`` verb, False via SETTINGS.
@@ -72,13 +72,13 @@ def drive_cbr(use_opcode: bool) -> dict:
             await asyncio.sleep(3.0)
             await read_ws(p1, 1.0)
             if use_opcode:
-                await p1.send("_rc,cbr")
+                await p1.send("_rc,crf")
             else:
-                await p1.send("SETTINGS," + json.dumps(_settings("primary", rate_control_mode="cbr")))
+                await p1.send("SETTINGS," + json.dumps(_settings("primary", rate_control_mode="crf")))
             await asyncio.sleep(3.0)
             await read_ws(p1, 1.0)
             # The second display connects only after the rate control was set,
-            # so any CBR it shows must have been inherited.
+            # so any CRF it shows must have been inherited.
             mark2 = loglen()
             async with websockets.connect(uri, max_size=None) as p2:
                 await asyncio.wait_for(p2.recv(), timeout=10)
@@ -94,15 +94,15 @@ def drive_cbr(use_opcode: bool) -> dict:
 
 
 def main() -> bool:
-    """Run the CBR-inheritance check via both the SETTINGS and opcode paths; True when both passed."""
+    """Run the CRF-inheritance check via both the SETTINGS and opcode paths; True when both passed."""
     ok = True
     for use_opcode in (False, True):
         H.server_start(mode="websockets", wayland=False, extra_env={"SELKIES_ENABLE_RATE_CONTROL": "true"})
         label = "SETTINGS" if not use_opcode else "_rc-opcode"
         res = H.Results(f"d4b-{label}")
-        r = drive_cbr(use_opcode)
+        r = drive_crf(use_opcode)
         seg = r.get('d2', '')
-        res.check(f"display2 inherits cbr ({label})", "CBR" in seg, seg)
+        res.check(f"display2 inherits crf ({label})", "CRF" in seg, seg)
         ok = res.summary() and ok
     return ok
 
