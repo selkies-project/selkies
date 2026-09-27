@@ -803,9 +803,9 @@ const manualResolution = (serverSettings) => {
 /**
  * Marker written beside a value the user chose explicitly. The cores persist
  * every value they are told to apply, so the stored key alone cannot tell a
- * user's pick from one the dashboard derived (HiDPI from the resolution mode,
- * paint-over from Turbo); the settings that are also derived read
- * storage through `readExplicitStored`, so a derived write never pins them.
+ * user's pick from one the dashboard derived (HiDPI from the resolution mode)
+ * or applied from the server (paint-over); those settings read storage through
+ * `readExplicitStored`, so such a write never pins them.
  */
 const EXPLICIT_CHOICE_SUFFIX = "_explicit_choice";
 /**
@@ -1292,20 +1292,12 @@ function Sidebar() {
    * State the conditional settings read; rebuilt each render so the hooks
    * below re-resolve against current values when their deps change.
    * `encoderBackends` decides whether the software encoding switch is shown.
-   * Paint-over also reads the encoder and Turbo, Turbo resolved here rather
-   * than taken from its state, which trails the `serverSettings` sync by a
-   * render.
    */
   const conditionalCtx = {
     manualActive: !!readStored("manual_width") || serverSettings?.manual_resolution?.value === true,
     encoderBackends: serverSettings?.encoder_backends?.value,
     allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
     macDesktop: isMacDesktop(),
-  };
-  const paintOverCtx = {
-    ...conditionalCtx,
-    encoder,
-    videoStreamingMode: resolveSpec(VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, readStored),
   };
   /**
    * Each conditional setting is one hook call over a shared spec. The hook
@@ -1318,7 +1310,7 @@ function Sidebar() {
   const [rateControlMode, setRateControlMode] = useConditionalSetting(
     RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
   const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
-    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings], readPaintOverStored);
+    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings], readPaintOverStored);
   const [videoFullColor, setVideoFullColor] = useConditionalSetting(
     VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   // Full color is 4:4:4 H.264; where the decoder has no such profile the core
@@ -1675,14 +1667,13 @@ function Sidebar() {
   }, [serverSettings]);
 
   /**
-   * Paint-over: pushes the resolved default so the encoder agrees, and drops
-   * the unmarked stored echo once the ladder moves on, as rate control does;
-   * a later encoder or Turbo change re-derives it.
+   * Paint-over: pushes the resolved value so the encoder agrees, and drops
+   * the unmarked stored echo once the ladder moves on, as rate control does.
    */
   useEffect(() => {
     if (!serverSettings) return;
     const key = USE_PAINT_OVER_QUALITY_SPEC.storageKey;
-    const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
+    const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, readPaintOverStored);
     if (!isExplicitChoice(USE_PAINT_OVER_QUALITY_SPEC)
       && readStored(key) !== null
       && readStored(key) !== String(resolved)) {
@@ -1695,14 +1686,6 @@ function Sidebar() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverSettings]);
-  useEffect(() => {
-    if (!serverSettings || isSettingPinned(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, readPaintOverStored)) return;
-    const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
-    if (resolved !== usePaintOverQuality) {
-      writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [encoder, videoStreamingMode]);
 
   /** UI scaling pick: persisted, so it pins across reloads and stops the startup derived-default post. */
   const handleDpiScalingChange = (event) => {

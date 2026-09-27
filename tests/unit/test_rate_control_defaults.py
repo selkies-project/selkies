@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """The rate-control default is CBR on both transports, for every encoder and
 either software H.264 encoder of a pixelflux build (read from
-pixelflux.SOFTWARE_ENCODERS), and paint-over is off while Turbo encodes every
-frame of a video encoder and on otherwise, JPEG included; an operator-provided
-rate_control_mode or use_paint_over_quality, or disabled rate control, always
-wins. The same holds at startup for either mode and across a live transport
-switch, which rewrites the mode, refilters the encoder, and re-derives
-paint-over exactly as the stream server does. The retired openh264enc encoder
-name is accepted as an alias of h264enc wherever an encoder name enters.
+pixelflux.SOFTWARE_ENCODERS), and paint-over is on whatever Turbo, the rate
+control, and the encoder; an operator-provided rate_control_mode or
+use_paint_over_quality, or disabled rate control, always wins. The same holds
+at startup for either mode and across a live transport switch, which rewrites
+the mode and refilters the encoder exactly as the stream server does. The
+retired openh264enc encoder name is accepted as an alias of h264enc wherever an
+encoder name enters.
 """
 import os
 import subprocess
@@ -194,43 +194,40 @@ got = probe(SWITCH, SELKIES_MODE="websockets", SELKIES_RATE_CONTROL_MODE="crf")
 check("and never overwrites an operator pin", got == "crf,crf", got)
 
 
-# Paint-over follows Turbo on either transport, whatever the rate control,
-# except for JPEG, which Turbo leaves damage-driven; an operator's choice
-# always stands.
+# Paint-over cleans up a still screen whatever Turbo sends and whatever the rate
+# control, so it is on by default everywhere; an operator's choice stands.
 def paintover(**env: str) -> str:
     return probe("print(s.settings.use_paint_over_quality[0])", **env)
 
 
 for mode in ("websockets", "webrtc"):
-    check(f"{mode} defaults paint-over off under Turbo", paintover(SELKIES_MODE=mode) == "False", "")
+    check(f"{mode} defaults paint-over on under Turbo", paintover(SELKIES_MODE=mode) == "True", "")
     check(f"{mode} defaults it on without Turbo",
           paintover(SELKIES_MODE=mode, SELKIES_VIDEO_STREAMING_MODE="false") == "True", "")
-    check(f"{mode} keeps it off under Turbo and an operator crf pin",
-          paintover(SELKIES_MODE=mode, SELKIES_RATE_CONTROL_MODE="crf") == "False", "")
-    check(f"{mode} keeps an operator's paint-over on under Turbo",
-          paintover(SELKIES_MODE=mode, SELKIES_USE_PAINT_OVER_QUALITY="true") == "True", "")
+    check(f"{mode} defaults it on under crf",
+          paintover(SELKIES_MODE=mode, SELKIES_RATE_CONTROL_MODE="crf") == "True", "")
+    check(f"{mode} keeps an operator's paint-over off under Turbo",
+          paintover(SELKIES_MODE=mode, SELKIES_USE_PAINT_OVER_QUALITY="false") == "False", "")
     check(f"{mode} keeps an operator's paint-over off without Turbo",
           paintover(SELKIES_MODE=mode, SELKIES_VIDEO_STREAMING_MODE="false",
                     SELKIES_USE_PAINT_OVER_QUALITY="false") == "False", "")
-check("jpeg defaults paint-over on under Turbo",
+check("jpeg defaults paint-over on",
       paintover(SELKIES_MODE="websockets", SELKIES_ENCODER="jpeg") == "True", "")
-check("disabled rate control (forced crf) leaves paint-over to Turbo",
-      paintover(SELKIES_MODE="webrtc", SELKIES_ENABLE_RATE_CONTROL="false") == "False", "")
+check("disabled rate control (forced crf) leaves paint-over on",
+      paintover(SELKIES_MODE="webrtc", SELKIES_ENABLE_RATE_CONTROL="false") == "True", "")
 
-# A switch to webrtc clamps jpeg to a video encoder, which Turbo leaves
-# nothing to paint over; the switch back restores jpeg and paint-over with it.
+# A switch to webrtc clamps jpeg to a video encoder and the switch back restores
+# jpeg; paint-over stays what it was across both.
 PAINT_SWITCH = ("out = []"
                 "\nfor mode in ('webrtc', 'websockets'):"
                 "\n    s.settings.mode = mode; s.settings.apply_webrtc_encoder_filter()"
-                "\n    s.settings.resolve_paint_over_default()"
                 "\n    out.append(f'{s.settings.encoder}:{s.settings.use_paint_over_quality[0]}')"
                 "\nprint(','.join(out))")
 got = probe(PAINT_SWITCH, SELKIES_MODE="websockets", SELKIES_ENCODER="jpeg")
-check("a live switch re-derives paint-over from the encoder it leaves",
-      got == "h264enc:False,jpeg:True", got)
+check("a live switch keeps paint-over on both ways", got == "h264enc:True,jpeg:True", got)
 got = probe(PAINT_SWITCH, SELKIES_MODE="websockets", SELKIES_ENCODER="jpeg",
-            SELKIES_USE_PAINT_OVER_QUALITY="true")
-check("and never overwrites an operator's paint-over", got == "h264enc:True,jpeg:True", got)
+            SELKIES_USE_PAINT_OVER_QUALITY="false")
+check("and never overwrites an operator's paint-over", got == "h264enc:False,jpeg:False", got)
 
 print(f"[rc-default] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

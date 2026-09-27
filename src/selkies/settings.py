@@ -703,7 +703,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "use_paint_over_quality",
         "type": "bool",
         "default": True,
-        "help": "Enable high-quality paint-over for static scenes. Unless set, it is off while video_streaming_mode (Turbo) encodes every frame of a video encoder, which leaves no scene static, and on otherwise, JPEG included.",
+        "help": "Clean up a still screen at the paint-over quality, under CBR and CRF alike and whether or not video_streaming_mode (Turbo) sends every frame: once the picture stops changing, or keeps changing only in small places, a video encoder refreshes what changed at the paint-over CRF, and after a large change sends a key frame at it once the screen holds still (under CBR only where the rate control has not already refined the picture further, a key frame within a second of the bitrate); JPEG re-sends still stripes at the paint-over JPEG quality.",
     },
     {
         "name": "paint_over_jpeg_quality",
@@ -717,14 +717,14 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "range",
         "default": "5-50",
         "meta": {"default_value": 18},
-        "help": 'H.264 paint-over CRF: allowed range, initial value, or both ("18,5-50"); "18-18" locks.',
+        "help": 'Paint-over quality index, on the video_crf scale and mapped onto each video codec\'s quantizer, that a still screen is cleaned up at: allowed range, initial value, or both ("18,5-50"); "18-18" locks.',
     },
     {
         "name": "video_paintover_burst_frames",
         "type": "range",
         "default": "1-30",
         "meta": {"default_value": 5},
-        "help": 'H.264 paint-over burst frames: allowed range, initial value, or both ("5,1-30"); "5-5" locks.',
+        "help": 'Frames a video encoder keeps sending after a cleanup or a key frame on a still screen, so rate control settles: allowed range, initial value, or both ("5,1-30"); "5-5" locks.',
     },
     {
         "name": "second_screen",
@@ -1917,23 +1917,6 @@ class AppSettings:
             self._pre_webrtc_encoder = None
             self._webrtc_encoder_fallback = None
 
-    def resolve_paint_over_default(self) -> None:
-        """Default paint-over to where it can act: off while Turbo encodes
-        every frame of a video encoder, since a scene is then never static,
-        and on otherwise, JPEG included, which Turbo leaves damage-driven.
-
-        An operator's use_paint_over_quality wins; a client's choice lives in
-        its display's state and the dashboards' precedence ladder, whose
-        conditional-settings.js derives the same default. Called again on a
-        transport switch, which can change the encoder.
-        """
-        if self.was_provided("use_paint_over_quality"):
-            return
-        self.use_paint_over_quality = (
-            self.encoder == "jpeg" or not self.video_streaming_mode[0],
-            self.use_paint_over_quality[1],
-        )
-
     def _post_process_settings(self) -> None:
         """Normalize and cross-check settings whose meaning spans several
         entries.
@@ -1948,9 +1931,7 @@ class AppSettings:
         quality on both transports, so the resolved mode and the menu
         published to clients are CRF alone; the "cbr" default would leave the
         dashboards showing a bitrate slider the encoder ignores and hiding the
-        CRF slider in force. Paint-over defaults off where Turbo
-        leaves it nothing to do (`resolve_paint_over_default`). Microphone
-        forwarding requires audio.
+        CRF slider in force. Microphone forwarding requires audio.
         A public listener is the both-family wildcard address, so the server
         binds from `addr` alone.
         The clipboard policy is normalized to exactly one of its four values.
@@ -1991,7 +1972,6 @@ class AppSettings:
             )
             if rc_definition is not None:
                 rc_definition["meta"]["allowed"] = ["crf"]
-        self.resolve_paint_over_default()
 
         audio_enabled = self.audio_enabled[0]
         if not audio_enabled and self.microphone_enabled[0]:

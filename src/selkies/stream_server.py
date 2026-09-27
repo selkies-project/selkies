@@ -2058,11 +2058,9 @@ class CentralizedStreamServer:
         Serialized under the supervisor lock so two switches can never overlap;
         switching to the already-active mode is a no-op. The service reads
         the settings at start, so the encoder knob is brought in line with the
-        transport first (a websockets-only encoder such as jpeg or striped
-        h264enc cannot ride the WebRTC pipeline, and a switch back restores
-        the operator's menu and value) and only then does an unpinned
-        paint-over resolve, since its default depends on the resolved encoder
-        (JPEG keeps it under Turbo), the same order as `_post_process_settings`.
+        transport before it starts (a websockets-only encoder such as jpeg or
+        striped h264enc cannot ride the WebRTC pipeline, and a switch back
+        restores the operator's menu and value).
 
         Args:
             mode_name: Registered service name ("websockets" or "webrtc").
@@ -2082,7 +2080,6 @@ class CentralizedStreamServer:
             logger.info(f"Starting service: {mode_name}")
             self.settings.mode = mode_name
             self.settings.apply_webrtc_encoder_filter()
-            self.settings.resolve_paint_over_default()
             service = self.services[mode_name]
             task = asyncio.create_task(service.start())
             self.active_task = task

@@ -367,6 +367,15 @@ let webcamEncoderPreference = 'auto';
 let preferredWebcamDeviceId = null;
 let displayId = 'primary';
 let displayPosition = 'right';
+/**
+ * Stored settings sent to the server only beside the explicit-choice marker a
+ * dashboard writes when the user picks them. The core stores every value it
+ * applies, so an unmarked one may be the echo of a default an older dashboard
+ * derived -- paint-over off under Turbo -- which sent at connect would switch
+ * the server's cleanup off while the dashboard shows it on.
+ */
+const EXPLICIT_ONLY_SETTINGS = ['use_paint_over_quality'];
+
 const PER_DISPLAY_SETTINGS = [
     'framerate', 'video_crf', 'video_fullcolor',
     'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
@@ -3111,13 +3120,16 @@ function getCurrentSettingsPayload() {
     const settingsToSend = {};
     const dpr = streamDensity();
     reportedStreamDensity = dpr;
-    const hasStoredParam = (key) => {
+    const storedKey = (key) => {
         let finalKey = `${storageAppName}_${key}`;
         if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
             finalKey = `${finalKey}_${displayId}`;
         }
-        return window.localStorage.getItem(finalKey) !== null;
+        return finalKey;
     };
+    const hasStoredParam = (key) => window.localStorage.getItem(storedKey(key)) !== null
+        && (!EXPLICIT_ONLY_SETTINGS.includes(key)
+            || window.localStorage.getItem(`${storedKey(key)}_explicit_choice`) === 'true');
     const storedEntries = [
         ['framerate', () => getIntParam('framerate', 60)],
         ['video_crf', () => getIntParam('video_crf', 25)],
@@ -6968,6 +6980,10 @@ class WorkerWebSocket {
             continue;
           }
           if (knownSettings.includes(baseKey)) {
+            if (EXPLICIT_ONLY_SETTINGS.includes(baseKey)
+                && localStorage.getItem(`${key}_explicit_choice`) !== 'true') {
+              continue;
+            }
             let value = localStorage.getItem(key);
             if (booleanSettingKeys.includes(baseKey)) {
               value = (value === 'true');

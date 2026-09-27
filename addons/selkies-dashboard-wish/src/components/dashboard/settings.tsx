@@ -24,8 +24,8 @@
  * adds the `_display2` suffix for per-display settings on a secondary display;
  * the cores read the same keys. The cores also persist every value they are
  * told to apply, so a stored key alone cannot tell a user's explicit pick from
- * one the dashboard derived (HiDPI from the resolution mode, paint-over from
- * Turbo). Settings that are also derived therefore carry an
+ * one the dashboard derived (HiDPI from the resolution mode) or applied from the
+ * server (paint-over). Those settings therefore carry an
  * `_explicit_choice` marker beside their value and resolve through the shared
  * specs of `selkies-web-core/lib/conditional-settings.js`, which honor pinned,
  * locked, and operator-overridden server values: a derived write never pins
@@ -336,20 +336,12 @@ export function Settings() {
      * State the conditional settings read; rebuilt each render so the hooks
      * below re-resolve against current values when their deps change.
      * `encoderBackends` decides whether the software encoding switch is shown.
-     * Paint-over also reads the encoder and Turbo, Turbo resolved here rather
-     * than taken from its state, which trails the serverSettings sync by a
-     * render.
      */
     const conditionalCtx = {
         manualActive: !!readStored("manual_width") || serverSettings?.manual_resolution?.value === true,
         encoderBackends: serverSettings?.encoder_backends?.value,
         allowedRateControl: serverSettings?.rate_control_mode?.allowed || rateControlOptions,
         macDesktop: isMacDesktop(),
-    };
-    const paintOverCtx = {
-        ...conditionalCtx,
-        encoder,
-        videoStreamingMode: resolveSpec(VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, readStored),
     };
     const DEBOUNCE_DELAY = 500;
     const debouncedPostSetting = useMemo(() => settingsPoster(DEBOUNCE_DELAY), []);
@@ -450,13 +442,12 @@ export function Settings() {
         parseInt(localStorage.getItem(getPrefixedKey("video_paintover_burst_frames")) ?? "", 10) || 5
     );
     const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
-        USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings], readPaintOverStored);
-    // Push the resolved paint-over default so the encoder agrees; a later
-    // encoder or Turbo change re-derives it.
+        USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings], readPaintOverStored);
+    // Push the resolved paint-over value so the encoder agrees.
     useEffect(() => {
         if (!serverSettings) return;
         const key = USE_PAINT_OVER_QUALITY_SPEC.storageKey;
-        const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
+        const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, readPaintOverStored);
         // Same stale-echo rule as rate control.
         if (!isExplicitChoice(USE_PAINT_OVER_QUALITY_SPEC)
             && readStored(key) !== null
@@ -470,14 +461,6 @@ export function Settings() {
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [serverSettings]);
-    useEffect(() => {
-        if (!serverSettings || isSettingPinned(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, readPaintOverStored)) return;
-        const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
-        if (resolved !== usePaintOverQuality) {
-            writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [encoder, videoStreamingMode]);
     const [useCpu, setUseCpu] = useConditionalSetting(
         USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
 

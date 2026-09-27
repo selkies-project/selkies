@@ -1176,6 +1176,13 @@ export default function webrtc() {
 					continue;
 				}
 				if (knownSettings.includes(baseKey)) {
+					// Sent only beside the explicit-choice marker: the core stores every
+					// value it applies, so an unmarked paint-over may be the echo of the
+					// off an older dashboard derived under Turbo.
+					if (baseKey === 'use_paint_over_quality'
+						&& localStorage.getItem(`${key}_explicit_choice`) !== 'true') {
+						continue;
+					}
 					let value = localStorage.getItem(key);
 					if (booleanSettingKeys.includes(baseKey)) {
 						value = (value === 'true');
