@@ -31,6 +31,7 @@ applied: List[tuple] = []
 def make_handler() -> WebRTCInput:
     h = WebRTCInput.__new__(WebRTCInput)
     h._pointer_seq = {}
+    h.button_mask = 0
 
     async def record(x, y, button_mask, scroll_magnitude, relative=False, display_id="primary"):
         applied.append((relative, x, y, button_mask))
@@ -62,6 +63,43 @@ h = make_handler()
 asyncio.run(h._dispatch_message("m,1,1,0,0,9", "primary", "c"))
 asyncio.run(h.release_gamepads_for_conn("c")) if hasattr(h, "client_gamepad_associations") else None
 check("a connection's count is kept until it goes", h._pointer_seq.get("c") == 9, h._pointer_seq)
+
+# A delta that lands after the release that followed it still moves the
+# pointer, but the button it carried is not pressed again.
+applied.clear()
+h = make_handler()
+
+
+async def record_mask(x, y, button_mask, scroll_magnitude, relative=False, display_id="primary"):
+    applied.append((relative, x, y, button_mask))
+    h.button_mask = button_mask
+
+h.send_x11_mouse = record_mask
+
+
+async def drag() -> None:
+    for msg in ("m2,0,0,1,0,20", "m2,4,0,1,0,22", "m2,0,0,0,0,23", "m2,3,0,1,0,21"):
+        await h._dispatch_message(msg, "primary", "d")
+
+
+asyncio.run(drag())
+check("a late delta still moves the pointer", (True, 3, 0, 0) in applied or (True, 3, 0, 1) in applied, applied)
+check("but does not press again the button released after it", applied[-1] == (True, 3, 0, 0), applied)
+
+# A wheel pulse overtaken by later motion is a click, not a state: its scroll
+# bit still rises, over the buttons held now rather than those it carried.
+applied.clear()
+
+
+async def late_pulse() -> None:
+    for msg in ("m2,0,0,1,0,30", "m2,5,0,0,0,33", "m2,0,0,1,1,31", "m2,0,0,9,1,32"):
+        await h._dispatch_message(msg, "primary", "e")
+
+
+asyncio.run(late_pulse())
+check("a late wheel pulse still scrolls", any(m & 8 for (_, _, _, m) in applied[2:]), applied)
+check("without pressing again the button held when it was sent",
+      all(not (m & 1) for (_, _, _, m) in applied[2:]), applied)
 
 print(f"[pointer-sequence] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

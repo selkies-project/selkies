@@ -8055,7 +8055,11 @@ class WebRTCInput:
                 # Motion may travel a channel that keeps no order, so pointer
                 # messages are numbered: an absolute position older than the
                 # last message applied for this connection is stale, not a move
-                # back; a delta still counts, in whatever order it lands.
+                # back; a delta still counts, in whatever order it lands. Every
+                # message carries the buttons held when it was sent, so a late
+                # one's are older than those applied since and are not applied
+                # again; only a wheel pulse's scroll bits, a click rather than
+                # a state, still land.
                 try: seq = int(toks[5])
                 except ValueError: return
                 last = self._pointer_seq.get(conn_id, 0)
@@ -8063,6 +8067,9 @@ class WebRTCInput:
                     return
                 if seq > last:
                     self._pointer_seq[conn_id] = seq
+                else:
+                    pulse = MOUSE_MASK_SCROLL_BITS if scroll_magnitude > 0 else 0
+                    button_mask = (self.button_mask & ~pulse) | (button_mask & pulse)
             try: await self.send_x11_mouse(x, y, button_mask, scroll_magnitude, relative, display_id=display_id)
             except Exception as e: logger_webrtc_input.warning(f"Failed to set mouse cursor: {e}")
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
@@ -8516,6 +8523,9 @@ MOUSE_BUTTON_RIGHT_ID = 43
 # (Pointer Events button 5) drives the primary button (see send_x11_mouse).
 MOUSE_MASK_BIT_PRIMARY = 1 << 0
 MOUSE_MASK_BIT_ERASER = 1 << 5
+# The wheel's bits: 3 and 4 vertical, 6 and 7 horizontal, each a click on its
+# rising edge while the message carries a scroll magnitude.
+MOUSE_MASK_SCROLL_BITS = (1 << 3) | (1 << 4) | (1 << 6) | (1 << 7)
 
 # Codes for the uinput mouse helper socket.
 UINPUT_BTN_LEFT = (EV_KEY, BTN_LEFT) 
