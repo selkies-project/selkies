@@ -48,6 +48,8 @@ export const SERVER_FRESH_MS = 3000;
  * @property {string} capture The capture path: `NvFBC`, `DRI3`, `XShm`,
  *     `dmabuf`, or `readback`.
  * @property {boolean} zero_copy Whether frames reach the encoder without a copy.
+ * @property {boolean} zero_copy_available Whether the display server offered the
+ *     encoder a zero-copy path at all, so that a copy fell short of one.
  * @property {string} capture_reason Why not, empty where there is nothing to explain.
  * @property {string} encoder `NVENC`, `VAAPI`, or the software library.
  * @property {boolean} hardware Whether the encoder runs on a GPU.

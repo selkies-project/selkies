@@ -15,7 +15,11 @@
  * choice and never for a server with no GPU, which is an ordinary deployment:
  * software encoding somebody selected, or on a host exposed no GPU, is neutral,
  * and software encoding on a session that asked for hardware where there is a
- * GPU is a warning and carries pixelflux's reason. The client's side reads the
+ * GPU is a warning and carries pixelflux's reason. A readback in front of a
+ * hardware encoder is read the same way: it warns where the display server
+ * offered the encoder a zero-copy path (`zero_copy_available`) and the capture
+ * took a copy anyway, and is neutral on a server that offers none, such as an
+ * Xvfb with neither DRI3 nor NvFBC. The client's side reads the
  * same way: software decoding warns only where a hardware decoder was there to
  * take the stream, since a client without one is as ordinary as a server
  * without a GPU, and a path through a relay or over TCP is how the network
@@ -96,7 +100,7 @@ function captureRow(info) {
   const wayland = info.backend === 'wayland';
   const software = wayland && info.renderer === 'pixman';
   const path = info.zero_copy ? `Zero-copy${wayland ? '' : ` (${info.capture})`}` : `Readback${wayland ? '' : ` (${info.capture})`}`;
-  const readbackToGpu = !info.zero_copy && info.hardware;
+  const readbackToGpu = !info.zero_copy && info.hardware && info.zero_copy_available;
   const renderedInSoftware = software && info.hardware_expected;
   return {
     key: 'capture',

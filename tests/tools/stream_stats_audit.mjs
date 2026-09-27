@@ -133,11 +133,16 @@ check('a server with no GPU warns on nothing and says so', rowOf(rows, 'encoder'
   && rows.every((row) => row.key === 'decoder' || row.reason === ''));
 check('and its report carries no reason for it', !streamReport(noGpu, client, null).includes('libcuda'));
 
-const hardware = { ...info, encoder: 'NVENC', hardware: true, gpu: 'NVIDIA GeForce RTX 3060', driver: 'nvidia', encode_node: '/dev/dri/renderD128' };
+const hardware = { ...info, encoder: 'NVENC', hardware: true, gpu: 'NVIDIA GeForce RTX 3060', driver: 'nvidia',
+  encode_node: '/dev/dri/renderD128', zero_copy_available: true };
 rows = streamRows(hardware, client, null, words);
-check('a hardware encoder behind a readback warns on the capture, with why',
+check('a hardware encoder behind a readback where the server offered zero-copy warns on the capture, with why',
   rowOf(rows, 'encoder').status === 'good' && rowOf(rows, 'capture').status === 'warn'
   && rowOf(rows, 'capture').reason === info.capture_reason);
+rows = streamRows({ ...hardware, zero_copy_available: false,
+  capture_reason: 'NvFBC: the X server offers no NV-GLX; DRI3: the server has no DRI3' }, client, null, words);
+check('a readback on a server offering no zero-copy path is how the host is built, and marks nothing',
+  rowOf(rows, 'capture').status === 'neutral' && rowOf(rows, 'capture').reason === '');
 check('the encoder row names the GPU and its node', rowOf(rows, 'encoder').detail.includes('RTX 3060')
   && rowOf(rows, 'encoder').detail.includes('renderD128'));
 
