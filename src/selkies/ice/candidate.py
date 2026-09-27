@@ -43,7 +43,7 @@ def candidate_foundation(
     See RFC 5245 - 4.1.1.3. Computing Foundations
     """
     key = "%s|%s|%s" % (candidate_type, candidate_transport, base_address)
-    return hashlib.md5(key.encode("ascii")).hexdigest()
+    return hashlib.md5(key.encode("ascii"), usedforsecurity=False).hexdigest()
 
 
 def candidate_priority(
