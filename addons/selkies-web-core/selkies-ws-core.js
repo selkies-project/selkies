@@ -5577,7 +5577,7 @@ function initWebsockets() {
 
   const pathname = getRoutePrefix() + '/';
 
-  /** Focus and gesture local-to-server clipboard sync (lib/clipboard-sync.js); text is deduped server-side. */
+  /** Focus and gesture local-to-server clipboard sync (lib/clipboard-sync.js), sending only what changed locally. */
   localClipboardSender = createLocalClipboardSender({
     isChromium,
     getDeferredWriteInFlight: () => deferredClipboardWriter.getInFlight(),
@@ -5586,6 +5586,7 @@ function initWebsockets() {
     canRead: () => !!clipboard_in_enabled,
     binaryEnabled: () => !!enable_binary_clipboard,
     sendClipboardData: (data, mime, onSkip) => sendClipboardData(data, mime, onSkip),
+    clipboardSync,
   });
   const readLocalClipboardAndSend = () => localClipboardSender.readAndSend();
   const maybeSendInitialClipboard = () => localClipboardSender.maybeInitial();

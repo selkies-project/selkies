@@ -303,6 +303,9 @@ export function createTaggedClipboardFetch() {
  */
 const EXPLICIT_PRECEDENCE_MS = 1000;
 
+/** What the local clipboard is known to hold right after a push the user asked for. */
+const PREDATES_EXPLICIT = Symbol('predates an explicit push');
+
 /** Longest a focus read waits for a server value still landing locally. */
 const SERVER_WRITE_WAIT_MS = 10000;
 
@@ -348,9 +351,8 @@ const INCOMING_STALL_MS = 30000;
  * @param {() => boolean} hooks.binaryEnabled Whether images are sent.
  * @param {(data: string|ArrayBuffer, mime?: string, onSkip?: Function) => Promise<void>} hooks.sendClipboardData
  *     Transport send.
- * @param {boolean} [hooks.dedupeText] Suppresses re-sending unchanged text;
- *     the WebRTC core's behavior, while the WebSocket core sends per event
- *     and dedupes at the server.
+ * @param {ClipboardSync} hooks.clipboardSync The clipboard state, which knows
+ *     what the local clipboard last held.
  * @param {(() => (Promise<*>|null))|null} [hooks.getDeferredWriteInFlight]
  *     The deferred writer's pending write, awaited before reading.
  * @returns {LocalClipboardSender}
@@ -362,11 +364,10 @@ export function createLocalClipboardSender({
     canRead,
     binaryEnabled,
     sendClipboardData,
-    dedupeText = false,
+    clipboardSync,
     getDeferredWriteInFlight = null,
 }) {
     let sendInFlight = null;
-    let lastText = null;
     let initialAttempted = false;
     let explicitRunning = 0;
     let explicitSettledAt = -Infinity;
@@ -391,11 +392,20 @@ export function createLocalClipboardSender({
     }
 
     /**
+     * Reads the local clipboard and sends it when it holds something the page
+     * has not seen there before.
+     *
+     * Content already read or written here is older than whatever the session
+     * took since -- an upload, or a session copy whose local write the
+     * browser refused -- so sending it again would put a stale value over a
+     * newer one; only a change is the user's latest copy. A read while a push
+     * the user asked for has precedence still records what it found, so the
+     * clipboard the user had before the upload never counts as a change.
+     *
      * A server push still settling through the deferred writer must land
-     * before this read: reading around it returns the pre-push content,
-     * which then reads as a change and bounces the stale value back to the
-     * server. The wait is bounded, since a push whose bytes stopped arriving
-     * never settles.
+     * before this read: reading around it returns the pre-push content, which
+     * would then read as a change. The wait is bounded, since a push whose
+     * bytes stopped arriving never settles.
      */
     async function readAndSend() {
         // navigator.clipboard is undefined on insecure origins.
@@ -414,28 +424,23 @@ export function createLocalClipboardSender({
             }
         }
 
-        if (explicitHasPrecedence()) return;
-
         const work = (async () => {
             try {
                 const res = await readLocalClipboard(binaryEnabled());
-                if (!res || explicitHasPrecedence()) return;
+                if (!res) return;
+                let payload = res.text;
+                let mime = 'text/plain';
                 if (res.kind === 'image') {
-                    const arrayBuffer = await res.blob.arrayBuffer();
-                    if (explicitHasPrecedence()) return;
-                    await sendClipboardData(arrayBuffer, res.mime);
-                    console.log(`Sent binary clipboard: ${res.mime}, size: ${res.blob.size} bytes`);
+                    payload = await res.blob.arrayBuffer();
+                    mime = res.mime;
                 } else if (res.kind === 'flavours') {
-                    if (!dedupeText || res.html !== lastText) {
-                        await sendClipboardData(packClipboardFlavours(res), CLIPBOARD_FLAVOURS_MIME);
-                        lastText = res.html;
-                        console.log(`Sent clipboard markup with its text, ${res.html.length} characters`);
-                    }
-                } else if (!dedupeText || res.text !== lastText) {
-                    await sendClipboardData(res.text);
-                    lastText = res.text;
-                    console.log("Sent clipboard text to server");
+                    payload = packClipboardFlavours(res);
+                    mime = CLIPBOARD_FLAVOURS_MIME;
                 }
+                const changed = clipboardSync.noteLocal(await clipboardSync.localSig(payload, mime));
+                if (!changed || explicitHasPrecedence()) return;
+                await sendClipboardData(payload, mime);
+                console.log(`Sent the local clipboard (${mime}) to the session`);
             } catch (err) {
                 if (err.name !== 'NotFoundError' && err.name !== 'DataError' && err.name !== 'NotAllowedError'
                     && !(err.message && err.message.includes('not focused'))) {
@@ -452,6 +457,7 @@ export function createLocalClipboardSender({
      */
     async function sendExplicit(data, mime, onSkip) {
         explicitRunning++;
+        clipboardSync.noteExplicit();
         await asSendInFlight((async () => {
             try {
                 const payload = (data && typeof data.arrayBuffer === 'function')
@@ -712,7 +718,7 @@ export function createIncomingClipboard({
         withdraw(lastLanding, 'superseded');
         const types = kind === 'image' ? ['image/png']
             : kind === 'text' ? ['text/plain'] : ['text/html', 'text/plain'];
-        const landing = { parts: {}, settled: false, withdrawn: false, failed: null };
+        const landing = { parts: {}, settled: false, withdrawn: false, failed: null, localSig: null };
         for (const type of types) landing.parts[type] = settleable();
         const settled = Promise.all(types.map((t) => landing.parts[t].promise));
         settled.then(() => { landing.settled = true; }, () => {});
@@ -731,7 +737,8 @@ export function createIncomingClipboard({
             }
         }, {
             settled,
-            onSuccess: kind === 'image' ? () => onImageWritten(mime) : undefined,
+            onSuccess: kind === 'image' ? () => onImageWritten(mime)
+                : () => { clipboardSync.noteLocal(landing.localSig); },
             onFailure: kind === 'image' ? onImageWriteFailed
                 : (err) => console.error(`Could not copy the session clipboard to the local one: ${err && err.name} - ${err && err.message}`),
         });
@@ -754,6 +761,7 @@ export function createIncomingClipboard({
                 });
             }
         } else if (kind === 'text') {
+            landing.localSig = clipboardSync.sig(content.text);
             landing.parts['text/plain'].resolve(new Blob([content.text], { type: 'text/plain' }));
         } else {
             landing.parts['text/html'].resolve(new Blob([content.html], { type: 'text/html' }));
@@ -803,6 +811,7 @@ export function createIncomingClipboard({
         } else if (typeof navigator !== 'undefined' && navigator.clipboard) {
             const text = t.kind === 'text' ? content.text : (content.text || content.html);
             writer.write(() => navigator.clipboard.writeText(text), {
+                onSuccess: () => { clipboardSync.noteLocal(clipboardSync.sig(text)); },
                 onFailure: (err) => console.error(`Could not copy the session clipboard to the local one: ${err && err.name}`),
             });
         }
@@ -905,6 +914,12 @@ export function clipboardPreviewMessage(text) {
  *     Change-only gate.
  * @property {(data: string|Uint8Array|ArrayBuffer|Blob, mime?: string) => void} markSynced
  *     Records content as synced, on transfer success.
+ * @property {(data: string|ArrayBuffer, mime?: string) => Promise<string>} localSig
+ *     Signature of content read from the local clipboard.
+ * @property {(s: string|null) => boolean} noteLocal Records what the local
+ *     clipboard holds now; whether that differs from what it held before.
+ * @property {() => void} noteExplicit Records that a push the user asked for
+ *     made whatever the local clipboard holds older than the session's.
  * @property {(text?: string, blob?: Blob, mime?: string, bytes?: Uint8Array) => void} resolveServer
  *     Caches fresh server data and settles pending requests.
  * @property {() => Promise<void>} captureLocalImageSig Records the browser's
@@ -948,6 +963,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
     let lastMime = 'text/plain';
     let lastSyncedSig = null;
     let lastReencodeSig = null;
+    let lastLocalSig = null;
     let pending = [];
     function noteSynced(s) {
         lastSyncedSig = s;
@@ -1014,6 +1030,39 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
     }
 
     /**
+     * Signature of content read from the local clipboard, in the form
+     * `shouldSend` compares. Bytes are digested by the worker where the
+     * caller supplied one, from a copy, since they are still to be sent.
+     */
+    async function localSig(data, mime) {
+        if (typeof data === 'string' || !digestBytes) return sig(data, mime);
+        return sig(await digestBytes(data.slice(0)), mime);
+    }
+
+    /**
+     * Records what the local clipboard holds now, from a read or from a write
+     * made here (`null` when its form there is unknown).
+     * @returns {boolean} Whether that differs from what it held last time; the
+     *     first look after a push the user asked for finds what the clipboard
+     *     held before it, which is no change.
+     */
+    function noteLocal(s) {
+        const changed = lastLocalSig !== PREDATES_EXPLICIT && (s === null || s !== lastLocalSig);
+        lastLocalSig = s;
+        return changed;
+    }
+
+    /**
+     * A push the user asked for (an upload, the clipboard box) made the
+     * session's clipboard newer than whatever the local one holds, seen here
+     * or not: an engine that reads the local clipboard only as a paste
+     * delivers it has never seen it.
+     */
+    function noteExplicit() {
+        lastLocalSig = PREDATES_EXPLICIT;
+    }
+
+    /**
      * Caches fresh server data and settles pending requests through the
      * one-behind guard. `bytes`, when the receive path has them, make the
      * stored signature content-hashed so it matches what `shouldSend`
@@ -1068,6 +1117,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
                 const reencoded = sig(digest || new Uint8Array(buf), m);
                 if (lastSyncedSig === anchor) {
                     lastReencodeSig = reencoded;
+                    lastLocalSig = reencoded;
                 }
                 return;
             }
@@ -1151,6 +1201,9 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
         sig,
         shouldSend,
         markSynced,
+        localSig,
+        noteLocal,
+        noteExplicit,
         resolveServer,
         captureLocalImageSig,
         request,

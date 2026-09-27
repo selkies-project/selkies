@@ -2548,9 +2548,9 @@ export default function webrtc() {
 
 	/**
 	 * Focus and gesture local-to-server clipboard sync (`lib/clipboard-sync.js`),
-	 * with text re-sends deduped. Every read is gated on the server's clipboard
-	 * policy as well as browser capability, so a clipboard-disabled server never
-	 * arms the focus read or its permission prompt.
+	 * sending only what changed locally. Every read is gated on the server's
+	 * clipboard policy as well as browser capability, so a clipboard-disabled
+	 * server never arms the focus read or its permission prompt.
 	 */
 	const localClipboardSender = createLocalClipboardSender({
 		isChromium,
@@ -2560,7 +2560,7 @@ export default function webrtc() {
 		canRead: () => !!clipboard_in_enabled,
 		binaryEnabled: () => !!enable_binary_clipboard,
 		sendClipboardData: (data, mime, onSkip) => sendClipboardData(data, mime, onSkip),
-		dedupeText: true,
+		clipboardSync,
 	});
 	const readLocalClipboardAndSend = () => localClipboardSender.readAndSend();
 	const maybeSendInitialClipboard = () => localClipboardSender.maybeInitial();

@@ -9,7 +9,9 @@
 // fires reads the clipboard the user had before, so without precedence the
 // upload lands on the session clipboard and the old value lands on top of it.
 // A push the user asked for therefore outranks a read while it runs and
-// briefly after; a copy made later still reaches the session.
+// briefly after, and a clipboard the page has already seen is never sent
+// again over what the session took since: only a copy made later reaches the
+// session.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -22,7 +24,7 @@ Object.defineProperty(globalThis, 'navigator', {
     value: { clipboard: { readText: async () => clipboard.text } },
 });
 
-const { createLocalClipboardSender } = await import(
+const { createClipboardSync, createLocalClipboardSender } = await import(
     '../../addons/selkies-web-core/lib/clipboard-sync.js');
 
 // The precedence window is a local in the module; pinned here so the audit
@@ -43,18 +45,21 @@ Date.now = () => clock;
 /** A sender whose transport records what it was asked to send. */
 function sender({ hold = null } = {}) {
     const sent = [];
+    const clipboardSync = createClipboardSync({ sendRequest: () => {} });
     const s = createLocalClipboardSender({
         isChromium: true,
         isSharedMode: () => false,
         canSync: () => true,
         canRead: () => true,
         binaryEnabled: () => false,
+        clipboardSync,
         sendClipboardData: async (data, mime) => {
             sent.push({ data, mime });
             if (hold) await hold.promise;
+            clipboardSync.markSynced(data, mime);
         },
     });
-    return { sender: s, sent };
+    return { sender: s, sent, clipboardSync };
 }
 
 function gate() {
@@ -95,14 +100,15 @@ clipboard.text = 'what the user copied before';
           sent.length === 1 && sent[0].mime === 'image/png', JSON.stringify(sent));
 }
 
-// Long enough after, a local copy is a local copy again.
+// No read saw the clipboard between the upload and the end of the window (an
+// engine that reads only on paste): what it holds then predates the upload.
 {
     const { sender: s, sent } = sender();
     await s.sendExplicit('the uploaded image', 'image/png');
     clock += EXPLICIT_PRECEDENCE_MS + 1;
     await s.readAndSend();
-    check('a read past the window syncs the local clipboard again',
-          sent.length === 2 && sent[1].data === clipboard.text, JSON.stringify(sent));
+    check('the first read after the window finds the clipboard the upload replaced, not a copy',
+          sent.length === 1, JSON.stringify(sent));
 }
 
 // The picker hands over a File, and the bytes arrive a task later; the push
@@ -117,6 +123,34 @@ clipboard.text = 'what the user copied before';
     await Promise.all([push, read]);
     check('a push whose bytes are still being read outranks a read',
           sent.length === 1 && sent[0].data === 'image bytes', JSON.stringify(sent));
+}
+
+// The refocus read found the clipboard the user had before the upload; a
+// later trip to another window and back finds it unchanged.
+{
+    const { sender: s, sent } = sender();
+    await s.sendExplicit('the uploaded image', 'image/png');
+    await s.readAndSend();
+    clock += EXPLICIT_PRECEDENCE_MS + 1;
+    await s.readAndSend();
+    check('an upload outlives later focus reads of the clipboard the user already had',
+          sent.length === 1 && sent[0].mime === 'image/png', JSON.stringify(sent));
+    clipboard.text = 'copied after the upload';
+    await s.readAndSend();
+    check('a copy made after the upload still reaches the session',
+          sent.length === 2 && sent[1].data === 'copied after the upload', JSON.stringify(sent));
+    clipboard.text = 'what the user copied before';
+}
+
+// The session took a newer value whose local write never landed (refused,
+// withdrawn): the local clipboard is unchanged and must not go back over it.
+{
+    const { sender: s, sent, clipboardSync } = sender();
+    await s.readAndSend();
+    clipboardSync.resolveServer('copied in the session');
+    await s.readAndSend();
+    check('an unchanged local clipboard is not sent over a newer session value',
+          sent.length === 1, JSON.stringify(sent));
 }
 
 Date.now = realNow;

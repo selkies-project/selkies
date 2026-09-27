@@ -271,15 +271,17 @@ async function multipart(incoming, mime, bytes, { cacheOnly = false, between = n
           writes.length === 0 && clipboardSync.lastBlob !== null, `${writes.length} writes`);
 }
 
-// Text is written as it came.
+// Text is written as it came, and the client then knows the local clipboard holds it.
 {
-    const { incoming } = client();
+    const { incoming, clipboardSync } = client();
     writes.length = 0;
     incoming.single('text/plain', base64(new TextEncoder().encode('from the session')), false);
     await tick();
     const blob = local.value && local.value['text/plain'];
     const text = blob ? await blob.text() : null;
-    check('session text lands', text === 'from the session', text);
+    check('session text lands, and a read of it afterwards is no local change',
+          text === 'from the session'
+          && clipboardSync.noteLocal(clipboardSync.sig('from the session')) === false, text);
 }
 
 // An image the browser cannot convert is reported, never retried as refused.
