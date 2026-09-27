@@ -82,6 +82,17 @@ sudo modprobe uinput
 sudo usermod -aG input "$(whoami)"
 ```
 
+### Keeping the devices off the host's seat
+
+A kernel device Selkies registers from inside a container is a device of the host's kernel, so the host's own session sees it as well: a desktop logged in at the host's screen takes a published virtual keyboard and pointer as its own input, and its games find the pad. Every kernel device Selkies registers names itself in its physical path: `virtual/input/selkies_ev<slot>/phys` for a pad, which is also what the interposer reports, and `selkies/virtinput/keyboard` or `selkies/virtinput/pointer`. One udev rule on the host moves them all to a seat of their own and grants the host's desktop user no access to them:
+
+```
+# /etc/udev/rules.d/72-selkies-seat.rules
+SUBSYSTEM=="input", ATTRS{phys}=="selkies/*|virtual/input/selkies_ev*", ENV{ID_SEAT}="seat-selkies", TAG-="uaccess"
+```
+
+The number places it after systemd's `70-uaccess.rules`, which tags controllers for the seat's user, and before `73-seat-late.rules`, which applies the seat. Without it, the user at the host's screen is granted access to the pad's node; with it, the devices sit on `seat-selkies`, which has no session, so no host session takes them or is granted access to them. Load it with `sudo udevadm control --reload`, and apply it to devices already present with `sudo udevadm trigger --subsystem-match=input`; `udevadm info /dev/input/eventN` then shows `ID_SEAT=seat-selkies`. On systemd 256 and later, `udevadm test --extra-rules-dir=DIR` shows the same for a rule not yet installed. Applications in the container are unaffected, since they open the nodes through the `input` group above.
+
 ## Rumble
 
 Both backends take a game's force feedback the way the kernel takes it from an Xbox pad: the evdev node reports rumble, the periodic waveforms such a pad plays as rumble, and gain, sixteen effects at a time, and a game uploads effects, plays them, and stops them with the usual `EVIOCSFF`, `EV_FF` writes, and `EVIOCRMFF` (SDL's `SDL_JoystickRumble` among them). Selkies mixes what each slot's games play and sends it to the one client driving that slot, which plays it on its own controller through the browser: a `dual-rumble` effect where the browser offers one (Chromium and Safari), the single-motor pulse Firefox offers otherwise, and the phone's own vibrator for the on-screen touch gamepad where the browser has `navigator.vibrate` (Android). A client that stops hearing from the server stops shaking within two seconds, and one that takes over a slot mid-effect gets it at once. The Rumble toggle among each dashboard's gamepad controls turns it off for that browser, which keeps the choice.

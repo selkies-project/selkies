@@ -124,6 +124,11 @@ check("device identity matches the interposer's",
       f"vendor=0x{cfg['vendor_id']:04x}" in setup and f"product=0x{cfg['product_id']:04x}" in setup
       and f"version=0x{cfg['version']:04x}" in setup and setup.endswith(cfg["name"]) and "bus=0x03" in setup,
       setup)
+# The interposer answers EVIOCGPHYS for this slot with the same path, and a
+# host's udev rule keys on it (docs/components/input-interposer.md).
+phys = [l.split(" ", 1)[1] for l in log if l.startswith("SET_PHYS ")]
+check("its physical path is the interposer's for the slot", phys == ["virtual/input/selkies_ev0/phys"],
+      phys)
 expected_abs = {code: (ih.ABS_HAT_MIN_VAL, ih.ABS_HAT_MAX_VAL, 0, 0, 0) if code in (ih.ABS_HAT0X, ih.ABS_HAT0Y)
                 else (ih.ABS_MIN_VAL, ih.ABS_MAX_VAL, 16, 128, 1) for code in cfg["axes_map"]}
 check("axis ranges match the interposer's EVIOCGABS", abs_setup == expected_abs,

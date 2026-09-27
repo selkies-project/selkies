@@ -94,6 +94,7 @@ int ioctl(int fd, unsigned long request, ...) {
     else if (request == UI_SET_KEYBIT) fprintf(logf, "SET_KEYBIT 0x%03lx\n", (unsigned long)arg);
     else if (request == UI_SET_ABSBIT) fprintf(logf, "SET_ABSBIT 0x%02lx\n", (unsigned long)arg);
     else if (request == UI_SET_FFBIT) fprintf(logf, "SET_FFBIT 0x%02lx\n", (unsigned long)arg);
+    else if (request == UI_SET_PHYS) fprintf(logf, "SET_PHYS %s\n", arg ? (const char *)arg : "");
     else if (request == UI_ABS_SETUP) {
         struct uinput_abs_setup *s = arg;
         fprintf(logf, "ABS_SETUP code=0x%02x value=%d min=%d max=%d fuzz=%d flat=%d res=%d\n",

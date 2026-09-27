@@ -132,6 +132,9 @@ def main() -> bool:
     check("sizeof(struct uinput_ff_erase)", struct.calcsize(ih.UINPUT_FF_ERASE_FMT),
           truth["sizeof_uinput_ff_erase"])
 
+    # The physical path a host's udev rule keys on (pad_phys).
+    check("UI_SET_PHYS", ih.UI_SET_PHYS, truth["UI_SET_PHYS"])
+
     print("RESULT", "all passed" if not fails else f"FAILED: {fails}")
     return not fails
 

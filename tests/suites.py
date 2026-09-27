@@ -168,6 +168,9 @@ SUITES: list = [
     # run it by hand (`test_gamepad_rumble.py kernel`) where one is.
     {"path": "integration/test_gamepad_rumble.py", "tier": "integration", "timeout": 300,
      "selectors": ["interposer"]},
+    # Likewise the kernel block here (`test_seat_isolation.py kernel`).
+    {"path": "integration/test_seat_isolation.py", "tier": "integration", "timeout": 300,
+     "selectors": ["interposer"]},
     {"path": "integration/test_uinput_interposer.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_virtual_input_devices.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_ack_latency.py", "tier": "integration", "timeout": 300},

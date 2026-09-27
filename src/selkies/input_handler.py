@@ -2513,6 +2513,9 @@ UI_SET_EVBIT = _uinput_ioc(_IOC_WRITE, 100, 4)
 UI_SET_KEYBIT = _uinput_ioc(_IOC_WRITE, 101, 4)
 UI_SET_ABSBIT = _uinput_ioc(_IOC_WRITE, 103, 4)
 UI_SET_FFBIT = _uinput_ioc(_IOC_WRITE, 107, 4)
+# _IOW('U', 108, char *): the argument is the string's address, which
+# fcntl.ioctl passes for a bytes argument.
+UI_SET_PHYS = _uinput_ioc(_IOC_WRITE, 108, struct.calcsize("P"))
 UI_GET_SYSNAME = _uinput_ioc(_IOC_READ, 44, UINPUT_SYSNAME_LEN)
 UI_BEGIN_FF_UPLOAD = _uinput_ioc(_IOC_READ | _IOC_WRITE, 200, UINPUT_FF_UPLOAD_SIZE)
 UI_END_FF_UPLOAD = _uinput_ioc(_IOC_WRITE, 201, UINPUT_FF_UPLOAD_SIZE)
@@ -2592,6 +2595,20 @@ def uinput_gamepads_enabled(mode: Optional[str]) -> bool:
     return True
 
 
+def pad_phys(slot: int) -> str:
+    """The physical path a slot's pad reports, the interposer's EVIOCGPHYS
+    answer on either backend. With the virtual keyboard and pointer's
+    `selkies/virtinput/...`, it is what a host's udev rule keys on to keep
+    kernel devices a container registers off the host's own seat
+    (docs/components/input-interposer.md)."""
+    return f"virtual/input/selkies_ev{slot}/phys"
+
+
+def set_uinput_phys(fd: int, phys: str) -> None:
+    """Name a uinput device's physical path, before UI_DEV_CREATE."""
+    fcntl.ioctl(fd, UI_SET_PHYS, phys.encode("utf-8")[:1023] + b"\0")
+
+
 class UInputGamepad:
     """One slot's kernel gamepad, created through /dev/uinput.
 
@@ -2600,11 +2617,12 @@ class UInputGamepad:
     interposer socket carries, presented as the same Xbox pad, force feedback
     included: the kernel hands an application's effect uploads and erasures to
     this device's owner to answer, and its plays arrive as EV_FF events
-    (`service_ff`).
+    (`service_ff`). `phys` is the physical path it reports (pad_phys).
     """
 
-    def __init__(self, label: str) -> None:
+    def __init__(self, label: str, phys: str = "") -> None:
         self.label = label
+        self.phys = phys
         self.fd: Optional[int] = None
         self.device_nodes: list = []
         # Effect id -> (strong, weak, length_ms, delay_ms), the magnitudes as
@@ -2634,6 +2652,8 @@ class UInputGamepad:
                 fcntl.ioctl(fd, UI_ABS_SETUP, struct.pack(
                     UINPUT_ABS_SETUP_FMT, code, 0, minimum, maximum, fuzz, flat, resolution
                 ))
+            if self.phys:
+                set_uinput_phys(fd, self.phys)
             fcntl.ioctl(fd, UI_DEV_SETUP, struct.pack(
                 UINPUT_SETUP_FMT,
                 BUS_USB,
@@ -2824,13 +2844,16 @@ class VirtualInputDevice:
     Where /dev/uinput is writable the kernel serves the device, so every
     application finds it without a preload; otherwise the Input Interposer's
     dynamic pool does, and applications preloaded with it read the same evdev
-    stream from a socket beside the descriptor that carries the identity.
+    stream from a socket beside the descriptor that carries the identity. A
+    kernel device reports `phys` as its physical path (pad_phys).
     """
 
     def __init__(self, name: str, vendor: int, product: int,
                  evbits: Iterable[int], keybits: Iterable[int] = (),
-                 relbits: Iterable[int] = (), sock_dir: str = "/tmp") -> None:
+                 relbits: Iterable[int] = (), sock_dir: str = "/tmp",
+                 phys: str = "") -> None:
         self.name = name
+        self.phys = phys
         self.vendor, self.product = vendor, product
         self.evbits, self.keybits, self.relbits = list(evbits), list(keybits), list(relbits)
         self.sock_dir = sock_dir
@@ -2853,6 +2876,8 @@ class VirtualInputDevice:
                 fcntl.ioctl(fd, UI_SET_KEYBIT, code)
             for code in self.relbits:
                 fcntl.ioctl(fd, UI_SET_RELBIT, code)
+            if self.phys:
+                set_uinput_phys(fd, self.phys)
             fcntl.ioctl(fd, UI_DEV_SETUP, struct.pack(
                 UINPUT_SETUP_FMT, BUS_VIRTUAL, self.vendor, self.product, 1,
                 self.name.encode("utf-8")[:UINPUT_MAX_NAME_SIZE - 1], 0))
@@ -3105,7 +3130,9 @@ class SelkiesGamepad:
         killing input."""
         if not self.uinput_enabled or self.uinput is not None:
             return
-        device = UInputGamepad(os.path.basename(self.js_sock_path))
+        match = re.search(r"selkies_js(\d+)\.sock$", self.js_sock_path)
+        device = UInputGamepad(os.path.basename(self.js_sock_path),
+                               pad_phys(int(match.group(1)) if match else 0))
         try:
             nodes = device.create()
         except OSError as e:
@@ -4845,7 +4872,8 @@ class WebRTCInput:
                 self.virtual_input_devices[key] = live
                 continue
             device = VirtualInputDevice(name, 0x1D6B, product, evbits, keybits, relbits,
-                                        sock_dir=self.js_socket_path_prefix)
+                                        sock_dir=self.js_socket_path_prefix,
+                                        phys=f"selkies/virtinput/{key}")
             if await device.open(kernel=kernel):
                 _persistent_virtual_devices[key] = device
                 self.virtual_input_devices[key] = device

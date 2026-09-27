@@ -27,6 +27,7 @@ int main(void) {
     printf("JS_EVENT_AXIS %d\n", JS_EVENT_AXIS);
     printf("JS_EVENT_INIT %d\n", JS_EVENT_INIT);
     printf("UI_SET_FFBIT %lu\n", (unsigned long)UI_SET_FFBIT);
+    printf("UI_SET_PHYS %lu\n", (unsigned long)UI_SET_PHYS);
     printf("UI_BEGIN_FF_UPLOAD %lu\n", (unsigned long)UI_BEGIN_FF_UPLOAD);
     printf("UI_END_FF_UPLOAD %lu\n", (unsigned long)UI_END_FF_UPLOAD);
     printf("UI_BEGIN_FF_ERASE %lu\n", (unsigned long)UI_BEGIN_FF_ERASE);
