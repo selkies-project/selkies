@@ -13,7 +13,8 @@ signaling), then through munge_sdp with each encoder and color setting.
 A surround session offers `multiopus` ahead of stereo RED and Opus on the
 audio it sends, and the client's `takeMultiopus` (lib/webrtc.js, run under
 node) puts it first in an answer the way an engine that decodes it keeps it,
-on that section alone; the microphone's section keeps Opus to answer with.
+on that section alone; the microphone's section offers only what its sink
+decodes, RED and Opus first and no multiopus.
 """
 import asyncio
 import json
@@ -186,8 +187,10 @@ async def surround(res: H.Results) -> None:
               [names(sent[0]).get(pt) for pt in fmt(sent[0])] if sent else None)
     res.check("surround: multiopus holds a payload type no video codec has",
               sent and not set(fmt(sent[0])[:1]) & set(re.findall(r'(?m)^a=rtpmap:(\d+) ', "".join(sections(offer, "video", "sendrecv")))))
-    res.check("surround: the microphone's section offers Opus to answer with",
-              len(mic) == 1 and "opus" in names(mic[0]).values(), names(mic[0]) if mic else None)
+    res.check("surround: the microphone's section offers RED and Opus first, and no multiopus",
+              len(mic) == 1 and [names(mic[0]).get(pt) for pt in fmt(mic[0])[:2]] == ["red", "opus"]
+              and "multiopus" not in names(mic[0]).values(),
+              [names(mic[0]).get(pt) for pt in fmt(mic[0])] if mic else None)
     if not shutil.which("node"):
         res.check("node available for takeMultiopus", False, "node not found")
         return

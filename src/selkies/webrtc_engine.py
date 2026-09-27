@@ -2375,14 +2375,19 @@ class RTCApp:
             `_stop_mic_playback_state` later tears down.
         """
         mic_tx = peer_connection.addTransceiver("audio", direction="recvonly")
-        if not bool(app_settings.audio_redundancy[0]):
-            try:
-                caps = RTCRtpSender.getCapabilities("audio")
-                opus_only = [c for c in caps.codecs if c.mimeType.lower() == "audio/opus"]
-                if opus_only:
-                    mic_tx.setCodecPreferences(opus_only)
-            except Exception as e:
-                logger.info(f"mic opus-only preference not applied: {e}")
+        try:
+            caps = RTCRtpSender.getCapabilities("audio").codecs
+            # The sink decodes Opus, RED-framed or not: never the multichannel
+            # codec a surround session offers first for the audio it sends,
+            # which a browser would otherwise send its microphone in.
+            if bool(app_settings.audio_redundancy[0]):
+                wanted = [c for c in caps if c.mimeType.lower() != "audio/multiopus"]
+            else:
+                wanted = [c for c in caps if c.mimeType.lower() == "audio/opus"]
+            if wanted and len(wanted) < len(caps):
+                mic_tx.setCodecPreferences(wanted)
+        except Exception as e:
+            logger.info(f"mic codec preference not applied: {e}")
 
         loop = self.async_event_loop
         state: Dict[str, Any] = {"pb": None, "starting": False, "closed": False}
