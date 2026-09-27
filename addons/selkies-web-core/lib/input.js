@@ -73,6 +73,13 @@ const WHITELIST_CLASS = 'allow-native-input';
  */
 const TRACKPAD_TAP_HOLD_MS = 180;
 
+/**
+ * How long the finger left over from a multi-finger trackpad gesture is kept
+ * from moving the pointer, in milliseconds: fingers never lift together, and
+ * the last one rolls as it leaves.
+ */
+const TRACKPAD_HANDOFF_MS = 200;
+
 /** Finger travel, in CSS pixels, that one wheel notch of a two-finger scroll stands for. */
 const TOUCH_SCROLL_NOTCH_PX = 50;
 
@@ -1521,6 +1528,8 @@ export class Input {
         this._trackpadGestureMode = null;
         /** Pending release of the button a trackpad tap pressed; a touch landing before it fires drags. */
         this._trackpadReleaseTimer = null;
+        /** When a multi-finger trackpad gesture last dropped to one finger, for `TRACKPAD_HANDOFF_MS`. */
+        this._trackpadHandoffAt = -Infinity;
         this.inputAttached = false;
     }
 
@@ -2781,6 +2790,10 @@ export class Input {
      * moving ends the click and adds a second, a double click. A second
      * finger landing ends the hold first, so a scroll never runs with the
      * button down.
+     *
+     * A three-finger tap is a middle click. When a gesture of two or more
+     * fingers drops to one, that finger moves the pointer on from where it
+     * then is, once `TRACKPAD_HANDOFF_MS` have passed, and never taps.
      */
     _handleTrackpadEvent(event) {
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
@@ -2817,6 +2830,11 @@ export class Input {
                 const [a, b] = this._trackpadTouches.values();
                 this._twoFingerStart(a.lastX, a.lastY, b.lastX, b.lastY);
             }
+            else {
+                this._trackpadReleaseButton();
+                this._trackpadGestureMode = touchCount === 3 ? 'three' : 'completed';
+                this._twoFinger = null;
+            }
         }
         else if (type === 'touchmove') {
             for (const touch of this._trackpadTouches.values()) {
@@ -2834,23 +2852,25 @@ export class Input {
                 const touchData = this._trackpadTouches.values().next().value;
                 if (touchData) {
                     const changedTouch = Array.from(changedTouches).find(t => t.identifier === touchData.id);
-                    if (changedTouch) {
+                    if (changedTouch && performance.now() - this._trackpadHandoffAt >= TRACKPAD_HANDOFF_MS) {
                         const moved = this._relativeToServer(
                             changedTouch.clientX - touchData.lastX,
                             changedTouch.clientY - touchData.lastY);
                         if (moved[0] !== 0 || moved[1] !== 0) {
                             this._sendPointer([ "m2", moved[0], moved[1], this.buttonMask, 0 ], true);
                         }
+                    }
+                    if (changedTouch) {
                         touchData.lastX = changedTouch.clientX;
                         touchData.lastY = changedTouch.clientY;
                     }
                 }
-            } else if (this._trackpadGestureMode === 'scrolling') {
+            } else {
                 for (const changed of changedTouches) {
                     const data = this._trackpadTouches.get(changed.identifier);
                     if (data) { data.lastX = changed.clientX; data.lastY = changed.clientY; }
                 }
-                if (this._trackpadTouches.size === 2) {
+                if (this._trackpadGestureMode === 'scrolling' && this._trackpadTouches.size === 2) {
                     const [a, b] = this._trackpadTouches.values();
                     this._twoFingerMove(a.lastX, a.lastY, b.lastX, b.lastY);
                 }
@@ -2862,9 +2882,10 @@ export class Input {
                 !Array.from(this._trackpadTouches.values()).some(t => t.moved);
             const mode = this._trackpadGestureMode;
 
-            if (touchCountBeforeEnd === 2 && wasTap) {
-                this.buttonMask |= (1 << 2); this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
-                setTimeout(() => { this.buttonMask &= ~(1 << 2); this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false); }, 50);
+            if ((touchCountBeforeEnd === 2 || touchCountBeforeEnd === 3) && wasTap && mode !== 'completed') {
+                const bit = touchCountBeforeEnd === 2 ? (1 << 2) : (1 << 1);
+                this.buttonMask |= bit; this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
+                setTimeout(() => { this.buttonMask &= ~bit; this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false); }, 50);
                 this._trackpadGestureMode = 'completed';
             }
             else if (touchCountBeforeEnd === 1 && mode === 'moving' && wasTap) {
@@ -2890,6 +2911,12 @@ export class Input {
 
             if (this._trackpadTouches.size === 0) {
                 this._trackpadGestureMode = null;
+                this._twoFinger = null;
+            } else if (this._trackpadTouches.size === 1 && touchCountBeforeEnd > 1) {
+                const [left] = this._trackpadTouches.values();
+                left.moved = true;
+                this._trackpadGestureMode = 'moving';
+                this._trackpadHandoffAt = performance.now();
                 this._twoFinger = null;
             }
         }

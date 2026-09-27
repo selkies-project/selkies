@@ -276,4 +276,90 @@ for (const trackpad of [true, false]) {
     }
 }
 
+// --- the finger left over from a multi-finger gesture ----------------------
+
+/** Net relative motion on the wire, in server pixels. */
+function travel(sent) {
+    let x = 0;
+    let y = 0;
+    for (const [, msg] of sent) {
+        const p = msg.split(',');
+        if (p[0] === 'm2') { x += Number(p[1]); y += Number(p[2]); }
+    }
+    return [x, y];
+}
+
+/** Two fingers scroll 100 px up, then one lifts and the other stays down. */
+function scrollThenLiftOne(input) {
+    const a = touch(1, 400, 500);
+    const b = touch(2, 500, 500);
+    fire(input, 'touchstart', [a], [a]);
+    advance(5);
+    fire(input, 'touchstart', [b], [a, b]);
+    for (let i = 1; i <= 10; i++) {
+        advance(16);
+        fire(input, 'touchmove', [touch(1, 400, 500 - 10 * i), touch(2, 500, 500 - 10 * i)],
+             [touch(1, 400, 500 - 10 * i), touch(2, 500, 500 - 10 * i)]);
+    }
+    advance(16);
+    fire(input, 'touchend', [touch(2, 500, 400)], [touch(1, 400, 400)]);
+}
+{
+    const { input, sent } = makeInput();
+    scrollThenLiftOne(input);
+    advance(30);
+    fire(input, 'touchmove', [touch(1, 404, 401)], [touch(1, 404, 401)]);
+    const rolled = travel(sent);
+    advance(300);
+    const before = travel(sent);
+    for (let i = 1; i <= 10; i++) {
+        advance(16);
+        fire(input, 'touchmove', [touch(1, 404 + 10 * i, 401)], [touch(1, 404 + 10 * i, 401)]);
+    }
+    const moved = travel(sent);
+    check('the finger left after a two-finger scroll moves the pointer again',
+          moved[0] - before[0] === 100 && moved[1] === before[1], `${moved[0] - before[0]},${moved[1] - before[1]}`);
+    check('but not while the other one is still leaving', rolled[0] === 0 && rolled[1] === 0, `${rolled}`);
+    fire(input, 'touchend', [touch(1, 504, 401)], []);
+    advance(500);
+    const clicks = leftTransitions(sent);
+    check('and lifting it after moving it clicks nothing', clicks.length === 0, JSON.stringify(clicks));
+}
+{
+    // A two-finger tap whose fingers lift one after the other: one right click,
+    // and the last finger up is no left click.
+    const { input, sent } = makeInput();
+    const a = touch(1, 400, 500);
+    const b = touch(2, 500, 500);
+    fire(input, 'touchstart', [a], [a]);
+    advance(5);
+    fire(input, 'touchstart', [b], [a, b]);
+    advance(60);
+    fire(input, 'touchend', [b], [a]);
+    advance(40);
+    fire(input, 'touchend', [a], []);
+    advance(500);
+    check('a two-finger tap lifted one finger at a time is one right click',
+          leftTransitions(sent, 4).map(([, x]) => x).join(',') === 'down,up' && leftTransitions(sent).length === 0,
+          `right=${JSON.stringify(leftTransitions(sent, 4))} left=${JSON.stringify(leftTransitions(sent))}`);
+}
+{
+    const { input, sent } = makeInput();
+    const a = touch(1, 400, 500);
+    const b = touch(2, 460, 500);
+    const c = touch(3, 520, 500);
+    fire(input, 'touchstart', [a], [a]);
+    advance(5);
+    fire(input, 'touchstart', [b], [a, b]);
+    advance(5);
+    fire(input, 'touchstart', [c], [a, b, c]);
+    advance(60);
+    fire(input, 'touchend', [a, b, c], []);
+    advance(500);
+    const middle = leftTransitions(sent, 2).map(([, x]) => x).join(',');
+    check('a three-finger tap is a middle click, and nothing else',
+          middle === 'down,up' && leftTransitions(sent).length === 0 && leftTransitions(sent, 4).length === 0,
+          `middle=${middle} left=${leftTransitions(sent).length} right=${leftTransitions(sent, 4).length}`);
+}
+
 process.exit(failed === 0 ? 0 : 1);
