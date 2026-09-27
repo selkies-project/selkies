@@ -266,7 +266,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "enum",
         "default": "cbr",
         "meta": {"allowed": ["cbr", "crf"]},
-        "help": "Rate control mode for the video encoders on both transports (cbr = constant bitrate, crf = constant quality/QP). Honored for every video encoder when enable_rate_control is true (the default).",
+        "help": "Rate control mode for the video encoders on both transports (cbr = constant bitrate, crf = constant quality/QP). Honored by every video encoder when enable_rate_control is true (the default), except the two that run at the bitrate whatever the mode: a V4L2 memory-to-memory device at a variable one, Tegra's encoder at a constant one.",
     },
     {
         "name": "enable_rate_control",
