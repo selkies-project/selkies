@@ -224,8 +224,12 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # stats
         self.__lsr: Optional[int] = None
         self.__lsr_time: Optional[float] = None
-        self.__ntp_timestamp = 0
+        # The RTP timestamp of the last frame sent, the CLOCK_MONOTONIC instant it
+        # stands for (its capture, where the frame says), and its clock rate: a
+        # sender report maps the RTP clock of the moment it is sent from these.
         self.__rtp_timestamp = 0
+        self.__rtp_instant_ns = 0
+        self.__rtp_clock_rate = 0
         self.__octet_count = 0
         self.__packet_count = 0
         self.__rtt: Optional[float] = None
@@ -587,6 +591,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     continue
                 codec = self.__send_codec
                 frame_time = time.time()
+                instant_ns = (enc_frame.timing[0] if enc_frame.timing and enc_frame.timing[0] > 0
+                              else time.monotonic_ns())
 
                 if self.__kind == "video" and (
                     self.__force_keyframe_used or enc_frame.keyframe
@@ -665,8 +671,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     self.__last_sequence = packet.sequence_number
                     await self._send(packet_bytes, packet.extensions.transport_sequence_number)
 
-                    self.__ntp_timestamp = clock.current_ntp_time()
-                    self.__rtp_timestamp = packet.timestamp
+                    self.__rtp_timestamp = timestamp
+                    self.__rtp_instant_ns = instant_ns
+                    self.__rtp_clock_rate = codec.clockRate
                     self.__octet_count += len(payload)
                     self.__packet_count += 1
                     sequence_number = uint16_add(sequence_number, 1)
@@ -724,18 +731,19 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 await asyncio.sleep(0.5 + random.random())
 
                 # RTCP SR
+                ntp_timestamp, rtp_timestamp = self._sender_clock(time.monotonic_ns())
                 packets: list[AnyRtcpPacket] = [
                     RtcpSrPacket(
                         ssrc=self._ssrc,
                         sender_info=RtcpSenderInfo(
-                            ntp_timestamp=self.__ntp_timestamp,
-                            rtp_timestamp=self.__rtp_timestamp,
+                            ntp_timestamp=ntp_timestamp,
+                            rtp_timestamp=rtp_timestamp,
                             packet_count=self.__packet_count & 0xFFFFFFFF,
                             octet_count=self.__octet_count & 0xFFFFFFFF,
                         ),
                     )
                 ]
-                self.__lsr = ((self.__ntp_timestamp) >> 16) & 0xFFFFFFFF
+                self.__lsr = (ntp_timestamp >> 16) & 0xFFFFFFFF
                 self.__lsr_time = time.time()
 
                 # RTCP SDES
@@ -761,6 +769,17 @@ class RTCRtpSender(AsyncIOEventEmitter):
 
         self.__log_debug("- RTCP finished")
         self.__rtcp_exited.set()
+
+    def _sender_clock(self, now_ns: int) -> tuple[int, int]:
+        """The NTP timestamp of `now_ns` (CLOCK_MONOTONIC) and the RTP timestamp the
+        media clock reads then, carried forward from the last frame sent (RFC 3550
+        6.4.1): a report pairs the instant it is sent with the RTP clock at that
+        instant, not with the last packet's timestamp, which stands for its capture.
+        Zero before any frame, which a receiver takes for no mapping."""
+        if not self.__rtp_instant_ns:
+            return 0, 0
+        elapsed = (now_ns - self.__rtp_instant_ns) * self.__rtp_clock_rate // 1_000_000_000
+        return clock.ntp_from_monotonic_ns(now_ns), (self.__rtp_timestamp + elapsed) & 0xFFFFFFFF
 
     async def _send_rtcp(self, packets: list[AnyRtcpPacket]) -> None:
         payload = b""

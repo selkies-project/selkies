@@ -26,8 +26,9 @@ thread, pcmflux encodes Opus on its own audio thread, and both hand
 zero-copy buffers back into the asyncio loop via `call_soon_threadsafe` for
 the transport's `produce_data` to packetize as RTP. Because RTP senders are
 live across capture restarts, the pipeline keeps its own monotonic pts
-clocks (video: 90 kHz wall-clock anchor; audio: an epoch offset over
-pcmflux's re-zeroing sample clock) so pts never jumps backward.
+clocks (video: 90 kHz from each frame's capture instant on a pipeline-scoped
+CLOCK_MONOTONIC anchor; audio: an epoch offset over pcmflux's re-zeroing
+sample clock) so pts never jumps backward.
 
 A running pipeline is the display's media graph; its two captures are
 started and paused one by one underneath it. `start_media_pipeline` opens
@@ -170,8 +171,9 @@ class MediaPipelinePixel(MediaPipeline):
             (DPI-scaled upstream); `<= 0` falls back to the settings default.
         capture_module: pixelflux `ScreenCapture`; Any, the import is optional.
         pcmflux_module: pcmflux `AudioCapture`; likewise.
-        _video_pts_anchor: Video pts clock origin; pipeline-scoped rather than
-            capture-scoped so restarts and fps changes never rewind pts.
+        _video_pts_anchor: Video pts clock origin, CLOCK_MONOTONIC ns;
+            pipeline-scoped rather than capture-scoped so restarts and fps
+            changes never rewind pts.
         _audio_capture_epoch: Bumped per audio capture start. The callback
             re-anchors `_audio_pts_offset` when it sees a new epoch, since
             pcmflux re-zeros its sample clock (`_audio_rtp_pts`).
@@ -255,7 +257,7 @@ class MediaPipelinePixel(MediaPipeline):
         self._is_pcmflux_capturing = False
         self._running = False
         self.async_lock = asyncio.Lock()
-        self._video_pts_anchor: Optional[float] = None
+        self._video_pts_anchor: Optional[int] = None
         # Whether the live capture has delivered a frame, for the first-frame check.
         self._framed = False
         self._last_video_pts = -1
@@ -562,17 +564,21 @@ class MediaPipelinePixel(MediaPipeline):
         the header's picture-type byte and, for a full frame whose encoder
         tracks its references, the frame's id and the id it predicts from;
         `produce_data` wraps it in an EncodedPacket and keeps a reference so
-        the frame stays alive. pts
-        (90 kHz) comes from the pipeline-scoped monotonic clock rather than
-        `frame.frame_id`: the u16 counter wraps, restarts at 0 on every
-        capture restart, and its implied step changes on live fps raises,
-        all backward RTP jumps on a live sender. Ties bump one tick so pts is
-        strictly increasing. Only one capture thread exists at a time (stop
-        joins before a new start), so this state needs no lock; and
-        `produce_data` is synchronous, so `call_soon_threadsafe` delivers it
-        with no per-frame Future, matching the websockets path. The frame's
-        capture and encode instants travel with it for the video-timing
-        extension.
+        the frame stays alive. pts (90 kHz) is the frame's capture instant, as
+        pixelflux stamped it on CLOCK_MONOTONIC, from the pipeline-scoped
+        anchor rather than `frame.frame_id`: the u16 counter wraps, restarts at
+        0 on every capture restart, and its implied step changes on live fps
+        raises, all backward RTP jumps on a live sender. The capture instant
+        rather than the delivery keeps the encode's varying duration out of
+        the RTP clock, so a receiver mapping it through the sender reports
+        reads capture times; a path that stamps no capture falls back to the
+        delivery. Ties bump one tick so pts is strictly increasing. Only one
+        capture thread exists at a time (stop joins before a new start), so
+        this state needs no lock; and `produce_data` is synchronous, so
+        `call_soon_threadsafe` delivers it with no per-frame Future, matching
+        the websockets path. The frame's capture and encode instants travel
+        with it for the sender's timing extensions and reports, the capture
+        one being the instant its pts was taken at.
         """
         self._framed = True
         try:
@@ -582,14 +588,16 @@ class MediaPipelinePixel(MediaPipeline):
                 if keyframe:
                     self.idr_pending = False
                 data_bytes = view[STRIPE_HEADER_LEN:]
-                now = time.monotonic()
+                captured = frame.capture_ns
+                if captured <= 0:
+                    captured = time.monotonic_ns()
                 if self._video_pts_anchor is None:
-                    self._video_pts_anchor = now
-                pts = int((now - self._video_pts_anchor) * 90000)
+                    self._video_pts_anchor = captured
+                pts = (captured - self._video_pts_anchor) * 9 // 100_000
                 if pts <= self._last_video_pts:
                     pts = self._last_video_pts + 1
                 self._last_video_pts = pts
-                timing = (frame.capture_ns, frame.encode_start_ns, frame.encode_end_ns)
+                timing = (captured, frame.encode_start_ns, frame.encode_end_ns)
                 reference = frame.reference_frame_id
                 dependency = None
                 if reference != -2 and frame.stripe_y_start == 0 and frame.stripe_height == self.height:

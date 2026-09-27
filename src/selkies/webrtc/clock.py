@@ -38,6 +38,12 @@ NTP_EPOCH = datetime.datetime(1900, 1, 1, tzinfo=datetime.timezone.utc)
 # Seconds from the NTP epoch to the Unix epoch.
 NTP_UNIX_OFFSET = 2208988800
 
+# The NTP clock the senders stamp and report is CLOCK_MONOTONIC placed on the
+# wall clock once, as libwebrtc's is: a capture instant the capture library
+# stamped on CLOCK_MONOTONIC maps into it exactly, and a step of the wall clock
+# never moves it between two sender reports.
+_NTP_OFFSET_NS = time.time_ns() + NTP_UNIX_OFFSET * 1_000_000_000 - time.monotonic_ns()
+
 
 def current_datetime() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
@@ -48,12 +54,16 @@ def current_ms() -> int:
     return int(delta.total_seconds() * 1000)
 
 
+def ntp_from_monotonic_ns(instant_ns: int) -> int:
+    """The 64-bit NTP timestamp of a CLOCK_MONOTONIC instant in nanoseconds."""
+    seconds, rest = divmod(instant_ns + _NTP_OFFSET_NS, 1_000_000_000)
+    return ((seconds & 0xFFFFFFFF) << 32) | ((rest << 32) // 1_000_000_000)
+
+
 def current_ntp_time() -> int:
-    """The NTP timestamp now, straight from the system clock: every RTP
-    packet stamps one, so no datetime is built on the way."""
-    now = time.time()
-    seconds = int(now)
-    return ((seconds + NTP_UNIX_OFFSET) << 32) | int((now - seconds) * (1 << 32))
+    """The NTP timestamp now: every RTP packet stamps one, so no datetime is
+    built on the way."""
+    return ntp_from_monotonic_ns(time.monotonic_ns())
 
 
 def datetime_from_ntp(ntp: int) -> datetime.datetime:
