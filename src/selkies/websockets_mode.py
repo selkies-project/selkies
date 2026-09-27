@@ -5297,11 +5297,15 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.info(
                     "No connected RandR output on this X server; the desktop is sized as a bare "
                     "framebuffer, and its displays are monitors carrying no output.")
-            elif not pluggable and total_mode_str not in available_resolutions:
+            # A real display's refresh caps what a vsynced application shows,
+            # so its modes never run slower than the fastest stream.
+            stream_fps = max(float((self.display_clients.get(did) or {}).get('framerate')
+                                   or self.app.framerate) for did in layouts)
+            if screen_name and not pluggable and total_mode_str not in available_resolutions:
                 data_logger.debug(f"Mode {total_mode_str} not found. Creating it.")
                 # Native first: a mode made by per-invocation xrandr dies with its
                 # connection on some servers (Xvfb).
-                if not await ensure_mode(total_mode_str):
+                if not await ensure_mode(total_mode_str, stream_fps):
                     try:
                         _, modeline_params = await generate_xrandr_gtf_modeline(total_mode_str)
                         await self._run_command(["xrandr", "--newmode", total_mode_str] + modeline_params.split(), "create new mode")
@@ -5360,7 +5364,7 @@ class DataStreamingServer(BaseStreamingService):
                 curr_norm = (curr_res or "").lower().replace(" ", "")
                 if curr_norm == total_mode_str:
                     data_logger.debug(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
-                elif not await resize_display(total_mode_str):
+                elif not await resize_display(total_mode_str, stream_fps):
                     # Some servers refuse runtime modes but honor a plain framebuffer
                     # grow (RRSetScreenSize); captures and pointer warps address the root.
                     if await grow_framebuffer(total_width, total_height):

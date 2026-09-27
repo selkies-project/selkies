@@ -30,6 +30,7 @@ SUITES: list = [
     {"path": "unit/test_gpu_probe_facts.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_resize_session_screen.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_secondary_shrink.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_display_modes.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_i18n_keys.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_client_typing.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_keyboard_chords.py", "tier": "unit", "timeout": 120},

@@ -890,14 +890,16 @@ async def clear_selkies_monitors() -> None:
 
 
 async def apply_monitor_layout(
-    layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int
+    layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int,
+    refresh: Optional[float] = None,
 ) -> bool:
     """Drive the server into an extended-desktop framebuffer covering ``layouts``.
 
     ``layouts`` maps display id to an `{x, y, w, h}` rectangle. Ensures the
-    total mode exists, sizes the framebuffer, and defines one `selkies-<id>`
-    logical monitor per display so window managers tile against the
-    per-display regions. Mirrors the websockets engine's command sequence.
+    total mode exists at ``refresh``, the stream's frame rate (`resize_display`),
+    sizes the framebuffer, and defines one `selkies-<id>` logical monitor per
+    display so window managers tile against the per-display regions. Mirrors
+    the websockets engine's command sequence.
 
     The monitors go first, at their final rectangles and under a server grab:
     window managers re-tile maximized windows on every root ConfigureNotify,
@@ -934,7 +936,7 @@ async def apply_monitor_layout(
             "No connected RandR output on this X server; the desktop is laid out on the "
             "framebuffer alone.")
     elif total_mode not in (available or []):
-        if not await ensure_mode(total_mode):
+        if not await ensure_mode(total_mode, refresh):
             try:
                 _, modeline = await generate_xrandr_gtf_modeline(total_mode)
                 await _run_xrandr(["--newmode", total_mode] + modeline.split(), "create mode")
@@ -946,7 +948,7 @@ async def apply_monitor_layout(
         await clear_selkies_monitors()
         return False
     if (curr_res or "").lower().replace(" ", "") != total_mode:
-        if not await resize_display(total_mode):
+        if not await resize_display(total_mode, refresh):
             if not await grow_framebuffer(total_w, total_h):
                 logger_app_resize.error(
                     f"Neither a mode-set nor a framebuffer grow reached {total_mode}; "

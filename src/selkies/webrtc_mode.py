@@ -365,7 +365,8 @@ class WebRTCService(BaseStreamingService):
         )
         if self._manual_dims:
             if not IS_WAYLAND:
-                realized = await resize_display(f"{self._manual_dims[0]}x{self._manual_dims[1]}")
+                realized = await resize_display(
+                    f"{self._manual_dims[0]}x{self._manual_dims[1]}", self.media_pipeline.framerate)
                 if realized:
                     self._manual_dims = realized
             self.media_pipeline.width, self.media_pipeline.height = self._manual_dims
@@ -1023,7 +1024,7 @@ class WebRTCService(BaseStreamingService):
                 )
                 return
 
-            realized = await resize_display(f"{target_w}x{target_h}")
+            realized = await resize_display(f"{target_w}x{target_h}", self.media_pipeline.framerate)
             if realized:
                 realized_w, realized_h = realized
                 if (realized_w, realized_h) != (target_w, target_h):
@@ -1895,7 +1896,7 @@ class WebRTCService(BaseStreamingService):
                         return
                     # Before the shrink, so no monitor lingers outside the framebuffer.
                     await retire_displays()
-                    realized = await resize_display(f"{p_w}x{p_h}")
+                    realized = await resize_display(f"{p_w}x{p_h}", self.media_pipeline.framerate)
                     if realized:
                         p_w, p_h = realized
                     self.media_pipeline.capture_region = None
@@ -1948,7 +1949,8 @@ class WebRTCService(BaseStreamingService):
                 # apply_extended_layout fits `layouts` to the root really produced:
                 # kept displays may shrink and an unplaceable one disappears from it.
                 requested = {d: (r["w"], r["h"]) for d, r in layouts.items()}
-                if (not await apply_extended_layout(layouts, total_w, total_h)
+                if (not await apply_extended_layout(
+                        layouts, total_w, total_h, self.media_pipeline.framerate)
                         or did not in layouts):
                     await self._drop_x11_secondary(
                         did, "The X server cannot extend the desktop to fit this display."

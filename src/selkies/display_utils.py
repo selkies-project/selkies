@@ -206,6 +206,7 @@ def _module_display() -> x11_display.Display:
         conn = x11_display.Display(blocking_timeout=15.0)
         conn.set_close_down_mode(x11_X.RetainTemporary)
         conn.sync()
+        _note_configured_refresh(conn)
         _reap_retained_predecessors(conn)
         _x11_conn = conn
     return _x11_conn
@@ -292,6 +293,138 @@ def _first_connected_output(d: x11_display.Display) -> Optional[int]:
         return None
 
 
+#: The refresh the display ran at when a Selkies process first reached this X
+#: server: the one it was configured with, which every mode it is given keeps
+#: (`_target_refresh`). None where the mode carried no timings to read, as a
+#: framebuffer server's first mode does.
+_configured_refresh: Optional[float] = None
+#: The root window property keeping `_configured_refresh`, in millihertz, for
+#: every later process on the same server: by then the display may run at a
+#: rate an earlier stream raised it to, which is no configuration.
+_CONFIGURED_REFRESH_PROP = "_SELKIES_CONFIGURED_REFRESH"
+#: How far a mode's refresh may sit from the one asked for and still serve:
+#: the room a driver's and CVT's clock rounding take (119.88 for 120), short
+#: of the step to the next common rate.
+_REFRESH_SLACK = 0.01
+
+
+def _mode_refresh(mode: Any) -> float:
+    """A RandR mode's refresh in Hz as xrandr reports it (the field rate of an
+    interlaced mode), or 0 for a mode without timings."""
+    v_total = float(mode.v_total)
+    if mode.flags & randr.DoubleScan:
+        v_total *= 2
+    if mode.flags & randr.Interlace:
+        v_total /= 2
+    if not mode.h_total or not v_total:
+        return 0.0
+    return mode.dot_clock / (mode.h_total * v_total)
+
+
+def _note_configured_refresh(d: x11_display.Display) -> None:
+    """Learn the configured refresh once per process: from the root window
+    where an earlier process on this server recorded it, else from the mode
+    the display shows before anything has changed it, then recorded there."""
+    global _configured_refresh
+    if _configured_refresh is not None:
+        return
+    try:
+        root = d.screen().root
+        atom = d.intern_atom(_CONFIGURED_REFRESH_PROP)
+        prop = root.get_full_property(atom, x11_Xatom.CARDINAL)
+        if prop is not None and len(prop.value) and prop.value[0] > 0:
+            _configured_refresh = prop.value[0] / 1000.0
+            return
+        _, res, _, oi, _ = _connected_output_state(d)
+        if not oi.crtc:
+            return
+        mode = randr.get_crtc_info(d, oi.crtc, res.config_timestamp).mode
+        rate = next((_mode_refresh(m) for m in res.modes if m.id == mode), 0.0)
+        if rate > 0:
+            _configured_refresh = rate
+            root.change_property(atom, x11_Xatom.CARDINAL, 32, [int(round(rate * 1000))])
+            d.sync()
+    except Exception as e:
+        logger_app_resize.debug(f"Configured refresh not read: {e}")
+
+
+def _target_refresh(stream_fps: Optional[float]) -> float:
+    """The refresh a display mode is chosen or made at.
+
+    The configured refresh, or the stream's frame rate where that is higher:
+    a vsynced application presents at the refresh and no faster, so a display
+    slower than the stream caps what the stream can show, and one slower than
+    configured drops what the operator asked for. 60 where neither is known.
+    A framebuffer server paces its vblank by the stream on its own
+    (`_FAKE_SCREEN_FPS`), so there the rate only names the mode.
+    """
+    return max(_configured_refresh or 0.0, float(stream_fps or 0.0)) or 60.0
+
+
+def _mode_at(
+    d: x11_display.Display,
+    root: Any,
+    res: Any,
+    oi: Any,
+    out_id: int,
+    names: Dict[int, str],
+    w: int,
+    h: int,
+    refresh: float,
+    name: str,
+) -> Tuple[int, float]:
+    """Resolve or create a ``w`` x ``h`` mode at ``refresh`` on output ``out_id``.
+
+    A mode is chosen by its geometry and refresh, never by name: a driver lists
+    several modes under one name, and the first of them is whatever it sorted
+    first (NVIDIA's pool holds most sizes at 60 Hz beside the configured mode,
+    and 1024x768 at 43 Hz ahead of the rest). Interlaced and doublescan modes
+    never serve; one without timings, a framebuffer server's, serves any
+    refresh. A mode on the output is preferred, and one elsewhere serves only
+    under a name this made for the purpose. A missing mode is made from CVT-RB
+    timings at ``refresh``, exactly ``w`` wide, and named ``name`` unless a mode
+    holds that name already, then with its rate appended, since RandR refuses a
+    user mode under a name that exists. Modes are owned by the creating
+    connection, so this must run on the retained module connection for the
+    mode to outlive the call.
+
+    Returns:
+        The mode's id, attached to the output, and its refresh.
+    """
+    on_output = set(oi.modes)
+    fits = []
+    for m in res.modes:
+        if (m.width, m.height) != (w, h) or m.flags & (randr.Interlace | randr.DoubleScan):
+            continue
+        if m.id not in on_output and names.get(m.id, "").split("_")[0] != name:
+            continue
+        rate = _mode_refresh(m)
+        off = abs(rate - refresh) if rate > 0 else 0.0
+        if off <= refresh * _REFRESH_SLACK:
+            fits.append((m.id not in on_output, off, m.id, rate or refresh))
+    if fits:
+        detached, _, mode_id, rate = min(fits)
+        if detached:
+            randr.add_output_mode(d, out_id, mode_id)
+        return mode_id, rate
+    taken = set(names.values())
+    mode_name = next((n for n in (name, f"{name}_{refresh:.0f}", f"{name}_{refresh:.2f}")
+                      if n not in taken), None)
+    if mode_name is None:
+        raise RuntimeError(f"no free name for a {w}x{h} mode at {refresh:.2f} Hz")
+    info = _cvt_rb_mode_info(w, h, refresh)
+    # CVT rounds the clock down to its quarter-megahertz step, which leaves the
+    # mode slower than asked; the step up keeps it from capping the stream.
+    info["dot_clock"] = -(-int(info["h_total"] * info["v_total"] * refresh) // 250_000) * 250_000
+    info["width"] = w
+    info["id"] = 0
+    info["name_length"] = len(mode_name)
+    mode_id = randr.create_mode(root, info, mode_name).mode
+    names[mode_id] = mode_name
+    randr.add_output_mode(d, out_id, mode_id)
+    return mode_id, info["dot_clock"] / (info["h_total"] * info["v_total"])
+
+
 def _sync_query_randr() -> Tuple[str, List[str], str]:
     """Blocking RandR query on the module connection.
 
@@ -323,44 +456,7 @@ def _sync_query_randr() -> Tuple[str, List[str], str]:
             raise
 
 
-def _ensure_mode_on_display(
-    d: x11_display.Display,
-    root: Any,
-    res: Any,
-    oi: Any,
-    out_id: int,
-    names: Dict[int, str],
-    res_str: str,
-    w_req: int,
-    h_req: int,
-) -> Tuple[int, int, int]:
-    """Resolve or create the mode named ``res_str`` on output ``out_id``.
-
-    Creates the mode from CVT-RB timings and attaches it to the output when
-    absent. Modes are owned by the creating connection, so this must run on
-    the retained module connection for the mode to outlive the call.
-
-    Returns:
-        ``(mode_id, width, height)`` of the resolved mode.
-    """
-    mode_id = next((m for m in oi.modes if names.get(m) == res_str), None)
-    if mode_id is not None:
-        w, h = next((m.width, m.height) for m in res.modes if m.id == mode_id)
-        return mode_id, w, h
-    mode_id = next((mid for mid, n in names.items() if n == res_str), None)
-    if mode_id is None:
-        info = _cvt_rb_mode_info(w_req, h_req)
-        info["id"] = 0
-        info["name_length"] = len(res_str)
-        mode_id = randr.create_mode(root, info, res_str).mode
-        randr.add_output_mode(d, out_id, mode_id)
-        return mode_id, info["width"], info["height"]
-    randr.add_output_mode(d, out_id, mode_id)
-    w, h = next((m.width, m.height) for m in res.modes if m.id == mode_id)
-    return mode_id, w, h
-
-
-def _sync_ensure_mode(res_str: str) -> None:
+def _sync_ensure_mode(res_str: str, refresh: Optional[float] = None) -> None:
     """Blocking ensure-mode on the module connection (no CRTC/screen change).
 
     Raises:
@@ -374,9 +470,9 @@ def _sync_ensure_mode(res_str: str) -> None:
         try:
             d = _module_display()
             root, res, out_id, oi, names = _connected_output_state(d)
-            mode_id, _, _ = _ensure_mode_on_display(
-                d, root, res, oi, out_id, names, res_str, w_req, h_req
-            )
+            w_cell = -(-w_req // 8) * 8
+            mode_id, _ = _mode_at(d, root, res, oi, out_id, names, w_cell, h_req,
+                                  _target_refresh(refresh), f"{w_cell}x{h_req}")
             d.sync()
             _, _, _, oi, _ = _connected_output_state(d)
             if mode_id not in oi.modes:
@@ -387,38 +483,37 @@ def _sync_ensure_mode(res_str: str) -> None:
             raise
 
 
-async def ensure_mode(res_str: str) -> bool:
-    """Ensure a RandR mode named ``res_str`` is attached to the connected output.
-
-    Later xrandr calls can then reference the mode by name.
+async def ensure_mode(res_str: str, refresh: Optional[float] = None) -> bool:
+    """Ensure a ``res_str`` mode is attached to the connected output, at the
+    refresh `_target_refresh` makes of ``refresh`` (the stream's frame rate).
 
     Returns:
         True on success; False leaves the caller to its subprocess fallback.
     """
     try:
-        await asyncio.to_thread(_sync_ensure_mode, res_str)
+        await asyncio.to_thread(_sync_ensure_mode, res_str, refresh)
         return True
     except Exception as e:
         logger_app_resize.info(f"Native RandR ensure-mode for '{res_str}' failed ({e}).")
         return False
 
 
-def _sync_resize_randr(res_str: str) -> Tuple[int, int]:
-    """Blocking RandR resize on the module connection.
+def _sync_resize_randr(
+    res_str: str, refresh: Optional[float] = None,
+) -> Tuple[int, int, float]:
+    """Blocking RandR resize on the module connection (`_resize_on_display`).
 
-    Ensures a mode named ``res_str`` exists on the first connected output
-    (creating CVT-RB timings when absent), activates it, and sizes the screen
-    to match. Raises on any failure so the caller can fall back to xrandr.
+    Raises on any failure so the caller can fall back to xrandr.
 
     Returns:
-        The ``(width, height)`` actually applied.
+        The ``(width, height, refresh)`` actually applied.
     """
     w_req, h_req = (int(p) for p in res_str.split("x"))
     if w_req <= 0 or h_req <= 0:
         raise ValueError(f"invalid resolution '{res_str}'")
     with _x11_lock:
         try:
-            return _resize_on_display(_module_display(), res_str, w_req, h_req)
+            return _resize_on_display(_module_display(), res_str, w_req, h_req, refresh)
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
@@ -426,24 +521,29 @@ def _sync_resize_randr(res_str: str) -> Tuple[int, int]:
 
 
 def _resize_on_display(
-    d: x11_display.Display, res_str: str, w_req: int, h_req: int
-) -> Tuple[int, int]:
+    d: x11_display.Display, res_str: str, w_req: int, h_req: int,
+    refresh: Optional[float] = None,
+) -> Tuple[int, int, float]:
     """The RandR mode-create/activate/screen-size sequence on connection ``d``.
 
-    CVT-RB snaps the width up to its 8-pixel cell, so the realized mode can be
-    wider than requested; the mode is named for its real geometry because a
-    name that disagrees with the pixel size breaks later xrandr calls that
-    derive framebuffer dimensions from it. The physical size follows the DPI
-    the last ``set_dpi`` stamped (96 when never retargeted): xdpyinfo and the
-    toolkit paths reading RandR's physical size would otherwise un-scale after
-    every resize. The screen may not shrink under an active CRTC, so a CRTC
-    that would poke out of the new screen is disabled first, as xrandr does.
+    The screen takes the width rounded up to the 8-pixel CVT cell, which is
+    what the modes created for it carry; they are named for that geometry
+    because a name that disagrees with the pixel size breaks later xrandr calls
+    that derive framebuffer dimensions from it. The mode is chosen or made at
+    the refresh `_target_refresh` makes of ``refresh``, the stream's frame
+    rate (`_mode_at`). The physical size follows the DPI the last ``set_dpi``
+    stamped (96 when never retargeted): xdpyinfo and the toolkit paths reading
+    RandR's physical size would otherwise un-scale after every resize. The
+    screen may not shrink under an active CRTC, so a CRTC that would poke out
+    of the new screen is disabled first, as xrandr does.
+
+    Returns:
+        The screen's ``(width, height)`` and the refresh of the mode set.
     """
     root, res, out_id, oi, names = _connected_output_state(d)
-    mode_name = f"{-(-w_req // 8) * 8}x{h_req}"
-    mode_id, mode_w, mode_h = _ensure_mode_on_display(
-        d, root, res, oi, out_id, names, mode_name, w_req, h_req
-    )
+    screen_w, screen_h = -(-w_req // 8) * 8, h_req
+    mode_id, rate = _mode_at(d, root, res, oi, out_id, names, screen_w, screen_h,
+                             _target_refresh(refresh), f"{screen_w}x{screen_h}")
     crtc = oi.crtc or (oi.crtcs[0] if oi.crtcs else 0)
     if not crtc:
         raise RuntimeError("output has no usable CRTC")
@@ -451,10 +551,10 @@ def _resize_on_display(
     outputs = list(ci.outputs) or [out_id]
     geom = root.get_geometry()
     dpi_hint = _APPLIED_DPI if _APPLIED_DPI is not None else 96
-    mm_w = max(1, round(mode_w * 25.4 / dpi_hint))
-    mm_h = max(1, round(mode_h * 25.4 / dpi_hint))
+    mm_w = max(1, round(screen_w * 25.4 / dpi_hint))
+    mm_h = max(1, round(screen_h * 25.4 / dpi_hint))
     rotation = ci.rotation or randr.Rotate_0
-    crtc_fits = ci.x + ci.width <= mode_w and ci.y + ci.height <= mode_h
+    crtc_fits = ci.x + ci.width <= screen_w and ci.y + ci.height <= screen_h
     d.grab_server()
     try:
         if ci.mode and not crtc_fits:
@@ -463,8 +563,8 @@ def _resize_on_display(
             ).status
             if status != randr.SetConfigSuccess:
                 raise RuntimeError(f"CRTC disable returned status {status}")
-        if (geom.width, geom.height) != (mode_w, mode_h):
-            randr.set_screen_size(root, mode_w, mode_h, mm_w, mm_h)
+        if (geom.width, geom.height) != (screen_w, screen_h):
+            randr.set_screen_size(root, screen_w, screen_h, mm_w, mm_h)
         status = randr.set_crtc_config(
             d, crtc, res.config_timestamp, ci.x, ci.y, mode_id,
             rotation, outputs,
@@ -481,11 +581,11 @@ def _resize_on_display(
             pass
     d.sync()
     geom = root.get_geometry()
-    if (geom.width, geom.height) != (mode_w, mode_h):
+    if (geom.width, geom.height) != (screen_w, screen_h):
         raise RuntimeError(
             f"screen is {geom.width}x{geom.height} after applying '{res_str}'"
         )
-    return mode_w, mode_h
+    return screen_w, screen_h, rate
 
 
 #: The output property a server offers on an output a client may plug in and
@@ -535,7 +635,7 @@ def _exact_mode(
     """Resolve or create a mode of exactly ``w`` x ``h`` on ``out_id``.
 
     A display's output is the rectangle its client streams, so the width is
-    not rounded up to the CVT cell as `_ensure_mode_on_display` does for a
+    not rounded up to the CVT cell as `_resize_on_display` does for a
     mode covering the whole framebuffer: two outputs side by side would
     overlap by the difference. The name says which kind it is, because a
     "WxH" name is looked up by both.
@@ -1473,14 +1573,16 @@ async def read_realized_root(fallback: Tuple[int, int]) -> Tuple[int, int]:
 
 
 async def apply_extended_layout(
-    layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int
+    layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int,
+    refresh: Optional[float] = None,
 ) -> bool:
     """Drive the server into an extended desktop covering ``layouts``.
 
     ``layouts`` maps display id to an `{x, y, w, h}` rectangle. Every display
     becomes an output of its own where the server offers pluggable outputs
     (`apply_output_layout`); anywhere else they become logical monitors over
-    its one output (`display_utils_xrandr.apply_monitor_layout`).
+    its one output (`display_utils_xrandr.apply_monitor_layout`), whose mode
+    keeps ``refresh``, the stream's frame rate, as `resize_display` does.
 
     Returns:
         True when the layout is in place. On the logical-monitor path
@@ -1491,7 +1593,7 @@ async def apply_extended_layout(
         return True
     from .display_utils_xrandr import apply_monitor_layout
 
-    return await apply_monitor_layout(layouts, total_w, total_h)
+    return await apply_monitor_layout(layouts, total_w, total_h, refresh)
 
 
 async def retire_displays() -> None:
@@ -1536,11 +1638,14 @@ async def get_new_res(res_str: str) -> Tuple[str, str, List[str], str, Optional[
     return curr_res, new_res, resolutions, max_res_str, screen_name
 
 
-async def resize_display(res_str: str) -> Optional[Tuple[int, int]]:
+async def resize_display(
+    res_str: str, refresh: Optional[float] = None,
+) -> Optional[Tuple[int, int]]:
     """Resize the display to ``res_str`` (e.g. "2560x1280").
 
-    Native RandR first (mode created from CVT-RB timings when absent), with
-    the xrandr/cvt subprocess chain as fallback.
+    Native RandR first (`_resize_on_display`: the mode chosen by geometry and
+    refresh, ``refresh`` being the stream's frame rate, and made from CVT-RB
+    timings when absent), with the xrandr/cvt subprocess chain as fallback.
 
     Returns:
         The realized ``(width, height)`` — CVT cell alignment may make it
@@ -1548,7 +1653,7 @@ async def resize_display(res_str: str) -> Optional[Tuple[int, int]]:
         report the realized size, not the request.
     """
     try:
-        w, h = await asyncio.to_thread(_sync_resize_randr, res_str)
+        w, h, rate = await asyncio.to_thread(_sync_resize_randr, res_str, refresh)
     except RuntimeError as e:
         if "no connected RandR output" in str(e):
             # No mode to set, but the framebuffer itself may still be sized.
@@ -1584,7 +1689,7 @@ async def resize_display(res_str: str) -> Optional[Tuple[int, int]]:
 
         return await _resize_display_xrandr(res_str)
     logger_app_resize.info(
-        f"Successfully applied RandR mode '{res_str}' ({w}x{h})."
+        f"Successfully applied RandR mode '{res_str}' ({w}x{h} at {rate:.2f} Hz)."
     )
     return w, h
 
