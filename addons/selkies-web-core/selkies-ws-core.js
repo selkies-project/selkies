@@ -1031,9 +1031,12 @@ const streamStats = new StreamStats({
  * decoder serves it: the video worker's where the wire is diverted to the
  * worker, else the page's. It moves only with the stream, so the metrics tick
  * keeps it current whether or not anybody looks, and an opening draws it at once.
+ * A JPEG stream is decoded by no `VideoDecoder`, so neither a video decoder's
+ * word nor the software preference a decoder fallback left says anything of it.
  */
 function describeClient() {
   const decode = videoDivertOn ? workerDecode : pageDecode;
+  const jpeg = currentEncoderMode === 'jpeg';
   const codec = codecOfEncoder(currentEncoderMode);
   const probe = (video_fullcolor && PROBE_FULLCOLOR_STRINGS[codec]) || PROBE_CODEC_STRINGS[codec];
   if (probe && canvas && canvas.width > 0) {
@@ -1045,12 +1048,12 @@ function describeClient() {
     codec: codecOfEncoder(currentEncoderMode) || currentEncoderMode,
     resolution: canvas && canvas.width > 0 ? `${canvas.width}x${canvas.height}` : '',
     sink: currentSink.split(/ \u2014 |; /)[0].replace(/\.$/, ''),
-    decode_path: currentEncoderMode === 'jpeg' ? jpegDecodePath() : '',
+    decode_path: jpeg ? jpegDecodePath() : '',
   }, webcodecsDecoder({
-    forcedSoftware: preferSoftwareDecode,
-    hardwareSupported: decode.hardware,
-    format: currentEncoderMode === 'jpeg' ? undefined : decode.format,
-    capable: currentEncoderMode === 'jpeg' ? null : decodeCapable.efficient,
+    forcedSoftware: preferSoftwareDecode && !jpeg,
+    hardwareSupported: jpeg ? null : decode.hardware,
+    format: jpeg ? undefined : decode.format,
+    capable: jpeg ? null : decodeCapable.efficient,
   })));
 }
 
