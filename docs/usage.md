@@ -29,6 +29,16 @@ The side menu is available by clicking the small button on the right side of the
 
 These chords are taken by the client before the session sees them, which collides with an application inside the session that binds the same ones. The shortcuts section of the side menu has a switch that hands every one of them to the session instead; the side menu's own buttons still reach each function, and pressing Escape three times still leaves gaming mode. `--keyboard-shortcuts` sets the starting position for every client and can be locked.
 
+## Touch
+
+On a touch screen the stream takes the fingers in one of two modes, switched with the trackpad button in the side menu.
+
+**Direct touch**, the default, puts the pointer under the finger: a tap clicks there, a drag holds the left button, and a long press right-clicks. Two fingers scroll by the distance they travel, the content following them, and pinching them zooms, which reaches the session as `Control` with the scroll wheel, the way desktop applications take a zoom.
+
+**Trackpad mode** turns the screen into a laptop touchpad. One finger moves the pointer from wherever it is, and a tap clicks as the finger lifts; touching again right after the tap turns that click into a drag, or, lifted again without moving, into a double click. Two fingers scroll and pinch as in direct touch, a two-finger tap right-clicks, and a three-finger tap middle-clicks. When a gesture of several fingers ends with one of them still down, that finger goes on moving the pointer.
+
+A laptop touchpad's own pinch, which browsers deliver as a scroll with `Control` held, reaches the session the same way.
+
 ## Clipboard
 
 Clipboard synchronization works in both directions and is supported across Chromium, Firefox, and Safari (a valid HTTPS context, or `localhost`, is still required by browsers).
