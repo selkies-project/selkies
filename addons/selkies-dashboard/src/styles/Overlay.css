@@ -891,10 +891,12 @@
 }
 .stream-meter-fill {
     display: block;
+    width: 100%;
     height: 100%;
     border-radius: 3px;
     background: var(--accent);
-    transition: width 0.4s ease;
+    transform-origin: left;
+    transition: transform 0.4s ease;
 }
 .stream-meter-text {
     color: var(--text-muted);

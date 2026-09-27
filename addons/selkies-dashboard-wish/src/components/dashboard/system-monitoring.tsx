@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { getLastServerSettings, getPrefixedKey } from "@/utils";
 import { t } from "@/i18n";
-import type { StreamClient, StreamInfo, StreamSample } from "../../../../selkies-web-core/lib/stream-stats.js";
+import { STATS_EVENT, type StreamClient, type StreamInfo, type StreamSample } from "../../../../selkies-web-core/lib/stream-stats.js";
 import {
 	graphPath,
 	seriesOf,
@@ -37,8 +37,9 @@ import {
  *
  * Everything drawn comes from the core's `window.stream_info`,
  * `window.stream_client`, and `window.stream_stats`
- * (`selkies-web-core/lib/stream-stats.js`), read once a second while the
- * overlay is mounted and the tab is visible; what a row says and when it warns
+ * (`selkies-web-core/lib/stream-stats.js`), read each time the core announces
+ * a change (`STATS_EVENT`) while the overlay is mounted and the tab is
+ * visible; what a row says and when it warns
  * is `lib/stream-stats-view.js`, shared with the default dashboard. Being on
  * screen is what turns the numbers on: the component posts `statsOpen` to the
  * core, which asks the server for them, and posts `open: false` on the way out.
@@ -63,7 +64,6 @@ declare global {
 	}
 }
 
-const READ_INTERVAL_MS = 1000;
 const GRAPH_WIDTH = 240;
 const GRAPH_HEIGHT = 44;
 
@@ -201,9 +201,9 @@ function Graph({ label, unit, series, max, bare }: GraphProps) {
 }
 
 /**
- * Renders the overlay, reading the core's `window` stream state once a second
- * and telling the core the stats are on screen for as long as it is mounted
- * in a visible tab.
+ * Renders the overlay, reading the core's `window` stream state whenever the
+ * core announces a change and telling the core the stats are on screen for as
+ * long as it is mounted in a visible tab.
  */
 export function SystemMonitoring() {
 	const [isDetailedView, setIsDetailedView] = useState(false);
@@ -233,9 +233,9 @@ export function SystemMonitoring() {
 			setFramerate(configuredFramerate());
 		};
 		read();
-		const id = setInterval(read, READ_INTERVAL_MS);
+		window.addEventListener(STATS_EVENT, read);
 		return () => {
-			clearInterval(id);
+			window.removeEventListener(STATS_EVENT, read);
 			countOverlay(-1);
 		};
 	}, [visible]);
@@ -394,8 +394,8 @@ export function SystemMonitoring() {
 							<span className="text-[11px] uppercase tracking-wide text-muted-foreground">{meterLabels[meter.key]}</span>
 							{meter.bar && (
 								<span className="h-1.5 overflow-hidden rounded-full bg-muted">
-									<span className="block h-full rounded-full bg-primary transition-[width] duration-500"
-										style={{ width: `${meter.percent}%` }} />
+									<span className="block h-full w-full origin-left rounded-full bg-primary transition-transform duration-500"
+										style={{ transform: `scaleX(${meter.percent / 100})` }} />
 								</span>
 							)}
 							<span className={meter.bar ? "text-right text-muted-foreground"

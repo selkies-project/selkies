@@ -10,8 +10,9 @@
  *
  * Everything drawn comes from the core's `window.stream_info`,
  * `window.stream_client`, and `window.stream_stats`
- * (`selkies-web-core/lib/stream-stats.js`), read once a second and only while
- * the section is on screen; what a row says and when it warns is
+ * (`selkies-web-core/lib/stream-stats.js`), read each time the core announces
+ * a change (`STATS_EVENT`) and only while the section is on screen; what a row
+ * says and when it warns is
  * `lib/stream-stats-view.js`, shared with the wish dashboard. Being on screen
  * is what turns the numbers on: the component posts `statsOpen` to the core,
  * which asks the server for them, and posts it again with `open: false` when
@@ -27,8 +28,8 @@ import {
   seriesOf,
   graphPath,
 } from "../../../selkies-web-core/lib/stream-stats-view.js";
+import { STATS_EVENT } from "../../../selkies-web-core/lib/stream-stats.js";
 
-const READ_INTERVAL_MS = 1000;
 const GRAPH_WIDTH = 240;
 const GRAPH_HEIGHT = 44;
 
@@ -156,9 +157,9 @@ export default function StreamStats({ t, active, framerate }) {
       });
     };
     read();
-    const id = setInterval(read, READ_INTERVAL_MS);
+    window.addEventListener(STATS_EVENT, read);
     return () => {
-      clearInterval(id);
+      window.removeEventListener(STATS_EVENT, read);
       window.postMessage({ type: "statsOpen", open: false }, window.location.origin);
     };
   }, [shown]);
@@ -261,7 +262,7 @@ export default function StreamStats({ t, active, framerate }) {
               <span className="stream-meter-label">{meterLabels[meter.key]}</span>
               {meter.bar && (
                 <span className="stream-meter-track">
-                  <span className="stream-meter-fill" style={{ width: `${meter.percent}%` }} />
+                  <span className="stream-meter-fill" style={{ transform: `scaleX(${meter.percent / 100})` }} />
                 </span>
               )}
               <span className="stream-meter-text">{meter.text}</span>
