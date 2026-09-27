@@ -149,6 +149,10 @@ def launch(browser: str, profile: str, dpr: float, query: str = "") -> subproces
             fh.write('user_pref("browser.startup.firstrunSkipsHomepage", true);\n')
             fh.write('user_pref("browser.startup.homepage_override.mstone", "ignore");\n')
             fh.write('user_pref("datareporting.policy.firstRunURL", "");\n')
+            # Firefox 156 opens its privacy notice or terms of use over a new
+            # profile's first page, and that page takes the clicks.
+            fh.write('user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);\n')
+            fh.write('user_pref("termsofuse.bypassNotification", true);\n')
         cmd = [binary("firefox"), "--no-remote", "--profile", profile,
                "--width", "1600", "--height", "900", url]
     else:
