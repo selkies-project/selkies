@@ -200,4 +200,80 @@ function leftTransitions(sent, bit = 1) {
           held.length === 0 && all[all.length - 1] === 'up', `${all.join(',')} held-scrolls=${held.length}`);
 }
 
+// --- two-finger scroll follows finger travel -------------------------------
+
+/** Scroll notches on the wire per direction, from each rising edge of a scroll bit times its magnitude. */
+function notches(sent) {
+    const bits = { down: 8, up: 16, left: 64, right: 128 };
+    const out = { down: 0, up: 0, left: 0, right: 0 };
+    let prev = 0;
+    for (const [, msg] of sent) {
+        const p = msg.split(',');
+        if (p[0] !== 'm' && p[0] !== 'm2') continue;
+        const mask = Number(p[3]);
+        for (const [name, bit] of Object.entries(bits)) {
+            if ((mask & bit) && !(prev & bit)) out[name] += Number(p[4]);
+        }
+        prev = mask;
+    }
+    return out;
+}
+
+/** Two fingers 100 px apart travel (dx, dy) in `steps` equal touchmoves. */
+function swipe(input, dx, dy, steps, x0 = 400, y0 = 500) {
+    const a = touch(1, x0, y0);
+    const b = touch(2, x0 + 100, y0);
+    fire(input, 'touchstart', [a], [a]);
+    advance(5);
+    fire(input, 'touchstart', [b], [a, b]);
+    for (let i = 1; i <= steps; i++) {
+        advance(8);
+        const pa = touch(1, x0 + dx * i / steps, y0 + dy * i / steps);
+        const pb = touch(2, x0 + 100 + dx * i / steps, y0 + dy * i / steps);
+        fire(input, 'touchmove', [pa, pb], [pa, pb]);
+    }
+    advance(8);
+    const ea = touch(1, x0 + dx, y0 + dy);
+    const eb = touch(2, x0 + 100 + dx, y0 + dy);
+    fire(input, 'touchend', [ea, eb], []);
+    advance(500);
+}
+
+for (const trackpad of [true, false]) {
+    const mode = trackpad ? 'trackpad' : 'direct touch';
+    const counts = [];
+    for (const [steps, label] of [[10, '10 x 20 px'], [40, '40 x 5 px'], [100, '100 x 2 px'], [200, '200 x 1 px']]) {
+        const { input, sent } = makeInput(trackpad);
+        swipe(input, 0, -200, steps);
+        counts.push([label, notches(sent)]);
+    }
+    const downs = counts.map(([, n]) => n.down);
+    check(`${mode}: a 200 px two-finger scroll is as long in any number of events`,
+          Math.max(...downs) - Math.min(...downs) <= 1 && Math.min(...downs) >= 3,
+          counts.map(([l, n]) => `${l}: ${n.down}`).join('; '));
+    check(`${mode}: fingers moving up scroll down, and only down`,
+          counts.every(([, n]) => n.up === 0 && n.left === 0 && n.right === 0),
+          JSON.stringify(counts[0][1]));
+    {
+        const { input, sent } = makeInput(trackpad);
+        swipe(input, 0, -60, 120);
+        const n = notches(sent);
+        check(`${mode}: a slow scroll, half a pixel per event, still scrolls`, n.down === 1, JSON.stringify(n));
+    }
+    {
+        const { input, sent } = makeInput(trackpad);
+        swipe(input, -200, 0, 40);
+        const n = notches(sent);
+        check(`${mode}: fingers moving left scroll right, as the content follows them`,
+              n.right >= 3 && n.left === 0 && n.up === 0 && n.down === 0, JSON.stringify(n));
+    }
+    {
+        const { input, sent } = makeInput(trackpad);
+        swipe(input, 45, -300, 60);
+        const n = notches(sent);
+        check(`${mode}: the drift of a vertical scroll does not scroll sideways`,
+              n.down >= 5 && n.left === 0 && n.right === 0, JSON.stringify(n));
+    }
+}
+
 process.exit(failed === 0 ? 0 : 1);

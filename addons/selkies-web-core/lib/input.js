@@ -73,6 +73,12 @@ const WHITELIST_CLASS = 'allow-native-input';
  */
 const TRACKPAD_TAP_HOLD_MS = 180;
 
+/** Finger travel, in CSS pixels, that one wheel notch of a two-finger scroll stands for. */
+const TOUCH_SCROLL_NOTCH_PX = 50;
+
+/** Finger travel, in CSS pixels, after which a two-finger scroll keeps to the axis it is mostly along. */
+const TWO_FINGER_SLOP_PX = 10;
+
 /**
  * A `MouseEvent.buttons` bitmask in the wire's numbering, which counts buttons
  * the way `MouseEvent.button` does. The two orders disagree on the middle and
@@ -1506,11 +1512,8 @@ export class Input {
         this._activeTouches = new Map();
         this._activeTouchIdentifier = null;
         this._isTwoFingerGesture = false;
-        this._MIN_SWIPE_DISTANCE = 30;
-        this._MAX_SWIPE_DURATION = 600;
-        this._VERTICAL_SWIPE_RATIO = 1.5;
-        this._SCROLL_PIXELS_PER_TICK = 40;
-        this._MAX_SCROLL_MAGNITUDE = 8;
+        /** The two-finger gesture in progress in either touch mode (`_twoFingerStart`), or null. */
+        this._twoFinger = null;
         this._TAP_THRESHOLD_DISTANCE_SQ = 10*10;
         this._TAP_MAX_DURATION = 250;
         this._trackpadMode = false;
@@ -1518,8 +1521,6 @@ export class Input {
         this._trackpadGestureMode = null;
         /** Pending release of the button a trackpad tap pressed; a touch landing before it fires drags. */
         this._trackpadReleaseTimer = null;
-        this._trackpadLastScrollCentroid = null;
-        this._touchScrollLastCentroid = null;
         this.inputAttached = false;
     }
 
@@ -2813,11 +2814,8 @@ export class Input {
             else if (touchCount === 2) {
                 this._trackpadReleaseButton();
                 this._trackpadGestureMode = 'scrolling';
-                const touches = Array.from(this._trackpadTouches.values());
-                this._trackpadLastScrollCentroid = {
-                    x: (touches[0].lastX + touches[1].lastX) / 2,
-                    y: (touches[0].lastY + touches[1].lastY) / 2
-                };
+                const [a, b] = this._trackpadTouches.values();
+                this._twoFingerStart(a.lastX, a.lastY, b.lastX, b.lastY);
             }
         }
         else if (type === 'touchmove') {
@@ -2848,22 +2846,13 @@ export class Input {
                     }
                 }
             } else if (this._trackpadGestureMode === 'scrolling') {
-                const touches = Array.from(this._trackpadTouches.values());
-                if (touches.length === 2) {
-                    for (const changed of changedTouches) {
-                        const data = this._trackpadTouches.get(changed.identifier);
-                        if (data) { data.lastX = changed.clientX; data.lastY = changed.clientY; }
-                    }
-                    const curr_avg_x = (touches[0].lastX + touches[1].lastX) / 2;
-                    const curr_avg_y = (touches[0].lastY + touches[1].lastY) / 2;
-                    if (this._trackpadLastScrollCentroid) {
-                        const deltaX = curr_avg_x - this._trackpadLastScrollCentroid.x;
-                        const deltaY = curr_avg_y - this._trackpadLastScrollCentroid.y;
-                        const SCROLL_THRESHOLD = 2;
-                        if (Math.abs(deltaY) > SCROLL_THRESHOLD) this._triggerMouseWheel(deltaY < 0 ? 'down' : 'up', 1);
-                        if (Math.abs(deltaX) > SCROLL_THRESHOLD) this._triggerHorizontalMouseWheel(deltaX < 0 ? 'left' : 'right', 1);
-                    }
-                    this._trackpadLastScrollCentroid = { x: curr_avg_x, y: curr_avg_y };
+                for (const changed of changedTouches) {
+                    const data = this._trackpadTouches.get(changed.identifier);
+                    if (data) { data.lastX = changed.clientX; data.lastY = changed.clientY; }
+                }
+                if (this._trackpadTouches.size === 2) {
+                    const [a, b] = this._trackpadTouches.values();
+                    this._twoFingerMove(a.lastX, a.lastY, b.lastX, b.lastY);
                 }
             }
         }
@@ -2901,7 +2890,7 @@ export class Input {
 
             if (this._trackpadTouches.size === 0) {
                 this._trackpadGestureMode = null;
-                this._trackpadLastScrollCentroid = null;
+                this._twoFinger = null;
             }
         }
     }
@@ -3456,7 +3445,7 @@ export class Input {
         this._activeTouches.clear();
         this._activeTouchIdentifier = null;
         this._isTwoFingerGesture = false;
-        this._touchScrollLastCentroid = null;
+        this._twoFinger = null;
 
         if (this._longPressTimer) {
             clearTimeout(this._longPressTimer);
@@ -3639,11 +3628,8 @@ export class Input {
                         this.cursorDiv.style.visibility = 'hidden';
                     }
                     this._isTwoFingerGesture = true; this._activeTouchIdentifier = null;
-                    const touches = Array.from(this._activeTouches.values());
-                    this._touchScrollLastCentroid = {
-                        x: (touches[0].currentX + touches[1].currentX) / 2,
-                        y: (touches[0].currentY + touches[1].currentY) / 2
-                    };
+                    const [a, b] = this._activeTouches.values();
+                    this._twoFingerStart(a.currentX, a.currentY, b.currentX, b.currentY);
                     if ((this.buttonMask & 1) === 1) this.buttonMask &= ~1;
                     preventDefault = true;
                 } else if (touchCount > 2) {
@@ -3673,17 +3659,8 @@ export class Input {
         }
         if (this._isTwoFingerGesture && this._activeTouches.size === 2) {
             preventDefault = true;
-            const touches = Array.from(this._activeTouches.values());
-            const curr_avg_x = (touches[0].currentX + touches[1].currentX) / 2;
-            const curr_avg_y = (touches[0].currentY + touches[1].currentY) / 2;
-            if (this._touchScrollLastCentroid) {
-                const deltaX = curr_avg_x - this._touchScrollLastCentroid.x;
-                const deltaY = curr_avg_y - this._touchScrollLastCentroid.y;
-                const SCROLL_THRESHOLD = 2;
-                if (Math.abs(deltaY) > SCROLL_THRESHOLD) this._triggerMouseWheel(deltaY < 0 ? 'down' : 'up', 1);
-                if (Math.abs(deltaX) > SCROLL_THRESHOLD) this._triggerHorizontalMouseWheel(deltaX < 0 ? 'left' : 'right', 1);
-            }
-            this._touchScrollLastCentroid = { x: curr_avg_x, y: curr_avg_y };
+            const [a, b] = this._activeTouches.values();
+            this._twoFingerMove(a.currentX, a.currentY, b.currentX, b.currentY);
         } else if (this._activeTouches.size === 1) {
             const [singleTouchID] = this._activeTouches.keys();
             const touchData = this._activeTouches.get(singleTouchID);
@@ -3747,11 +3724,11 @@ export class Input {
                         this.cursorDiv.style.visibility = 'visible';
                     }
                     this._isTwoFingerGesture = false;
-                    this._touchScrollLastCentroid = null;
+                    this._twoFinger = null;
                 }
                 if (remainingTouchCount === 0) {
                     this._activeTouchIdentifier = null; this._isTwoFingerGesture = false;
-                    this._touchScrollLastCentroid = null;
+                    this._twoFinger = null;
                     if (this._longPressTimer) { clearTimeout(this._longPressTimer); this._longPressTimer = null; }
                     this._longPressTouchIdentifier = null;
                 }
@@ -3796,6 +3773,68 @@ export class Input {
         if (preventDefault && this.element.contains(event.target)) {
             event.preventDefault();
         }
+    }
+
+    /** Starts a two-finger gesture at two touch points, in client coordinates. */
+    _twoFingerStart(ax, ay, bx, by) {
+        const x = (ax + bx) / 2;
+        const y = (ay + by) / 2;
+        this._twoFinger = { x, y, x0: x, y0: y, rail: null, accX: 0, accY: 0 };
+    }
+
+    /**
+     * Moves the two-finger gesture to new touch points: the travel of their
+     * midpoint becomes wheel notches at `TOUCH_SCROLL_NOTCH_PX` each, and the
+     * fraction of a notch carries forward, so a slow scroll goes as far as a
+     * fast one and neither depends on how often the digitizer reports. Once
+     * the fingers have traveled `TWO_FINGER_SLOP_PX` the gesture keeps to an
+     * axis it is mostly along (twice the other), as a touchpad's scroll rails
+     * do, so the drift of a vertical scroll never scrolls sideways; a diagonal
+     * one moves both. The content follows the fingers: up scrolls down, left
+     * scrolls right.
+     */
+    _twoFingerMove(ax, ay, bx, by) {
+        const g = this._twoFinger;
+        if (!g) return;
+        const x = (ax + bx) / 2;
+        const y = (ay + by) / 2;
+        if (g.rail === null) {
+            const panX = Math.abs(x - g.x0);
+            const panY = Math.abs(y - g.y0);
+            if (Math.hypot(panX, panY) >= TWO_FINGER_SLOP_PX) {
+                g.rail = panY >= 2 * panX ? 'y' : (panX >= 2 * panY ? 'x' : 'xy');
+                if (g.rail === 'y') g.accX = 0;
+                if (g.rail === 'x') g.accY = 0;
+            }
+        }
+        if (g.rail !== 'x') g.accY += g.y - y;
+        if (g.rail !== 'y') g.accX += g.x - x;
+        g.x = x;
+        g.y = y;
+        g.accY = this._drainScrollNotches(g.accY, true);
+        g.accX = this._drainScrollNotches(g.accX, false);
+    }
+
+    /**
+     * Sends the whole notches of a scroll carry, in CSS pixels of finger
+     * travel, and returns the travel left over; positive is down or right.
+     * @param {number} carry
+     * @param {boolean} vertical
+     * @returns {number}
+     */
+    _drainScrollNotches(carry, vertical) {
+        let notches = Math.trunc(carry / TOUCH_SCROLL_NOTCH_PX);
+        if (notches === 0) return carry;
+        const rest = carry - notches * TOUCH_SCROLL_NOTCH_PX;
+        const direction = vertical ? (notches > 0 ? 'down' : 'up') : (notches > 0 ? 'right' : 'left');
+        notches = Math.abs(notches);
+        while (notches > 0) {
+            const burst = Math.min(notches, this._scrollMagnitude);
+            if (vertical) this._triggerMouseWheel(direction, burst);
+            else this._triggerHorizontalMouseWheel(direction, burst);
+            notches -= burst;
+        }
+        return rest;
     }
 
     /**
