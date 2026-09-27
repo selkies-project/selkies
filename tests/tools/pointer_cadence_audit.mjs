@@ -217,4 +217,34 @@ const move = (type, x, extra = {}) => ({
     check('in the order they were drawn', xs.every((x, i) => i === 0 || x > xs[i - 1]), xs.join(','));
 }
 
+// --- a trackpad scroll's notch goes out with the event that completes it --
+{
+    const { input, sent } = makeInput();
+    advance(2000);
+    const deltas = [7, 9, 12, 10, 8, 11, 9, 13, 10, 8, 12, 9, 11, 10, 7, 12, 9, 10, 11, 8,
+                    9, 12, 10, 8, 11, 9, 13, 10, 8, 12];
+    let total = 0;
+    const due = [];
+    for (const d of deltas) {
+        advance(16);
+        const before = Math.floor(total / 100);
+        total += d;
+        if (Math.floor(total / 100) > before) due.push(now);
+        input._mouseWheelWrapper({ type: 'wheel', deltaY: d, deltaX: 0, deltaMode: 0, ctrlKey: false,
+                                   target: element, preventDefault() {} });
+    }
+    advance(500);
+    const rises = [];
+    let prev = 0;
+    for (const [t, m] of sent) {
+        const p = m.split(',');
+        const mask = Number(p[3]);
+        if ((mask & 8) && !(prev & 8)) rises.push(t);
+        prev = mask;
+    }
+    const lags = due.map((t, i) => (rises[i] === undefined ? Infinity : rises[i] - t));
+    check('a trackpad scroll notch goes out with the event that completes it',
+          rises.length === due.length && lags.every((l) => l === 0), `lags ${lags.join(',')} ms`);
+}
+
 process.exit(failed === 0 ? 0 : 1);

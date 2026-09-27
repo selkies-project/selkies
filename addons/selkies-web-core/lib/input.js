@@ -1489,18 +1489,16 @@ export class Input {
         this.listeners = [];
         this.listeners_context = [];
         this._queue = new Queue();
-        this._allowTrackpadScrolling = true;
         /**
-         * Whether wheel input is classified as a trackpad. Starts true until
-         * the detector has its samples: the throttle path never drops events,
-         * so an unclassified burst costs at most one smoothing window, whereas
-         * a discrete-wheel start would emit a trackpad gesture's opening deltas
-         * as scroll clicks.
+         * Whether wheel input is classified as a trackpad, which takes a fixed
+         * 100px notch (`_wheelNotches`). Starts true until the detector has its
+         * samples: a wheel taken for a trackpad loses nothing but the notch
+         * size of its first few clicks, whereas a trackpad taken for a wheel
+         * would emit its gesture's opening deltas as scroll clicks.
          */
         this._allowThreshold = true;
         this._smallestDeltaY = 10000;
         this._smallestLineDeltaY = 10000;
-        this._wheelThreshold = 100;
         this._scrollMagnitude = 10;
         /**
          * Fractional-notch accumulators, one per wheel axis: a fast discrete
@@ -4090,13 +4088,10 @@ export class Input {
 
     /**
      * Wheel handler: ends the scroll session after an idle second, samples
-     * pixel deltas for the device classifier, and routes a trackpad through
-     * the smoothing throttle and a discrete wheel straight to emission. Line
-     * and page mode bypass the classifier, being always a discrete wheel
-     * (trackpads report pixels). The throttle rate-limits emission but drops
-     * no delta: throttled ticks accumulate and flush at the window end. A
-     * discrete wheel emits per event, so a fast spin never collapses to the
-     * throttle rate.
+     * pixel deltas for the device classifier, and emits every event's whole
+     * notches as they accumulate, a trackpad's at its fixed notch size and a
+     * discrete wheel's at its learned one. Line and page mode bypass the
+     * classifier, being always a discrete wheel (trackpads report pixels).
      *
      * A wheel event reporting a Control no held key accounts for is a
      * touchpad pinch, which the engines deliver as Ctrl+wheel, and goes to
@@ -4125,22 +4120,7 @@ export class Input {
         if (this._queue.size() == 4) {
             this._allowThreshold = !this._isDiscreteWheel();
         }
-        if (this._allowThreshold) {
-            if (this._allowTrackpadScrolling) {
-                this._allowTrackpadScrolling = false;
-                this._mouseWheel(event);
-                setTimeout(() => {
-                    this._allowTrackpadScrolling = true;
-                    this._emitWheelY();
-                    this._emitWheelX();
-                }, this._wheelThreshold);
-            } else {
-                this._accumulateWheelY(event);
-                this._accumulateWheelX(event);
-            }
-        } else {
-            this._mouseWheel(event);
-        }
+        this._mouseWheel(event);
         event.preventDefault();
     }
 
