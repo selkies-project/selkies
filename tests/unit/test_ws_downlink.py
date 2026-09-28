@@ -9,7 +9,10 @@ socket only, that a request arriving ahead of its nonce waits for it, that a str
 client, or by the socket leaving) brings the audio back to the socket, that a
 nonce opens only the kind it was announced for and an unknown kind nothing, and
 that a reader that falls behind loses the oldest packets rather than holding
-the rest.
+the rest. Video is pinned through a real relay: once its stream is confirmed,
+the relay writes its frames there in order and none down the socket, the
+backpressure gate reads their arrival from the stream's own acknowledgments,
+and a stream that ends hands the frames back to the socket.
 """
 import asyncio
 import os
@@ -43,6 +46,9 @@ class Socket:
     async def send_str(self, text):
         self.sent.append(text)
 
+    async def send_bytes(self, data):
+        self.sent.append(bytes(data))
+
 
 def make_server():
     server = DataStreamingServer.__new__(DataStreamingServer)
@@ -72,6 +78,84 @@ async def read_records(resp, count, timeout=2.0):
             out.append(buf[4:4 + n])
             buf = buf[4 + n:]
     return out
+
+
+def frame(frame_id: int, key: bool) -> dict:
+    """A full-frame H.264 chunk as the relay is offered it."""
+    data = bytes([0x04, 0x01 if key else 0x00, 0, frame_id, 0, 0, 0, 16, 0, 16, 0, frame_id]) + b"x" * 64
+    return {"data": memoryview(data), "owner": data, "frame_id": frame_id}
+
+
+async def video_through_relay(server, client, ws) -> None:
+    ws.sent.clear()
+    ds = {"ws": ws, "sent_timestamps": wsm.OrderedDict()}
+    server.display_clients = {"primary": ds}
+    server.video_relay_groups = {"primary": {}}
+    relay = wsm._VideoRelay(server, "primary", ws, 1 << 20)
+    server.video_relay_groups["primary"][ws] = relay
+    relay.start()
+    nonce = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+    await server._on_downlink_verb(ws, "video," + nonce)
+    resp = await client.get("/api/downlink/video", params={"stream": nonce})
+    await read_records(resp, 1)
+    relay.offer(frame(1, True))
+    await asyncio.sleep(0.05)
+    check("before the confirmation a frame goes down the socket", ws.sent == [bytes(frame(1, True)["data"])],
+          [len(m) for m in ws.sent])
+    await server._on_downlink_verb(ws, "video,ok")
+    relay.offer(frame(2, False))
+    relay.offer(frame(3, False))
+    records = await read_records(resp, 2)
+    check("after it the relay writes the frames to the stream, in order",
+          records == [bytes(frame(2, False)["data"]), bytes(frame(3, False)["data"])], [r[:4] for r in records])
+    check("and down the socket only the switch mark, behind the frame it carried",
+          ws.sent[1:] == ["DOWNLINK,video,switch"], ws.sent[1:])
+    check("the frames are stamped for the ack round trip as on the socket",
+          list(ds["sent_timestamps"]) == [1, 2, 3], list(ds["sent_timestamps"]))
+    await asyncio.sleep(0.05)
+    sent_at = ds["sent_timestamps"][3][0]
+    check("the gate reads their arrival from the stream's acknowledgments",
+          ds.get("video_downlink") is not None and wsm._arrived_at(ds) >= sent_at, wsm._arrived_at(ds))
+    server._end_downlink(ws, "video")
+    await asyncio.wait_for(resp.content.read(), 2.0)
+    relay.offer(frame(4, False))
+    await asyncio.sleep(0.05)
+    check("a stream that ends hands the frames back to the socket",
+          ws.sent[-1] == bytes(frame(4, False)["data"]), ws.sent[-1][:4] if ws.sent else None)
+    relay.stop()
+    await asyncio.sleep(0)
+
+
+async def arrival_marks() -> None:
+    """The stream's arrival reading against acknowledgments it is told."""
+    marks = {"acked": 0, "next": 0}
+
+    def fake_mark(_conn):
+        return marks["acked"], marks["next"]
+
+    class Response:
+        async def write(self, data):
+            marks["next"] += len(data)
+
+    real = wsm._delivery_mark
+    wsm._delivery_mark = fake_mark
+    try:
+        link = _StreamDownlink("video")
+        link._response = Response()
+        await link.send(b"a" * 96, "test")
+        first = link._marks[0][0]
+        await link.send(b"b" * 96, "test")
+        check("nothing acknowledged: nothing written has arrived", link.arrived_at() == 0.0, link.arrived_at())
+        marks["acked"] = 100
+        check("the first record acknowledged: what was written before its write has arrived",
+              link.arrived_at() == first, (link.arrived_at(), first))
+        marks["acked"] = 200
+        now = wsm.time.monotonic()
+        check("everything acknowledged: everything written until now has arrived", link.arrived_at() >= now)
+        link.close()
+        check("a stream that ended says nothing", link.arrived_at() is None)
+    finally:
+        wsm._delivery_mark = real
 
 
 async def main():
@@ -139,11 +223,15 @@ async def main():
         nonce4 = "ffeeddccbbaa99887766554433221100"
         await server._on_downlink_verb(other, "audio," + nonce4)
         wrong = await client.get("/api/downlink/video", params={"stream": nonce4})
+        check("a nonce opens only the kind it was announced for", wrong.status == 404, wrong.status)
+        wrong = await client.get("/api/downlink/cursor", params={"stream": nonce4})
         check("an unknown kind opens nothing", wrong.status == 404, wrong.status)
-        await server._on_downlink_verb(other, "video," + nonce4)
+        await server._on_downlink_verb(other, "cursor," + nonce4)
         check("nor is a nonce for an unknown kind registered",
               server._downlink_nonces.get(nonce4) == (other, "audio"), server._downlink_nonces.get(nonce4))
         server._end_downlink(other)
+
+        await video_through_relay(server, client, ws)
 
         old = wsm.DOWNLINK_CONFIRM_SECONDS
         wsm.DOWNLINK_CONFIRM_SECONDS = 0.2
@@ -166,6 +254,7 @@ async def main():
         kept.append(stream._queue.get_nowait()["data"][2])
     check("a reader that falls behind loses the oldest packets",
           kept == list(range(3, wsm.DOWNLINK_QUEUE_ITEMS["audio"] + 3)), kept[:3])
+    await arrival_marks()
 
 
 if __name__ == "__main__":

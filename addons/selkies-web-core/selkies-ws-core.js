@@ -17,10 +17,10 @@
  * full frames, presented id for stripes) -- and carries the microphone and
  * webcam encoders' frames out over their own ports: nothing occupying the
  * page's thread can interrupt any of them. On Gecko, which delivers a worker's
- * socket through the page's thread all the same, the worker takes audio from
- * a streamed `<route prefix>/api/downlink/audio` response instead, confirmed
- * by `DOWNLINK,audio,<nonce>`, `DOWNLINK,audio,ok`, and the server's
- * `DOWNLINK,audio,switch` (`SOCKET_WORKER_SRC`).
+ * socket through the page's thread all the same, the worker takes audio and
+ * video from streamed `<route prefix>/api/downlink/<kind>` responses instead,
+ * each confirmed by `DOWNLINK,<kind>,<nonce>`, `DOWNLINK,<kind>,ok`, and the
+ * server's `DOWNLINK,<kind>,switch` (`SOCKET_WORKER_SRC`).
  * Binary messages are typed by their first byte. From the server: `0x01`
  * audio (Opus, with the RED redundancy layout documented on
  * extractOpusFrames), `0x03` a JPEG stripe (`u8 reserved`, `u16 frame id`,
@@ -6273,12 +6273,13 @@ function initWebsockets() {
  * overtake that audio, and everything else is handed to the page unchanged.
  * Sends arrive from the page and keep their order, since one port delivers in
  * sequence. Gecko still routes a worker's WebSocket delivery through the
- * page's main thread, so a stall there would cost what the playback worklet's
- * jitter depth cannot cover; the body of a fetch the worker reads is delivered
- * off that thread, so on Gecko the worker moves audio onto a streamed response
- * from the server (`openDownlink`, `socketWaitsOnPage`), keeping it on the
- * socket wherever that response does not arrive promptly. Chromium and WebKit
- * deliver both to the worker alike, and keep audio on the socket.
+ * page's main thread, so a stall there would hold audio back past what the
+ * playback worklet's jitter depth covers and video frames past their turn; the
+ * body of a fetch the worker reads is delivered off that thread, so on Gecko
+ * the worker moves audio and video onto streamed responses from the server
+ * (`openDownlink`, `socketWaitsOnPage`), keeping each on the socket wherever
+ * its response does not arrive promptly. Chromium and WebKit deliver both to
+ * the worker alike, and keep them on the socket.
  */
 const SOCKET_WORKER_SRC = `
 let ws = null, audioPort = null, audioOn = true, primary = true;
@@ -6356,6 +6357,22 @@ function takeAudio(d, at) {
   }
 }
 
+// One video message (0x03/0x04) straight to the video worker while the page
+// diverts video there; false when it is the page's to handle.
+function takeVideo(d, at) {
+  if (!videoPort || !videoDivert || d.byteLength <= 6) return false;
+  const t = new Uint8Array(d, 0, 1)[0];
+  if (t !== 0x03 && (t !== 0x04 || d.byteLength <= 10)) return false;
+  if (videoAckSource === 'receive') {
+    const head = new Uint8Array(d, 2, 2);
+    videoLastId = (head[0] << 8) | head[1];
+    videoLastIdAt = performance.now();
+  }
+  if (at) videoPort.postMessage({ buffer: d, at }, [d]);
+  else videoPort.postMessage(d, [d]);
+  return true;
+}
+
 // Opens a streamed downlink for one kind of message: announces a nonce on the
 // socket, fetches the downlink it names, and once the hello arrives, confirms
 // it, after which the server sends that kind there, each record handed to
@@ -6381,20 +6398,40 @@ function openDownlink(kind, wsUrl, deliver, headers) {
     const res = await fetch(url.href, { cache: 'no-store', signal: abort.signal, headers });
     if (!res.ok || !res.body) return;
     const reader = res.body.getReader();
-    let rest = new Uint8Array(0);
+    // Unparsed bytes as the reads delivered them, so a record spanning many
+    // reads (a key frame) is copied once, when it is whole.
+    const parts = [];
+    let have = 0;
+    const take = (n, into) => {
+      let got = 0;
+      while (got < n) {
+        const p = parts[0];
+        const k = Math.min(n - got, p.length);
+        if (into) into.set(k === p.length ? p : p.subarray(0, k), got);
+        got += k;
+        if (k === p.length) parts.shift();
+        else parts[0] = p.subarray(k);
+      }
+      have -= n;
+      return into;
+    };
+    const length = () => {
+      let n = 0, i = 0;
+      for (const p of parts) {
+        for (let j = 0; j < p.length && i < 4; j++, i++) n = n * 256 + p[j];
+        if (i === 4) break;
+      }
+      return n;
+    };
     for (;;) {
       const { value, done } = await reader.read();
       if (done) return;
-      let buf = value;
-      if (rest.length) {
-        buf = new Uint8Array(rest.length + value.length);
-        buf.set(rest);
-        buf.set(value, rest.length);
-      }
-      let off = 0;
-      while (buf.length - off >= 4) {
-        const n = ((buf[off] << 24) | (buf[off + 1] << 16) | (buf[off + 2] << 8) | buf[off + 3]) >>> 0;
-        if (buf.length - off - 4 < n) break;
+      parts.push(value);
+      have += value.length;
+      while (have >= 4) {
+        const n = length();
+        if (have - 4 < n) break;
+        take(4, null);
         if (!confirmed) {
           confirmed = true;
           clearTimeout(hello);
@@ -6402,13 +6439,11 @@ function openDownlink(kind, wsUrl, deliver, headers) {
           ws.send('DOWNLINK,' + kind + ',ok');
         }
         if (n) {
-          const rec = buf.slice(off + 4, off + 4 + n).buffer;
+          const rec = take(n, new Uint8Array(n)).buffer;
           if (link.switched) deliver(rec);
           else link.held.push(rec);
         }
-        off += 4 + n;
       }
-      rest = buf.slice(off);
     }
   })().catch(() => {}).finally(() => {
     clearTimeout(hello);
@@ -6486,6 +6521,12 @@ self.onmessage = (e) => {
     ws.onopen = () => {
       self.postMessage({ type: 'open' });
       if (m.downlinks && primary) openDownlink('audio', m.url, (rec) => takeAudio(rec, 0), m.headers || {});
+      if (m.downlinks) {
+        openDownlink('video', m.url, (rec) => {
+          const at = statsOn ? performance.timeOrigin + performance.now() : 0;
+          if (!takeVideo(rec, at)) self.postMessage({ type: 'message', data: rec, at }, [rec]);
+        }, m.headers || {});
+      }
     };
     ws.onerror = () => self.postMessage({ type: 'error' });
     ws.onclose = (ev) => {
@@ -6510,19 +6551,7 @@ self.onmessage = (e) => {
         }
         return;
       }
-      if (videoPort && videoDivert && d instanceof ArrayBuffer && d.byteLength > 6) {
-        const t = new Uint8Array(d, 0, 1)[0];
-        if (t === 0x03 || (t === 0x04 && d.byteLength > 10)) {
-          if (videoAckSource === 'receive') {
-            const head = new Uint8Array(d, 2, 2);
-            videoLastId = (head[0] << 8) | head[1];
-            videoLastIdAt = performance.now();
-          }
-          if (at) videoPort.postMessage({ buffer: d, at }, [d]);
-          else videoPort.postMessage(d, [d]);
-          return;
-        }
-      }
+      if (d instanceof ArrayBuffer && takeVideo(d, at)) return;
       if (d instanceof ArrayBuffer) self.postMessage({ type: 'message', data: d, at }, [d]);
       else self.postMessage({ type: 'message', data: d });
     };
@@ -6553,8 +6582,8 @@ class WorkerWebSocket {
    *     that one takes the audio short-circuit.
    * @param {string[]} [protocols] Subprotocols the handshake offers
    *     (`sessionTokenProtocols`).
-   * @param {boolean} [downlinks] Whether the worker moves audio onto a streamed
-   *     fetch once the socket is open (`socketWaitsOnPage`).
+   * @param {boolean} [downlinks] Whether the worker moves audio and video onto
+   *     streamed fetches once the socket is open (`socketWaitsOnPage`).
    */
   constructor(url, primary, protocols = [], downlinks = false) {
     this.readyState = WebSocket.CONNECTING;

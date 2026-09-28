@@ -129,6 +129,7 @@ def relay_server(ws: Socket) -> DataStreamingServer:
     server.clients = {ws}
     server.display_clients = {"primary": {"ws": ws, "sent_timestamps": OrderedDict(), "sent_bytes": 0}}
     server.video_relay_groups = {"primary": {}}
+    server._downlinks = {}
     return server
 
 

@@ -193,13 +193,14 @@ SEND_STALL_SECONDS = 10.0
 # How often a waiting send looks at its socket for that progress.
 SEND_PROBE_SECONDS = 0.5
 # A socket's streamed downlink (`_StreamDownlink`): the kinds of message one may
-# carry, what each holds behind a slow reader before dropping the oldest, how
-# long its hello waits for the client to confirm it, how often a silent one
-# sends a keepalive record so a proxy in front never sees it idle, and how long
-# a request waits for its socket to announce the nonce it names (the two travel
+# carry, what each holds behind a slow reader before dropping the oldest (video
+# is written by its relay, which bounds a slow reader itself), how long its
+# hello waits for the client to confirm it, how often a silent one sends a
+# keepalive record so a proxy in front never sees it idle, and how long a
+# request waits for its socket to announce the nonce it names (the two travel
 # on separate connections, and a proxy may deliver the request first).
-DOWNLINK_KINDS = ("audio",)
-DOWNLINK_QUEUE_ITEMS = {"audio": 64}
+DOWNLINK_KINDS = ("audio", "video")
+DOWNLINK_QUEUE_ITEMS = {"audio": 64, "video": 1}
 DOWNLINK_CONFIRM_SECONDS = 5.0
 DOWNLINK_KEEPALIVE_SECONDS = 15.0
 DOWNLINK_ANNOUNCE_SECONDS = 2.0
@@ -371,6 +372,12 @@ _SIOCOUTQNSD = 0x894B
 _SIOCOUTQNSD_ARG = struct.pack("i", 0)
 
 
+def _transport_of(conn: Any) -> Any:
+    """The transport under a WebSocket, or under a streamed response (`_StreamDownlink`)."""
+    writer = getattr(conn, "_writer", None) or getattr(conn, "_payload_writer", None)
+    return getattr(writer, "transport", None)
+
+
 def _ws_write_backlog(ws: Any) -> Optional[int]:
     """Bytes this socket still owes the network, or None when nothing can say.
 
@@ -378,7 +385,7 @@ def _ws_write_backlog(ws: Any) -> Optional[int]:
     socket buffer absorbs megabytes, so the transport's figure alone reports no
     backlog on the very transfer that is burying the stream behind one.
     """
-    transport = getattr(getattr(ws, "_writer", None), "transport", None)
+    transport = _transport_of(ws)
     if transport is None:
         return None
     pending = None
@@ -411,7 +418,7 @@ def _peer_progress(ws: Any) -> Optional[int]:
     socket's other writers cannot move; else the write backlog negated, so a
     backlog that shrinks reads as growth. None when nothing can say.
     """
-    transport = getattr(getattr(ws, "_writer", None), "transport", None)
+    transport = _transport_of(ws)
     if transport is None:
         return None
     try:
@@ -425,11 +432,34 @@ def _peer_progress(ws: Any) -> Optional[int]:
     return None if backlog is None else -backlog
 
 
+# Linux SIOCOUTQ: bytes a socket has accepted and its peer not yet acknowledged.
+_SIOCOUTQ = 0x5411
+
+
+def _delivery_mark(conn: Any) -> Optional[Tuple[int, int]]:
+    """What this connection's peer has acknowledged (`_peer_progress`), and the
+    count it reaches once everything written to it so far has arrived; None
+    where the kernel does not say."""
+    transport = _transport_of(conn)
+    if transport is None or fcntl is None:
+        return None
+    try:
+        sock = transport.get_extra_info("socket")
+        info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, _TCPI_BYTES_ACKED + 8)
+        if len(info) < _TCPI_BYTES_ACKED + 8:
+            return None
+        acked = struct.unpack_from("Q", info, _TCPI_BYTES_ACKED)[0]
+        unacked = struct.unpack("i", fcntl.ioctl(sock.fileno(), _SIOCOUTQ, _SIOCOUTQNSD_ARG))[0]
+        return acked, acked + unacked + transport.get_write_buffer_size()
+    except (AttributeError, OSError):
+        return None
+
+
 def _abort_ws(ws: Any) -> None:
     """Drop a dead socket at once. A close would queue its close frame behind
     the very backlog the peer stopped taking, and the socket would linger with
     it; aborting fails every send waiting on it as a lost connection."""
-    transport = getattr(getattr(ws, "_writer", None), "transport", None)
+    transport = _transport_of(ws)
     if transport is not None:
         transport.abort()
     else:
@@ -466,7 +496,7 @@ class _SendWatch:
         self.handle = self.loop.call_later(SEND_PROBE_SECONDS, self.probe)
 
 
-async def _send_live(ws: Any, data: Any, what: str) -> None:
+async def _send_live(ws: Any, data: Any, what: str, send: Any = None) -> None:
     """Send one frame, binary or (for a str) text, waiting as long as the socket keeps draining.
 
     An uncompressed aiohttp send writes the whole frame before it awaits
@@ -479,16 +509,20 @@ async def _send_live(ws: Any, data: Any, what: str) -> None:
     left alone.
 
     Args:
-        ws: The client socket.
+        ws: The client socket, or a streamed response.
         data: The frame.
         what: What is sending, for the log line that drops a dead client.
+        send: What writes `data` to `ws` in place of the socket's own frame
+            send (a streamed response's write).
 
     Raises:
         ConnectionResetError: The socket was found dead and aborted.
     """
     watch = _SendWatch(ws, what, asyncio.get_running_loop())
     try:
-        if isinstance(data, str):
+        if send is not None:
+            await send(data)
+        elif isinstance(data, str):
             await ws.send_str(data)
         else:
             await ws.send_bytes(data)
@@ -496,6 +530,20 @@ async def _send_live(ws: Any, data: Any, what: str) -> None:
         watch.handle.cancel()
     if watch.dead:
         raise ConnectionResetError(f"{what}: the client took nothing for {SEND_STALL_SECONDS:.0f}s")
+
+
+def _arrived_at(display_state: dict) -> float:
+    """The latest moment by which everything a display's client was sent before it
+    had arrived: the video downlink's own delivery while its relay writes there
+    (`_StreamDownlink.arrived_at`), else the answer to the last ping written
+    behind the socket's frames (`socket_gauge`). 0.0 when nothing says."""
+    ws = display_state.get('ws')
+    downlink = display_state.get('video_downlink')
+    if downlink is not None and downlink[0] is ws and downlink[1].live:
+        arrived = downlink[1].arrived_at()
+        if arrived is not None:
+            return arrived
+    return 0.0 if ws is None else _uplink_session_state(ws).get('answered', 0.0)
 
 
 def _expect_key_frame(display_state: dict) -> None:
@@ -574,9 +622,8 @@ def _key_frame_pending(display_state: dict, now: float) -> bool:
     """
     crossing = display_state.get('key_crossing')
     if crossing is not None:
-        ws = display_state.get('ws')
-        if (crossing['sent'] is not None and crossing['delivered'] is None and ws is not None
-                and _uplink_session_state(ws).get('answered', 0.0) >= crossing['sent']):
+        if (crossing['sent'] is not None and crossing['delivered'] is None
+                and _arrived_at(display_state) >= crossing['sent']):
             crossing['delivered'] = now
         if (now - crossing['since'] < SEND_STALL_SECONDS
                 and (crossing['delivered'] is None or now - crossing['delivered'] < STILL_RESUME_GRACE_SECONDS)):
@@ -845,9 +892,12 @@ class _StreamDownlink:
     rather than delaying the rest, a write that makes no progress for
     `SEND_STALL_SECONDS` ends the stream, and whenever it ends, the kind returns
     to the socket.
-    Audio is the one kind; a sender of another kind registers it in
-    `DOWNLINK_KINDS` and `DOWNLINK_QUEUE_ITEMS` and pushes to the live downlink
-    of each socket (`_downlink_push`) in place of sending there.
+    Audio is pushed to the live downlink of each socket (`_downlink_push`) in
+    place of being sent there. Video is written by the socket's relay itself
+    (`send`), which waits on the write as it would on the socket, so its byte
+    budget and key frame resync bound a slow reader, and whose delivery the
+    backpressure gate reads from the connection's own acknowledgments
+    (`arrived_at`), since a ping on the socket no longer queues behind it.
     """
 
     def __init__(self, kind: str) -> None:
@@ -855,6 +905,12 @@ class _StreamDownlink:
         self.live = False
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=DOWNLINK_QUEUE_ITEMS[kind])
         self._closed = False
+        self._response: Optional[web.StreamResponse] = None
+        # (when a write started, the acknowledged count that says it arrived), oldest first.
+        self._marks: deque = deque()
+        self._marking = True
+        self._writing: Optional[float] = None
+        self._arrived = 0.0
 
     def push(self, item: Optional[dict]) -> None:
         """Queue one item (`{'data', 'owner'}`, the owner kept alive until it is
@@ -871,10 +927,57 @@ class _StreamDownlink:
             self._closed = True
             self.push(None)
 
+    async def send(self, data: Any, what: str) -> None:
+        """Write one message as a record, waiting as long as the reader keeps
+        taking bytes (`_send_live`).
+
+        Raises:
+            ConnectionResetError: The stream has ended, or its reader took
+                nothing for SEND_STALL_SECONDS.
+        """
+        response = self._response
+        if response is None or self._closed:
+            raise ConnectionResetError(f"{what}: the {self.kind} downlink has ended")
+        record = bytearray(4 + len(data))
+        struct.pack_into(">I", record, 0, len(data))
+        record[4:] = data
+        self._writing = time.monotonic()
+        try:
+            await _send_live(response, record, what, send=response.write)
+            got = _delivery_mark(response) if self._marking else None
+            if got is None:
+                self._marking = False
+                self._marks.clear()
+            else:
+                self._marks.append((self._writing, got[1]))
+                self._settle(got[0])
+        finally:
+            self._writing = None
+
+    def _settle(self, acked: int) -> None:
+        """Retire the writes the reader has acknowledged as far as `acked`."""
+        while self._marks and acked >= self._marks[0][1]:
+            self._arrived = self._marks.popleft()[0]
+
+    def arrived_at(self) -> Optional[float]:
+        """The latest moment by which everything written here before it had
+        reached the reader, as its connection's acknowledgments say; None where
+        the kernel does not say."""
+        if not self._marking or self._response is None or self._closed:
+            return None
+        got = _delivery_mark(self._response)
+        if got is None:
+            return None
+        self._settle(got[0])
+        if not self._marks and self._writing is None:
+            self._arrived = time.monotonic()
+        return self._arrived
+
     async def serve(self, response: web.StreamResponse) -> None:
         """Write the hello, then each queued message as a record, until the stream
         is closed, a write stalls, or the client never confirms."""
         loop = asyncio.get_running_loop()
+        self._response = response
         await asyncio.wait_for(response.write(bytes(4)), SEND_STALL_SECONDS)
         confirm_by = loop.time() + DOWNLINK_CONFIRM_SECONDS
         while not self._closed:
@@ -907,7 +1010,9 @@ class _VideoRelay:
     one is useless), so the true bound is budget plus one keyframe burst.
     That budget is the only bound on a slow client: a send waits for as long
     as its socket keeps draining, and only a socket that stops draining costs
-    the client its connection (`_send_live`).
+    the client its connection (`_send_live`). While the client takes video over
+    a streamed downlink (`_StreamDownlink`), the relay writes there in the
+    same way, and a downlink that ends hands its frames back to the socket.
 
     Video reference-chain safety is tracked per stripe ROW (wire-header y_start, bytes
     4:6): one capture frame can mix IDR and delta stripes (a lone stripe
@@ -1033,11 +1138,22 @@ class _VideoRelay:
                 item = self.backlog.popleft()
                 data = item['data']
                 self.backlog_bytes -= len(data)
+                downlink = self.server._downlinks.get((self.ws, "video"))
+                if downlink is not None and not downlink.live:
+                    downlink = None
                 # Stamped before the await, and only for the display's
                 # registered client: that is what the ACK RTT math measures.
                 ds = self.server.display_clients.get(self.display_id)
                 if ds is not None and ds.get('ws') is self.ws:
+                    ds['video_downlink'] = (self.ws, downlink) if downlink is not None else None
                     _note_send(ds, item['frame_id'], len(data))
+                if downlink is not None:
+                    try:
+                        await downlink.send(data, f"Video downlink for '{self.display_id}'")
+                        continue
+                    except (ConnectionResetError, OSError, RuntimeError):
+                        # Ended under this frame, which the socket carries instead.
+                        downlink.close()
                 try:
                     await _send_live(self.ws, data, f"Video relay for '{self.display_id}'")
                 except (ConnectionResetError, OSError, RuntimeError):
@@ -3150,7 +3266,7 @@ class DataStreamingServer(BaseStreamingService):
                         gate['acked'], gate['since'] = acked_sent_at, now
                     if gate['delivered'] is None and (
                             now - gate['pinged'] >= SEND_STALL_SECONDS
-                            or _uplink_session_state(display_state.get('ws')).get('answered', 0.0) >= gate['pinged']):
+                            or _arrived_at(display_state) >= gate['pinged']):
                         gate['delivered'] = now
                     if (unacked_since is None and gate['delivered'] is not None
                             and now - max(gate['since'], gate['delivered']) >= STALLED_CLIENT_REPROBE_SECONDS):

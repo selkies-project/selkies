@@ -11,7 +11,9 @@ nonce and fetches the stream it names beside the socket's own path, confirms
 it on its hello (a record split across reads included), holds its records
 until the socket's switch mark has followed the audio the socket carried
 before them, says when it ends, and leaves audio on the socket when no hello
-comes in time or the page did not ask for a stream.
+comes in time or the page did not ask for a stream. The video stream beside it
+goes the same way, its records to the video worker's port behind the frames
+the socket carried before its switch mark, and none to the page.
 """
 import json
 import os
@@ -68,12 +70,14 @@ class FakeWebSocket {
   close() {}
 }
 global.WebSocket = FakeWebSocket;
-let feed = null, fetched = null, fetchedHeaders = null;
+const feeds = {}, fetched = {};
+let fetchedHeaders = null;
 global.fetch = (url, opts) => {
-  fetched = url;
+  const kind = new URL(url).pathname.split('/').pop();
+  fetched[kind] = url;
   fetchedHeaders = opts.headers;
   const body = new ReadableStream({ start(c) {
-    feed = { push: (b) => c.enqueue(new Uint8Array(b)), end: () => c.close() };
+    feeds[kind] = { push: (b) => c.enqueue(new Uint8Array(b)), end: () => c.close() };
     opts.signal.addEventListener('abort', () => c.error(new Error('aborted')));
   } });
   return Promise.resolve({ ok: true, body });
@@ -83,16 +87,21 @@ const bytes = (m) => Array.from(new Uint8Array(m.buffer));
 __WORKER__
 (async () => {
   const out = {};
+  const toVideo = [];
   self.onmessage({ data: { type: 'audioPort', port: { postMessage: (m) => toDecoder.push(m) } } });
+  self.onmessage({ data: { type: 'videoPort', port: { postMessage: (m) => toVideo.push(m) } } });
+  self.onmessage({ data: { type: 'videoState', divert: true, ack: false } });
   self.onmessage({ data: { type: 'open', url: 'ws://host/sub/api/websockets?token=t', primary: true,
     downlinks: MODE !== 'off', headers: { Authorization: 'Bearer t' } } });
   const socket = FakeWebSocket.last;
   socket.onopen();
   await tick();
-  out.announce = socket.sent[0] || '';
+  out.announce = socket.sent.find((m) => m.startsWith('DOWNLINK,audio,')) || '';
+  out.videoAnnounce = socket.sent.find((m) => m.startsWith('DOWNLINK,video,')) || '';
   out.fetched = fetched;
   out.headers = fetchedHeaders;
   if (MODE === 'stream') {
+    const feed = feeds.audio;
     feed.push([0, 0, 0, 0, 0, 0, 0, 3, 0x01]);
     feed.push([0x00, 0xaa]);
     await tick();
@@ -103,6 +112,19 @@ __WORKER__
     feed.push([0, 0, 0, 3, 0x01, 0x00, 0xbb]);
     await tick();
     out.order = toDecoder.map(bytes);
+    const frame = (id) => [0x04, 0x00, 0x00, id, 0, 0, 0, 0, 0, 0, 0, id];
+    const video = feeds.video;
+    video.push([0, 0, 0, 0, 0, 0, 0, 12, ...frame(2)]);
+    await tick();
+    out.videoConfirmed = socket.sent.includes('DOWNLINK,video,ok');
+    out.videoHeld = toVideo.length;
+    socket.onmessage({ data: new Uint8Array(frame(1)).buffer });
+    socket.onmessage({ data: 'DOWNLINK,video,switch' });
+    video.push([0, 0]);
+    video.push([0, 12, ...frame(3).slice(0, 5)]);
+    video.push(frame(3).slice(5));
+    await tick();
+    out.videoOrder = toVideo.map((m) => new Uint8Array(m.buffer || m)[3]);
     out.pageMessages = toPage.filter((m) => m && m.type === 'message').length;
     feed.end();
     await tick();
@@ -137,29 +159,39 @@ def run_stream() -> None:
     check("the worker announces a 128-bit nonce on the socket",
           len(nonce) == 32 and all(c in "0123456789abcdef" for c in nonce), r["announce"])
     check("and fetches the stream it names beside the socket's own path, credentials kept",
-          r["fetched"] == f"http://host/sub/api/downlink/audio?token=t&stream={nonce}", r["fetched"])
+          r["fetched"].get("audio") == f"http://host/sub/api/downlink/audio?token=t&stream={nonce}", r["fetched"])
     check("with the credentials the page's own API calls carry", r["headers"] == {"Authorization": "Bearer t"},
           r["headers"])
     check("the hello, even with a record split across reads behind it, confirms the stream", r["confirmed"])
     check("stream records wait for the switch mark", r["heldBeforeSwitch"] == 0, r["heldBeforeSwitch"])
     check("the socket's audio before the mark, then the held record, then the live one",
           r["order"] == [[1, 0, 0x11], [1, 0, 0xaa], [1, 0, 0xbb]], r["order"])
-    check("neither the records nor the mark reach the page", r["pageMessages"] == 0, r["pageMessages"])
+    vnonce = r["videoAnnounce"].rsplit(",", 1)[1] if r["videoAnnounce"] else ""
+    check("video gets a stream of its own beside the socket's path",
+          len(vnonce) == 32 and vnonce != nonce
+          and r["fetched"].get("video") == f"http://host/sub/api/downlink/video?token=t&stream={vnonce}", r["fetched"])
+    check("its hello confirms it, and its records wait for its switch mark",
+          r["videoConfirmed"] and r["videoHeld"] == 0, (r["videoConfirmed"], r["videoHeld"]))
+    check("the socket's frame before the mark, then the held record, then the live one (its length and body"
+          " split across reads), to the video worker",
+          r["videoOrder"] == [1, 2, 3], r["videoOrder"])
+    check("neither the records nor the marks reach the page", r["pageMessages"] == 0, r["pageMessages"])
     check("a stream that ends is reported, so audio returns to the socket", r["last"] == "DOWNLINK,audio,off", r["last"])
 
     r = drive(STREAM_DRIVER, "silent")
     if "error" in r:
         check("silent driver ran", False, r["error"])
         return
-    check("no hello in time: the stream is dropped without a confirmation",
-          len(r["sent"]) == 1 and r["sent"][0].startswith("DOWNLINK,audio,"), r["sent"])
+    check("no hello in time: the streams are dropped without a confirmation",
+          sorted(m.split(",")[1] for m in r["sent"]) == ["audio", "video"]
+          and all(len(m.split(",")[2]) == 32 for m in r["sent"]), r["sent"])
     check("and audio stays on the socket", r["order"] == [[1, 0, 0x22]], r["order"])
 
     r = drive(STREAM_DRIVER, "off")
     if "error" in r:
         check("off driver ran", False, r["error"])
         return
-    check("a page that asks for no stream opens none", r["sent"] == [] and r["fetched"] is None, r)
+    check("a page that asks for no stream opens none", r["sent"] == [] and r["fetched"] == {}, r)
 
 
 def run() -> int:
