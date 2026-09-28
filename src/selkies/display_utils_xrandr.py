@@ -1104,10 +1104,11 @@ async def _xrandr_output_rates() -> Tuple[Optional[str], Dict[str, List[float]]]
             if " connected" in line:
                 screen_name = output.group(1)
             continue
-        mode = re.match(r"\s+(\S+)\s+((?:\d+\.\d+\S*\s*)+)$", line)
-        if screen_name is not None and mode:
-            rates.setdefault(mode.group(1), []).extend(
-                float(r) for r in re.findall(r"\d+\.\d+", mode.group(2)))
+        fields = line.split()
+        if (screen_name is not None and line[:1].isspace() and len(fields) > 1
+                and all(re.match(r"\d+\.\d+", field) for field in fields[1:])):
+            rates.setdefault(fields[0], []).extend(
+                float(r) for field in fields[1:] for r in re.findall(r"\d+\.\d+", field))
     return screen_name, rates
 
 

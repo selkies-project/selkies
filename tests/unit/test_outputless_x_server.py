@@ -16,6 +16,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))), "src"))
@@ -30,6 +31,18 @@ WITH_OUTPUT = """Screen 0: minimum 1 x 1, current 1280 x 720, maximum 8192 x 409
 screen connected primary 1280x720+0+0 0mm x 0mm
    8192x4096      0.00
    1280x720       0.00*
+"""
+# A driver lists several refreshes under one mode name, marks the current one
+# with * and the preferred with +, and nothing stops a mode being named like a
+# rate; a line such as the last must neither count nor stall the parse.
+MULTI_RATE = """Screen 0: minimum 8 x 8, current 1920 x 1080, maximum 32767 x 32767
+DP-0 connected primary 1920x1080+0+0 520mm x 290mm
+   1920x1080     60.00*+ 119.98    59.94    50.00
+   1024x768      75.03    60.00
+   1024x768i     43.48
+ ! 0.""" + "000." * 40 + """ x
+DP-1 disconnected
+   800x600       56.25
 """
 
 
@@ -54,6 +67,15 @@ async def scenario(res: "H.Results") -> None:
         res.check("one with an output reports the output, its modes, and the fitted size",
                   curr == "1280x720" and name == "screen" and modes == ["1280x720", "8192x4096"]
                   and fitted == "2560x1440", (curr, name, modes, fitted))
+        fake_xrandr(bindir, MULTI_RATE)
+        started = time.monotonic()
+        name, rates = await DX._xrandr_output_rates()
+        elapsed = time.monotonic() - started
+        res.check("each mode of the connected output keeps every rate it lists, marks aside",
+                  name == "DP-0" and rates == {"1920x1080": [60.0, 119.98, 59.94, 50.0],
+                                               "1024x768": [75.03, 60.0], "1024x768i": [43.48]},
+                  (name, rates))
+        res.check("a line that only looks like rates is skipped in linear time", elapsed < 2.0, elapsed)
     finally:
         os.environ["PATH"] = saved_path
 
