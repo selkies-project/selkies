@@ -175,28 +175,40 @@ def dd_selection(dd, offer):
     emit("dd_selection", present=bool(offer))
 
 
-# Devices are taken only for the capabilities the seat announces: a seat
-# without a keyboard (a compositor started with no input devices) refuses
-# get_keyboard with a protocol error.
+# Devices are taken only for the capabilities the seat announces, and when it
+# announces one later: a seat without a keyboard (a compositor started with no
+# input devices) refuses get_keyboard with a protocol error, and KWin's seat
+# gains its pointer only once an emulated device, such as a portal's, joins.
 caps = [0]
-seat.dispatcher["capabilities"] = lambda _s, c: caps.__setitem__(0, int(c))
+kbd = ptr = None
+
+
+def take_devices() -> None:
+    global kbd, ptr
+    if kbd is None and caps[0] & WlSeat.capability.keyboard:
+        kbd = seat.get_keyboard()
+        kbd.dispatcher["keymap"] = kbd_keymap
+        kbd.dispatcher["enter"] = kbd_enter
+        kbd.dispatcher["leave"] = kbd_leave
+        kbd.dispatcher["key"] = kbd_key
+        kbd.dispatcher["modifiers"] = kbd_mods
+    if ptr is None and caps[0] & WlSeat.capability.pointer:
+        ptr = seat.get_pointer()
+        ptr.dispatcher["enter"] = ptr_enter
+        ptr.dispatcher["leave"] = ptr_leave
+        ptr.dispatcher["motion"] = ptr_motion
+        ptr.dispatcher["button"] = ptr_button
+        ptr.dispatcher["axis"] = ptr_axis
+
+
+def seat_capabilities(_s, c) -> None:
+    caps[0] = int(c)
+    take_devices()
+
+
+seat.dispatcher["capabilities"] = seat_capabilities
 seat.dispatcher["name"] = lambda _s, _n: None
 display.roundtrip()
-kbd = seat.get_keyboard() if caps[0] & WlSeat.capability.keyboard else None
-if kbd is not None:
-    kbd.dispatcher["keymap"] = kbd_keymap
-    kbd.dispatcher["enter"] = kbd_enter
-    kbd.dispatcher["leave"] = kbd_leave
-    kbd.dispatcher["key"] = kbd_key
-    kbd.dispatcher["modifiers"] = kbd_mods
-
-ptr = seat.get_pointer() if caps[0] & WlSeat.capability.pointer else None
-if ptr is not None:
-    ptr.dispatcher["enter"] = ptr_enter
-    ptr.dispatcher["leave"] = ptr_leave
-    ptr.dispatcher["motion"] = ptr_motion
-    ptr.dispatcher["button"] = ptr_button
-    ptr.dispatcher["axis"] = ptr_axis
 
 if handles["ddm"] is not None:
     dd = handles["ddm"].get_data_device(seat)
