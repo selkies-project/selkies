@@ -14,7 +14,9 @@ What has to hold: the gaming mode chord fullscreens the page and locks the
 pointer; every relative move on the browser's display goes out as exactly that
 delta and reaches the game as exactly that delta, one event per message; a key
 reaches the game; a tap of Escape reaches it as Escape and leaves the mode
-standing, since the keyboard lock holds the key; a held Escape ends the mode.
+standing, since the keyboard lock holds the key, and so do the browser's own
+Ctrl+T and Ctrl+W, which reach the game while the browser keeps its one tab; a
+held Escape ends the mode.
 A second page withholds the Keyboard Lock API the way Brave's Shields do, and
 there the client has to say so once and a single Escape has to end the mode,
 which is what a user of that browser gets.
@@ -414,7 +416,7 @@ def run(wayland: bool, res: "H.Results", two: bool = False) -> None:
                     return
                 probe = game_window(res, desk, wayland, capture, "chrome")
                 if probe is not None and enter_gaming_mode(res, desk, page, "chrome"):
-                    played(res, desk, page, probe, "chrome")
+                    played(res, desk, page, probe, "chrome", shortcuts=True)
                 if probe is not None:
                     probe.stop()
                 page.context.close()

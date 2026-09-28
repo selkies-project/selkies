@@ -481,7 +481,8 @@ function stage(ids, locked = null) {
     const element = makeElement('ok');
     reset(element);
     const events = [];
-    const keyboard = { calls: [], lock: (keys) => { keyboard.calls.push('lock'); return Promise.resolve(); },
+    const keyboard = { calls: [], keys: [],
+                       lock: (keys) => { keyboard.calls.push('lock'); keyboard.keys.push(keys); return Promise.resolve(); },
                        unlock: () => keyboard.calls.push('unlock') };
     Object.defineProperty(globalThis, 'navigator', { value: { keyboard }, configurable: true });
     const requested = [];
@@ -520,6 +521,10 @@ function stage(ids, locked = null) {
     check('gaming mode takes the pointer and the keyboard',
           element.calls.length > 0 && keyboard.calls.join(',') === 'lock',
           `${element.calls.join(',')} / ${keyboard.calls.join(',')}`);
+    // Every key, the browser's own shortcuts among them, as a fullscreen asked
+    // for with keyboardLock "browser" holds them in Firefox and Safari.
+    check('the keyboard lock names no keys, so it holds all of them',
+          keyboard.keys.length === 1 && keyboard.keys[0] === undefined, JSON.stringify(keyboard.keys));
 
     document.fullscreenElement = null;
     input._onFullscreenChange();

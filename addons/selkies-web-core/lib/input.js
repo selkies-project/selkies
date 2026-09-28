@@ -5007,17 +5007,17 @@ export class Input {
     }
 
     /**
-     * Locks the system keys the browser would otherwise intercept, for gaming
-     * mode alone: through the Keyboard Lock API where it exists, else by the
-     * fullscreen request's own `keyboardLock` where the engine took it
-     * (`_gamingFullscreenOptions`). Only where neither holds the keys does the
+     * Locks every key the browser or the system would otherwise take, its own
+     * shortcuts (Ctrl+W, Ctrl+T) among them, for gaming mode alone: through the
+     * Keyboard Lock API where it exists, else by the fullscreen request's own
+     * `keyboardLock` where the engine took it (`_gamingFullscreenOptions`),
+     * which holds the same keys. Only where neither holds the keys does the
      * user hear that one Escape leaves the mode.
      */
     requestKeyboardLock() {
         if (!this.gamingMode || !document.fullscreenElement) return;
         if (navigator.keyboard && 'lock' in navigator.keyboard) {
-            const keys = [ "AltLeft", "AltRight", "Tab", "Escape", "MetaLeft", "MetaRight", "ContextMenu" ];
-            navigator.keyboard.lock(keys).catch(() => {});
+            navigator.keyboard.lock().catch(() => {});
             return;
         }
         if (this._fullscreenKeyboardLock) return;
