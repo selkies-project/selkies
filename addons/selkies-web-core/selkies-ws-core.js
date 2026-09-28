@@ -4684,19 +4684,74 @@ const initializeInput = () => {
 };
 
 /**
+ * The route playback takes to a chosen output device where the AudioContext
+ * cannot choose one itself (`applyOutputDevice`): the context it was built
+ * for, the MediaStreamAudioDestinationNode the context plays into, and the
+ * `<audio>` element that plays that stream on the device.
+ * @type {?{context: AudioContext, destination: MediaStreamAudioDestinationNode, element: HTMLAudioElement}}
+ */
+let outputRoute = null;
+
+/** Stops the media element a chosen output device was reached through. */
+function releaseOutputRoute() {
+  if (!outputRoute) return;
+  try { outputRoute.element.pause(); } catch (e) { /* already stopped */ }
+  outputRoute.element.srcObject = null;
+  outputRoute = null;
+}
+
+/**
  * Routes playback to the preferred output device. Audio plays out of the
- * AudioContext (no media element carries it), so this needs
- * `AudioContext.setSinkId`; where it is missing, or the context is not
- * running yet, playback stays on the default device.
+ * AudioContext, so this takes `AudioContext.setSinkId` where the engine has
+ * it (applied once the context runs). Where it has not (Firefox, Safari) but a
+ * media element can choose its sink, a chosen device is reached through one:
+ * the context plays into a MediaStreamAudioDestinationNode that an `<audio>`
+ * element plays on the device (`outputRoute`). The default device keeps the
+ * direct path, which that element's own output buffer would only lengthen.
  */
 async function applyOutputDevice() {
-  if (!preferredOutputDeviceId) {
-    console.log("No preferred output device set, using default.");
-    return;
-  }
+  const chosen = preferredOutputDeviceId && preferredOutputDeviceId !== 'default';
   const supportsSinkId = typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
   if (!supportsSinkId) {
-    console.warn("Browser does not support setSinkId, cannot apply output device preference.");
+    if (outputRoute && outputRoute.context !== audioContext) releaseOutputRoute();
+    if (!audioContext || !audioGainNode) return;
+    if (!chosen) {
+      if (outputRoute) {
+        audioGainNode.disconnect();
+        audioGainNode.connect(audioContext.destination);
+        releaseOutputRoute();
+      }
+      return;
+    }
+    if (typeof HTMLMediaElement === 'undefined' || !('setSinkId' in HTMLMediaElement.prototype)) {
+      console.warn("Browser does not support setSinkId, cannot apply output device preference.");
+      return;
+    }
+    try {
+      if (!outputRoute) {
+        const destination = audioContext.createMediaStreamDestination();
+        try { destination.channelCount = getAudioChannelCount(); } catch (e) { /* stays stereo */ }
+        const element = new Audio();
+        element.srcObject = destination.stream;
+        outputRoute = { context: audioContext, destination, element };
+      }
+      await outputRoute.element.setSinkId(preferredOutputDeviceId);
+      audioGainNode.disconnect();
+      audioGainNode.connect(outputRoute.destination);
+      await outputRoute.element.play();
+      console.log(`Playback output set to device: ${preferredOutputDeviceId} (through a media element)`);
+    } catch (err) {
+      console.error(`Error routing playback to output device (ID: ${preferredOutputDeviceId}): ${err.name}`, err);
+      if (audioContext && audioGainNode) {
+        audioGainNode.disconnect();
+        audioGainNode.connect(audioContext.destination);
+      }
+      releaseOutputRoute();
+    }
+    return;
+  }
+  if (!chosen) {
+    console.log("No preferred output device set, using default.");
     return;
   }
   if (audioContext) {
@@ -6822,6 +6877,7 @@ class WorkerWebSocket {
       console.warn("Closing existing AudioContext during init.");
       try { await audioContext.close(); } catch (e) { console.error(e); }
       audioContext = null;
+      releaseOutputRoute();
       audioWorkletNode = null;
       audioWorkletProcessorPort = null;
     }
@@ -7240,6 +7296,7 @@ class WorkerWebSocket {
         audioContext.close();
       }
       audioContext = null;
+      releaseOutputRoute();
       audioWorkletNode = null;
       audioWorkletProcessorPort = null;
     }
@@ -8567,6 +8624,7 @@ class WorkerWebSocket {
           if (audioContext) {
             try { audioContext.close(); } catch (e) { console.error("Error closing AudioContext on AUDIO_DISABLED:", e); }
             audioContext = null;
+            releaseOutputRoute();
             audioWorkletNode = null;
             audioWorkletProcessorPort = null;
           }
@@ -9685,6 +9743,7 @@ function cleanup() {
   if (audioContext) {
     if (audioContext.state !== 'closed') audioContext.close().catch(e => console.error('Cleanup error:', e));
     audioContext = null;
+    releaseOutputRoute();
     audioWorkletNode = null;
     audioWorkletProcessorPort = null;
     window.currentAudioBufferSize = 0;

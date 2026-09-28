@@ -660,8 +660,10 @@ export function Settings() {
      *
      * Output selection is probed on the sink the active core plays through,
      * `HTMLMediaElement.setSinkId` for the WebRTC core's video element and
-     * `AudioContext.setSinkId` (which Firefox lacks) for the WebSocket core;
-     * probing the wrong one would render a picker that does nothing.
+     * `AudioContext.setSinkId` for the WebSocket core, or where that is
+     * missing, as in Firefox, the media element that core then plays its
+     * context through; probing the wrong one would render a picker that does
+     * nothing.
      */
     const ensureAudioDevices = useCallback(() => {
         if (audioDevicesRequested.current) return;
@@ -672,9 +674,8 @@ export function Settings() {
             setAudioInputDevices([]);
             setAudioOutputDevices([]);
 
-            const supportsSinkId = isWebrtc
-                ? 'setSinkId' in HTMLMediaElement.prototype
-                : typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype;
+            const supportsSinkId = 'setSinkId' in HTMLMediaElement.prototype
+                || (!isWebrtc && typeof AudioContext !== 'undefined' && 'setSinkId' in AudioContext.prototype);
             setIsOutputSelectionSupported(supportsSinkId);
 
             try {

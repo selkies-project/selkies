@@ -1935,7 +1935,8 @@ function Sidebar() {
    * microphone permission so labels are readable. Output routing goes through
    * whatever the active core plays on: the WebRTC core's `<video>` element
    * (`HTMLMediaElement.setSinkId`) or the WebSocket core's AudioContext
-   * (`AudioContext.setSinkId`, which Firefox lacks), so the one in use is
+   * (`AudioContext.setSinkId`, or where that is missing, as in Firefox, a
+   * media element the core plays the context through), so the one in use is
    * probed or the output picker would render and do nothing. The selections
    * are left alone: the core keeps the devices this dashboard picked for the
    * life of the page, so a reopened section shows them rather than defaulting.
@@ -1946,9 +1947,8 @@ function Sidebar() {
     setAudioDeviceError(null);
     setAudioInputDevices([]);
     setAudioOutputDevices([]);
-    const supportsSinkId = isWebrtc
-      ? "setSinkId" in HTMLMediaElement.prototype
-      : typeof AudioContext !== "undefined" && "setSinkId" in AudioContext.prototype;
+    const supportsSinkId = "setSinkId" in HTMLMediaElement.prototype
+      || (!isWebrtc && typeof AudioContext !== "undefined" && "setSinkId" in AudioContext.prototype);
     setIsOutputSelectionSupported(supportsSinkId);
     console.log(
       "Dashboard: Output device selection supported:",
