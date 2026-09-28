@@ -366,8 +366,16 @@ def spawn(cmd: Iterable, **kwargs: Any) -> subprocess.Popen:
 
 def named_process(name: str, env: dict) -> subprocess.Popen:
     """A sleeping child the kernel names `name`, which `pgrep -x` then finds as
-    that daemon or session, started with `env` and PATH alone."""
-    proc = spawn([sys.executable, "-c", "import ctypes, sys, time; ctypes.CDLL(None).prctl("
+    that daemon or session, started with `env` and PATH alone.
+
+    It ends on SIGHUP whatever disposition the suite inherited, as the daemons
+    it stands in for handle that signal themselves: under `nohup` an ignored
+    SIGHUP passes to every child, which would then outlive the reload a check
+    waits for. The disposition is reset before the rename, so a child that
+    carries the name already takes the signal.
+    """
+    proc = spawn([sys.executable, "-c", "import ctypes, signal, sys, time; "
+                  "signal.signal(signal.SIGHUP, signal.SIG_DFL); ctypes.CDLL(None).prctl("
                   "15, sys.argv[1].encode(), 0, 0, 0); time.sleep(120)", name],
                  env={"PATH": os.environ.get("PATH", ""), **env})
     deadline = time.time() + 10
