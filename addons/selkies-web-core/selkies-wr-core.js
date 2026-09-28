@@ -62,7 +62,7 @@
  * `setScaleLocally`, `resetResolutionToWindow`, `setManualResolution`,
  * `setUseCssScaling`, `settings`, `command`, `pipelineControl`,
  * `gamepadControl`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
- * `audioDeviceSelected`, `requestFullscreen`, `setSynth`,
+ * `clipboardCopySecret`, `audioDeviceSelected`, `requestFullscreen`, `setSynth`,
  * `showVirtualKeyboard`, `setAntiAliasing`, `setUseBrowserCursors`, `setRawPointerMotion`,
  * `setTrackpadSpeed`, `setGamepadRumble`, `touchinput:trackpad`, `touchinput:touch`, `statsOpen`, plus the `requestFileUpload` DOM
  * event. Window messages posted: `sidebarButtonStatusUpdate`,
@@ -514,7 +514,8 @@ export default function webrtc() {
 		toPng: reencodePngOffThread,
 		canWriteLocal: () => clipboard_seamless && clipboardStatus === 'enabled' && clipboard_out_enabled,
 		binaryEnabled: () => enable_binary_clipboard,
-		onPreview: (text) => window.postMessage(clipboardPreviewMessage(text), window.location.origin),
+		isChromium,
+		onPreview: (text, secret) => window.postMessage(clipboardPreviewMessage(text, secret), window.location.origin),
 		onImageWritten: (mime) => {
 			console.log(`Successfully wrote image (${mime}) from server to local clipboard.`);
 			window.postMessage({
@@ -1923,6 +1924,9 @@ export default function webrtc() {
 			case 'printRequest':
 				printDocument(message.url);
 				break;
+			case 'clipboardCopySecret':
+				incomingClipboard.copySecret();
+				break;
 			case 'clipboardImageUpdate': {
 				// Every skip surfaces a notification: a dead click reads as a bug.
 				if (isSharedMode) {
@@ -3155,11 +3159,11 @@ export default function webrtc() {
 				switch (msg.type) {
 					case 'clipboard-msg':
 						incomingClipboard.single(msg.data.mime_type || 'text/plain', msg.data.content,
-							consumeInitClipboardFetch());
+							consumeInitClipboardFetch(), msg.data.secret === true);
 						break;
 					case 'clipboard-msg-start':
 						incomingClipboard.begin(msg.data.mime_type, msg.data.total_size,
-							consumeInitClipboardFetch());
+							consumeInitClipboardFetch(), msg.data.secret === true);
 						break;
 					case 'clipboard-msg-data':
 						incomingClipboard.push(msg.data.content);

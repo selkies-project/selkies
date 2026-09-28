@@ -103,6 +103,7 @@ from .display_utils_xrandr import (
 )
 from .input_handler import (
     CLIPBOARD_FLAVOURS_MIME,
+    SecretText,
     BULK_DRAIN_TIMEOUT_S,
     WebRTCInput as InputHandler,
     CLIPBOARD_CHUNK_SIZE,
@@ -863,6 +864,11 @@ class SelkiesStreamingApp:
                 clipboard, so a copy made there has no business on a viewer's
                 link.
 
+        Text its owner marked secret (`SecretText`) is preceded by a
+        `clipboard_secret` frame on the same ordered socket, so clients keep it
+        out of sight and take it back off the local clipboard; an empty one
+        says the session's clipboard no longer holds the secret sent before it.
+
         Payload frames get the bulk tolerance the data channel's drain allows
         (a slow link is not a dead client); control frames keep the liveness
         bound, since one stalled client must not wedge clipboard delivery for
@@ -886,6 +892,7 @@ class SelkiesStreamingApp:
                     f"Attempted to send binary clipboard data ({mime_type}) but feature is disabled on server."
                 )
                 return
+            secret = isinstance(data, SecretText)
             data_bytes = data.encode('utf-8') if not is_binary and isinstance(data, str) else data
             total_size = len(data_bytes)
             if total_size:
@@ -941,6 +948,9 @@ class SelkiesStreamingApp:
                         return
                     if reply_to:
                         await _broadcast_to_clients(clients, f"clipboard_reply,{reply_to}",
+                                                    per_client_timeout=2.0, only=cid)
+                    if secret:
+                        await _broadcast_to_clients(clients, "clipboard_secret",
                                                     per_client_timeout=2.0, only=cid)
                     if small:
                         await _broadcast_to_clients(clients, message,

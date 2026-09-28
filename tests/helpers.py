@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 import weakref
-from typing import Any, Iterable, Iterator, NoReturn, Optional
+from typing import Any, Dict, Iterable, Iterator, NoReturn, Optional
 
 REPO = os.environ.get(
     "SELKIES_REPO",
@@ -818,11 +818,13 @@ def x_display() -> Any:
     return xdisp.Display(require_display())
 
 
-def x_own_clipboard(payload: bytes) -> tuple:
+def x_own_clipboard(payload: bytes, extra: Optional[Dict[str, bytes]] = None) -> tuple:
     """Own CLIPBOARD on the test X server and serve selection requests.
 
     Args:
         payload: Bytes handed to any requestor asking for the selection.
+        extra: Further targets offered beside UTF8_STRING, each answered with
+            its own bytes (a password manager's hint, say).
 
     Returns:
         `(display, stop)` where setting `stop["flag"]` ends the serving thread.
@@ -835,6 +837,7 @@ def x_own_clipboard(payload: bytes) -> tuple:
     clip = ext.get_atom("CLIPBOARD")
     utf8 = ext.get_atom("UTF8_STRING")
     targets = ext.get_atom("TARGETS")
+    extras = {ext.get_atom(name): data for name, data in (extra or {}).items()}
     win.set_selection_owner(clip, X.CurrentTime)
     ext.flush()
     import threading
@@ -857,7 +860,9 @@ def x_own_clipboard(payload: bytes) -> tuple:
                 e = ext.next_event()
                 if isinstance(e, xevent.SelectionRequest):
                     if e.target == targets:
-                        e.requestor.change_property(e.property, targets, 32, [utf8])
+                        e.requestor.change_property(e.property, targets, 32, [utf8, *extras])
+                    elif e.target in extras:
+                        e.requestor.change_property(e.property, e.target, 8, extras[e.target])
                     else:
                         # ChangeProperty's length field is 16-bit, so a payload
                         # larger than 64 KiB must be appended in chunks.

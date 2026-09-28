@@ -667,7 +667,9 @@ class _X11ClipboardMonitor:
     a text/uri-list of file:// URIs rather than image bytes and is resolved
     locally, as the xclip path resolves it. Content written from the browser
     is offered on PRIMARY as well as CLIPBOARD, mirroring the middle-click
-    paste the Wayland compositor provides natively.
+    paste the Wayland compositor provides natively. A copy whose owner offers a
+    password manager's hint reads as its text alone, marked `SecretText`, and
+    such text is offered with the hint again.
 
     The Display is opened with a bounded reply wait: the monitor is (re)built
     from the event loop, sometimes while the server is disrupted — exactly
@@ -773,6 +775,7 @@ class _X11ClipboardMonitor:
         self._text_targets = [(self._d.get_atom(t), t) for t in (
             'UTF8_STRING', 'text/plain;charset=utf-8', 'STRING')]
         self._uri_list_atom = self._d.get_atom('text/uri-list')
+        self._secret_hint_atoms = [self._d.get_atom(m) for m in CLIPBOARD_SECRET_HINTS]
         self._d.xfixes_select_selection_input(
             self._win, self._clipboard,
             xfixes.XFixesSetSelectionOwnerNotifyMask
@@ -1081,9 +1084,9 @@ class _X11ClipboardMonitor:
 
     def read(self, use_binary: bool) -> tuple:
         """Blocking read (call via executor): (data, mime) like read_clipboard —
-        text as str with mime 'text/plain', markup with the text beneath it as
-        one envelope under CLIPBOARD_FLAVOURS_MIME, images as bytes with their
-        mime.
+        text as str with mime 'text/plain' (`SecretText` for a copy marked
+        secret), markup with the text beneath it as one envelope under
+        CLIPBOARD_FLAVOURS_MIME, images as bytes with their mime.
 
         Images come first where the caller takes them, since a copied picture
         offers markup of its own (an `img` tag pointing back at a page) that is
@@ -1099,6 +1102,11 @@ class _X11ClipboardMonitor:
             if not reply or reply[1] != 32:
                 return None, None
         offered = set(reply[0])
+        hint = next((atom for atom in self._secret_hint_atoms if atom in offered), None)
+        if hint is not None:
+            got = self._convert_and_wait(hint)
+            if got is not None and got[1] == 8 and clipboard_secret_hint(got[0]):
+                return self._read_secret(offered)
         if use_binary:
             for atom, mime in self._image_targets:
                 if atom in offered:
@@ -1130,6 +1138,17 @@ class _X11ClipboardMonitor:
                 if got is not None and got[0] is not None:
                     return bytes(got[0]).decode('utf-8', errors='replace'), 'text/plain'
         return None, None
+
+    def _read_secret(self, offered: set) -> tuple:
+        """The text of a copy its owner marked secret, as `SecretText`; empty
+        when it offers no text, and (None, None) when the text cannot be read."""
+        atom = next((a for a, _name in self._text_targets if a in offered), None)
+        if atom is None:
+            return SecretText(''), 'text/plain'
+        got = self._convert_and_wait(atom)
+        if got is None or got[0] is None:
+            return None, None
+        return SecretText(bytes(got[0]).decode('utf-8', errors='replace')), 'text/plain'
 
     def _resolve_uri_list_image(self, data_bytes: bytes) -> Optional[tuple]:
         """Resolve a text/uri-list (file-manager copy) to (image_bytes, mime): the
@@ -1171,6 +1190,7 @@ class _X11ClipboardMonitor:
         text. Returns True when ownership was acquired."""
         offerable = dict((m, a) for a, m in self._image_targets)
         offerable['text/html'] = self._html_atom
+        offerable.update(zip(CLIPBOARD_SECRET_HINTS, self._secret_hint_atoms))
         offers: list = []
         for mime_type, data in entries:
             if not data:
@@ -1945,6 +1965,32 @@ def clipboard_flavours(payload: bytes) -> List[Tuple[str, bytes]]:
     if not entries:
         raise ValueError(f"no usable clipboard flavour in {sorted(decoded)}")
     return entries
+
+
+# The target a password manager offers beside a secret it copies, valued
+# `secret` (KeePassXC, KDE), in KDE's spelling and the prefixed ones a toolkit
+# that validates mime types can see.
+CLIPBOARD_SECRET_HINTS = ("x-kde-passwordManagerHint", "text/x-kde-passwordManagerHint",
+                          "application/x-kde-passwordManagerHint")
+
+
+class SecretText(str):
+    """Session clipboard text its owner marked secret (`CLIPBOARD_SECRET_HINTS`).
+
+    The mark rides with the text to the clients, which keep it out of sight and
+    take it back off the local clipboard as far as the browser lets them
+    (lib/clipboard-sync.js), and back onto the session's clipboard when this
+    server writes the text there again. The text alone is carried: markup or a
+    picture beside it would leave the secret where the mark cannot follow. An
+    empty one tells the clients that the session's clipboard no longer holds
+    the secret sent before it.
+    """
+    __slots__ = ()
+
+
+def clipboard_secret_hint(value: Optional[bytes]) -> bool:
+    """Whether a hint target's value marks its copy secret."""
+    return bool(value) and bytes(value).strip(b"\0 \t\r\n") == b"secret"
 
 
 def clipboard_png_beside(mime_type: str, data: bytes) -> Optional[bytes]:
@@ -7170,7 +7216,8 @@ class WebRTCInput:
 
     async def _app_clipboard_read(self, use_binary: bool) -> tuple:
         """Read the selection of the compositor the apps use over the pixelflux
-        data-control ABI; (None, None) when it is empty or unreadable."""
+        data-control ABI; (None, None) when it is empty or unreadable. A copy
+        its owner marked secret reads as its text alone (`SecretText`)."""
         read_fn = getattr(self.wayland_input, 'clipboard_read_app', None)
         types_fn = getattr(self.wayland_input, 'clipboard_types_app', None)
         if read_fn is None or types_fn is None:
@@ -7178,10 +7225,22 @@ class WebRTCInput:
             return None, None
         display = self._app_wayland_display()
         loop = asyncio.get_running_loop()
+        text_mimes = ['text/plain;charset=utf-8', 'text/plain',
+                      'UTF8_STRING', 'STRING', 'TEXT']
         try:
             available_types = await loop.run_in_executor(
                 None, types_fn, display)
             self._app_clip_read_failure = None
+            hint = next((m for m in CLIPBOARD_SECRET_HINTS if m in available_types), None)
+            if hint is not None and clipboard_secret_hint(
+                    await loop.run_in_executor(None, read_fn, display, hint)):
+                source_mime = next((m for m in text_mimes if m in available_types), None)
+                if source_mime is None:
+                    return SecretText(''), 'text/plain'
+                data = await loop.run_in_executor(None, read_fn, display, source_mime)
+                if data is None:
+                    return None, None
+                return SecretText(bytes(data).decode('utf-8', errors='replace')), 'text/plain'
             if use_binary:
                 image_mimes = ['image/png', 'image/jpeg', 'image/bmp', 'image/webp',
                                'image/svg+xml', 'image/svg']
@@ -7202,8 +7261,6 @@ class WebRTCInput:
                             None, read_fn, display, beside) or b'')
                     entries = [("text/html", bytes(html))] + ([("text/plain", plain)] if plain else [])
                     return clipboard_envelope(entries), CLIPBOARD_FLAVOURS_MIME
-            text_mimes = ['text/plain;charset=utf-8', 'text/plain',
-                          'UTF8_STRING', 'STRING', 'TEXT']
             source_mime = next((m for m in text_mimes if m in available_types), None)
             if source_mime:
                 data = await loop.run_in_executor(None, read_fn, display, source_mime)
@@ -7223,12 +7280,20 @@ class WebRTCInput:
         """What the capture compositor's own selection reads as, from the
         flavours its callback delivered: a picture as bytes with its mime where
         pictures are taken, markup with the text beneath it as one envelope,
-        text as str; (None, None) for a picture where none is taken."""
+        text as str, and the text alone as `SecretText` where the owner marked
+        the copy secret; (None, None) for a picture where none is taken, and
+        for a cleared selection, which is delivered without flavours."""
+        hinted = any(mime in CLIPBOARD_SECRET_HINTS and clipboard_secret_hint(data)
+                     for mime, data in entries)
+        entries = [(mime, data) for mime, data in entries if mime not in CLIPBOARD_SECRET_HINTS]
+        plain = next((data for mime, data in entries
+                      if mime != 'text/html' and not mime.startswith('image/')), None)
+        if hinted:
+            return SecretText((plain or b'').decode('utf-8', errors='replace')), 'text/plain'
         image = next(((data, mime) for mime, data in entries if mime.startswith('image/')), None)
         if image is not None:
             return image if use_binary else (None, None)
         html = next((data for mime, data in entries if mime == 'text/html'), None)
-        plain = next((data for mime, data in entries if mime != 'text/html'), None)
         if html:
             return clipboard_envelope([("text/html", html)] + ([("text/plain", plain)] if plain else [])), \
                 CLIPBOARD_FLAVOURS_MIME
@@ -7253,10 +7318,10 @@ class WebRTCInput:
                 before falling back to text.
 
         Returns:
-            (data, mime): text as str with mime 'text/plain', markup with the
-            text beneath it as one envelope under CLIPBOARD_FLAVOURS_MIME,
-            images as bytes with their mime, or (None, None) when nothing is
-            readable.
+            (data, mime): text as str with mime 'text/plain' (`SecretText` for a
+            copy its owner marked secret), markup with the text beneath it as
+            one envelope under CLIPBOARD_FLAVOURS_MIME, images as bytes with
+            their mime, or (None, None) when nothing is readable.
         """
         if self.is_wayland:
             monitor = await self._ensure_x11_clipboard_monitor_async()
@@ -7291,7 +7356,16 @@ class WebRTCInput:
             if proc_targets.returncode != 0:
                 return None, None
             targets = stdout_targets.decode().strip().split('\n')
-            if use_binary:
+            secret = False
+            hint = next((m for m in CLIPBOARD_SECRET_HINTS if m in targets), None)
+            if hint is not None:
+                proc_hint = await subprocess.create_subprocess_exec(
+                    "xclip", "-selection", "clipboard", "-o", "-t", hint,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                stdout_hint, _ = await self._communicate_or_kill(proc_hint, 1, f"xclip {hint}")
+                secret = proc_hint.returncode == 0 and clipboard_secret_hint(stdout_hint)
+            if use_binary and not secret:
                 for mime_type in ['image/png', 'image/jpeg', 'image/bmp', 'image/webp',
                                   'image/svg+xml', 'image/svg']:
                     if mime_type in targets:
@@ -7337,8 +7411,9 @@ class WebRTCInput:
                 )
                 stdout_text, _ = await self._communicate_or_kill(proc_text, 1, "xclip UTF8_STRING")
                 if proc_text.returncode == 0:
-                    return stdout_text.decode(), 'text/plain'
-            return None, None
+                    text = stdout_text.decode()
+                    return (SecretText(text) if secret else text), 'text/plain'
+            return (SecretText(''), 'text/plain') if secret else (None, None)
         except FileNotFoundError:
             if not self._xclip_missing_warned:
                 self._xclip_missing_warned = True
@@ -7366,7 +7441,8 @@ class WebRTCInput:
 
         An image in another format is offered as PNG as well, first, since
         that is what most applications paste (`clipboard_png_beside`), which
-        makes the PNG the flavour read back. The client's messages wait for
+        makes the PNG the flavour read back. `SecretText` is offered with the
+        hint that marked it, so the session's clipboard history skips it again. The client's messages wait for
         this write, so the conversion is waited for only briefly: a photo
         taking longer is offered as it came at once, and the PNG joins it
         when ready unless something newer took the clipboard meanwhile.
@@ -7418,6 +7494,8 @@ class WebRTCInput:
         # against; `flavours` is everything the copy carried, offered together.
         entries = [(m, d if isinstance(d, bytes) else d.encode('utf-8'))
                    for m, d in (flavours or [(mime_type, input_bytes)])]
+        if isinstance(data, SecretText):
+            entries += [(hint, b"secret") for hint in CLIPBOARD_SECRET_HINTS]
 
         if self.is_wayland:
             if not self._has_separate_app_compositor():
@@ -7687,6 +7765,11 @@ class WebRTCInput:
         change events during that stretch were skipped and a copy made before
         any client connected would otherwise never arrive.
 
+        A selection that goes empty, or unreadable, after a `SecretText` was
+        broadcast is broadcast as an empty one, so the clients take the secret
+        back as the session's clipboard lets it go (a password manager clearing
+        its copy); any other copy retracts it by replacing it.
+
         The compositor callback watches the capture compositor's selection;
         with a separate app compositor the apps' copies land on its selection
         instead, watched through the data-control client, which is (re)armed
@@ -7725,6 +7808,7 @@ class WebRTCInput:
         first_pass = True
         had_consumers = False
         reread_pending = 0
+        secret_out = False
         try:
             while self.clipboard_running:
                 try:
@@ -7799,9 +7883,9 @@ class WebRTCInput:
                             changed = False
                     elif app_watch_queue is not None:
                         try:
-                            await asyncio.wait_for(app_watch_queue.get(), 2.0)
+                            # No mimes is a cleared selection: nothing to settle and re-read.
+                            from_edge = bool(await asyncio.wait_for(app_watch_queue.get(), 2.0))
                             changed = True
-                            from_edge = True
                         except asyncio.TimeoutError:
                             changed = False
                             # A watch on a dead compositor never fires again; a dead
@@ -7856,6 +7940,8 @@ class WebRTCInput:
                         curr_data_bytes = curr_data.encode('utf-8') if isinstance(curr_data, str) else curr_data
                     if curr_data_bytes is None and from_edge:
                         reread_pending = _CLIPBOARD_REREAD_ATTEMPTS
+                    if curr_data_bytes is None and secret_out and not reread_pending:
+                        curr_data, curr_mime, curr_data_bytes = SecretText(''), 'text/plain', b''
                     # The baseline exists to swallow this server's own write
                     # coming back. A delivery that is neither that write nor an
                     # arm's staged read is a copy someone made, and a client
@@ -7878,6 +7964,7 @@ class WebRTCInput:
                             recopied or curr_data_bytes != self._clipboard_last_bytes):
                         logger_webrtc_input.debug(f"Clipboard changed. Sending content ({curr_mime})")
                         self._clipboard_last_bytes = curr_data_bytes
+                        secret_out = isinstance(curr_data, SecretText) and bool(curr_data)
                         self._spawn_task(self.on_clipboard_read(curr_data, curr_mime),
                                          name="ClipboardBroadcast")
                 except asyncio.CancelledError:

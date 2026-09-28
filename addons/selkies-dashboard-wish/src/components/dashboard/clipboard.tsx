@@ -18,9 +18,10 @@ import { t } from "@/i18n";
  *
  * Reads `clipboardContentUpdate` and `serverSettings` messages from the core
  * and posts `clipboardUpdateFromUI` (text, on blur), `clipboardImageUpdate`
- * (an image blob), and `settings` (the `enable_binary_clipboard` toggle, which
- * the core persists). A rejected non-image file is reported through the
- * `fileUpload` warning channel core-emitted clipboard skips use.
+ * (an image blob), `clipboardCopySecret` (the masked secret's copy button), and
+ * `settings` (the `enable_binary_clipboard` toggle, which the core persists). A
+ * rejected non-image file is reported through the `fileUpload` warning channel
+ * core-emitted clipboard skips use.
  *
  * The image picker belongs to the page, not to the panel: the panel lives in a
  * menu that closes, unmounting everything in it, the moment the browser's file
@@ -64,16 +65,22 @@ function pickClipboardImage(onPicked: (file: File) => void): void {
  * when its submenu opens, usually long after the core last reported the
  * clipboard. Large server clipboards arrive as a bounded, truncated preview;
  * editing it would echo the cut-down text back over the real server
- * clipboard on blur, so truncated content renders read-only.
+ * clipboard on blur, so truncated content renders read-only. Text the
+ * session's owner marked secret arrives as that flag alone and renders masked
+ * and read-only, with a button that has the core copy it to this device.
  */
 /** Tallest the preview is shown, matching the max-h-32 the canvas carries. */
 const PREVIEW_MAX_PX = 128;
+/** What the clipboard box shows for a secret, which the core never hands over. */
+const CLIPBOARD_SECRET_MASK = '\u2022'.repeat(8);
 
 export function Clipboard() {
 	const [dashboardClipboardContent, setDashboardClipboardContent] = useState(
 		() => getLastClipboardContent()?.text ?? '');
 	const [clipboardTruncated, setClipboardTruncated] = useState(
 		() => getLastClipboardContent()?.truncated ?? false);
+	const [clipboardSecret, setClipboardSecret] = useState(
+		() => getLastClipboardContent()?.secret ?? false);
 	const [clipboardImage, setClipboardImage] = useState<File | null>(() => lastPickedImage);
 	const previewRef = useRef<HTMLCanvasElement>(null);
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
@@ -122,6 +129,7 @@ export function Clipboard() {
 				if (typeof message.text === 'string') {
 					setDashboardClipboardContent(message.text);
 					setClipboardTruncated(message.truncated === true);
+					setClipboardSecret(message.secret === true);
 				}
 			}
 
@@ -151,8 +159,13 @@ export function Clipboard() {
 	};
 
 	const handleClipboardBlur = (event: React.FocusEvent<HTMLTextAreaElement>) => {
-		if (clipboardTruncated) return;
+		if (clipboardTruncated || clipboardSecret) return;
 		window.postMessage({ type: 'clipboardUpdateFromUI', text: event.target.value }, window.location.origin);
+	};
+
+	/** Has the core write the masked secret to this device's clipboard, inside this click. */
+	const handleCopySecret = () => {
+		window.postMessage({ type: 'clipboardCopySecret' }, window.location.origin);
 	};
 
 	/** Sends a picked image to the session clipboard, or reports a non-image. */
@@ -256,14 +269,23 @@ export function Clipboard() {
 			<Label htmlFor="dashboardClipboardTextarea">{t('sections.clipboard.title')}</Label>
 			<Textarea
 				id="dashboardClipboardTextarea"
-				value={dashboardClipboardContent}
+				value={clipboardSecret ? CLIPBOARD_SECRET_MASK : dashboardClipboardContent}
 				onChange={handleClipboardChange}
 				onBlur={handleClipboardBlur}
-				readOnly={clipboardTruncated}
+				readOnly={clipboardTruncated || clipboardSecret}
 				rows={5}
 				placeholder={t('clipboard.inputPlaceholder')}
 				className="allow-native-input resize-none bg-background/95 overflow-y-auto max-h-[150px]"
 			/>
+
+			{clipboardSecret && (
+				<div className="flex flex-col gap-2">
+					<p className="text-xs text-muted-foreground">{t('sections.clipboard.secretHidden')}</p>
+					<Button variant="outline" size="sm" onClick={handleCopySecret}>
+						{t('sections.clipboard.copySecret')}
+					</Button>
+				</div>
+			)}
 
 			{/* Image writes need the binary clipboard: the server drops them otherwise. */}
 			{(renderableSettings.binaryClipboard ?? true) && enableBinaryClipboard && (

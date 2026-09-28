@@ -75,7 +75,10 @@ export function getPrefixedKey(key: string): string {
 export interface PrintJob { name: string; url: string }
 
 let lastServerSettings: any = null;
-let lastClipboardContent: { text: string; truncated: boolean } | null = null;
+/** The server clipboard preview; a secret arrives as the flag alone, never its text. */
+export interface ClipboardPreview { text: string; truncated: boolean; secret: boolean }
+
+let lastClipboardContent: ClipboardPreview | null = null;
 let printJobs: PrintJob[] = [];
 let lastEffectiveCursorState: boolean | null = null;
 const lastAudioDevices: { input: string | null; output: string | null } = { input: null, output: null };
@@ -87,7 +90,8 @@ if (typeof window !== 'undefined') {
     if (message.type === 'serverSettings') {
       lastServerSettings = message.payload;
     } else if (message.type === 'clipboardContentUpdate' && typeof message.text === 'string') {
-      lastClipboardContent = { text: message.text, truncated: message.truncated === true };
+      lastClipboardContent = { text: message.text, truncated: message.truncated === true,
+        secret: message.secret === true };
     } else if (message.type === 'effectiveCursorState' && typeof message.value === 'boolean') {
       lastEffectiveCursorState = message.value;
     } else if (message.type === 'audioDeviceSelected' && message.deviceId) {
@@ -111,7 +115,7 @@ export function getLastServerSettings(): any {
 }
 
 /** The last server clipboard preview; the core emits it only on clipboard events. */
-export function getLastClipboardContent(): { text: string; truncated: boolean } | null {
+export function getLastClipboardContent(): ClipboardPreview | null {
   return lastClipboardContent;
 }
 

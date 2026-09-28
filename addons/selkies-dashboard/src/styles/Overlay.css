@@ -1020,6 +1020,11 @@ body {
     opacity: 0.8;
 }
 
+.dashboard-clipboard-note {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
 /* --- Gamepad Visualizer Styles --- */
 .gamepad-visualizer-instance {
     margin-bottom: 20px;

@@ -107,6 +107,7 @@ from .display_utils import LOST_FRAME_MEMORY
 from .webrtc_media_pipeline import MediaPipeline
 from .input_handler import (
     BULK_DRAIN_TIMEOUT_S,
+    SecretText,
     gamepad_slot_denied,
     VIEWER_ALLOWED_PREFIXES,
     VIEWER_COLLAB_EXTRA_PREFIXES,
@@ -737,7 +738,12 @@ class RTCApp:
         a small copy made during a large transfer would otherwise reach the
         client first and be overwritten when the older payload completes. A
         tagged reply is neither superseded nor supersedes, since its payload is
-        only cached and never pasted.
+        only cached and never pasted. Text its owner marked secret
+        (`SecretText`) carries `secret` on its clipboard-msg or
+        clipboard-msg-start payload, so clients keep it out of sight and take
+        it back off the local clipboard; an empty one, sent like any other
+        announcement, says the session's clipboard no longer holds the secret
+        sent before it.
 
         Args:
             data: Clipboard payload; str is UTF-8 encoded before sending.
@@ -758,7 +764,8 @@ class RTCApp:
                 never takes the session's clipboard, so a copy made there has
                 no business on a viewer's channel.
         """
-        if not data and not reply_to:
+        secret = isinstance(data, SecretText)
+        if not data and not reply_to and not secret:
             return
 
         is_text = mime_type == "text/plain"
@@ -804,6 +811,8 @@ class RTCApp:
             }
             if reply_to:
                 payload["reply_to"] = reply_to
+            if secret:
+                payload["secret"] = True
 
             async def deliver_whole(channel: Any) -> None:
                 async with locks.setdefault(id(channel), asyncio.Lock()):
@@ -819,6 +828,8 @@ class RTCApp:
             }
             if reply_to:
                 start_payload["reply_to"] = reply_to
+            if secret:
+                start_payload["secret"] = True
             offsets = list(range(0, len(data_bytes), clipboard_chunk_size))
             prepared: dict = {}
             prepare_lock = asyncio.Lock()

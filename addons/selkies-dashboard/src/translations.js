@@ -185,6 +185,8 @@ const en = {
             downDetails: "Carry what the remote session copies out to this browser.",
             seamlessLabel: "Seamless",
             seamlessDetails: "Follow every copy on either side automatically. Off, clipboard content moves only through the box below.",
+            secretHidden: "Hidden: the application that copied this marked it as a password.",
+            copySecret: "Copy hidden text",
         },
         files: {
             title: "Files",
@@ -478,6 +480,8 @@ const es = {
              downDetails: "Trae a este navegador lo que copia la sesión remota.",
              seamlessLabel: "Sincronización continua",
              seamlessDetails: "Sigue automáticamente cada copia de ambos lados. Desactivado, el contenido solo se mueve por el cuadro de abajo.",
+             secretHidden: "Oculto: la aplicación que lo copió lo marcó como contraseña.",
+             copySecret: "Copiar texto oculto",
         },
         files: {
              title: "Archivos",
@@ -771,6 +775,8 @@ const zh_cn = {
             downDetails: "把远程会话复制的内容带到此浏览器。",
             seamlessLabel: "无缝同步",
             seamlessDetails: "自动跟随两侧的每次复制。关闭后，内容仅通过下方的文本框传输。",
+            secretHidden: "已隐藏：复制它的应用将其标记为密码。",
+            copySecret: "复制隐藏的文本",
         },
         files: {
             title: "文件",
@@ -1064,6 +1070,8 @@ const hi = {
             downDetails: "दूरस्थ सत्र जो कॉपी करता है उसे इस ब्राउज़र में लाता है।",
             seamlessLabel: "निर्बाध सिंक",
             seamlessDetails: "दोनों ओर की हर कॉपी का स्वतः अनुसरण करता है। बंद होने पर सामग्री केवल नीचे दिए बॉक्स से जाती है।",
+            secretHidden: "छिपाया गया: इसे कॉपी करने वाले ऐप्लिकेशन ने इसे पासवर्ड के रूप में चिह्नित किया है।",
+            copySecret: "छिपा हुआ टेक्स्ट कॉपी करें",
         },
         files: {
             title: "फ़ाइलें",
@@ -1357,6 +1365,8 @@ const pt = {
             downDetails: "Traz para este navegador o que a sessão remota copia.",
             seamlessLabel: "Sincronização contínua",
             seamlessDetails: "Acompanha automaticamente cada cópia dos dois lados. Desligado, o conteúdo só se move pela caixa abaixo.",
+            secretHidden: "Oculto: o aplicativo que o copiou marcou-o como senha.",
+            copySecret: "Copiar texto oculto",
         },
         files: {
             title: "Arquivos",
@@ -1650,6 +1660,8 @@ const fr = {
             downDetails: "Apporte à ce navigateur ce que la session distante copie.",
             seamlessLabel: "Synchronisation continue",
             seamlessDetails: "Suit automatiquement chaque copie des deux côtés. Désactivé, le contenu ne circule que par le champ ci-dessous.",
+            secretHidden: "Masqué : l'application qui l'a copié l'a marqué comme mot de passe.",
+            copySecret: "Copier le texte masqué",
         },
         files: {
             title: "Fichiers",
@@ -1944,6 +1956,8 @@ const ru = {
             downDetails: "Переносит в этот браузер то, что копирует удалённая сессия.",
             seamlessLabel: "Непрерывная синхронизация",
             seamlessDetails: "Автоматически следует за каждым копированием с обеих сторон. При отключении содержимое передаётся только через поле ниже.",
+            secretHidden: "Скрыто: приложение, скопировавшее это, пометило его как пароль.",
+            copySecret: "Копировать скрытый текст",
         },
         files: {
             title: "Файлы",
@@ -2237,6 +2251,8 @@ const de = {
             downDetails: "Überträgt in diesen Browser, was die entfernte Sitzung kopiert.",
             seamlessLabel: "Nahtlose Synchronisierung",
             seamlessDetails: "Folgt automatisch jeder Kopie auf beiden Seiten. Ausgeschaltet bewegt sich Inhalt nur über das Feld unten.",
+            secretHidden: "Verborgen: Die Anwendung, die dies kopiert hat, hat es als Passwort markiert.",
+            copySecret: "Verborgenen Text kopieren",
         },
         files: {
             title: "Dateien",
@@ -2530,6 +2546,8 @@ const tr = {
             downDetails: "Uzak oturumun kopyaladığını bu tarayıcıya taşır.",
             seamlessLabel: "Kesintisiz eşitleme",
             seamlessDetails: "Her iki taraftaki her kopyalamayı otomatik izler. Kapalıyken içerik yalnızca aşağıdaki kutudan taşınır.",
+            secretHidden: "Gizli: bunu kopyalayan uygulama onu parola olarak işaretledi.",
+            copySecret: "Gizli metni kopyala",
         },
         files: {
             title: "Dosyalar",
@@ -2823,6 +2841,8 @@ const it = {
             downDetails: "Porta in questo browser ciò che copia la sessione remota.",
             seamlessLabel: "Sincronizzazione continua",
             seamlessDetails: "Segue automaticamente ogni copia da entrambi i lati. Disattivato, il contenuto si sposta solo tramite il riquadro sottostante.",
+            secretHidden: "Nascosto: l'applicazione che l'ha copiato lo ha contrassegnato come password.",
+            copySecret: "Copia testo nascosto",
         },
         files: {
             title: "File",
@@ -3116,6 +3136,8 @@ const nl = {
             downDetails: "Brengt wat de externe sessie kopieert naar deze browser.",
             seamlessLabel: "Naadloze synchronisatie",
             seamlessDetails: "Volgt automatisch elke kopie aan beide kanten. Uit verplaatst inhoud alleen via het vak hieronder.",
+            secretHidden: "Verborgen: de toepassing die dit kopieerde, heeft het als wachtwoord gemarkeerd.",
+            copySecret: "Verborgen tekst kopiëren",
         },
         files: {
             title: "Bestanden",
@@ -3409,6 +3431,8 @@ const ar = {
             downDetails: "ينقل ما تنسخه الجلسة البعيدة إلى هذا المتصفح.",
             seamlessLabel: "مزامنة سلسة",
             seamlessDetails: "يتابع تلقائيًا كل نسخ على الجانبين. عند الإيقاف ينتقل المحتوى عبر المربع أدناه فقط.",
+            secretHidden: "مخفي: وسم التطبيق الذي نسخ هذا النص على أنه كلمة مرور.",
+            copySecret: "نسخ النص المخفي",
         },
         files: {
             title: "الملفات",
@@ -3702,6 +3726,8 @@ const ko = {
             downDetails: "원격 세션이 복사한 내용을 이 브라우저로 옮깁니다.",
             seamlessLabel: "자동 동기화",
             seamlessDetails: "양쪽의 모든 복사를 자동으로 따라갑니다. 끄면 아래 상자를 통해서만 내용이 이동합니다.",
+            secretHidden: "숨김: 이 내용을 복사한 애플리케이션이 비밀번호로 표시했습니다.",
+            copySecret: "숨겨진 텍스트 복사",
         },
         files: {
             title: "파일",
@@ -3995,6 +4021,8 @@ const ja = {
             downDetails: "リモートセッションがコピーした内容をこのブラウザーに渡します。",
             seamlessLabel: "シームレス同期",
             seamlessDetails: "両側のコピーを自動で追従します。オフのときは下のボックス経由でのみ移動します。",
+            secretHidden: "非表示: コピー元のアプリケーションがパスワードとしてマークしました。",
+            copySecret: "非表示のテキストをコピー",
         },
         files: {
             title: "ファイル",
@@ -4288,6 +4316,8 @@ const vi = {
             downDetails: "Đưa những gì phiên từ xa sao chép về trình duyệt này.",
             seamlessLabel: "Đồng bộ liền mạch",
             seamlessDetails: "Tự động theo mọi thao tác sao chép ở cả hai phía. Khi tắt, nội dung chỉ di chuyển qua ô bên dưới.",
+            secretHidden: "Đã ẩn: ứng dụng đã sao chép nội dung này đánh dấu nó là mật khẩu.",
+            copySecret: "Sao chép văn bản ẩn",
         },
         files: {
             title: "Tệp",
@@ -4581,6 +4611,8 @@ const th = {
             downDetails: "นำสิ่งที่เซสชันระยะไกลคัดลอกมายังเบราว์เซอร์นี้",
             seamlessLabel: "ซิงก์ต่อเนื่อง",
             seamlessDetails: "ติดตามการคัดลอกทุกครั้งจากทั้งสองฝั่งโดยอัตโนมัติ เมื่อปิด เนื้อหาจะย้ายผ่านกล่องด้านล่างเท่านั้น",
+            secretHidden: "ซ่อนไว้: แอปพลิเคชันที่คัดลอกข้อความนี้ทำเครื่องหมายว่าเป็นรหัสผ่าน",
+            copySecret: "คัดลอกข้อความที่ซ่อนไว้",
         },
         files: {
             title: "ไฟล์",
@@ -4874,6 +4906,8 @@ const fil = {
             downDetails: "Dinadala sa browser na ito ang kinokopya ng remote session.",
             seamlessLabel: "Tuloy-tuloy na sync",
             seamlessDetails: "Awtomatikong sinusundan ang bawat kopya sa magkabilang panig. Kapag naka-off, dumadaan lang ang nilalaman sa kahon sa ibaba.",
+            secretHidden: "Nakatago: minarkahan ito bilang password ng application na kumopya nito.",
+            copySecret: "Kopyahin ang nakatagong text",
         },
         files: {
             title: "Mga File",
@@ -5167,6 +5201,8 @@ const da = {
             downDetails: "Fører det, den eksterne session kopierer, til denne browser.",
             seamlessLabel: "Sømløs synkronisering",
             seamlessDetails: "Følger automatisk hver kopiering på begge sider. Slået fra flyttes indhold kun via feltet nedenfor.",
+            secretHidden: "Skjult: programmet, der kopierede dette, markerede det som en adgangskode.",
+            copySecret: "Kopiér skjult tekst",
         },
         files: {
             title: "Filer",
@@ -5460,6 +5496,8 @@ const zh_tw = {
             downDetails: "將遠端連線中複製的內容帶到瀏覽器。",
             seamlessLabel: "無縫切換",
             seamlessDetails: "自動偵測遠端/本地兩側的每一次複製操作。若關閉此功能，剪貼簿內容僅透過下方的輸入框進行傳遞。",
+            secretHidden: "已隱藏：複製它的應用程式將其標記為密碼。",
+            copySecret: "複製隱藏的文字",
         },
         files: {
             title: "檔案",

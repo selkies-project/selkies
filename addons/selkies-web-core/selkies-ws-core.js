@@ -44,7 +44,7 @@
  * `DISPLAY_CONFIG_UPDATE,{json}`, `cursor,{json}`, `system,{json}`,
  * `KILL <reason>`, the clipboard family (`clipboard,`, `clipboard_binary,`,
  * `clipboard_start,`, `clipboard_data,`, `clipboard_finish`,
- * `clipboard_reply,`), and JSON objects typed `server_settings`,
+ * `clipboard_reply,`, `clipboard_secret`), and JSON objects typed `server_settings`,
  * `server_apps`, `pipeline_status`, `stream_resolution`, `stream_info`, and
  * `stream_stats` (lib/stream-stats.js).
  *
@@ -66,7 +66,7 @@
  * `setUseBrowserCursors`, `setRawPointerMotion`, `setTrackpadSpeed`,
  * `setGamepadRumble`, `setManualResolution`, `resetResolutionToWindow`,
  * `settings`, `getStats`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
- * `pipelineStatusUpdate`, `pipelineControl`, `audioDeviceSelected`,
+ * `clipboardCopySecret`, `pipelineStatusUpdate`, `pipelineControl`, `audioDeviceSelected`,
  * `gamepadControl`, `requestFullscreen`, `command`, `touchinput:trackpad`,
  * `touchinput:touch`, `sidebarVisibilityChanged`, and `statsOpen`, and posts
  * `pipelineStatusUpdate`, `sidebarButtonStatusUpdate`, `serverSettings`,
@@ -735,7 +735,8 @@ const incomingClipboard = createIncomingClipboard({
   toPng: reencodePngOffThread,
   canWriteLocal: () => clipboard_out_enabled && clipboard_seamless,
   binaryEnabled: () => enable_binary_clipboard,
-  onPreview: (text) => window.postMessage(clipboardPreviewMessage(text), window.location.origin),
+  isChromium,
+  onPreview: (text, secret) => window.postMessage(clipboardPreviewMessage(text, secret), window.location.origin),
   onImageWritten: (mime) => {
     console.log(`Successfully wrote image (${mime}) from server to local clipboard.`);
     window.postMessage({
@@ -5014,6 +5015,9 @@ function receiveMessage(event) {
     case 'printRequest':
       printDocument(message.url);
       break;
+    case 'clipboardCopySecret':
+      incomingClipboard.copySecret();
+      break;
     case 'clipboardImageUpdate': {
       if (isSharedMode) {
         console.log("Shared mode: Clipboard image write to server blocked.");
@@ -8170,6 +8174,8 @@ class WorkerWebSocket {
           }
         } else if (event.data.startsWith('clipboard_reply,')) {
             if (event.data.substring(16) === 'cr') armTaggedClipboardReply();
+        } else if (event.data === 'clipboard_secret') {
+            incomingClipboard.markSecret();
         } else if (event.data.startsWith('clipboard_start,')) {
             const parts = event.data.split(',');
             // Consumed at a payload's first frame, so message order decides which payload settles the connect-time fetch.

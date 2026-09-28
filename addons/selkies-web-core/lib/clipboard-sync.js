@@ -12,7 +12,9 @@
  * never re-crosses the transport in either direction), `createIncomingClipboard`
  * is the server-to-client path (reassembly through `createMultipartClipboardState`,
  * the cache, and the local write, issued when a payload is announced),
- * `createTaggedClipboardFetch` marks the connect-time cache-only fetch,
+ * `createSecretClipboardGuard` takes a secret the session copied back off the
+ * local clipboard, `createTaggedClipboardFetch` marks the connect-time
+ * cache-only fetch,
  * `createLocalClipboardSender` is the focus-driven local-to-server path,
  * `createDeferredClipboardWriter` keeps a write the engine refused (no focus,
  * no user activation) for the next gesture, `localClipboardBlocker` names what
@@ -496,6 +498,8 @@ export function createLocalClipboardSender({
  * @property {() => (Promise<boolean>|null)} getLanding The most recent
  *     attempt once its payload is complete, or `null`.
  * @property {() => boolean} hasPending Whether a write is stashed or in flight.
+ * @property {() => number} issued How many writes have been issued, which
+ *     tells whether one was issued since a given moment.
  */
 
 /**
@@ -593,17 +597,120 @@ export function createDeferredClipboardWriter() {
         getInFlight: () => (inFlight ? inFlight.promise : null),
         getLanding: () => (inFlight && inFlight.settled ? inFlight.promise : null),
         hasPending: () => !!pending || !!inFlight,
+        issued: () => writeSeq,
+    };
+}
+
+/** How long a secret the session copied may stay on the local clipboard. */
+export const SECRET_CLIPBOARD_TTL_MS = 60000;
+
+/**
+ * @typedef {object} SecretClipboardGuard
+ * @property {(text: string) => void} landed A secret reached the local
+ *     clipboard: it is taken back once its time is up.
+ * @property {(text: string) => boolean} holds Whether `text` is the secret
+ *     being watched.
+ * @property {() => void} retract The session's clipboard moved on: the secret
+ *     is taken back now.
+ */
+
+/**
+ * Takes a secret the session copied back off the local clipboard.
+ *
+ * A password manager marks what it copies so that no clipboard history keeps
+ * it, and empties its own clipboard after a while. A page can put no such mark
+ * on what it writes, so a secret written here is taken back instead:
+ * `SECRET_CLIPBOARD_TTL_MS` after it landed, or as soon as the session's
+ * clipboard moves on, whichever comes first -- and only while the local
+ * clipboard still holds it, since anything else there is a copy made since.
+ * The check waits a task, so the write of the payload that retracted the
+ * secret is issued first; a write issued before the check lands before it,
+ * and one issued during it cancels the clear, since either replaces the
+ * secret itself.
+ *
+ * Only Chromium lets a page read and write the clipboard without a user
+ * gesture, and only with the clipboard-read permission granted (asking from a
+ * timer would raise the prompt) and the document focused, so an unfocused page
+ * takes the secret back when it is focused again. Firefox and WebKit refuse
+ * both outside a gesture, and a read inside one raises their paste prompt
+ * whenever another application's copy is on the clipboard, so there nothing is
+ * watched and the secret stays until something replaces it.
+ * @param {object} hooks
+ * @param {boolean} hooks.isChromium Engine flag.
+ * @param {DeferredClipboardWriter} hooks.writer The local writer, whose writes
+ *     settle first.
+ * @param {() => void} hooks.onCleared The secret was taken back.
+ * @returns {SecretClipboardGuard}
+ */
+export function createSecretClipboardGuard({ isChromium, writer, onCleared }) {
+    let secret = null;
+
+    async function takeBack() {
+        const s = secret;
+        if (!s || !s.due || s.busy) return;
+        s.busy = true;
+        try {
+            for (let w = writer.getInFlight(); w; w = writer.getInFlight()) await w.catch(() => {});
+            // A write the engine refused lands at the next gesture, over the secret.
+            if (secret !== s || writer.hasPending() || !document.hasFocus()) return;
+            const permission = await navigator.permissions.query({ name: 'clipboard-read' });
+            if (permission.state === 'denied') secret = null;
+            if (secret !== s || permission.state !== 'granted') return;
+            const issued = writer.issued();
+            const held = await navigator.clipboard.readText();
+            if (secret !== s) return;
+            if (held !== s.text) {
+                secret = null;
+                return;
+            }
+            if (writer.issued() !== issued) return;
+            await navigator.clipboard.writeText('');
+            if (secret === s) secret = null;
+            onCleared();
+        } catch (_) {
+            // Unfocused again or refused: the next focus tries again.
+        } finally {
+            s.busy = false;
+        }
+    }
+
+    function due(s) {
+        clearTimeout(s.timer);
+        s.due = true;
+        setTimeout(takeBack, 0);
+    }
+
+    if (isChromium && typeof window !== 'undefined') {
+        window.addEventListener('focus', () => { if (secret && secret.due) takeBack(); });
+    }
+
+    return {
+        landed(text) {
+            if (!isChromium) return;
+            if (secret) clearTimeout(secret.timer);
+            const s = { text, due: false, busy: false, timer: null };
+            s.timer = setTimeout(() => due(s), SECRET_CLIPBOARD_TTL_MS);
+            secret = s;
+        },
+        holds: (text) => !!secret && secret.text === text,
+        retract() {
+            if (secret) due(secret);
+        },
     };
 }
 
 /**
  * @typedef {object} IncomingClipboard
- * @property {(mime: string, total: number, cacheOnly: boolean) => void} begin
+ * @property {(mime: string, total: number, cacheOnly: boolean, secret?: boolean) => void} begin
  *     Announces a multipart payload of `total` bytes.
  * @property {(b64: string) => void} push Hands one base64 chunk on.
  * @property {() => void} finish Ends the multipart payload.
- * @property {(mime: string, b64: string, cacheOnly: boolean) => void} single
+ * @property {(mime: string, b64: string, cacheOnly: boolean, secret?: boolean) => void} single
  *     Takes a whole payload carried by one message.
+ * @property {() => void} markSecret Marks the next payload secret, for a
+ *     transport that says so in a message of its own ahead of it.
+ * @property {() => Promise<boolean>} copySecret Writes the session's secret to
+ *     the local clipboard, inside the gesture of a user who asked for it.
  * @property {() => void} reset Drops a payload in progress.
  */
 
@@ -633,6 +740,15 @@ export function createDeferredClipboardWriter() {
  * dropped content would otherwise read as already held and never land.
  * `cacheOnly` marks the reply to the connect-time fetch, which fills the cache
  * and preview but never the local clipboard.
+ *
+ * A `secret` payload is text a password manager copied in the session. Its
+ * preview reaches the dashboards masked, never as the text, and nothing of it
+ * is stored anywhere but this module's memory; written locally, it is watched
+ * by `createSecretClipboardGuard`, which takes it back when its time is up or
+ * when any later payload shows the session's clipboard moved on. An empty
+ * secret is that retraction without a replacement: the session's clipboard no
+ * longer holds the secret, so nothing is written, and the local copy is taken
+ * back where it is still there.
  * @param {object} hooks
  * @param {{decode: Function, decodeStream: Function}} hooks.worker The
  *     clipboard worker bridge.
@@ -642,21 +758,31 @@ export function createDeferredClipboardWriter() {
  * @param {() => boolean} hooks.canWriteLocal Whether server content may reach
  *     the local clipboard now.
  * @param {() => boolean} hooks.binaryEnabled Whether images are taken.
- * @param {(text: string) => void} hooks.onPreview Shows server text to the dashboards.
+ * @param {(text: string, secret: boolean) => void} hooks.onPreview Shows server
+ *     text to the dashboards, a secret masked.
  * @param {(mime: string) => (Promise<*>|void)} hooks.onImageWritten An image landed
  *     locally; what it returns is awaited before the landing counts as done.
  * @param {(err: *) => void} hooks.onImageWriteFailed An image write failed for good.
+ * @param {boolean} [hooks.isChromium] Engine flag, for the secret guard.
  * @returns {IncomingClipboard}
  */
 export function createIncomingClipboard({
     worker, clipboardSync, writer, toPng, canWriteLocal, binaryEnabled,
-    onPreview, onImageWritten, onImageWriteFailed,
+    onPreview, onImageWritten, onImageWriteFailed, isChromium = false,
 }) {
     const multipart = createMultipartClipboardState((mime) => worker.decodeStream(mime));
     let current = null;
     let generation = 0;
     let lastLanding = null;
     let stallTimer = null;
+    let secretNext = false;
+    /** The session's clipboard text while it is a secret, for the copy the user asks for. */
+    let sessionSecret = null;
+    const guard = createSecretClipboardGuard({
+        isChromium,
+        writer,
+        onCleared: () => clipboardSync.forget(),
+    });
 
     /**
      * A payload whose chunks stopped arriving is dropped, so its write settles
@@ -713,8 +839,9 @@ export function createIncomingClipboard({
     /**
      * Issues a local write whose data settle later: one Promise per type the
      * item carries, declared now because a ClipboardItem cannot add a type.
+     * A secret is handed to the guard once it landed.
      */
-    function issue(kind, mime) {
+    function issue(kind, mime, secret) {
         withdraw(lastLanding, 'superseded');
         const types = kind === 'image' ? ['image/png']
             : kind === 'text' ? ['text/plain'] : ['text/html', 'text/plain'];
@@ -738,7 +865,10 @@ export function createIncomingClipboard({
         }, {
             settled,
             onSuccess: kind === 'image' ? () => onImageWritten(mime)
-                : () => { clipboardSync.noteLocal(landing.localSig); },
+                : () => {
+                    clipboardSync.noteLocal(landing.localSig);
+                    if (secret) guard.landed(landing.text);
+                },
             onFailure: kind === 'image' ? onImageWriteFailed
                 : (err) => console.error(`Could not copy the session clipboard to the local one: ${err && err.name} - ${err && err.message}`),
         });
@@ -762,6 +892,7 @@ export function createIncomingClipboard({
             }
         } else if (kind === 'text') {
             landing.localSig = clipboardSync.sig(content.text);
+            landing.text = content.text;
             landing.parts['text/plain'].resolve(new Blob([content.text], { type: 'text/plain' }));
         } else {
             landing.parts['text/html'].resolve(new Blob([content.html], { type: 'text/html' }));
@@ -782,9 +913,22 @@ export function createIncomingClipboard({
             const text = decoded.result;
             fresh = clipboardSync.shouldSend(text, 'text/plain');
             clipboardSync.resolveServer(text, null, 'text/plain');
-            onPreview(text);
+            sessionSecret = t.secret && text ? text : null;
+            onPreview(text, !!sessionSecret);
             content = { text };
+            if (guard.holds(text) && t.secret) {
+                // The session copied the secret again: it stays for a full term.
+                if (!fresh) guard.landed(text);
+            } else {
+                guard.retract();
+            }
+            if (t.secret && !text) {
+                withdraw(t.landing, 'retracted');
+                return;
+            }
         } else {
+            sessionSecret = null;
+            guard.retract();
             const digest = digestedPayload(decoded.byteLength, decoded.hash);
             fresh = clipboardSync.shouldSend(digest, t.mime);
             if (t.kind === 'flavours') {
@@ -805,20 +949,29 @@ export function createIncomingClipboard({
         if (t.landing) {
             fulfill(t.landing, t.kind, content);
         } else if (canWriteItems()) {
-            fulfill(issue(t.kind, t.mime), t.kind, content);
+            fulfill(issue(t.kind, t.mime, t.secret), t.kind, content);
         } else if (t.kind === 'image') {
             onImageWriteFailed(new Error('the local clipboard takes no images here'));
         } else if (typeof navigator !== 'undefined' && navigator.clipboard) {
-            const text = t.kind === 'text' ? content.text : (content.text || content.html);
-            writer.write(() => navigator.clipboard.writeText(text), {
-                onSuccess: () => { clipboardSync.noteLocal(clipboardSync.sig(text)); },
-                onFailure: (err) => console.error(`Could not copy the session clipboard to the local one: ${err && err.name}`),
-            });
+            writeText(t.kind === 'text' ? content.text : (content.text || content.html), t.secret);
         }
     }
 
+    /** Writes text locally through the writer, a secret into the guard's care. */
+    function writeText(text, secret) {
+        return writer.write(() => navigator.clipboard.writeText(text), {
+            onSuccess: () => {
+                clipboardSync.noteLocal(clipboardSync.sig(text));
+                if (secret) guard.landed(text);
+            },
+            onFailure: (err) => console.error(`Could not copy the session clipboard to the local one: ${err && err.name}`),
+        });
+    }
+
     /** Opens a payload, superseding whatever was still arriving. */
-    function open(mime, cacheOnly) {
+    function open(mime, cacheOnly, secret) {
+        const marked = secretNext;
+        secretNext = false;
         if (current) {
             withdraw(current.landing, 'superseded');
             multipart.reset();
@@ -826,15 +979,18 @@ export function createIncomingClipboard({
         }
         const kind = kindOf(mime);
         if (!kind || (kind === 'image' && !binaryEnabled())) return null;
-        return { kind, mime, cacheOnly, gen: ++generation, landing: null };
+        return { kind, mime, cacheOnly, secret: kind === 'text' && !!(secret || marked),
+                 gen: ++generation, landing: null };
     }
 
     return {
-        begin(mime, total, cacheOnly) {
-            const t = open(mime, cacheOnly);
+        begin(mime, total, cacheOnly, secret) {
+            const t = open(mime, cacheOnly, secret);
             if (!t) return;
             multipart.begin(mime, total);
-            if (wanted(t.kind, cacheOnly) && canWriteItems()) t.landing = issue(t.kind, mime);
+            if (wanted(t.kind, cacheOnly) && canWriteItems() && !(t.secret && !total)) {
+                t.landing = issue(t.kind, mime, t.secret);
+            }
             current = t;
             armStallTimer();
         },
@@ -866,15 +1022,25 @@ export function createIncomingClipboard({
                 console.error('Error assembling final clipboard content:', err);
             });
         },
-        single(mime, b64, cacheOnly) {
-            const t = open(mime, cacheOnly);
+        single(mime, b64, cacheOnly, secret) {
+            const t = open(mime, cacheOnly, secret);
             if (!t) return;
             worker.decode(b64, t.kind === 'text' ? 'text/plain' : mime).then(
                 (decoded) => land(t, decoded),
                 (err) => console.error('Error processing clipboard data from the session:', err));
         },
+        markSecret() {
+            secretNext = true;
+        },
+        copySecret() {
+            if (!sessionSecret || typeof navigator === 'undefined' || !navigator.clipboard) {
+                return Promise.resolve(false);
+            }
+            return writeText(sessionSecret, true);
+        },
         reset() {
             if (current) withdraw(current.landing, 'dropped');
+            secretNext = false;
             clearTimeout(stallTimer);
             multipart.reset();
             current = null;
@@ -893,16 +1059,21 @@ export const CLIPBOARD_PREVIEW_LIMIT = 256 * 1024;
  * controlled textarea, freezing the page, while the UI only needs a bounded
  * preview. The `truncated` flag tells the dashboard to render it read-only so
  * a blur cannot echo the cut-down text back over the real server clipboard.
+ * A secret travels as the `secret` flag alone, never as its text or length:
+ * the dashboards show it masked, read-only for the same reason, with a button
+ * that posts `clipboardCopySecret` for the core to write it locally.
  * @param {string} text The server clipboard text.
- * @returns {{type: string, text: string, truncated: boolean, totalLength: number}}
+ * @param {boolean} [secret] Whether the text is a secret.
+ * @returns {{type: string, text: string, truncated: boolean, totalLength: number, secret: boolean}}
  */
-export function clipboardPreviewMessage(text) {
-    const truncated = text.length > CLIPBOARD_PREVIEW_LIMIT;
+export function clipboardPreviewMessage(text, secret = false) {
+    const truncated = !secret && text.length > CLIPBOARD_PREVIEW_LIMIT;
     return {
         type: 'clipboardContentUpdate',
-        text: truncated ? text.slice(0, CLIPBOARD_PREVIEW_LIMIT) : text,
+        text: secret ? '' : (truncated ? text.slice(0, CLIPBOARD_PREVIEW_LIMIT) : text),
         truncated,
-        totalLength: text.length,
+        totalLength: secret ? 0 : text.length,
+        secret,
     };
 }
 
@@ -920,6 +1091,8 @@ export function clipboardPreviewMessage(text) {
  *     clipboard holds now; whether that differs from what it held before.
  * @property {() => void} noteExplicit Records that a push the user asked for
  *     made whatever the local clipboard holds older than the session's.
+ * @property {() => void} forget Forgets the synced value and what the local
+ *     clipboard held, once this page emptied the local clipboard.
  * @property {(text?: string, blob?: Blob, mime?: string, bytes?: Uint8Array) => void} resolveServer
  *     Caches fresh server data and settles pending requests.
  * @property {() => Promise<void>} captureLocalImageSig Records the browser's
@@ -1060,6 +1233,16 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      */
     function noteExplicit() {
         lastLocalSig = PREDATES_EXPLICIT;
+    }
+
+    /**
+     * After this page emptied the local clipboard (a secret taken back), the
+     * session's next copy of the same content has to land again, and whatever
+     * the user copies next is a change.
+     */
+    function forget() {
+        noteSynced(null);
+        lastLocalSig = null;
     }
 
     /**
@@ -1204,6 +1387,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
         localSig,
         noteLocal,
         noteExplicit,
+        forget,
         resolveServer,
         captureLocalImageSig,
         request,

@@ -31,7 +31,7 @@
  * `gamepadControl`, `setManualResolution`, `resetResolutionToWindow`,
  * `setScaleLocally`, `setAntiAliasing`, `setTrackpadSpeed`, `setGamepadRumble`,
  * `audioDeviceSelected`,
- * `clipboardUpdateFromUI`, `clipboardImageUpdate`, `requestFullscreen`,
+ * `clipboardUpdateFromUI`, `clipboardImageUpdate`, `clipboardCopySecret`, `requestFullscreen`,
  * `requestGamingMode`, `mode`, `setSynth`, `sidebarVisibilityChanged`, `TOUCH_GAMEPAD_SETUP`,
  * `TOUCH_GAMEPAD_VISIBILITY`, `touchinput:trackpad`, and `touchinput:touch`,
  * plus whatever channel a conditional-settings spec propagates through; the
@@ -170,6 +170,8 @@ const DEFAULT_ENCODER = encoderOptions[0];
 const DEFAULT_VIDEO_CRF = 25;
 const DEFAULT_SCALE_LOCALLY = true;
 const DEFAULT_ENABLE_BINARY_CLIPBOARD = true;
+/** What the clipboard box shows for a secret, which the core never hands over. */
+const CLIPBOARD_SECRET_MASK = "\u2022".repeat(8);
 const REPO_BASE_URL =
   "https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/";
 const METADATA_URL = `${REPO_BASE_URL}metadata.yml`;
@@ -1435,6 +1437,12 @@ function Sidebar() {
    */
   const [dashboardClipboardTruncated, setDashboardClipboardTruncated] =
     useState(false);
+  /**
+   * The session's clipboard holds text its owner marked secret: the box
+   * shows it masked and read-only, with a button that has the core copy it.
+   */
+  const [dashboardClipboardSecret, setDashboardClipboardSecret] =
+    useState(false);
   const [audioInputDevices, setAudioInputDevices] = useState([]);
   const [audioOutputDevices, setAudioOutputDevices] = useState([]);
   const [selectedInputDeviceId, setSelectedInputDeviceId] = useState("default");
@@ -2445,14 +2453,17 @@ function Sidebar() {
     // Cleared so the same file can be picked again.
     event.target.value = "";
   };
-  /** Pushes the edited clipboard text to the server on blur, never a truncated preview. */
+  /** Pushes the edited clipboard text to the server on blur, never a truncated preview or a mask. */
   const handleClipboardBlur = (event) => {
-    if (dashboardClipboardTruncated) return;
+    if (dashboardClipboardTruncated || dashboardClipboardSecret) return;
     window.postMessage(
       { type: "clipboardUpdateFromUI", text: event.target.value },
       window.location.origin
     );
   };
+  /** Has the core write the masked secret to this device's clipboard, inside this click. */
+  const handleCopyClipboardSecret = () =>
+    window.postMessage({ type: "clipboardCopySecret" }, window.location.origin);
   const toggleTheme = () => {
     const newTheme = theme === "dark" ? "light" : "dark";
     setTheme(newTheme);
@@ -2636,6 +2647,7 @@ function Sidebar() {
           if (typeof message.text === "string") {
             setDashboardClipboardContent(message.text);
             setDashboardClipboardTruncated(message.truncated === true);
+            setDashboardClipboardSecret(message.secret === true);
           }
         } else if (message.type === "audioDeviceSelected") {
           if (message.deviceId) {
@@ -4023,13 +4035,26 @@ function Sidebar() {
                       <textarea
                         className="allow-native-input"
                         id="dashboardClipboardTextarea"
-                        value={dashboardClipboardContent}
+                        value={dashboardClipboardSecret ? CLIPBOARD_SECRET_MASK : dashboardClipboardContent}
                         onChange={handleClipboardChange}
                         onBlur={handleClipboardBlur}
-                        readOnly={dashboardClipboardTruncated}
+                        readOnly={dashboardClipboardTruncated || dashboardClipboardSecret}
                         rows="5"
                         placeholder={t("sections.clipboard.placeholder")}
                       />
+                      {dashboardClipboardSecret && (
+                        <>
+                          <span className="dashboard-clipboard-note">
+                            {t("sections.clipboard.secretHidden")}
+                          </span>
+                          <button
+                            className="app-action-button install"
+                            onClick={handleCopyClipboardSecret}
+                          >
+                            {t("sections.clipboard.copySecret")}
+                          </button>
+                        </>
+                      )}
                     </div>
                     {(renderableSettings.binaryClipboard ?? true) &&
                       enableBinaryClipboard && (
