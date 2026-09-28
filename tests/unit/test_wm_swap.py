@@ -10,7 +10,9 @@ follows monitor changes live needs nothing, and kwin_x11 builds its screens
 from CRTCs, which a restart does not change.
 
 The decision is driven against stand-ins; the readers are then checked against
-a real Openbox on the test display, restarted for real.
+a real Openbox, restarted for real, on an X server of the suite's own: the
+tier needs no harness display up, and nothing else on one can hold or replace
+the manager under test.
 """
 import asyncio
 import logging
@@ -113,6 +115,13 @@ res.check("the desktop image names no window manager",
           "MULTI_MONITOR_WM" not in open(DESKTOP_IMAGE, encoding="utf-8").read())
 
 
+def start_openbox(args: list, env: dict) -> subprocess.Popen:
+    """Openbox started with `args`, writing where the suite's logs are kept, so
+    a manager that never came up says why."""
+    with open(os.path.join(H.WORKDIR, "wm-openbox.log"), "a", encoding="utf-8") as log:
+        return H.spawn(["openbox", *args], env=env, stdout=log, stderr=subprocess.STDOUT)
+
+
 def wm_manages_a_window(display: str, timeout: float = 15.0) -> float:
     """Seconds until the manager lists a window mapped now, or -1.
 
@@ -148,29 +157,16 @@ def wm_manages_a_window(display: str, timeout: float = 15.0) -> float:
         d.close()
 
 
-def live_openbox_check() -> None:
+def live_openbox_check(display: str) -> None:
     """The readers against a real Openbox, and a real restart of it."""
-    if H.shutil.which("openbox") is None:
-        res.skip("a real Openbox is read and restarted", "no openbox on PATH")
-        return
-    if not H.TEST_DISPLAY:
-        # This tier is defined to need only the source tree; the live half runs
-        # wherever a throwaway server is configured for the suites to drive.
-        res.skip("a real Openbox is read and restarted", "E2E_DISPLAY is not set")
-        return
-    display = H.require_display()
     env = {**os.environ, "DISPLAY": display}
-    # The readers open the display the environment names; never the desktop's.
-    os.environ["DISPLAY"] = display
-    DU._drop_module_display()
     stale = DU._sync_wm_pid()
     if stale:
         os.kill(stale, 15)
         deadline = time.time() + 10
         while time.time() < deadline and DU._sync_wm_pid() == stale:
             time.sleep(0.2)
-    proc = H.spawn(["openbox", "--replace"], env=env,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    proc = start_openbox(["--replace"], env)
     try:
         deadline = time.time() + 15
         while time.time() < deadline and DU._sync_wm_pid() != proc.pid:
@@ -215,19 +211,13 @@ def live_openbox_check() -> None:
             proc.wait(timeout=5)
 
 
-def live_autostart_check() -> None:
+def live_autostart_check(display: str) -> None:
     """A real restart runs the session's autostart hook no second time.
 
     Openbox is started the way a desktop session starts it, with the hook that
     runs the autostart, and the hook records every run: a restart that kept it
     would open the session's applications again, one set per extend.
     """
-    if H.shutil.which("openbox") is None:
-        res.skip("a real restart runs no autostart twice", "no openbox on PATH")
-        return
-    display = H.require_display()
-    os.environ["DISPLAY"] = display
-    DU._drop_module_display()
     marker = os.path.join(H.WORKDIR, "wm-autostart.log")
     script = os.path.join(H.WORKDIR, "wm-autostart.sh")
     with open(script, "w", encoding="utf-8") as f:
@@ -240,9 +230,7 @@ def live_autostart_check() -> None:
         deadline = time.time() + 10
         while time.time() < deadline and DU._sync_wm_pid() == stale:
             time.sleep(0.2)
-    proc = H.spawn(["openbox", "--replace", "--startup", script],
-                   env={**os.environ, "DISPLAY": display},
-                   stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    proc = start_openbox(["--replace", "--startup", script], {**os.environ, "DISPLAY": display})
     def runs() -> int:
         return open(marker, encoding="utf-8").read().count("ran")
 
@@ -275,6 +263,26 @@ def live_autostart_check() -> None:
             proc.wait(timeout=5)
 
 
-live_openbox_check()
-live_autostart_check()
+def live_checks() -> None:
+    """Both live checks, on a private X server started for them."""
+    if H.shutil.which("openbox") is None:
+        res.skip("a real Openbox is read and restarted", "no openbox on PATH")
+        return
+    try:
+        xserver, display = H.private_x_server(640, 480)
+    except RuntimeError as e:
+        res.skip("a real Openbox is read and restarted", e)
+        return
+    # The readers open the display the environment names; never the desktop's.
+    os.environ["DISPLAY"] = display
+    DU._drop_module_display()
+    try:
+        live_openbox_check(display)
+        live_autostart_check(display)
+    finally:
+        DU._drop_module_display()
+        H.stop_x_server(xserver, display)
+
+
+live_checks()
 sys.exit(0 if res.summary() else 1)
