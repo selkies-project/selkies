@@ -110,8 +110,9 @@ sudo cp -r addons/ondemand /var/www/ood/apps/sys/selkies
 Selkies listens on the node's addresses for the proxy, in
 [secure mode](secure-mode.md): the job sets a master token, provisions one
 session token once Selkies answers, and only then reports the session running,
-and the view's link carries that token, so no one else on the cluster network
-reaches the session. `form.yml` offers the desktop and the backend, and holds
+and the view's link carries that token in its fragment, so no one else on the
+cluster network reaches the session and the portal's access log never records
+the token. `form.yml` offers the desktop and the backend, and holds
 in `selkies_command` how the node finds Selkies: `selkies-session` from a native
 package or a module, `<AppImage> selkies-session`, or
 `apptainer exec --nv <image> selkies-session` with the flags

@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """A reverse proxy in front of the server under test that logs every text
-message the browser sends on its WebSocket.
+message the browser sends on its WebSocket, and optionally every request line.
 
 The client's socket lives in its socket worker, which a page-side hook never
 sees, so a suite that has to count what the worker sends (frame acks) puts
-this in front of the server and reads the log. HTTP requests are relayed
-whole; WebSocket frames are relayed as they arrive.
+this in front of the server and reads the log; one that has to know what a
+proxy's access log would record also names a request log. HTTP requests are
+relayed whole; a WebSocket's subprotocols and frames are relayed as a proxy
+relays them, the one the server selects echoed to the browser.
 
-Usage: ws_tap.py <listen_port> <upstream_port> <log_path>
+Usage: ws_tap.py <listen_port> <upstream_port> <log_path> [<request_log_path>]
 Log lines: `<monotonic seconds> <first 80 characters of the message>`.
+Request log lines: `<method> <path and query> [<offered subprotocols>]`, a
+session-token subprotocol shown without its value.
 """
 import asyncio
 import sys
@@ -20,15 +24,20 @@ from aiohttp import web
 LISTEN, UPSTREAM, LOG_PATH = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 HOP_HEADERS = {"host", "transfer-encoding", "content-length", "connection", "keep-alive"}
 log = open(LOG_PATH, "a", buffering=1)
+request_log = open(sys.argv[4], "a", buffering=1) if len(sys.argv) > 4 else None
 
 
-async def relay_socket(request: web.Request) -> web.WebSocketResponse:
+async def relay_socket(request: web.Request, protocols: list) -> web.StreamResponse:
     """Bridge one client WebSocket to the upstream server, logging client text."""
-    ws = web.WebSocketResponse(max_msg_size=0)
-    await ws.prepare(request)
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(f"ws://127.0.0.1:{UPSTREAM}{request.rel_url}",
-                                      max_msg_size=0) as upstream:
+        try:
+            upstream = await session.ws_connect(f"ws://127.0.0.1:{UPSTREAM}{request.rel_url}",
+                                                max_msg_size=0, protocols=protocols)
+        except aiohttp.WSServerHandshakeError as e:
+            return web.Response(status=e.status)
+        ws = web.WebSocketResponse(max_msg_size=0, protocols=(upstream.protocol,) if upstream.protocol else ())
+        await ws.prepare(request)
+        async with upstream:
             async def client_to_server() -> None:
                 async for m in ws:
                     if m.type == aiohttp.WSMsgType.TEXT:
@@ -55,8 +64,14 @@ async def relay_socket(request: web.Request) -> web.WebSocketResponse:
 
 
 async def handle(request: web.Request) -> web.StreamResponse:
-    if request.headers.get("Upgrade", "").lower() == "websocket":
-        return await relay_socket(request)
+    upgrade = request.headers.get("Upgrade", "").lower() == "websocket"
+    protocols = [p.strip() for h in request.headers.getall("Sec-WebSocket-Protocol", ())
+                 for p in h.split(",") if p.strip()] if upgrade else []
+    if request_log:
+        shown = ",".join("selkies.token.*" if p.startswith("selkies.token.") else p for p in protocols)
+        request_log.write(f"{request.method} {request.rel_url} {shown}".rstrip() + "\n")
+    if upgrade:
+        return await relay_socket(request, protocols)
     body = await request.read()
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS}
     async with aiohttp.ClientSession(auto_decompress=False) as session:

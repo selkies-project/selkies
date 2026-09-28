@@ -127,8 +127,9 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
-from .stream_server import (BaseStreamingService, CongestionSteer, TransferPacer, UplinkGauge, _observe_rtt_floor,
-                            _uplink_session_state, note_pong, uplink_rtt_ms, socket_gauge)
+from .stream_server import (SESSION_TOKEN_PROTOCOL, BaseStreamingService, CongestionSteer, TransferPacer, UplinkGauge,
+                            _observe_rtt_floor, _uplink_session_state, handshake_session_token, note_pong,
+                            uplink_rtt_ms, socket_gauge)
 from .metrics import Metrics
 
 # How much stream may stand queued past the path's own round trip before the
@@ -6329,21 +6330,25 @@ class DataStreamingServer(BaseStreamingService):
         Refuses when the websockets transport is not the active mode. A
         view-only basic-auth credential caps the role at viewer no matter what
         the query string asks for (legacy, non-secure mode); secure mode leaves
-        the ceiling unset and lets the token govern.
+        the ceiling unset and lets the token govern. In secure mode an upgrade
+        presents its token (``handshake_session_token``); a plain GET, the
+        client's probe, has already passed the auth middleware on a token of
+        its own and gets the refusal ``prepare`` gives anything but an upgrade.
         """
         if self.supervisor.current_mode != self.mode:
             return web.Response(status=409, text="WebSocket mode is inactive")
 
         token = ""
-        if self.cli_args.master_token:
-            token = request.query.get('token') 
+        if self.cli_args.master_token and request.headers.get("Upgrade", "").lower() == "websocket":
+            token = handshake_session_token(request) or ""
             if not token:
                 return web.Response(status=401, text="Token missing in secure mode")
 
         # compress=False: the frames are already H.264/JPEG/Opus. heartbeat:
         # protocol pings reap a silently dead peer, as the signaling sockets' probes
         # do. autoping=False: the loop answers PING and feeds PONG to the uplink gauge.
-        ws = web.WebSocketResponse(compress=False, max_msg_size=WS_MAX_MESSAGE_BYTES, heartbeat=30, autoping=False)
+        ws = web.WebSocketResponse(compress=False, max_msg_size=WS_MAX_MESSAGE_BYTES, heartbeat=30, autoping=False,
+                                   protocols=(SESSION_TOKEN_PROTOCOL,))
         await ws.prepare(request)
 
         peername = request.transport.get_extra_info('peername')

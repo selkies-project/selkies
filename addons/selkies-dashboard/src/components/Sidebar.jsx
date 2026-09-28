@@ -54,6 +54,7 @@
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
+import { fragmentWithSessionToken, urlFragmentKeyword } from "../../../selkies-web-core/lib/page-url.js";
 import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, stopIndex, stopsWithin } from "../../../selkies-web-core/lib/slider-stops.js";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords } from "../../../selkies-web-core/lib/touch-controls.js";
@@ -78,7 +79,7 @@ import {
 } from "../../../selkies-web-core/lib/app-commands.js";
 import * as yaml from "js-yaml";
 
-const urlHash = window.location.hash;
+const urlHash = urlFragmentKeyword();
 const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
 
 /**
@@ -890,7 +891,7 @@ function Sidebar() {
    * on this side, so the touch affordance for them is the gamepad toggle alone.
    */
   const [isViewerRole, setIsViewerRole] = useState(() => {
-    const h = (typeof window !== "undefined" ? window.location.hash : "").toLowerCase();
+    const h = (typeof window !== "undefined" ? urlFragmentKeyword() : "").toLowerCase();
     return h.startsWith("#shared") || /^#player[234]$/.test(h);
   });
   const toggleSidebar = () => {
@@ -1083,7 +1084,7 @@ function Sidebar() {
    * @returns {boolean} Whether the window opened.
    */
   const launchWindow = (direction, screen = null) => {
-    const url = `${window.location.href.split('#')[0]}#display2-${direction}`;
+    const url = `${window.location.href.split('#')[0]}${fragmentWithSessionToken(`display2-${direction}`)}`;
     // Not `noopener` in the features: that makes window.open return null even
     // when it opened, leaving a refusal indistinguishable from success. The
     // opener is severed on the handle instead.

@@ -73,6 +73,7 @@ import { SelkiesLogo } from "@/components/logo";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, isMobileClient, isSecondaryDisplay } from "@/utils";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords } from "../../../../selkies-web-core/lib/touch-controls.js";
+import { fragmentWithSessionToken } from "../../../../selkies-web-core/lib/page-url.js";
 import { t } from "@/i18n";
 
 /**
@@ -437,7 +438,7 @@ export function TopMenu({
    * @returns Whether the window opened.
    */
   const launchWindow = (direction: string, screen: any = null) => {
-    const url = `${window.location.href.split('#')[0]}#display2-${direction}`;
+    const url = `${window.location.href.split('#')[0]}${fragmentWithSessionToken(`display2-${direction}`)}`;
     // Not `noopener` in the features: that makes window.open return null even
     // when it opened, leaving a refusal indistinguishable from success. The
     // opener is severed on the handle instead.

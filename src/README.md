@@ -55,7 +55,7 @@ This server provides the backend infrastructure for establishing and managing in
 9.  **Token-Based Authentication & Authorization:**
     *   Features an optional secure mode, enabled by setting a `master_token`.
     *   When enabled, it exposes a token-management API (`POST /api/tokens`) on the main streaming port, gated by the master token.
-    *   Clients must connect with a valid token (`?token=...`) to establish a WebSocket connection.
+    *   Clients must present a valid token to establish a WebSocket connection: a token from the page's fragment as a WebSocket subprotocol, or `?token=...`.
     *   Assigns roles (e.g., `controller`, `viewer`) and properties (e.g., gamepad `slot`) to clients based on their token.
     *   Enforces permissions on the server-side, restricting actions that viewers can perform.
     *   Automatically disconnects clients if their token is revoked or their permissions change.

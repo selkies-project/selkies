@@ -738,7 +738,8 @@ def _ipv6_loopback_redirect(request: web.Request, path: str) -> Optional[str]:
         return None
     # Where the browser goes is this process's to say: the literal host, the port
     # this socket listens on, and the caller's own route. Only the query rides
-    # along, which a session's token needs and which cannot name another origin.
+    # along, which a page opened with ``?token=`` needs (the browser keeps a
+    # fragment across the redirect itself) and which cannot name another origin.
     scheme = "https" if request.secure else "http"
     query = f"?{request.query_string}" if request.query_string else ""
     return f"{scheme}://127.0.0.1:{int(sockname[1])}{path}{query}"
@@ -859,12 +860,48 @@ WEBSOCKET_ROUTES: Tuple[str, ...] = ("/api/websockets", "/api/webrtc/signaling",
 # Mirror of the secure-mode session token for requests the client cannot put
 # a header on (the file-manager iframe and its download links).
 SESSION_TOKEN_COOKIE: str = "selkies_token"
+# Subprotocols of a handshake presenting its session token without a URL: the
+# one selected, and the prefix of the base64url token (``handshake_session_token``).
+SESSION_TOKEN_PROTOCOL: str = "selkies"
+SESSION_TOKEN_PROTOCOL_PREFIX: str = "selkies.token."
 # Fallback carrier for the master token on the token and mode-switch
 # endpoints, same ``Bearer <token>`` grammar as Authorization. A request has
 # one Authorization header, so a caller behind a Basic login (a reverse
 # proxy's, typically) must spend it on the Basic credentials and present the
 # master token here instead; Authorization is still tried first.
 MASTER_TOKEN_HEADER: str = "Selkies-Authorization"
+
+
+def handshake_session_token(request: web.BaseRequest) -> Optional[str]:
+    """The session token a WebSocket handshake presents, or None.
+
+    A client that took its token from the page's fragment offers it as the
+    ``selkies.token.<base64url>`` subprotocol beside ``selkies``, so no request
+    line carries it; one that took it from the query presents it as ``?token=``
+    on the socket URL. The subprotocol wins when both are there.
+
+    Raises:
+        web.HTTPBadRequest: The token subprotocol arrived without ``selkies``,
+            or does not decode. aiohttp logs the offered subprotocols when it
+            finds none it can select, which would write the token into the log,
+            so such a handshake is refused before it gets that far.
+    """
+    offered = [
+        protocol.strip()
+        for header in request.headers.getall("Sec-WebSocket-Protocol", ())
+        for protocol in header.split(",")
+    ]
+    carried = [p for p in offered if p.startswith(SESSION_TOKEN_PROTOCOL_PREFIX)]
+    if not carried:
+        return request.query.get("token") or None
+    if SESSION_TOKEN_PROTOCOL not in offered:
+        raise web.HTTPBadRequest(text="Session token subprotocol offered without the selkies protocol")
+    encoded = carried[0][len(SESSION_TOKEN_PROTOCOL_PREFIX):]
+    try:
+        token = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True).decode("utf-8")
+    except ValueError:  # binascii.Error and UnicodeDecodeError both
+        raise web.HTTPBadRequest(text="Undecodable session token subprotocol") from None
+    return token or None
 
 FILE_INDEX_HEADER: str = """<!DOCTYPE html>
 <html lang="en">
@@ -1838,11 +1875,12 @@ class CentralizedStreamServer:
     def _session_token_carriers(request: web.Request) -> List[Tuple[str, str]]:
         """The session-token carriers a request presents, most explicit first.
 
-        The Bearer header is what scripts send; the ``?token=`` query is what
-        URLs the client navigates to rather than fetches carry (the page itself,
-        the file-manager listing it opens); the cookie is the mirror the client
-        keeps for requests it can put neither on. The cookie value is tried as
-        sent and URL-decoded, since the client stores it encoded.
+        The Bearer header is what scripts send; the ``?token=`` query is what a
+        page opened with one carries on the URLs it navigates to rather than
+        fetches (the file-manager listing it opens), which a page holding its
+        token in the fragment leaves to the cookie; the cookie is the mirror the
+        client keeps for requests it can put neither on. The cookie value is
+        tried as sent and URL-decoded, since the client stores it encoded.
 
         Returns:
             ``(source, token)`` pairs, source being "header", "query" or "cookie".

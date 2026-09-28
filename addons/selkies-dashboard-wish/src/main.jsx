@@ -22,6 +22,7 @@ import App from './App.tsx';
 import PlayerGamepadButton from './components/dashboard/PlayerGamepadButton.tsx';
 import './index.css';
 import { getRoutePrefix } from './utils.ts';
+import { urlFragmentKeyword } from '../../selkies-web-core/lib/page-url.js';
 // Bundled straight from the addon it lives in, so a fresh checkout builds
 // without a vendored copy in src/.
 import "../../universal-touch-gamepad/universalTouchGamepad.js";
@@ -73,7 +74,7 @@ async function waitForCore(timeoutMs = 10000) {
   }
 }
 
-const currentHash = window.location.hash;
+const currentHash = urlFragmentKeyword();
 const noDashboardModes = ['#shared', '#player2', '#player3', '#player4'];
 const playerClientModes = ['#player2', '#player3', '#player4'];
 

@@ -5,7 +5,8 @@ app on the basic template: the job runs `selkies-session` on the port the
 portal picks, and the portal's reverse proxy (`/rnode/<host>/<port>/`) carries
 the page and its WebSocket to the browser, behind the portal's own login.
 Selkies runs in secure mode: the job provisions one session token, which the
-view's link carries, so nobody else on the cluster network reaches the port.
+view's link carries in its fragment, so nobody else on the cluster network
+reaches the port and no access log records the token.
 
 ```bash
 sudo cp -r addons/ondemand /var/www/ood/apps/sys/selkies

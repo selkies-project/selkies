@@ -22,9 +22,9 @@ curl -u proxyuser:proxypass \
 
 The master token is also accepted as a Bearer credential on every other API route below, so an operator can upload, download, or scrape metrics with it.
 
-A session token is what a client holds. The client page is opened as `https://host/?token=<session token>` (a deployment subfolder goes in front as usual, and `#display2` and the other hashes still apply). The token's provisioned role is authoritative: a viewer token cannot drive input, own a display, open a second display, or upload, whatever the page asks for.
+A session token is what a client holds. The client page is opened with it in the fragment, `https://host/#token=<session token>`, or in the query, `https://host/?token=<session token>` (a deployment subfolder goes in front as usual). In the fragment it follows a display or sharing keyword after `&` (`#display2-right&token=<session token>`), percent-encoded as a query value is, and the fragment's token wins when a page has both. The token's provisioned role is authoritative: a viewer token cannot drive input, own a display, open a second display, or upload, whatever the page asks for.
 
-Tokens ride the URL, so the access log is written without query strings and the server's own logs never print them; a reverse proxy in front keeps its own request and referrer logs, which is worth a thought when tokens travel in URLs.
+A browser never sends the fragment, so a token there reaches no request line, proxy log, or Referer, and the client keeps it out of every URL it requests afterwards: that is the form to hand out wherever a proxy in front logs requests. A query token is in the page's request line, and the client carries it on the URLs it navigates to. The server's own access log is written without query strings, its Referer included, and its logs never print a token.
 
 ## How the Routes Are Bound
 
@@ -32,7 +32,7 @@ The static web client (`/`, its scripts and assets) is served without credential
 
 | Route | Credential |
 |---|---|
-| `/api/websockets` (WebSocket data transport) | `?token=` on the handshake |
+| `/api/websockets` (WebSocket data transport) | the `selkies.token.<token, base64url without padding>` subprotocol offered beside `selkies`, which the handshake selects, or `?token=` |
 | `/api/webrtc/signaling` (WebRTC signaling) | `client_token` in the HELLO message; the in-process server peer presents the master token |
 | `/api/tokens` | master token only (`Authorization` Bearer, or the `Selkies-Authorization` fallback) |
 | `/api/switch` | session or master token (either header); viewer tokens are refused (403) |
@@ -50,7 +50,8 @@ An API request can present its session token in three ways, tried in this order:
 The web client uses all three for you:
 
 - Every script-driven call (the upload `POST`, the TURN fetch, the transport probes) sends the Bearer header.
-- The file manager the dashboards open in an iframe is loaded as `/api/files/?token=…`, and the listing carries the token on its own links, so it keeps working where a cookie cannot follow (for example when Selkies is itself embedded cross-site).
+- The data socket of a page holding its token in the fragment offers it as the subprotocol above, on a URL without a query; a query token rides the socket's URL as `?token=`.
+- On a page opened with `?token=`, the file manager the dashboards open in an iframe is loaded as `/api/files/?token=…`, and the listing carries the token on its own links, so it keeps working where a cookie cannot follow (for example when Selkies is itself embedded cross-site). A page holding its token in the fragment leaves the file manager to the cookie.
 - On load the client mirrors its token, URL-encoded, into a `selkies_token` session cookie scoped to `<subfolder>/api/` with `SameSite=Strict` (`Secure` over HTTPS), which covers anything the browser requests on its own, such as a download link or a listing opened by hand. A request that changes state on the cookie alone (an upload) is additionally held to the same-origin rule the mode switch applies. The cookie disappears when the browser closes; the next page load with a token overwrites it.
 
 A Prometheus scrape job uses the master token as its bearer credential:

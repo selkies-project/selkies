@@ -12,13 +12,22 @@ websockets:  a browser page loaded with ?token= streams over WebSockets,
              sets the API cookie, uploads through the file input with a
              Bearer header, and opens the file listing (whose links keep the
              token); a viewer page's upload is refused.
+fragment:    a page loaded with #token= through a reverse proxy that records
+             every request line, in Chromium, Firefox, and WebKit, as a
+             controller and as a #shared viewer: it streams, its data socket
+             offers the token as a subprotocol on a URL without a query, the
+             cookie and the Bearer header carry it, the listing is served on
+             the cookie, and no request line the proxy saw carries a token.
 webrtc:      the same page over WebRTC fetches its TURN configuration with
-             the Bearer header and streams.
+             the Bearer header and streams; loaded with #token= through the
+             proxy, in Chromium and Firefox, it does so with no token in any
+             request line.
 dashboards:  both dashboards open their file manager with the page's token
-             and the listing renders inside the modal; the classic one
-             switches transport on that same token, asking the user for
-             nothing (the master token is the operator's, not a session
-             user's, so a prompt for it would be unanswerable).
+             and the listing renders inside the modal, and on a #token= page
+             the file manager's URL and the listing's links carry none; the
+             classic one switches transport on that same token, asking the
+             user for nothing (the master token is the operator's, not a
+             session user's, so a prompt for it would be unanswerable).
 legacy:      without a master token nothing changes: the routes are open with
              Basic auth off and Basic-gated, view-only password included,
              with it on.
@@ -29,6 +38,8 @@ import http.client
 import json
 import os
 import shutil
+import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -47,6 +58,8 @@ BEARER_CHALLENGE = 'Bearer realm="Selkies Restricted"'
 
 SCRATCH = tempfile.mkdtemp(prefix="selkies-secure-mode-")
 FILES_DIR = os.path.join(SCRATCH, "files")
+TAP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "ws_tap.py")
+ENGINES = ("chromium", "firefox", "webkit")
 
 
 def request(method: str, path: str, headers=None, body=None) -> tuple:
@@ -110,13 +123,24 @@ def wait_file(path: str, timeout: float = 15) -> bool:
     return False
 
 
-async def ws_handshake(query: str, seconds: float = 3.0) -> tuple:
-    """Connect the data socket and collect the handshake's text messages."""
+def token_protocols(token: str) -> list:
+    """The subprotocols a page holding the token in its fragment offers."""
+    return ["selkies", "selkies.token." + base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")]
+
+
+async def ws_handshake(query: str, seconds: float = 3.0, subprotocols=None) -> tuple:
+    """Connect the data socket and collect the handshake's text messages.
+
+    Returns:
+        `(messages, close code, HTTP status of a refused upgrade, subprotocol
+        the server selected)`.
+    """
     uri = f"ws://localhost:{H.PORT}/api/websockets{query}"
     messages = []
-    close_code = None
+    close_code = refused = selected = None
     try:
-        async with websockets.connect(uri, max_size=None) as ws:
+        async with websockets.connect(uri, max_size=None, subprotocols=subprotocols) as ws:
+            selected = ws.subprotocol
             deadline = time.monotonic() + seconds
             while time.monotonic() < deadline:
                 try:
@@ -129,9 +153,11 @@ async def ws_handshake(query: str, seconds: float = 3.0) -> tuple:
                         break
     except websockets.exceptions.ConnectionClosed as e:
         close_code = e.rcvd.code if e.rcvd else e.code
+    except websockets.exceptions.InvalidStatus as e:
+        refused = e.response.status_code
     except Exception as e:
         messages.append(f"ERROR {e!r}")
-    return messages, close_code
+    return messages, close_code, refused, selected
 
 
 def provision(res: "H.Results") -> None:
@@ -206,11 +232,20 @@ def run_routes() -> "H.Results":
     status, _, _ = request("GET", "/api/turn", headers=bearer(CTRL_TOKEN))
     res.check("Bearer controller: /api/turn passes the gate (409: WebRTC inactive)", status == 409, status)
 
-    msgs, code = asyncio.run(ws_handshake(f"?token={CTRL_TOKEN}"))
+    msgs, code, _, _ = asyncio.run(ws_handshake(f"?token={CTRL_TOKEN}"))
     res.check("the data WebSocket still authenticates with ?token=",
               any(m.startswith("AUTH_SUCCESS") for m in msgs), f"{code} {msgs[:3]}")
-    msgs, code = asyncio.run(ws_handshake(f"?token={CTRL_TOKEN[:-1]}", seconds=2.0))
+    msgs, code, _, _ = asyncio.run(ws_handshake(f"?token={CTRL_TOKEN[:-1]}", seconds=2.0))
     res.check("the data WebSocket still refuses a wrong token", code == 4001, f"{code} {msgs[:2]}")
+    msgs, code, _, selected = asyncio.run(ws_handshake("", subprotocols=token_protocols(CTRL_TOKEN)))
+    res.check("the data WebSocket authenticates with the token subprotocol and selects selkies",
+              any(m.startswith("AUTH_SUCCESS") for m in msgs) and selected == "selkies", f"{selected} {code} {msgs[:3]}")
+    msgs, code, _, _ = asyncio.run(ws_handshake("", seconds=2.0, subprotocols=token_protocols(CTRL_TOKEN[:-1])))
+    res.check("the data WebSocket refuses a wrong subprotocol token", code == 4001, f"{code} {msgs[:2]}")
+    _, _, refused, _ = asyncio.run(ws_handshake("", subprotocols=token_protocols(CTRL_TOKEN)[1:]))
+    res.check("the token subprotocol without selkies is refused before the upgrade", refused == 400, refused)
+    _, _, refused, _ = asyncio.run(ws_handshake(""))
+    res.check("a handshake with no token is refused before the upgrade", refused == 401, refused)
     log = H.server_log()
     res.check("session tokens never reach the server log",
               CTRL_TOKEN not in log and VIEW_TOKEN not in log, "")
@@ -218,9 +253,57 @@ def run_routes() -> "H.Results":
     return res
 
 
-def launch(pw, query: str, mode: str, url_hash: str = "") -> tuple:
-    """A page on the server with the given query; returns (browser, page, requests)."""
-    browser = C.launch_browser(pw, "chromium")
+def start_tap() -> tuple:
+    """A reverse proxy in front of the server that records every request line.
+
+    Returns:
+        `(process, base URL, request log path)`, the process listening.
+    """
+    port = H._free_port()
+    log = os.path.join(SCRATCH, f"requests-{port}.log")
+    open(log, "w").close()
+    proc = H.spawn([sys.executable, TAP, str(port), str(H.PORT), os.devnull, log],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=0.5).close()
+            break
+        except OSError:
+            time.sleep(0.1)
+    return proc, f"http://127.0.0.1:{port}", log
+
+
+def request_lines(log: str) -> list:
+    with open(log) as f:
+        return [line.rstrip("\n") for line in f]
+
+
+def lines_carrying(lines: list, token: str) -> list:
+    """The request lines holding the token, as it is or percent-encoded."""
+    needles = {token, urllib.parse.quote(token, safe="")}
+    return [line for line in lines if any(n in line for n in needles)]
+
+
+def find_listing(page, timeout: float = 15):
+    """The frame showing the file listing once it rendered, or None."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for frame in page.frames:
+            if "/api/files/" in frame.url:
+                try:
+                    if "hello.txt" in frame.content():
+                        return frame
+                except Exception:
+                    pass
+        time.sleep(0.5)
+    return None
+
+
+def launch(pw, query: str, mode: str, url_hash: str = "", engine: str = "chromium", base: str = "") -> tuple:
+    """A page on the server (or on `base`, a proxy in front of it) with the
+    given query and hash; returns (browser, page, requests)."""
+    browser = C.launch_browser(pw, engine)
     ctx = browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
     page = ctx.new_page()
@@ -243,7 +326,7 @@ def launch(pw, query: str, mode: str, url_hash: str = "") -> tuple:
         if (e.data && e.data.type === 'fileUpload') window.__uploads.push(e.data.payload);
       });
     """)
-    page.goto(f"{H.BASE_URL}/{query}{url_hash}", wait_until="load")
+    page.goto(f"{base or H.BASE_URL}/{query}{url_hash}", wait_until="load")
     return browser, page, requests
 
 
@@ -337,6 +420,75 @@ def run_websockets() -> "H.Results":
     return res
 
 
+def run_fragment() -> "H.Results":
+    from playwright.sync_api import sync_playwright
+    res = H.Results("fragment")
+    fresh_files_dir()
+    H.server_start(mode="websockets", wayland=False, extra_env=secure_env())
+    provision(res)
+    tap, base, log = start_tap()
+    try:
+        with sync_playwright() as pw:
+            for engine in ENGINES:
+                mark = len(request_lines(log))
+                browser, page, requests = launch(pw, "", "websockets", f"#token={CTRL_TOKEN}", engine, base)
+                try:
+                    info = C.wait_ws_video(page, timeout=30)
+                    res.check(f"{engine}: a page opened with #token= streams over WebSockets", info is not None, info)
+                    c = api_cookie(page)
+                    res.check(f"{engine}: the page set the API cookie from its fragment token",
+                              urllib.parse.unquote(c.get("value", "")) == CTRL_TOKEN and c.get("path") == "/api/", c)
+                    name = f"{engine}-fragment-upload.txt"
+                    page.set_input_files("#globalFileInput", {
+                        "name": name, "mimeType": "text/plain", "buffer": b"from the fragment page\n"})
+                    ups = wait_upload_end(page)
+                    up_reqs = [r for r in requests if r[0] == "POST" and "/api/upload" in r[1]]
+                    res.check(f"{engine}: the upload completed on the Bearer token",
+                              any(u.get("status") == "end" for u in ups) and wait_file(os.path.join(FILES_DIR, name), 5)
+                              and up_reqs and all(r[2].get("authorization") == f"Bearer {CTRL_TOKEN}" for r in up_reqs),
+                              ups[-2:])
+                    listing = page.context.new_page()
+                    listing.goto(f"{base}/api/files/", wait_until="load")
+                    hrefs = listing.evaluate(
+                        "() => new Promise(r => setTimeout(() => r([...document.querySelectorAll('table#list td a')].map(a => a.getAttribute('href'))), 800))")
+                    res.check(f"{engine}: the listing is served on the cookie, its links without a token",
+                              "hello.txt" in listing.content() and hrefs and all("token" not in h for h in hrefs), hrefs)
+                    listing.close()
+                finally:
+                    browser.close()
+                lines = request_lines(log)[mark:]
+                sockets = [ln for ln in lines if ln.split(" ")[1].startswith("/api/websockets")]
+                res.check(f"{engine}: the data socket's URL has no query and offers the token subprotocol",
+                          any(ln.endswith(" selkies,selkies.token.*") for ln in sockets)
+                          and all("?" not in ln.split(" ")[1] for ln in sockets), sockets)
+                carrying = lines_carrying(lines, CTRL_TOKEN)
+                res.check(f"{engine}: no request line carries the token", not carrying, carrying[:3])
+
+                mark = len(request_lines(log))
+                browser, page, _ = launch(pw, "", "websockets", f"#shared&token={VIEW_TOKEN}", engine, base)
+                try:
+                    info = C.wait_ws_video(page, timeout=30)
+                    res.check(f"{engine}: a #shared&token= viewer page streams", info is not None, info)
+                    status = page.evaluate("""async (token) => {
+                        const r = await fetch('api/upload', { method: 'POST', body: 'nope',
+                            headers: { 'Authorization': 'Bearer ' + token, 'X-Upload-Path': 'viewer-upload.txt' } });
+                        return r.status;
+                    }""", VIEW_TOKEN)
+                    res.check(f"{engine}: an upload forced from the viewer page is refused",
+                              status == 403 and not os.path.exists(os.path.join(FILES_DIR, "viewer-upload.txt")), status)
+                finally:
+                    browser.close()
+                carrying = lines_carrying(request_lines(log)[mark:], VIEW_TOKEN)
+                res.check(f"{engine}: no request line carries the viewer's token", not carrying, carrying[:3])
+    finally:
+        tap.terminate()
+    log_text = H.server_log()
+    res.check("session tokens never reach the server log",
+              CTRL_TOKEN not in log_text and VIEW_TOKEN not in log_text, "")
+    res.summary()
+    return res
+
+
 def run_webrtc() -> "H.Results":
     from playwright.sync_api import sync_playwright
     res = H.Results("webrtc")
@@ -351,7 +503,25 @@ def run_webrtc() -> "H.Results":
               status == 200 and b"iceServers" in body, f"{status} {body[:60]}")
     status, _, body = request("GET", "/api/turn", headers=cookie(VIEW_TOKEN))
     res.check("cookie viewer: /api/turn serves the RTC configuration", status == 200, status)
+    tap, base, log = start_tap()
     with sync_playwright() as pw:
+        try:
+            for engine in ("chromium", "firefox"):
+                mark = len(request_lines(log))
+                browser, page, requests = launch(pw, "", "webrtc", f"#token={CTRL_TOKEN}", engine, base)
+                try:
+                    info = C.wait_wr_video(page, timeout=60)
+                    res.check(f"{engine}: a page opened with #token= streams over WebRTC", info is not None, info)
+                    turn_reqs = [r for r in requests if "/api/turn" in r[1]]
+                    res.check(f"{engine}: its TURN fetch carried the fragment token as Bearer",
+                              turn_reqs and all(r[2].get("authorization") == f"Bearer {CTRL_TOKEN}" for r in turn_reqs),
+                              [r[2].get("authorization") for r in turn_reqs])
+                finally:
+                    browser.close()
+                carrying = lines_carrying(request_lines(log)[mark:], CTRL_TOKEN)
+                res.check(f"{engine}: no request line of the WebRTC page carries the token", not carrying, carrying[:3])
+        finally:
+            tap.terminate()
         browser, page, requests = launch(pw, f"?token={CTRL_TOKEN}", "webrtc")
         try:
             info = C.wait_wr_video(page, timeout=60)
@@ -419,6 +589,23 @@ def run_dashboards() -> "H.Results":
                        extra_env=secure_env(SELKIES_ENABLE_DUAL_MODE="true"))
         provision(res)
         with sync_playwright() as pw:
+            browser, page, _ = launch(pw, "", "websockets", f"#token={CTRL_TOKEN}")
+            try:
+                info = C.wait_ws_video(page, timeout=30)
+                res.check(f"{dashboard}: the dashboard page streams with #token=", info is not None, info)
+                res.check(f"{dashboard}: the files modal opens on the #token= page", open_files_modal(page, dashboard))
+                src = page.evaluate("() => { const f = document.querySelector('iframe'); return f ? f.getAttribute('src') : null; }")
+                res.check(f"{dashboard}: the file-manager iframe carries no token",
+                          src is not None and "api/files/" in src and "token" not in src, src)
+                listing = find_listing(page)
+                res.check(f"{dashboard}: the listing rendered on the cookie alone", listing is not None,
+                          [f.url for f in page.frames])
+                if listing is not None:
+                    hrefs = listing.evaluate("() => [...document.querySelectorAll('table#list td a')].map(a => a.getAttribute('href'))")
+                    res.check(f"{dashboard}: the listing's links carry no token",
+                              hrefs and all("token" not in h for h in hrefs), hrefs)
+            finally:
+                browser.close()
             browser, page, requests = launch(pw, f"?token={CTRL_TOKEN}", "websockets")
             navigations = []
             prompts = []
@@ -440,17 +627,7 @@ def run_dashboards() -> "H.Results":
                 src = page.evaluate("() => { const f = document.querySelector('iframe'); return f ? f.getAttribute('src') : null; }")
                 res.check(f"{dashboard}: the file-manager iframe carries the token",
                           src is not None and "/api/files/" in src and f"token={CTRL_TOKEN}" in src, src)
-                listing = None
-                deadline = time.time() + 15
-                while time.time() < deadline and listing is None:
-                    for frame in page.frames:
-                        if "/api/files/" in frame.url:
-                            try:
-                                if "hello.txt" in frame.content():
-                                    listing = frame
-                            except Exception:
-                                pass
-                    time.sleep(0.5)
+                listing = find_listing(page)
                 res.check(f"{dashboard}: the listing rendered inside the modal", listing is not None,
                           [f.url for f in page.frames])
                 if listing is not None:
@@ -523,7 +700,7 @@ def run_legacy() -> "H.Results":
     return res
 
 
-BLOCKS = {"routes": run_routes, "websockets": run_websockets, "webrtc": run_webrtc,
+BLOCKS = {"routes": run_routes, "websockets": run_websockets, "fragment": run_fragment, "webrtc": run_webrtc,
           "dashboards": run_dashboards, "legacy": run_legacy}
 
 

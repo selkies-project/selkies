@@ -7,18 +7,18 @@ This document outlines the API for an external dashboard to interact with the cl
 Before interacting with the client via `postMessage`, it must first connect to the server. The client supports multiple modes for establishing its role and permissions, determined by the URL used to access the page.
 
 ### 1. Token Authentication Mode (Primary)
-*   **URL Format:** `https://<server>/?token=<ACCESS_TOKEN>`
-*   **Behavior:** The token is sent to the server during the WebSocket handshake. If valid, the server responds with the client's assigned role (e.g., `controller`, `viewer`), permissions, and controller `slot`. This mode takes precedence over legacy modes.
+*   **URL Format:** `https://<server>/#token=<ACCESS_TOKEN>`, after a mode keyword when there is one (`/#display2-right&token=<ACCESS_TOKEN>`), or `https://<server>/?token=<ACCESS_TOKEN>`
+*   **Behavior:** The token is sent to the server during the WebSocket handshake: as a subprotocol when it came in the fragment, which keeps it out of every request line, and as `?token=` when it came in the query. If valid, the server responds with the client's assigned role (e.g., `controller`, `viewer`), permissions, and controller `slot`. This mode takes precedence over legacy modes.
 
 ### 2. Legacy Hash & Multi-Monitor Modes
 *   **URL Format:** `https://<server>/#<mode>` (e.g., `/#shared`, `/#player2`, `/#display2-right`)
-*   **Behavior:** Used if no `?token=` parameter is present. 
+*   **Behavior:** Used if the page carries no token. 
     *   `#shared` or `#playerX`: Assigns a specific controller slot or viewer role.
     *   `#display2-<position>`: Configures the client to act as a secondary monitor extending the primary display.
 
 ### URL Query Parameters
 
-*   **`token`** — Access token for Token Authentication Mode (see above).
+*   **`token`** — Access token for Token Authentication Mode (see above); a `token=` item in the fragment takes precedence.
 *   **`offscreen_worker`** — `false` disables the worker video sink (see *Video Rendering* below), forcing main-thread rendering. Defaults to `true`, and only takes effect on browsers without a main-thread track generator (i.e. non-Chromium).
 
 ---

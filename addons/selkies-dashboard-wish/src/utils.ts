@@ -25,6 +25,7 @@
  */
 
 import { getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../selkies-web-core/lib/util.js";
+import { urlFragmentKeyword } from "../../selkies-web-core/lib/page-url.js";
 
 export { isMobileClient };
 
@@ -47,7 +48,7 @@ const PER_DISPLAY_SETTINGS = [
   'video_bitrate', 'force_aligned_resolution', 'scaling_dpi',
 ];
 
-const urlHash = typeof window !== 'undefined' ? window.location.hash : '';
+const urlHash = typeof window !== 'undefined' ? urlFragmentKeyword() : '';
 /** Which display this page is, from the `#display2` URL hash. */
 export const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
 export const isSecondaryDisplay = displayId === 'display2';

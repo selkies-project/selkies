@@ -25,6 +25,7 @@ import App from './App.jsx';
 import PlayerGamepadButton from './components/PlayerGamepadButton.jsx';
 import './index.css';
 import { getRoutePrefix } from '../../selkies-web-core/lib/util.js';
+import { urlFragmentKeyword } from '../../selkies-web-core/lib/page-url.js';
 import "../../universal-touch-gamepad/universalTouchGamepad.js";
 
 /**
@@ -58,7 +59,7 @@ async function detectInitialMode() {
   }
 }
 
-const currentHash = window.location.hash;
+const currentHash = urlFragmentKeyword();
 const noDashboardModes = ['#shared', '#player2', '#player3', '#player4'];
 const playerClientModes = ['#player2', '#player3', '#player4'];
 

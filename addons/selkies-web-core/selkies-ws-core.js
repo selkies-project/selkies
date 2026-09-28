@@ -121,7 +121,8 @@ import {
 } from './lib/file-upload.js';
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
-import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
+import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.js';
+import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, displayLabel, serverAnswers } from './lib/util.js';
 import {
@@ -773,15 +774,16 @@ let detectedSharedModeType = null;
 let playerInputTargetIndex = 0;
 
 const urlParams = new URLSearchParams(window.location.search);
-const authToken = urlParams.get('token');
+const authToken = getSessionToken();
 
 /**
- * The page hash selects the role: `#display2[-position]` is the secondary
- * display in every auth mode (a token-authenticated page that connected as
- * `primary` would supersede the page already holding it), and without a token
- * `#shared` and `#player2` to `#player4` are the shared-viewer roles.
+ * The page hash's keyword selects the role: `#display2[-position]` is the
+ * secondary display in every auth mode (a token-authenticated page that
+ * connected as `primary` would supersede the page already holding it), and
+ * without a token `#shared` and `#player2` to `#player4` are the shared-viewer
+ * roles. A session token riding the hash beside it is not part of the keyword.
  */
-const hash = window.location.hash;
+const hash = urlFragmentKeyword();
 if (hash.startsWith('#display2')) {
     displayId = 'display2';
     const parts = hash.split('-');
@@ -6306,7 +6308,13 @@ self.onmessage = (e) => {
   }
   if (m.type === 'open') {
     primary = m.primary !== false;
-    ws = new WebSocket(m.url);
+    try {
+      ws = new WebSocket(m.url, m.protocols || []);
+    } catch (err) {
+      // Uncaught here, the page would wait on a socket that never opens.
+      self.postMessage({ type: 'close', code: 1006, reason: '', wasClean: false });
+      return;
+    }
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => self.postMessage({ type: 'open' });
     ws.onerror = () => self.postMessage({ type: 'error' });
@@ -6367,8 +6375,10 @@ class WorkerWebSocket {
    * @param {string} url Session socket URL, query string included.
    * @param {boolean} primary Whether this page owns the primary display; only
    *     that one takes the audio short-circuit.
+   * @param {string[]} [protocols] Subprotocols the handshake offers
+   *     (`sessionTokenProtocols`).
    */
-  constructor(url, primary) {
+  constructor(url, primary, protocols = []) {
     this.readyState = WebSocket.CONNECTING;
     this.binaryType = 'arraybuffer';
     this.onopen = this.onmessage = this.onerror = this.onclose = null;
@@ -6409,7 +6419,7 @@ class WorkerWebSocket {
         return;
       }
     };
-    this._worker.postMessage({ type: 'open', url, primary });
+    this._worker.postMessage({ type: 'open', url, primary, protocols });
   }
 
   /**
@@ -7047,8 +7057,10 @@ class WorkerWebSocket {
 
   const ws_protocol = location.protocol === 'http:' ? 'ws://' : 'wss://';
   let websocketEndpointURL = new URL(`${ws_protocol}${window.location.host}${pathname}`);
+  // A token from the page's fragment rides the subprotocols, never the URL.
+  const tokenProtocols = sessionTokenProtocols();
   if (isTokenAuthMode) {
-      websocketEndpointURL.search = `?token=${authToken}`;
+      if (tokenProtocols.length === 0) websocketEndpointURL.search = `?token=${encodeURIComponent(authToken)}`;
   } else if (isSharedMode) {
       // The role and slot ride as query parameters; a fragment never reaches the server.
       const wsParams = new URLSearchParams();
@@ -7072,14 +7084,14 @@ class WorkerWebSocket {
     : getBoolParam('socket_worker', true);
   try {
     if (!socketWorkerEnabled) throw new Error('socket_worker=false');
-    websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary');
+    websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols);
     if (streamStats.open) websocket.setStats(true);
   } catch (e) {
     // No worker to be had (a policy forbidding blob workers, say). The socket
     // then runs here, where a busy thread costs audio its cadence, which is
     // still better than no session.
     if (socketWorkerEnabled) console.warn('[websockets] socket worker unavailable, reading on the page:', e);
-    websocket = new WebSocket(websocketEndpointURL.href);
+    websocket = new WebSocket(websocketEndpointURL.href, tokenProtocols);
     websocket.binaryType = 'arraybuffer';
   }
   // The socket itself is in a worker, so this handle is what page-side
@@ -7800,7 +7812,7 @@ class WorkerWebSocket {
         updateStatusDisplay();
 
         if (!isTokenAuthMode) {
-            const hash = window.location.hash;
+            const hash = urlFragmentKeyword();
             if (hash === '#shared') {
                 clientRole = 'viewer'; clientSlot = null;
             } else if (hash.startsWith('#player')) {
@@ -8057,7 +8069,7 @@ class WorkerWebSocket {
             }
           } else if (obj.type === 'print_document') {
             // A second display page is the same browser as the primary one.
-            if (!window.location.hash.startsWith('#display2')) printJobs.announce(obj.name, obj.size_bytes);
+            if (!urlFragmentKeyword().startsWith('#display2')) printJobs.announce(obj.name, obj.size_bytes);
           } else if (obj.type === 'pipeline_status') {
             let statusChanged = false;
             if (obj.video !== undefined && obj.video !== isVideoPipelineActive) {

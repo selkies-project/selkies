@@ -84,7 +84,8 @@ import { createFileUploader } from "./lib/file-upload.js";
 import { ClipboardWorkerBridge, sendClipboardChunked } from './lib/clipboard-worker-bridge.js'
 import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
-import { installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
+import { getSessionToken, installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
+import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, serverAnswers } from './lib/util.js';
 import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
@@ -527,7 +528,7 @@ export default function webrtc() {
 		onImageWriteFailed: (err) => notifyClipboardImageWriteFailed(err),
 	});
 
-	const hash = window.location.hash;
+	const hash = urlFragmentKeyword();
 	if (hash === '#shared') {
         clientRole = CLIENT_VIEWER;
         clientSlot = -1;
@@ -567,7 +568,7 @@ export default function webrtc() {
 	 * two displays' picks never share a key; must match the dashboards'
 	 * `getPrefixedKey` and the WebSocket core.
 	 */
-	const storageDisplayId = window.location.hash.startsWith('#display2') ? 'display2' : 'primary';
+	const storageDisplayId = urlFragmentKeyword().startsWith('#display2') ? 'display2' : 'primary';
 	/** Display rectangles (+ per-page scale) from the last display-config update. */
 	let latestDisplayLayouts = null;
 	/** Whether the server runs on Wayland, as the last display-config update named it. */
@@ -687,7 +688,7 @@ export default function webrtc() {
 	 */
 	function applyEffectiveCursorSetting() {
 		const userPreference = useBrowserCursors;
-		const isDisplay2 = window.location.hash.startsWith('#display2');
+		const isDisplay2 = urlFragmentKeyword().startsWith('#display2');
 		const isMultiMonitorActive = (isDisplay2 || isSecondaryDisplayConnected);
 		const finalSetting = isMultiMonitorActive ? true : userPreference;
 		if (input && typeof input.setUseBrowserCursors === 'function') {
@@ -1619,7 +1620,7 @@ export default function webrtc() {
 		if (window.manualResolution && manualWidth && manualHeight) {
 			console.log(`Applying manual resolution: ${manualWidth}x${manualHeight}`);
 			applyManualStyle(manualWidth, manualHeight, scaleLocal);
-			if (window.location.hash.startsWith('#display2')) {
+			if (urlFragmentKeyword().startsWith('#display2')) {
 				sendResolutionToServer(manualWidth, manualHeight);
 			}
 		} else {
@@ -2892,7 +2893,7 @@ export default function webrtc() {
 			var protocol = (location.protocol == "http:" ? "ws://" : "wss://");
 			var url = new URL(protocol + window.location.host + pathname + "api/" + appName + "/signaling/");
 			// Secure-mode token, matched against the active mk token to grant collaboration.
-			var authToken = new URLSearchParams(window.location.search).get('token') || undefined;
+			var authToken = getSessionToken() || undefined;
 			fatalConnectionHalt = false;
 			let pcRecoveryTimer = null;
 			var signaling = new WebRTCSignaling(url, clientRole, clientSlot, isStrictViewer, authToken, displayId, displayPosition);
@@ -3227,7 +3228,7 @@ export default function webrtc() {
 			 */
 			webrtc.onprintdocument = (doc) => {
 				// A second display page is the same browser as the primary one.
-				if (printJobs && !window.location.hash.startsWith('#display2')) printJobs.announce(doc.name, doc.size_bytes);
+				if (printJobs && !urlFragmentKeyword().startsWith('#display2')) printJobs.announce(doc.name, doc.size_bytes);
 			};
 			webrtc.onsystemaction = (action) => {
 				if (action.startsWith('rumble,')) {

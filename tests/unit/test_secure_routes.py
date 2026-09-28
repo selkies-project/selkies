@@ -36,8 +36,10 @@ from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 
 from selkies import sessions  # noqa: E402
+from aiohttp.test_utils import make_mocked_request  # noqa: E402
 from selkies.stream_server import (  # noqa: E402
-    AUTH_REALM, MASTER_TOKEN_HEADER, SESSION_TOKEN_COOKIE, CentralizedStreamServer,
+    AUTH_REALM, MASTER_TOKEN_HEADER, SESSION_TOKEN_COOKIE, SESSION_TOKEN_PROTOCOL,
+    SESSION_TOKEN_PROTOCOL_PREFIX, CentralizedStreamServer, handshake_session_token,
 )
 
 MASTER = "unit-master-token"
@@ -358,6 +360,34 @@ async def legacy_modes() -> None:
               status == 200 and body == "viewer", f"{status} {body}")
 
 
+def _token_protocol(token: str) -> str:
+    return SESSION_TOKEN_PROTOCOL_PREFIX + base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")
+
+
+def handshake_carriers() -> None:
+    """What a WebSocket handshake presents as its session token."""
+    def token(path: str, protocols: str = ""):
+        headers = {"Sec-WebSocket-Protocol": protocols} if protocols else {}
+        return handshake_session_token(make_mocked_request("GET", path, headers=headers))
+
+    def refused(protocols: str) -> bool:
+        try:
+            token("/api/websockets", protocols)
+        except web.HTTPBadRequest:
+            return True
+        return False
+
+    offered = f"{SESSION_TOKEN_PROTOCOL}, {_token_protocol(ODD)}"
+    check("a fragment token arrives in the subprotocol, any character intact", token("/api/websockets", offered) == ODD)
+    check("a query token arrives as ?token=", token(f"/api/websockets?token={CTRL}") == CTRL)
+    check("the subprotocol wins over ?token=",
+          token(f"/api/websockets?token={VIEW}", f"{SESSION_TOKEN_PROTOCOL},{_token_protocol(CTRL)}") == CTRL)
+    check("a handshake with neither presents no token", token("/api/websockets") is None)
+    check("the token subprotocol without selkies is refused", refused(_token_protocol(CTRL)))
+    check("an undecodable token subprotocol is refused",
+          refused(f"{SESSION_TOKEN_PROTOCOL}, {SESSION_TOKEN_PROTOCOL_PREFIX}not+base64url"))
+
+
 def main() -> bool:
     # The server module configures logging at import; the stub server's access
     # lines and the middleware's refusal warnings are not the output here.
@@ -367,6 +397,7 @@ def main() -> bool:
     asyncio.run(secure_subfolder())
     asyncio.run(secure_basic_on())
     asyncio.run(legacy_modes())
+    handshake_carriers()
     print(f"[secure-routes] {passed}/{passed + failed} passed", flush=True)
     return failed == 0
 
