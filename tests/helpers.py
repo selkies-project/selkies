@@ -724,6 +724,16 @@ def free_display(taken: Iterable[str] = ()) -> Iterable[str]:
         yield f":{number}"
 
 
+def x_lock_holder(display: str) -> Optional[int]:
+    """The process id the display's lock file names, None without a readable one."""
+    number = display.lstrip(":").split(".")[0]
+    try:
+        with open(f"/tmp/.X{number}-lock") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def private_x_server(width: int = 1280, height: int = 720, depth: int = 24,
                      extra_args: Iterable[str] = (), xvfb: str = "Xvfb") -> tuple:
     """A throwaway Xvfb of this suite's own, on a display nothing else holds.
@@ -732,7 +742,10 @@ def private_x_server(width: int = 1280, height: int = 720, depth: int = 24,
     private server needs it. A number another server takes first is simply the
     next candidate, so suites running side by side do not collide; the attempts
     are bounded, because a host where no server can start at all must report
-    that rather than work through every number in the range.
+    that rather than work through every number in the range. A display that
+    answers is taken only when its lock names this server: two suites starting
+    together try the same number, and the one whose server loses the lock would
+    otherwise take the winner's display in the moment before its own exits.
 
     Args:
         width: Screen width. Xvfb fixes its maximum screen size here, so a
@@ -765,7 +778,9 @@ def private_x_server(width: int = 1280, height: int = 720, depth: int = 24,
                 break
             if subprocess.run(["xdpyinfo", "-display", display],
                               capture_output=True).returncode == 0:
-                return proc, display
+                if x_lock_holder(display) == proc.pid:
+                    return proc, display
+                break
             time.sleep(0.25)
         proc.kill()
         proc.wait(timeout=5)
@@ -787,16 +802,10 @@ def stop_x_server(proc: subprocess.Popen, display: str) -> None:
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=5)
+    if x_lock_holder(display) != proc.pid:
+        return
     number = display.lstrip(":").split(".")[0]
-    lock = f"/tmp/.X{number}-lock"
-    try:
-        with open(lock) as f:
-            stale = int(f.read().strip()) == proc.pid
-    except (OSError, ValueError):
-        return
-    if not stale:
-        return
-    for path in (lock, f"/tmp/.X11-unix/X{number}"):
+    for path in (f"/tmp/.X{number}-lock", f"/tmp/.X11-unix/X{number}"):
         try:
             os.unlink(path)
         except OSError:

@@ -69,7 +69,7 @@ saved_env = {k: os.environ.get(k) for k in ("HOME", "DISPLAY", "XDG_CONFIG_HOME"
 os.environ["HOME"] = home
 os.environ["XDG_CONFIG_HOME"] = os.path.join(home, ".config")
 os.environ.pop("DISPLAY", None)
-xserver = display = None
+xserver = display = other_server = None
 try:
     res.check("a fresh home names no density", DU.desktop_dpi() is None, DU.desktop_dpi())
     with open(os.path.join(home, ".xsettingsd"), "w") as f:
@@ -94,8 +94,10 @@ try:
                   DU.desktop_dpi() == 120, DU.desktop_dpi())
 
         # Stand-ins named xsettingsd, one serving this display and one another
-        # display from this same home, which a SIGHUP ends.
-        other = f":{int(display.lstrip(':')) + 1}"
+        # display from this same home, which a SIGHUP ends. The other display is
+        # a server of this suite's own: the readers find a process by its DISPLAY
+        # across the host, so a number nothing holds can be a concurrent run's.
+        other_server, other = H.private_x_server(320, 240)
         daemons = {d: H.named_process("xsettingsd", {"DISPLAY": d}) for d in (display, other)}
         try:
             merged = asyncio.run(DU._run_xrdb(144, DU.logger_app_resize))
@@ -266,6 +268,8 @@ finally:
             os.environ[k] = v
     if xserver:
         H.stop_x_server(xserver, display)
+    if other_server:
+        H.stop_x_server(other_server, other)
     shutil.rmtree(home, ignore_errors=True)
 
 sys.exit(0 if res.summary() else 1)
