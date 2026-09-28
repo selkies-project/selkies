@@ -801,7 +801,10 @@ class RtcpRtpfbPacket:
 
     @classmethod
     def parse(cls, data: bytes, fmt: int) -> "RtcpRtpfbPacket":
-        if len(data) < 8 or len(data) % 4:
+        # Only a NACK's FCI comes in whole words: a transport-cc feedback runs
+        # to any length and libwebrtc pads it with the RTCP padding bit, which
+        # the caller has already stripped.
+        if len(data) < 8 or (fmt == RTCP_RTPFB_NACK and len(data) % 4):
             raise ValueError("RTCP RTP feedback length is invalid")
 
         ssrc, media_ssrc = unpack("!LL", data[0:8])

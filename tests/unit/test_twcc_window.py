@@ -13,7 +13,10 @@ climbed back.
 
 A control interval's worth of feedback is the measurement, and an interval
 that carried none steers nothing. A link that really is losing packets must
-still be backed off exactly as before.
+still be backed off exactly as before. And all of it is read: libwebrtc pads
+a feedback that does not end on a 32-bit boundary with the RTCP padding bit,
+three in four of them, and such a feedback, with the compound packet around
+it, parses whole.
 
 The same interval measures the queue standing on the path from one-way delay:
 the feedback's reference time puts every arrival on the receiver's one clock,
@@ -28,6 +31,7 @@ from types import SimpleNamespace
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
+from selkies.webrtc import rtp  # noqa: E402
 from selkies.webrtc.rtcdtlstransport import RTCDtlsTransport  # noqa: E402
 from selkies.webrtc.rtp import pack_twcc_fci  # noqa: E402
 
@@ -46,6 +50,14 @@ def feedback(base_seq: int, received: int, lost: int, delta_us: int = 1000) -> b
     if lost:
         fci += struct.pack("!H", lost)                      # run of "not received"
     return fci + bytes([delta_us // 250]) * received
+
+
+def _refused(rtp_mod, data: bytes) -> bool:
+    try:
+        rtp_mod.RtcpPacket.parse(data)
+    except ValueError:
+        return True
+    return False
 
 
 def transport() -> RTCDtlsTransport:
@@ -69,8 +81,31 @@ def deliver(tr: RTCDtlsTransport, base_seq: int, received: int, lost: int) -> No
     tr._twcc_process_feedback(feedback(base_seq, received, lost))
 
 
+def padded_feedback(fci: bytes) -> bytes:
+    """A transport-cc feedback as libwebrtc sends it: the FCI as long as it
+    runs, padded to 32 bits with the RTCP padding bit and a count byte."""
+    body = struct.pack("!LL", 1, 0) + fci
+    pad = -len(body) % 4
+    body += bytes(pad - 1) + bytes([pad]) if pad else b""
+    return struct.pack("!BBH", (2 << 6) | (1 << 5 if pad else 0) | rtp.RTCP_RTPFB_TWCC, rtp.RTCP_RTPFB,
+                       len(body) // 4) + body
+
+
 def main() -> int:
     res = H.Results("twcc-window")
+
+    fci = struct.pack("!HHL", 100, 3, 0) + struct.pack("!H", (1 << 13) | 3) + bytes([4, 4, 4])
+    try:
+        packets = rtp.RtcpPacket.parse(bytes(rtp.RtcpRrPacket(ssrc=1)) + padded_feedback(fci))
+    except ValueError as exc:
+        packets = str(exc)
+    res.check("a feedback padded with the RTCP padding bit parses, and so does its compound",
+              not isinstance(packets, str)
+              and [type(p).__name__ for p in packets] == ["RtcpRrPacket", "RtcpRtpfbPacket"]
+              and packets[1].fmt == rtp.RTCP_RTPFB_TWCC and packets[1].fci == fci, packets)
+    res.check("while a NACK whose entries stop short of a whole word is still refused",
+              _refused(rtp, struct.pack("!BBH", (2 << 6) | (1 << 5) | rtp.RTCP_RTPFB_NACK, rtp.RTCP_RTPFB, 3)
+                       + bytes(10) + bytes([0, 2])), "")
 
     tr = transport()
     deliver(tr, 100, 17, 5)
