@@ -29,7 +29,7 @@ if [ -n "$need_selkies$need_xvfb" ]; then
     sudo apt-get -o DPkg::Lock::Timeout=300 update -qq
     file=(sudo apt-get -o DPkg::Lock::Timeout=300 install -y)
     repo=(sudo apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends)
-    pkg="$([ "$ID" = ubuntu ] && echo "ubuntu$VERSION_ID" || echo "$VERSION_CODENAME")-$(dpkg --print-architecture).deb"
+    pkg="$ID$([ "$ID" = ubuntu ] && echo "$VERSION_ID" || echo "$VERSION_CODENAME")-$(dpkg --print-architecture).deb"
     xvfb=xvfb
   elif command -v dnf > /dev/null; then
     file=(sudo dnf install -y)
@@ -52,8 +52,11 @@ if [ -n "$need_selkies$need_xvfb" ]; then
   fi
   if [ -n "$need_selkies" ]; then
     version='${SELKIES_VERSION}'
-    [ -n "$version" ] || version=$(curl -fsSL https://api.github.com/repos/selkies-project/selkies/releases/latest \
-      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+    if [ -z "$version" ]; then
+      # The latest release's tag, from the redirect GitHub answers without its rate-limited API
+      version=$(curl -fsSLI -o /dev/null -w '%%{url_effective}' https://github.com/selkies-project/selkies/releases/latest)
+      version=$${version##*/}
+    fi
     work=$(mktemp -d)
     curl -fsSL -o "$work/selkies-$version-$pkg" \
       "https://github.com/selkies-project/selkies/releases/download/$version/selkies-$version-$pkg"
@@ -61,6 +64,8 @@ if [ -n "$need_selkies$need_xvfb" ]; then
     rm -rf "$work"
   fi
   [ -z "$need_xvfb" ] || "$${repo[@]}" "$xvfb"
+  # The package depends on the PulseAudio client alone, and selkies-session starts only a server the workspace has
+  command -v pulseaudio > /dev/null || command -v pipewire-pulse > /dev/null || "$${repo[@]}" pulseaudio
 fi
 
 args=(--port="$port" --enable-basic-auth=false --enable-https=false)
