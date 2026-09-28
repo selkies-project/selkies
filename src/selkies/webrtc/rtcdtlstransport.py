@@ -491,6 +491,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         # receiver's feedback, and the latest loss/delay estimate derived from it.
         self._twcc_seq = 0
         self._twcc_history: dict[int, tuple[int, float]] = {}
+        self._twcc_missing: dict[int, int] = {}
+        self._twcc_window_id = 0
         self._twcc_pruned_at = 0.0
         self.twcc_estimate: Optional[dict] = None
         self._twcc_window = self._twcc_window_zero()
@@ -987,6 +989,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         seq = self._twcc_seq
         self._twcc_seq = (self._twcc_seq + 1) & 0xFFFF
         now = time.monotonic()
+        self._twcc_history.pop(seq, None)
+        self._twcc_missing.pop(seq, None)
         self._twcc_history[seq] = (size, now)
         # Bounded by age, not count: a retransmission storm allocates thousands
         # of numbers a second, and one let go before its feedback arrives would
@@ -997,18 +1001,38 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
                 if now - at < TWCC_HISTORY_S:
                     break
                 del self._twcc_history[old]
+                self._twcc_missing.pop(old, None)
         return seq
+
+    def _twcc_unmark_missing(self, seq: int) -> None:
+        """Retract a provisional loss only while its control interval is open.
+
+        A positive acknowledgment or a local discard resolves the negative.
+        Intervals already consumed by the controller remain unchanged.
+        """
+        if self._twcc_missing.pop(seq, None) == self._twcc_window_id:
+            self._twcc_window["lost"] -= 1
 
     def _twcc_dropped(self, seq: int) -> None:
         """Record that the pacer dropped the packet sent under `seq`, so the
         receiver reporting it missing counts as nothing the wire lost."""
         if seq in self._twcc_history:
             self._twcc_history[seq] = (0, self._twcc_history[seq][1])
+            self._twcc_unmark_missing(seq)
 
     def _twcc_process_feedback(self, fci: bytes) -> None:
         """Decode a transport-cc feedback FCI (draft-holmer-rmcat-transport-wide-cc):
         walk the packet-status chunks and receive deltas, join them against the send
         history, and publish a loss / throughput / delay estimate.
+
+        A missing status is provisional: the packet may still be in transit.
+        Retain its history until a positive acknowledgment or normal expiry,
+        and count the negative once. A late positive contributes its bytes
+        once and retracts a negative only from the current control interval.
+        Missing markers carry interval numbers rather than retaining drained
+        windows, and expire or reset with their send-history entries. Unknown
+        packets and local discards contribute neither loss nor delivery;
+        feedback containing no new observations cannot steer the pacer.
 
         The deltas chain arrival times: the first is the first arrival's offset
         from the feedback's reference time, each later one the gap from the
@@ -1078,15 +1102,17 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         if not statuses:
             return
         self._twcc_reference = reference
-        received = len(arrivals)
+        received = 0
         # A packet the pacer dropped was never on the wire to lose. Loss the
         # wire spread through the window says it is short of room; one run of
         # it is an outage, which says nothing about the room there is.
         lost = runs = 0
         previous = None
         for seq in missing:
-            if self._twcc_history.pop(seq, (1,))[0] == 0:
+            sent = self._twcc_history.get(seq)
+            if sent is None or sent[0] == 0 or seq in self._twcc_missing:
                 continue
+            self._twcc_missing[seq] = self._twcc_window_id
             lost += 1
             if previous is None or (seq - previous) & 0xFFFF != 1:
                 runs += 1
@@ -1101,13 +1127,17 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         delay_min = delay_last = None
         for seq, at in arrivals:
             sent = self._twcc_history.pop(seq, None)
-            if sent is not None:
+            self._twcc_unmark_missing(seq)
+            if sent is not None and sent[0] > 0:
+                received += 1
                 bytes_acked += sent[0]
                 matched.append((at, sent[0]))
                 in_order.append((sent[1], at, sent[0]))
                 delay_last = at / 1e6 - sent[1]
                 if delay_min is None or delay_last < delay_min:
                     delay_min = delay_last
+        if not received and not lost:
+            return
         matched.sort(key=lambda m: m[0])
         span_us = 0.0
         for (t0, _size), (t1, size) in zip(matched, matched[1:]):
@@ -1197,6 +1227,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         if not packets:
             return None
         self._twcc_window = self._twcc_window_zero()
+        self._twcc_window_id += 1
         queue_ms = rising_ms = depth_ms = None
         if window["delay_min"] is not None:
             now = time.monotonic()
