@@ -47,7 +47,15 @@ def service_exec(name: str) -> str:
 
 class KdeRig:
     """kwin_wayland (virtual backend), PipeWire, and the KDE portal on a private session bus and
-    runtime dir, the way a KDE session exposes them; `socket_path` is the compositor's socket."""
+    runtime dir, the way a KDE session exposes them; `socket_path` is the compositor's socket.
+
+    KWin runs with `KWIN_WAYLAND_NO_PERMISSION_CHECKS`, as the KDE image sets it: KWin 6 grants
+    its restricted globals, the screencast one among them, by the desktop file of the client's
+    executable, which it does not resolve in this bare session (it logs the backend as not
+    listing `zkde_screencast_unstable_v1`, which the backend's desktop file does), and the backend
+    then refuses every session request. KDE 6's backend also asks before a remote-desktop session
+    starts unless the permission store's `kde-authorized` table grants the app `remote-desktop`,
+    so the rig grants it to a host app, whose id is empty, as a deployment does ahead of time."""
 
     def __init__(self) -> None:
         # A short path: the compositor's, PipeWire's, and the bus's sockets all live under it.
@@ -74,7 +82,7 @@ class KdeRig:
 
     def start(self) -> str:
         """Bring the stack up; returns why it could not, or an empty string."""
-        for binary in ("kwin_wayland", "dbus-daemon", "pipewire", "wireplumber"):
+        for binary in ("kwin_wayland", "dbus-daemon", "gdbus", "pipewire", "wireplumber"):
             if not shutil.which(binary):
                 return f"{binary} not installed"
         for name, path in (("xdg-desktop-portal", self.portal), ("xdg-desktop-portal-kde", self.portal_kde)):
@@ -92,7 +100,7 @@ class KdeRig:
         self._spawn(["wireplumber"], "wireplumber")
         self._spawn(["kwin_wayland", "--virtual", "--width", str(SIZE[0]), "--height", str(SIZE[1]),
                      "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities",
-                     "--socket", self.socket_name], "kwin")
+                     "--socket", self.socket_name], "kwin", KWIN_WAYLAND_NO_PERMISSION_CHECKS="1")
         deadline = time.time() + 20
         while not os.path.exists(self.socket_path):
             if time.time() > deadline:
@@ -102,6 +110,14 @@ class KdeRig:
         self._spawn([self.portal_kde], "portal-kde", KDE_FULL_SESSION="true")
         self._spawn([self.portal, "-r"], "portal")
         time.sleep(2.0)
+        grant = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", "org.freedesktop.impl.portal.PermissionStore",
+             "--object-path", "/org/freedesktop/impl/portal/PermissionStore",
+             "--method", "org.freedesktop.impl.portal.PermissionStore.SetPermission",
+             "kde-authorized", "true", "remote-desktop", "", "['yes']"],
+            env=self.env, capture_output=True, text=True, timeout=15)
+        if grant.returncode != 0:
+            return f"the permission store took no remote-desktop grant: {grant.stderr.strip()}"
         return ""
 
     def log(self, name: str) -> str:
