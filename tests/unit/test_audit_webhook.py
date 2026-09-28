@@ -29,7 +29,7 @@ from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
 from selkies import audit  # noqa: E402
 from selkies.input_handler import WebRTCInput  # noqa: E402
-from selkies.webrtc_engine import RTCApp  # noqa: E402
+from selkies.webrtc_engine import ClientType, RTCApp  # noqa: E402
 from selkies.websockets_mode import SelkiesStreamingApp  # noqa: E402
 from selkies.settings import SENSITIVE_SETTING_NAMES, build_client_settings_payload, settings  # noqa: E402
 from selkies.stream_server import CentralizedStreamServer, TransferPacer  # noqa: E402
@@ -326,7 +326,8 @@ async def hook_cases() -> None:
           await rtc_app.send_clipboard_data(b"\x89PNG..", "image/png")
           channel = Channel()
           rtc_app.peer_connections = {"peer": {"peer_conn": SimpleNamespace(connectionState="connected"),
-                                               "data_channel": channel}}
+                                               "data_channel": channel,
+                                               "client_type": ClientType.CONTROLLER}}
           await rtc_app.send_clipboard_data(b"\x89PNG..", "image/png")
           await rtc_app.send_clipboard_data("", "text/plain", reply_to="cr")
           await delivered()

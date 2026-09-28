@@ -858,7 +858,10 @@ class SelkiesStreamingApp:
                 that client alone: every other one already holds the content or
                 is about to be told of a change, and a tagged reply they did
                 not ask for is read as their own fetch and cached without ever
-                reaching their clipboard.
+                reaching their clipboard. An announcement goes to every client
+                but the viewers: a viewer's page never takes the session's
+                clipboard, so a copy made there has no business on a viewer's
+                link.
 
         Payload frames get the bulk tolerance the data channel's drain allows
         (a slow link is not a dead client); control frames keep the liveness
@@ -899,7 +902,11 @@ class SelkiesStreamingApp:
             for table in (locks, latest):
                 for gone in [k for k in table if k not in live]:
                     del table[gone]
-            recipients = [c for c in list(clients) if conn_id is None or id(c) == conn_id]
+            if conn_id is not None:
+                recipients = [c for c in list(clients) if id(c) == conn_id]
+            else:
+                recipients = [c for c in list(clients)
+                              if client_permissions.get(c, {}).get("role") != "viewer"]
             announcement = object()
             if not reply_to:
                 for c in recipients:

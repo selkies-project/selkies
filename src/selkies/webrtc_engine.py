@@ -753,7 +753,10 @@ class RTCApp:
                 `send_system_action` addresses a requester: the other peers
                 already hold the content, and a reply they did not ask for is
                 read as their own fetch and cached rather than pasted. A
-                requester whose channel has closed receives nothing.
+                requester whose channel has closed receives nothing. An
+                announcement goes to the controllers alone: a viewer's page
+                never takes the session's clipboard, so a copy made there has
+                no business on a viewer's channel.
         """
         if not data and not reply_to:
             return
@@ -768,12 +771,11 @@ class RTCApp:
             if channel is None or channel.readyState != "open":
                 return
             requester = channel
-        if data_bytes and (requester is not None
-                           or next(self._iter_open_data_channels(), None) is not None):
+        channels = ([requester] if requester is not None
+                    else [channel for _did, channel in self._controller_channels()])
+        if data_bytes and channels:
             audit.emit("clipboard.send", mime_type=mime_type, size_bytes=len(data_bytes))
 
-        channels = ([requester] if requester is not None
-                    else list(self._iter_open_data_channels()))
         # One payload at a time per channel: start/data/end carry no transfer
         # id, so a send racing another would interleave two payloads' chunks
         # into one assembly.

@@ -8,7 +8,10 @@ chunks, and the client drops a payload whose chunks stop at the next start.
 Over WebRTC a small payload used to go out between an older transfer's chunks,
 and the client completed the older one over it. A tagged reply to the
 connect-time fetch is only cached, so it is neither superseded nor supersedes.
-The sockets and channels record what they are sent; pacing is a short sleep.
+An announcement reaches the controllers alone: a viewer's page never takes the
+session's clipboard, so a copy has no business on a viewer's link, while a
+viewer's own fetch is still answered. The sockets and channels record what
+they are sent; pacing is a short sleep.
 """
 import asyncio
 import json
@@ -99,13 +102,27 @@ async def websockets_case() -> None:
           and sock.frames.count("clipboard_data") == chunks
           and sock.frames[-2:] == ["clipboard_finish", "clipboard_binary"], sock.frames)
 
+    viewer = Socket()
+    app.data_streaming_server.clients = {sock, viewer}
+    wsm.client_permissions[viewer] = {"role": "viewer"}
+    try:
+        sock.frames.clear()
+        await app.send_ws_clipboard_data("a copy", "text/plain")
+        await app.send_ws_clipboard_data("asked for", "text/plain", reply_to="cr", conn_id=id(viewer))
+        check("websockets: a viewer is announced no copy, and is answered what it asked",
+              sock.frames == ["clipboard"] and viewer.frames == ["clipboard_reply", "clipboard"],
+              (sock.frames, viewer.frames))
+    finally:
+        wsm.client_permissions.pop(viewer, None)
+
 
 async def webrtc_case() -> None:
     rte.drain_data_channel = drain
     app = rte.RTCApp.__new__(rte.RTCApp)
     channel = Channel()
     app.peer_connections = {"peer": {"peer_conn": SimpleNamespace(connectionState="connected"),
-                                     "data_channel": channel}}
+                                     "data_channel": channel,
+                                     "client_type": rte.ClientType.CONTROLLER}}
     big = bytes(range(256)) * 800
     chunks = -(-len(big) // rte.get_adjusted_chunk_size(app.peer_connections))
 
@@ -126,6 +143,15 @@ async def webrtc_case() -> None:
     check("webrtc: a tagged reply completes before the copy that followed it",
           channel.sent.count("clipboard-msg-data") == chunks
           and channel.sent[-2:] == ["clipboard-msg-end", "clipboard-msg"], channel.sent)
+
+    viewer = Channel()
+    app.peer_connections["viewer"] = {"peer_conn": SimpleNamespace(connectionState="connected"),
+                                      "data_channel": viewer, "client_type": rte.ClientType.VIEWER}
+    channel.sent.clear()
+    await app.send_clipboard_data(b"a copy", "image/png")
+    await app.send_clipboard_data(b"asked for", "image/png", reply_to="cr", peer_id="viewer")
+    check("webrtc: a viewer is announced no copy, and is answered what it asked",
+          channel.sent == ["clipboard-msg"] and viewer.sent == ["clipboard-msg"], (channel.sent, viewer.sent))
 
 
 async def main() -> None:
