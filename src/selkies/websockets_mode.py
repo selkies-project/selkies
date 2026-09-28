@@ -49,6 +49,7 @@ import os
 import struct
 import time
 import secrets
+import socket
 from collections import OrderedDict, deque
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -180,10 +181,14 @@ STRUCTURAL_CAPTURE_SETTINGS = (
 # client: a stalled client is sent nothing, so nothing could otherwise reach it
 # to ack, and the gate would hold until the page reloaded.
 STALLED_CLIENT_REPROBE_SECONDS = 2.0
-# Liveness bound for one send on the shared audio fan-out and the video relays:
-# backlogs are bounded upstream, so a send this slow means a dead socket, which
-# is dropped and never reused (the canceled write tore its framing).
-SHARED_STREAM_SEND_TIMEOUT_SECONDS = 1.0
+# A socket whose peer takes nothing of what a send waits on for this long is
+# dead and is aborted. One that keeps taking is a slow path, however long a key
+# frame takes to cross it: its relay's byte budget bounds how far it falls
+# behind. Longer than the pauses a live path shows (a Wi-Fi roam, TCP backing
+# its retransmission timer off, a tab the engine froze for a moment).
+SEND_STALL_SECONDS = 10.0
+# How often a waiting send looks at its socket for that progress.
+SEND_PROBE_SECONDS = 0.5
 # Per-client video backlog bound as seconds of stream at the configured bitrate
 # (backlog is latency debt, so it tracks the rate), floored so low-bitrate
 # streams still absorb transport jitter; see _VideoRelay.
@@ -379,6 +384,101 @@ def _ws_write_backlog(ws: Any) -> Optional[int]:
         except Exception:
             pass
     return pending
+
+
+# Linux struct tcp_info: tcpi_bytes_acked, what the peer has acknowledged.
+_TCPI_BYTES_ACKED = 120
+
+
+def _peer_progress(ws: Any) -> Optional[int]:
+    """A count that grows while this socket's peer takes what was written to it.
+
+    The bytes the peer acknowledged where the kernel reports them, a count the
+    socket's other writers cannot move; else the write backlog negated, so a
+    backlog that shrinks reads as growth. None when nothing can say.
+    """
+    transport = getattr(getattr(ws, "_writer", None), "transport", None)
+    if transport is None:
+        return None
+    try:
+        sock = transport.get_extra_info("socket")
+        info = sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_INFO, _TCPI_BYTES_ACKED + 8)
+        if len(info) >= _TCPI_BYTES_ACKED + 8:
+            return struct.unpack_from("Q", info, _TCPI_BYTES_ACKED)[0]
+    except (AttributeError, OSError):
+        pass
+    backlog = _ws_write_backlog(ws)
+    return None if backlog is None else -backlog
+
+
+def _abort_ws(ws: Any) -> None:
+    """Drop a dead socket at once. A close would queue its close frame behind
+    the very backlog the peer stopped taking, and the socket would linger with
+    it; aborting fails every send waiting on it as a lost connection."""
+    transport = getattr(getattr(ws, "_writer", None), "transport", None)
+    if transport is not None:
+        transport.abort()
+    else:
+        _close_abandoned_ws(ws)
+
+
+class _SendWatch:
+    """Watches the socket one send waits on (`_send_live`) and aborts it once
+    its peer has taken nothing for SEND_STALL_SECONDS."""
+
+    __slots__ = ('ws', 'what', 'loop', 'mark', 'since', 'dead', 'handle')
+
+    def __init__(self, ws: Any, what: str, loop: asyncio.AbstractEventLoop) -> None:
+        self.ws = ws
+        self.what = what
+        self.loop = loop
+        self.mark: Optional[int] = None
+        self.since: Optional[float] = None
+        self.dead = False
+        self.handle = loop.call_later(SEND_PROBE_SECONDS, self.probe)
+
+    def probe(self) -> None:
+        """Runs while the send still waits: note progress, or give up on the socket."""
+        mark = _peer_progress(self.ws)
+        now = self.loop.time()
+        if self.since is None or (mark is not None and (self.mark is None or mark > self.mark)):
+            self.mark, self.since = mark, now
+        elif now - self.since >= SEND_STALL_SECONDS:
+            self.dead = True
+            data_logger.warning(f"{self.what} send stalled past {SEND_STALL_SECONDS:.0f}s with "
+                                "nothing taken by the client; dropping it.")
+            _abort_ws(self.ws)
+            return
+        self.handle = self.loop.call_later(SEND_PROBE_SECONDS, self.probe)
+
+
+async def _send_live(ws: Any, data: Any, what: str) -> None:
+    """Send one binary frame, waiting as long as the socket keeps draining.
+
+    An uncompressed aiohttp send writes the whole frame before it awaits
+    anything; what it waits on is its transport's buffer falling back under
+    the low-water mark, and a far or slow path takes seconds to carry a key
+    frame that far. So the send is bounded by progress rather than by time: it
+    waits while the peer keeps taking bytes, and a peer that takes nothing for
+    SEND_STALL_SECONDS is dead (`_SendWatch`). Nothing is canceled on the way,
+    so a slow socket stays usable and the drain its other senders share is
+    left alone.
+
+    Args:
+        ws: The client socket.
+        data: The frame.
+        what: What is sending, for the log line that drops a dead client.
+
+    Raises:
+        ConnectionResetError: The socket was found dead and aborted.
+    """
+    watch = _SendWatch(ws, what, asyncio.get_running_loop())
+    try:
+        await ws.send_bytes(data)
+    finally:
+        watch.handle.cancel()
+    if watch.dead:
+        raise ConnectionResetError(f"{what}: the client took nothing for {SEND_STALL_SECONDS:.0f}s")
 
 
 def _note_round_trip(display_state: dict, rtt_ms: float, sent_bytes: int, now: float) -> None:
@@ -626,6 +726,9 @@ class _VideoRelay:
     its backlog and skips ahead to the next keyframe, the standard
     broadcast-video contract. Keyframes are exempt from the budget (part of
     one is useless), so the true bound is budget plus one keyframe burst.
+    That budget is the only bound on a slow client: a send waits for as long
+    as its socket keeps draining, and only a socket that stops draining costs
+    the client its connection (`_send_live`).
 
     Video reference-chain safety is tracked per stripe ROW (wire-header y_start, bytes
     4:6): one capture frame can mix IDR and delta stripes (a lone stripe
@@ -762,18 +865,7 @@ class _VideoRelay:
                     if len(ds['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
                         ds['sent_timestamps'].popitem(last=False)
                 try:
-                    await asyncio.wait_for(
-                        self.ws.send_bytes(data),
-                        timeout=SHARED_STREAM_SEND_TIMEOUT_SECONDS,
-                    )
-                except asyncio.TimeoutError:
-                    # Checked before OSError: on 3.11+ TimeoutError subclasses it.
-                    data_logger.warning(
-                        f"Video relay for '{self.display_id}' send stalled past "
-                        f"{SHARED_STREAM_SEND_TIMEOUT_SECONDS}s; dropping client.")
-                    self.server.clients.discard(self.ws)
-                    _close_abandoned_ws(self.ws)
-                    return
+                    await _send_live(self.ws, data, f"Video relay for '{self.display_id}'")
                 except (ConnectionResetError, OSError, RuntimeError):
                     self.server.clients.discard(self.ws)
                     return
@@ -1789,10 +1881,11 @@ class DataStreamingServer(BaseStreamingService):
         """Broadcast queued Opus audio chunks to the primary-viewer sockets.
 
         Runs as a long-lived task. Secondary-display sockets are excluded (they
-        render video only; audio rides the primary connection), and sends are
-        bounded so one stalled socket cannot freeze the shared stream. A queue
-        that stays silent past the health interval is the cue to ask pcmflux
-        whether the capture worker died (_check_pcmflux_health).
+        render video only; audio rides the primary connection), and each
+        socket's send runs on its own (`_send_audio_chunk`), so a slow or dead
+        socket holds neither the shared stream nor another client's audio. A
+        queue that stays silent past the health interval is the cue to ask
+        pcmflux whether the capture worker died (_check_pcmflux_health).
         """
         data_logger.debug("pcmflux audio chunk broadcasting task started.")
         try:
@@ -1817,19 +1910,30 @@ class DataStreamingServer(BaseStreamingService):
 
                 # A zero-copy view over the AudioFrame, header included; sent as-is.
                 message_to_send = item['data']
-                dropped = await _broadcast_to_clients(
-                    primary_viewers, message_to_send,
-                    per_client_timeout=SHARED_STREAM_SEND_TIMEOUT_SECONDS,
-                )
-                if dropped:
-                    # primary_viewers is a per-chunk temporary; the drop must reach the registry.
-                    self.clients -= dropped
+                for ws in primary_viewers:
+                    _spawn_background_task(self._send_audio_chunk(ws, message_to_send))
 
                 self.pcmflux_audio_queue.task_done()
         except asyncio.CancelledError:
             data_logger.debug("pcmflux audio chunk broadcasting task canceled.")
         finally:
             data_logger.debug("pcmflux audio chunk broadcasting task finished.")
+
+    async def _send_audio_chunk(self, ws: web.WebSocketResponse, data: Any) -> None:
+        """Send one audio chunk to one socket, dropping the client only when its
+        socket stops draining (`_send_live`).
+
+        A send writes its whole frame before it waits on anything, and these
+        tasks start in the order the chunks came, so a socket's chunks go out
+        in order even while an earlier one still waits on its drain.
+        """
+        if ws.closed:
+            self.clients.discard(ws)
+            return
+        try:
+            await _send_live(ws, data, "Audio")
+        except (ConnectionResetError, OSError, RuntimeError):
+            self.clients.discard(ws)
 
     def _compute_audio_red_distance(self) -> int:
         """RED distance for the shared audio broadcast.
