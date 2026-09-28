@@ -467,7 +467,7 @@ class _SendWatch:
 
 
 async def _send_live(ws: Any, data: Any, what: str) -> None:
-    """Send one binary frame, waiting as long as the socket keeps draining.
+    """Send one frame, binary or (for a str) text, waiting as long as the socket keeps draining.
 
     An uncompressed aiohttp send writes the whole frame before it awaits
     anything; what it waits on is its transport's buffer falling back under
@@ -488,7 +488,10 @@ async def _send_live(ws: Any, data: Any, what: str) -> None:
     """
     watch = _SendWatch(ws, what, asyncio.get_running_loop())
     try:
-        await ws.send_bytes(data)
+        if isinstance(data, str):
+            await ws.send_str(data)
+        else:
+            await ws.send_bytes(data)
     finally:
         watch.handle.cancel()
     if watch.dead:
@@ -678,22 +681,22 @@ async def _bulk_pace(gauge: UplinkGauge, pacer: TransferPacer, nbytes: int) -> N
 async def _broadcast_to_clients(
     clients: set,
     message: Union[str, bytes, bytearray, memoryview],
-    per_client_timeout: Optional[float] = None,
+    watched: bool = False,
     only: Optional[int] = None,
 ) -> set:
     """Broadcast concurrently to all clients, removing only on clear connection errors.
 
-    When per_client_timeout is set, a client whose send stalls past the bound
-    is treated as dead: the send is canceled and the socket is dropped and
-    closed. A canceled send_str may have left a half-written frame on the
-    wire, so that socket must never be reused for later sends.
+    A watched send waits as long as its socket keeps draining, and a client
+    whose socket takes nothing for SEND_STALL_SECONDS is dead: the socket is
+    aborted and dropped (`_send_live`). A slow client stays, so a control
+    message queued behind a key frame on a far path never costs the session.
 
     Args:
         clients: The socket set to fan out over; dead sockets are removed from
             it in place.
         message: Text control message, or raw bytes for binary frames.
-        per_client_timeout: Per-send liveness bound in seconds; None sends
-            unbounded.
+        watched: Whether each send drops a client whose socket stopped
+            taking bytes; unwatched sends wait unbounded.
         only: Connection identity (`id(socket)`) to address alone, for an
             answer that belongs to one client rather than to the session. A
             requester that has since disconnected receives nothing.
@@ -735,7 +738,7 @@ async def _broadcast_to_clients(
 
     async def _send_one(client):
         if isinstance(message, (bytes, bytearray, memoryview)):
-            await client.send_bytes(message)
+            await _send(client, message)
         elif getattr(client, "_ws_gz", False) and len(message) >= WS_GZIP_MIN_BYTES:
             # No await between this test and the append: concurrent sends must
             # not double-compress.
@@ -750,9 +753,17 @@ async def _broadcast_to_clients(
                 # compression the others are waiting on.
                 frame = await asyncio.shield(frame)
                 gz_frame_holder[0] = frame
-            await client.send_bytes(frame)
+            await _send(client, frame)
         else:
-            await client.send_str(message)
+            await _send(client, message)
+
+    async def _send(client, data):
+        if watched:
+            await _send_live(client, data, "Control message")
+        elif isinstance(data, str):
+            await client.send_str(data)
+        else:
+            await client.send_bytes(data)
 
     # Single-recipient fast path (the common case), same removal semantics as below.
     if len(recipients) == 1:
@@ -761,14 +772,7 @@ async def _broadcast_to_clients(
             clients.discard(client)
             return {client}
         try:
-            if per_client_timeout is not None:
-                await asyncio.wait_for(_send_one(client), timeout=per_client_timeout)
-            else:
-                await _send_one(client)
-        except asyncio.TimeoutError:
-            clients.discard(client)
-            _close_abandoned_ws(client)
-            return {client}
+            await _send_one(client)
         except ConnectionResetError:
             clients.discard(client)
             return {client}
@@ -781,17 +785,13 @@ async def _broadcast_to_clients(
 
     client_task_pairs = []
     closed_clients = set()
-    timed_out_clients = set()
+    canceled_clients = set()
 
     for client in recipients:
         if client.closed:
             closed_clients.add(client)
             continue
-        if per_client_timeout is not None:
-            task = asyncio.wait_for(_send_one(client), timeout=per_client_timeout)
-        else:
-            task = _send_one(client)
-        client_task_pairs.append((client, task))
+        client_task_pairs.append((client, _send_one(client)))
 
     tasks = [task for _, task in client_task_pairs]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -800,12 +800,9 @@ async def _broadcast_to_clients(
             # A BaseException the Exception branch never sees: without this the
             # client is neither delivered to nor dropped.
             data_logger.warning("Broadcast send was canceled; dropping the socket.")
-            timed_out_clients.add(client)
+            canceled_clients.add(client)
         elif isinstance(result, Exception):
-            # TimeoutError first: on 3.11+ it subclasses OSError.
-            if isinstance(result, asyncio.TimeoutError):
-                timed_out_clients.add(client)
-            elif isinstance(result, ConnectionResetError):
+            if isinstance(result, ConnectionResetError):
                 closed_clients.add(client)
             elif isinstance(result, (OSError, RuntimeError)):
                 err_msg = str(result).lower()
@@ -814,9 +811,9 @@ async def _broadcast_to_clients(
             else:
                 data_logger.warning(f"Broadcast exception (client not removed): {type(result).__name__}: {result}")
 
-    for client in timed_out_clients:
+    for client in canceled_clients:
         _close_abandoned_ws(client)
-    closed_clients |= timed_out_clients
+    closed_clients |= canceled_clients
 
     if closed_clients:
         clients -= closed_clients
@@ -1223,17 +1220,17 @@ class SelkiesStreamingApp:
                         return
                     if reply_to:
                         await _broadcast_to_clients(clients, f"clipboard_reply,{reply_to}",
-                                                    per_client_timeout=2.0, only=cid)
+                                                    watched=True, only=cid)
                     if secret:
                         await _broadcast_to_clients(clients, "clipboard_secret",
-                                                    per_client_timeout=2.0, only=cid)
+                                                    watched=True, only=cid)
                     if small:
                         await _broadcast_to_clients(clients, message,
-                                                    per_client_timeout=BULK_DRAIN_TIMEOUT_S,
+                                                    watched=True,
                                                     only=cid)
                         return
                     if await _broadcast_to_clients(clients, start_message,
-                                                   per_client_timeout=2.0, only=cid):
+                                                   watched=True, only=cid):
                         return
                     offset = 0
                     loop = asyncio.get_running_loop()
@@ -1247,12 +1244,12 @@ class SelkiesStreamingApp:
                         if superseded(cid):
                             return
                         if await _broadcast_to_clients(clients, data_message,
-                                                       per_client_timeout=BULK_DRAIN_TIMEOUT_S, only=cid):
+                                                       watched=True, only=cid):
                             return
                         offset += len(chunk)
                         await asyncio.sleep(0)
                     await _broadcast_to_clients(clients, "clipboard_finish",
-                                                per_client_timeout=2.0, only=cid)
+                                                watched=True, only=cid)
 
             await asyncio.gather(*(deliver(c) for c in recipients))
             if not small:
@@ -1284,7 +1281,7 @@ class SelkiesStreamingApp:
             async def _broadcast_cursor_helper():
                 """Bounded: cursor changes arrive at high rate, and a stalled
                 client would otherwise accumulate one blocked coroutine each."""
-                await _broadcast_to_clients(clients_ref, msg_to_broadcast, per_client_timeout=2.0)
+                await _broadcast_to_clients(clients_ref, msg_to_broadcast, watched=True)
 
             asyncio.run_coroutine_threadsafe(
                 _broadcast_cursor_helper(), self.async_event_loop
@@ -1309,7 +1306,7 @@ class SelkiesStreamingApp:
             clients_ref = self.data_streaming_server.clients
 
             async def _broadcast_system_helper():
-                await _broadcast_to_clients(clients_ref, msg, per_client_timeout=2.0,
+                await _broadcast_to_clients(clients_ref, msg, watched=True,
                                             only=conn_id)
 
             asyncio.run_coroutine_threadsafe(
@@ -1968,7 +1965,7 @@ class DataStreamingServer(BaseStreamingService):
         
         data_logger.debug(f"Broadcasting display config update: {message_str}")
         # Bounded: callers hold _reconfigure_lock.
-        await _broadcast_to_clients(self.clients, message_str, per_client_timeout=2.0)
+        await _broadcast_to_clients(self.clients, message_str, watched=True)
 
     def refresh_cursor_cache(self) -> Optional[dict]:
         """Refresh and return the cached cursor payload for late-joining clients."""
@@ -2509,17 +2506,15 @@ class DataStreamingServer(BaseStreamingService):
         
         if display_id == 'primary' and self.clients:
             data_logger.debug(f"Broadcasting primary pipeline reset to all {len(self.clients)} clients: {message}")
-            await _broadcast_to_clients(self.clients, message, per_client_timeout=2.0)
+            await _broadcast_to_clients(self.clients, message, watched=True)
         else:
             websocket = display_state.get('ws')
             if websocket:
                 try:
-                    await asyncio.wait_for(websocket.send_str(message), timeout=2.0)
-                except asyncio.TimeoutError:
-                    data_logger.warning(f"Timed out notifying client for '{display_id}' of reset; dropping socket.")
+                    await _send_live(websocket, message, "Pipeline reset")
+                except ConnectionResetError:
                     self.clients.discard(websocket)
-                    _close_abandoned_ws(websocket)
-                except (ConnectionResetError, OSError, RuntimeError):
+                except (OSError, RuntimeError):
                     data_logger.warning(f"Could not notify client for '{display_id}' of reset; connection closed.")
         
         display_state['backpressure_enabled'] = True
@@ -2940,7 +2935,7 @@ class DataStreamingServer(BaseStreamingService):
         )
         for message_str, sockets in groups.items():
             # Bounded: runs under _reconfigure_lock; a frozen client is dropped, not waited on.
-            dropped = await _broadcast_to_clients(sockets, message_str, per_client_timeout=2.0)
+            dropped = await _broadcast_to_clients(sockets, message_str, watched=True)
             # The fan-out ran over a computed set; mirror the drop into the registry.
             for ws in dropped:
                 self.clients.discard(ws)
@@ -3386,7 +3381,7 @@ class DataStreamingServer(BaseStreamingService):
             message = json.dumps({"type": "print_document", "name": name, "size_bytes": size})
             # Bounded like every control fan-out; the set is a computed one, so
             # the drop is mirrored into the registry.
-            for ws in await _broadcast_to_clients(sockets, message, per_client_timeout=2.0):
+            for ws in await _broadcast_to_clients(sockets, message, watched=True):
                 self.clients.discard(ws)
 
     def capture_candidates(self) -> List[Any]:
@@ -3439,7 +3434,7 @@ class DataStreamingServer(BaseStreamingService):
         for message_str, sockets in groups.items():
             data_logger.debug(f"Broadcasting stream resolution to {len(sockets)} client(s): {message_str}")
             # Bounded: runs under _reconfigure_lock; a frozen client is dropped, not waited on.
-            dropped = await _broadcast_to_clients(sockets, message_str, per_client_timeout=2.0)
+            dropped = await _broadcast_to_clients(sockets, message_str, watched=True)
             # The fan-out ran over a computed set; mirror the drop into the registry.
             for ws in dropped:
                 self.clients.discard(ws)
@@ -4957,7 +4952,7 @@ class DataStreamingServer(BaseStreamingService):
                                         started = True
                                         data_logger.debug("START_AUDIO: pcmflux audio pipeline already active.")
                                     if started:
-                                        await _broadcast_to_clients(self.clients, "AUDIO_STARTED", per_client_timeout=2.0)
+                                        await _broadcast_to_clients(self.clients, "AUDIO_STARTED", watched=True)
                                 else:
                                     data_logger.warning("START_AUDIO: Cannot start server-to-client audio (pcmflux not available).")
                                     try:
@@ -4975,7 +4970,7 @@ class DataStreamingServer(BaseStreamingService):
                             if self.is_pcmflux_capturing:
                                 await self._stop_pcmflux_pipeline()
                             if self.clients:
-                                await _broadcast_to_clients(self.clients, "AUDIO_STOPPED", per_client_timeout=2.0)
+                                await _broadcast_to_clients(self.clients, "AUDIO_STOPPED", watched=True)
 
                     elif message.startswith("SET_NATIVE_CURSOR_RENDERING,"):
                         # Taken as it comes: before any capture it is only recorded, for the

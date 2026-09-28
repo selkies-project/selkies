@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""A slow socket is kept and a dead one is dropped, on the video relay and the
-shared audio fan-out alike.
+"""A slow socket is kept and a dead one is dropped, on the video relay, the
+shared audio fan-out, and the control messages alike.
 
 A websockets send waits while its socket's buffers stay full, and over a far
 or slow path a key frame takes seconds to drain; the page answers a dropped
@@ -105,6 +105,9 @@ class Socket:
             if self.drain is None or self.drain.done():
                 self.drain = asyncio.get_running_loop().create_future()
             await self.drain
+
+    async def send_str(self, data: str) -> None:
+        await self.send_bytes(data.encode())
 
     async def close(self) -> None:
         self.closed = True
@@ -213,6 +216,28 @@ async def audio_run(slow: Socket, seconds: float) -> dict:
     return out
 
 
+async def control_run(sockets: list) -> dict:
+    """One watched control broadcast to `sockets`: who is dropped, and when each send returned."""
+    for ws in sockets:
+        ws.start()
+    clients = set(sockets)
+    done = {}
+
+    async def timed():
+        start = time.monotonic()
+        dropped = await w._broadcast_to_clients(clients, "cursor," + "x" * 200, watched=True)
+        done["took"] = time.monotonic() - start
+        return dropped
+
+    dropped = await timed()
+    out = {"dropped": sorted(sockets.index(ws) for ws in dropped), "kept": sorted(sockets.index(ws) for ws in clients),
+           "took": done["took"], "aborted": [ws.transport.aborted for ws in sockets]}
+    for ws in sockets:
+        ws.stop()
+    await asyncio.sleep(0.05)
+    return out
+
+
 # A key frame over a slow path: 600 KB at 150 KB/s drains for about 4 s.
 r = asyncio.run(relay_run(150 * 1024, 6.0))
 res.check("a relay whose socket drains a key frame for 4 s keeps its client", r["kept"] and not r["aborted"],
@@ -238,7 +263,19 @@ res.check("the other client's audio is not held behind that drain",
           a["fast_got"] >= a["chunks"] - 2 and a["fast_late_max"] is not None and a["fast_late_max"] < 0.1,
           f"{a['fast_got']}/{a['chunks']} chunks, latest {a['fast_late_max'] and round(a['fast_late_max'], 3)} s after its turn")
 
+# A control message queued behind that key frame waits for it, and the client stays.
+c = asyncio.run(control_run([Socket(150 * 1024, pending=600 * 1024)]))
+res.check("a control send behind a 4 s drain keeps its client", c["kept"] == [0] and not any(c["aborted"]),
+          f"returned after {c['took']:.1f} s, {c}")
+c = asyncio.run(control_run([Socket(150 * 1024, pending=600 * 1024), Socket(10 * 1024 * 1024)]))
+res.check("and every client of the broadcast stays", c["kept"] == [0, 1] and not any(c["aborted"]), c)
+
 w.SEND_STALL_SECONDS, w.SEND_PROBE_SECONDS = 1.5, 0.1
+c = asyncio.run(control_run([Socket(0.0, pending=600 * 1024)]))
+res.check("a control send to a socket that takes nothing drops it", c["dropped"] == [0] and c["aborted"][0]
+          and c["took"] < 3.0, c)
+c = asyncio.run(control_run([Socket(0.0, pending=600 * 1024), Socket(10 * 1024 * 1024)]))
+res.check("and drops only it from a broadcast", c["dropped"] == [0] and c["kept"] == [1], c)
 a = asyncio.run(audio_run(Socket(0.0, pending=600 * 1024), 3.5))
 res.check("a dead client is dropped from the audio fan-out", not a["slow_kept"], a)
 res.check("while the other client's audio keeps its cadence",
