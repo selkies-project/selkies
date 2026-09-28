@@ -2,10 +2,16 @@
 """D4 empirical: connect a primary, set framerate via SETTINGS (streaming
 customizes it), then open a display2 that does NOT carry framerate (browser
 without stored per-display param). Its capture must inherit 33fps, not the
-server-default 60fps. Reads the server log's "FPS:" line for display2."""
+server-default 60fps. Reads the server log's "FPS:" line for display2.
+
+Then the primary's rate changes live, through SETTINGS and the `_arg_fps` verb:
+the X server's output must follow to a mode at the new rate (read from xrandr)
+without a capture restarting."""
 import asyncio
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 
@@ -69,6 +75,14 @@ async def read_ws(ws, seconds: float) -> None:
             return
 
 
+def output_refresh() -> float:
+    """The refresh of the mode the test X server's output shows, 0 if none."""
+    out = subprocess.run(["xrandr"], env={**os.environ, "DISPLAY": H.TEST_DISPLAY},
+                         capture_output=True, text=True, timeout=10).stdout
+    rate = re.search(r"(\d+\.\d+)\*", out)
+    return float(rate.group(1)) if rate else 0.0
+
+
 def main() -> "H.Results":
     """Declare 33fps on the primary, then check a bare display2 inherits it."""
     H.server_start(mode="websockets", wayland=False)
@@ -106,7 +120,17 @@ def main() -> "H.Results":
                     res.skip("display2 capture carries client bitrate",
                              "the capture module omits bitrate from its status line")
                 await asyncio.sleep(0.5)
-            await read_ws(p1, 1)
+            await read_ws(p1, 3)
+            for fps, send in ((144, "SETTINGS," + json.dumps(_settings("primary", framerate=144))),
+                              (90, "_arg_fps,90")):
+                mark = loglen()
+                await p1.send(send)
+                await read_ws(p1, 3)
+                rate = output_refresh()
+                res.check(f"output refresh follows a live {fps} fps", abs(rate - fps) <= fps * 0.01,
+                          f"{rate:.2f} Hz")
+                res.check(f"no capture restarts for {fps} fps",
+                          "Capture started for" not in H.server_log()[mark:])
 
     asyncio.new_event_loop().run_until_complete(drive())
     res.summary()

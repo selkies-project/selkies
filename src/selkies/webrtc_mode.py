@@ -57,7 +57,7 @@ from .webrtc.codecs import configure_multiopus
 from .webrtc_signaling_client import WebRTCSignalingClient
 from .webrtc_signaling_server import WebRTCPeerManagement
 from .input_handler import WebRTCInput
-from .display_utils import (resize_display, applied_dpi, set_dpi, set_cursor_size, parse_gpu_id,
+from .display_utils import (resize_display, refresh_output_mode, applied_dpi, set_dpi, set_cursor_size, parse_gpu_id,
                             compute_dual_layout, apply_extended_layout, get_new_res,
                             retire_displays, clamp_primary_feedback,
                             WAYLAND_SCREEN_OUTPUT_ID, wayland_output_id,
@@ -2441,6 +2441,9 @@ class WebRTCService(BaseStreamingService):
         pipeline = self.display_pipelines.get(display_id)
         if pipeline is not None:
             await applier(pipeline, value)
+        if key == "framerate" and display_id == "primary" and self.media_pipeline and not IS_WAYLAND:
+            # The display's modes follow the primary's rate (`resize_display`).
+            await refresh_output_mode(self.media_pipeline.framerate)
         if key == "encoder" and display_id == "primary":
             self.settings.encoder = str(value)
             self.settings._encoder_client_set = True

@@ -2,13 +2,15 @@
 """The X server's fake vblank follows the stream on both transports.
 
 While a page streams the X11 display, the root window carries the capture's
-frame rate as `_FAKE_SCREEN_FPS`, a live frame-rate change moves it, and it is
-gone once the page leaves. The Xvfb the images build paces the clients that
+frame rate as `_FAKE_SCREEN_FPS`, a live frame-rate change moves it and the
+output's mode with it, and it is gone once the page leaves. The Xvfb the images build paces the clients that
 wait on Present by it (never below the rate it started at), so a vsynced
 application presents as fast as the session streams; pixelflux publishes the
 property on any server, which is what is read here.
 """
 import os
+import re
+import subprocess
 import sys
 import time
 
@@ -51,6 +53,14 @@ def settles(want: Optional[int], timeout: float = 15) -> Optional[int]:
     return got
 
 
+def output_refresh() -> float:
+    """The refresh of the mode the test X server's output shows, 0 if none."""
+    out = subprocess.run(["xrandr"], env={**os.environ, "DISPLAY": H.TEST_DISPLAY},
+                         capture_output=True, text=True, timeout=10).stdout
+    rate = re.search(r"(\d+\.\d+)\*", out)
+    return float(rate.group(1)) if rate else 0.0
+
+
 def run(mode: str) -> bool:
     res = H.Results(f"vblank-{mode}")
     clear_leftover()
@@ -68,6 +78,8 @@ def run(mode: str) -> bool:
                 C.settings_change(page, {"framerate": 90})
                 got = settles(90)
                 res.check("a live frame-rate change follows", got == 90, got)
+                rate = output_refresh()
+                res.check("so does the display's refresh", abs(rate - 90) <= 0.9, rate)
             finally:
                 browser.close()
         got = settles(None, 30)

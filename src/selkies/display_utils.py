@@ -498,6 +498,61 @@ async def ensure_mode(res_str: str, refresh: Optional[float] = None) -> bool:
         return False
 
 
+def _sync_refresh_output_mode(refresh: Optional[float]) -> Optional[float]:
+    """Blocking `refresh_output_mode` on the module connection.
+
+    Returns:
+        The refresh of the mode set, or None where the output's mode already
+        runs at the target or carries no timings to change.
+    """
+    with _x11_lock:
+        try:
+            d = _module_display()
+            root, res, out_id, oi, names = _connected_output_state(d)
+            if not oi.crtc:
+                return None
+            ci = randr.get_crtc_info(d, oi.crtc, res.config_timestamp)
+            mode = next((m for m in res.modes if m.id == ci.mode), None)
+            target = _target_refresh(refresh)
+            rate = _mode_refresh(mode) if mode is not None else 0.0
+            if not rate or abs(rate - target) <= target * _REFRESH_SLACK:
+                return None
+            w, h = mode.width, mode.height
+            prefix = "selkies-" if names.get(mode.id, "").startswith("selkies-") else ""
+            mode_id, rate = _mode_at(d, root, res, oi, out_id, names, w, h, target,
+                                     f"{prefix}{w}x{h}")
+            status = randr.set_crtc_config(
+                d, oi.crtc, res.config_timestamp, ci.x, ci.y, mode_id,
+                ci.rotation or randr.Rotate_0, list(ci.outputs),
+            ).status
+            if status != randr.SetConfigSuccess:
+                raise RuntimeError(f"SetCrtcConfig returned status {status}")
+            d.sync()
+            return rate
+        except Exception as e:
+            if not isinstance(e, x11_error.XError):
+                _drop_module_display()
+            raise
+
+
+async def refresh_output_mode(refresh: Optional[float]) -> None:
+    """Keep the connected output at the refresh `_target_refresh` makes of
+    ``refresh``, the stream's new frame rate, where the rate changes without
+    a resize.
+
+    The output keeps its geometry and position and takes a mode of the same
+    size at the new refresh (`_mode_at`), so the screen, the monitors, and
+    every capture stay as they are.
+    """
+    try:
+        rate = await asyncio.to_thread(_sync_refresh_output_mode, refresh)
+    except Exception as e:
+        logger_app_resize.warning(f"Display refresh not changed for {refresh:g} fps ({e}).")
+        return
+    if rate is not None:
+        logger_app_resize.info(f"Display refresh set to {rate:.2f} Hz for a {refresh:g} fps stream.")
+
+
 def _sync_resize_randr(
     res_str: str, refresh: Optional[float] = None,
     output_size: Optional[Tuple[int, int]] = None,

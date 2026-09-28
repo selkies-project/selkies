@@ -74,6 +74,7 @@ from .display_utils import (
     release_pixelflux_cursor_callback,
     get_new_res,
     ensure_mode,
+    refresh_output_mode,
     resize_display,
     retire_displays,
     apply_output_layout,
@@ -1458,6 +1459,17 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.info(f"Applied framerate live via '_arg_fps': {sanitized} fps for '{display_id}'")
             except Exception as e:
                 data_logger.warning(f"Live framerate update failed for '{display_id}' ({e}).")
+        await self._refresh_display_mode()
+
+    async def _refresh_display_mode(self) -> None:
+        """Keep the display's refresh at the rule its resizes follow, after a
+        frame rate changed without one: never below the fastest display of the
+        layout (`display_utils.refresh_output_mode`, no capture restarts)."""
+        if IS_WAYLAND or not self.display_layouts:
+            return
+        await refresh_output_mode(max(
+            float((self.display_clients.get(did) or {}).get('framerate') or self.app.framerate)
+            for did in self.display_layouts))
 
     async def _handle_opcode_video_bitrate(self, bitrate: Any, display_id: str = "primary") -> None:
         """Live video bitrate (kbps) for the 'vb' verb, sanitized exactly like
@@ -3457,6 +3469,8 @@ class DataStreamingServer(BaseStreamingService):
                                 "Triggering full reconfiguration as a fallback."
                             )
                             needs_fallback_reconfigure = True
+                    if display_state.get('framerate') != old_settings.get('framerate'):
+                        await self._refresh_display_mode()
         except BaseException:
             # A raise skips the pending re-check below; a reconfigure coalesced
             # during the hold must not be stranded.
