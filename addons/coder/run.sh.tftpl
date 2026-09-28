@@ -64,6 +64,8 @@ if [ -n "$need_selkies$need_xvfb" ]; then
     rm -rf "$work"
   fi
   [ -z "$need_xvfb" ] || "$${repo[@]}" "$xvfb"
+  # The package depends on the PulseAudio client alone, and selkies-session starts only a server the workspace has
+  command -v pulseaudio > /dev/null || command -v pipewire-pulse > /dev/null || "$${repo[@]}" pulseaudio
 fi
 
 args=(--port="$port" --enable-basic-auth=false --enable-https=false)
