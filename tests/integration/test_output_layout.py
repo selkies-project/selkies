@@ -13,6 +13,8 @@ layout it gets instead is tests/integration/test_extended_monitor_outputs.py.
 """
 import asyncio
 import os
+import re
+import subprocess
 import sys
 import time
 
@@ -51,6 +53,13 @@ def monitors(du) -> dict:
         root = d.screen().root
         return {d.get_atom_name(m.name): (m.x, m.y, m.width_in_pixels, m.height_in_pixels)
                 for m in randr.get_monitors(root, is_active=True).monitors}
+
+
+def output_refresh() -> float:
+    """The refresh of the mode the connected output shows, 0 if none."""
+    out = subprocess.run(["xrandr"], capture_output=True, text=True, timeout=10).stdout
+    rate = re.search(r"(\d+\.\d+)\*", out)
+    return float(rate.group(1)) if rate else 0.0
 
 
 def rect(layout: dict) -> tuple:
@@ -126,6 +135,23 @@ def main() -> bool:
                   ok and "screen_1" in outputs(du)
                   and not [n for n in monitors(du) if n.startswith("selkies-")],
                   (outputs(du), monitors(du)))
+
+        asyncio.run(du.retire_displays())
+        native = du._sync_resize_randr
+
+        def refused(*_args):
+            raise RuntimeError("native RandR refused")
+
+        du._sync_resize_randr = refused
+        try:
+            for fps in (120, 60):
+                realized = asyncio.run(du.resize_display("1600x900", fps))
+                rate = output_refresh()
+                res.check(f"the xrandr fallback sets a mode at a {fps} fps stream's rate",
+                          realized == (1600, 900) and abs(rate - fps) <= fps * du._REFRESH_SLACK,
+                          (realized, rate))
+        finally:
+            du._sync_resize_randr = native
     finally:
         server.terminate()
     return res.summary()

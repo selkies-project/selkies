@@ -48,6 +48,7 @@ from .Xlib import error as x11_error
 from .Xlib.ext import randr
 from .Xlib.ext import res as xres
 from .display_utils import (
+    _REFRESH_SLACK,
     Rect,
     _communicate_or_kill,
     _drop_module_display,
@@ -55,6 +56,7 @@ from .display_utils import (
     _module_display,
     _sync_client_windows,
     _sync_follow_display_moves,
+    _target_refresh,
     seat_desktop_windows,
     _x11_lock,
     applied_dpi,
@@ -1047,22 +1049,57 @@ async def _get_new_res_xrandr(
     return curr_res, new_res, resolutions, max_res_str, screen_name
 
 
-async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
+async def _xrandr_output_rates() -> Tuple[Optional[str], Dict[str, List[float]]]:
+    """The first connected output and the refresh of each mode it lists, by
+    name, as the ``xrandr`` listing gives them (a driver lists several modes
+    under one name)."""
+    try:
+        process = await subprocess.create_subprocess_exec(
+            "xrandr", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        stdout, _ = await _communicate_or_kill(process)
+    except Exception as e:
+        logger_app_resize.error(f"xrandr command failed: {e}")
+        return None, {}
+    screen_name: Optional[str] = None
+    rates: Dict[str, List[float]] = {}
+    for line in stdout.decode("utf-8", "replace").splitlines():
+        output = re.match(r"(\S+) (?:dis)?connected", line)
+        if output:
+            if screen_name is not None:
+                break
+            if " connected" in line:
+                screen_name = output.group(1)
+            continue
+        mode = re.match(r"\s+(\S+)\s+((?:\d+\.\d+\S*\s*)+)$", line)
+        if screen_name is not None and mode:
+            rates.setdefault(mode.group(1), []).extend(
+                float(r) for r in re.findall(r"\d+\.\d+", mode.group(2)))
+    return screen_name, rates
+
+
+async def _resize_display_xrandr(
+    res_str: str, refresh: Optional[float] = None,
+) -> Optional[Tuple[int, int]]:
     """Resize the display using xrandr subprocesses.
 
-    Adds a new mode via cvt/gtf if the requested mode doesn't exist, naming
-    it for the geometry the modeline really carries (cvt snaps width up to
-    the 8-pixel CVT cell, so it can be wider than requested). The mode is set
-    together with ``--fb`` sized from that realized geometry: without it a
-    larger root left over from a prior extended layout keeps the screen
-    oversized, so the new mode lands top-left and whole-root capture shows
-    black bars (the native path and the websockets engine both force it),
-    and a framebuffer narrower than the active mode is rejected outright.
+    The mode follows the native path's rule (`display_utils._mode_at`): one of
+    the requested geometry at the refresh `_target_refresh` makes of
+    ``refresh``, the stream's frame rate, chosen by name and rate since a
+    driver lists several modes under one name. A missing one is made with cvt
+    at that refresh, its clock rounded up to the next quarter megahertz so it
+    never runs slower than asked, and named for the geometry the modeline
+    really carries (cvt snaps width up to the 8-pixel CVT cell, so it can be
+    wider than requested), with the rate appended where that name is taken.
+    The mode is set together with ``--fb`` sized from that realized geometry:
+    without it a larger root left over from a prior extended layout keeps the
+    screen oversized, so the new mode lands top-left and whole-root capture
+    shows black bars (the native path and the websockets engine both force
+    it), and a framebuffer narrower than the active mode is rejected outright.
 
     Returns:
         The realized ``(width, height)``, or None on failure.
     """
-    _, _, available_resolutions, _, screen_name = await _get_new_res_xrandr(res_str)
+    screen_name, rates = await _xrandr_output_rates()
 
     if not screen_name:
         logger_app_resize.error(
@@ -1076,18 +1113,22 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
         logger_app_resize.error(f"Invalid resolution format: {res_str}")
         return None
 
+    target = _target_refresh(refresh)
+
+    def rate_of(name: str) -> Optional[float]:
+        return next((r for r in rates.get(name, ())
+                     if abs(r - target) <= target * _REFRESH_SLACK), None)
+
     target_mode_to_set = res_str
     realized_w, realized_h = w_req, h_req
+    rate = rate_of(res_str)
 
-    if res_str not in available_resolutions:
+    if rate is None:
         logger_app_resize.debug(
-            f"Mode {res_str} not found in xrandr list. Attempting to add for screen '{screen_name}'."
+            f"No {res_str} mode at {target:.2f} Hz in the xrandr list. Attempting to add for screen '{screen_name}'."
         )
         try:
-            (
-                modeline_name_from_cvt_output,
-                modeline_params,
-            ) = await generate_xrandr_gtf_modeline(res_str)
+            _, modeline_params = await generate_xrandr_gtf_modeline(res_str, target)
         except Exception as e:
             logger_app_resize.error(
                 f"Failed to generate modeline for {res_str}: {e}"
@@ -1098,11 +1139,18 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
         params = modeline_params.split()
         try:
             realized_w, realized_h = int(params[1]), int(params[5])
+            clock_steps = -(-int(params[4]) * int(params[8]) * target // 250_000)
+            params[0] = f"{clock_steps / 4:.2f}"
         except (IndexError, ValueError):
             realized_w, realized_h = w_req, h_req
         target_mode_to_set = f"{realized_w}x{realized_h}"
+        rate = rate_of(target_mode_to_set)
 
-        if target_mode_to_set not in available_resolutions:
+        if rate is None:
+            geometry = target_mode_to_set
+            target_mode_to_set = next(
+                (n for n in (geometry, f"{geometry}_{target:.0f}", f"{geometry}_{target:.2f}")
+                 if n not in rates), f"{geometry}_{target:.3f}")
             cmd_new = ["xrandr", "--newmode", target_mode_to_set] + params
             new_mode_proc = await subprocess.create_subprocess_exec(
                 *cmd_new,
@@ -1147,8 +1195,9 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
     logger_app_resize.debug(
         f"Applying xrandr mode '{target_mode_to_set}' for screen '{screen_name}'."
     )
+    rate_args = ["--rate", f"{rate:.2f}"] if rate is not None else []
     cmd_output = ["xrandr", "--output", screen_name, "--mode", target_mode_to_set,
-                  "--fb", f"{realized_w}x{realized_h}"]
+                  *rate_args, "--fb", f"{realized_w}x{realized_h}"]
     set_mode_proc = await subprocess.create_subprocess_exec(
         *cmd_output,
         stdout=subprocess.PIPE,
@@ -1162,7 +1211,7 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
         retried = False
         if target_mode_to_set == res_str and snapped_w != realized_w:
             cmd_retry = ["xrandr", "--output", screen_name, "--mode", target_mode_to_set,
-                         "--fb", f"{snapped_w}x{h_req}"]
+                         *rate_args, "--fb", f"{snapped_w}x{h_req}"]
             retry_proc = await subprocess.create_subprocess_exec(
                 *cmd_retry,
                 stdout=subprocess.PIPE,
@@ -1181,17 +1230,18 @@ async def _resize_display_xrandr(res_str: str) -> Optional[Tuple[int, int]]:
             return None
 
     logger_app_resize.info(
-        f"Successfully applied xrandr mode '{target_mode_to_set}' ({realized_w}x{realized_h})."
+        f"Successfully applied xrandr mode '{target_mode_to_set}' ({realized_w}x{realized_h} "
+        f"at {rate if rate is not None else target:.2f} Hz)."
     )
     return realized_w, realized_h
 
 
 # Keyed by (resolution, refresh): the timings change with the refresh rate.
-_MODELINE_CACHE: Dict[Tuple[str, int], Tuple[str, str]] = {}
+_MODELINE_CACHE: Dict[Tuple[str, float], Tuple[str, str]] = {}
 
 
 async def generate_xrandr_gtf_modeline(
-    res_wh_str: str, refresh_hz: int = 60
+    res_wh_str: str, refresh_hz: float = 60
 ) -> Tuple[str, str]:
     """Generate an xrandr modeline using cvt, falling back to gtf.
 
@@ -1212,7 +1262,7 @@ async def generate_xrandr_gtf_modeline(
     cached = _MODELINE_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    refresh_str = str(refresh_hz)
+    refresh_str = f"{refresh_hz:g}"
     tool_name = "cvt"
     try:
         try:

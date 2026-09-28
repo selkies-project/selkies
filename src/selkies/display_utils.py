@@ -1699,14 +1699,14 @@ async def resize_display(
         )
         from .display_utils_xrandr import _resize_display_xrandr
 
-        return await _resize_display_xrandr(res_str)
+        return await _resize_display_xrandr(res_str, refresh)
     except Exception as e:
         logger_app_resize.info(
             f"Native RandR resize for '{res_str}' failed ({e}); falling back to xrandr."
         )
         from .display_utils_xrandr import _resize_display_xrandr
 
-        return await _resize_display_xrandr(res_str)
+        return await _resize_display_xrandr(res_str, refresh)
     logger_app_resize.info(
         f"Successfully applied RandR mode '{res_str}' ({w}x{h} at {rate:.2f} Hz)."
     )
