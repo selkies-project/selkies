@@ -18,6 +18,13 @@
  * is enough to answer what it does with a generator: construct it with no
  * arguments, take the writer from `writable`, and hand `track` to the page in
  * the transfer list, without which the page receives a detached track.
+ *
+ * The canvas sink an engine without one gets is run the same way, on a clock
+ * each draw advances, with frames that count their closes, which no browser
+ * reports: a thread that keeps up draws every frame at once, one still busy
+ * with its last draw draws only the newest of what arrived, once the work
+ * queued ahead of it has run, and every frame is closed exactly once, drawn or
+ * not.
  * @module
  */
 import { readFileSync } from 'node:fs';
@@ -150,9 +157,9 @@ function generatorStub(state) {
     };
 }
 
-/** Evaluates the worker source with a dedicated worker's globals; returns what
- *  it posted and whether it built a generator. */
-function runWorker({ withGenerator }) {
+/** Evaluates the worker source with a dedicated worker's globals, over which
+ *  `globals` goes; returns what it posted and whether it built a generator. */
+function runWorker({ withGenerator, globals = {} }) {
     const state = { constructed: false, readReadable: false, posts: [] };
     const scope = {
         VideoDecoder: class { constructor() {} },
@@ -166,6 +173,7 @@ function runWorker({ withGenerator }) {
         console,
     };
     if (withGenerator) scope.VideoTrackGenerator = generatorStub(state);
+    Object.assign(scope, globals);
     const self = {
         postMessage: (msg, transfer) => state.posts.push({ msg, transfer }),
         onmessage: null,
@@ -200,6 +208,69 @@ check('an engine without one is told to send a canvas',
       canvasMode && canvasMode.msg.mode === 'canvas', canvasMode && canvasMode.msg.mode);
 check('and nothing is transferred with it',
       canvasMode && !canvasMode.transfer, canvasMode && canvasMode.transfer);
+
+/** A decoded frame that counts its closes. */
+const frame = (id) => ({ id, displayWidth: 1280, displayHeight: 800, timestamp: id, closes: 0,
+                         close() { this.closes++; } });
+/** The worker's clock, which a draw advances by what it costs. */
+let clock = 1000;
+const DRAW_MS = 10, FRAME_MS = 16.7;
+const decoders = [], draws = [];
+const sink = runWorker({ withGenerator: false, globals: {
+    performance: { now: () => clock, timeOrigin: 0 },
+    VideoDecoder: class {
+        constructor(init) { this.init = init; this.state = 'unconfigured'; this.decodeQueueSize = 0; decoders.push(this); }
+        configure() { this.state = 'configured'; }
+        decode() {}
+        close() { this.state = 'closed'; }
+        static isConfigSupported() { return Promise.resolve({ supported: true }); }
+    },
+} });
+const tell = (data) => sink.onmessage({ data });
+tell({ canvas: { width: 300, height: 150, getContext: () => ({
+    // A browser refuses to draw a closed frame.
+    drawImage: (f) => {
+        if (f.closes) throw new Error(`frame ${f.id} drawn after its close`);
+        draws.push(f.id);
+        clock += DRAW_MS;
+    },
+}) } });
+tell({ type: 'statsOpen', open: true });
+tell({ type: 'decoderConfig', codec: 'avc1.42e01f', codedWidth: 1280, codedHeight: 800 });
+const decoded = (f) => decoders[decoders.length - 1].init.output(f);
+const nextTask = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+const kept = [frame(1), frame(2)];
+decoded(kept[0]);
+clock += FRAME_MS;
+decoded(kept[1]);
+check('a canvas that keeps up draws each decoded frame at once', JSON.stringify(draws) === '[1,2]', draws);
+const burst = [frame(3), frame(4), frame(5)];
+burst.forEach(decoded);
+check('one decoded while its last draw is still recent waits for the work queued ahead of it',
+      JSON.stringify(draws) === '[1,2]', draws);
+await nextTask();
+check('then only the newest of a burst is drawn', JSON.stringify(draws) === '[1,2,5]', draws);
+clock += FRAME_MS;
+const paced = frame(6);
+decoded(paced);
+check('and a thread caught up again draws at once', JSON.stringify(draws) === '[1,2,5,6]', draws);
+const stale = frame(7);
+decoded(stale);
+tell({ type: 'wireMode', striped: true });
+await nextTask();
+check('a frame its decoder left behind is dropped, never drawn over what replaced it',
+      !draws.includes(7), draws);
+tell({ type: 'decodeStats' });
+const stats = sink.posts.filter((p) => p.msg && p.msg.type === 'decodeStats').pop();
+check('the frames it never drew count as not shown',
+      stats && stats.msg.shown.presented === 4 && stats.msg.shown.superseded === 3,
+      stats && JSON.stringify(stats.msg.shown));
+const all = [...kept, ...burst, paced, stale];
+check('every frame is closed exactly once, drawn or not', all.every((f) => f.closes === 1), all.map((f) => f.closes));
+check('and the page hears once that the canvas holds a picture',
+      sink.posts.filter((p) => p.msg && p.msg.type === 'presented').length === 1,
+      sink.posts.map((p) => p.msg && p.msg.type).join());
 
 /** An IDL-faithful `MediaStreamTrackProcessor`: a dictionary carrying a video
  *  track, and a `ReadableStream` of frames. */

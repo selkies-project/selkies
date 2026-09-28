@@ -1753,9 +1753,21 @@ const sendNeedKey = (reason) => {
   self.postMessage({ type: 'needKeyframe', reason });
 };
 const ack = () => self.postMessage({ ack: true });
+// The decoded frame waiting for the canvas and when it arrived, and when the
+// canvas last finished a draw and how long that draw took.
+let waiting = null, waitingAt = NaN, drawQueued = false, drawnAt = -Infinity, drawCost = 0;
 
 // Present one decoded VideoFrame on the active sink, which consumes it; at is
-// when it arrived, NaN where unknown.
+// when it arrived, NaN where unknown. While this thread keeps up with the
+// canvas, that is, has been free of drawing for as long as its last draw took,
+// a frame is drawn at once, since a timer would only add its own delay.
+// Otherwise the canvas takes only the newest frame, drawn by a zero-delay
+// timer once the work queued ahead of it has run (WebKit fires a worker's
+// timers only while no message waits): a drawImage of a VideoFrame costs
+// WebKit 5 to 25 ms and at times over 100, so drawing every frame saturates
+// this thread, whose timers then starve while the decode queue grows until
+// the gate drops frames. A frame replaced before its draw is closed and
+// counted as not shown.
 function present(f, at) {
   presentedFrames++;
   if (statsOpen) noteDecoded(f);
@@ -1772,19 +1784,45 @@ function present(f, at) {
     writer.write(f).catch(() => { try { f.close(); } catch (_) {} closed = true; self.postMessage({ type: 'error' }); });
     return;
   }
+  if (!ctx) { f.close(); return; }
+  dropWaiting();
+  waiting = f;
+  waitingAt = at;
+  if (drawQueued) return;
+  if (performance.now() - drawnAt >= drawCost) { drawWaiting(); return; }
+  drawQueued = true;
+  setTimeout(drawWaiting, 0);
+}
+
+// Closes the frame waiting for the canvas, replaced by a newer one or left
+// behind by the decoder that made it.
+function dropWaiting() {
+  if (!waiting) return;
+  waiting.close();
+  waiting = null;
+  if (statsOpen) shown.superseded(1);
+}
+
+function drawWaiting() {
+  drawQueued = false;
+  const f = waiting, at = waitingAt;
+  if (!f) return;
+  waiting = null;
   try {
-    if (ctx) {
-      if (oc.width !== f.displayWidth || oc.height !== f.displayHeight) { oc.width = f.displayWidth; oc.height = f.displayHeight; }
-      ctx.drawImage(f, 0, 0);
-      if (statsOpen) shown.drawn(at);
-      // Tell the page the OffscreenCanvas has real content so it can hide the
-      // main canvas (hiding it before this point flashes black).
-      if (!presented) { presented = true; self.postMessage({ type: 'presented' }); }
-    }
+    if (oc.width !== f.displayWidth || oc.height !== f.displayHeight) { oc.width = f.displayWidth; oc.height = f.displayHeight; }
+    const start = performance.now();
+    ctx.drawImage(f, 0, 0);
+    drawnAt = performance.now();
+    drawCost = drawnAt - start;
+    if (statsOpen) shown.drawn(at);
+    // Tell the page the OffscreenCanvas has real content so it can hide the
+    // main canvas (hiding it before this point flashes black).
+    if (!presented) { presented = true; self.postMessage({ type: 'presented' }); }
   } finally { f.close(); }
 }
 
 function closeDecoder() {
+  dropWaiting();
   if (dec) { try { if (dec.state !== 'closed') dec.close(); } catch (_) {} dec = null; }
   gate.configured();
   wireCodec = null; wireW = 0; wireH = 0; wireDesc = null;

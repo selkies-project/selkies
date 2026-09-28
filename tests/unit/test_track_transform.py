@@ -13,8 +13,12 @@ The checks run the client's own worker sources against stubs holding those
 interfaces to their IDL: a generator constructed with no arguments, whose
 writer comes from `writable` and whose `track` reaches the page in the transfer
 list, and a processor constructed from a dictionary whose `readable` is the
-frame source. They live in tests/tools/track_generator_probe.mjs, because the
-path under test is JavaScript.
+frame source. The canvas sink an engine without a generator gets runs there
+too, on frames that count their closes: it draws each frame at once while it
+keeps up and only the newest of a burst that arrives while its last draw is
+still recent, and every frame is closed exactly once. They live in
+tests/tools/track_generator_probe.mjs, because the path under test is
+JavaScript.
 """
 import os
 import shutil
