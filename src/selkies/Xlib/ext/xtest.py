@@ -19,6 +19,8 @@
 #    Suite 330,
 #    Boston, MA 02111-1307 USA
 
+import struct
+
 from .. import X
 from ..protocol import rq
 
@@ -90,17 +92,37 @@ class FakeInput(rq.Request):
                          rq.Pad(8)
                          )
 
+# Selkies: FakeInput's wire layout packed in one call. A pointer message is
+# injected on every motion sample, and the generic field walker behind
+# FakeInput costs several times the rest of the injection.
+_fake_input_struct = struct.Struct('=BBHBBxxIIxxxxxxxxhhxxxxxxxx')
+_fake_input_types = (X.KeyPress, X.KeyRelease, X.ButtonPress, X.ButtonRelease,
+                     X.MotionNotify)
+
+
+class _PackedRequest(object):
+    """A request whose wire bytes are already built, for a queue that reads
+    only the bytes and the serial of a request that waits for no reply."""
+    __slots__ = ('_binary', '_serial')
+
+    def __init__(self, binary):
+        self._binary = binary
+        self._serial = None
+
+
 def fake_input(self, event_type, detail = 0, time = X.CurrentTime,
                root = X.NONE, x = 0, y = 0):
 
-    FakeInput(display = self.display,
-              opcode = self.display.get_extension_major(extname),
-              event_type = event_type,
-              detail = detail,
-              time = time,
-              root = root,
-              x = x,
-              y = y)
+    if event_type not in _fake_input_types:
+        raise ValueError('field event_type: argument %s not in %s'
+                         % (event_type, _fake_input_types))
+    if hasattr(root, '__window__'):
+        root = root.__window__()
+    display = self.display
+    display.send_request(_PackedRequest(_fake_input_struct.pack(
+        display.get_extension_major(extname), 2,
+        _fake_input_struct.size // 4, event_type, detail, time, root, x, y)),
+        False)
 
 class GrabControl(rq.Request):
     _request = rq.Struct(rq.Card8('opcode'),

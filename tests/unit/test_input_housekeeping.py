@@ -5,8 +5,9 @@ Fire-and-forget session tasks keep a reference (asyncio only weakly holds a
 running task); the xdotool type fallback ends its options before the text so
 a payload starting with '-' is typed, not parsed; a client's REQUEST_CLIPBOARD
 waits for the XFixes change without consuming the edge the monitor loop
-broadcasts on; and the per-connect cursor fetch reuses the PNG the monitor
-already encoded for that cursor serial.
+broadcasts on; the per-connect cursor fetch reuses the PNG the monitor
+already encoded for that cursor serial; and an X11 pointer message is one
+packed XTEST request, byte for byte the generic one, and one flush.
 """
 import asyncio
 import os
@@ -18,6 +19,8 @@ REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 
 from selkies import input_handler as ih  # noqa: E402
+from selkies.Xlib import X  # noqa: E402
+from selkies.Xlib.ext import xtest  # noqa: E402
 from selkies.input_handler import WebRTCInput, _X11ClipboardMonitor  # noqa: E402
 
 results = []
@@ -37,6 +40,28 @@ class Cursor:
     def __init__(self, serial: int) -> None:
         self.cursor_serial = serial
         self.width = self.height = 1
+
+
+class FakeProtocolDisplay:
+    """The request queue of python-xlib's protocol display, recording each request's bytes."""
+
+    def __init__(self) -> None:
+        self.sent = []
+
+    def get_extension_major(self, name: str) -> int:
+        return 132
+
+    def send_request(self, request, wait_for_response: bool) -> None:
+        self.sent.append(request._binary)
+
+
+class FakeXDisplay:
+    def __init__(self) -> None:
+        self.display = FakeProtocolDisplay()
+        self.flushes = 0
+
+    def flush(self) -> None:
+        self.flushes += 1
 
 
 def make_handler() -> WebRTCInput:
@@ -126,6 +151,31 @@ async def main() -> None:
     hc.cursor_size_cap = 32
     hc._encode_cursor(Cursor(8))
     check("a changed size cap re-encodes", encodes == [7, 8, 8])
+
+
+    # An X11 pointer message is one packed XTEST request and one flush.
+    xd = FakeXDisplay()
+    for event_type, detail, x, y in ((X.MotionNotify, 0, 640, 360), (X.MotionNotify, 1, -5, 7),
+                                     (X.ButtonPress, 3, 0, 0), (X.KeyRelease, 38, 0, 0)):
+        xtest.fake_input(xd, event_type, detail=detail, root=X.NONE, x=x, y=y)
+        xtest.FakeInput(display=xd.display, opcode=132, event_type=event_type, detail=detail,
+                        time=X.CurrentTime, root=X.NONE, x=x, y=y)
+    sent = xd.display.sent
+    check("the packed FakeInput is the generic request, byte for byte",
+          len(sent) == 8 and sent[0::2] == sent[1::2], str(sent[:2]))
+    hm = WebRTCInput.__new__(WebRTCInput)
+    hm.xdisplay = FakeXDisplay()
+    hm.mouse = ih._XTestMouse(hm.xdisplay)
+    hm.wayland_input = None
+    hm.data_server_instance = None
+    hm.uinput_mouse_socket_path = None
+    hm.tracked_position_stale = False
+    hm.last_x = hm.last_y = 0
+    hm.button_mask = 0
+    await hm.send_x11_mouse(100, 200, 0, 0)
+    check("an absolute move queues one warp and flushes once",
+          len(hm.xdisplay.display.sent) == 1 and hm.xdisplay.flushes == 1,
+          f"{len(hm.xdisplay.display.sent)} requests, {hm.xdisplay.flushes} flushes")
 
 
 asyncio.run(main())

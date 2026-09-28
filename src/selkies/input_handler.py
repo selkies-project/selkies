@@ -1900,10 +1900,10 @@ class _XTestMouse:
 
     @position.setter
     def position(self, xy: tuple) -> None:
+        """Queues a warp to (x, y); `send_x11_mouse` flushes once per pointer message."""
         x, y = xy
         xtest.fake_input(self._d, Xlib.X.MotionNotify, detail=False,
                          root=Xlib.X.NONE, x=int(x), y=int(y))
-        self._d.flush()
 
     def scroll(self, dx: int, dy: int) -> None:
         d = self._d
