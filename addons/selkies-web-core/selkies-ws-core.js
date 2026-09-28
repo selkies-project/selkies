@@ -6139,12 +6139,14 @@ function initWebsockets() {
  * The page's thread is otherwise between the socket and the audio decoder, so
  * anything occupying it -- a dashboard re-render, a `getUserMedia` prompt --
  * stops audio being delivered for as long as it lasts. Here the socket is read
- * off that thread: `0x01` goes straight down a port to the decoder, and
- * everything else is handed to the page unchanged. Sends arrive from the page
- * and keep their order, since one port delivers in sequence. Gecko still
- * routes a worker's WebSocket delivery through the page's main thread, so
- * there a stall costs what the playback worklet's jitter depth cannot cover;
- * Chromium and WebKit deliver to the worker directly.
+ * off that thread: `0x01` goes straight down a port to the decoder, the quiet
+ * mark with the audio it follows, since a mark that took another way could
+ * overtake that audio, and everything else is handed to the page unchanged.
+ * Sends arrive from the page and keep their order, since one port delivers in
+ * sequence. Gecko still routes a worker's WebSocket delivery through the
+ * page's main thread, so there a stall costs what the playback worklet's
+ * jitter depth cannot cover; Chromium and WebKit deliver to the worker
+ * directly.
  */
 const SOCKET_WORKER_SRC = `
 let ws = null, audioPort = null, audioOn = true, primary = true;
@@ -6270,7 +6272,7 @@ self.onmessage = (e) => {
       const d = ev.data;
       const at = statsOn ? performance.timeOrigin + performance.now() : 0;
       if (audioPort && audioOn && primary && d instanceof ArrayBuffer &&
-          d.byteLength > 2 && new Uint8Array(d, 0, 1)[0] === 0x01) {
+          d.byteLength >= 2 && new Uint8Array(d, 0, 1)[0] === 0x01) {
         // The page still owns the AudioContext, which only it can resume, so it
         // is told audio is arriving -- rarely, since this runs per packet.
         const now = Date.now();
