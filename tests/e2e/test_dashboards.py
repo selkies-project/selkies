@@ -147,10 +147,13 @@ def wish_stats_fit_check(page, res: "H.Results") -> None:
       const h3 = [...document.querySelectorAll('h3')].find((h) => h.closest('div.w-80'));
       if (!h3) return null;
       const panel = h3.closest('div.w-80');
-      panel.scrollTop = panel.scrollHeight;
-      const box = panel.getBoundingClientRect(), last = panel.lastElementChild.getBoundingClientRect();
+      const scroller = [panel, ...panel.querySelectorAll('div')].find(
+        (el) => /auto|scroll/.test(getComputedStyle(el).overflowY)) || panel;
+      scroller.scrollTop = scroller.scrollHeight;
+      const box = panel.getBoundingClientRect(), last = scroller.lastElementChild.getBoundingClientRect();
       return { left: Math.round(box.left), top: Math.round(box.top), bottom: Math.round(box.bottom),
-               last_bottom: Math.round(last.bottom), viewport: innerHeight };
+               last_bottom: Math.round(last.bottom), shown_bottom: Math.round(scroller.getBoundingClientRect().bottom),
+               viewport: innerHeight };
     }"""
     page.set_viewport_size({"width": 1280, "height": 720})
     try:
@@ -162,7 +165,7 @@ def wish_stats_fit_check(page, res: "H.Results") -> None:
         time.sleep(1.0)
         got = page.evaluate(measure)
         res.check("wish detailed stats fit a 720-px window and scroll to their last row",
-                  bool(got) and got["bottom"] <= got["viewport"] and got["last_bottom"] <= got["viewport"],
+                  bool(got) and got["bottom"] <= got["viewport"] and got["last_bottom"] <= got["shown_bottom"],
                   got)
         if got:
             page.mouse.move(got["left"] + 120, got["top"] + 14)
