@@ -633,6 +633,11 @@ class MediaPipelinePixel(MediaPipeline):
         pixelflux is the cursor source on both backends (compositor on
         Wayland, XFixes monitor on X11); an older X11-only build stashes the
         callback harmlessly and the input handler's monitor keeps delivering.
+        The capture counts as running from before the start is awaited: its
+        first frames reach the video bridge while the start is still under
+        way, and what the bridge and the other live setters ask of it in reply
+        (a lost frame, a keyframe, a rate) has to reach it rather than be
+        dropped as meant for a capture that is not running.
 
         Raises:
             MediaPipelineError: When pixelflux is unavailable or the capture
@@ -654,12 +659,12 @@ class MediaPipelinePixel(MediaPipeline):
             self.capture_module = ScreenCapture()
             self.capture_module.set_cursor_callback(self._pixelflux_cursor_handler)
             self._framed = False
+            self._is_screen_capturing = True
             await asyncio.to_thread(
                 self.capture_module.start_capture,
                 self._screen_capture_callback,
                 settings,
             )
-            self._is_screen_capturing = True
             logger.info("Started screen capture module")
             module = self.capture_module
             asyncio.get_running_loop().call_later(
@@ -1108,7 +1113,7 @@ class MediaPipelinePixel(MediaPipeline):
         return self._running
 
     def is_screen_capturing(self) -> bool:
-        """True once the screen capture runs, which precedes `_running` (the
+        """True once the screen capture starts, which precedes `_running` (the
         audio half of the pipeline may still be starting); settings that must
         reach a live capture key on this, not on the whole pipeline."""
         return self._is_screen_capturing
