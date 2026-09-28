@@ -131,4 +131,43 @@ function stalled({ track = true } = {}) {
         last === 'decode' && id === 0x10000 + 5, `${last} at ${id - 1}`);
 }
 
+{
+  const { gate } = stalled();
+  check('a key frame behind a backlog past the bound is decoded in place of that backlog',
+        gate.decide(true, 2, 2, BACKED_UP) === 'flush');
+  check('and what predicts from it decodes', tracked(gate, 3, KEEPING_UP) === 'decode');
+  check('a key frame the decoder keeps up with is decoded behind what is queued',
+        gate.decide(true, 4, 4, OVERLOAD_QUEUE) === 'decode');
+}
+
+{
+  // A decoder at 25 frames a second under a 60 fps stream whose encoder predicts past
+  // every loss and sends a key frame twice a second (loss repair on a wrapping frame_num).
+  const FRAME_MS = 1000 / 60, DECODE_MS = 40, KEY_EVERY = 30;
+  const run = (flushes) => {
+    const { gate, tick } = makeGate();
+    let queue = 0, done = 0, lastGood = 0, peak = 0, late = 0;
+    for (let id = 0; id < 60 * 20; id++) {
+      tick(FRAME_MS);
+      done += FRAME_MS;
+      while (queue > 0 && done >= DECODE_MS) { queue--; done -= DECODE_MS; }
+      if (queue === 0) done = 0;
+      const key = id % KEY_EVERY === 0;
+      let d = gate.decide(key, id, key ? id : lastGood, queue);
+      if (d === 'flush' && !flushes) d = 'decode';
+      if (d === 'flush') { queue = 0; d = 'decode'; }
+      if (d === 'decode') { queue++; lastGood = id; }
+      peak = Math.max(peak, queue);
+      if (id >= 60 * 19) late = Math.max(late, queue);
+    }
+    return { peak, late };
+  };
+  const bound = OVERLOAD_QUEUE + Math.ceil(OVERLOAD_HOLD_MS / FRAME_MS) + 2;
+  const without = run(false), withFlush = run(true);
+  check('a decoder slower than the stream fell further behind at every key frame without the flush',
+        without.late > 2 * bound, JSON.stringify(without));
+  check('and stays within the overload bound and its hold with it',
+        withFlush.peak <= bound && withFlush.late <= bound, `${JSON.stringify(withFlush)} <= ${bound}`);
+}
+
 process.exit(failed ? 1 : 0);

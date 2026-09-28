@@ -16,7 +16,11 @@
  * wire. Where the encoder says nothing -- a stripe of a striped stream, a codec
  * whose session does not track its references -- the only repair is a key
  * frame, so the gate asks for one instead. A run of drops that the encoder
- * never predicts past is the same case and ends in that request too.
+ * never predicts past is the same case and ends in that request too. A key
+ * frame that finds the decoder behind is decoded in place of everything queued
+ * ahead of it, all of which predicts from before it and would only be shown
+ * late: without that, a decoder slower than the stream falls further behind at
+ * every key frame, since each one starts the hold over while the backlog stays.
  *
  * @module
  */
@@ -37,9 +41,11 @@ export const LOST_MEMORY = 64;
 export const LOST_HORIZON = 0x8000;
 
 /**
- * @typedef {'decode'|'lost'|'no_key'|'overload'} Decision What to do with a
- *     frame: decode it, let it go and report it lost, or ask for a key frame
- *     because none has been decoded yet or because dropping more would not help.
+ * @typedef {'decode'|'flush'|'lost'|'no_key'|'overload'} Decision What to do
+ *     with a frame: decode it, decode it after dropping the decoder's backlog
+ *     (a key frame behind more than OVERLOAD_QUEUE frames), let it go and report
+ *     it lost, or ask for a key frame because none has been decoded yet or
+ *     because dropping more would not help.
  */
 
 export class DecodeGate {
@@ -87,7 +93,7 @@ export class DecodeGate {
       this._haveKey = true;
       this._needKey = false;
       this._reset();
-      return 'decode';
+      return queueSize > OVERLOAD_QUEUE ? 'flush' : 'decode';
     }
     if (!this._haveKey || this._needKey) return 'no_key';
     const tracked = reference !== undefined && reference !== frameId;

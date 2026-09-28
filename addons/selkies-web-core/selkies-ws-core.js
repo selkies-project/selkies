@@ -1741,7 +1741,7 @@ ${decodeGateSource.replace(/^export /gm, '')}
 // transferred OffscreenCanvas. Encoded chunks are decoded here so no decoded frame
 // crosses the thread boundary; a frame transferred in (m.frame) is the warm-up path.
 let mode = null, oc = null, ctx = null, writer = null, closed = false, presented = false;
-let dec = null;
+let dec = null, decConfig = null;
 const gate = new DecodeGate();
 // Decode figures, gathered only while the page has its stats open and posted as it samples.
 let statsOpen = false, statsBytes = 0, statsDecodeMs = 0, statsFrames = 0;
@@ -1896,6 +1896,7 @@ function configureDecoder(codec, w, h, software, description) {
     if (description) cfg.description = description;
     cfg.colorSpace = decoderColorSpace(codec, wireFullRange);
     dec.configure(cfg);
+    decConfig = cfg;
     probeHardware(codec, w, h);
     // A keyframe is required after (re)configure.
     gate.configured();
@@ -1909,7 +1910,10 @@ function decodeChunk(key, data, timestamp, frameId, reference, at) {
   if (!dec || dec.state !== 'configured') return;
   const decision = gate.decide(key, frameId, reference, dec.decodeQueueSize);
   if (decision === 'lost') { self.postMessage({ type: 'lostFrame', id: frameId }); return; }
-  if (decision !== 'decode') { sendNeedKey(decision); return; }
+  if (decision === 'flush') {
+    try { dec.reset(); dec.configure(decConfig); }
+    catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); return; }
+  } else if (decision !== 'decode') { sendNeedKey(decision); return; }
   if (statsOpen) {
     decodeStarts.set(timestamp, performance.now());
     if (at > 0) arrivedAt.set(Math.trunc(timestamp), at);
