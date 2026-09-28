@@ -115,4 +115,20 @@ function stalled({ track = true } = {}) {
         gate.decide(false, 4, 2, KEEPING_UP) === 'decode');
 }
 
+{
+  // Frame ids are 16-bit, and an infinite GOP sends no key frame to clear what was lost.
+  const { gate, tick } = stalled();
+  tracked(gate, 2, BACKED_UP);
+  gate.decide(false, 3, 2, KEEPING_UP);
+  check('a frame the encoder predicted past a loss with decodes',
+        gate.decide(false, 4, 1, KEEPING_UP) === 'decode');
+  let id = 5, last = 'decode';
+  for (; id <= 0x10000 + 4 && last === 'decode'; id++) {
+    tick(16);
+    last = gate.decide(false, id & 0xFFFF, (id - 1) & 0xFFFF, KEEPING_UP);
+  }
+  check('65536 frames later the frames naming the recurring ids of the lost ones decode too',
+        last === 'decode' && id === 0x10000 + 5, `${last} at ${id - 1}`);
+}
+
 process.exit(failed ? 1 : 0);

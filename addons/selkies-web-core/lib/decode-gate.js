@@ -28,8 +28,13 @@ export const OVERLOAD_HOLD_MS = 250;
 /** How long frames may go undecodable before a key frame is asked for, in ms. */
 export const LOST_RECOVERY_MS = 1000;
 /** How many dropped frame ids are remembered. A frame predicts from one of the
- * last few its encoder produced, so an older id can never be named again. */
+ * last few its encoder produced, so nothing is lost by forgetting an older one. */
 export const LOST_MEMORY = 64;
+/** How far behind the frame being decided a remembered id is forgotten. Frame ids
+ * are 16-bit and recur every 65536 frames, which an infinite GOP outlasts; half
+ * the id space is far past any reference or frame in flight, and well short of
+ * the id coming round again. */
+export const LOST_HORIZON = 0x8000;
 
 /**
  * @typedef {'decode'|'lost'|'no_key'|'overload'} Decision What to do with a
@@ -87,6 +92,7 @@ export class DecodeGate {
     if (!this._haveKey || this._needKey) return 'no_key';
     const tracked = reference !== undefined && reference !== frameId;
     const now = this._now();
+    while (this._lost.length && ((frameId - this._lost[0]) & 0xFFFF) >= LOST_HORIZON) this._lost.shift();
     if (tracked && this._lost.includes(reference)) {
       this._remember(frameId);
       if (now - this._lostSince > LOST_RECOVERY_MS) {
