@@ -6557,6 +6557,7 @@ class WorkerWebSocket {
       const contextOptions = {
         sampleRate: 48000
       };
+      if (!(navigator.audioSession && navigator.audioSession.type === 'play-and-record')) setAudioSessionType('playback');
       audioContext = new(window.AudioContext || window.webkitAudioContext)(contextOptions);
       console.log('Playback AudioContext initialized. Actual sampleRate:', audioContext.sampleRate, 'Initial state:', audioContext.state);
       audioContext.onstatechange = () => {
@@ -8940,6 +8941,25 @@ const micEncodeWorkerCode = `
 `;
 
 /**
+ * Names this page's audio to the platform's audio session
+ * (`navigator.audioSession`, WebKit): 'playback' while it plays the stream,
+ * so iOS keeps it audible with the ring/silent switch on (an AudioContext
+ * otherwise joins the ambient session that switch mutes, where the WebRTC
+ * transport's media element plays regardless), and 'play-and-record' from
+ * the microphone's request until it stops. The session ends a microphone
+ * track under any other type the page set, so a playback context built
+ * meanwhile, even with the request still pending on a permission prompt,
+ * leaves that type in place, which plays as well. A no-op where the engine
+ * has no audio session.
+ * @param {string} type 'playback' or 'play-and-record'.
+ */
+function setAudioSessionType(type) {
+  try {
+    if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type;
+  } catch (e) { /* the engine refused the type */ }
+}
+
+/**
  * Starts the microphone uplink: getUserMedia at 24 kHz mono with processing
  * on, the capture worklet, and the encode worker whose Opus frames go
  * straight onto the socket, so only encoded bytes cross the wire and the
@@ -8975,6 +8995,7 @@ async function startMicrophoneCapture(askedByServer = false) {
       },
       video: false
     };
+    setAudioSessionType('play-and-record');
     micStream = await navigator.mediaDevices.getUserMedia(constraints);
     const audioTracks = micStream.getAudioTracks();
     if (audioTracks.length > 0) {
@@ -9038,6 +9059,8 @@ async function startMicrophoneCapture(askedByServer = false) {
     if (!askedByServer) alert(`Microphone error: ${error.name} - ${error.message}`);
     else if (isCaptureRefusal(error)) micDemandRefused = true;
     stopMicrophoneCapture();
+    // A refused request leaves the stop above nothing to release.
+    setAudioSessionType('playback');
   }
 }
 
@@ -9080,6 +9103,7 @@ function stopMicrophoneCapture() {
       micAudioContext = null;
     }
   }
+  setAudioSessionType('playback');
   if (isMicrophoneActive) {
     isMicrophoneActive = false;
     postSidebarButtonUpdate();
