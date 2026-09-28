@@ -87,8 +87,10 @@ async def mixer() -> None:
     gp.ff_record("a", play(1, 0x8000, 0x8000, 60, delay=80))
     check("a delayed effect waits out its delay", not sent, sent)
     await asyncio.sleep(0.18)
-    check("then plays for its length", sent and sent[0][1:] == (0.5, 0.5, 60)
-          and 0.075 <= sent[0][0] - t0 <= 0.17, sent)
+    # A late wake holds the mix for what is left, so the effect still ends on time.
+    check("then plays for its length", sent and sent[0][1:3] == (0.5, 0.5)
+          and 0.075 <= sent[0][0] - t0 <= 0.17 and abs(sent[0][0] + sent[0][3] / 1000 - t0 - 0.14) <= 0.002,
+          sent)
     await asyncio.sleep(0.15)
     check("and stops", sent[-1][1:] == (0.0, 0.0, 0), sent)
 
