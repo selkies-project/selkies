@@ -179,6 +179,18 @@ def play_tone(seconds: int) -> Optional[subprocess.Popen]:
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def wait_sink_playing(timeout: float = 5) -> None:
+    """Wait until the session's sink is playing what reaches it."""
+    pulse = H.pulse_server()
+    deadline = time.time() + timeout
+    while pulse and time.time() < deadline:
+        sinks = subprocess.run(["pactl", "--server", pulse, "list", "short", "sinks"],
+                               capture_output=True, text=True).stdout.splitlines()
+        if any(line.split("\t")[1:2] == ["output"] and line.rstrip().endswith("RUNNING") for line in sinks):
+            return
+        time.sleep(0.05)
+
+
 def audio_track(path: str) -> Optional[dict]:
     """The file's first audio stream as ffprobe decodes it, with the tone
     analysis of its second second as mono PCM."""
@@ -199,7 +211,15 @@ def audio_track(path: str) -> Optional[dict]:
 
 def recording_round(res: "H.Results", label: str, collector: Collector, expect_size: Optional[tuple] = None) -> None:
     """One recording, with a tone playing into the session's sink while it
-    runs, and one screenshot against the running server."""
+    runs, and one screenshot against the running server.
+
+    The tone starts first: a sound server renders an idle sink's monitor in
+    blocks of up to two seconds, so a capture that starts on silence has its
+    first samples that late, and the track would not span the recording.
+    """
+    tone = play_tone(3)
+    if tone is not None:
+        wait_sink_playing()
     status, started = api("POST", "/api/recording")
     res.check(f"{label}: a recording starts into the file-manager directory",
               status == 200 and started and started["active"] and os.path.dirname(started["path"]) == FILES_DIR
@@ -207,7 +227,6 @@ def recording_round(res: "H.Results", label: str, collector: Collector, expect_s
     path = (started or {}).get("path", "")
     status, again = api("POST", "/api/recording")
     res.check(f"{label}: a second start is a conflict", status == 409, status)
-    tone = play_tone(3)
     time.sleep(4)
     status, live = api("GET", "/api/recording")
     res.check(f"{label}: the status shows the recording growing",
