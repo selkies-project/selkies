@@ -74,10 +74,13 @@ const WHITELIST_CLASS = 'allow-native-input';
 /**
  * Shortest spacing of two pointer motion messages, in milliseconds. Motion
  * arriving sooner waits out the rest of it, the newest position replacing an
- * older one and deltas summing, so a 1000 Hz mouse sends at most this often
- * while a slower device's every sample goes out the moment it arrives.
+ * older one and deltas summing, so a 1000 Hz mouse sends at most 250 messages
+ * a second while a 250 Hz or slower device's every sample goes out the moment
+ * it arrives. Against 2 ms, 4 ms halves the messages and the server's input
+ * loop cost of a 1000 Hz mouse for about a millisecond of a sample's wait,
+ * inside a 60 fps capture's sampling of the pointer.
  */
-const MOTION_SEND_INTERVAL_MS = 2;
+const MOTION_SEND_INTERVAL_MS = 4;
 
 /**
  * Bytes the motion path's transport may hold unsent before motion goes back

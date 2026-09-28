@@ -127,9 +127,9 @@ const move = (type, x, extra = {}) => ({
         return out ? out[0] - t : Infinity;
     });
     const worst = Math.max(...holds);
-    check('1000 Hz motion goes out as one message per 2 ms', m.length >= 95 && m.length <= 105,
+    check('1000 Hz motion goes out as one message per 4 ms', m.length >= 45 && m.length <= 55,
           `${m.length} messages for 200 samples`);
-    check('and no sample is held longer than 2 ms', worst <= 2, `worst ${worst} ms`);
+    check('and no sample is held longer than 4 ms', worst <= 4, `worst ${worst} ms`);
     check('and the last position is the last sent', m[m.length - 1][1].startsWith('m,299,'),
           m[m.length - 1][1]);
 }
@@ -212,8 +212,8 @@ const move = (type, x, extra = {}) => ({
     input._handleRawPointerUpdate(last);
     advance(50);
     const xs = motion(sent).map(([, m]) => Number(m.split(',')[1]));
-    check('a drag sends what one event coalesced, one sample per 2 ms of it',
-          xs.length >= 10 && xs.length <= 11 && xs[xs.length - 1] === 195, xs.join(','));
+    check('a drag sends what one event coalesced, one sample per 4 ms of it',
+          xs.length >= 5 && xs.length <= 6 && xs[xs.length - 1] === 195, xs.join(','));
     check('in the order they were drawn', xs.every((x, i) => i === 0 || x > xs[i - 1]), xs.join(','));
 }
 
