@@ -214,7 +214,9 @@ class Session:
     The children share a process group the launcher is not in, so stopping
     ends every process they started while a signal meant for the launcher's
     caller, Ctrl-C in a terminal or a scheduler's for the job, still reaches
-    the launcher and stops them in order.
+    the launcher and stops them in order. What they orphan, a desktop's
+    agents and every application a menu double-forks, the launcher adopts
+    (`adopt_orphans`), collects once it exits, and ends with the session.
     """
 
     def __init__(self) -> None:
@@ -336,12 +338,19 @@ class Session:
         log(f"desktop {sid or entry['Exec']} on {env.get('WAYLAND_DISPLAY') or env['DISPLAY']}")
 
     def stragglers(self) -> List[int]:
-        """The processes still carrying the session's runtime directory, such
-        as the agents a desktop daemonizes out of its process group."""
+        """The processes outside the session's process groups: those carrying
+        its runtime directory, and the orphans the launcher adopted, since an
+        agent that makes itself undumpable (ssh-agent) hides its environment."""
         marker = f"XDG_RUNTIME_DIR={self.runtime_dir}".encode()
+        launcher, ours = str(os.getpid()).encode(), {proc.pid for proc in self.children}
         found = []
         for entry in filter(str.isdigit, os.listdir("/proc")):
             try:
+                with open(f"/proc/{entry}/stat", "rb") as fh:
+                    adopted = fh.read().rsplit(b")", 1)[1].split()[1] == launcher
+                if adopted and int(entry) not in ours:
+                    found.append(int(entry))
+                    continue
                 with open(f"/proc/{entry}/environ", "rb") as fh:
                     if marker in fh.read().split(b"\0"):
                         found.append(int(entry))
@@ -349,10 +358,31 @@ class Session:
                 continue
         return found
 
-    def signal_groups(self, sig: int) -> None:
+    def reap(self) -> None:
+        """Collect the children that exited: the session's own through their
+        Popen, which keeps their status, and the orphans it adopted."""
+        for proc in self.children:
+            proc.poll()
+        ours = {proc.pid for proc in self.children}
+        while True:
+            try:
+                exited = os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                return
+            if exited is None or exited.si_pid in ours:
+                return
+            os.waitpid(exited.si_pid, 0)
+
+    def signal_session(self, sig: int) -> None:
+        """The session's process groups, then whatever left them."""
         for pgid in self.groups:
             try:
                 os.killpg(pgid, sig)
+            except OSError:
+                pass
+        for pid in self.stragglers():
+            try:
+                os.kill(pid, sig)
             except OSError:
                 pass
 
@@ -365,22 +395,27 @@ class Session:
                 self.selkies.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self.selkies.kill()
-        self.signal_groups(signal.SIGTERM)
+        self.signal_session(signal.SIGTERM)
         deadline = time.monotonic() + 5
         for proc in self.children:
             try:
                 proc.wait(timeout=max(0.1, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 pass
-        self.signal_groups(signal.SIGKILL)
-        for pid in self.stragglers():
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+        self.signal_session(signal.SIGKILL)
         for proc in self.children:
             proc.wait()
+        self.reap()
         shutil.rmtree(self.runtime_dir, ignore_errors=True)
+
+
+def adopt_orphans() -> None:
+    """Have the kernel make the launcher, not the host's init, the parent of
+    every process the session orphans."""
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(36, 1)  # PR_SET_CHILD_SUBREAPER
+    except (AttributeError, OSError):
+        pass
 
 
 def follow_parent() -> None:
@@ -419,6 +454,7 @@ def main(argv: Optional[List[str]] = None, follow: bool = False) -> int:
     wayland = bool(settings.wayland[0])
     if follow:
         follow_parent()
+    adopt_orphans()
     stopping: List[int] = []
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         if signal.getsignal(sig) is not signal.SIG_IGN:  # nohup's, and a background job's SIGINT
@@ -440,6 +476,7 @@ def main(argv: Optional[List[str]] = None, follow: bool = False) -> int:
         if not wayland:
             session.selkies = session.spawn(command, env=for_selkies(session.env))
         while session.selkies.poll() is None and not stopping:
+            session.reap()
             time.sleep(0.5)
         status = 0 if stopping else session.selkies.returncode
     except RuntimeError as err:

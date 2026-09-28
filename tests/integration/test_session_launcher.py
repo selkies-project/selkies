@@ -48,15 +48,33 @@ def status(port: int, path: str = "/api/health") -> int:
         return -1
 
 
+# Daemonizes as ssh-agent does, undumpable, so its environment cannot be read
+AGENT = """import ctypes, os, sys, time
+if os.fork():
+    sys.exit(0)
+os.setsid()
+ctypes.CDLL(None).prctl(4, 0)
+open(sys.argv[1] + ".tmp", "w").write(str(os.getpid()))
+os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+time.sleep(3600)
+"""
+
+
 def data_dir(root: str, kind: str, record: str) -> str:
     """An XDG data directory holding one session of `kind`, a stand-in that
     records its environment to `record`, daemonizes a helper out of its
-    process group as a desktop's agents do, and stays up."""
+    process group as a desktop's agents do, orphans a process that exits at
+    once as a menu's double fork does, starts an agent that daemonizes and
+    hides its environment, recording its pid beside `record`, and stays up."""
     folder = os.path.join(root, "share", kind)
     os.makedirs(folder, exist_ok=True)
+    agent = os.path.join(root, "agent.py")
+    with open(agent, "w") as fh:
+        fh.write(AGENT)
     with open(os.path.join(folder, "standin.desktop"), "w") as fh:
         fh.write("[Desktop Entry]\nName=Stand-in\nDesktopNames=StandIn;Test;\n"
-                 f"Exec=sh -c 'env > {record}; setsid sleep 3600 & exec sleep 3600'\nType=Application\n")
+                 f"Exec=sh -c 'env > {record}; setsid sleep 3600 & sh -c \"true &\"; "
+                 f"{sys.executable} {agent} {record}.agent; exec sleep 3600'\nType=Application\n")
     return os.path.join(root, "share")
 
 
@@ -165,6 +183,29 @@ def leftovers(runtime: str, seconds: float = 20.0) -> list:
         time.sleep(0.5)
 
 
+def zombies(parent: int) -> list:
+    """The children of `parent` that exited and that it has not collected."""
+    found = []
+    for entry in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as fh:
+                fields = fh.read().rsplit(b")", 1)[1].split()
+        except OSError:
+            continue
+        if fields[0] == b"Z" and int(fields[1]) == parent:
+            found.append(int(entry))
+    return found
+
+
+def running(pid: Optional[int]) -> bool:
+    """Whether `pid` runs: neither gone nor exited."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            return fh.read().rsplit(b")", 1)[1].split()[0] != b"Z"
+    except (OSError, TypeError):
+        return False
+
+
 def logged(log: str, prefix: str) -> Optional[str]:
     """The rest of the first launcher line starting with `prefix`."""
     for line in open(log, errors="replace"):
@@ -198,6 +239,7 @@ def block(res: H.Results, tag: str, wayland: bool, session: list, path_env: Opti
            "XDG_RUNTIME_DIR": runtime, "SELKIES_WAYLAND": "true" if wayland else "false",
            "XDG_DATA_DIRS": data_dir(root, "wayland-sessions" if wayland else "xsessions", record),
            "XDG_DATA_HOME": os.path.join(root, "home-share"), **H.inherited_env()}
+    agent = None
     try:
         proc, port, pid = start(session, env, log, detached)
     except RuntimeError as err:
@@ -261,10 +303,21 @@ def block(res: H.Results, tag: str, wayland: bool, session: list, path_env: Opti
         # stripes as the host has cores to cut, and a paint-over pass only where
         # one is on, so it is the rows painted that say the picture arrived.
         res.check(f"{tag} video frames flow", got["rows"] == SETTINGS["initialClientHeight"], got)
+        if not session:
+            deadline = time.time() + 5
+            while (zombies(pid) or not os.path.exists(record + ".agent")) and time.time() < deadline:
+                time.sleep(0.2)
+            agent = int(open(record + ".agent").read()) if os.path.exists(record + ".agent") else None
+            res.check(f"{tag} the launcher collects what the session orphans, once it exits",
+                      agent is not None and not zombies(pid), (agent, zombies(pid)))
     finally:
         code = stop(proc, pid, detached)
         left = leftovers(session_dir)
-        for leftover, _ in left:
+        survived = running(agent)
+        if survived:
+            time.sleep(2)
+            survived = running(agent)
+        for leftover in [p for p, _ in left] + ([agent] if survived else []):
             try:
                 os.kill(leftover, signal.SIGKILL)
             except OSError:
@@ -272,6 +325,8 @@ def block(res: H.Results, tag: str, wayland: bool, session: list, path_env: Opti
     if not detached:
         res.check(f"{tag} SIGTERM ends the launcher with status 0", code == 0, code)
     res.check(f"{tag} SIGTERM ends everything the launcher started", not left and status(port) == -1, left[:3])
+    if agent is not None:
+        res.check(f"{tag} and an agent that daemonized and hid its environment, as ssh-agent does", not survived, agent)
     res.check(f"{tag} and removes its runtime directory",
               not any(d.startswith("selkies-session-") for d in os.listdir(runtime)), os.listdir(runtime))
 
