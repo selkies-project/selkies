@@ -134,6 +134,11 @@ def local_text(page) -> str:
     return page.evaluate("navigator.clipboard.readText().catch((e) => 'ERR:' + e.name)")
 
 
+def masked(text: str, secret: str) -> str:
+    """`text` as a check prints it, with the secret masked wherever it appears."""
+    return text.replace(secret, "<the secret>")
+
+
 def kept(page) -> dict:
     return json.loads(page.evaluate(KEPT_JS))
 
@@ -197,10 +202,11 @@ def masked_checks(res: "H.Results", tag: str, page, wayland: bool, dashboard: st
     owner = Owner(wayland, secret, hint)
     try:
         got = wait_until(lambda: last_preview(page).get("secret") is True, 10)
+        preview = last_preview(page)
         res.check(f"{tag} a copy marked {hint} reaches the page as the flag alone",
-                  got and last_preview(page).get("text") == "", last_preview(page))
+                  got and preview.get("text") == "", masked(json.dumps(preview), secret))
         shown = pane(page, dashboard)
-        res.check(f"{tag} the clipboard pane shows it masked", shown == MASK, shown[:40])
+        res.check(f"{tag} the clipboard pane shows it masked", shown == MASK, masked(shown, secret)[:40])
         button = page.locator('button:has-text("Copy hidden text")').first
         page.evaluate("window.postMessage({type: 'settings', settings: {clipboard_seamless: false}}, "
                       "window.location.origin)")
@@ -230,7 +236,7 @@ def masked_checks(res: "H.Results", tag: str, page, wayland: bool, dashboard: st
         shown = pane(page, dashboard)
         res.check(f"{tag} ordinary text is shown as it is",
                   got and shown == f"ordinary-{tag}-{n}" and last_preview(page).get("secret") is False,
-                  shown[:40])
+                  masked(shown, secret)[:40])
         close_panel(page, dashboard)
     finally:
         owner.release()
@@ -243,12 +249,13 @@ def take_back_checks(res: "H.Results", tag: str, page, wayland: bool) -> None:
     secret = f"pw-{tag}-release-Zq8!"
     owner = Owner(wayland, secret)
     landed = wait_until(lambda: local_text(page) == secret, 10)
-    res.check(f"{tag} with seamless sync the secret lands on the local clipboard", landed, local_text(page))
+    res.check(f"{tag} with seamless sync the secret lands on the local clipboard", landed,
+              masked(local_text(page), secret))
     started = time.time()
     owner.release()
     taken = wait_until(lambda: local_text(page) == "", 8)
     res.check(f"{tag} the session letting it go takes it off the local clipboard",
-              taken, f"{local_text(page)!r} after {time.time() - started:.1f} s")
+              taken, f"{masked(local_text(page), secret)!r} after {time.time() - started:.1f} s")
 
     secret = f"pw-{tag}-kept-Zq8!"
     owner = Owner(wayland, secret)
@@ -257,7 +264,7 @@ def take_back_checks(res: "H.Results", tag: str, page, wayland: bool) -> None:
     owner.release()
     time.sleep(4.0)
     res.check(f"{tag} a copy the user made since is left alone when the session lets go",
-              local_text(page) == "a copy the user made", local_text(page))
+              local_text(page) == "a copy the user made", masked(local_text(page), secret))
 
     secret = f"pw-{tag}-term-Zq8!"
     owner = Owner(wayland, secret)
@@ -269,7 +276,8 @@ def take_back_checks(res: "H.Results", tag: str, page, wayland: bool) -> None:
         taken = wait_until(lambda: local_text(page) == "", 12, step=0.5)
         res.check(f"{tag} a secret still held is taken back when its term is up, not before",
                   early == secret and taken,
-                  f"at {TERM_S - 5:.0f} s {early[:20]!r}, emptied after {time.time() - landed_at:.1f} s")
+                  f"at {TERM_S - 5:.0f} s {masked(early, secret)[:20]!r}, "
+                  f"emptied after {time.time() - landed_at:.1f} s")
     finally:
         owner.release()
     time.sleep(1.5)
@@ -281,7 +289,7 @@ def take_back_checks(res: "H.Results", tag: str, page, wayland: bool) -> None:
         page.evaluate("navigator.clipboard.writeText('another copy the user made')")
         time.sleep(TERM_S + 5)
         res.check(f"{tag} a copy the user made since is left alone when the term is up",
-                  local_text(page) == "another copy the user made", local_text(page))
+                  local_text(page) == "another copy the user made", masked(local_text(page), secret))
     finally:
         owner.release()
     time.sleep(1.0)
@@ -307,7 +315,7 @@ def viewer_checks(res: "H.Results", tag: str, browser, mode: str, wayland: bool)
         got = viewer.evaluate("window.__clipMsgs.slice(%d)" % seen)
         writes = viewer.evaluate("window.__clipWrites.length")
         res.check(f"{tag} a shared viewer's page takes nothing of the session's clipboard, a secret or not",
-                  not got and not writes, f"previews={got} writes={writes}")
+                  not got and not writes, f"{len(got)} previews, {writes} writes")
     finally:
         ctx.close()
 

@@ -110,7 +110,8 @@ const {
 let failed = 0;
 function check(label, ok, detail = '') {
     if (!ok) failed++;
-    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-secret-page] ${label}  ${detail}`);
+    // A detail shows the page's state, which may hold the secret; the line never does.
+    console.log(`${ok ? 'PASS' : 'FAIL'}  [clip-secret-page] ${label}  ${String(detail).replaceAll(SECRET, '<the secret>')}`);
 }
 const settle = () => new Promise((resolve) => realSetTimeout(resolve, 30));
 const b64 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));

@@ -37,6 +37,16 @@ from selkies.input_handler import (  # noqa: E402
     CLIPBOARD_SECRET_HINTS, SecretText, WebRTCInput, _X11ClipboardMonitor)
 
 PASSWORD = "correct horse battery staple"
+# The spellings password managers offer the hint under, written out rather than
+# read from the server's CLIPBOARD_SECRET_HINTS: the checks hold the server to
+# them, and CodeQL takes whatever is read from that table for a secret.
+HINTS = ("x-kde-passwordManagerHint", "text/x-kde-passwordManagerHint",
+         "application/x-kde-passwordManagerHint")
+
+
+def shown(data) -> str:
+    """Clipboard data as a check prints it: its type and length, never its text."""
+    return "None" if data is None else f"{type(data).__name__} of {len(data)}"
 
 
 class XOwner:
@@ -92,7 +102,7 @@ class XOwner:
 def x11_reads(res: H.Results, display: str) -> None:
     reader = _X11ClipboardMonitor(display)
     try:
-        for hint in CLIPBOARD_SECRET_HINTS:
+        for hint in HINTS:
             owner = XOwner(display, [("UTF8_STRING", PASSWORD.encode()),
                                      ("text/plain;charset=utf-8", PASSWORD.encode()), (hint, b"secret")])
             try:
@@ -106,7 +116,7 @@ def x11_reads(res: H.Results, display: str) -> None:
         try:
             data, _ = reader.read(use_binary=True)
             res.check("x11: an owner without the hint reads as ordinary text",
-                      data == "ordinary" and not isinstance(data, SecretText), repr(data))
+                      data == "ordinary" and not isinstance(data, SecretText), shown(data))
         finally:
             owner.clear()
 
@@ -151,17 +161,17 @@ def x11_monitor(res: H.Results, display: str) -> None:
     async def run() -> None:
         task = asyncio.create_task(h.start_clipboard())
         await asyncio.sleep(0.5)
-        owner = XOwner(display, [("UTF8_STRING", PASSWORD.encode()), (CLIPBOARD_SECRET_HINTS[0], b"secret")])
+        owner = XOwner(display, [("UTF8_STRING", PASSWORD.encode()), (HINTS[0], b"secret")])
         await asyncio.sleep(1.0)
         res.check("x11 monitor: the password manager's copy goes out marked",
-                  sent[-1:] == [PASSWORD] and isinstance(sent[-1], SecretText), sent)
+                  sent[-1:] == [PASSWORD] and isinstance(sent[-1], SecretText), [shown(d) for d in sent])
         started = time.monotonic()
         owner.clear()
         while time.monotonic() - started < 5 and not (sent and sent[-1] == ""):
             await asyncio.sleep(0.05)
         res.check("x11 monitor: its giving the selection up goes out as an empty secret",
                   sent[-1:] == [""] and isinstance(sent[-1], SecretText),
-                  f"{sent} after {time.monotonic() - started:.2f} s")
+                  f"{[shown(d) for d in sent]} after {time.monotonic() - started:.2f} s")
         h.clipboard_running = False
         await asyncio.wait_for(task, 5.0)
 
@@ -231,7 +241,7 @@ def compositor_block(res: H.Results) -> None:
     capture.set_clipboard_callback(lambda entries: deliveries.append(
         [(mime, bytes(data)) for mime, data in entries]))
     source = pixelflux.ScreenCapture()
-    for hint in CLIPBOARD_SECRET_HINTS:
+    for hint in HINTS:
         seen = len(deliveries)
         source.clipboard_write_app(socket_name, [("text/plain;charset=utf-8", PASSWORD.encode()),
                                                  (hint, b"secret")])
@@ -242,7 +252,8 @@ def compositor_block(res: H.Results) -> None:
     seen = len(deliveries)
     source.clipboard_clear_app(socket_name)
     res.check("compositor: a source clearing the selection is delivered as no flavours",
-              wait_for(deliveries, seen + 1) and deliveries[-1] == [], deliveries[seen:])
+              wait_for(deliveries, seen + 1) and deliveries[-1] == [],
+              [[mime for mime, _ in d] for d in deliveries[seen:]])
 
     # A source slow to answer (Firefox re-encoding an image takes seconds) and a
     # copy made meanwhile: the newer copy is the selection, so it has to be the
@@ -299,7 +310,7 @@ def nested_block(res: H.Results) -> None:
         h.wayland_input = client
         h._app_wayland_display = lambda: socket
         h._app_clip_read_failure = None
-        for hint in CLIPBOARD_SECRET_HINTS:
+        for hint in HINTS:
             client.clipboard_write_app(socket, [("text/plain;charset=utf-8", PASSWORD.encode()),
                                                 ("text/plain", PASSWORD.encode()), (hint, b"secret")])
             data, mime = asyncio.run(h._app_clipboard_read(use_binary=True))
@@ -309,7 +320,7 @@ def nested_block(res: H.Results) -> None:
         client.clipboard_write_app(socket, [("text/plain", b"ordinary")])
         data, _ = asyncio.run(h._app_clipboard_read(use_binary=True))
         res.check("nested: a source without the hint reads as ordinary text",
-                  data == "ordinary" and not isinstance(data, SecretText), repr(data))
+                  data == "ordinary" and not isinstance(data, SecretText), shown(data))
         seen = len(changes)
         client.clipboard_clear_app(socket)
         res.check("nested: the watch reports a cleared selection as no mimes",

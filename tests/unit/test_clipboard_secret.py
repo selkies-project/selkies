@@ -32,6 +32,11 @@ from selkies.input_handler import (  # noqa: E402
 
 results = []
 PASSWORD = "correct horse battery staple"
+# The spellings password managers offer the hint under, written out rather than
+# read from the server's CLIPBOARD_SECRET_HINTS: the checks hold the server to
+# them, and CodeQL takes whatever is read from that table for a secret.
+HINTS = ("x-kde-passwordManagerHint", "text/x-kde-passwordManagerHint",
+         "application/x-kde-passwordManagerHint")
 
 
 def check(label: str, ok, detail="") -> None:
@@ -43,11 +48,16 @@ def is_secret(data, text: str) -> bool:
     return isinstance(data, SecretText) and data == text
 
 
+def shown(data) -> str:
+    """Clipboard data as a check prints it: its type and length, never its text."""
+    return "None" if data is None else f"{type(data).__name__} of {len(data)}"
+
+
 def x11_reads() -> None:
     """The X11 monitor's read, its conversions answered by a table."""
     atoms = {name: n for n, name in enumerate(
         ["TARGETS", "UTF8_STRING", "text/plain;charset=utf-8", "STRING", "text/html",
-         "text/uri-list", "image/png", *CLIPBOARD_SECRET_HINTS], start=100)}
+         "text/uri-list", "image/png", *HINTS, *CLIPBOARD_SECRET_HINTS], start=100)}
     monitor = _X11ClipboardMonitor.__new__(_X11ClipboardMonitor)
     monitor._targets = atoms["TARGETS"]
     monitor._image_targets = [(atoms["image/png"], "image/png")]
@@ -64,23 +74,23 @@ def x11_reads() -> None:
             return (offer[name], 8) if name in offer else None
         monitor._convert_and_wait = convert
 
-    for hint in CLIPBOARD_SECRET_HINTS:
+    for hint in HINTS:
         owner({"UTF8_STRING": PASSWORD.encode(), hint: b"secret"})
         data, mime = monitor.read(use_binary=True)
         check(f"x11: a copy offering {hint} reads as its text, marked secret",
               is_secret(data, PASSWORD) and mime == "text/plain", (type(data).__name__, mime))
     owner({"UTF8_STRING": PASSWORD.encode(), "image/png": b"\x89PNG", "text/html": b"<b>x</b>",
-           CLIPBOARD_SECRET_HINTS[0]: b"secret"})
+           HINTS[0]: b"secret"})
     data, mime = monitor.read(use_binary=True)
     check("x11: a secret copy reads as its text alone, whatever else it offers",
           is_secret(data, PASSWORD) and mime == "text/plain", mime)
-    owner({"UTF8_STRING": b"", CLIPBOARD_SECRET_HINTS[0]: b"secret"})
+    owner({"UTF8_STRING": b"", HINTS[0]: b"secret"})
     data, mime = monitor.read(use_binary=False)
-    check("x11: an empty secret reads as an empty one", is_secret(data, ""), repr(data))
-    owner({"UTF8_STRING": b"hello", CLIPBOARD_SECRET_HINTS[0]: b"public"})
+    check("x11: an empty secret reads as an empty one", is_secret(data, ""), shown(data))
+    owner({"UTF8_STRING": b"hello", HINTS[0]: b"public"})
     data, mime = monitor.read(use_binary=False)
     check("x11: a hint valued anything but secret leaves the text ordinary",
-          data == "hello" and not isinstance(data, SecretText), repr(data))
+          data == "hello" and not isinstance(data, SecretText), shown(data))
     owner({"UTF8_STRING": b"hello"})
     data, mime = monitor.read(use_binary=False)
     check("x11: an ordinary copy reads as before", data == "hello" and not isinstance(data, SecretText))
@@ -89,15 +99,15 @@ def x11_reads() -> None:
 def native_reads() -> None:
     """The capture compositor's flavours, as its callback delivers them."""
     payload = WebRTCInput._native_clipboard_payload
-    for hint in CLIPBOARD_SECRET_HINTS:
+    for hint in HINTS:
         data, mime = payload([("text/plain;charset=utf-8", PASSWORD.encode()), (hint, b"secret")], True)
         check(f"compositor: a copy offering {hint} reads as its text, marked secret",
               is_secret(data, PASSWORD) and mime == "text/plain", repr(type(data)))
-    data, _ = payload([(CLIPBOARD_SECRET_HINTS[1], b"secret")], True)
-    check("compositor: a secret whose text is empty reads as an empty one", is_secret(data, ""), repr(data))
-    data, _ = payload([("text/plain", b"hello"), (CLIPBOARD_SECRET_HINTS[0], b"no")], True)
+    data, _ = payload([(HINTS[1], b"secret")], True)
+    check("compositor: a secret whose text is empty reads as an empty one", is_secret(data, ""), shown(data))
+    data, _ = payload([("text/plain", b"hello"), (HINTS[0], b"no")], True)
     check("compositor: a hint valued anything but secret leaves the text ordinary",
-          data == "hello" and not isinstance(data, SecretText), repr(data))
+          data == "hello" and not isinstance(data, SecretText), shown(data))
     check("compositor: a cleared selection reads as nothing", payload([], True) == (None, None))
 
 
@@ -121,7 +131,7 @@ async def app_reads() -> None:
     h = WebRTCInput.__new__(WebRTCInput)
     h._app_wayland_display = lambda: "wayland-2"
     h._app_clip_read_failure = None
-    for hint in CLIPBOARD_SECRET_HINTS:
+    for hint in HINTS:
         h.wayland_input = FakeAppCompositor({"image/png": b"\x89PNG", "text/plain": PASSWORD.encode(),
                                              hint: b"secret"})
         data, mime = await h._app_clipboard_read(use_binary=True)
@@ -189,24 +199,24 @@ async def monitor_loop() -> None:
     comp = h.wayland_input
     task = asyncio.create_task(h.start_clipboard())
     await asyncio.sleep(0.3)
-    comp.deliver(("text/plain", PASSWORD.encode()), (CLIPBOARD_SECRET_HINTS[0], b"secret"))
+    comp.deliver(("text/plain", PASSWORD.encode()), (HINTS[0], b"secret"))
     await asyncio.sleep(0.3)
     check("monitor: a secret copy reaches the clients marked",
-          len(h.sent) == 1 and is_secret(h.sent[0], PASSWORD), h.sent)
+          len(h.sent) == 1 and is_secret(h.sent[0], PASSWORD), [shown(d) for d in h.sent])
     comp.deliver()
     await asyncio.sleep(0.3)
     check("monitor: the selection cleared after it goes out as an empty secret",
-          len(h.sent) == 2 and is_secret(h.sent[1], ""), h.sent)
+          len(h.sent) == 2 and is_secret(h.sent[1], ""), [shown(d) for d in h.sent])
     comp.deliver(("text/plain", b"ordinary"))
     await asyncio.sleep(0.3)
     comp.deliver()
     await asyncio.sleep(0.3)
     check("monitor: a selection cleared after ordinary text sends nothing",
-          h.sent[2:] == ["ordinary"] and not isinstance(h.sent[2], SecretText), h.sent[2:])
-    comp.deliver(("text/plain", PASSWORD.encode()), (CLIPBOARD_SECRET_HINTS[2], b"secret"))
+          h.sent[2:] == ["ordinary"] and not isinstance(h.sent[2], SecretText), [shown(d) for d in h.sent[2:]])
+    comp.deliver(("text/plain", PASSWORD.encode()), (HINTS[2], b"secret"))
     await asyncio.sleep(0.3)
     check("monitor: the same secret copied again after its retraction goes out again",
-          len(h.sent) == 4 and is_secret(h.sent[3], PASSWORD), h.sent[3:])
+          len(h.sent) == 4 and is_secret(h.sent[3], PASSWORD), [shown(d) for d in h.sent[3:]])
     h.clipboard_running = False
     await asyncio.wait_for(task, 5.0)
 
@@ -215,7 +225,7 @@ async def monitor_loop() -> None:
     offered = dict(h.wayland_input.offered)
     check("write-back: a secret is offered with the hint in every spelling",
           offered.get("text/plain") == PASSWORD.encode()
-          and all(offered.get(hint) == b"secret" for hint in CLIPBOARD_SECRET_HINTS), sorted(offered))
+          and all(offered.get(hint) == b"secret" for hint in HINTS), sorted(offered))
     await h._set_clipboard("ordinary")
     check("write-back: ordinary text is offered without it",
           [m for m, _ in h.wayland_input.offered] == ["text/plain"], h.wayland_input.offered)
@@ -261,8 +271,9 @@ async def transports() -> None:
     sock = Socket()
     app.data_streaming_server = SimpleNamespace(clients={sock}, enable_binary_clipboard=True)
     await app.send_ws_clipboard_data(SecretText(PASSWORD), "text/plain")
+    verbs = [f.split(",", 1)[0] for f in sock.frames]
     check("websockets: a secret's payload follows a clipboard_secret frame",
-          [f.split(",", 1)[0] for f in sock.frames] == ["clipboard_secret", "clipboard"], sock.frames)
+          verbs == ["clipboard_secret", "clipboard"], verbs)
     sock.frames.clear()
     await app.send_ws_clipboard_data(SecretText(""), "text/plain")
     check("websockets: an empty secret goes out, marked", sock.frames == ["clipboard_secret", "clipboard,"],
@@ -284,9 +295,9 @@ async def transports() -> None:
         await app.send_ws_clipboard_data(SecretText(PASSWORD), "text/plain")
         await app.send_ws_clipboard_data("ordinary", "text/plain")
         await app.send_ws_clipboard_data("asked for", "text/plain", reply_to="cr", conn_id=id(viewer))
+        verbs = [f.split(",", 1)[0] for f in viewer.frames]
         check("websockets: a viewer is announced nothing, a secret or not, and answered what it asked",
-              len(sock.frames) == 3 and [f.split(",", 1)[0] for f in viewer.frames]
-              == ["clipboard_reply", "clipboard"], viewer.frames)
+              len(sock.frames) == 3 and verbs == ["clipboard_reply", "clipboard"], verbs)
     finally:
         wsm.client_permissions.pop(viewer, None)
 
