@@ -3054,10 +3054,18 @@ class CentralizedStreamServer:
         self.static_fs_path = await self._get_static_content_path()
         if self.static_fs_path:
             async def index_handler(request: web.Request) -> web.FileResponse:
+                """The entry page, which a browser revalidates on every load.
+
+                With validators alone a browser may reuse it by heuristic
+                freshness, so a page cached before the server changed its web
+                root or was upgraded comes back and loads the wrong client;
+                the validators keep each revalidation a 304.
+                """
                 moved = _ipv6_loopback_redirect(request, f"{api_prefix}/")
                 if moved:
                     raise web.HTTPFound(moved)
-                return web.FileResponse(os.path.join(self.static_fs_path, "index.html"))
+                return web.FileResponse(os.path.join(self.static_fs_path, "index.html"),
+                                        headers={"Cache-Control": "no-cache"})
 
             self.app.router.add_get(f"{api_prefix}/", index_handler)
             self.app.router.add_static(
