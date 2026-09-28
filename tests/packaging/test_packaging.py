@@ -83,7 +83,11 @@ def main() -> bool:
         if os.path.lexists(link):
             os.unlink(link)
         os.symlink(H.PYTHON, link)
-    env = dict(os.environ, PATH=shim + os.pathsep + os.environ.get("PATH", ""))
+    # A tree on PYTHONPATH, as a worktree's interpreter wrapper puts one, would reach the
+    # packager's venv too, whose pip then takes the tree's egg-info for an installed selkies
+    # and installs no commands.
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env["PATH"] = shim + os.pathsep + os.environ.get("PATH", "")
 
     run = subprocess.run(["bash", SIMULATE, wheels], capture_output=True,
                          text=True, env=env)
