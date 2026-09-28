@@ -8,7 +8,9 @@ lost segment's retransmission, a Wi-Fi hop's jitter) that one check sees and
 the next does not leaves the gate open, however often it recurs; a queue that
 stands through two checks in a row shuts it, which stays shut while the queue
 stands and lifts once it drains. Without the steer, which bounds a queue on the
-path, the gate is that bound and the first check over the allowance shuts it.
+path, the gate is that bound: the first check over the allowance shuts it while
+the client's acks move on, a queue the path delivers behind, and a check whose
+acks stood still, a hold, leaves it to the next.
 """
 import asyncio
 import os
@@ -38,10 +40,11 @@ class Module:
         pass
 
 
-def gate_states(script: list, steered: bool = True) -> list:
+def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -> list:
     """Whether the gate is open after each check, the n-th check seeing
     `script[n]` ms of stream standing in flight past the floor, with congestion
-    control steering the display or not."""
+    control steering the display or not, and the client's acks moving on or
+    standing still since the check before."""
     server = DataStreamingServer.__new__(DataStreamingServer)
     server.client_settings_received = None
     server.backpressure_check_interval_s = INTERVAL
@@ -68,6 +71,7 @@ def gate_states(script: list, steered: bool = True) -> list:
         state["sent_timestamps"] = OrderedDict(
             (101 + i, (now - 0.9 + i / 1000.0, 20000)) for i in range(in_flight))
         state["last_sent_frame_id"] = 100 + in_flight
+        state["acked_at"] = now if acks_moving else now - 1.0
 
     async def one_check_per_sleep(delay, *args, **kwargs):
         if delay == INTERVAL:
@@ -101,8 +105,13 @@ res.check("a queue standing through two checks shuts it at the second", standing
 res.check("it stays shut while the queue stands and lifts once it drains",
           standing[3:] == [False, True, True], standing)
 res.check("a stream in flight within the allowance never shuts it", all(gate_states([100, 150, 200, 150])))
-unsteered = gate_states([0, 300, 0], steered=False)
-res.check("without congestion control a moment past the allowance shuts it at once", unsteered == [True, False, True],
-          unsteered)
+delivered = gate_states([0, 300, 0], steered=False, acks_moving=True)
+res.check("without congestion control a queue the path goes on delivering behind shuts it at once",
+          delivered == [True, False, True], delivered)
+held = gate_states([0, 300, 0, 0], steered=False)
+res.check("without congestion control a moment the path holds the stream, acks standing still, leaves it open",
+          all(held), held)
+stuck = gate_states([0, 300, 300, 0], steered=False)
+res.check("a hold still there at the next check shuts it", stuck == [True, True, False, True], stuck)
 
 sys.exit(0 if res.summary() else 1)

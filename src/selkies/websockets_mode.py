@@ -134,6 +134,10 @@ from .metrics import Metrics
 # How much stream may stand queued past the path's own round trip before the
 # backpressure gate stops sending a display's delta frames.
 BACKPRESSURE_ALLOWED_DESYNC_MS = 250
+# A client acks the newest frame it has every 50 ms: acks that moved on no
+# later than this say the path is delivering, acks that stood still longer say
+# it holds the stream a moment.
+BACKPRESSURE_ACK_HOLD_S = 0.1
 # A capture that produced nothing for this long was a still screen; the
 # backpressure gate leaves the stream it resumes unjudged for the grace after.
 STILL_SCREEN_GAP_SECONDS = 1.0
@@ -2572,10 +2576,12 @@ class DataStreamingServer(BaseStreamingService):
         hop's jitter) releases what it held within one check, and a gate shut
         on that moment would freeze the stream and resume it on a key frame,
         while a queue is still there at the next. Where nothing else bounds
-        the queue on the path, the first check shuts it. A stream
-        resuming after a still screen (a capture that produced nothing for
-        STILL_SCREEN_GAP_SECONDS) is left unjudged for
-        STILL_RESUME_GRACE_SECONDS: every frame it sends
+        the queue on the path, the first check shuts it while the client's
+        acks move on (the path delivering, behind a queue) and leaves it to
+        the next when they stood still for BACKPRESSURE_ACK_HOLD_S (the path
+        holding the stream). A stream resuming after a still screen (a
+        capture that produced nothing for STILL_SCREEN_GAP_SECONDS) is left
+        unjudged for STILL_RESUME_GRACE_SECONDS: every frame it sends
         counts against the client until the client's first ack of them comes
         back, which after an idle spell can take a quarter of a second, and
         the gate would answer that with a freeze and a key frame on every
@@ -2677,8 +2683,11 @@ class DataStreamingServer(BaseStreamingService):
                         and now - display_state.get('resumed_at', 0.0) >= STILL_RESUME_GRACE_SECONDS)
                 over_at = display_state.get('queue_over_at')
                 display_state['queue_over_at'] = now if over else None
-                standing = over and (not steered or not display_state.get('backpressure_enabled', True) or (
-                    over_at is not None and now - over_at <= 1.5 * self.backpressure_check_interval_s))
+                delivering = now - display_state.get('acked_at', 0.0) <= BACKPRESSURE_ACK_HOLD_S
+                standing = over and (not display_state.get('backpressure_enabled', True)
+                                     or (not steered and delivering)
+                                     or (over_at is not None
+                                         and now - over_at <= 1.5 * self.backpressure_check_interval_s))
 
                 if unanswered_for > STALLED_CLIENT_TIMEOUT_SECONDS:
                     gated_at = display_state.get('stall_gated_at')
@@ -4255,6 +4264,7 @@ class DataStreamingServer(BaseStreamingService):
                                     send_time, sent_bytes = sent_ts.pop(acked_frame_id)
                                     display_state['acked_sent_at'] = send_time
                                     now = time.monotonic()
+                                    display_state['acked_at'] = now
                                     rtt_sample_ms = max(
                                         0.0,
                                         (now - send_time) * 1000.0 - held_ms)
