@@ -52,8 +52,11 @@ if [ -n "$need_selkies$need_xvfb" ]; then
   fi
   if [ -n "$need_selkies" ]; then
     version='${SELKIES_VERSION}'
-    [ -n "$version" ] || version=$(curl -fsSL https://api.github.com/repos/selkies-project/selkies/releases/latest \
-      | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+    if [ -z "$version" ]; then
+      # The latest release's tag, from the redirect GitHub answers without its rate-limited API
+      version=$(curl -fsSLI -o /dev/null -w '%%{url_effective}' https://github.com/selkies-project/selkies/releases/latest)
+      version=$${version##*/}
+    fi
     work=$(mktemp -d)
     curl -fsSL -o "$work/selkies-$version-$pkg" \
       "https://github.com/selkies-project/selkies/releases/download/$version/selkies-$version-$pkg"
