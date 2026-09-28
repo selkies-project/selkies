@@ -87,6 +87,12 @@ const MOTION_SEND_INTERVAL_MS = 2;
 const MOTION_BACKLOG_BYTES = 16 * 1024;
 
 /**
+ * Animation frames gaming mode's pointer lock waits at most for the engine to
+ * place the fullscreen viewport (`Input._viewportSettled`) before asking anyway.
+ */
+const LOCK_SETTLE_FRAMES = 30;
+
+/**
  * How long a trackpad tap holds the button it pressed before releasing it, in
  * milliseconds: libinput's tap timeout. A touch landing sooner takes the held
  * button over as a drag, or makes a double click if it lifts without moving.
@@ -1675,6 +1681,23 @@ export class Input {
     /** Whether the next lock request asks for raw movement. */
     static _asksRawMotion() {
         return Input.rawPointerMotion && !Input._rawMotionRefused;
+    }
+
+    /**
+     * Whether the engine's own record of where the viewport sits on the
+     * screen puts it at the window's origin, as a fullscreen viewport sits.
+     * Only Gecko exposes that record (`mozInnerScreenX`/`mozInnerScreenY`),
+     * and only Gecko needs it: under pointer lock it warps the pointer to the
+     * viewport's center through that record and measures the next movement
+     * from there, while the record trails a fullscreen transition by the
+     * toolbars the transition collapses, so a lock taken meanwhile adds their
+     * height to its first movement. Elsewhere the viewport counts as placed.
+     * @returns {boolean}
+     */
+    static _viewportSettled() {
+        const x = window.mozInnerScreenX, y = window.mozInnerScreenY;
+        if (typeof x !== 'number' || typeof y !== 'number') return true;
+        return Math.abs(x - window.screenX) < 1 && Math.abs(y - window.screenY) < 1;
     }
 
     /** Paints the server cursor bitmap onto the cursor canvas at the current device pixel ratio and rebases the hotspot. */
@@ -4593,14 +4616,23 @@ export class Input {
      * input authority was handed away -- must not capture the pointer for
      * motion nothing would receive. Chrome rejects a request made while the
      * fullscreen transition is still settling (WrongDocumentError), so it
-     * retries over a few short intervals.
+     * retries over a few short intervals. Gecko grants one then, and measures
+     * the first locked movement from where its transition had yet to place the
+     * viewport, so the request waits a frame at a time until the viewport sits
+     * where fullscreen puts it (`_viewportSettled`).
+     * @param {number} [attempt] Refused requests so far.
+     * @param {number} [frames] Frames waited so far for the viewport.
      */
-    _armPointerLock(attempt = 0) {
+    _armPointerLock(attempt = 0, frames = 0) {
         if (!this.inputAttached || !this.gamingMode || !this._isStreamFullscreen()) return;
         if (this._isStreamLocked()) return;
-        this._requestPointerLock(this.element, () => this._armPointerLock(attempt), (err) => {
+        if (frames < LOCK_SETTLE_FRAMES && !Input._viewportSettled()) {
+            requestAnimationFrame(() => this._armPointerLock(attempt, frames + 1));
+            return;
+        }
+        this._requestPointerLock(this.element, () => this._armPointerLock(attempt, frames), (err) => {
             if (attempt < 5) {
-                setTimeout(() => this._armPointerLock(attempt + 1), 60);
+                setTimeout(() => this._armPointerLock(attempt + 1, frames), 60);
             } else {
                 console.warn("Pointer lock failed on fullscreen:", err);
             }

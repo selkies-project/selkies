@@ -19,7 +19,9 @@
 // caller guards the request (gaming mode, stream fullscreen, not already locked,
 // an input context attached); the request it re-runs after a refusal must pass those
 // guards again, since the page can leave fullscreen while the first one is still
-// pending.
+// pending. Where the engine keeps its own record of the viewport's place on the
+// screen (Gecko), the request waits, for a bounded number of frames, until that
+// record puts the fullscreen viewport at the window's origin.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -82,6 +84,7 @@ function reset(element) {
     Input._rawMotionRefused = false;
     globalThis.document = { pointerLockElement: null, fullscreenElement: element,
                             getElementById: () => null };
+    globalThis.window = { screenX: 0, screenY: 0 };
 }
 
 // --- the request itself ---------------------------------------------------
@@ -359,6 +362,39 @@ function stage(ids, locked = null) {
     await sleep(10);
     check('gaming mode locks through a refusal', element.calls.join(',') === 'unadjusted,plain',
           element.calls.join(','));
+}
+{
+    // Gecko warps a locked pointer to the viewport's center through its own
+    // record of where the viewport sits on the screen, which a fullscreen
+    // transition updates only once the toolbars it collapses are gone: the
+    // request waits a frame at a time for the viewport to reach the window's
+    // origin, and asks anyway after a bounded wait.
+    const frames = [];
+    globalThis.requestAnimationFrame = (cb) => frames.push(cb);
+    const step = (n) => { for (let i = 0; i < n; i++) frames.splice(0).forEach((cb) => cb()); };
+    const element = makeElement('ok');
+    reset(element);
+    Object.assign(window, { mozInnerScreenX: 0, mozInnerScreenY: 85 });
+    makeInput(element)._armPointerLock();
+    step(3);
+    const waited = element.calls.length;
+    window.mozInnerScreenY = 0;
+    step(1);
+    await sleep(10);
+    check('Gecko is asked for the lock once its viewport sits at the window origin',
+          waited === 0 && element.calls.join(',') === 'unadjusted', `${waited}, then ${element.calls.join(',')}`);
+
+    const stuck = makeElement('ok');
+    reset(stuck);
+    Object.assign(window, { mozInnerScreenX: 0, mozInnerScreenY: 85 });
+    makeInput(stuck)._armPointerLock();
+    step(29);
+    const early = stuck.calls.length;
+    step(1);
+    await sleep(10);
+    check('a viewport that never gets there is asked after a bounded wait',
+          early === 0 && stuck.calls.join(',') === 'unadjusted', `${early}, then ${stuck.calls.join(',')}`);
+    delete globalThis.requestAnimationFrame;
 }
 {
     // Plain fullscreen: the pointer is the browser's, so nothing is asked for.
