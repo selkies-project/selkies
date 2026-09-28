@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Browser-engine matrix: Chromium (Chrome binary), Firefox, WebKit over the
-websockets transport (flow, input, clipboard, resize, console health), plus a
-reduced WebRTC flow on Firefox (parity with the Chrome reference) and WebKit."""
+websockets transport (flow, audio, input, clipboard, resize, console health),
+plus a reduced WebRTC flow on Firefox (parity with the Chrome reference) and
+WebKit. Over WebSockets, audio reaches playback on every engine, over a
+streamed response on Firefox (whose worker socket waits on the page's thread)
+and over the socket elsewhere."""
 import os
 import sys
 import time
@@ -107,6 +110,23 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
 
             page.mouse.click(640, 360)
             time.sleep(0.5)
+            if mode == "websockets":
+                # The capture sends nothing while the desktop is silent.
+                tone = H.pulse_sine()
+                try:
+                    deadline = time.time() + 12
+                    depth = 0
+                    while time.time() < deadline:
+                        depth = page.evaluate("window.currentAudioBufferSize || 0") or 0
+                        if depth > 0:
+                            break
+                        time.sleep(0.5)
+                    res.check("audio: packets reach playback", depth > 0, depth)
+                finally:
+                    H.pulse_unload(tone)
+                streamed = "takes audio over a streamed response" in open(H.LOG, errors="replace").read()
+                res.check("audio: over a streamed response on Firefox, over the socket elsewhere",
+                          streamed == (engine == "firefox"), streamed)
             pressed = False
             for _ in range(4):
                 # Headless WebKit drops synthetic keydowns under load, so the whole

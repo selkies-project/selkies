@@ -67,6 +67,7 @@ SUITES: list = [
     {"path": "unit/test_audio_worklet.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_socket_worker_audio.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_audio_decoder_worker.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_ws_downlink.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_audio_multistream.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_control_plane_guards.py", "tier": "unit", "timeout": 300},
     {"path": "unit/test_listen_address.py", "tier": "unit", "timeout": 120},

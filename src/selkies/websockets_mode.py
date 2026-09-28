@@ -192,6 +192,17 @@ STALLED_CLIENT_REPROBE_SECONDS = 2.0
 SEND_STALL_SECONDS = 10.0
 # How often a waiting send looks at its socket for that progress.
 SEND_PROBE_SECONDS = 0.5
+# A socket's streamed downlink (`_StreamDownlink`): the kinds of message one may
+# carry, what each holds behind a slow reader before dropping the oldest, how
+# long its hello waits for the client to confirm it, how often a silent one
+# sends a keepalive record so a proxy in front never sees it idle, and how long
+# a request waits for its socket to announce the nonce it names (the two travel
+# on separate connections, and a proxy may deliver the request first).
+DOWNLINK_KINDS = ("audio",)
+DOWNLINK_QUEUE_ITEMS = {"audio": 64}
+DOWNLINK_CONFIRM_SECONDS = 5.0
+DOWNLINK_KEEPALIVE_SECONDS = 15.0
+DOWNLINK_ANNOUNCE_SECONDS = 2.0
 # Per-client video backlog bound as seconds of stream at the configured bitrate
 # (backlog is latency debt, so it tracks the rate), floored so low-bitrate
 # streams still absorb transport jitter; see _VideoRelay.
@@ -812,6 +823,79 @@ async def _broadcast_to_clients(
     return closed_clients
 
 
+class _StreamDownlink:
+    """One kind of a data socket's binary messages, sent over a streamed HTTP
+    response instead of the socket.
+
+    Gecko hands every message of a worker's WebSocket to the worker through the
+    page's main thread, so a busy page holds the stream back as long as it is
+    busy; the body of a fetch the same worker reads is delivered off that
+    thread. A client on such an engine announces a random nonce for a kind on
+    its data socket (`DOWNLINK,<kind>,<nonce>`) and opens
+    `GET /api/downlink/<kind>?stream=<nonce>`, which ties the response to that
+    socket: the request passes the same authentication as every other route,
+    and the nonce, carried only on the already authenticated socket, says which
+    socket it serves. The server writes a hello record at once and keeps the
+    kind on the socket until the client, having read the hello, confirms
+    (`DOWNLINK,<kind>,ok`); a proxy that buffers the response never delivers
+    the hello, the client gives up, and the kind stays on the socket. On the
+    confirmation the kind moves to the stream and `DOWNLINK,<kind>,switch` goes
+    down the socket behind the last message of that kind sent there, so the
+    client holds stream records until it has read everything the socket carried
+    before them. Records are a big-endian `u32` length and the message the
+    socket would have carried (a zero length is the hello or a keepalive). A
+    slow reader loses the oldest items past the kind's `DOWNLINK_QUEUE_ITEMS`
+    rather than delaying the rest, a write that makes no progress for
+    `SEND_STALL_SECONDS` ends the stream, and whenever it ends, the kind returns
+    to the socket.
+    Audio is the one kind; a sender of another kind registers it in
+    `DOWNLINK_KINDS` and `DOWNLINK_QUEUE_ITEMS` and pushes to the live downlink
+    of each socket (`_downlink_push`) in place of sending there.
+    """
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+        self.live = False
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=DOWNLINK_QUEUE_ITEMS[kind])
+        self._closed = False
+
+    def push(self, item: Optional[dict]) -> None:
+        """Queue one item (`{'data', 'owner'}`, the owner kept alive until it is
+        written), or None to end the stream, dropping the oldest behind a full
+        queue."""
+        if self._queue.full():
+            with contextlib.suppress(asyncio.QueueEmpty):
+                self._queue.get_nowait()
+        self._queue.put_nowait(item)
+
+    def close(self) -> None:
+        """End the stream; its writer returns at the next item."""
+        if not self._closed:
+            self._closed = True
+            self.push(None)
+
+    async def serve(self, response: web.StreamResponse) -> None:
+        """Write the hello, then each queued message as a record, until the stream
+        is closed, a write stalls, or the client never confirms."""
+        loop = asyncio.get_running_loop()
+        await asyncio.wait_for(response.write(bytes(4)), SEND_STALL_SECONDS)
+        confirm_by = loop.time() + DOWNLINK_CONFIRM_SECONDS
+        while not self._closed:
+            wait = DOWNLINK_KEEPALIVE_SECONDS if self.live else confirm_by - loop.time()
+            try:
+                item = await asyncio.wait_for(self._queue.get(), max(0.0, wait))
+            except asyncio.TimeoutError:
+                if not self.live:
+                    return
+                record = bytes(4)
+            else:
+                if item is None:
+                    return
+                data = item["data"]
+                record = struct.pack(">I", len(data)) + bytes(data)
+            await asyncio.wait_for(response.write(record), SEND_STALL_SECONDS)
+
+
 class _VideoRelay:
     """Bounded video delivery for one (client, display) pair.
 
@@ -1297,6 +1381,12 @@ class DataStreamingServer(BaseStreamingService):
             video is bounded per client by the relay byte budget instead.
         audio_redundancy_by_ws: Per-socket Opus+RED capability from the
             `audioRedundancy` settings field.
+        _downlinks: The streamed downlinks the sockets opened, by
+            `(socket, kind)` (`_StreamDownlink`).
+        _downlink_nonces: Nonce a socket announced for the downlink it is about
+            to open, to that `(socket, kind)`; each is taken once.
+        _downlink_waiters: Downlink requests that arrived before their nonce,
+            by nonce.
         _active_audio_red_distance: RED distance the running audio pipeline
             was started with.
         _pcmflux_reported_failure: `(module id, reason)` of the failure already
@@ -1433,6 +1523,9 @@ class DataStreamingServer(BaseStreamingService):
         self._pcmflux_reported_failure = None
         self._pcmflux_last_restart = 0.0
         self.audio_redundancy_by_ws = {}
+        self._downlinks: Dict[Tuple[web.WebSocketResponse, str], _StreamDownlink] = {}
+        self._downlink_nonces: Dict[str, Tuple[web.WebSocketResponse, str]] = {}
+        self._downlink_waiters: Dict[str, asyncio.Future] = {}
         self.audio_redundancy_enabled = bool(settings.audio_redundancy[0])
         self._active_audio_red_distance = 0
         # The vendored WebRTC RedOpusEncoder reads its depth from audio_config,
@@ -1996,6 +2089,7 @@ class DataStreamingServer(BaseStreamingService):
                     if did != 'primary' and client_info.get('ws')
                 }
                 primary_viewers = self.clients - secondary_websockets
+                primary_viewers -= self._downlink_push("audio", primary_viewers, item)
 
                 if not primary_viewers:
                     self.pcmflux_audio_queue.task_done()
@@ -2027,6 +2121,112 @@ class DataStreamingServer(BaseStreamingService):
             await _send_live(ws, data, "Audio")
         except (ConnectionResetError, OSError, RuntimeError):
             self.clients.discard(ws)
+
+    def _downlink_push(self, kind: str, sockets: set, item: dict) -> set:
+        """Queue one item of `kind` on the live downlinks of `sockets` (`_StreamDownlink`).
+
+        Returns:
+            The sockets it went to, which the WebSocket send then skips.
+        """
+        sent = set()
+        for (ws, k), downlink in self._downlinks.items():
+            if k == kind and downlink.live and ws in sockets:
+                downlink.push(item)
+                sent.add(ws)
+        return sent
+
+    async def _on_downlink_verb(self, ws: web.WebSocketResponse, arg: str) -> None:
+        """Handle `DOWNLINK,<kind>,<arg>` from a data socket (`_StreamDownlink`).
+
+        A nonce (32 hex digits) registers the downlink the socket is about to
+        open for that kind, replacing one it announced before; `ok` moves the
+        kind onto the socket's downlink, and the switch mark goes down the socket
+        as a task started after every send already started there, so it follows
+        them; `off` ends the downlink and brings the kind back to the socket.
+        """
+        kind, _, arg = arg.partition(",")
+        if kind not in DOWNLINK_KINDS:
+            return
+        key = (ws, kind)
+        if arg == "ok":
+            downlink = self._downlinks.get(key)
+            if downlink is not None and not downlink.live:
+                downlink.live = True
+                addr = (client_permissions.get(ws) or {}).get("remote_address")
+                data_logger.info(f"Client {addr} takes {kind} over a streamed response.")
+
+                async def _send_switch():
+                    with contextlib.suppress(ConnectionResetError, OSError, RuntimeError):
+                        await ws.send_str(f"DOWNLINK,{kind},switch")
+                _spawn_background_task(_send_switch())
+        elif arg == "off":
+            self._end_downlink(ws, kind)
+        elif len(arg) == 32 and all(c in "0123456789abcdef" for c in arg):
+            for nonce in [n for n, owner in self._downlink_nonces.items() if owner == key]:
+                del self._downlink_nonces[nonce]
+            self._downlink_nonces[arg] = key
+            waiter = self._downlink_waiters.pop(arg, None)
+            if waiter is not None and not waiter.done():
+                waiter.set_result(None)
+
+    def _end_downlink(self, ws: web.WebSocketResponse, kind: Optional[str] = None) -> None:
+        """End a socket's downlink of `kind` (every kind when None) and forget its
+        nonces, if it has any."""
+        for key in [k for k in self._downlinks if k[0] is ws and kind in (None, k[1])]:
+            self._downlinks.pop(key).close()
+        for nonce in [n for n, (owner, k) in self._downlink_nonces.items()
+                      if owner is ws and kind in (None, k)]:
+            del self._downlink_nonces[nonce]
+
+    async def downlink_handler(self, request: web.Request) -> web.StreamResponse:
+        """`GET /api/downlink/<kind>?stream=<nonce>`: the downlink of that kind for
+        the data socket that announced `nonce` (`_StreamDownlink`), open until it
+        ends. A request that arrives before the announcement waits for it,
+        briefly."""
+        if self.supervisor.current_mode != self.mode:
+            return web.Response(status=409, text="WebSocket mode is inactive")
+        kind = request.match_info.get("kind", "")
+        nonce = request.query.get("stream", "")
+        if kind not in DOWNLINK_KINDS:
+            return web.Response(status=404, text="No such stream")
+        if nonce not in self._downlink_nonces and nonce not in self._downlink_waiters:
+            waiter = asyncio.get_running_loop().create_future()
+            self._downlink_waiters[nonce] = waiter
+            try:
+                await asyncio.wait_for(waiter, DOWNLINK_ANNOUNCE_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                if self._downlink_waiters.get(nonce) is waiter:
+                    del self._downlink_waiters[nonce]
+        key = self._downlink_nonces.get(nonce)
+        if key is None or key[1] != kind:
+            return web.Response(status=404, text="No such stream")
+        del self._downlink_nonces[nonce]
+        ws = key[0]
+        if ws.closed or ws not in self.clients:
+            return web.Response(status=404, text="No such stream")
+        self._end_downlink(ws, kind)
+        downlink = _StreamDownlink(kind)
+        self._downlinks[key] = downlink
+        response = web.StreamResponse(headers={
+            "Content-Type": "application/octet-stream",
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        })
+        try:
+            await response.prepare(request)
+            await downlink.serve(response)
+        except (ConnectionResetError, OSError, RuntimeError, asyncio.TimeoutError) as e:
+            data_logger.debug(f"The {kind} downlink ended: {e!r}")
+        finally:
+            if self._downlinks.get(key) is downlink:
+                del self._downlinks[key]
+            downlink.close()
+            if downlink.live and ws in self.clients:
+                addr = (client_permissions.get(ws) or {}).get("remote_address")
+                data_logger.info(f"Client {addr}'s {kind} stream ended; its {kind} goes over its socket again.")
+        return response
 
     def _compute_audio_red_distance(self) -> int:
         """RED distance for the shared audio broadcast.
@@ -4730,6 +4930,9 @@ class DataStreamingServer(BaseStreamingService):
                                 # Non-blocking in pixelflux (atomic flag / channel send).
                                 module.request_idr_frame()
 
+                    elif message.startswith("DOWNLINK,"):
+                        await self._on_downlink_verb(websocket, message[len("DOWNLINK,"):])
+
                     elif message == "START_AUDIO":
                         async def _handle_start_audio_request():
                             await self.client_settings_received.wait()
@@ -4867,6 +5070,7 @@ class DataStreamingServer(BaseStreamingService):
                     stale_relay.stop()
             if self.data_ws is websocket:
                 self.data_ws = None
+            self._end_downlink(websocket)
             # A departing non-capable client may let the rest enable RED.
             self.audio_redundancy_by_ws.pop(websocket, None)
             if self.is_pcmflux_capturing:
@@ -6527,6 +6731,7 @@ class DataStreamingServer(BaseStreamingService):
         needs is proxied through /api.
         """
         main_router.add_get(f'{api_prefix}/api/websockets{{slash:/?}}', self.data_ws_handler)
+        main_router.add_get(f'{api_prefix}/api/downlink/{{kind}}', self.downlink_handler)
         main_router.add_post(f'{api_prefix}/api/tokens', self.handle_tokens)
 
     async def handle_tokens(self, request: web.Request) -> web.StreamResponse:

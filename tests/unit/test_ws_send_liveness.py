@@ -180,6 +180,7 @@ async def audio_run(slow: Socket, seconds: float) -> dict:
     server = DataStreamingServer.__new__(DataStreamingServer)
     server.clients = {fast, slow}
     server.display_clients = {}
+    server._downlinks = {}
     server.pcmflux_audio_queue = asyncio.Queue(maxsize=120)
     task = asyncio.ensure_future(server._pcmflux_send_audio_chunks())
     enqueued = []
