@@ -2652,7 +2652,13 @@ class WebRTCService(BaseStreamingService):
         """Ensure the per-transport packet pacer is enabled/configured (called
         from the congestion loop; idempotent and cheap).
 
-        Encoder ceiling: the display's configured video bitrate, CBR or not.
+        Encoder rate: the display's configured video bitrate, CBR or not,
+        also while congestion control steers the encoder under it. Pacing at
+        the steered target, as libwebrtc paces at its estimate, shrinks the
+        queue budget (CAP_MIN_MS of the pace) into the pacer's purging regime:
+        on a constrained link it cut a fifth to a third of the frames delivered
+        and doubled the swing of the received rate for its lower delay. The
+        pacer's own brake follows the wire instead.
         The shared DTLS transport is reachable via `pc.sctp` only once the
         data-channel m-line is negotiated, while media (and TWCC estimates)
         can flow before that, so any transceiver's sender transport — the same
