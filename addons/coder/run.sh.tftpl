@@ -29,7 +29,7 @@ if [ -n "$need_selkies$need_xvfb" ]; then
     sudo apt-get -o DPkg::Lock::Timeout=300 update -qq
     file=(sudo apt-get -o DPkg::Lock::Timeout=300 install -y)
     repo=(sudo apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends)
-    pkg="$([ "$ID" = ubuntu ] && echo "ubuntu$VERSION_ID" || echo "$VERSION_CODENAME")-$(dpkg --print-architecture).deb"
+    pkg="$ID$([ "$ID" = ubuntu ] && echo "$VERSION_ID" || echo "$VERSION_CODENAME")-$(dpkg --print-architecture).deb"
     xvfb=xvfb
   elif command -v dnf > /dev/null; then
     file=(sudo dnf install -y)
