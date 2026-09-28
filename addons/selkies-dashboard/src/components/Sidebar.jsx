@@ -1179,9 +1179,11 @@ function Sidebar() {
       console.log("Dashboard: First touch detected. Enabling touch-specific features.");
       setHasDetectedTouch(true);
     };
-    window.addEventListener('touchstart', detectTouch, { once: true, passive: true });
+    // In the capture phase: in trackpad mode the stream's own handler stops
+    // the touch from bubbling, and the first touch is usually on the stream.
+    window.addEventListener('touchstart', detectTouch, { once: true, passive: true, capture: true });
     return () => {
-      window.removeEventListener('touchstart', detectTouch, { once: true, passive: true });
+      window.removeEventListener('touchstart', detectTouch, { capture: true });
     };
   }, []);
 

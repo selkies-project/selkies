@@ -6,14 +6,17 @@ The palette, beside the soft modifier keys a touch client gets, holds the keys
 an on-screen keyboard lacks, a few chords, and chords the user adds and keeps.
 Each key or chord has to reach the session as those keys, pressed in order and
 released in reverse, a modifier held on a soft key has to stay held across a
-chord, and a chord the user added has to be there after a reload. The keys are
-read back from the X server, and on Wayland from the seat.
+chord, and a chord the user added has to be there after a reload. On phone
+viewports, portrait and landscape, in direct touch and in trackpad mode, the
+palette's toggle has to stay in the viewport and take a click with the palette
+open or closed, and its keys and field have to take one too. The keys are read
+back from the X server, and on Wayland from the seat.
 
 Trackpad travel is accelerated by the finger's speed: a slow drag moves the
 pointer as far as the finger went, a fast one further, and the speed picked in
-the dashboard scales it and is kept. Chromium is driven through CDP touch,
-Firefox and WebKit through synthetic touches, which only make the dashboards
-offer their touch controls there.
+the dashboard scales it and is kept. Every block runs in Chromium, Firefox,
+and WebKit on both transports: Chromium driven through CDP touch, Firefox and
+WebKit through synthetic touches.
 
     python3 tests/e2e/test_touch_controls.py x11|wl
 """
@@ -44,6 +47,16 @@ def open_client(pw: Any, engine: str, mode: str) -> tuple:
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
     page = ctx.new_page()
     page.goto(H.BASE_URL + "/", wait_until="load")
+    if engine == "firefox":
+        # Firefox runs on one persistent profile, so the touch mode, the
+        # trackpad speed, and the chords an earlier block left would carry into
+        # this one: each block starts from none of them.
+        page.evaluate("""() => {
+          for (const k of Object.keys(localStorage)) {
+            if (/_(trackpadMode|trackpad_speed|user_chords)$/.test(k)) localStorage.removeItem(k);
+          }
+        }""")
+        page.goto(H.BASE_URL + "/", wait_until="load")
     return browser, page
 
 
@@ -156,12 +169,74 @@ def palette_block(res: "H.Results", dashboard: str, dist: str, engine: str, mode
                 open_palette(page, dashboard)
                 res.check(f"{tag}: the user's chord is still there after a reload",
                           page.locator("[data-chord='Ctrl+Shift+T']").count() == 1)
+                for width, height in PHONES:
+                    page.set_viewport_size({"width": width, "height": height})
+                    time.sleep(1.5)
+                    for trackpad in (False, True):
+                        how = "trackpad mode" if trackpad else "direct touch"
+                        ok, detail = in_reach(page, dashboard, trackpad)
+                        res.check(f"{tag}: at {width}x{height} in {how}, the palette's toggle and keys are in reach",
+                                  ok, detail)
             finally:
                 C.close_browser(browser)
     finally:
         if watcher is not None:
             watcher.close()
         H.server_stop()
+
+
+# Phone viewports, portrait and landscape: the palette has to stay in reach on them.
+PHONES = ((390, 844), (844, 390))
+
+RECT_JS = """(sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  return {x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height),
+          inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
+          on_top: !!hit && (hit === el || el.contains(hit))};
+}"""
+
+
+def set_trackpad(page: Any, dashboard: str, on: bool) -> None:
+    """Puts the page in trackpad mode or direct touch with the dashboard's own button."""
+    active = page.evaluate("() => !!(window.webrtcInput && window.webrtcInput._trackpadMode)")
+    if active != on:
+        trackpad_button(page, dashboard)
+
+
+def in_reach(page: Any, dashboard: str, trackpad: bool) -> tuple:
+    """Whether the palette's toggle opens it, its keys and its field take a click,
+    and the toggle, in the viewport and uncovered, closes it again."""
+    set_trackpad(page, dashboard, trackpad)
+    if dashboard == "classic":
+        open_sidebar(page)
+    toggle = page.locator(".key-palette-toggle").first
+    steps = []
+    try:
+        if toggle.get_attribute("aria-expanded", timeout=5000) == "true":
+            toggle.click(timeout=5000)
+            time.sleep(0.3)
+        toggle.scroll_into_view_if_needed(timeout=5000)
+        closed = page.evaluate(RECT_JS, ".key-palette-toggle")
+        toggle.click(timeout=5000)
+        time.sleep(0.4)
+        opened = page.evaluate(RECT_JS, ".key-palette-toggle")
+        for sel in ("[data-code='F12']", "[data-chord='Ctrl+Shift+Esc']", ".key-palette-input"):
+            page.locator(sel).first.click(timeout=5000)
+            steps.append(sel)
+        toggle.click(timeout=5000)
+        time.sleep(0.3)
+        shut = toggle.get_attribute("aria-expanded") == "false"
+    except Exception as e:
+        return False, f"after {steps}: {str(e).splitlines()[0][:160]}"
+    finally:
+        if dashboard == "classic":
+            close_sidebar(page)
+    ok = bool(closed and opened and closed["inside"] and closed["on_top"] and opened["inside"]
+              and opened["on_top"] and shut)
+    return ok, f"closed {closed} open {opened} shut {shut}"
 
 
 def pointer_x() -> int:
@@ -206,16 +281,26 @@ def close_sidebar(page: Any) -> None:
         time.sleep(0.8)
 
 
-def trackpad_button(page: Any, dashboard: str) -> bool:
+def trackpad_button(page: Any, dashboard: str, engine: str = "") -> bool:
     """Turns trackpad mode on with the dashboard's own button, as a user does:
-    a dashboard learns of the mode from its button, not from the core."""
+    a dashboard learns of the mode from its button, not from the core. The
+    button shows once the dashboard has seen a touch; with `engine`, one more
+    touch is made if it has not."""
     if dashboard == "classic":
         open_sidebar(page)
         button = page.locator(".trackpad-mode-button").first
     else:
         button = page.locator("button[title='Trackpad Mode']").first
-    if not button.count():
-        return False
+    for attempt in range(3):
+        try:
+            button.wait_for(state="attached", timeout=3000)
+            break
+        except Exception:
+            if not engine or attempt == 2:
+                return False
+            touch_once(page, engine)
+            if dashboard == "classic":
+                open_sidebar(page)
     button.click()
     time.sleep(0.6)
     if dashboard == "classic":
@@ -223,22 +308,22 @@ def trackpad_button(page: Any, dashboard: str) -> bool:
     return True
 
 
-def speed_block(res: "H.Results", dashboard: str, dist: str, mode: str) -> None:
-    tag = f"{dashboard} chromium {mode}"
+def speed_block(res: "H.Results", dashboard: str, dist: str, mode: str, engine: str = "chromium") -> None:
+    tag = f"{dashboard} {engine} {mode}"
     H.server_start(mode=mode, web_root=dist)
     try:
         with sync_playwright() as pw:
-            browser, page = open_client(pw, "chromium", mode)
+            browser, page = open_client(pw, engine, mode)
             try:
                 video = C.wait_ws_video(page, 40) if mode == "websockets" else C.wait_wr_video(page, 60)
                 res.check(f"{tag}: video up", video is not None, video)
                 if not video:
                     return
-                touch_once(page, "chromium")
-                if not trackpad_button(page, dashboard):
+                touch_once(page, engine)
+                if not trackpad_button(page, dashboard, engine):
                     res.check(f"{tag}: the dashboard offers trackpad mode", False)
                     return
-                f = Fingers(page, "chromium")
+                f = Fingers(page, engine)
                 slow = travel(f, 100, 50, 0.02)
                 # A flick: a few long steps sent back to back.
                 fast = travel(f, 100, 4, 0)
@@ -269,13 +354,13 @@ def speed_block(res: "H.Results", dashboard: str, dist: str, mode: str) -> None:
         H.server_stop()
 
 
-def wayland_block(res: "H.Results", mode: str) -> None:
-    tag = f"classic wayland {mode}"
+def wayland_block(res: "H.Results", mode: str, engine: str = "chromium") -> None:
+    tag = f"classic wayland {engine} {mode}"
     H.server_start(mode=mode, wayland=True, web_root=H.CLASSIC_DIST)
     obs = None
     try:
         with sync_playwright() as pw:
-            browser, page = open_client(pw, "chromium", mode)
+            browser, page = open_client(pw, engine, mode)
             try:
                 video = C.wait_ws_video(page, 40) if mode == "websockets" else C.wait_wr_video(page, 60)
                 res.check(f"{tag}: video up", video is not None, video)
@@ -284,7 +369,7 @@ def wayland_block(res: "H.Results", mode: str) -> None:
                 obs = H.WlObs("wayland-1")
                 res.check(f"{tag}: observer mapped", obs.ready())
                 # A tap on the observer gives it the keyboard focus.
-                f = Fingers(page, "chromium")
+                f = Fingers(page, engine)
                 f.down((1, 640, 360))
                 time.sleep(0.06)
                 f.up(1)
@@ -312,13 +397,14 @@ def main() -> None:
     res = H.Results(f"touch-controls-{which}")
     if which == "x11":
         for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
-            for engine in ("chromium", "firefox", "webkit"):
-                palette_block(res, dashboard, dist, engine, "websockets")
-            palette_block(res, dashboard, dist, "chromium", "webrtc")
-            speed_block(res, dashboard, dist, "websockets")
+            for mode in ("websockets", "webrtc"):
+                for engine in ("chromium", "firefox", "webkit"):
+                    palette_block(res, dashboard, dist, engine, mode)
+                    speed_block(res, dashboard, dist, mode, engine)
     elif which == "wl":
         for mode in ("websockets", "webrtc"):
-            wayland_block(res, mode)
+            for engine in ("chromium", "firefox", "webkit"):
+                wayland_block(res, mode, engine)
     else:
         raise SystemExit(f"unknown block {which}")
     sys.exit(0 if res.summary() else 1)

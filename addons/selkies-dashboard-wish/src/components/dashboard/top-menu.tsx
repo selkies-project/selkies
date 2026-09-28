@@ -242,11 +242,13 @@ export function TopMenu({
     const detectTouch = () => {
       console.log("Dashboard: First touch detected. Enabling touch-specific features.");
       setHasDetectedTouch(true);
-      window.removeEventListener('touchstart', detectTouch);
+      window.removeEventListener('touchstart', detectTouch, { capture: true });
     };
-    window.addEventListener('touchstart', detectTouch, { passive: true } as AddEventListenerOptions);
+    // In the capture phase: in trackpad mode the stream's own handler stops
+    // the touch from bubbling, and the first touch is usually on the stream.
+    window.addEventListener('touchstart', detectTouch, { passive: true, capture: true } as AddEventListenerOptions);
     return () => {
-      window.removeEventListener('touchstart', detectTouch);
+      window.removeEventListener('touchstart', detectTouch, { capture: true });
     };
   }, []);
 
@@ -1161,10 +1163,87 @@ export function TopMenu({
       {(isMobile || hasDetectedTouch) &&
         ((renderableSettings.softButtons ?? true) || (renderableSettings.trackpad ?? true)) && (
         <motion.div
-          className="fixed bottom-4 left-4 z-40 flex flex-wrap gap-2 p-2 rounded-lg border bg-card shadow-lg"
+          className="fixed bottom-4 left-4 z-40 flex flex-col gap-2 p-2 rounded-lg border bg-card shadow-lg"
+          style={{ maxWidth: 'calc(100vw - 2rem)', maxHeight: 'calc(100dvh - 2rem)' }}
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
         >
+          {/* The palette opens above the soft keys and scrolls within what the
+              viewport leaves, so the keys and its toggle stay at the bottom and
+              in reach on a phone in either orientation and either touch mode. */}
+          {(renderableSettings.softButtons ?? true) && isKeyPaletteOpen && (
+            <div className="key-palette flex min-h-0 max-w-[22rem] flex-col gap-2 overflow-y-auto">
+              <div className="grid grid-cols-6 gap-1">
+                {PALETTE_KEYS.map(([label, key, code]: string[]) => (
+                  <Button
+                    key={code}
+                    variant="secondary"
+                    size="sm"
+                    data-code={code}
+                    onClick={() => handleOnceKeyClick(key, code)}
+                    onMouseDown={(e) => e.preventDefault()}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {PALETTE_CHORDS.map((chord: string) => (
+                  <Button
+                    key={chord}
+                    variant="secondary"
+                    size="sm"
+                    data-chord={chord}
+                    onClick={() => playChord(chord)}
+                    onMouseDown={(e) => e.preventDefault()}
+                  >
+                    {chord}
+                  </Button>
+                ))}
+                {userChords.map((chord) => (
+                  <span key={chord} className="flex gap-0.5">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      data-chord={chord}
+                      onClick={() => playChord(chord)}
+                      onMouseDown={(e) => e.preventDefault()}
+                    >
+                      {chord}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      aria-label={t('keyPalette.remove', { chord })}
+                      title={t('keyPalette.remove', { chord })}
+                      onClick={() => handleRemoveChord(chord)}
+                      onMouseDown={(e) => e.preventDefault()}
+                    >
+                      ×
+                    </Button>
+                  </span>
+                ))}
+              </div>
+              <form className="flex gap-1" onSubmit={handleAddChord}>
+                <input
+                  type="text"
+                  className="key-palette-input allow-native-input min-w-0 flex-1 rounded border bg-background px-2 py-1 text-xs"
+                  value={chordDraft}
+                  onChange={(e) => { setChordDraft(e.target.value); setChordRefused(false); }}
+                  placeholder={t('keyPalette.addPlaceholder')}
+                  aria-label={t('keyPalette.addPlaceholder')}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+                <Button type="submit" variant="secondary" size="sm">{t('keyPalette.add')}</Button>
+              </form>
+              {chordRefused && (
+                <p className="text-xs text-muted-foreground">{t('keyPalette.refused')}</p>
+              )}
+            </div>
+          )}
+          <div className="flex shrink-0 flex-wrap gap-2">
           {(renderableSettings.softButtons ?? true) && (<>
           <Button
             variant={heldKeys.Control ? "default" : "secondary"}
@@ -1252,78 +1331,7 @@ export function TopMenu({
               {isKeyPaletteOpen ? t('keyPalette.less') : t('keyPalette.more')}
             </Button>
           )}
-          {(renderableSettings.softButtons ?? true) && isKeyPaletteOpen && (
-            <div className="key-palette flex w-full max-w-[22rem] flex-col gap-2">
-              <div className="grid grid-cols-6 gap-1">
-                {PALETTE_KEYS.map(([label, key, code]: string[]) => (
-                  <Button
-                    key={code}
-                    variant="secondary"
-                    size="sm"
-                    data-code={code}
-                    onClick={() => handleOnceKeyClick(key, code)}
-                    onMouseDown={(e) => e.preventDefault()}
-                  >
-                    {label}
-                  </Button>
-                ))}
-              </div>
-              <div className="flex flex-wrap gap-1">
-                {PALETTE_CHORDS.map((chord: string) => (
-                  <Button
-                    key={chord}
-                    variant="secondary"
-                    size="sm"
-                    data-chord={chord}
-                    onClick={() => playChord(chord)}
-                    onMouseDown={(e) => e.preventDefault()}
-                  >
-                    {chord}
-                  </Button>
-                ))}
-                {userChords.map((chord) => (
-                  <span key={chord} className="flex gap-0.5">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      data-chord={chord}
-                      onClick={() => playChord(chord)}
-                      onMouseDown={(e) => e.preventDefault()}
-                    >
-                      {chord}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      aria-label={t('keyPalette.remove', { chord })}
-                      title={t('keyPalette.remove', { chord })}
-                      onClick={() => handleRemoveChord(chord)}
-                      onMouseDown={(e) => e.preventDefault()}
-                    >
-                      ×
-                    </Button>
-                  </span>
-                ))}
-              </div>
-              <form className="flex gap-1" onSubmit={handleAddChord}>
-                <input
-                  type="text"
-                  className="key-palette-input allow-native-input min-w-0 flex-1 rounded border bg-background px-2 py-1 text-xs"
-                  value={chordDraft}
-                  onChange={(e) => { setChordDraft(e.target.value); setChordRefused(false); }}
-                  placeholder={t('keyPalette.addPlaceholder')}
-                  aria-label={t('keyPalette.addPlaceholder')}
-                  autoCapitalize="off"
-                  autoCorrect="off"
-                  spellCheck={false}
-                />
-                <Button type="submit" variant="secondary" size="sm">{t('keyPalette.add')}</Button>
-              </form>
-              {chordRefused && (
-                <p className="text-xs text-muted-foreground">{t('keyPalette.refused')}</p>
-              )}
-            </div>
-          )}
+          </div>
         </motion.div>
       )}
 
