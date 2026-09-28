@@ -881,7 +881,8 @@ class RTCApp:
 
             await asyncio.gather(*(deliver(c) for c in channels), return_exceptions=True)
 
-        logger.debug(f"Sent clipboard data of length {len(data_bytes)} with mime type {mime_type}")
+        size = "a secret" if secret else f"{len(data_bytes)} bytes"
+        logger.debug(f"Sent clipboard data ({mime_type}, {size})")
 
     def send_cursor_data(self, data: Any) -> None:
         """Broadcast a cursor update, remembering it for late-joining peers."""

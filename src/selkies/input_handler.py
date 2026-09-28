@@ -1983,9 +1983,15 @@ class SecretText(str):
     server writes the text there again. The text alone is carried: markup or a
     picture beside it would leave the secret where the mark cannot follow. An
     empty one tells the clients that the session's clipboard no longer holds
-    the secret sent before it.
+    the secret sent before it. Its repr shows neither the text nor its length,
+    so a log line that prints one with `%r`, or a container holding one, keeps
+    it out of sight as well; str(), formatting, and comparison stay a str's,
+    since every transport sends the text itself.
     """
     __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "SecretText(<hidden>)" if self else "SecretText('')"
 
 
 def clipboard_secret_hint(value: Optional[bytes]) -> bool:
@@ -7363,7 +7369,7 @@ class WebRTCInput:
                     "xclip", "-selection", "clipboard", "-o", "-t", hint,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
-                stdout_hint, _ = await self._communicate_or_kill(proc_hint, 1, f"xclip {hint}")
+                stdout_hint, _ = await self._communicate_or_kill(proc_hint, 1, "xclip password-manager hint")
                 secret = proc_hint.returncode == 0 and clipboard_secret_hint(stdout_hint)
             if use_binary and not secret:
                 for mime_type in ['image/png', 'image/jpeg', 'image/bmp', 'image/webp',

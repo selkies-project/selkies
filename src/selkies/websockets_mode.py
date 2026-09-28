@@ -935,7 +935,8 @@ class SelkiesStreamingApp:
                 else:
                     message = f"clipboard,{encoded_data}"
             else:
-                data_logger.debug(f"Sending large clipboard data ({mime_type}, {total_size} bytes) via multipart.")
+                size = "a secret" if secret else f"{total_size} bytes"
+                data_logger.debug(f"Sending large clipboard data ({mime_type}, {size}) via multipart.")
                 start_message = f"clipboard_start,{mime_type},{total_size}"
 
             async def deliver(client: Any) -> None:
