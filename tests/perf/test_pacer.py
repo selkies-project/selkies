@@ -19,6 +19,7 @@ import logging
 import os
 import random
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -489,11 +490,14 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
     pr.cpu_percent()
     window = {}
     load_proc = None
+    # The capture sends nothing from a silent desktop, and audio behind video
+    # bursts is what the cells measure.
+    tone = H.pulse_sine()
     try:
         if LOAD_GEN:
             load_proc = H.spawn(
                 [os.path.join(H.TOOLS, "pacer_load_gen.sh")],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         # The listener answers before the service has registered its signaling
         # peer; a session asked for in between is refused.
         deadline = time.monotonic() + 30
@@ -512,8 +516,14 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
         if osc_task is not None:
             osc_task.cancel()
         if load_proc is not None:
-            load_proc.terminate()
-            subprocess.run(["pkill", "-9", "-f", "pacer-load"], capture_output=True)
+            # The generator's terminal shares its process group; anything else
+            # on the host matching its name is not this cell's to end.
+            try:
+                os.killpg(load_proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            load_proc.wait()
+        H.pulse_unload(tone)
         cell_log = server_log_delta(log, log_before)
         cpu = pr.cpu_percent()
         H.server_stop()
