@@ -2547,9 +2547,18 @@ class DataStreamingServer(BaseStreamingService):
         client stops receiving delta frames, and the lift requests an IDR
         resync. The frames in flight over the floor are forgiven, the queue
         standing behind them is not: a queue the gate lets grow is latency the
-        viewer sees, however long the path. A stream resuming after a still
-        screen (a capture that produced nothing for STILL_SCREEN_GAP_SECONDS)
-        is left unjudged for STILL_RESUME_GRACE_SECONDS: every frame it sends
+        viewer sees, however long the path. Where congestion control steers
+        the display (`_steer_bitrate_to_link`, which backs the rate off on the
+        first window standing past the floor), the queue has to stand past the
+        allowance at two checks in a row before the gate shuts: a path that
+        holds the stream a moment (a lost segment's retransmission, a Wi-Fi
+        hop's jitter) releases what it held within one check, and a gate shut
+        on that moment would freeze the stream and resume it on a key frame,
+        while a queue is still there at the next. Where nothing else bounds
+        the queue on the path, the first check shuts it. A stream
+        resuming after a still screen (a capture that produced nothing for
+        STILL_SCREEN_GAP_SECONDS) is left unjudged for
+        STILL_RESUME_GRACE_SECONDS: every frame it sends
         counts against the client until the client's first ack of them comes
         back, which after an idle spell can take a quarter of a second, and
         the gate would answer that with a freeze and a key frame on every
@@ -2645,6 +2654,14 @@ class DataStreamingServer(BaseStreamingService):
                 now = time.monotonic()
                 unacked_since = display_state.get('unacked_since')
                 unanswered_for = (now - unacked_since) if unacked_since is not None else 0.0
+                steered = (self.cli_args.congestion_control[0] and display_state.get(
+                    'rate_control_mode', self.rc_mode.value) == RateControlMode.CBR.value)
+                over = (effective_desync_frames > allowed_desync_frames
+                        and now - display_state.get('resumed_at', 0.0) >= STILL_RESUME_GRACE_SECONDS)
+                over_at = display_state.get('queue_over_at')
+                display_state['queue_over_at'] = now if over else None
+                standing = over and (not steered or not display_state.get('backpressure_enabled', True) or (
+                    over_at is not None and now - over_at <= 1.5 * self.backpressure_check_interval_s))
 
                 if unanswered_for > STALLED_CLIENT_TIMEOUT_SECONDS:
                     gated_at = display_state.get('stall_gated_at')
@@ -2658,8 +2675,7 @@ class DataStreamingServer(BaseStreamingService):
                         display_state['stall_gated_at'] = None
                         display_state['unacked_since'] = None
                         self._set_backpressure_enabled(display_id, display_state, True)
-                elif (effective_desync_frames > allowed_desync_frames
-                      and now - display_state.get('resumed_at', 0.0) >= STILL_RESUME_GRACE_SECONDS):
+                elif standing:
                     display_state['stall_gated_at'] = None
                     if display_state.get('backpressure_enabled', True):
                         data_logger.warning(f"Backpressure TRIGGERED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f > Allowed:{allowed_desync_frames:.1f}f).")
@@ -2669,8 +2685,7 @@ class DataStreamingServer(BaseStreamingService):
                     if not display_state.get('backpressure_enabled', True):
                         data_logger.info(f"Backpressure LIFTED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f <= Allowed:{allowed_desync_frames:.1f}f).")
                     self._set_backpressure_enabled(display_id, display_state, True)
-                if (self.cli_args.congestion_control[0] and display_state.get(
-                        'rate_control_mode', self.rc_mode.value) == RateControlMode.CBR.value):
+                if steered:
                     self._steer_bitrate_to_link(display_id, display_state, now)
 
         except asyncio.CancelledError:

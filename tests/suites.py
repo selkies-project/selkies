@@ -100,6 +100,7 @@ SUITES: list = [
     {"path": "unit/test_encoder_backends.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_congestion_steer.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ws_link_steer.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_ws_gate_jitter.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_sequence.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_video_timing_legs.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rtp_capture_clock.py", "tier": "unit", "timeout": 120},
