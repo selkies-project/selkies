@@ -976,7 +976,15 @@ export default function webrtc() {
 
 	/**
 	 * Picks the video's `image-rendering`: pixelated with anti-aliasing off or
-	 * at 1:1, `auto` (smoothed) when CSS-scaled above 1 dpr.
+	 * at 1:1, `auto` (smoothed) when CSS-scaled above 1 dpr. Off a manual
+	 * resolution the box follows the window and the stream follows it only as
+	 * far as the server does, so 1:1 also takes the stream's own size to match
+	 * the box to within the resize alignment (a mode's cell, the 16-pixel
+	 * aligned request): a pinned resolution, or one not yet realized, is
+	 * scaled into the box and stays smoothed. There only Chromium takes it:
+	 * its compositor resamples a smoothed video every frame, which costs a
+	 * software compositor a frame of latency, while Firefox's draws a
+	 * nearest-sampled video slower than a smoothed one.
 	 */
 	function updateVideoImageRendering(){
 		if (!videoElement) return;
@@ -987,7 +995,11 @@ export default function webrtc() {
 			}
 			return;
 		}
-		const isOneToOne = Math.abs(streamDensity() - (window.devicePixelRatio || 1)) < 1e-6;
+		const dpr = window.devicePixelRatio || 1;
+		const box = window.manualResolution ? null : videoElement.getBoundingClientRect();
+		const isOneToOne = Math.abs(streamDensity() - dpr) < 1e-6 && (!box
+			|| (isChromium && Math.abs(videoElement.videoWidth - box.width * dpr) <= 16
+				&& Math.abs(videoElement.videoHeight - box.height * dpr) <= 16));
 		if (isOneToOne) {
 			if (videoElement.style.imageRendering !== 'pixelated') {
 				console.log("Setting video rendering to 'pixelated' for sharp display.");
@@ -1342,7 +1354,11 @@ export default function webrtc() {
 	/**
 	 * Sizes the video element to the window: the buffer hint in physical
 	 * pixels, the on-screen box in CSS pixels (styling it with physical pixels
-	 * overflows the viewport by dpr squared on HiDPI displays).
+	 * overflows the viewport by dpr squared on HiDPI displays), and its
+	 * `image-rendering` for the density. The stream the server realizes can
+	 * be a few pixels off the box (a mode's cell alignment), so the browser
+	 * scales every frame, a resample Chromium's software compositor pays a
+	 * frame of latency for when it is smoothed.
 	 * @param {number} targetWidth Window width in CSS pixels.
 	 * @param {number} targetHeight Window height in CSS pixels.
 	 */
@@ -1365,6 +1381,7 @@ export default function webrtc() {
 		videoElement.style.top = '0px';
 		videoElement.style.left = '0px';
 		videoElement.style.objectFit = 'fill';
+		updateVideoImageRendering();
 		console.log(`Resized to window resolution: ${logicalWidth}x${logicalHeight} (css ${targetWidth}x${targetHeight})`);
 	}
 
@@ -1426,12 +1443,15 @@ export default function webrtc() {
 	 * matches the display the window is on. Called from both the resize
 	 * handler and the matchMedia density watcher: an OS scaling change can
 	 * surface as either, and emulated density changes fire only the resize.
+	 * The video's rendering follows too, since the same stream now meets the
+	 * box at another scale.
 	 */
 	function maybeFollowDpr() {
 		const dpr = window.devicePixelRatio || 1;
 		if (dpr === lastFollowedDpr) return;
 		lastFollowedDpr = dpr;
 		if (followDerivedDpi('devicePixelRatio changed')) pushScalingDpi();
+		if (!isSharedMode) updateVideoImageRendering();
 	}
 
 	/**
@@ -2774,6 +2794,7 @@ export default function webrtc() {
 					window.streamResolutionDiverged =
 						(vw !== lastRequestedStreamRes[0] || vh !== lastRequestedStreamRes[1]);
 				}
+				if (!isSharedMode) updateVideoImageRendering();
 				// The realized buffer just settled. A resize that did not change the
 				// requested density (a window dragged to a screen of another density)
 				// left the last SETTINGS a scale measured off the old buffer, so the
