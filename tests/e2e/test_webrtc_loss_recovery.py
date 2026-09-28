@@ -142,9 +142,17 @@ async def session(res: H.Results, log: str, link: str) -> Optional[dict]:
     before = os.path.getsize(log)
     await rig.run_client(f"ws://127.0.0.1:{H.PORT}/api/ws", measure_s=MEASURE_S, warmup_s=8.0)
     seen = analyze(list(rig.REC.video_pkts), dict(rig.REC.rtx_map))
-    with open(log, errors="replace") as f:
-        f.seek(before)
-        seen.update(server_counts(f.read()))
+    # The server logs the pacer's close when it handles the client's hangup,
+    # which lands a few milliseconds after the client returns.
+    deadline = time.monotonic() + 5
+    while True:
+        with open(log, errors="replace") as f:
+            f.seek(before)
+            text = f.read()
+        if "pacer closed:" in text or time.monotonic() > deadline:
+            break
+        await asyncio.sleep(0.05)
+    seen.update(server_counts(text))
     seen["lost_down"] = rig.CURRENT_SHAPER["down"].lost + rig.CURRENT_SHAPER["down"].dropped
     seen.update({k: v for k, v in feedback.items() if k != "pli_at"})
     seen["streams"] = {ssrc: n for ssrc, n in rig.REC.ssrcs.items()}
