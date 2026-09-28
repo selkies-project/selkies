@@ -37,6 +37,7 @@ import datetime
 import enum
 import logging
 import os
+import statistics
 import struct
 import time
 import traceback
@@ -94,6 +95,12 @@ TWCC_DELAY_FLOOR_S = 30.0
 # Consecutive feedback packets whose least delays each grow on the last that
 # read as a queue building.
 TWCC_RISE_FEEDBACKS = 4
+# Packets sent within this of the one before belong to one burst, and a burst
+# of fewer packets measures nothing.
+TWCC_BURST_GAP_S = 0.001
+TWCC_BURST_MIN_PACKETS = 4
+# The resolution of transport-cc arrival times.
+TWCC_TICK_US = 250.0
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +111,44 @@ X509_DIGEST_ALGORITHMS = {
     "sha-384": hashes.SHA384(),
     "sha-512": hashes.SHA512(),
 }
+
+
+def burst_delivery_bps(packets: list, probe_bytes: float) -> Optional[float]:
+    """The median rate the wire delivered bursts' leading bytes at.
+
+    A frame's packets are sent back to back, and the pacer lets the first
+    `probe_bytes` of one out at once whenever it holds nothing back, so their
+    arrivals are spread by the slowest hop alone: the bytes after the first
+    over the time from the first arrival to the last is that hop's rate. The
+    rest of a burst may leave at the pace and would measure the pace instead.
+    Arrivals sit on the feedback's grid, so a burst arriving within one step
+    counts as arriving over one.
+
+    Args:
+        packets: `(send instant in seconds, arrival in microseconds, size)`
+            per packet a feedback acknowledged, in send order.
+        probe_bytes: How many leading bytes of a burst leave unpaced.
+
+    Returns:
+        The median of the bursts' rates in bits per second, or None when no
+        burst had `TWCC_BURST_MIN_PACKETS` packets.
+    """
+    rates = []
+    count = 0
+    last_sent = first_size = size_sum = lo = hi = 0.0
+    for sent_at, at_us, size in packets:
+        if not count or sent_at - last_sent > TWCC_BURST_GAP_S:
+            if count >= TWCC_BURST_MIN_PACKETS:
+                rates.append((size_sum - first_size) * 8e6 / max(hi - lo, TWCC_TICK_US))
+            count, first_size, size_sum, lo, hi = 1, size, size, at_us, at_us
+        elif size_sum + size <= probe_bytes:
+            count += 1
+            size_sum += size
+            lo, hi = min(lo, at_us), max(hi, at_us)
+        last_sent = sent_at
+    if count >= TWCC_BURST_MIN_PACKETS:
+        rates.append((size_sum - first_size) * 8e6 / max(hi - lo, TWCC_TICK_US))
+    return statistics.median(rates) if rates else None
 
 
 @dataclass(frozen=True)
@@ -969,7 +1014,10 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         outage or an idle sender, and a rate measured across it would say the
         wire carries almost nothing. A feedback whose chunks or deltas run
         short, or that carries the reserved status symbol, is dropped whole,
-        so a malformed one consumes no history."""
+        so a malformed one consumes no history. Each feedback also tells the
+        pacer how fast the wire delivered frames' leading bursts
+        (`burst_delivery_bps`), or that it lost a packet, which sizes the
+        pacer's burst budget."""
         if len(fci) < 8:
             return
         base_seq, status_count = struct.unpack("!HH", fci[0:4])
@@ -1036,12 +1084,14 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         # delivered inside it.
         bytes_acked = spanned = 0
         matched: list[tuple[float, int]] = []
+        in_order: list[tuple[float, float, int]] = []
         delay_min = delay_last = None
         for seq, at in arrivals:
             sent = self._twcc_history.pop(seq, None)
             if sent is not None:
                 bytes_acked += sent[0]
                 matched.append((at, sent[0]))
+                in_order.append((sent[1], at, sent[0]))
                 delay_last = at / 1e6 - sent[1]
                 if delay_min is None or delay_last < delay_min:
                     delay_min = delay_last
@@ -1072,12 +1122,15 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
                 window["delay_min"] = delay_min
             window["delay_last"] = delay_last
             window["feedback_mins"].append(delay_min)
-        # A brake sizes itself from a rate the wire limited. A window the wire
-        # delivered whole, or one carrying almost no data, measured the pacer's
-        # own output instead, which a braked pacer can only ever read back.
-        if (self._pacer is not None and goodput and spanned >= MIN_GOODPUT_SAMPLE_BYTES
-                and runs >= BRAKE_LOSS_RUNS and lost >= BRAKE_LOSS_FRACTION * (received + lost)):
-            self._pacer.set_goodput_bps(goodput)
+        if self._pacer is not None:
+            # A brake sizes itself from a rate the wire limited. A window the wire
+            # delivered whole, or one carrying almost no data, measured the pacer's
+            # own output instead, which a braked pacer can only ever read back.
+            if (goodput and spanned >= MIN_GOODPUT_SAMPLE_BYTES
+                    and runs >= BRAKE_LOSS_RUNS and lost >= BRAKE_LOSS_FRACTION * (received + lost)):
+                self._pacer.set_goodput_bps(goodput)
+            self._pacer.set_link_bps(
+                0.0 if lost else burst_delivery_bps(in_order, self._pacer.burst_probe_bytes))
         logger.debug(
             "TWCC feedback: recv=%d lost=%d goodput=%s bps",
             received,

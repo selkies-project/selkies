@@ -121,7 +121,8 @@ def main() -> int:
     def arrivals(tr: RTCDtlsTransport, times: list, fed: list) -> dict:
         for i in range(len(times)):
             tr._twcc_history[i] = (PACKET_BYTES, 0.0)
-        tr._pacer = SimpleNamespace(set_goodput_bps=fed.append)
+        tr._pacer = SimpleNamespace(set_goodput_bps=fed.append, set_link_bps=lambda bps: None,
+                                    burst_probe_bytes=12_500)
         tr._twcc_process_feedback(pack_twcc_fci(0, times, 0))
         return tr.twcc_estimate
 

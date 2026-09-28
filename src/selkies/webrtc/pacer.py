@@ -18,6 +18,10 @@
 # Invariants:
 #   * The burst budget always covers one max-size packet, otherwise a packet
 #     could never become affordable and its class would wedge forever.
+#   * The burst budget follows the link, never the pace alone: 5 ms of the
+#     pace until transport-cc feedback shows the wire delivering frames'
+#     leading bursts at twice the encoder's rate or more without loss, then
+#     what that link delivers in 10 ms (`_apply_pace`, `set_link_bps`).
 #   * Video is the only droppable class; every other class is bounded by
 #     backpressure on the sender instead.
 #   * The video queue budget is max(CAP_MIN_MS of wire time, IDR_FLOOR_FACTOR x
@@ -72,9 +76,20 @@ OVERFLOW_RECOVERY_PER_S = 0.25
 # crater the stream into a starvation valley that +25%/s takes seconds to
 # climb out of.
 AIMD_FLOOR_FACTOR = 0.35
-# Burst credit window: how much wire time the bucket may hoard. Wider windows
-# let video bursts land in front of audio.
+# Burst credit window: how much wire time at the pace the bucket may hoard
+# while the link's room is unknown or short. Wider windows let video bursts
+# land in front of audio at a bottleneck.
 DEBT_WINDOW_S = 0.005
+# A link measured to have room takes the burst it delivers in BURST_LINK_S,
+# never more than libwebrtc's send burst interval at the pace under its byte
+# cap, which keeps a burst inside a socket's send buffer.
+BURST_LINK_S = 0.010
+BURST_WINDOW_S = 0.040
+MAX_BURST_BYTES = 63_000
+# Room is a link delivering a frame's leading burst at this many times the
+# encoder's rate or faster, measured within LINK_MAX_AGE_S.
+LINK_HEADROOM_FACTOR = 2.0
+LINK_MAX_AGE_S = 2.0
 # Floor under the burst budget. Credit saturates at the budget, so a budget
 # below one packet leaves that packet unaffordable forever; DTLS records here
 # are MTU-sized and this keeps headroom above them.
@@ -188,6 +203,9 @@ class RtpPacer:
         self._video_tags: Deque[Optional[int]] = deque()
         self.credit = 0.0
         self._debt_cap = 0.0
+        self._narrow_cap = 0.0
+        self._link_bps: Optional[float] = None
+        self._link_at = 0.0
         self._pace_bps = MIN_PACE_BPS
         # Sentinel for "AIMD owns the pace now"; distinct from the recovery
         # clock, which ticks on every pace update.
@@ -260,6 +278,26 @@ class RtpPacer:
             self._goodput_bps = bps
             self._goodput_at = now
 
+    def set_link_bps(self, bps: Optional[float]) -> None:
+        """Take the rate the wire delivered a frame's leading burst at.
+
+        Args:
+            bps: The rate from the latest transport-cc feedback; 0 when that
+                feedback showed the wire losing packets, None when it held no
+                burst to measure, which leaves the last estimate to age out.
+        """
+        if bps is None:
+            return
+        self._link_bps = float(bps)
+        self._link_at = time.monotonic()
+        self._apply_pace()
+
+    @property
+    def burst_probe_bytes(self) -> float:
+        """How much of a frame leaves unpaced whatever the link's room: the
+        leading bytes whose arrivals measure the link rather than the pace."""
+        return self._narrow_cap
+
     def _on_overflow(self) -> None:
         """Brake on queue overflow, sized by wire evidence alone.
 
@@ -299,6 +337,9 @@ class RtpPacer:
             return
         ceiling = PACE_FACTOR * self._encoder_bps
         self._last_pace_update_at = now
+        if self._link_bps and now - self._link_at > LINK_MAX_AGE_S:
+            self._link_bps = None
+            self._apply_pace()
         if self._pace_bps >= ceiling:
             return
         grown = int(self._pace_bps * (1.0 + OVERFLOW_RECOVERY_PER_S) ** min(dt, 4.0))
@@ -314,14 +355,32 @@ class RtpPacer:
         ]
 
     def _apply_pace(self) -> None:
-        """Re-derive the burst budget from the current pace and clamp credit to
-        it. Credit saturates at the budget, so the budget is floored at
+        """Re-derive the burst budget from the pace and the link, and clamp
+        credit to it.
+
+        The budget is DEBT_WINDOW_S of the pace while the link's room is
+        unknown or short. A link the latest feedback showed delivering a
+        frame's leading burst at LINK_HEADROOM_FACTOR times the encoder's rate
+        or faster, with nothing lost on the wire and the pace not braked, takes
+        what it delivers in BURST_LINK_S, at most libwebrtc's burst, so a
+        frame leaves whole instead of trickling out at the pace behind its
+        first packets. Sizing the burst to the measured link rather than to
+        the pace keeps the wide one off a link near capacity, where it only
+        moves the queue from the pacer to the bottleneck, ahead of audio.
+        Credit saturates at the budget, so it is floored at
         BURST_FLOOR_BYTES: below one packet's size, that packet could never
         become affordable and its class would wedge."""
-        self._debt_cap = max(self._pace_bps / 8.0 * DEBT_WINDOW_S,
-                             float(BURST_FLOOR_BYTES))
-        if self.credit > self._debt_cap:
-            self.credit = self._debt_cap
+        pace_bytes = self._pace_bps / 8.0
+        self._narrow_cap = cap = max(pace_bytes * DEBT_WINDOW_S, float(BURST_FLOOR_BYTES))
+        link = self._link_bps
+        if (link and link >= LINK_HEADROOM_FACTOR * self._encoder_bps
+                and self._pace_bps >= int(PACE_FACTOR * self._encoder_bps)
+                and time.monotonic() - self._link_at <= LINK_MAX_AGE_S):
+            cap = max(cap, min(link / 8.0 * BURST_LINK_S, pace_bytes * BURST_WINDOW_S,
+                               float(MAX_BURST_BYTES)))
+        self._debt_cap = cap
+        if self.credit > cap:
+            self.credit = cap
 
     def _refresh_windows(self) -> None:
         ceiling = PACE_FACTOR * self._encoder_bps
@@ -657,6 +716,7 @@ class RtpPacer:
     def snapshot(self) -> Dict[str, int]:
         out = dict(self.stats)
         out["pace_bps"] = int(self._pace_bps)
+        out["burst_bytes"] = int(self._debt_cap)
         out["queued_bytes"] = self._bytes_queued
         out["video_bytes"] = self._video_bytes
         out["idr_floor_bytes"] = int(self._idr_floor_bytes)
