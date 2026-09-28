@@ -201,6 +201,9 @@ IDR_REQUEST_FLOOR_S = 0.25
 # own, so an encoder that ignores requests degrades to a smear rather than
 # a dead stream.
 GATE_TIMEOUT_S = 1.0
+# Frames without an encode instant a bridge holds back, predicting from one it
+# let go, before it takes the encoder for one that never predicted past the drop.
+LOST_CHAIN_FRAMES = 3
 
 
 async def drain_data_channel(channel: RTCDataChannel,
@@ -295,6 +298,14 @@ class PipelineBridge:
     dropped with a word to the encoder (`invalidate_reference`), which then
     predicts past it, and only the frames predicting from a dropped one are
     held back, so the stream resumes on the next frame without a keyframe. A
+    second frame held back that way although its encode began after the word
+    went out says the encoder never heard it (a word sent while the capture is
+    still starting is lost) and will keep predicting from what the bridge let
+    go, so a keyframe is asked for, as for a closed gate, until one arrives.
+    The first such frame proves nothing, since the encoder reads its words
+    just before it stamps an encode, and the frames it coded before the word
+    are held without one however far the loop lags. A frame without an encode
+    instant counts instead, past LOST_CHAIN_FRAMES in a row. A
     frame that names nothing closes a gate that holds delta frames back, a
     keyframe is asked for until one arrives and reopens it, and a queued
     keyframe is never evicted by a delta frame. A gate no keyframe answers
@@ -336,6 +347,11 @@ class PipelineBridge:
         self._last_request: Optional[float] = None
         # Frame ids dropped recently, which nothing delivered may predict from.
         self._lost: deque = deque(maxlen=LOST_FRAME_MEMORY)
+        # When the encoder was last told of a drop, on the clock the capture stamps
+        # encode instants with, and the frames held since then that it coded after
+        # that or that carry no encode instant.
+        self._told_at: Optional[float] = None
+        self._held = 0
         self.dropped = 0
         self.invalidated = 0
 
@@ -368,13 +384,13 @@ class PipelineBridge:
             self._queued_keyframe = True
             self._gated_at = None
             self._lost.clear()
+            self._held = 0
             return
         dependency = data.dependency if self._invalidate is not None else None
         if dependency is not None:
             frame_id, reference = dependency
             if reference in self._lost:
-                self._lost.append(frame_id)
-                self.dropped += 1
+                self._hold(frame_id, getattr(data, "timing", None))
                 return
             if queue.full():
                 if self._queued_keyframe:
@@ -382,11 +398,11 @@ class PipelineBridge:
                     return
                 self._drop(queue.get_nowait())
                 if reference in self._lost:
-                    self._lost.append(frame_id)
-                    self.dropped += 1
+                    self._hold(frame_id, getattr(data, "timing", None))
                     return
             queue.put_nowait(data)
             self._queued_keyframe = False
+            self._held = 0
             return
         now = self._clock()
         if self._gated_at is not None:
@@ -418,8 +434,27 @@ class PipelineBridge:
         """Let a frame go and tell the encoder, so nothing later predicts from it."""
         self.dropped += 1
         self.invalidated += 1
+        self._held = 0
+        self._told_at = self._clock()
         self._lost.append(item.dependency[0])
         self._invalidate(item.dependency[0])
+
+    def _hold(self, frame_id: int, timing: Optional[tuple]) -> None:
+        """Hold back a frame predicting from one already let go, and ask for a
+        keyframe when the encoder coded it after it was told of the drop."""
+        self.dropped += 1
+        self._lost.append(frame_id)
+        encoded = timing[1] / 1e9 if timing and len(timing) > 1 and timing[1] > 0 else None
+        if encoded is None:
+            self._held += 1
+            unheard = self._held > LOST_CHAIN_FRAMES
+        elif self._told_at is not None and encoded > self._told_at:
+            self._held += 1
+            unheard = self._held > 1
+        else:
+            unheard = False
+        if unheard:
+            self._ask(self._clock())
 
     def empty(self) -> bool:
         return self._queue.empty()
