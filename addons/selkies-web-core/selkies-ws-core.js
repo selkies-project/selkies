@@ -154,14 +154,17 @@ installSessionCookie();
  * Best-effort local keyboard layout, `null` while unknown (and then omitted from
  * settings). Resolved once at script init so it is ready by the time the socket
  * connects; a probe that lands after the initial SETTINGS payload sends the
- * hint on its own, guarded because the connection may not exist yet, and never
- * from a shared viewer, which pushes no settings.
+ * hint on its own, and never from a shared viewer, which pushes no settings.
+ * One that lands earlier rides that payload instead (`initialSettingsSent`):
+ * sent alone, it would be the first settings the server sees and start the
+ * stream ahead of the payload the session waits to build, full color and all.
  */
 let detectedKeyboardLayout = null;
+let initialSettingsSent = false;
 detectKeyboardLayout().then((layout) => {
     detectedKeyboardLayout = layout;
     try {
-        if (layout && !isSharedMode && typeof websocket !== 'undefined' && websocket &&
+        if (layout && initialSettingsSent && !isSharedMode && typeof websocket !== 'undefined' && websocket &&
             websocket.readyState === WebSocket.OPEN) {
             websocket.send(`SETTINGS,${JSON.stringify({ keyboardLayout: layout })}`);
         }
@@ -3293,11 +3296,15 @@ function settleServerEncoder(encoder, entry) {
 }
 
 /**
- * Sends the full `SETTINGS,{json}` payload; never from a shared viewer.
+ * Sends the full `SETTINGS,{json}` payload; never from a shared viewer, and not
+ * before this connection's initial payload (`initialSettingsSent`), which is
+ * built from the same state when it goes: sent earlier, a change would be the
+ * first settings the server sees and start the stream on settings the session
+ * is still settling, such as full color while the decoder probe is out.
  * @param {string} reason Logged with the send.
  */
 function sendFullSettingsUpdateToServer(reason) {
-    if (isSharedMode) return;
+    if (isSharedMode || !initialSettingsSent) return;
     if (websocket && websocket.readyState === WebSocket.OPEN) {
         const settingsToSend = getCurrentSettingsPayload();
         const settingsJson = JSON.stringify(settingsToSend);
@@ -7495,6 +7502,7 @@ class WorkerWebSocket {
     console.log('[websockets] Connection opened!');
     socketOpenedAt = performance.now();
     reconnectUnopened = 0;
+    initialSettingsSent = false;
     await settleFullColorSupport();
     if (await h264FramingReady === 'avcc') console.info('[Selkies] H.264 decodes here with an avcC description; frames are reframed for it.');
     // The first answer is the baseline; a later one that differs is a new build.
@@ -7595,6 +7603,7 @@ class WorkerWebSocket {
         const settingsJson = JSON.stringify(settingsToSend);
         const message = `SETTINGS,${settingsJson}`;
         websocket.send(message);
+        initialSettingsSent = true;
         console.log('[websockets] Sent initial settings (resolutions are physical) to server:', settingsToSend);
       } catch (e) {
         console.error('[websockets] Error constructing or sending initial settings:', e);
