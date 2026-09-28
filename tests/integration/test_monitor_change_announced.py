@@ -14,7 +14,11 @@ Driven on a root fixed at the union of every layout below, so no swap here can
 change the framebuffer size and nothing but the announcement can prompt the
 re-read. Read back from the wire, and from GDK's own monitor list wherever an
 interpreter with GTK3 bindings is available: the wire proves the event is sent,
-GDK proves it is the one a desktop acts on.
+GDK proves it is the one a desktop acts on. Qt re-reads the monitors on the
+root's ConfigureNotify but announces a new geometry only for a monitor that is
+exactly one CRTC, so a display that moves or resizes beside another reaches a
+running Qt client only as a monitor of a new name; that is read from the
+screens of a Qt 6 client wherever an interpreter with PyQt6 is available.
 """
 import asyncio
 import json
@@ -64,22 +68,64 @@ Gtk.main()
 """
 
 
-def gtk3_interpreter():
-    """An interpreter that can import the GTK3 bindings, or None.
+# Runs in whichever interpreter has PyQt6: the screens a Qt client that was
+# already running has once the swap has landed.
+QT_PROBE = r"""
+import json, sys
+from PyQt6.QtCore import QTimer
+from PyQt6.QtGui import QGuiApplication
+
+app = QGuiApplication(sys.argv[:1])
+ready = sys.argv[1]
+
+def state():
+    return sorted([s.geometry().x(), s.geometry().y(), s.geometry().width(), s.geometry().height()]
+                  for s in app.screens())
+
+before = state()
+QTimer.singleShot(0, lambda: open(ready, "w").close())
+QTimer.singleShot(4000, lambda: (print(json.dumps({"before": before, "after": state()})), app.quit()))
+app.exec()
+"""
+
+
+def interpreter_with(probe: str):
+    """The first interpreter that runs ``probe``, or None.
 
     The suites run on whatever interpreter the capture stack is installed for,
-    which is rarely the one carrying a distribution's PyGObject; the system
-    interpreter usually is.
+    which is rarely the one carrying a distribution's PyGObject or PyQt; the
+    system interpreter usually is.
     """
-    seen = set()
-    for cand in (sys.executable, "python3"):
-        if not cand or cand in seen:
-            continue
-        seen.add(cand)
-        probe = "import gi; gi.require_version('Gtk','3.0'); import gi.repository.Gtk"
-        if subprocess.run([cand, "-c", probe], capture_output=True).returncode == 0:
+    for cand in dict.fromkeys((sys.executable, "python3", "/usr/bin/python3")):
+        if cand and subprocess.run([cand, "-c", probe], capture_output=True).returncode == 0:
             return cand
     return None
+
+
+def qt_across(python, display_name, swap, res, label):
+    """Run a Qt client through ``swap`` and return its before/after screens."""
+    ready = os.path.join(H.WORKDIR, "qt-probe-ready")
+    script = os.path.join(H.WORKDIR, "qt_probe.py")
+    with open(script, "w") as f:
+        f.write(QT_PROBE)
+    if os.path.exists(ready):
+        os.unlink(ready)
+    env = dict(os.environ, DISPLAY=display_name, QT_QPA_PLATFORM="xcb")
+    proc = subprocess.Popen([python, script, ready], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, env=env)
+    deadline = time.time() + 20
+    while not os.path.exists(ready) and time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    swap()
+    out, err = proc.communicate(timeout=30)
+    try:
+        return json.loads(out.strip().splitlines()[-1])
+    except Exception:
+        res.check(f"{label}: the Qt probe reported its screens", False,
+                  (out or err or "no output")[-160:])
+        return None
 
 
 def publish(layouts):
@@ -195,7 +241,25 @@ def run() -> H.Results:
         res.check("the root never changed size, so nothing else could prompt a re-read",
                   (root.width, root.height) == UNION, (root.width, root.height))
 
-        python = gtk3_interpreter()
+        python = interpreter_with("from PyQt6.QtGui import QGuiApplication")
+        if not python:
+            res.skip("a running Qt client follows displays that move or resize",
+                     "no interpreter here can import PyQt6")
+        else:
+            publish(RIGHT)
+            taller = {"primary": dict(PRIMARY), "display2": {**RIGHT["display2"], "h": 600}}
+            seen = qt_across(python, display_name, lambda: publish(taller), res, "resize")
+            if seen:
+                res.check("a display resized beside another reaches a running Qt client",
+                          seen["after"] == [[0, 0, 1024, 640], [1024, 0, 640, 600]], seen)
+            seen = qt_across(python, display_name, lambda: publish(LEFT), res, "move")
+            if seen:
+                res.check("displays that trade sides reach a running Qt client",
+                          seen["after"] == [[0, 0, 640, 480], [640, 0, 1024, 640]], seen)
+            publish(ONE)
+
+        python = interpreter_with(
+            "import gi; gi.require_version('Gtk','3.0'); import gi.repository.Gtk")
         if not python:
             res.skip("a running toolkit follows the swap",
                      "no interpreter here can import the GTK3 bindings")

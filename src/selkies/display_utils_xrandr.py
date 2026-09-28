@@ -15,7 +15,11 @@ nothing here runs on a server where it is:
   physical output because GTK realizes a monitor only where one is listed,
   whether the server lets them share it is read back rather than assumed, and
   the swap is announced on an output property because RRSetMonitor emits no
-  RandR event of its own. A single display is shown whole by the output, its
+  RandR event of its own. Qt matches a monitor to its screen by name and
+  announces a new geometry only for a monitor that is exactly one CRTC, which
+  no display of several sharing the output is, so a display whose rectangle
+  changes takes a monitor named for the new rectangle (`_monitor_names`) and
+  Qt replaces that one screen. A single display is shown whole by the output, its
   CRTC exactly the monitor rather than the framebuffer rounded up to the CVT
   cell (`resize_display`'s ``output_size``): Qt re-reads the monitors on the
   root's ConfigureNotify but announces a new geometry only for a monitor
@@ -149,7 +153,7 @@ def _monitor_info(
     """
     return {
         "name": d.intern_atom(name),
-        "primary": name == "selkies-primary",
+        "primary": _display_of(name) == "primary",
         "automatic": False,
         "x": int(x),
         "y": int(y),
@@ -262,10 +266,42 @@ def _sync_selkies_monitors(
     return monitors
 
 
+def _display_of(name: str) -> str:
+    """The display id a selkies-* monitor name carries."""
+    return name[len("selkies-"):].split("@", 1)[0]
+
+
+def _monitor_names(
+    layouts: Dict[str, Dict[str, int]], live: Dict[str, Tuple[int, int, int, int, bool, bool]],
+) -> Dict[str, str]:
+    """The monitor name each display of ``layouts`` is published under.
+
+    A new display takes `selkies-<id>`. One that stays keeps the name its live
+    monitor has while its rectangle is unchanged, or while it is the only
+    display, whose CRTC shows exactly its monitor so that Qt announces a change
+    in place (`resize_display`'s ``output_size``). Any other display that moved
+    or resized is named for its new rectangle, `selkies-<id>@WxH+X+Y`: Qt
+    matches a monitor to its screen by name and stores a new geometry for a
+    monitor that is not one CRTC without announcing it, so a Qt desktop would
+    keep drawing the display at the size and place it had, where a new name
+    makes Qt replace that screen. GTK keys its monitors by output and KWin its
+    screens by CRTC, so neither sees the name change.
+    """
+    kept = {_display_of(name): (name, m[:4]) for name, m in live.items()}
+    names = {}
+    for did, l in layouts.items():
+        x, y, w, h = (int(l["x"]), int(l["y"]), int(l["w"]), int(l["h"]))
+        name, live_rect = kept.get(did, (f"selkies-{did}", None))
+        if live_rect is not None and live_rect != (x, y, w, h) and len(layouts) > 1:
+            name = f"selkies-{did}@{w}x{h}+{x}+{y}"
+        names[did] = name
+    return names
+
+
 def _sync_display_rects(d: x11_display.Display, root: Any) -> Dict[str, Rect]:
     """Each display's rectangle as the logical monitors have it; with none
     defined, the primary is the framebuffer."""
-    rects = {name[len("selkies-"):]: m[:4] for name, m in _sync_selkies_monitors(d, root).items()}
+    rects = {_display_of(name): m[:4] for name, m in _sync_selkies_monitors(d, root).items()}
     if not rects:
         geom = root.get_geometry()
         rects["primary"] = (0, 0, int(geom.width), int(geom.height))
@@ -335,11 +371,11 @@ def _monitors_match(
     this server was measured to keep it."""
     if {name: m[:4] for name, m in live.items()} != desired:
         return False
-    if "selkies-primary" in desired and not live["selkies-primary"][5]:
+    if any(_display_of(name) == "primary" and not m[5] for name, m in live.items()):
         return False
     if not has_output:
         return all(not m[4] for m in live.values())
-    return all(m[4] == (share_output or name == "selkies-primary")
+    return all(m[4] == (share_output or _display_of(name) == "primary")
                for name, m in live.items())
 
 
@@ -380,7 +416,7 @@ def _sync_announce_monitor_change(
 
 def _sync_set_selkies_layout(
     d: x11_display.Display, root: Any, out_id: Optional[int],
-    ordered: List[Tuple[str, Dict[str, int]]], share_output: bool,
+    ordered: List[Tuple[str, Dict[str, int]]], share_output: bool, names: Dict[str, str],
 ) -> Dict[str, Tuple[int, int, int, int, bool, bool]]:
     """Define the whole selkies-* set from scratch; returns what survived.
 
@@ -400,7 +436,7 @@ def _sync_set_selkies_layout(
     take_output = True
     for display_id, l in ordered:
         randr.set_monitor(root, _monitor_info(
-            d, out_id, f"selkies-{display_id}",
+            d, out_id, names[display_id],
             l["x"], l["y"], l["w"], l["h"], take_output,
         ))
         take_output = share_output
@@ -431,19 +467,19 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
             d = _module_display()
             root = d.screen().root
             out_id = _first_connected_output(d)
+            live = _sync_selkies_monitors(d, root)
+            names = _monitor_names(layouts, live)
             desired = {
-                f"selkies-{did}": (int(l["x"]), int(l["y"]), int(l["w"]), int(l["h"]))
+                names[did]: (int(l["x"]), int(l["y"]), int(l["w"]), int(l["h"]))
                 for did, l in layouts.items()
             }
             ordered = sorted(layouts.items(), key=lambda kv: kv[0] != "primary")
             share = _OUTPUT_SHARED is not False
-            if _monitors_match(
-                _sync_selkies_monitors(d, root), desired, share, out_id is not None
-            ):
+            if _monitors_match(live, desired, share, out_id is not None):
                 return
             d.grab_server()
             try:
-                live = _sync_set_selkies_layout(d, root, out_id, ordered, share)
+                live = _sync_set_selkies_layout(d, root, out_id, ordered, share, names)
                 if share and set(live) != set(desired):
                     _OUTPUT_SHARED = False
                     logger_app_resize.info(
@@ -451,7 +487,7 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
                         "the primary display becomes a monitor toolkits can see; the rest "
                         "of the desktop paints and tiles as if they were not there."
                     )
-                    live = _sync_set_selkies_layout(d, root, out_id, ordered, False)
+                    live = _sync_set_selkies_layout(d, root, out_id, ordered, False, names)
                 elif share:
                     _OUTPUT_SHARED = True
                 # Qt takes any monitor listing the primary output for the
@@ -470,10 +506,7 @@ def _sync_replace_selkies_monitors(layouts: Dict[str, Dict[str, int]]) -> None:
                 except Exception:
                     pass
             d.sync()
-            _verify_monitors_on_display(d, {
-                f"selkies-{did}": (int(l["x"]), int(l["y"]), int(l["w"]), int(l["h"]))
-                for did, l in layouts.items()
-            })
+            _verify_monitors_on_display(d, desired)
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
@@ -523,9 +556,10 @@ async def replace_selkies_monitors(
     await clear_selkies_monitors()
     ok = True
     take_output = True
+    names = _monitor_names(layouts, {})
     for display_id, l in sorted(layouts.items(), key=lambda kv: kv[0] != "primary"):
         ok &= await set_logical_monitor(
-            f"selkies-{display_id}", l["x"], l["y"], l["w"], l["h"],
+            names[display_id], l["x"], l["y"], l["w"], l["h"],
             take_output, screen_name=screen_name,
         )
         take_output = _OUTPUT_SHARED is not False

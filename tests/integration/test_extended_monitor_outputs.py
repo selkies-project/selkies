@@ -9,7 +9,9 @@ new one takes the output from, which would drop a display outright. So the
 publish asks for the output on all of them and reads the reply back, and the
 enforcing shape is driven here through a shim implementing that clause on top
 of whichever server the host runs. Proven from the wire (GetMonitors), because
-the server accepts either form without complaint.
+the server accepts either form without complaint. A display that moves or
+resizes is published under a new name, the one change Qt announces for a
+monitor that is not its one CRTC.
 """
 import asyncio
 import os
@@ -183,6 +185,12 @@ def main() -> bool:
             asyncio.run(dx.delete_logical_monitor("selkies-fallbackprobe"))
         else:
             res.skip("xrandr fallback also lists the output", "xrandr not installed")
+
+        moved = {"primary": dict(PRIMARY), "display2": {"x": 0, "y": 640, "w": 800, "h": 600}}
+        asyncio.run(dx.apply_monitor_layout(moved, 1024, 1280))
+        names = sorted(read_monitors(display_name)["monitors"])
+        res.check("a display that resizes takes a new name, and one that stays keeps its own",
+                  names == ["selkies-display2@800x600+0+640", "selkies-primary"], names)
 
         asyncio.run(dx.clear_selkies_monitors())
     finally:
