@@ -128,7 +128,7 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, displayLabel, serverAnswers } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS,
@@ -412,7 +412,34 @@ let preferredInputDeviceId = null;
 let preferredOutputDeviceId = null;
 let metricsIntervalId = null;
 let backpressureIntervalId = null;
-let reconnectIntervalId = null;
+/**
+ * The session socket's reconnect ladder (`scheduleReconnect`): the pending
+ * attempt, whether it reloads the page rather than reconnecting in place, the
+ * attempts since the socket last held for RECONNECT_STABLE_MS, the sockets in
+ * a row an answering server never opened, when the current socket opened, and
+ * the entry page's validators as this page loaded them.
+ */
+let reconnectTimer = null;
+let reconnectByReload = false;
+let reconnectAttempts = 0;
+let reconnectUnopened = 0;
+let socketOpenedAt = 0;
+let entryPageValidators = null;
+/** Opens a new session socket with every handler bound; set by initWebsockets. */
+let reopenSessionSocket = null;
+/**
+ * First in-place reconnect after a drop, doubled per attempt up to
+ * RECONNECT_MAX_MS: an attempt is one GET while the server is away, so a
+ * short ceiling costs it nothing and shortens the wait once it is back.
+ */
+const RECONNECT_FIRST_MS = 400;
+const RECONNECT_MAX_MS = 1000;
+/** How long a new socket may stay connecting before the attempt counts as failed. */
+const RECONNECT_OPEN_MS = 5000;
+/** How long a socket has to stay open for its drop to start the ladder over. */
+const RECONNECT_STABLE_MS = 10000;
+/** Sockets in a row an answering server never opens before the page reloads instead. */
+const RECONNECT_UNOPENED_MAX = 3;
 /**
  * Watchdog for a START_VIDEO lost while the tab was hidden, which would leave a
  * black stream. Armed when the tab becomes visible, cleared on the first
@@ -7204,26 +7231,34 @@ class WorkerWebSocket {
   const socketWorkerEnabled = (socketWorkerParam !== null)
     ? (socketWorkerParam.toLowerCase() === 'true')
     : getBoolParam('socket_worker', true);
-  try {
-    if (!socketWorkerEnabled) throw new Error('socket_worker=false');
-    websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols,
-      socketWaitsOnPage());
-    if (streamStats.open) websocket.setStats(true);
-  } catch (e) {
-    // No worker to be had (a policy forbidding blob workers, say). The socket
-    // then runs here, where a busy thread costs audio its cadence, which is
-    // still better than no session.
-    if (socketWorkerEnabled) console.warn('[websockets] socket worker unavailable, reading on the page:', e);
-    websocket = new WebSocket(websocketEndpointURL.href, tokenProtocols);
-    websocket.binaryType = 'arraybuffer';
-  }
-  // The socket itself is in a worker, so this handle is what page-side
-  // tooling has to observe or close the transport through.
-  window.selkiesTransport = websocket;
-  wireSocketToDecoder();
-  // A fresh socket worker holds the divert default; re-point it.
-  videoDivertOn = false;
-  wireSocketToVideoWorker();
+  /**
+   * Opens the session socket and wires the decoders' lines into it; the page
+   * binds its handlers to it next (`bindSessionSocket`). Runs again for each
+   * in-place reconnect.
+   */
+  const openSessionSocket = () => {
+    try {
+      if (!socketWorkerEnabled) throw new Error('socket_worker=false');
+      websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols,
+        socketWaitsOnPage());
+      if (streamStats.open) websocket.setStats(true);
+    } catch (e) {
+      // No worker to be had (a policy forbidding blob workers, say). The socket
+      // then runs here, where a busy thread costs audio its cadence, which is
+      // still better than no session.
+      if (socketWorkerEnabled) console.warn('[websockets] socket worker unavailable, reading on the page:', e);
+      websocket = new WebSocket(websocketEndpointURL.href, tokenProtocols);
+      websocket.binaryType = 'arraybuffer';
+    }
+    // The socket itself is in a worker, so this handle is what page-side
+    // tooling has to observe or close the transport through.
+    window.selkiesTransport = websocket;
+    wireSocketToDecoder();
+    // A fresh socket worker holds the divert default; re-point it.
+    videoDivertOn = false;
+    wireSocketToVideoWorker();
+  };
+  openSessionSocket();
 
   /**
    * Acks the newest video frame the client is done with, so the server can
@@ -7322,10 +7357,14 @@ class WorkerWebSocket {
    * suffixed per-display keys, never the primary's), advertises gzip,
    * requests the cache-only clipboard, and starts the metrics and ack timers.
    */
-  websocket.onopen = async () => {
+  const onSocketOpen = async () => {
     console.log('[websockets] Connection opened!');
+    socketOpenedAt = performance.now();
+    reconnectUnopened = 0;
     await settleFullColorSupport();
     if (await h264FramingReady === 'avcc') console.info('[Selkies] H.264 decodes here with an avcC description; frames are reframed for it.');
+    // The first answer is the baseline; a later one that differs is a new build.
+    entryPageChanged().then((changed) => { if (changed) location.reload(); });
     wsEverOpened = true;
     try { sessionStorage.removeItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
     status = 'connected_waiting_mode';
@@ -7473,9 +7512,10 @@ class WorkerWebSocket {
 
   /**
    * Whether the server echoed `_gz,1`, after which text sends of 512 bytes or
-   * more (clipboard) are gzipped into 0x05 frames through `websocket.send`,
-   * patched below. Small text (input verbs) and binary (microphone, webcam)
-   * are never wrapped, and a send chain keeps multipart chunks in sequence.
+   * more (clipboard) are gzipped into 0x05 frames through each socket's
+   * `send`, which `gzipTextSends` patches. Small text (input verbs) and binary
+   * (microphone, webcam) are never wrapped, and a send chain keeps multipart
+   * chunks in sequence.
    */
   let wsGzTx = false;
   let __wsSendChain = Promise.resolve();
@@ -7487,20 +7527,22 @@ class WorkerWebSocket {
     out.set(new Uint8Array(buf), 1);
     return out.buffer;
   };
-  const __rawWsSend = websocket.send.bind(websocket);
-  websocket.send = (data) => {
-    if (wsGzTx && typeof data === 'string' && data.length >= 512) {
-      __wsSendPending++;
-      __wsSendChain = __wsSendChain.then(async () => {
-        try { __rawWsSend(await __compressGz05(data)); }
-        catch (e) { __rawWsSend(data); }
-        finally { __wsSendPending--; }
-      });
-    } else if (typeof data === 'string' && __wsSendPending > 0) {
-      __wsSendChain = __wsSendChain.then(() => __rawWsSend(data));
-    } else {
-      __rawWsSend(data);
-    }
+  const gzipTextSends = (sock) => {
+    const rawSend = sock.send.bind(sock);
+    sock.send = (data) => {
+      if (wsGzTx && typeof data === 'string' && data.length >= 512) {
+        __wsSendPending++;
+        __wsSendChain = __wsSendChain.then(async () => {
+          try { rawSend(await __compressGz05(data)); }
+          catch (e) { rawSend(data); }
+          finally { __wsSendPending--; }
+        });
+      } else if (typeof data === 'string' && __wsSendPending > 0) {
+        __wsSendChain = __wsSendChain.then(() => rawSend(data));
+      } else {
+        rawSend(data);
+      }
+    };
   };
 
   /**
@@ -7804,7 +7846,7 @@ class WorkerWebSocket {
       if (event.data.startsWith('KILL ')) {
         const reason = event.data.substring(5);
         console.error(`Received KILL message from server: ${reason}`);
-        if (reconnectIntervalId) clearInterval(reconnectIntervalId);
+        stopReconnecting();
         if (websocket) {
             websocket.onclose = () => {};
             websocket.close();
@@ -8061,10 +8103,7 @@ class WorkerWebSocket {
                       websocket.onclose = () => {};
                       websocket.close();
                   }
-                  if (reconnectIntervalId) {
-                      clearInterval(reconnectIntervalId);
-                      reconnectIntervalId = null;
-                  }
+                  stopReconnecting();
                   return;
               }
               const changes = sanitizeAndStoreSettings(obj.settings);
@@ -8487,7 +8526,7 @@ class WorkerWebSocket {
   };
 
   /** Inflates 0x05 frames and routes everything through `__rawWsMessage` in order (see `__wsCtrlChain`). */
-  websocket.onmessage = (event) => {
+  const onSocketMessage = (event) => {
     const d = event.data;
     if (d instanceof ArrayBuffer) {
       if (d.byteLength >= 1 && new Uint8Array(d, 0, 1)[0] === 0x05) {
@@ -8514,7 +8553,7 @@ class WorkerWebSocket {
     }
   };
 
-  websocket.onerror = (event) => {
+  const onSocketError = (event) => {
     console.error('[websockets] Error:', event);
     status = 'error';
     loadingText = 'WebSocket connection error.';
@@ -8535,12 +8574,12 @@ class WorkerWebSocket {
   };
 
   /**
-   * Tears the session down and schedules a reconnect through a page reload,
+   * Tears the session down and reconnects in place (`scheduleReconnect`),
    * except after an invalid token (4001) or when another live connection
    * superseded this one, where auto-reconnecting would evict the new holder
    * and the two pages would trade the session forever.
    */
-  websocket.onclose = (event) => {
+  const onSocketClose = (event) => {
     console.log('[websockets] Connection closed', event);
     streamStats.disconnected();
     // No renewal will come; a rumble playing stops now rather than at its lease.
@@ -8550,19 +8589,19 @@ class WorkerWebSocket {
     if (window.__selkiesAuthProbe) window.__selkiesAuthProbe();
     if (event.code === 4001) {
         console.error("Server rejected connection: Invalid token. Disabling reconnect.");
-        if (reconnectIntervalId) clearInterval(reconnectIntervalId);
-        reconnectIntervalId = null;
+        stopReconnecting();
         loadingText = 'Connection Failed: Invalid Token';
         updateStatusDisplay();
         return;
     } else if (event.code === 4002) {
+        // A new role builds the page differently, so it comes back through a reload.
         console.log("Server closed connection due to permission change. Reconnecting...");
+        reconnectByReload = true;
     }
     const superseded = /superseded/i.test(event.reason || '');
     if (superseded) {
         console.warn("Session superseded by a new connection. Auto-reconnect disabled.");
-        if (reconnectIntervalId) clearInterval(reconnectIntervalId);
-        reconnectIntervalId = null;
+        stopReconnecting();
     }
     status = 'disconnected';
     loadingText = superseded
@@ -8601,34 +8640,130 @@ class WorkerWebSocket {
         sharedClientState = 'idle';
         clearSharedStallWatchdog();
     }
-    if (!superseded && !reconnectIntervalId) {
-      reconnectIntervalId = setInterval(() => {
-        if (websocket && (websocket.readyState === WebSocket.OPEN || websocket.readyState === WebSocket.CONNECTING)) {
-        } else {
-          console.log("WebSocket disconnected, reloading page to reconnect.");
-          reloadPossiblyFlippingMode();
-        }
-      }, 5000);
+    // The next socket's ids start over, and its stream at a key frame.
+    lastReceivedVideoFrameId = -1;
+    lastPresentedVideoFrameId = null;
+    lastAckSentId = -1;
+    clearDecodedStripesQueue();
+    wsGzTx = false;
+    if (!superseded) {
+      // Shown again until the next socket's first frame hides it.
+      streamStarted = false;
+      if (statusDisplayElement) statusDisplayElement.classList.remove('hidden');
+      if (socketOpenedAt && performance.now() - socketOpenedAt >= RECONNECT_STABLE_MS) reconnectAttempts = 0;
+      scheduleReconnect();
     }
+    socketOpenedAt = 0;
+  };
+
+  /**
+   * Binds the handlers above to the socket `openSessionSocket` made.
+   * @returns {void}
+   */
+  const bindSessionSocket = () => {
+    gzipTextSends(websocket);
+    websocket.onopen = onSocketOpen;
+    websocket.onmessage = onSocketMessage;
+    websocket.onerror = onSocketError;
+    websocket.onclose = onSocketClose;
+  };
+  bindSessionSocket();
+  reopenSessionSocket = () => {
+    openSessionSocket();
+    bindSessionSocket();
   };
 }
 
 let wsEverOpened = false;
 
 /**
- * Reloads the page once the server answers a plain GET on the transport
- * endpoint (`serverAnswers`), leaving it for the next tick while nothing does;
- * a 409 there means the server is serving WebRTC, and the stored stream mode
- * is switched first. The switch is tried once per connect cycle, and only if
+ * Brings the session socket back in place after a drop, keeping the page and
+ * what it holds (fullscreen, the keyboard lock, the user activation audio
+ * needs, the dashboard's state): the first attempt RECONNECT_FIRST_MS after
+ * the drop, each later one twice as far out up to RECONNECT_MAX_MS. An
+ * attempt asks the transport endpoint first (`serverAnswers`) and waits for
+ * the next while nothing answers; the network coming back (`online`) starts
+ * the ladder over. The page reloads instead (`reloadPossiblyFlippingMode`)
+ * only where no new socket can recover the session: the server now serves
+ * WebRTC (a 409), it changed this client's role (4002), or it answers while
+ * RECONNECT_UNOPENED_MAX sockets in a row never opened; a socket that opens
+ * onto a new build reloads too (`entryPageChanged`). A transport switch in
+ * progress owns the page, so an attempt stands down during it.
+ * @returns {void}
+ */
+function scheduleReconnect() {
+  if (reconnectTimer !== null || !reopenSessionSocket) return;
+  const delay = Math.min(RECONNECT_FIRST_MS * 2 ** reconnectAttempts, RECONNECT_MAX_MS);
+  reconnectAttempts++;
+  const timer = setTimeout(async () => {
+    if (window.__selkiesModeSwitching) { reconnectTimer = null; return; }
+    // The same path derivation as the data socket, so the probe hits its route.
+    const probeURL = new URL(window.location.href);
+    probeURL.pathname = getRoutePrefix() + '/api/websockets';
+    const res = await serverAnswers(probeURL.href, sessionAuthHeaders());
+    if (reconnectTimer !== timer) return;
+    reconnectTimer = null;
+    if (!res) { scheduleReconnect(); return; }
+    if (res.status === 409 || reconnectByReload || reconnectUnopened >= RECONNECT_UNOPENED_MAX) {
+      reloadPossiblyFlippingMode(res);
+      return;
+    }
+    reconnectUnopened++;
+    console.log(`[websockets] Reconnecting in place (attempt ${reconnectAttempts}).`);
+    reopenSessionSocket();
+    // A path that swallows the handshake holds the socket connecting for minutes.
+    const sock = websocket;
+    setTimeout(() => {
+      if (websocket === sock && sock.readyState === WebSocket.CONNECTING) sock.close();
+    }, RECONNECT_OPEN_MS);
+  }, delay);
+  reconnectTimer = timer;
+}
+
+window.addEventListener('online', () => {
+  if (reconnectTimer === null) return;
+  stopReconnecting();
+  reconnectAttempts = 0;
+  scheduleReconnect();
+});
+
+/**
+ * Cancels the reconnect ladder, for a verdict that forbids reconnecting or a
+ * page going away.
+ * @returns {void}
+ */
+function stopReconnecting() {
+  if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+}
+
+/**
+ * Whether the server's entry page differs from the one this page loaded
+ * (`entryPageTag`): a new build this page's scripts may not speak. The first
+ * answer, taken when a socket first opens, is the baseline; a page that
+ * cannot be read counts as unchanged.
+ * @returns {Promise<boolean>}
+ */
+async function entryPageChanged() {
+  const tag = await entryPageTag(sessionAuthHeaders());
+  if (tag === null) return false;
+  if (entryPageValidators === null) {
+    entryPageValidators = tag;
+    return false;
+  }
+  return tag !== entryPageValidators;
+}
+
+/**
+ * Reloads the page, the reconnect ladder's last rung. A 409 on the transport
+ * endpoint means the server is serving WebRTC, and the stored stream mode is
+ * switched first. The switch is tried once per connect cycle, and only if
  * this session never connected, so a client whose stored mode disagrees with
  * the server converges instead of loop-reloading.
+ * @param {Response} res The endpoint's answer (`serverAnswers`).
+ * @returns {void}
  */
-async function reloadPossiblyFlippingMode() {
-  // The same path derivation as the data socket, so the probe hits its route.
-  const probeURL = new URL(window.location.href);
-  probeURL.pathname = getRoutePrefix() + '/api/websockets';
-  const res = await serverAnswers(probeURL.href, sessionAuthHeaders());
-  if (!res) return;
+function reloadPossiblyFlippingMode(res) {
   let flipGuard = null;
   try { flipGuard = sessionStorage.getItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
   if (!wsEverOpened && !flipGuard && res.status === 409) {
@@ -9453,6 +9588,7 @@ function cleanup() {
   }
   clearSharedStallWatchdog();
   releaseWakeLock();
+  stopReconnecting();
   if (window.isCleaningUp) return;
   window.isCleaningUp = true;
   console.log("Cleanup: Starting cleanup process...");

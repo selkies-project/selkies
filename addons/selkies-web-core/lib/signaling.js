@@ -34,11 +34,16 @@
  * `ERROR ...` lines report server-side failures. The server always offers
  * and the client answers.
  *
- * A failed or dropped connection retries after three seconds; the fourth
- * consecutive failure hands over to `onfatalretry` (or reloads the page) so
- * the browser re-runs HTTP authentication.
+ * A failed or dropped connection retries RETRY_FIRST_MS later, each further
+ * failure twice as far out up to RETRY_MAX_MS; the fourth consecutive failure
+ * hands over to `onfatalretry` (or reloads the page) so the browser re-runs
+ * HTTP authentication.
  * @module
  */
+
+/** First signaling retry after a failure, doubled per failure up to RETRY_MAX_MS. */
+const RETRY_FIRST_MS = 400;
+const RETRY_MAX_MS = 1000;
 
 /**
  * Connection to the signaling server, delivering SDP and ICE to callbacks.
@@ -119,6 +124,22 @@ export class WebRTCSignaling {
          * `close`, and both funnel into this one scheduled retry.
          */
         this._retry_timer = null;
+
+        /** Failures since the socket last opened, which set the next retry's delay. */
+        this._backoff = 0;
+
+        /** Stops the current socket's events reaching this client (`reconnect`). */
+        this._forget_socket = () => {};
+
+        // The network coming back retries at once rather than at the next rung.
+        window.addEventListener('online', () => {
+            if (!this._retry_timer) return;
+            clearTimeout(this._retry_timer);
+            this._retry_timer = null;
+            this._backoff = 0;
+            this.retry_count--;
+            this._scheduleRetry();
+        });
 
         /**
          * Set by `disconnect` so a locally requested close is not treated as
@@ -213,11 +234,14 @@ export class WebRTCSignaling {
         this._ws_conn.send(`HELLO ${this.peer_type} ${JSON.stringify(meta)}`);
         this._setStatus("Registering with server, peer type: " + this.peer_type + ", client type: " + this.client_type);
         this.retry_count = 0;
+        this._backoff = 0;
     }
 
     /**
-     * Schedules one reconnect three seconds out; a timer already pending
-     * absorbs the second of the paired `error` and `close` events.
+     * Schedules one reconnect, RETRY_FIRST_MS after the first failure and
+     * twice as far out after each further one up to RETRY_MAX_MS; a timer
+     * already pending absorbs the second of the paired `error` and `close`
+     * events.
      *
      * After three failed retries the credentials have most likely expired and
      * the upgrade is being rejected, so the page reloads for the browser to
@@ -227,6 +251,8 @@ export class WebRTCSignaling {
     _scheduleRetry() {
         if (this._retry_timer) return;
         this.retry_count++;
+        const delay = Math.min(RETRY_FIRST_MS * 2 ** this._backoff, RETRY_MAX_MS);
+        this._backoff++;
         this._retry_timer = setTimeout(() => {
             this._retry_timer = null;
             if (this.retry_count > 3) {
@@ -238,13 +264,13 @@ export class WebRTCSignaling {
             } else {
                 this.connect();
             }
-        }, 3000);
+        }, delay);
     }
 
     /**
      * Starts the retry cycle over, for an app whose `onfatalretry` found the
-     * server not answering: the next connect three seconds out, and the next
-     * cycle ending in `onfatalretry` again.
+     * server not answering: the next connect on the delay the failures so far
+     * set, and the next cycle ending in `onfatalretry` again.
      */
     retry() {
         this.retry_count = 0;
@@ -253,7 +279,7 @@ export class WebRTCSignaling {
 
     /** Socket error: retries when the socket is already closed, else the close event does. */
     _onServerError() {
-        this._setStatus("Connection error, retry in 3 seconds.");
+        this._setStatus("Connection error, retrying.");
         if (this._ws_conn.readyState === this._ws_conn.CLOSED) {
             this._scheduleRetry();
         }
@@ -369,11 +395,33 @@ export class WebRTCSignaling {
         this._setStatus("Connecting to server.");
 
         this._ws_conn = new WebSocket(this._server);
+        let live = true;
+        this._forget_socket = () => { live = false; };
+        const own = (handler) => (event) => { if (live) handler.call(this, event); };
 
-        this._ws_conn.addEventListener('open', this._onServerOpen.bind(this));
-        this._ws_conn.addEventListener('error', this._onServerError.bind(this));
-        this._ws_conn.addEventListener('message', this._onServerMessage.bind(this));
-        this._ws_conn.addEventListener('close', this._onServerClose.bind(this));
+        this._ws_conn.addEventListener('open', own(this._onServerOpen));
+        this._ws_conn.addEventListener('error', own(this._onServerError));
+        this._ws_conn.addEventListener('message', own(this._onServerMessage));
+        this._ws_conn.addEventListener('close', own(this._onServerClose));
+    }
+
+    /**
+     * Starts a new session in place of one whose media path failed while this
+     * socket stayed up: the socket is closed without waiting for its close
+     * (which a dead path can hold back for a long time), whatever it still
+     * reports is ignored, among it the 4001 the server's newest-wins sends a
+     * holder it had not reaped yet, and `ondisconnect(true)` has the app
+     * reconnect as after a server-side drop.
+     */
+    reconnect() {
+        this._forget_socket();
+        if (this._retry_timer) {
+            clearTimeout(this._retry_timer);
+            this._retry_timer = null;
+        }
+        try { if (this._ws_conn) this._ws_conn.close(); } catch (e) { /* already closing */ }
+        this.state = 'disconnected';
+        if (this.ondisconnect !== null) this.ondisconnect(true);
     }
 
     /** Closes the socket; the close is reported as `ondisconnect(false)`, not as a drop. */

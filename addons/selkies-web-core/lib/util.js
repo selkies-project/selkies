@@ -321,12 +321,16 @@ export function getRoutePrefix() {
     return dirPath.replace(/\/$/, '');
 }
 
+/** How long `serverAnswers` and `entryPageTag` wait for an answer. */
+const SERVER_ANSWER_MS = 5000;
+
 /**
  * The server's answer to a plain GET on one of its endpoints, or null where it
- * gave none: nothing answered, or the answer says it is not up (502, 503, 504:
- * a gateway in front of a stopped server, or the server itself still
- * starting). A page reloaded into a server stopping or starting lands on an
- * error page with nothing left to retry, so a core reloads only once this
+ * gave none: nothing answered within SERVER_ANSWER_MS (a path that swallows
+ * packets holds a fetch open for minutes), or the answer says it is not up
+ * (502, 503, 504: a gateway in front of a stopped server, or the server itself
+ * still starting). A page reloaded into a server stopping or starting lands on
+ * an error page with nothing left to retry, so a core reloads only once this
  * returns an answer.
  * @param {string} url
  * @param {Object<string, string>=} headers
@@ -334,8 +338,26 @@ export function getRoutePrefix() {
  */
 export async function serverAnswers(url, headers) {
     try {
-        const res = await fetch(url, { cache: 'no-store', headers });
+        const signal = typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(SERVER_ANSWER_MS) : undefined;
+        const res = await fetch(url, { cache: 'no-store', headers, signal });
         return [502, 503, 504].includes(res.status) ? null : res;
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * The validators (`ETag`, `Last-Modified`) the server answers for the page's
+ * own entry document now: two answers differ when a new build is served.
+ * @param {Object<string, string>} [headers] Credentials the page's API calls carry.
+ * @returns {Promise<?string>} Null when the server does not answer.
+ */
+export async function entryPageTag(headers) {
+    try {
+        const signal = typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(SERVER_ANSWER_MS) : undefined;
+        const res = await fetch(window.location.href, { method: 'HEAD', cache: 'no-store', headers, signal });
+        if (!res.ok) return null;
+        return `${res.headers.get('etag') || ''}|${res.headers.get('last-modified') || ''}`;
     } catch (e) {
         return null;
     }

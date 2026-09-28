@@ -70,7 +70,7 @@
  * `serverSettings`, `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
  * `clientRoleUpdate`, `toggleDashboard`, `toggleTouchGamepad`. Flags read:
  * `window.__selkiesModeSwitching` (a mode switch in progress suppresses the
- * recovery reloads), `window.__selkiesAuthProbe` (re-presents the
+ * recovery reconnects), `window.__selkiesAuthProbe` (re-presents the
  * login after an auth drop), `window.clipboard_enabled`.
  * @module
  */
@@ -87,7 +87,7 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, serverAnswers } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers } from './lib/util.js';
 import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
@@ -295,6 +295,16 @@ export default function webrtc() {
 	 * page cannot re-enter the takeover loop.
 	 */
 	let fatalConnectionHalt = false;
+	/** The entry page's validators when the first session connected (`entryPageTag`). */
+	let entryPageBaseline = null;
+	/**
+	 * How long a peer connection may stay `failed` or `disconnected` before a
+	 * new session replaces it: `failed` is final, and its short grace only lets
+	 * a signaling drop arriving with it take the reconnect instead;
+	 * `disconnected` heals by itself when the path comes back in time.
+	 */
+	const PC_FAILED_GRACE_MS = 400;
+	const PC_DISCONNECTED_GRACE_MS = 8000;
 	/**
 	 * Last stream resolution asked of the server, in physical pixels; compared
 	 * with the track's intrinsic size to detect a realized size that differs
@@ -858,8 +868,8 @@ export default function webrtc() {
 
 	/**
 	 * Watchdog tick: resends START_VIDEO while the playback clock has not moved
-	 * past `mark`, up to RESUME_WATCHDOG_MAX_ATTEMPTS, then reloads to
-	 * reconnect unless a fatal verdict or a mode switch forbids it. A tab
+	 * past `mark`, up to RESUME_WATCHDOG_MAX_ATTEMPTS, then reconnects in place
+	 * unless a fatal verdict or a mode switch forbids it. A tab
 	 * hidden again stands the watchdog down, the visibility path owning that
 	 * state, and so does a stream the server declined, which no resend brings
 	 * back. Each attempt also replays the element, since one the browser
@@ -884,8 +894,8 @@ export default function webrtc() {
 		resumeWatchdogAttempts = 0;
 		if (fatalConnectionHalt) return;
 		if (typeof window !== 'undefined' && window.__selkiesModeSwitching) return;
-		console.warn('[webrtc] no video after resuming; reloading to reconnect.');
-		location.reload();
+		console.warn('[webrtc] no video after resuming; reconnecting in place.');
+		webrtc.signaling.reconnect();
 	}
 
 	/**
@@ -3006,6 +3016,10 @@ export default function webrtc() {
 			};
 
 			signaling.ondisconnect = (reconnect) => {
+				if (pcRecoveryTimer !== null) {
+					clearTimeout(pcRecoveryTimer);
+					pcRecoveryTimer = null;
+				}
 				videoElement.style.cursor = "auto";
 				incomingClipboard.reset();
 				releaseWakeLock();
@@ -3059,15 +3073,24 @@ export default function webrtc() {
 
 			/**
 			 * Once the server tears the pipeline down only a fresh SDP exchange
-			 * brings the picture back, so `failed` and `disconnected` reload to
-			 * reconnect after a grace: `disconnected` can self-heal and gets the
-			 * longer one, `failed` is final.
+			 * brings the picture back, so `failed` and `disconnected` start a new
+			 * session in place (`WebRTCSignaling.reconnect`) after a grace:
+			 * `disconnected` can self-heal and gets the longer one, `failed` is
+			 * final. A signaling socket that dropped reconnects on its own. The
+			 * page reloads only when a session reconnected to a server whose
+			 * entry page changed (`entryPageTag`): a new build these scripts may
+			 * not speak.
 			 */
 			webrtc.onconnectionstatechange = (state) => {
 				videoConnected = state;
 				if (videoConnected === "connected") {
 					status = state;
 					try { sessionStorage.removeItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
+					entryPageTag(sessionAuthHeaders()).then((tag) => {
+						if (tag === null) return;
+						if (entryPageBaseline === null) entryPageBaseline = tag;
+						else if (tag !== entryPageBaseline) location.reload();
+					});
 					if (pcRecoveryTimer !== null) {
 						clearTimeout(pcRecoveryTimer);
 						pcRecoveryTimer = null;
@@ -3080,14 +3103,15 @@ export default function webrtc() {
 				} else if (state === "failed" || state === "disconnected") {
 					if (input) input.stopRumble();
 					if (!fatalConnectionHalt && pcRecoveryTimer === null) {
-						const graceMs = state === "failed" ? 1500 : 8000;
+						const graceMs = state === "failed" ? PC_FAILED_GRACE_MS : PC_DISCONNECTED_GRACE_MS;
 						pcRecoveryTimer = setTimeout(() => {
 							pcRecoveryTimer = null;
 							const st = webrtc.peerConnection && webrtc.peerConnection.connectionState;
 							if (st === "connected" || fatalConnectionHalt) return;
 							if (typeof window !== 'undefined' && window.__selkiesModeSwitching) return;
-							console.warn(`[webrtc] connection ${st}; reloading to reconnect.`);
-							location.reload();
+							if (signaling.state !== 'connected') return;
+							console.warn(`[webrtc] connection ${st}; reconnecting in place.`);
+							signaling.reconnect();
 						}, graceMs);
 					}
 				}
