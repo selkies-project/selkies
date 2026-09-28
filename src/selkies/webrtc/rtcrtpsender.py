@@ -89,6 +89,12 @@ logger = logging.getLogger(__name__)
 RTT_ALPHA = 0.85
 # Receive-only reporters answered per sender report (libwebrtc answers at most 50 per XR).
 RRTR_REPORTERS_MAX = 50
+# How long a peer may send nothing at all before this sender stops: a browser sends
+# feedback for whatever it receives and checks consent on its path every few seconds
+# (2.5 s in libwebrtc, about 5 s in Firefox's stack) even while a still screen sends it
+# nothing, so a peer silent this long is gone (asleep, off the network), where ICE
+# consent would keep the stream going to it for half a minute.
+PEER_SILENCE_S = 10.0
 
 
 def random_sequence_number() -> int:
@@ -180,6 +186,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # supplies no MediaStream grouping.
         self._stream_id = str(uuid.uuid4())
         self._enabled = True
+        self._peer_silent = False
         self.__encoder: Optional[Encoder] = None
         # The negotiated codecs and the one frames go out as; None drops them.
         self.__codecs: list[RTCRtpCodecParameters] = []
@@ -483,6 +490,20 @@ class RTCRtpSender(AsyncIOEventEmitter):
         """
         self.emit("pli")
 
+    def _peer_gone(self) -> bool:
+        """Whether the peer has sent nothing at all for PEER_SILENCE_S, so frames are not
+        sent to a client that left without a goodbye. Its first packet after the silence
+        asks for a key frame: the frames skipped meanwhile broke the prediction chain, and
+        `_describe` already leaves out the ones predicting from them."""
+        silent = time.monotonic() - self.transport._peer_heard_at() > PEER_SILENCE_S
+        if silent != self._peer_silent:
+            self._peer_silent = silent
+            logger.info("%s sender %s: the peer %s", self.__kind, self._ssrc,
+                        "went silent; sending stopped" if silent else "is back; sending again")
+            if not silent:
+                self._emit_pli_event()
+        return silent
+
     def steer_fec(self, loss_fraction: float) -> None:
         """Set the FlexFEC repair density from a measured loss fraction: one
         repair per group under 2% loss, two under 8%, three above, read on a
@@ -497,7 +518,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # If the sender is disabled, drop the frame instead of packing it.
         # We still want to read from the track in order to avoid frames
         # accumulating in memory.
-        if not self._enabled or self.__send_codec is None:
+        if not self._enabled or self.__send_codec is None or self._peer_gone():
             return None
 
         if self.__encoder is None:

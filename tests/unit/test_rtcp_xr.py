@@ -54,6 +54,9 @@ class FakeTransport:
     def _unregister_rtp_sender(self, sender) -> None:
         pass
 
+    def _peer_heard_at(self) -> float:
+        return time.monotonic()
+
     async def _send_rtp(self, data: bytes, rtc_class=None, twcc_seq=None) -> bool:
         if rtp.is_rtcp(data):
             self.rtcp.append(data)

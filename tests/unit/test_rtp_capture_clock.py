@@ -124,6 +124,9 @@ class FakeTransport:
     def _unregister_rtp_sender(self, sender) -> None:
         pass
 
+    def _peer_heard_at(self) -> float:
+        return time.monotonic()
+
     def _twcc_next(self, size: int) -> int:
         self.seq = (self.seq + 1) & 0xFFFF
         return self.seq

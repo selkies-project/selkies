@@ -43,6 +43,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 from collections.abc import Callable
 from typing import Optional, Union, cast
 
@@ -541,6 +542,8 @@ class Connection:
         self._remote_candidates: list[Candidate] = []
         self._remote_candidates_end = False
         self._query_consent_task: Optional[asyncio.Task] = None
+        # When the peer was last heard from: media, DTLS, SCTP, or its consent checks.
+        self.last_received = time.monotonic()
         self._queue: asyncio.Queue[tuple[Optional[bytes], Optional[int]]] = (
             asyncio.Queue()
         )
@@ -1390,6 +1393,7 @@ class Connection:
                     return await self.close()
 
     def data_received(self, data: Optional[bytes], component: Optional[int]) -> None:
+        self.last_received = time.monotonic()
         self._queue.put_nowait((data, component))
 
     def request_received(
@@ -1415,6 +1419,7 @@ class Connection:
         except ValueError:
             self.respond_error(message, addr, protocol, (400, "Bad Request"))
             return
+        self.last_received = time.monotonic()
 
         # 7.2.1.1. Detecting and Repairing Role Conflicts
         if self.ice_controlling and "ICE-CONTROLLING" in message.attributes:

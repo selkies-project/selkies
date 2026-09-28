@@ -898,6 +898,11 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         if self._pacer is not None:
             self._pacer.note_keyframe(total_payload_bytes, natural)
 
+    def _peer_heard_at(self) -> float:
+        """Monotonic time the peer was last heard from on the ICE path: media, DTLS,
+        SCTP, or one of its consent checks."""
+        return self.transport._connection.last_received
+
     def _send_delay(self) -> float:
         """Seconds until a packet handed over now is on the wire."""
         return self._pacer.drain_s() if self._pacer is not None else 0.0
