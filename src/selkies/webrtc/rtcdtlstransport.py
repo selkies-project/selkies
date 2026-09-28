@@ -92,9 +92,13 @@ TWCC_HISTORY_S = 2.0
 # How far back the least one-way delay is the path's own: short enough that
 # the drift between the two ends' clocks stays a few milliseconds inside it.
 TWCC_DELAY_FLOOR_S = 30.0
-# Consecutive feedback packets whose least delays each grow on the last that
-# read as a queue building.
-TWCC_RISE_FEEDBACKS = 4
+# How far past the path's own delay one-way delay stands before congestion
+# control reads a queue on it.
+TWCC_QUEUE_MS = 25.0
+# The fewest feedback packets a queue is read over, which a still screen's
+# trickle takes a second or more to send; twice as many read one over the
+# newest half of an interval.
+TWCC_STAND_FEEDBACKS = 4
 # Packets sent within this of the one before belong to one burst, and a burst
 # of fewer packets measures nothing.
 TWCC_BURST_GAP_S = 0.001
@@ -1162,17 +1166,26 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         `TWCC_DELAY_FLOOR_S` is the queue that stood through all of it: a key
         frame's burst delays the packets behind it for a moment, while a queue
         the rate has outgrown delays every one of them. A queue still building
-        shows before it stands a whole interval as the least delay of each of
-        the last `TWCC_RISE_FEEDBACKS` feedback packets growing on the one
-        before; the packets behind a burst arrive ever sooner, so a burst never
-        reads that way. The newest arrival's delay over that floor is how deep
-        the queue is by the interval's end, which a growing one has grown into.
+        shows before it stands a whole interval as the least delay of the
+        newest half of its feedback packets standing past the path's own, the
+        least of a few hundred packets: jitter that spreads one-way delay over
+        tens of milliseconds, as a Wi-Fi hop does, never lifts all of those,
+        where a row of rising feedback packets comes from it once in 24
+        intervals, and the packets behind a burst arrive ever sooner, so a
+        burst shorter than half an interval never reads that way either. An
+        interval of fewer than `TWCC_STAND_FEEDBACKS` feedback packets, a still
+        screen's trickle, reads no queue: jitter lifts the least of one or two
+        of them past any allowance, and a verdict there would take the
+        trickle's goodput for the path's capacity. The newest arrival's delay
+        over that floor is how deep the queue is by the interval's end, which a
+        growing one has grown into.
 
         Returns:
             Loss and goodput over the drained interval, with the standing queue,
-            the queue still building (None unless it rose through the last
-            feedback packets), and the depth, in milliseconds (None without a
-            delay measured), or None when no feedback arrived in it.
+            the queue still building (None unless the newest half of the
+            interval stood past `TWCC_QUEUE_MS`), and the depth, in milliseconds
+            (None without a delay measured or with too few feedback packets to
+            read one), or None when no feedback arrived in it.
         """
         window = self._twcc_window
         packets = window["received"] + window["lost"]
@@ -1187,12 +1200,14 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             while floor[0][0] < now - TWCC_DELAY_FLOOR_S:
                 floor.popleft()
             least = min(d for _, d in floor)
-            queue_ms = (window["delay_min"] - least) * 1000.0
-            depth_ms = (window["delay_last"] - least) * 1000.0
-            recent = window["feedback_mins"][-TWCC_RISE_FEEDBACKS:]
-            if (len(recent) == TWCC_RISE_FEEDBACKS
-                    and all(b > a for a, b in zip(recent, recent[1:]))):
-                rising_ms = (recent[-1] - least) * 1000.0
+            mins = window["feedback_mins"]
+            if len(mins) >= TWCC_STAND_FEEDBACKS:
+                queue_ms = (window["delay_min"] - least) * 1000.0
+                depth_ms = (window["delay_last"] - least) * 1000.0
+            if len(mins) >= 2 * TWCC_STAND_FEEDBACKS:
+                newest_ms = (min(mins[len(mins) // 2:]) - least) * 1000.0
+                if newest_ms > TWCC_QUEUE_MS:
+                    rising_ms = newest_ms
         return {
             "received": window["received"],
             "lost": window["lost"],

@@ -21,8 +21,10 @@ it, parses whole.
 The same interval measures the queue standing on the path from one-way delay:
 the feedback's reference time puts every arrival on the receiver's one clock,
 so a queue that grows a little with every frame, with nothing lost, reads as a
-queue, while delay that only jitters, or one key frame's burst, does not, and
-the 24-bit reference time wrapping changes nothing.
+queue, and so does one standing through feedback that comes only four times a
+second, while delay that only jitters, even as widely as a Wi-Fi hop spreads it
+and over a still screen's trickle, or one key frame's burst, does not, and the
+24-bit reference time wrapping changes nothing.
 """
 from collections import deque
 import os
@@ -288,9 +290,47 @@ def main() -> int:
     queues = run_delay(lambda t: 0.020 + rng.uniform(0.0, 0.015), 10.0)
     res.check("delay that only jitters never reads as a standing queue, or a rising one",
               max(queues) < 25 and max((r or 0.0) for r in rising) < 25, ([round(q, 1) for q in queues], rising))
+    epoch = {"until": -1.0, "extra": 0.0}
+
+    def wifi(t: float) -> float:
+        """20 ms, plus up to 40 ms redrawn at exponential epochs of 20 ms on average."""
+        if t >= epoch["until"]:
+            epoch["extra"] = rng.uniform(0.0, 0.040)
+            epoch["until"] = t + rng.expovariate(1 / 0.020)
+        return 0.020 + epoch["extra"]
+
+    queues = run_delay(wifi, 300.0)
+    res.check("delay a Wi-Fi hop spreads over 40 ms never reads as a standing queue, or a rising one",
+              max(queues) < 25 and max((r or 0.0) for r in rising) < 25,
+              ([round(q, 1) for q in queues if q >= 25], [round(r, 1) for r in rising if r]))
     queues = run_delay(lambda t: 0.020 + (0.120 if 4.0 <= t < 4.05 else 0.0), 8.0)
     res.check("one key frame's burst does not either", max(queues) < 25 and not any(rising),
               ([round(q, 1) for q in queues], rising))
+
+    def trickle(tr, start: float, seconds: float, per_second: int, delay) -> list:
+        """`per_second` lone packets a second, each fed back on its own, drained every second."""
+        seq, windows = 20000, []
+        for second in range(int(start), int(start + seconds)):
+            for i in range(per_second):
+                t = second + i / per_second
+                tr._twcc_history[seq] = (PACKET_BYTES, t)
+                tr._twcc_process_feedback(pack_twcc_fci(seq, [5_000_000.0 + (t + delay(t)) * 1000.0], 0))
+                seq = (seq + 1) & 0xFFFF
+            windows.append(tr.take_twcc_window())
+        return windows
+
+    tr = transport()
+    run_delay(lambda t: 0.020, 3.0, tr=tr)
+    epoch["until"] = -1.0
+    thin = trickle(tr, 3.0, 600.0, 2, wifi)
+    res.check("nor does a still screen's trickle over it, two lone packets a second, which reads no queue",
+              all(w["queue_ms"] is None and w["queue_rising_ms"] is None for w in thin),
+              [w["queue_ms"] for w in thin if w["queue_ms"] is not None][:10])
+    tr = transport()
+    run_delay(lambda t: 0.020, 3.0, tr=tr)
+    queues = [w["queue_ms"] for w in trickle(tr, 3.0, 4.0, 4, lambda t: 0.020 if t < 4.0 else 0.080)]
+    res.check("while a queue standing through four feedback packets a second reads as one",
+              queues[0] < 25 and queues[2] > 50, [round(q, 1) for q in queues])
     tr = transport()
     run_delay(lambda t: 0.020, 3.0, tr=tr, offset_ms=(0xFFFFFF - 20) * 64.0)
     queues = run_delay(lambda t: 0.020, 3.0, tr=tr, start=3.0, offset_ms=(0xFFFFFF - 20) * 64.0)

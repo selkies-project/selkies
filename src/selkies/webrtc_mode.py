@@ -54,6 +54,7 @@ from .sessions import current_session_tokens
 from .webrtc_media_pipeline import (MediaPipelinePixel,
                                     ScreenCapture as PixelfluxScreenCapture)
 from .webrtc.codecs import configure_multiopus
+from .webrtc.rtcdtlstransport import TWCC_QUEUE_MS
 from .webrtc_signaling_client import WebRTCSignalingClient
 from .webrtc_signaling_server import WebRTCPeerManagement
 from .input_handler import WebRTCInput
@@ -77,9 +78,6 @@ from .audio_control import AudioControl
 
 logger = logging.getLogger("webrtc")
 
-# How far a tick's least one-way delay stands past the path's own before
-# congestion control reads a queue on it (`take_twcc_window`).
-PATH_QUEUE_MS = 25.0
 
 
 def _selkies_is_aioice_frame_chain(exc: BaseException) -> bool:
@@ -2711,7 +2709,7 @@ class WebRTCService(BaseStreamingService):
         """GCC-style bitrate adaptation from transport-wide-cc receiver feedback:
         per display, follow the slowest of ITS peers' goodput estimates with
         headroom, back off on the first tick whose one-way delay shows a queue
-        standing, or still building, `PATH_QUEUE_MS` past the path's own
+        standing, or still building, `TWCC_QUEUE_MS` past the path's own
         (`take_twcc_window`), to what the path delivered meanwhile, or
         multiplicatively on two ticks of loss in a
         row, and hold there before recovering (`CongestionSteer`), and retarget
@@ -2799,7 +2797,7 @@ class WebRTCService(BaseStreamingService):
                 ceiling = max(lo_kbps, min(hi_kbps, ceiling))
                 queue_ms = bucket["queue_ms"]
                 queue_s = None if queue_ms is None else (
-                    max(queue_ms, bucket["depth_ms"]) / 1000.0 if queue_ms > PATH_QUEUE_MS else 0.0)
+                    max(queue_ms, bucket["depth_ms"]) / 1000.0 if queue_ms > TWCC_QUEUE_MS else 0.0)
                 # Goodput may lift the target, never drag it down (see docstring).
                 steer = self._congestion_steer.setdefault(did, CongestionSteer())
                 target = round(steer.target(
