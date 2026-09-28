@@ -6,7 +6,10 @@ server-default 60fps. Reads the server log's "FPS:" line for display2.
 
 Then the primary's rate changes live, through SETTINGS and the `_arg_fps` verb:
 the X server's output must follow to a mode at the new rate (read from xrandr)
-without a capture restarting."""
+without a capture restarting. A display refreshing at an NTSC rate is asked for
+as the fraction it names (60000/1001), which both paths carry whole: a display
+opening at it states 59.94 fps, and the verb applies it rather than refusing
+a rate that is no whole number."""
 import asyncio
 import json
 import os
@@ -131,6 +134,18 @@ def main() -> "H.Results":
                           f"{rate:.2f} Hz")
                 res.check(f"no capture restarts for {fps} fps",
                           "Capture started for" not in H.server_log()[mark:])
+            mark = loglen()
+            await p1.send(f"_arg_fps,{60000 / 1001!r}")
+            res.check("the verb applies an NTSC rate whole",
+                      wait_contains(mark, "Applied framerate live via '_arg_fps': 59.94 fps"),
+                      [ln for ln in H.server_log()[mark:].splitlines() if "fps" in ln][:2])
+            mark3 = loglen()
+            async with websockets.connect(uri, max_size=None) as p3:
+                await asyncio.wait_for(p3.recv(), timeout=10)
+                await p3.send("SETTINGS," + json.dumps(_settings("display2", framerate=60000 / 1001)))
+                res.check("a display opening at an NTSC rate states it whole",
+                          wait_contains(mark3, "59.94 fps."),
+                          [ln for ln in H.server_log()[mark3:].splitlines() if "settings applied" in ln][:1])
 
     asyncio.new_event_loop().run_until_complete(drive())
     res.summary()

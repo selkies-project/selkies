@@ -344,7 +344,7 @@ class WebRTCService(BaseStreamingService):
         self.media_pipeline = MediaPipelinePixel(
             async_event_loop=asyncio.get_running_loop(),
             encoder=self.args.encoder,
-            framerate=int(self.args.framerate),
+            framerate=self.args.framerate,
             # kbps, as consumed by pixelflux.
             video_bitrate=int(self.args.video_bitrate),
             # Enum with a wider server-side value_range: an operator override can
@@ -841,7 +841,7 @@ class WebRTCService(BaseStreamingService):
             await self.media_pipeline.set_audio_bitrate(int(sanitized))
         self.args.audio_bitrate = sanitized
 
-    async def handle_fps_change(self, fps: int, display_id: str = "primary") -> None:
+    async def handle_fps_change(self, fps: float, display_id: str = "primary") -> None:
         """Framerate change for the display whose page sent it; sanitized against
         the server's configured range like the SETTINGS path."""
         sanitized = sanitize_client_setting("framerate", fps, self.settings, logger)
@@ -1981,7 +1981,7 @@ class WebRTCService(BaseStreamingService):
                 pipeline = MediaPipelinePixel(
                     async_event_loop=asyncio.get_running_loop(),
                     encoder=str(setting("encoder")),
-                    framerate=int(setting("framerate")),
+                    framerate=setting("framerate"),
                     video_bitrate=int(setting("video_bitrate")),
                     audio_enabled=False,
                     width=s["w"],

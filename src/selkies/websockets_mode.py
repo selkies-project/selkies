@@ -113,7 +113,7 @@ from .input_handler import (
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
-from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting, socket_dir
+from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, fps_label, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting, socket_dir
 from .settings import settings as app_settings
 from . import sessions
 from . import audit
@@ -1080,7 +1080,7 @@ class SelkiesStreamingApp:
     def __init__(
         self,
         async_event_loop: asyncio.AbstractEventLoop,
-        framerate: int,
+        framerate: float,
         encoder: str,
         data_streaming_server: Optional["DataStreamingServer"] = None,
         mode: str = "websockets",
@@ -1325,9 +1325,9 @@ class SelkiesStreamingApp:
 
     def set_framerate(self, framerate: Union[int, float]) -> None:
         """Store the session default framerate; applies at the next pipeline (re)start."""
-        self.framerate = int(framerate)
+        self.framerate = framerate
         logger_app.debug(
-            f"Framerate for {self.encoder} set to {self.framerate}. Restart pipeline if active."
+            f"Framerate for {self.encoder} set to {fps_label(framerate)} fps. Restart pipeline if active."
         )
 
 
@@ -1759,7 +1759,7 @@ class DataStreamingServer(BaseStreamingService):
         if display_id == 'primary':
             # Only the primary controller moves the session default later displays seed from.
             self.app.set_framerate(sanitized)
-            data_logger.debug(f"Session default framerate updated to {int(sanitized)} for new displays.")
+            data_logger.debug(f"Session default framerate updated to {fps_label(sanitized)} fps for new displays.")
         display_state = self.display_clients.get(display_id)
         if display_state is not None:
             display_state["framerate"] = sanitized
@@ -1768,7 +1768,7 @@ class DataStreamingServer(BaseStreamingService):
             try:
                 module.update_framerate(float(sanitized))
                 self._track_capture_settings(display_id, target_fps=float(sanitized))
-                data_logger.info(f"Applied framerate live via '_arg_fps': {sanitized} fps for '{display_id}'")
+                data_logger.info(f"Applied framerate live via '_arg_fps': {fps_label(sanitized)} fps for '{display_id}'")
             except Exception as e:
                 data_logger.warning(f"Live framerate update failed for '{display_id}' ({e}).")
         await self._refresh_display_mode()
@@ -3588,7 +3588,7 @@ class DataStreamingServer(BaseStreamingService):
                 else f"crf {state.get('video_crf')}")
         return (f"Client {raddr} settings applied for '{display_id}': "
                 f"{state.get('width')}x{state.get('height')}, {state.get('encoder')} "
-                f"{rate}, {state.get('framerate')} fps"
+                f"{rate}, {fps_label(state.get('framerate') or self.app.framerate)} fps"
                 + (", software encoding" if state.get('use_cpu') else "") + ".")
 
     def _parse_settings_payload(self, payload_str: str) -> dict:
@@ -3626,7 +3626,7 @@ class DataStreamingServer(BaseStreamingService):
         def get_str(k):
             v = settings_data.get(k)
             return str(v) if v is not None else None
-        parsed["framerate"] = get_int("framerate")
+        parsed["framerate"] = get_number("framerate")
         parsed["video_crf"] = get_int("video_crf")
         parsed["encoder"] = get_str("encoder")
         parsed["video_fullcolor"] = get_bool("video_fullcolor")
@@ -3863,7 +3863,7 @@ class DataStreamingServer(BaseStreamingService):
                             continue
                         for attr in targets:
                             if attr == 'app_framerate':
-                                self.app.set_framerate(int(value))
+                                self.app.set_framerate(value)
                             elif attr == 'app_encoder':
                                 self.app.encoder = value
                                 # Written through: transport services re-seed from the
@@ -4015,6 +4015,7 @@ class DataStreamingServer(BaseStreamingService):
                             )
                             needs_fallback_reconfigure = True
                     if display_state.get('framerate') != old_settings.get('framerate'):
+                        data_logger.info(f"Frame rate for '{display_id}' is now {fps_label(display_state.get('framerate'))} fps.")
                         await self._refresh_display_mode()
         except BaseException:
             # A raise skips the pending re-check below; a reconfigure coalesced

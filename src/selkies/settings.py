@@ -1163,6 +1163,12 @@ def _range_number(text: str) -> Union[int, float]:
     return int(value) if value.is_integer() else value
 
 
+def fps_label(fps: float) -> str:
+    """A frame rate as a log line states it: to a hundredth, without trailing
+    zeros, so 60000/1001 reads 59.94 and 60 reads 60."""
+    return f"{round(float(fps), 2):g}"
+
+
 def parse_bool(value: Any, default: bool = False) -> bool:
     """Resolve a configured value's truth: "true" or "1", case-insensitively,
     ahead of any "|locked" suffix. Everything else is false.

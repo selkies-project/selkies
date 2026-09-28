@@ -56,7 +56,7 @@ import time
 from abc import ABCMeta, abstractmethod
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
-from .settings import RateControlMode, codec_for_encoder, encoder_for_codec, settings as app_settings
+from .settings import RateControlMode, codec_for_encoder, encoder_for_codec, fps_label, settings as app_settings
 from . import stream_stats
 from .audio_control import AudioControl
 from .display_utils import (
@@ -116,7 +116,7 @@ class MediaPipeline(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    async def set_framerate(self, framerate: int) -> None:
+    async def set_framerate(self, framerate: float) -> None:
         pass
 
     @abstractmethod
@@ -192,7 +192,7 @@ class MediaPipelinePixel(MediaPipeline):
         self,
         async_event_loop: asyncio.AbstractEventLoop,
         encoder: str,
-        framerate: int = 30,
+        framerate: float = 30,
         video_bitrate: int = 8000,
         audio_bitrate: int = 128000,
         width: int = 1920,
@@ -479,7 +479,7 @@ class MediaPipelinePixel(MediaPipeline):
             await self._stop_audio_pipeline()
             await self._start_audio_pipeline()
 
-    async def set_framerate(self, framerate: int) -> None:
+    async def set_framerate(self, framerate: float) -> None:
         """Set the pixelflux capture rate, applied live."""
         async with self.async_lock:
             if framerate <= 0 or self.framerate == framerate:
@@ -489,7 +489,7 @@ class MediaPipelinePixel(MediaPipeline):
             if not self._is_screen_capturing or self.capture_module is None:
                 return
             self.capture_module.update_framerate(float(self.framerate))
-            logger.info(f"Updated framerate to: {self.framerate}")
+            logger.info(f"Updated framerate to {fps_label(self.framerate)} fps")
 
     async def dynamic_idr_frame(self) -> None:
         """Request an IDR frame from pixelflux; `idr_pending` holds until it is captured."""

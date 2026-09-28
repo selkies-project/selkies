@@ -8899,8 +8899,8 @@ class WebRTCInput:
                 logger_webrtc_input.warning("Received 'cmd' message without a command string.")
         elif msg_type == "_arg_fps":
             try:
-                fps = int(toks[1])
-                if fps <= 0:
+                fps = float(toks[1])
+                if not 0 < fps < float("inf"):
                     return
                 await self.on_set_fps(fps, display_id)
             except Exception as e:
