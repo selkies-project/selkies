@@ -3,7 +3,13 @@
 must reload itself into the browser's credential prompt (the 401 challenge)
 instead of reconnecting forever against rejected websockets. The reload comes
 from the core's same-origin 401 guard; the guard's loop-breaker caps how many
-reloads a broken credential can cause, so exactly one arrives here."""
+reloads a broken credential can cause, so exactly one arrives here.
+
+A same-origin request that meets the challenge raises the credential prompt
+itself, and a headless engine has nobody to answer it, so the guard's probe
+would wait on it forever. The page therefore carries a password the server
+refuses: Playwright offers it once, then cancels the prompt, which is what a
+user who cannot log in does, and the 401 reaches the page."""
 import os
 import sys
 import time
@@ -32,7 +38,8 @@ def main() -> None:
     })
     with sync_playwright() as p:
         browser = C.launch_browser(p, "chromium")
-        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page = browser.new_page(viewport={"width": 1280, "height": 800},
+                                http_credentials={"username": "selkies", "password": "wrong"})
         navigates = []
         page.on(
             "request",
