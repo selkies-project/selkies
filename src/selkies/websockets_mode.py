@@ -141,15 +141,20 @@ STILL_RESUME_GRACE_SECONDS = 1.0
 # link; one such sample would skew the flat smoothing window for its lifetime.
 RTT_SAMPLE_SANE_MAX_MS = 10000
 BACKPRESSURE_CHECK_INTERVAL_S = 0.5
-# How far past its floor a display's frame round trip stands before
-# congestion control reads a queue on the path (_steer_bitrate_to_link).
+# How far past its floor, beyond half the path's own jitter, a display's frame
+# round trip stands before congestion control reads a queue on the path
+# (_steer_bitrate_to_link).
 LINK_QUEUE_MS = 40.0
+# Weight of each window in the path's jitter.
+LINK_JITTER_GAIN = 0.125
 # Acked frames kept for the link steer's windows: a few seconds at the
 # client's 50 ms ack cadence.
 LINK_ACK_HISTORY = 64
 # Consecutive acks whose round trips each grow on the last that read as a
-# queue building, before the whole window stands over the floor.
+# queue building, before the whole window stands over the floor, on a path
+# that does not jitter; one more per LINK_RISE_JITTER_MS of jitter.
 LINK_RISE_ACKS = 4
+LINK_RISE_JITTER_MS = 3.0
 MAX_UINT16_FRAME_ID = 65535
 FRAME_ID_SUSPICIOUS_GAP_THRESHOLD = (
     MAX_UINT16_FRAME_ID // 2
@@ -389,6 +394,15 @@ def _note_round_trip(display_state: dict, rtt_ms: float, sent_bytes: int, now: f
     display_state.setdefault('link_acks', deque(maxlen=LINK_ACK_HISTORY)).append((now, rtt_ms, sent_bytes))
 
 
+def _round_trip_jitter(round_trips: List[float]) -> float:
+    """The mean change between successive round trips, less the change they
+    share: a queue building or draining moves every round trip by the same
+    step, which is not jitter."""
+    changes = [b - a for a, b in zip(round_trips, round_trips[1:])]
+    trend = sum(changes) / len(changes)
+    return sum(abs(c - trend) for c in changes) / len(changes)
+
+
 def _forget_path(display_state: dict) -> None:
     """Drop what a display's link state learned about the path of the page it
     served, for a new connection taking the display over.
@@ -398,7 +412,7 @@ def _forget_path(display_state: dict) -> None:
     minutes the floor remembers, and congestion control would back its rate
     off on every tick. The steered rate stays as the starting point.
     """
-    for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer', 'link_delivered_bps'):
+    for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer', 'link_delivered_bps', 'link_jitter_ms'):
         display_state.pop(key, None)
 
 
@@ -2688,21 +2702,45 @@ class DataStreamingServer(BaseStreamingService):
         still building shows sooner, as the last `LINK_RISE_ACKS` round trips
         each longer than the one before and past `LINK_QUEUE_MS`; the frames
         behind a key frame's burst arrive ever sooner, so it never reads that
-        way. The queue's depth is read from the newest round trip, which a
-        growing queue has grown into. The window's delivery rate, the bytes of
-        the frames it acked over the time they took to be acked, is the path's
+        way. A path that jitters asks for more: a Wi-Fi hop, or a lossy one
+        whose retransmissions hold a stream back, spreads round trips over
+        tens of milliseconds with no queue at all, which puts four acks in a
+        rising row once in 24 windows and now and then lifts even the least of
+        a window's ten. Its jitter is the mean change between successive round
+        trips less the change they share, which a queue building or draining
+        adds to every one (`_round_trip_jitter`), taken from the first acks and
+        then averaged over the windows that read no queue. Both verdicts then
+        stand half that jitter higher, and a building queue rises through one
+        more ack per `LINK_RISE_JITTER_MS` of it: four jittered acks rise in a
+        row once in 24 windows and ten once in 3.6 million, while a path that
+        does not jitter keeps the four and reads a queue as soon as it can.
+        Before a session has that many acks, the row it has counts; the late
+        round trips a lossy path's stalls leave count toward its jitter, so
+        they lengthen the row rather than end one. A window of fewer than
+        eight acks, a caret blinking on a still screen, is judged with the acks
+        before it, since the least of two round trips says little. Nor is a
+        window whose round trips fell while it delivered more than the rate in
+        force: its frames were held back a moment (a lost segment's
+        retransmission, the gate's pause) and are arriving together, which a
+        queue the rate outgrew never does; an encoder running over its target
+        keeps its round trips up.
+
+        The queue's depth is read from the newest round trip, which a growing
+        queue has grown into. The window's delivery rate, the bytes of the
+        frames it acked over the time they took to be acked, is the path's
         capacity while that queue stands, or the rate the window before it
-        delivered where that is higher: a path that stalls for a moment acks
-        a window's frames late and together, which reads as a queue over a
-        slow path, and a path carries at least what it just delivered unless
-        it is losing capacity, which the next window then shows. Both go to
-        the transports' shared
-        `CongestionSteer`, which backs off on the first such window. A display
-        the backpressure gate holds counts as queued, measured by the frames
-        still acked from before the gate shut, or as a queue of unknown depth
-        once none are. A window with nothing acked otherwise moves nothing: a
-        still screen sends no frames, and a verdict from a round trip measured
-        before it would steer an idle stream on stale evidence.
+        delivered where that is higher: a path that stalls for a moment acks a
+        window's frames late and together, which reads as a queue over a slow
+        path, and a path carries at least what it just delivered unless it is
+        losing capacity, which the next window then shows. Both go to the
+        transports' shared `CongestionSteer`, which backs off on the first such
+        window. A display the backpressure gate holds is judged by the frames
+        still acked from before the gate shut, like any window, since a
+        moment's delay trips the gate without a queue behind it; once none
+        are, it counts as a queue of unknown depth. A window with nothing acked
+        otherwise moves nothing: a still screen sends no frames, and a verdict
+        from a round trip measured before it would steer an idle stream on
+        stale evidence.
 
         Every display behind one bottleneck sees the same queue and settles on a
         share of it, where the backpressure gate alone pauses whichever falls
@@ -2720,18 +2758,28 @@ class DataStreamingServer(BaseStreamingService):
         if target <= 0 or module is None:
             return
         floor_ms = display_state.get('rtt_floor_ms') or 0.0
-        least_ms = min((a[1] for a in window), default=0.0)
+        stand = [a[1] for a in display_state.get('link_acks', ())][-max(len(window), 2 * LINK_RISE_ACKS):]
+        least_ms = min(stand, default=0.0) if window else 0.0
         if not window:
             delivered_bps, queue_s = 0.0, LINK_QUEUE_MS / 1000.0
         else:
             span = window[-1][0] - window[0][0]
             delivered_bps = (window[-1][2] - window[0][2]) * 8 / span if span > 0 else 0.0
             newest_ms = window[-1][1] - floor_ms
-            recent = [a[1] for a in window[-LINK_RISE_ACKS:]]
-            rising = (len(recent) == LINK_RISE_ACKS
-                      and all(b > a for a, b in zip(recent, recent[1:])))
-            queued = (gated or least_ms - floor_ms > LINK_QUEUE_MS
-                      or (rising and newest_ms > LINK_QUEUE_MS))
+            jitter_ms = display_state.get('link_jitter_ms')
+            if jitter_ms is None and len(stand) >= LINK_RISE_ACKS:
+                jitter_ms = display_state['link_jitter_ms'] = _round_trip_jitter(stand)
+            allowed_ms = LINK_QUEUE_MS + (jitter_ms or 0.0) / 2
+            run = LINK_RISE_ACKS + round((jitter_ms or 0.0) / LINK_RISE_JITTER_MS)
+            row = [a[1] for a in display_state['link_acks']][-run:]
+            rising = (len(row) >= LINK_RISE_ACKS and all(b > a for a, b in zip(row, row[1:]))
+                      and row[-1] - floor_ms > allowed_ms)
+            catching_up = (delivered_bps > self._video_bitrate_kbps(display_state) * 1000
+                           and window[-1][1] < window[0][1])
+            queued = (least_ms - floor_ms > allowed_ms or rising) and not catching_up
+            if not queued and not catching_up and jitter_ms is not None:
+                display_state['link_jitter_ms'] = jitter_ms + LINK_JITTER_GAIN * (
+                    _round_trip_jitter(stand) - jitter_ms)
             queue_s = max(newest_ms, LINK_QUEUE_MS) / 1000.0 if queued else 0.0
             previous_bps = display_state.get('link_delivered_bps', 0.0)
             display_state['link_delivered_bps'] = delivered_bps

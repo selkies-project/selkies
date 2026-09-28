@@ -8,11 +8,15 @@ queue still building is read before it stands a whole window, and a gated
 display is measured by the frames still acked from before the gate shut. A
 window a stall acked late backs off from what the path delivered just before.
 A round trip at its floor never moves the rate, one key frame's burst does not
-either, a window with nothing acked moves nothing, a page taking the display
-over is measured against its own path, and whatever else applies a bitrate
-applies the steered one.
+either, round trips a jittering path spreads or a lossy one holds back never do,
+a gate shut on a moment's delay or frames held back a moment and delivered
+together do not either, while a queue behind an encoder running over its target
+still does; a window with nothing acked moves nothing, a page taking the
+display over is measured against its own path, and whatever else applies a
+bitrate applies the steered one.
 """
 import os
+import random
 import sys
 from collections import deque
 
@@ -53,15 +57,18 @@ def fresh_state():
 state = fresh_state()
 
 
-def run(rtt_ms, start, seconds, delivered_kbps=None, acks=True, spike_at=None):
-    """Ack every 50 ms at `rtt_ms` with the path delivering `delivered_kbps` (by
-    default the rate in force: the stream, not the path, is the limit), running
-    the steer every half second as the backpressure loop does."""
+def run(rtt_ms, start, seconds, delivered_kbps=None, acks=True, spike_at=None, every=1):
+    """Ack every 50 ms (every `every` x 50 ms) at `rtt_ms` with the path
+    delivering `delivered_kbps` (by default the rate in force: the stream, not
+    the path, is the limit), running the steer every half second as the
+    backpressure loop does."""
     t = start
     step = 0.05
+    n = 0
     while t < start + seconds - 1e-9:
         t = round(t + step, 3)
-        if acks:
+        n += 1
+        if acks and n % every == 0:
             rate = delivered_kbps if delivered_kbps is not None else server._video_bitrate_kbps(state)
             state["sent_bytes"] += rate * 125 * step
             rtt = rtt_ms(t) if callable(rtt_ms) else rtt_ms
@@ -112,9 +119,51 @@ state = fresh_state()
 module.rates.clear()
 t = run(20.0, 0.0, 5, delivered_kbps=3000.0)
 start = t
-run(lambda at: 20.0 if at < start + 0.3 else 20.0 + (at - start - 0.3) * 1000.0, t, 0.5, delivered_kbps=3000.0)
+run(lambda at: 20.0 if at < start + 0.1 else 20.0 + (at - start - 0.1) * 500.0, t, 0.5, delivered_kbps=3000.0)
 check("a queue still building reads as one before the whole window stands over the floor",
       module.rates == [1950], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+rng = random.Random(1)
+t = run(lambda at: 20.0 + rng.uniform(0.0, 40.0) + rng.uniform(0.0, 40.0), 0.0, 600)
+check("round trips a Wi-Fi hop spreads over 80 ms, both ways, with no queue never read as one",
+      module.rates == [], module.rates)
+run(lambda at: 20.0 + rng.uniform(0.0, 40.0) + rng.uniform(0.0, 40.0) + max(0.0, at - t - 0.5) * 300.0, t, 2)
+check("while a queue building past that jitter still reads as one", module.rates != [], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+run(lambda at: 20.0 + rng.uniform(0.0, 40.0) + rng.uniform(0.0, 40.0), 0.0, 600, every=5)
+check("nor do they with two acks a window, a caret blinking on a still screen", module.rates == [], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+run(lambda at: 100.0 + rng.uniform(0.0, 2.0) + (125.0 if rng.random() < 0.1 else 0.0), 0.0, 600)
+check("nor do the single late round trips a lossy path's retransmissions leave", module.rates == [], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5)
+state["backpressure_enabled"] = False
+run(20.0, t, 0.5)
+check("a gate shut on a moment's delay that its acked frames do not show backs nothing off",
+      module.rates == [], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5)
+start = t
+run(lambda at: 150.0 - (at - start) * 60.0, t, 0.5, delivered_kbps=4500.0)
+check("nor does a window of frames held back a moment and delivered together, faster than the rate in force",
+      module.rates == [], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5)
+run(120.0, t, 0.5, delivered_kbps=4500.0)
+check("while a queue behind an encoder running over its target still reads as one",
+      module.rates == [3375], module.rates)
 
 state = fresh_state()
 module.rates.clear()
