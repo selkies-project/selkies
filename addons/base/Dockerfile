@@ -590,8 +590,12 @@ ENV PATH="/usr/local/nvidia/bin${PATH:+:${PATH}}"
 ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
 ENV NVIDIA_VISIBLE_DEVICES="all"
 ENV NVIDIA_DRIVER_CAPABILITIES="all"
-# Off because the stream's rate is Selkies' to change; a GL client locked to the
-# framebuffer's refresh would pace itself against a rate that is not the stream's.
+# Off: vsync here costs an application about two frames of input latency, the
+# frames its driver queues behind the fake vblank, and does not reliably keep
+# a GPU-bound one from starving the capture, which a frame limiter does
+# (docs/components/desktop-image.md). GLX takes it as the default an
+# application's own swap interval overrides; NVIDIA's EGL applies it over the
+# application's choice.
 ENV __GL_SYNC_TO_VBLANK="0"
 
 # Package state is already owned by the session user: the recursive chown above
