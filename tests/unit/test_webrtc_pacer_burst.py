@@ -3,9 +3,12 @@
 
 While the link's room is unknown, short, or losing packets, or the pace is
 braked, the burst budget is 5 ms of the pace. A link that transport-cc feedback
-shows delivering a frame's leading burst at twice the encoder's rate or faster takes
-what it delivers in 10 ms, at most libwebrtc's 40 ms of the pace under 63 KB,
-so a frame leaves within the sender's own sends rather than trickling out at
+shows delivering a frame's leading burst at twice the encoder's rate or faster
+takes what it delivers in 10 ms, at most libwebrtc's 40 ms of the pace under
+63 KB, and keeps that room until its rate typically falls below 1.5 times the
+encoder's (the median of the last five estimates; one below the encoder's own
+rate gives the room up at once), so a frame leaves within the sender's own
+sends rather than trickling out at
 the pace behind its first packets; what a frame has beyond the budget queues
 and drains at the pace. The rate comes from the arrivals of each burst's
 unpaced leading bytes (`burst_delivery_bps`).
@@ -17,7 +20,7 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 from selkies.webrtc.pacer import (  # noqa: E402
-    CLASS_VIDEO, LINK_MAX_AGE_S, MAX_BURST_BYTES, RtpPacer,
+    CLASS_VIDEO, LINK_MAX_AGE_S, LINK_SAMPLES, MAX_BURST_BYTES, RtpPacer,
 )
 from selkies.webrtc.rtcdtlstransport import RTCDtlsTransport, burst_delivery_bps  # noqa: E402
 from selkies.webrtc.rtp import pack_twcc_fci  # noqa: E402
@@ -63,6 +66,15 @@ def burst(start_s: float, n: int, rate_bps: float, size: int = 1200, paced_bps: 
     return out
 
 
+def steady(pacer: RtpPacer, bps: float, clear: bool = True) -> None:
+    """Feed `pacer` a link measured at `bps` over every sample its room is judged on,
+    after a loss report that clears what it measured before, unless `clear` is False."""
+    if clear:
+        pacer.set_link_bps(0.0)
+    for _ in range(LINK_SAMPLES):
+        pacer.set_link_bps(bps)
+
+
 async def main_async(res: H.Results) -> None:
     sent: list = []
 
@@ -77,18 +89,18 @@ async def main_async(res: H.Results) -> None:
                   now == 10 and pacer._bytes_queued == 7 * 1200, (now, pacer._bytes_queued))
         await drain(pacer)
 
-        pacer.set_link_bps(5_500_000)
+        steady(pacer, 5_500_000)
         res.check("a link slower than the pace keeps 5 ms of the pace", pacer._debt_cap == NARROW_8M,
                   pacer._debt_cap)
-        pacer.set_link_bps(15_000_000)
+        steady(pacer, 15_000_000)
         res.check("a link under twice the encoder's rate keeps 5 ms of the pace", pacer._debt_cap == NARROW_8M,
                   pacer._debt_cap)
-        pacer.set_link_bps(16_000_000)
+        steady(pacer, 16_000_000)
         res.check("a link at twice the encoder's rate takes what it delivers in 10 ms",
                   pacer._debt_cap == 20_000, pacer._debt_cap)
-        pacer.set_link_bps(40_000_000)
+        steady(pacer, 40_000_000)
         res.check("a link with room takes what it delivers in 10 ms", pacer._debt_cap == 50_000, pacer._debt_cap)
-        pacer.set_link_bps(1e9)
+        steady(pacer, 1e9)
         res.check("a fast link takes libwebrtc's capped burst", pacer._debt_cap == MAX_BURST_BYTES,
                   pacer._debt_cap)
         now = await frame(pacer, sent, 20_400)
@@ -100,6 +112,27 @@ async def main_async(res: H.Results) -> None:
         ms = await drain(pacer)
         res.check("the rest drains at the pace", not pacer._bytes_queued and 8 <= ms <= 60, ms)
 
+        steady(pacer, 13_000_000, clear=False)
+        res.check("a link with room keeps it down to 1.5 times the encoder's rate",
+                  pacer._debt_cap == 16_250, pacer._debt_cap)
+        steady(pacer, 11_000_000, clear=False)
+        res.check("and loses it below that", pacer._debt_cap == NARROW_8M, pacer._debt_cap)
+        steady(pacer, 13_000_000, clear=False)
+        res.check("which only twice the encoder's rate gives back", pacer._debt_cap == NARROW_8M,
+                  pacer._debt_cap)
+        steady(pacer, 40_000_000)
+        pacer.set_link_bps(11_000_000)
+        res.check("one estimate below the room keeps it, the burst sized by that estimate",
+                  pacer._debt_cap == 13_750, pacer._debt_cap)
+        for _ in range(2):
+            pacer.set_link_bps(11_000_000)
+        res.check("the typical estimate falling below it gives the room up", pacer._debt_cap == NARROW_8M,
+                  pacer._debt_cap)
+        steady(pacer, 40_000_000)
+        pacer.set_link_bps(7_000_000)
+        res.check("one estimate below the encoder's rate gives it up at once", pacer._debt_cap == NARROW_8M,
+                  pacer._debt_cap)
+        pacer.set_link_bps(1e9)
         pacer.set_link_bps(0.0)
         res.check("wire loss returns the budget to 5 ms of the pace", pacer._debt_cap == NARROW_8M,
                   pacer._debt_cap)

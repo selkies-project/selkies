@@ -19,9 +19,11 @@
 #   * The burst budget always covers one max-size packet, otherwise a packet
 #     could never become affordable and its class would wedge forever.
 #   * The burst budget follows the link, never the pace alone: 5 ms of the
-#     pace until transport-cc feedback shows the wire delivering frames'
-#     leading bursts at twice the encoder's rate or more without loss, then
-#     what that link delivers in 10 ms (`_apply_pace`, `set_link_bps`).
+#     pace until transport-cc feedback typically shows the wire delivering
+#     frames' leading bursts at twice the encoder's rate or more without loss,
+#     then what that link delivers in 10 ms until it typically falls below 1.5
+#     times the encoder's rate, loses a packet, delivers less than the encoder
+#     makes, or goes unmeasured (`_apply_pace`, `set_link_bps`).
 #   * Video is the only droppable class; every other class is bounded by
 #     backpressure on the sender instead.
 #   * The video queue budget is max(CAP_MIN_MS of wire time, IDR_FLOOR_FACTOR x
@@ -47,6 +49,7 @@
 import asyncio
 import logging
 import os
+import statistics
 import time
 from typing import Awaitable, Callable, Dict, Deque, Optional
 from collections import deque
@@ -87,8 +90,12 @@ BURST_LINK_S = 0.010
 BURST_WINDOW_S = 0.040
 MAX_BURST_BYTES = 63_000
 # Room is a link delivering a frame's leading burst at this many times the
-# encoder's rate or faster, measured within LINK_MAX_AGE_S.
+# encoder's rate or faster, typically over the last LINK_SAMPLES feedback
+# packets and measured within LINK_MAX_AGE_S; a link found to have room keeps
+# it down to LINK_KEEP_FACTOR times that rate.
 LINK_HEADROOM_FACTOR = 2.0
+LINK_KEEP_FACTOR = 1.5
+LINK_SAMPLES = 5
 LINK_MAX_AGE_S = 2.0
 # Floor under the burst budget. Credit saturates at the budget, so a budget
 # below one packet leaves that packet unaffordable forever; DTLS records here
@@ -206,6 +213,8 @@ class RtpPacer:
         self._narrow_cap = 0.0
         self._link_bps: Optional[float] = None
         self._link_at = 0.0
+        self._link_recent: Deque[float] = deque(maxlen=LINK_SAMPLES)
+        self._link_room = False
         self._pace_bps = MIN_PACE_BPS
         # Sentinel for "AIMD owns the pace now"; distinct from the recovery
         # clock, which ticks on every pace update.
@@ -290,6 +299,10 @@ class RtpPacer:
             return
         self._link_bps = float(bps)
         self._link_at = time.monotonic()
+        if bps > 0:
+            self._link_recent.append(float(bps))
+        else:
+            self._link_recent.clear()
         self._apply_pace()
 
     @property
@@ -339,6 +352,7 @@ class RtpPacer:
         self._last_pace_update_at = now
         if self._link_bps and now - self._link_at > LINK_MAX_AGE_S:
             self._link_bps = None
+            self._link_recent.clear()
             self._apply_pace()
         if self._pace_bps >= ceiling:
             return
@@ -364,19 +378,30 @@ class RtpPacer:
         or faster, with nothing lost on the wire and the pace not braked, takes
         what it delivers in BURST_LINK_S, at most libwebrtc's burst, so a
         frame leaves whole instead of trickling out at the pace behind its
-        first packets. Sizing the burst to the measured link rather than to
-        the pace keeps the wide one off a link near capacity, where it only
-        moves the queue from the pacer to the bottleneck, ahead of audio.
+        first packets. Room is judged on the median of the last LINK_SAMPLES
+        estimates and kept while that stays at LINK_KEEP_FACTOR times the
+        encoder's rate or more: one burst's rate scatters with the receiver's
+        own timing, and a single estimate against a single threshold flips the
+        budget on every other feedback of a link close to it. The burst is
+        sized by the lower of the latest estimate and that median, and a
+        latest estimate below the encoder's rate closes the room at once, so
+        a link that drops is never burst into at its old rate. Sizing the burst
+        to the measured link rather than to the pace keeps the wide one off a
+        link near capacity, where it only moves the queue from the pacer to
+        the bottleneck, ahead of audio.
         Credit saturates at the budget, so it is floored at
         BURST_FLOOR_BYTES: below one packet's size, that packet could never
         become affordable and its class would wedge."""
         pace_bytes = self._pace_bps / 8.0
         self._narrow_cap = cap = max(pace_bytes * DEBT_WINDOW_S, float(BURST_FLOOR_BYTES))
         link = self._link_bps
-        if (link and link >= LINK_HEADROOM_FACTOR * self._encoder_bps
-                and self._pace_bps >= int(PACE_FACTOR * self._encoder_bps)
-                and time.monotonic() - self._link_at <= LINK_MAX_AGE_S):
-            cap = max(cap, min(link / 8.0 * BURST_LINK_S, pace_bytes * BURST_WINDOW_S,
+        typical = statistics.median(self._link_recent) if self._link_recent else 0.0
+        factor = LINK_KEEP_FACTOR if self._link_room else LINK_HEADROOM_FACTOR
+        self._link_room = bool(link and link >= self._encoder_bps
+                               and typical >= factor * self._encoder_bps
+                               and time.monotonic() - self._link_at <= LINK_MAX_AGE_S)
+        if self._link_room and self._pace_bps >= int(PACE_FACTOR * self._encoder_bps):
+            cap = max(cap, min(min(link, typical) / 8.0 * BURST_LINK_S, pace_bytes * BURST_WINDOW_S,
                                float(MAX_BURST_BYTES)))
         self._debt_cap = cap
         if self.credit > cap:
