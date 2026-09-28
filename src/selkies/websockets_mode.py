@@ -793,6 +793,11 @@ class _VideoRelay:
             self.backlog_bytes = 0
             self.live_rows.clear()
 
+    def hold_sync(self) -> None:
+        """A key frame for every row is already asked for (the gate's lift): the
+        deltas dropped until it arrives ask for no other within the sync floor."""
+        self._next_sync_req = time.monotonic() + VIDEO_RELAY_SYNC_FLOOR_SECONDS
+
     def _want_sync(self) -> bool:
         """Rate-limit this relay's keyframe (re)requests to the sync floor."""
         now = time.monotonic()
@@ -2659,12 +2664,19 @@ class DataStreamingServer(BaseStreamingService):
 
         While backpressure was active, delta frames were dropped, so on the
         False->True (LIFTED) transition the client needs a keyframe to resync;
-        otherwise it decodes deltas against a reference it never received.
+        otherwise it decodes deltas against a reference it never received. The
+        deltas encoded before that keyframe still reach the client's relay
+        first and are dropped there, and a request of the relay's own landing
+        after the encoder took this one would cost a second keyframe, so the
+        relay is told one is on its way (`_VideoRelay.hold_sync`).
         """
         prev_enabled = display_state.get('backpressure_enabled', True)
         display_state['backpressure_enabled'] = enabled
         if enabled and not prev_enabled:
             self._schedule_idr_for_display(display_id)
+            relay = self.video_relay_groups.get(display_id, {}).get(display_state.get('ws'))
+            if relay is not None:
+                relay.hold_sync()
 
     async def _run_frame_backpressure_logic(self, display_id: str) -> None:
         """The core backpressure and latency calculation loop for a single display.

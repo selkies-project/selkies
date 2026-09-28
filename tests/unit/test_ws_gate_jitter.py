@@ -62,6 +62,7 @@ def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -
     server.cli_args = SimpleNamespace(congestion_control=(steered,))
     server.rc_mode = SimpleNamespace(value=w.RateControlMode.CBR.value)
     server.metrics = None
+    server.video_relay_groups = {}
     state = {
         "ws": Socket(), "framerate": FPS, "acknowledged_frame_id": 100, "acked_sent_at": None,
         "last_sent_frame_id": 100, "has_sent_any_frame": True, "sent_timestamps": OrderedDict(),

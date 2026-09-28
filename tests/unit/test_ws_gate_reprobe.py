@@ -14,7 +14,8 @@ frozen client costs a key frame per re-probe, not a stream; a client waiting
 for a key frame recovers on the first re-probe; a slow client still catching
 up is left to catch up; a key frame still crossing a slow path, during which
 the acks stand still too, is waited for rather than answered with another;
-and a client that went silent stays the stall branch's.
+and a client that went silent stays the stall branch's. A lift asks for one key
+frame: the deltas that reach the client's relay before it arrives ask for none.
 """
 import asyncio
 import logging
@@ -31,7 +32,7 @@ import helpers as H
 
 from selkies import websockets_mode as w
 from selkies.stream_server import note_pong
-from selkies.websockets_mode import DataStreamingServer
+from selkies.websockets_mode import DataStreamingServer, _VideoRelay
 
 res = H.Results("ws-gate-reprobe")
 FPS = 60
@@ -97,6 +98,7 @@ def make_server(module: Module, link: Link) -> DataStreamingServer:
     server.cli_args = SimpleNamespace(congestion_control=(False,))
     server.rc_mode = SimpleNamespace(value="cbr")
     server.metrics = None
+    server.video_relay_groups = {}
     server.display_clients = {"primary": {
         "ws": link, "framerate": FPS, "acknowledged_frame_id": -1, "acked_sent_at": None,
         "last_sent_frame_id": 0, "has_sent_any_frame": False, "sent_timestamps": OrderedDict(),
@@ -291,5 +293,35 @@ res.check("a silent client is not re-probed as a desynced one",
           LOG.count("Re-probing desynced client", mark) == 0, "")
 res.check("the stall branch still re-probes it", LOG.count("Re-probing stalled client", mark) >= 1,
           f"{LOG.count('Client stall for', mark)} stalls, {LOG.count('Re-probing stalled client', mark)} re-probes")
+
+
+
+def chunk(fid: int, key: bool) -> dict:
+    """A full-frame video chunk as pixelflux wraps it, the header's row at 0."""
+    head = bytes([0x04, 0x01 if key else 0x00, fid >> 8, fid & 0xFF]) + bytes(8)
+    data = head + bytes(2000)
+    return {"data": memoryview(data), "owner": data, "frame_id": fid}
+
+
+# The gate closed, so every row of the client's relay waits for its key frame; the lift
+# asks the encoder for one, and the deltas encoded before it still reach the relay first.
+module = Module()
+server = make_server(module, Link())
+ds = server.display_clients["primary"]
+relay = _VideoRelay(server, "primary", ds["ws"], 8 * 1024 * 1024)
+server.video_relay_groups["primary"] = {ds["ws"]: relay}
+relay.flush_for_gate()
+ds["backpressure_enabled"] = False
+server._set_backpressure_enabled("primary", ds, True)
+asks = [relay.offer(chunk(fid, False)) for fid in range(10, 13)]
+res.check("a lift asks for one key frame, and the deltas ahead of it ask for none",
+          len(module.idrs) == 1 and not any(asks), f"{len(module.idrs)} from the lift, relay asks {asks}")
+relay.offer(chunk(13, True))
+res.check("and the stream resumes on it", relay.offer(chunk(14, False)) is False and len(relay.backlog) == 2,
+          f"{len(relay.backlog)} chunks queued")
+relay.flush_for_gate()
+time.sleep(w.VIDEO_RELAY_SYNC_FLOOR_SECONDS + 0.1)
+res.check("a relay whose key frame never came asks again after the sync floor",
+          relay.offer(chunk(15, False)) is True, "")
 
 sys.exit(0 if res.summary() else 1)
