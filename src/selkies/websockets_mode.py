@@ -5373,7 +5373,7 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.warning(f"Live re-target failed for '{did}' ({e}); restarting it.")
                         keep_ids.discard(did)
                         await self._stop_capture_for_display(did)
-            if pluggable and await apply_output_layout(layouts, total_width, total_height):
+            if pluggable and await apply_output_layout(layouts, total_width, total_height, stream_fps):
                 data_logger.debug("Displays laid out as outputs of their own.")
             else:
                 data_logger.debug("Swapping logical monitors to the new layout...")
@@ -5479,7 +5479,7 @@ class DataStreamingServer(BaseStreamingService):
                 # a root that merely came back larger needs none, since every swap re-tiles.
                 if (fit.dropped or fit.reanchored or fit.clamped) and not (
                         pluggable
-                        and await apply_output_layout(layouts, realized_w, realized_h)):
+                        and await apply_output_layout(layouts, realized_w, realized_h, stream_fps)):
                     await replace_selkies_monitors(layouts, screen_name=screen_name)
         else:
             await self._apply_wayland_output_layout(layouts, keep_ids)

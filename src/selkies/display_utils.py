@@ -498,37 +498,42 @@ async def ensure_mode(res_str: str, refresh: Optional[float] = None) -> bool:
         return False
 
 
-def _sync_refresh_output_mode(refresh: Optional[float]) -> Optional[float]:
+def _sync_refresh_output_mode(refresh: Optional[float]) -> List[float]:
     """Blocking `refresh_output_mode` on the module connection.
 
     Returns:
-        The refresh of the mode set, or None where the output's mode already
+        The refresh of each mode set; empty where every output's mode already
         runs at the target or carries no timings to change.
     """
     with _x11_lock:
         try:
             d = _module_display()
-            root, res, out_id, oi, names = _connected_output_state(d)
-            if not oi.crtc:
-                return None
-            ci = randr.get_crtc_info(d, oi.crtc, res.config_timestamp)
-            mode = next((m for m in res.modes if m.id == ci.mode), None)
+            root, res, _, _, names = _connected_output_state(d)
             target = _target_refresh(refresh)
-            rate = _mode_refresh(mode) if mode is not None else 0.0
-            if not rate or abs(rate - target) <= target * _REFRESH_SLACK:
-                return None
-            w, h = mode.width, mode.height
-            prefix = "selkies-" if names.get(mode.id, "").startswith("selkies-") else ""
-            mode_id, rate = _mode_at(d, root, res, oi, out_id, names, w, h, target,
-                                     f"{prefix}{w}x{h}")
-            status = randr.set_crtc_config(
-                d, oi.crtc, res.config_timestamp, ci.x, ci.y, mode_id,
-                ci.rotation or randr.Rotate_0, list(ci.outputs),
-            ).status
-            if status != randr.SetConfigSuccess:
-                raise RuntimeError(f"SetCrtcConfig returned status {status}")
+            modes = {m.id: m for m in res.modes}
+            rates = []
+            for out_id in res.outputs:
+                oi = randr.get_output_info(d, out_id, res.config_timestamp)
+                if oi.connection != randr.Connected or not oi.crtc:
+                    continue
+                ci = randr.get_crtc_info(d, oi.crtc, res.config_timestamp)
+                mode = modes.get(ci.mode)
+                rate = _mode_refresh(mode) if mode is not None else 0.0
+                if not rate or abs(rate - target) <= target * _REFRESH_SLACK:
+                    continue
+                w, h = mode.width, mode.height
+                prefix = "selkies-" if names.get(mode.id, "").startswith("selkies-") else ""
+                mode_id, rate = _mode_at(d, root, res, oi, out_id, names, w, h, target,
+                                         f"{prefix}{w}x{h}")
+                status = randr.set_crtc_config(
+                    d, oi.crtc, res.config_timestamp, ci.x, ci.y, mode_id,
+                    ci.rotation or randr.Rotate_0, list(ci.outputs),
+                ).status
+                if status != randr.SetConfigSuccess:
+                    raise RuntimeError(f"SetCrtcConfig returned status {status}")
+                rates.append(rate)
             d.sync()
-            return rate
+            return rates
         except Exception as e:
             if not isinstance(e, x11_error.XError):
                 _drop_module_display()
@@ -536,21 +541,23 @@ def _sync_refresh_output_mode(refresh: Optional[float]) -> Optional[float]:
 
 
 async def refresh_output_mode(refresh: Optional[float]) -> None:
-    """Keep the connected output at the refresh `_target_refresh` makes of
+    """Keep every connected output at the refresh `_target_refresh` makes of
     ``refresh``, the stream's new frame rate, where the rate changes without
     a resize.
 
-    The output keeps its geometry and position and takes a mode of the same
+    Each output keeps its geometry and position and takes a mode of the same
     size at the new refresh (`_mode_at`), so the screen, the monitors, and
     every capture stay as they are.
     """
     try:
-        rate = await asyncio.to_thread(_sync_refresh_output_mode, refresh)
+        rates = await asyncio.to_thread(_sync_refresh_output_mode, refresh)
     except Exception as e:
         logger_app_resize.warning(f"Display refresh not changed for {refresh:g} fps ({e}).")
         return
-    if rate is not None:
-        logger_app_resize.info(f"Display refresh set to {rate:.2f} Hz for a {refresh:g} fps stream.")
+    if rates:
+        logger_app_resize.info(
+            f"Display refresh set to {', '.join(f'{r:.2f}' for r in rates)} Hz "
+            f"for a {refresh:g} fps stream.")
 
 
 def _sync_resize_randr(
@@ -701,31 +708,19 @@ async def has_pluggable_outputs() -> bool:
 
 def _exact_mode(
     d: x11_display.Display, root: Any, res: Any, out_id: int,
-    names: Dict[int, str], w: int, h: int,
+    names: Dict[int, str], w: int, h: int, refresh: float,
 ) -> int:
-    """Resolve or create a mode of exactly ``w`` x ``h`` on ``out_id``.
+    """Resolve or create a mode of exactly ``w`` x ``h`` at ``refresh`` on ``out_id``.
 
     A display's output is the rectangle its client streams, so the width is
     not rounded up to the CVT cell as `_resize_on_display` does for a
     mode covering the whole framebuffer: two outputs side by side would
     overlap by the difference. The name says which kind it is, because a
-    "WxH" name is looked up by both.
+    "WxH" name is looked up by both. The refresh is chosen as for any mode
+    (`_mode_at`).
     """
-    name = f"selkies-{w}x{h}"
     oi = randr.get_output_info(d, out_id, res.config_timestamp)
-    mode_id = next((m for m in oi.modes if names.get(m) == name), None)
-    if mode_id is not None:
-        return mode_id
-    mode_id = next((mid for mid, n in names.items() if n == name), None)
-    if mode_id is None:
-        info = _cvt_rb_mode_info(w, h)
-        info["width"] = w
-        info["id"] = 0
-        info["name_length"] = len(name)
-        mode_id = randr.create_mode(root, info, name).mode
-        names[mode_id] = name
-    randr.add_output_mode(d, out_id, mode_id)
-    return mode_id
+    return _mode_at(d, root, res, oi, out_id, names, w, h, refresh, f"selkies-{w}x{h}")[0]
 
 
 def _set_crtc(
@@ -1012,7 +1007,8 @@ def seat_desktop_windows() -> None:
 
 
 def _sync_apply_output_layout(
-    layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int
+    layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int,
+    refresh: Optional[float] = None,
 ) -> None:
     """Blocking layout of every display as an output of its own.
 
@@ -1024,7 +1020,8 @@ def _sync_apply_output_layout(
     uses are switched off and unplugged, the screen grows to hold the old and
     the new arrangement at once (a CRTC may never poke out of the screen),
     each display's output is plugged in and its CRTC given the display's
-    exact mode at the display's position, and the screen shrinks to the
+    exact mode, at the refresh `_target_refresh` makes of ``refresh`` (the
+    stream's frame rate), at the display's position, and the screen shrinks to the
     total. Logical monitors a previous layout defined are deleted, since the
     server derives a monitor from every active CRTC once none is defined.
 
@@ -1087,7 +1084,8 @@ def _sync_apply_output_layout(
                     crtc = oi.crtc or (oi.crtcs[0] if oi.crtcs else 0)
                     if not crtc:
                         raise RuntimeError(f"output {oi.name} has no usable CRTC")
-                    mode_id = _exact_mode(d, root, res, out_id, names, l["w"], l["h"])
+                    mode_id = _exact_mode(d, root, res, out_id, names, l["w"], l["h"],
+                                          _target_refresh(refresh))
                     _set_crtc(d, crtc, ts, l["x"], l["y"], mode_id, [out_id])
                 size_screen(total_w, total_h)
                 randr.set_output_primary(root, primary_out)
@@ -1231,10 +1229,12 @@ def _sync_retire_outputs() -> None:
 
 
 async def apply_output_layout(
-    layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int
+    layouts: Dict[str, Dict[str, int]], total_w: int, total_h: int,
+    refresh: Optional[float] = None,
 ) -> bool:
     """Lay every display out as an output of its own, where the server offers
-    pluggable outputs (`_sync_apply_output_layout`). A layout that adds a
+    pluggable outputs (`_sync_apply_output_layout`), each at a mode keeping
+    ``refresh``, the stream's frame rate, as `resize_display` does. A layout that adds a
     display and moves the primary is published in two steps, the move first
     (`output_layout_stage`).
 
@@ -1248,9 +1248,9 @@ async def apply_output_layout(
     try:
         stage = await asyncio.to_thread(_sync_output_stage, layouts)
         if stage:
-            await asyncio.to_thread(_sync_apply_output_layout, stage, total_w, total_h)
+            await asyncio.to_thread(_sync_apply_output_layout, stage, total_w, total_h, refresh)
             await asyncio.sleep(_OUTPUT_SETTLE_S)
-        await asyncio.to_thread(_sync_apply_output_layout, layouts, total_w, total_h)
+        await asyncio.to_thread(_sync_apply_output_layout, layouts, total_w, total_h, refresh)
         return True
     except Exception as e:
         logger_app_resize.warning(
@@ -1652,15 +1652,16 @@ async def apply_extended_layout(
     ``layouts`` maps display id to an `{x, y, w, h}` rectangle. Every display
     becomes an output of its own where the server offers pluggable outputs
     (`apply_output_layout`); anywhere else they become logical monitors over
-    its one output (`display_utils_xrandr.apply_monitor_layout`), whose mode
-    keeps ``refresh``, the stream's frame rate, as `resize_display` does.
+    its one output (`display_utils_xrandr.apply_monitor_layout`). Either way
+    the modes keep ``refresh``, the stream's frame rate, as `resize_display`
+    does.
 
     Returns:
         True when the layout is in place. On the logical-monitor path
         ``layouts`` is fitted in place to the root the server realized, so the
         caller reads the rectangles back rather than reusing what it passed.
     """
-    if await apply_output_layout(layouts, total_w, total_h):
+    if await apply_output_layout(layouts, total_w, total_h, refresh):
         return True
     from .display_utils_xrandr import apply_monitor_layout
 
