@@ -306,8 +306,13 @@ export function TopMenu({
     };
   }, [isDragging]);
 
-  /** Starts dragging the System Monitoring panel. */
+  /**
+   * Starts dragging the System Monitoring panel, unless the press is on the
+   * scrollbar of a panel taller than the window below it.
+   */
   const handleSystemMonitoringMouseDown = (e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (e.nativeEvent.offsetX >= target.clientWidth || e.nativeEvent.offsetY >= target.clientHeight) return;
     setIsSystemMonitoringDragging(true);
     systemMonitoringStartPosRef.current = {
       x: e.clientX - systemMonitoringPosition.x,
@@ -1132,6 +1137,11 @@ export function TopMenu({
               position: 'fixed',
               left: systemMonitoringPosition.x,
               top: systemMonitoringPosition.y,
+              // Held to the window below its top and scrolled within, the panel
+              // stays whole wherever the drag clamp puts it.
+              display: 'flex',
+              flexDirection: 'column',
+              maxHeight: `calc(100dvh - ${systemMonitoringPosition.y}px)`,
               zIndex: 30,
               cursor: isSystemMonitoringDragging ? 'grabbing' : 'grab'
             }}

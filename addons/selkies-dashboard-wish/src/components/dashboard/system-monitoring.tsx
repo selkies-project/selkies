@@ -336,7 +336,7 @@ export function SystemMonitoring() {
 	};
 
 	return (
-		<div className="flex w-80 flex-col gap-2.5 rounded-lg border bg-background p-3 text-xs shadow-lg tabular-nums cursor-grab active:cursor-grabbing">
+		<div className="flex min-h-0 w-80 flex-col gap-2.5 overflow-y-auto rounded-lg border bg-background p-3 text-xs shadow-lg tabular-nums cursor-grab active:cursor-grabbing">
 			<div className="flex items-center justify-between">
 				<h3 className="text-sm font-semibold text-card-foreground pointer-events-none">{t('stats.monitorTitle')}</h3>
 				<div className="flex items-center gap-1">

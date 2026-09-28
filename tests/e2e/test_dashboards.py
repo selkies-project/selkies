@@ -135,6 +135,51 @@ def wish_clipboard_seed_check(page, res: "H.Results") -> None:
     time.sleep(0.3)
 
 
+def wish_stats_fit_check(page, res: "H.Results") -> None:
+    """The detailed stats overlay fits a small window and reaches its last row
+    by scrolling within, and it still drags.
+
+    At 1280x720 the detailed view is taller than the window below its top, so
+    without a height of its own its last rows sit below the window, where the
+    drag clamp, pinning its top at 0, cannot bring them.
+    """
+    measure = """() => {
+      const h3 = [...document.querySelectorAll('h3')].find((h) => h.closest('div.w-80'));
+      if (!h3) return null;
+      const panel = h3.closest('div.w-80');
+      panel.scrollTop = panel.scrollHeight;
+      const box = panel.getBoundingClientRect(), last = panel.lastElementChild.getBoundingClientRect();
+      return { left: Math.round(box.left), top: Math.round(box.top), bottom: Math.round(box.bottom),
+               last_bottom: Math.round(last.bottom), viewport: innerHeight };
+    }"""
+    page.set_viewport_size({"width": 1280, "height": 720})
+    try:
+        page.mouse.move(640, 5)
+        time.sleep(0.6)
+        page.evaluate("() => document.querySelector('svg.lucide-gauge').closest('button').click()")
+        time.sleep(0.5)
+        page.evaluate("() => document.querySelector('svg.lucide-chevron-down').closest('button').click()")
+        time.sleep(1.0)
+        got = page.evaluate(measure)
+        res.check("wish detailed stats fit a 720-px window and scroll to their last row",
+                  bool(got) and got["bottom"] <= got["viewport"] and got["last_bottom"] <= got["viewport"],
+                  got)
+        if got:
+            page.mouse.move(got["left"] + 120, got["top"] + 14)
+            page.mouse.down()
+            page.mouse.move(got["left"] + 220, got["top"] + 4, steps=5)
+            page.mouse.up()
+            time.sleep(0.3)
+            moved = page.evaluate(measure)
+            res.check("wish detailed stats still drag, and stay in the window",
+                      bool(moved) and moved["left"] == got["left"] + 100
+                      and moved["bottom"] <= moved["viewport"], (got, moved))
+        page.evaluate("() => document.querySelector('svg.lucide-gauge').closest('button').click()")
+        time.sleep(0.5)
+    finally:
+        page.set_viewport_size({"width": 1440, "height": 900})
+
+
 def classic_viewer_check(page, res: "H.Results") -> None:
     """A client demoted to viewer by the server gets no classic sidebar: an
     open sidebar folds, the handle goes, and Ctrl+Shift+M (the core's own
@@ -632,6 +677,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
 
         if dashboard == "wish":
             wish_clipboard_seed_check(page, res)
+            wish_stats_fit_check(page, res)
         gaming_mode_check(page, res, dashboard)
         if dashboard == "classic":
             classic_layout_check(page, res)
