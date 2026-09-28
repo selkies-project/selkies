@@ -2894,7 +2894,10 @@ export class Input {
      * coalesced ahead of its own (a busy page thread, a digitizer faster than
      * the page), one per `MOTION_SEND_INTERVAL_MS` of their own time, so a
      * stroke keeps its shape; hovering, only the newest position matters, and
-     * under pointer lock the event's movement already sums them.
+     * under pointer lock the event's movement already sums them. They go out
+     * as they are read, outside the spacing live motion keeps: they are late
+     * already, their own time bounds their rate, and a spacing they started
+     * would hold back the event's own position, the newest.
      * @param {PointerEvent} event
      */
     _sendCoalescedContact(event) {
@@ -2903,6 +2906,8 @@ export class Input {
             return;
         }
         const samples = event.getCoalescedEvents();
+        const flushScheduled = this._moveFlushScheduled, lastSend = this._lastMotionSend;
+        this._moveFlushScheduled = true;
         let last = -Infinity;
         for (let i = 0; i + 1 < samples.length; i++) {
             if (samples[i].timeStamp - last < MOTION_SEND_INTERVAL_MS) continue;
@@ -2910,6 +2915,8 @@ export class Input {
             this._mouseButtonMovement(samples[i]);
             this._flushCoalescedMouseMove();
         }
+        this._moveFlushScheduled = flushScheduled;
+        this._lastMotionSend = lastSend;
     }
 
     /**

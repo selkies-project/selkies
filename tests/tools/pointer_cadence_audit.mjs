@@ -221,8 +221,10 @@ const move = (type, x, extra = {}) => ({
 // Safari has no pointerrawupdate: an Apple Pencil reports at 240 Hz and the
 // page gets one pointermove per 60 Hz frame, with the three positions before
 // its own coalesced into it. Half a second of handwriting, loops of 15 px at
-// 1 px/ms: how many of the pen's positions reach the wire, and how far the
-// polyline they draw strays from the one the pen drew.
+// 1 px/ms: how many of the pen's positions reach the wire, how far the
+// polyline they draw strays from the one the pen drew, and whether each
+// event's own position, the newest, leaves as the event is handled rather
+// than behind the ones it coalesced.
 function penStroke(input, sent) {
     const t0 = now;
     const pen = (i) => {
@@ -234,6 +236,7 @@ function penStroke(input, sent) {
     };
     input.buttonMask = 1;
     const truth = [];
+    let newestAtOnce = 0;
     for (let frame = 0; frame < 30; frame++) {
         const samples = [0, 1, 2, 3].map((k) => pen(frame * 4 + k));
         truth.push(...samples);
@@ -241,6 +244,8 @@ function penStroke(input, sent) {
         const ev = samples[3];
         ev.getCoalescedEvents = () => samples;
         input._handlePointerMove(ev);
+        const last = motion(sent).at(-1);
+        if (last && last[1].startsWith(`m,${Math.round(ev.clientX)},${Math.round(ev.clientY)},`)) newestAtOnce++;
     }
     advance(50);
     const pts = motion(sent).map(([, m]) => m.split(',').slice(1, 3).map(Number));
@@ -257,7 +262,7 @@ function penStroke(input, sent) {
         for (let i = 1; i < pts.length; i++) best = Math.min(best, seg(p, pts[i - 1], pts[i]));
         err = Math.max(err, best);
     }
-    return { perSecond: Math.round(pts.length / 0.5), err };
+    return { perSecond: Math.round(pts.length / 0.5), err, newestAtOnce };
 }
 {
     const { input, sent } = makeInput();
@@ -266,6 +271,8 @@ function penStroke(input, sent) {
     check('a pen stroke without pointerrawupdate sends every position the pen reported',
           got.perSecond >= 230, `${got.perSecond} positions/s of 240`);
     check('and draws the line the pen drew, within a pixel', got.err < 1, `strays ${got.err.toFixed(2)} px`);
+    check('and each event\'s own position leaves as the event is handled', got.newestAtOnce === 30,
+          `${got.newestAtOnce} of 30 events`);
 }
 
 // --- a trackpad scroll's notch goes out with the event that completes it --
