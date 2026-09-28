@@ -306,23 +306,29 @@ def chunk(fid: int, key: bool) -> dict:
 
 # The gate closed, so every row of the client's relay waits for its key frame; the lift
 # asks the encoder for one, and the deltas encoded before it still reach the relay first.
-module = Module()
-server = make_server(module, Link())
-ds = server.display_clients["primary"]
-relay = _VideoRelay(server, "primary", ds["ws"], 8 * 1024 * 1024)
-server.video_relay_groups["primary"] = {ds["ws"]: relay}
-relay.flush_for_gate()
-ds["backpressure_enabled"] = False
-server._set_backpressure_enabled("primary", ds, True)
-asks = [relay.offer(chunk(fid, False)) for fid in range(10, 13)]
-res.check("a lift asks for one key frame, and the deltas ahead of it ask for none",
-          len(module.idrs) == 1 and not any(asks), f"{len(module.idrs)} from the lift, relay asks {asks}")
-relay.offer(chunk(13, True))
-res.check("and the stream resumes on it", relay.offer(chunk(14, False)) is False and len(relay.backlog) == 2,
-          f"{len(relay.backlog)} chunks queued")
-relay.flush_for_gate()
-time.sleep(w.VIDEO_RELAY_SYNC_FLOOR_SECONDS + 0.1)
-res.check("a relay whose key frame never came asks again after the sync floor",
-          relay.offer(chunk(15, False)) is True, "")
+# The relay is built on a running loop, as the server builds it; Python 3.9's asyncio
+# primitives bind a loop when they are made, and asyncio.run() above left none current.
+async def relay_checks() -> None:
+    module = Module()
+    server = make_server(module, Link())
+    ds = server.display_clients["primary"]
+    relay = _VideoRelay(server, "primary", ds["ws"], 8 * 1024 * 1024)
+    server.video_relay_groups["primary"] = {ds["ws"]: relay}
+    relay.flush_for_gate()
+    ds["backpressure_enabled"] = False
+    server._set_backpressure_enabled("primary", ds, True)
+    asks = [relay.offer(chunk(fid, False)) for fid in range(10, 13)]
+    res.check("a lift asks for one key frame, and the deltas ahead of it ask for none",
+              len(module.idrs) == 1 and not any(asks), f"{len(module.idrs)} from the lift, relay asks {asks}")
+    relay.offer(chunk(13, True))
+    res.check("and the stream resumes on it", relay.offer(chunk(14, False)) is False and len(relay.backlog) == 2,
+              f"{len(relay.backlog)} chunks queued")
+    relay.flush_for_gate()
+    time.sleep(w.VIDEO_RELAY_SYNC_FLOOR_SECONDS + 0.1)
+    res.check("a relay whose key frame never came asks again after the sync floor",
+              relay.offer(chunk(15, False)) is True, "")
+
+
+asyncio.run(relay_checks())
 
 sys.exit(0 if res.summary() else 1)
