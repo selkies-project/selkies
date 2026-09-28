@@ -146,6 +146,10 @@ TRANSFER_CHUNK_MAX_BYTES: int = 1 << 20
 TRANSFER_MIN_GAUGED_BYTES: int = 4 * 1024 * 1024
 
 
+# The web client's files whose staleness changes what a page does.
+WEB_CODE = (".html", ".js", ".mjs", ".css", ".wasm")
+
+
 class _AuditedFileResponse(web.FileResponse):
     """A file served by aiohttp, recorded for the audit as `event` once it
     went out: the whole file or the range asked for, with the bytes served. A
@@ -3054,23 +3058,35 @@ class CentralizedStreamServer:
         self.static_fs_path = await self._get_static_content_path()
         if self.static_fs_path:
             async def index_handler(request: web.Request) -> web.FileResponse:
-                """The entry page, which a browser revalidates on every load.
-
-                With validators alone a browser may reuse it by heuristic
-                freshness, so a page cached before the server changed its web
-                root or was upgraded comes back and loads the wrong client;
-                the validators keep each revalidation a 304.
-                """
                 moved = _ipv6_loopback_redirect(request, f"{api_prefix}/")
                 if moved:
                     raise web.HTTPFound(moved)
-                return web.FileResponse(os.path.join(self.static_fs_path, "index.html"),
-                                        headers={"Cache-Control": "no-cache"})
+                return web.FileResponse(os.path.join(self.static_fs_path, "index.html"))
 
-            self.app.router.add_get(f"{api_prefix}/", index_handler)
-            self.app.router.add_static(
+            index = self.app.router.add_get(f"{api_prefix}/", index_handler)
+            static = self.app.router.add_static(
                 f"{api_prefix}/", self.static_fs_path, name="static"
             )
+
+            async def _revalidate_fixed_names(request: web.Request, response: web.StreamResponse) -> None:
+                """Have a browser revalidate, on every load, the entry page and
+                every other file of the web client's code whose name does not
+                change with its content.
+
+                With validators alone a browser may reuse such a file by
+                heuristic freshness, so after an upgrade or a change of web
+                root it loads the old page, or the old core under a new page;
+                the validators keep each revalidation a 304. What the build
+                names by content hash, under `assets/`, is left to cache, and
+                so are icons and the manifest, which no page's behavior hangs
+                on and which Firefox would revalidate on every load.
+                """
+                resource = request.match_info.route.resource
+                name = request.match_info.get("filename", "")
+                if resource is index.resource or (
+                        resource is static and not name.startswith("assets/") and name.endswith(WEB_CODE)):
+                    response.headers.setdefault("Cache-Control", "no-cache")
+            self.app.on_response_prepare.append(_revalidate_fixed_names)
         else:
             logger.warning("Unable to find web content, skipping web routers handlers")
         return self.app
