@@ -144,12 +144,16 @@ def main() -> bool:
 
         du._sync_resize_randr = refused
         try:
-            for fps in (120, 60):
+            for i, fps in enumerate((120, 60, 60, 120, 60)):
                 realized = asyncio.run(du.resize_display("1600x900", fps))
                 rate = output_refresh()
-                res.check(f"the xrandr fallback sets a mode at a {fps} fps stream's rate",
+                res.check(f"the xrandr fallback sets a mode at a {fps} fps stream's rate ({i + 1})",
                           realized == (1600, 900) and abs(rate - fps) <= fps * du._REFRESH_SLACK,
                           (realized, rate))
+            out = subprocess.run(["xrandr"], capture_output=True, text=True, timeout=10).stdout
+            made = sorted(re.findall(r"^\s+(1600x900\S*)\s", out, re.M))
+            res.check("and makes one mode per rate, found again on the next resize",
+                      len(made) == 2, made)
         finally:
             du._sync_resize_randr = native
     finally:

@@ -1124,7 +1124,9 @@ async def _resize_display_xrandr(
     at that refresh, its clock rounded up to the next quarter megahertz so it
     never runs slower than asked, and named for the geometry the modeline
     really carries (cvt snaps width up to the 8-pixel CVT cell, so it can be
-    wider than requested), with the rate appended where that name is taken.
+    wider than requested), with the rate appended where that name is taken;
+    a mode so named is found again by that name, so the next resize to the
+    size and rate reuses it rather than making another.
     The mode is set together with ``--fb`` sized from that realized geometry:
     without it a larger root left over from a prior extended layout keeps the
     screen oversized, so the new mode lands top-left and whole-root capture
@@ -1150,15 +1152,17 @@ async def _resize_display_xrandr(
 
     target = _target_refresh(refresh)
 
-    def rate_of(name: str) -> Optional[float]:
-        return next((r for r in rates.get(name, ())
-                     if abs(r - target) <= target * _REFRESH_SLACK), None)
+    def fitting(geometry: str) -> Optional[Tuple[str, float]]:
+        return next(((name, r) for name, listed in rates.items()
+                     if name == geometry or name.startswith(geometry + "_")
+                     for r in listed if abs(r - target) <= target * _REFRESH_SLACK), None)
 
     target_mode_to_set = res_str
     realized_w, realized_h = w_req, h_req
-    rate = rate_of(res_str)
+    found = fitting(res_str)
+    rate = None
 
-    if rate is None:
+    if found is None:
         logger_app_resize.debug(
             f"No {res_str} mode at {target:.2f} Hz in the xrandr list. Attempting to add for screen '{screen_name}'."
         )
@@ -1178,11 +1182,11 @@ async def _resize_display_xrandr(
             params[0] = f"{clock_steps / 4:.2f}"
         except (IndexError, ValueError):
             realized_w, realized_h = w_req, h_req
-        target_mode_to_set = f"{realized_w}x{realized_h}"
-        rate = rate_of(target_mode_to_set)
+        geometry = f"{realized_w}x{realized_h}"
+        target_mode_to_set = geometry
+        found = fitting(geometry)
 
-        if rate is None:
-            geometry = target_mode_to_set
+        if found is None:
             target_mode_to_set = next(
                 (n for n in (geometry, f"{geometry}_{target:.0f}", f"{geometry}_{target:.2f}")
                  if n not in rates), f"{geometry}_{target:.3f}")
@@ -1227,6 +1231,8 @@ async def _resize_display_xrandr(
                 return None
             logger_app_resize.debug(f"Successfully ran: {' '.join(cmd_add)}")
 
+    if found is not None:
+        target_mode_to_set, rate = found
     logger_app_resize.debug(
         f"Applying xrandr mode '{target_mode_to_set}' for screen '{screen_name}'."
     )
