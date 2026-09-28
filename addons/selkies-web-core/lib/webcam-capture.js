@@ -706,7 +706,9 @@ export class WebcamCapture {
   /**
    * Opens the camera and starts sending. Failures are reported through
    * `onError` rather than thrown, and a track that ends (device unplugged,
-   * permission revoked) stops the capture.
+   * permission revoked) stops the capture. A stop while the permission
+   * request is still pending withdraws the start: the camera it gets is
+   * released at once, and a failure after it is not reported.
    * @param {string=} deviceId Camera to open; the default device otherwise.
    */
   async start(deviceId) {
@@ -727,11 +729,18 @@ export class WebcamCapture {
     if (deviceId) {
       video.deviceId = { exact: deviceId };
     }
+    const asked = ++this._generation;
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
     } catch (error) {
-      this._onError(error);
+      if (this._generation === asked) {
+        this._onError(error);
+      }
+      return;
+    }
+    if (this._generation !== asked) {
+      stream.getTracks().forEach((t) => t.stop());
       return;
     }
     const track = stream.getVideoTracks()[0];
@@ -779,12 +788,15 @@ export class WebcamCapture {
     }
   }
 
-  /** Stops the capture and releases the camera, encoder, and workers; idempotent. */
+  /**
+   * Stops the capture and releases the camera, encoder, and workers, or
+   * withdraws a start still waiting on its permission request; idempotent.
+   */
   stop() {
+    this._generation++;
     if (!this._active && !this._stream) {
       return;
     }
-    this._generation++;
     this._active = false;
     this._stopEncodeWorker();
     if (this._source) {

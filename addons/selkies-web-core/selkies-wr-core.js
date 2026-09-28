@@ -1671,8 +1671,9 @@ export default function webrtc() {
 				isWebcamActive = true;
 			} else {
 				isWebcamActive = false;
-				// The only falsy return is an engine with no getUserMedia at all.
-				if (askedByServer) webcamDemandRefused = true;
+				// False is an engine with no getUserMedia at all; null, a stop
+				// that withdrew this start, is no refusal.
+				if (ok === false && askedByServer) webcamDemandRefused = true;
 			}
 		} catch (error) {
 			console.error('Webcam capture error:', error);

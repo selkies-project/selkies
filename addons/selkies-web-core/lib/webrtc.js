@@ -150,6 +150,8 @@ export class WebRTCClient {
 		this._webcamTransceiver = null;
 		/** Active camera capture, null until the user enables it. @type {?MediaStream} */
 		this._webcamStream = null;
+		/** The enable waiting on its permission prompt, which a disable meanwhile withdraws. @type {?{withdrawn: boolean}} */
+		this._webcamPending = null;
 
 		/** @type {?function(string): void} */
 		this.onstatus = null;
@@ -460,7 +462,9 @@ export class WebRTCClient {
 	 * @param {boolean} enabled
 	 * @param {?string} deviceId Camera, the default one when null.
 	 * @param {{width?: number, height?: number, fps?: number}} hints Capture hints.
-	 * @returns {Promise<boolean>} False when getUserMedia is unavailable.
+	 * @returns {Promise<?boolean>} False when getUserMedia is unavailable;
+	 *     null when a disable withdrew the enable while its permission request
+	 *     was pending, the camera it got released at once.
 	 * @throws {Error} When the server withheld the webcam m-line (the webcam
 	 *     is locked off), raised before prompting for permission; or when the
 	 *     sender refuses the track (its transceiver stopped), the camera
@@ -471,11 +475,21 @@ export class WebRTCClient {
 			if (!this._webcamTransceiver) {
 				throw new Error('Webcam is disabled on this server.');
 			}
-			if (this._webcamStream) return true;
+			if (this._webcamStream || this._webcamPending) return true;
 			if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
 			const video = { width: { ideal: width }, height: { ideal: height }, frameRate: { ideal: fps } };
 			if (deviceId) video.deviceId = { exact: deviceId };
-			const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+			const pending = this._webcamPending = { withdrawn: false };
+			let stream;
+			try {
+				stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+			} finally {
+				this._webcamPending = null;
+			}
+			if (pending.withdrawn) {
+				stream.getTracks().forEach((t) => t.stop());
+				return null;
+			}
 			const track = stream.getVideoTracks()[0];
 			try {
 				if (track) {
@@ -492,6 +506,7 @@ export class WebRTCClient {
 			await this.setWebcamCodec(codec);
 			return true;
 		}
+		if (this._webcamPending) this._webcamPending.withdrawn = true;
 		if (this._webcamTransceiver && this._webcamTransceiver.sender) {
 			await this._setSenderActive(this._webcamTransceiver.sender, false);
 			try { await this._webcamTransceiver.sender.replaceTrack(null); } catch (e) {}
