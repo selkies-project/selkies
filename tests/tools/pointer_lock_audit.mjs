@@ -583,4 +583,44 @@ function stage(ids, locked = null) {
           `${keyboard.calls.join(',')} / ${notices.join(',')}`);
 }
 
+// --- a fullscreen the page holds already -----------------------------------
+// Firefox and Safari hold the keys only for a fullscreen asked for with
+// keyboardLock "browser". Gaming mode entered from a plain fullscreen asks for
+// the same element again with it, which by the Fullscreen spec sets its keyboard
+// lock with no transition; refused, the page says the keys are the browser's.
+// An engine with the Keyboard Lock API locks through it and is not asked again.
+{
+    const enter = async (element, navigatorValue, answer) => {
+        reset(element);
+        Object.defineProperty(globalThis, 'navigator', { value: navigatorValue, configurable: true });
+        Input._keyboardLockNoticed = false;
+        const asked = [];
+        element.requestFullscreen = (options) => {
+            asked.push(options && options.keyboardLock ? options.keyboardLock : 'none');
+            return answer;
+        };
+        document.fullscreenElement = element;
+        const input = makeInput(element, false);
+        const notices = [];
+        input.onnotice = (code) => notices.push(code);
+        input.enterGamingMode();
+        await sleep(10);
+        return { asked, notices, locked: element.calls.length > 0 };
+    };
+    let got = await enter(makeElement('ok'), {}, Promise.resolve());
+    check('from a fullscreen held already, an engine without the API is asked again with keyboardLock',
+          got.asked.join(',') === 'browser' && got.notices.length === 0 && got.locked,
+          `${got.asked.join(',')} / ${got.notices.join(',')} / locked ${got.locked}`);
+    got = await enter(makeElement('ok'), {}, Promise.reject(new Error('denied')));
+    check('and, refused, says that a single Escape leaves gaming mode',
+          got.notices.join(',') === 'keyboardLockUnavailable' && got.locked,
+          `${got.notices.join(',')} / locked ${got.locked}`);
+    const keyboard = { calls: [], lock: () => { keyboard.calls.push('lock'); return Promise.resolve(); },
+                       unlock: () => {} };
+    got = await enter(makeElement('ok'), { keyboard }, Promise.resolve());
+    check('an engine with the Keyboard Lock API locks through it and is not asked for fullscreen again',
+          got.asked.length === 0 && keyboard.calls.join(',') === 'lock' && got.locked,
+          `${got.asked.join(',')} / ${keyboard.calls.join(',')}`);
+}
+
 process.exit(failed === 0 ? 0 : 1);

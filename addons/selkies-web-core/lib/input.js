@@ -4947,7 +4947,12 @@ export class Input {
      * fullscreenchange handler arms both once fullscreen lands, still inside
      * the gesture's transient-activation window. A refused request takes the
      * mode back down with it: left set, the next transition from any source
-     * would arm the locks.
+     * would arm the locks. From a fullscreen the page holds already, an engine
+     * without the Keyboard Lock API asks for the same element again with the
+     * gaming options: by the Fullscreen spec that sets the element's keyboard
+     * lock with no transition (Firefox 156 holds Escape after it); it comes
+     * after the pointer lock request, since a fullscreen request consumes the
+     * gesture's transient activation.
      */
     enterGamingMode() {
         this._setGamingMode(true);
@@ -4960,6 +4965,13 @@ export class Input {
             return;
         }
         this._armPointerLock();
+        if (!(navigator.keyboard && 'lock' in navigator.keyboard)) {
+            document.fullscreenElement.requestFullscreen(this._gamingFullscreenOptions())
+                .catch(() => {
+                    this._fullscreenKeyboardLock = false;
+                    this.requestKeyboardLock();
+                });
+        }
         this.requestKeyboardLock();
     }
 
