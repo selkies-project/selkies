@@ -703,7 +703,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "use_paint_over_quality",
         "type": "bool",
         "default": True,
-        "help": "Clean up a still screen at the paint-over quality, under CBR and CRF alike and whether or not video_streaming_mode (Turbo) sends every frame: once the picture stops changing, or keeps changing only in small places, a video encoder refreshes what changed at the paint-over CRF, and after a large change sends a key frame at it once the screen holds still (under CBR only where the rate control has not already refined the picture further, a key frame within a second of the bitrate); JPEG re-sends still stripes at the paint-over JPEG quality.",
+        "help": "Clean up a still screen at the paint-over quality, under CBR and CRF alike and whether or not video_streaming_mode (Turbo) sends every frame: once the picture stops changing, or keeps changing only in small places, a video encoder refreshes what changed at the paint-over CRF, and after a large change sends a key frame at it once the screen holds still. Under CBR, NVENC and x264 instead keep sending frames within the bitrate until their rate control reaches that quality, with no key frame (NVENC refreshes the screen a band a frame where the bitrate is too low for it to get there), and other encoders clean up only where the rate control has not already refined the picture further, a key frame within a second of the bitrate; JPEG re-sends still stripes at the paint-over JPEG quality.",
     },
     {
         "name": "paint_over_jpeg_quality",
@@ -724,7 +724,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "range",
         "default": "1-30",
         "meta": {"default_value": 5},
-        "help": 'Frames a video encoder keeps sending after a cleanup or a key frame on a still screen, so rate control settles: allowed range, initial value, or both ("5,1-30"); "5-5" locks.',
+        "help": 'Frames a video encoder keeps sending after a cleanup or a key frame on a still screen, so rate control settles (under CBR, NVENC and x264 keep sending until their rate control has refined the screen instead): allowed range, initial value, or both ("5,1-30"); "5-5" locks.',
     },
     {
         "name": "second_screen",
