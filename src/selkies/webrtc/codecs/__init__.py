@@ -189,6 +189,11 @@ def init_codecs() -> None:
                     RTCRtcpFeedback(type="ccm", parameter="fir"),
                     RTCRtcpFeedback(type="goog-remb"),
                     RTCRtcpFeedback(type="transport-cc"),
+                    # Offered so a libwebrtc receiver sends reference times (RTCP XR)
+                    # for the round trip a receive-only stream needs to place its
+                    # frames' capture time; its answer never echoes it, so a sender
+                    # answers whatever reference time arrives.
+                    RTCRtcpFeedback(type="rrtr"),
                 ],
                 parameters=parameters or {},
             ),

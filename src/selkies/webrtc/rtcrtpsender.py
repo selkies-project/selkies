@@ -69,6 +69,7 @@ from .rtp import (
     RtcpSenderInfo,
     RtcpSourceInfo,
     RtcpSrPacket,
+    RtcpXrPacket,
     RtpPacket,
     dependency_descriptor,
     unpack_remb_fci,
@@ -86,6 +87,8 @@ from pyee.asyncio import AsyncIOEventEmitter
 logger = logging.getLogger(__name__)
 
 RTT_ALPHA = 0.85
+# Receive-only reporters answered per sender report (libwebrtc answers at most 50 per XR).
+RRTR_REPORTERS_MAX = 50
 
 
 def random_sequence_number() -> int:
@@ -233,6 +236,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self.__octet_count = 0
         self.__packet_count = 0
         self.__rtt: Optional[float] = None
+        # The last reference time each receive-only reporter sent (middle 32 bits of its
+        # NTP time) and the CLOCK_MONOTONIC instant it arrived, answered in every report.
+        self.__rrtrs: dict[int, tuple[int, int]] = {}
 
         # logging
         self.__log_debug: Callable[..., None] = lambda *args: None
@@ -442,6 +448,11 @@ class RTCRtpSender(AsyncIOEventEmitter):
             if gone:
                 # Gone from the history: only a key frame brings the peer back.
                 self._emit_pli_event()
+        elif isinstance(packet, RtcpXrPacket) and packet.rrtr is not None:
+            self.__rrtrs.pop(packet.ssrc, None)
+            if len(self.__rrtrs) >= RRTR_REPORTERS_MAX:
+                del self.__rrtrs[next(iter(self.__rrtrs))]
+            self.__rrtrs[packet.ssrc] = ((packet.rrtr >> 16) & 0xFFFFFFFF, time.monotonic_ns())
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_TWCC:
             self.transport._twcc_process_feedback(packet.fci)
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_PLI:
@@ -759,6 +770,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 self.__lsr = (ntp_timestamp >> 16) & 0xFFFFFFFF
                 self.__lsr_time = time.time()
 
+                # RTCP XR DLRR
+                if self.__rrtrs:
+                    packets.append(self._dlrr_report(time.monotonic_ns()))
+
                 # RTCP SDES
                 if self.__cname is not None:
                     packets.append(
@@ -793,6 +808,18 @@ class RTCRtpSender(AsyncIOEventEmitter):
             return 0, 0
         elapsed = (now_ns - self.__rtp_instant_ns) * self.__rtp_clock_rate // 1_000_000_000
         return clock.ntp_from_monotonic_ns(now_ns), (self.__rtp_timestamp + elapsed) & 0xFFFFFFFF
+
+    def _dlrr_report(self, now_ns: int) -> RtcpXrPacket:
+        """The DLRR answering each reporter's last reference time, sent beside every sender
+        report rather than once per reference time: libwebrtc drops the round trip it
+        reports for a stream at a sender report arriving without one."""
+        return RtcpXrPacket(
+            ssrc=self._ssrc,
+            dlrr=[
+                (ssrc, lrr, (((now_ns - arrived_ns) << 16) // 1_000_000_000) & 0xFFFFFFFF)
+                for ssrc, (lrr, arrived_ns) in self.__rrtrs.items()
+            ],
+        )
 
     async def _send_rtcp(self, packets: list[AnyRtcpPacket]) -> None:
         payload = b""

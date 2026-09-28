@@ -66,6 +66,7 @@ RTCP_SDES = 202
 RTCP_BYE = 203
 RTCP_RTPFB = 205
 RTCP_PSFB = 206
+RTCP_XR = 207
 
 RTCP_RTPFB_NACK = 1
 RTCP_RTPFB_TWCC = 15
@@ -75,6 +76,9 @@ RTCP_PSFB_SLI = 2
 RTCP_PSFB_RPSI = 3
 RTCP_PSFB_FIR = 4
 RTCP_PSFB_APP = 15
+
+RTCP_XR_RRTR = 4
+RTCP_XR_DLRR = 5
 
 # The RTP Dependency Descriptor of the AV1 RTP specification, written on every packet of a
 # video stream whose encoder tracks its references: the frame the packet belongs to, its
@@ -882,6 +886,51 @@ class RtcpSrPacket:
         return RtcpSrPacket(ssrc=ssrc, sender_info=sender_info, reports=reports)
 
 
+@dataclass
+class RtcpXrPacket:
+    """
+    Extended Report (RFC 3611) carrying the round-trip blocks: a receive-only peer sends
+    a Receiver Reference Time Report (`rrtr`, its NTP time), and the sender answers with
+    DLRR sub-blocks (`dlrr`: the reporter's SSRC, the middle 32 bits of that NTP time,
+    and the delay since, in 1/65536 s), from which the receiver computes the round trip
+    as a sender does from a receiver report. Other block types are skipped.
+    """
+
+    ssrc: int
+    rrtr: Optional[int] = None
+    dlrr: list[tuple[int, int, int]] = field(default_factory=list)
+
+    def __bytes__(self) -> bytes:
+        payload = pack("!L", self.ssrc)
+        if self.rrtr is not None:
+            payload += pack("!BBHQ", RTCP_XR_RRTR, 0, 2, self.rrtr)
+        if self.dlrr:
+            payload += pack("!BBH", RTCP_XR_DLRR, 0, 3 * len(self.dlrr))
+            for item in self.dlrr:
+                payload += pack("!LLL", *item)
+        return pack_rtcp_packet(RTCP_XR, 0, payload)
+
+    @classmethod
+    def parse(cls, data: bytes) -> "RtcpXrPacket":
+        if len(data) < 4:
+            raise ValueError("RTCP extended report length is invalid")
+
+        packet = cls(ssrc=unpack_from("!L", data)[0])
+        pos = 4
+        while pos + 4 <= len(data):
+            block_type, _, length = unpack_from("!BBH", data, pos)
+            pos += 4
+            end = pos + 4 * length
+            if len(data) < end:
+                raise ValueError("RTCP extended report block is truncated")
+            if block_type == RTCP_XR_RRTR and length == 2:
+                packet.rrtr = unpack_from("!Q", data, pos)[0]
+            elif block_type == RTCP_XR_DLRR and length % 3 == 0:
+                packet.dlrr += [unpack_from("!LLL", data, sub) for sub in range(pos, end, 12)]
+            pos = end
+        return packet
+
+
 AnyRtcpPacket = Union[
     RtcpByePacket,
     RtcpPsfbPacket,
@@ -889,6 +938,7 @@ AnyRtcpPacket = Union[
     RtcpRtpfbPacket,
     RtcpSdesPacket,
     RtcpSrPacket,
+    RtcpXrPacket,
 ]
 
 
@@ -935,6 +985,8 @@ class RtcpPacket:
                 packets.append(RtcpRtpfbPacket.parse(payload, count))
             elif packet_type == RTCP_PSFB:
                 packets.append(RtcpPsfbPacket.parse(payload, count))
+            elif packet_type == RTCP_XR:
+                packets.append(RtcpXrPacket.parse(payload))
 
         return packets
 

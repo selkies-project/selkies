@@ -74,6 +74,7 @@ from .rtp import (
     RtcpRtpfbPacket,
     pack_twcc_fci,
     RtcpSrPacket,
+    RtcpXrPacket,
     RtpPacket,
     is_rtcp,
 )
@@ -369,6 +370,10 @@ class RtpRouter:
                         add_recipient(self.senders.get(ssrc))
                 except ValueError:
                     pass
+        elif isinstance(packet, RtcpXrPacket) and packet.rrtr is not None:
+            # A reference time names no media source: every sender answers it.
+            for sender in self.senders.values():
+                add_recipient(sender)
 
         return recipients
 
