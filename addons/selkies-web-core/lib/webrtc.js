@@ -144,6 +144,8 @@ export class WebRTCClient {
 		this._micTransceiver = null;
 		/** Active microphone capture, null until the user enables it. @type {?MediaStream} */
 		this._micStream = null;
+		/** The enable waiting on its permission prompt, which a disable meanwhile withdraws. @type {?{withdrawn: boolean}} */
+		this._micPending = null;
 		/** Sendonly transceiver the server reserved for the webcam, or null. @type {?RTCRtpTransceiver} */
 		this._webcamTransceiver = null;
 		/** Active camera capture, null until the user enables it. @type {?MediaStream} */
@@ -402,7 +404,9 @@ export class WebRTCClient {
 	 * detaches and stops it.
 	 * @param {boolean} enabled
 	 * @param {?string} deviceId Capture device, the default one when null.
-	 * @returns {Promise<boolean>} False when getUserMedia is unavailable.
+	 * @returns {Promise<?boolean>} False when getUserMedia is unavailable;
+	 *     null when a disable withdrew the enable while its permission request
+	 *     was pending, the stream it got released at once.
 	 * @throws {Error} When the server withheld the microphone m-line (the
 	 *     microphone is disabled server-side); raised before prompting for
 	 *     permission so the UI never claims an active mic that streams nothing.
@@ -412,20 +416,29 @@ export class WebRTCClient {
 			if (!this._micTransceiver) {
 				throw new Error('Microphone is disabled on this server.');
 			}
-			if (this._micStream) return true;
+			if (this._micStream || this._micPending) return true;
 			if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
 			const audio = { channelCount: 1, sampleRate: 24000, echoCancellation: true, noiseSuppression: true, autoGainControl: true };
 			if (deviceId) audio.deviceId = { exact: deviceId };
-			this._micStream = await navigator.mediaDevices.getUserMedia({
-				audio,
-				video: false
-			});
+			const pending = this._micPending = { withdrawn: false };
+			let stream;
+			try {
+				stream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
+			} finally {
+				this._micPending = null;
+			}
+			if (pending.withdrawn) {
+				stream.getTracks().forEach((t) => t.stop());
+				return null;
+			}
+			this._micStream = stream;
 			const track = this._micStream.getAudioTracks()[0];
 			if (this._micTransceiver && this._micTransceiver.sender && track) {
 				await this._micTransceiver.sender.replaceTrack(track);
 			}
 			return true;
 		}
+		if (this._micPending) this._micPending.withdrawn = true;
 		if (this._micTransceiver && this._micTransceiver.sender) {
 			try { await this._micTransceiver.sender.replaceTrack(null); } catch (e) {}
 		}

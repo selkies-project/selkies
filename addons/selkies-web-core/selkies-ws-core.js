@@ -382,6 +382,11 @@ const PER_DISPLAY_SETTINGS = [
     'video_bitrate', 'force_aligned_resolution', 'scaling_dpi'
 ];
 let micStream = null;
+/**
+ * The microphone start waiting on getUserMedia, which a permission prompt holds
+ * for as long as the user takes, as `{withdrawn}`: a stop meanwhile withdraws it.
+ */
+let micPending = null;
 let micAudioContext = null;
 let micSourceNode = null;
 let micWorkletNode = null;
@@ -8975,11 +8980,12 @@ async function startMicrophoneCapture(askedByServer = false) {
     postSidebarButtonUpdate();
     return;
   }
-  if (isMicrophoneActive || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+  if (isMicrophoneActive || micPending || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     if (!isMicrophoneActive) isMicrophoneActive = false;
     postSidebarButtonUpdate();
     return;
   }
+  const pending = { withdrawn: false };
   let constraints;
   try {
     constraints = {
@@ -8996,7 +9002,19 @@ async function startMicrophoneCapture(askedByServer = false) {
       video: false
     };
     setAudioSessionType('play-and-record');
-    micStream = await navigator.mediaDevices.getUserMedia(constraints);
+    micPending = pending;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+    } finally {
+      micPending = null;
+    }
+    if (pending.withdrawn) {
+      stream.getTracks().forEach((track) => track.stop());
+      setAudioSessionType('playback');
+      return;
+    }
+    micStream = stream;
     const audioTracks = micStream.getAudioTracks();
     if (audioTracks.length > 0) {
       const settings = audioTracks[0].getSettings();
@@ -9056,7 +9074,7 @@ async function startMicrophoneCapture(askedByServer = false) {
     postSidebarButtonUpdate();
   } catch (error) {
     console.error('Failed to start microphone capture:', error);
-    if (!askedByServer) alert(`Microphone error: ${error.name} - ${error.message}`);
+    if (!askedByServer && !pending.withdrawn) alert(`Microphone error: ${error.name} - ${error.message}`);
     else if (isCaptureRefusal(error)) micDemandRefused = true;
     stopMicrophoneCapture();
     // A refused request leaves the stop above nothing to release.
@@ -9064,8 +9082,13 @@ async function startMicrophoneCapture(askedByServer = false) {
   }
 }
 
-/** Stops the microphone uplink and releases the stream, worklet, worker, and context. */
+/**
+ * Stops the microphone uplink and releases the stream, worklet, worker, and
+ * context; a start still waiting on its permission prompt is withdrawn, so the
+ * stream it gets is released at once.
+ */
 function stopMicrophoneCapture() {
+  if (micPending) micPending.withdrawn = true;
   if (!isMicrophoneActive && !micStream && !micAudioContext) {
     if (isMicrophoneActive) {
       isMicrophoneActive = false;

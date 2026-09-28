@@ -1633,8 +1633,8 @@ export default function webrtc() {
 	 * @param {boolean} [askedByServer] The session asked rather than the user, so a refusal latches.
 	 */
 	function setMicrophone(on, askedByServer = false) {
-		webrtc.setMicrophone(on, preferredInputDeviceId).then(() => {
-			isMicrophoneActive = on;
+		webrtc.setMicrophone(on, preferredInputDeviceId).then((started) => {
+			isMicrophoneActive = on && started === true;
 			postSidebarButtonUpdate();
 		}).catch((e) => {
 			console.error('Microphone toggle failed:', e);
