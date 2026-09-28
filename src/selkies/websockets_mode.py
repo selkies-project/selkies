@@ -484,6 +484,101 @@ async def _send_live(ws: Any, data: Any, what: str) -> None:
         raise ConnectionResetError(f"{what}: the client took nothing for {SEND_STALL_SECONDS:.0f}s")
 
 
+def _expect_key_frame(display_state: dict) -> None:
+    """Note that the display's client is next sent a key frame it cannot ack
+    before the whole of it has crossed the path: a gate's lift, a new page, a
+    reset (`_run_frame_backpressure_logic`)."""
+    display_state['key_crossing'] = {'since': time.monotonic(), 'sent': None, 'delivered': None}
+    display_state['key_drain'] = None
+
+
+def _note_send(display_state: dict, frame_id: int, size: int) -> None:
+    """Stamp one frame sent to a display's registered client, with the bytes
+    sent through it for the delivery rate. The first frame after
+    `_expect_key_frame` is that key frame: a ping written behind it
+    (`socket_gauge`) says when the whole of it arrived."""
+    now = time.monotonic()
+    ds = display_state
+    ds['sent_bytes'] = ds.get('sent_bytes', 0) + size
+    ds['sent_timestamps'][frame_id] = (now, ds['sent_bytes'])
+    ds['last_sent_frame_id'] = frame_id
+    ds['has_sent_any_frame'] = True
+    if ds.get('unacked_since') is None:
+        ds['unacked_since'] = now
+    if len(ds['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
+        ds['sent_timestamps'].popitem(last=False)
+    crossing = ds.get('key_crossing')
+    if crossing is not None and crossing['sent'] is None:
+        crossing['sent'] = now
+        _spawn_background_task(socket_gauge(ds['ws']).sample())
+
+
+def _note_ack(display_state: dict, frame_id: int, held_ms: float) -> None:
+    """Fold one CLIENT_FRAME_ACK from a display's registered client into its state.
+
+    Any ack, a repeated id included, is the client alive. An id matching a send
+    stamp moves the gate's reference to that send, is dated (`acked_at`: acks
+    that keep moving on say the path delivers), and yields a round trip, less
+    the time the client held the id before its ack tick fired. The first ack of
+    a key frame the client was waiting for starts the drain of the queue that
+    key frame put on the path, sized by how far its own round trip stood over
+    the floor (`_key_frame_pending`).
+    """
+    display_state['acknowledged_frame_id'] = frame_id
+    display_state['unacked_since'] = None
+    sent_ts = display_state.get('sent_timestamps')
+    if not sent_ts or frame_id not in sent_ts:
+        return
+    send_time, sent_bytes = sent_ts.pop(frame_id)
+    display_state['acked_sent_at'] = send_time
+    now = time.monotonic()
+    display_state['acked_at'] = now
+    rtt_sample_ms = max(0.0, (now - send_time) * 1000.0 - held_ms)
+    crossing = display_state.get('key_crossing')
+    if crossing is not None and crossing['sent'] is not None and send_time >= crossing['sent']:
+        display_state['key_crossing'] = None
+        display_state['key_drain'] = {
+            'since': now, 'excess_ms': rtt_sample_ms - (display_state.get('rtt_floor_ms') or 0.0)}
+    # An id collision (uint16, reset on restarts) is not a round trip.
+    if 0 <= rtt_sample_ms <= RTT_SAMPLE_SANE_MAX_MS:
+        _note_round_trip(display_state, rtt_sample_ms, sent_bytes, now)
+
+
+def _key_frame_pending(display_state: dict, now: float) -> bool:
+    """Whether the key frame a display's client was last sent (`_expect_key_frame`)
+    is still crossing its path, or the queue it put there still draining.
+
+    Crossing ends when the client acks it (`_note_ack`), when its delivery (the
+    pong to a ping written behind it) is STILL_RESUME_GRACE_SECONDS old with no
+    ack, or after SEND_STALL_SECONDS. Draining lasts twice the time the key
+    frame itself stood over the floor, since a queue drains no slower than that
+    while the path has room, and ends early once the newest round trip stands
+    twice as far over the floor as the key frame's own did: the stream behind
+    it outgrows the path rather than draining. Neither a round trip that dips
+    under the allowance nor one that merely rises ends it: the frames a relay
+    stamps together behind a long send arrive one after another.
+    """
+    crossing = display_state.get('key_crossing')
+    if crossing is not None:
+        ws = display_state.get('ws')
+        if (crossing['sent'] is not None and crossing['delivered'] is None and ws is not None
+                and _uplink_session_state(ws).get('answered', 0.0) >= crossing['sent']):
+            crossing['delivered'] = now
+        if (now - crossing['since'] < SEND_STALL_SECONDS
+                and (crossing['delivered'] is None or now - crossing['delivered'] < STILL_RESUME_GRACE_SECONDS)):
+            return True
+        display_state['key_crossing'] = None
+    drain = display_state.get('key_drain')
+    if drain is None:
+        return False
+    newest = next((a[1] for a in reversed(display_state.get('link_acks', ())) if a[0] >= drain['since']), None)
+    deeper = newest is not None and newest - (display_state.get('rtt_floor_ms') or 0.0) > 2.0 * drain['excess_ms']
+    if deeper or now - drain['since'] >= min(SEND_STALL_SECONDS, 2.0 * drain['excess_ms'] / 1000.0):
+        display_state['key_drain'] = None
+        return False
+    return True
+
+
 def _note_round_trip(display_state: dict, rtt_ms: float, sent_bytes: int, now: float) -> None:
     """Fold one acked frame's round trip into its display's link state.
 
@@ -858,20 +953,10 @@ class _VideoRelay:
                 data = item['data']
                 self.backlog_bytes -= len(data)
                 # Stamped before the await, and only for the display's
-                # registered client: that is what the ACK RTT math measures,
-                # with the bytes sent through this chunk for the delivery rate.
+                # registered client: that is what the ACK RTT math measures.
                 ds = self.server.display_clients.get(self.display_id)
                 if ds is not None and ds.get('ws') is self.ws:
-                    fid = item['frame_id']
-                    now = time.monotonic()
-                    ds['sent_bytes'] = ds.get('sent_bytes', 0) + len(data)
-                    ds['sent_timestamps'][fid] = (now, ds['sent_bytes'])
-                    ds['last_sent_frame_id'] = fid
-                    ds['has_sent_any_frame'] = True
-                    if ds.get('unacked_since') is None:
-                        ds['unacked_since'] = now
-                    if len(ds['sent_timestamps']) > SENT_FRAME_TIMESTAMP_HISTORY_SIZE:
-                        ds['sent_timestamps'].popitem(last=False)
+                    _note_send(ds, item['frame_id'], len(data))
                 try:
                     await _send_live(self.ws, data, f"Video relay for '{self.display_id}'")
                 except (ConnectionResetError, OSError, RuntimeError):
@@ -2218,6 +2303,7 @@ class DataStreamingServer(BaseStreamingService):
         display_state['smoothed_rtt'] = 0.0
         display_state.pop('_fps_sample_acked', None)
         display_state.pop('_fps_sample_time', None)
+        _expect_key_frame(display_state)
         
         message = f"PIPELINE_RESETTING {display_id}"
         
@@ -2674,6 +2760,7 @@ class DataStreamingServer(BaseStreamingService):
         display_state['backpressure_enabled'] = enabled
         if enabled and not prev_enabled:
             self._schedule_idr_for_display(display_id)
+            _expect_key_frame(display_state)
             relay = self.video_relay_groups.get(display_id, {}).get(display_state.get('ws'))
             if relay is not None:
                 relay.hold_sync()
@@ -2708,8 +2795,19 @@ class DataStreamingServer(BaseStreamingService):
         the gate would answer that with a freeze and a key frame on every
         resume. A queue a slow path builds under motion that continues has no
         such pause and is judged throughout; the gate's own pauses stop the
-        sends, not the capture, so they grant no grace. Also feeds the
+        sends, not the capture, so they grant no such grace. Also feeds the
         Prometheus fps/latency gauges for the primary display.
+
+        What a lift does grant is the time its key frame takes to cross. The
+        client can ack nothing after that key frame until the whole of it has
+        arrived, and on a slow path a large one outlasts the allowance, so the
+        frames sent behind it would read as a lagging client, close the gate
+        again, and cost another key frame at the next lift, over and over.
+        After a lift, a new page, or a reset (`_expect_key_frame`) the desync
+        branch therefore waits for that key frame to cross and for the queue
+        it put on the path to drain, for as long as that queue took to build,
+        twice over (`_key_frame_pending`). A stream the path cannot carry
+        deepens the queue past that instead and is judged at once.
 
         A stall is a frame that has gone unanswered by any ack for
         STALLED_CLIENT_TIMEOUT_SECONDS, timed from the first send after the
@@ -2817,7 +2915,8 @@ class DataStreamingServer(BaseStreamingService):
                 unanswered_for = (now - unacked_since) if unacked_since is not None else 0.0
                 steered = (self.cli_args.congestion_control[0] and display_state.get(
                     'rate_control_mode', self.rc_mode.value) == RateControlMode.CBR.value)
-                over = (effective_desync_frames > allowed_desync_frames
+                over = (not _key_frame_pending(display_state, now)
+                        and effective_desync_frames > allowed_desync_frames
                         and now - display_state.get('resumed_at', 0.0) >= STILL_RESUME_GRACE_SECONDS)
                 over_at = display_state.get('queue_over_at')
                 display_state['queue_over_at'] = now if over else None
@@ -4321,6 +4420,7 @@ class DataStreamingServer(BaseStreamingService):
                                      # Replaced below on Wayland; the X11 capture has no scale.
                                      'scale': 1.0,
                                 }
+                                _expect_key_frame(self.display_clients[display_id])
                                 # The page stops being a capture candidate with its socket still open.
                                 await capture_demand.sync(self)
                                 if IS_WAYLAND and self.input_handler is not None:
@@ -4343,6 +4443,7 @@ class DataStreamingServer(BaseStreamingService):
                                 display_state['acked_sent_at'] = None
                                 display_state['unacked_since'] = None
                                 display_state['stall_gated_at'] = None
+                                _expect_key_frame(display_state)
                                 display_state['sent_timestamps'].clear()
                                 display_state['rtt_samples'].clear()
                                 display_state['smoothed_rtt'] = 0.0
@@ -4417,23 +4518,7 @@ class DataStreamingServer(BaseStreamingService):
                             # it never got.
                             display_state = self.display_clients.get(target_display_id)
                             if display_state and display_state.get('ws') is websocket:
-                                display_state['acknowledged_frame_id'] = acked_frame_id
-                                # Any ack, a repeated id included, is the client alive.
-                                display_state['unacked_since'] = None
-                                
-                                sent_ts = display_state.get('sent_timestamps')
-                                if sent_ts and acked_frame_id in sent_ts:
-                                    send_time, sent_bytes = sent_ts.pop(acked_frame_id)
-                                    display_state['acked_sent_at'] = send_time
-                                    now = time.monotonic()
-                                    display_state['acked_at'] = now
-                                    rtt_sample_ms = max(
-                                        0.0,
-                                        (now - send_time) * 1000.0 - held_ms)
-                                    # An id collision (uint16, reset on restarts) is not a
-                                    # round trip.
-                                    if 0 <= rtt_sample_ms <= RTT_SAMPLE_SANE_MAX_MS:
-                                        _note_round_trip(display_state, rtt_sample_ms, sent_bytes, now)
+                                _note_ack(display_state, acked_frame_id, held_ms)
                         except (IndexError, ValueError):
                             data_logger.warning(f"Malformed CLIENT_FRAME_ACK from {raddr}: {message}")
 

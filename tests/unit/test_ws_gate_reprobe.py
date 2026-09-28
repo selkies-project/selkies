@@ -108,25 +108,17 @@ def make_server(module: Module, link: Link) -> DataStreamingServer:
     return server
 
 
-def ack(ds: dict, fid: int) -> None:
-    """What the CLIENT_FRAME_ACK handler records for one ack."""
-    ds["acknowledged_frame_id"] = fid
-    ds["unacked_since"] = None
-    sent = ds["sent_timestamps"]
-    if sent and fid in sent:
-        send_time, _ = sent.pop(fid)
-        ds["acked_sent_at"] = send_time
-
-
 async def play(server: DataStreamingServer, module: Module, client, seconds: float,
-               big_at: float = -1.0, big: int = 0) -> dict:
+               big_at: float = -1.0, big: int = 0, key_size: int = 0) -> dict:
     """Run the loop for `seconds` with the capture producing FPS frames a second.
 
     The fan-out sends a frame only while the gate is open and stamps it as the
     relay does; after every lift it sends from the key frame the lift asked
-    for. The link delivers each frame after the ones ahead of it; the first
-    frame sent `big_at` seconds in is a key frame of `big` bytes. `client` is
-    the page: it gets each frame as it arrives and says what to ack each tick.
+    for, of `key_size` bytes where given. The link delivers each frame after
+    the ones ahead of it; the first frame sent `big_at` seconds in is a key
+    frame of `big` bytes. `client` is the page: it gets each frame as it
+    arrives and says what to ack each tick. Sends and acks go through the
+    server's own bookkeeping (`_note_send`, `_note_ack`).
     """
     ds = server.display_clients["primary"]
     link = ds["ws"]
@@ -157,12 +149,9 @@ async def play(server: DataStreamingServer, module: Module, client, seconds: flo
                     idrs_seen = len(module.idrs)
                     if big and big_at >= 0 and now - start >= big_at:
                         size, key, big = big, True, 0
-                    ds["sent_bytes"] += size
-                    ds["sent_timestamps"][fid] = (now, ds["sent_bytes"])
-                    ds["last_sent_frame_id"] = fid
-                    ds["has_sent_any_frame"] = True
-                    if ds.get("unacked_since") is None:
-                        ds["unacked_since"] = now
+                    elif key and key_size:
+                        size = key_size
+                    w._note_send(ds, fid, size)
                     stats["idrs_sent"] += int(key)
                     in_flight.append((link.carry(size), fid, key))
                     stats["sent"] += 1
@@ -173,7 +162,7 @@ async def play(server: DataStreamingServer, module: Module, client, seconds: flo
                 last_ack = now
                 aid = client.ack(now)
                 if aid is not None:
-                    ack(ds, aid)
+                    w._note_ack(ds, aid, 0.0)
             await asyncio.sleep(0.004)
     finally:
         if stats["gated_since"] is not None:
@@ -192,8 +181,9 @@ class Client:
     `mode` from `freeze_at` on: `frozen` holds the ack at the last usable id and
     repeats it every second; `keygate` does the same until a key frame arrives
     (a decoder that lost its reference), then acks as before; `silent` sends
-    nothing at all; `slow` acks what it received `lag` seconds ago; `live` acks
-    the newest frame to arrive, as a full-frame client does.
+    nothing at all; `slow` acks what it received `lag` seconds ago (a queue the
+    floor learned before it does not forgive); `live` acks the newest frame to
+    arrive, as a full-frame client does.
     """
 
     def __init__(self, mode: str, freeze_at: float, lag: float = 0.0) -> None:
@@ -224,7 +214,8 @@ class Client:
         if self.mode == "silent" and now >= self.freeze_at:
             return None
         if self.mode == "slow":
-            while self.frames and self.frames[0][0] <= now - self.lag:
+            lag = self.lag if now >= self.freeze_at else 0.0
+            while self.frames and self.frames[0][0] <= now - lag:
                 self.usable = self.frames.popleft()[1]
         if self.usable is None:
             return None
@@ -235,12 +226,12 @@ class Client:
 
 
 def run(mode: str, seconds: float, freeze_at: float = 1.0, lag: float = 0.0, rate: float = 0.0,
-        big_at: float = -1.0, big: int = 0):
+        big_at: float = -1.0, big: int = 0, key_size: int = 0):
     module = Module()
     server = make_server(module, Link(rate))
     client = Client(mode, freeze_at, lag)
     mark = time.monotonic()
-    stats = asyncio.run(play(server, module, client, seconds, big_at, big))
+    stats = asyncio.run(play(server, module, client, seconds, big_at, big, key_size))
     return stats, client, module, mark
 
 
@@ -256,8 +247,8 @@ res.check("no closed spell outlasts the re-probe by more than a check or two",
           longest <= w.STALLED_CLIENT_REPROBE_SECONDS + 4 * TICK + 0.3,
           f"longest closed {longest:.2f} s (re-probe after {w.STALLED_CLIENT_REPROBE_SECONDS} s)")
 frozen_share = stats["sent"] / max(1, stats["produced"])
-res.check("a client that stays frozen is sent a small share of the stream, a key frame per re-probe",
-          frozen_share < 0.35 and stats["idrs_sent"] <= reprobes + 2,
+res.check("a client that stays frozen costs a key frame per re-probe and at most half the stream",
+          frozen_share < 0.5 and stats["idrs_sent"] <= reprobes + 2,
           f"{stats['sent']}/{stats['produced']} frames ({frozen_share:.0%}), {stats['idrs_sent']} key frames")
 
 # A decoder that lost its reference: it can ack nothing until a key frame arrives.
@@ -271,9 +262,9 @@ res.check("and, answering it, keeps its stream",
           f"{after} triggers after recovering")
 
 # A slow client still catching up moves its ack: that is the gate doing its job.
-stats, client, module, mark = run("slow", 6.0, freeze_at=0.0, lag=0.6)
-res.check("a slow client whose acks keep moving is never re-probed",
-          LOG.count("Re-probing desynced client", mark) == 0,
+stats, client, module, mark = run("slow", 7.0, freeze_at=2.0, lag=0.6)
+res.check("a slow client whose acks keep moving is gated but never re-probed",
+          LOG.count("Backpressure TRIGGERED", mark) >= 1 and LOG.count("Re-probing desynced client", mark) == 0,
           f"{LOG.count('Backpressure TRIGGERED', mark)} triggers, "
           f"{LOG.count('Re-probing desynced client', mark)} re-probes")
 
@@ -286,6 +277,16 @@ res.check("and is waited for, not answered with another key frame",
           LOG.count("Re-probing desynced client", mark) == 0 and LOG.count("Backpressure LIFTED", mark) >= 1,
           f"{LOG.count('Re-probing desynced client', mark)} re-probes, "
           f"{LOG.count('Backpressure LIFTED', mark)} lifts")
+
+# Over the same path every lift's key frame is 400 KB and takes 1.6 s to cross, while the
+# stream behind it fits the path: once the frames queued behind the first lift's key frame
+# are let arrive, the gate has nothing more to close on.
+stats, client, module, mark = run("live", 10.0, rate=250_000, big_at=1.0, big=700_000, key_size=400_000)
+triggers = LOG.count("Backpressure TRIGGERED", mark)
+res.check("a lift's own key frame crossing a slow path does not close the gate again",
+          triggers <= 1 and LOG.count("Backpressure LIFTED", mark) >= 1,
+          f"{triggers} triggers, {LOG.count('Backpressure LIFTED', mark)} lifts, "
+          f"{stats['idrs_sent']} key frames in 10 s")
 
 # A client that sends nothing at all is the stall branch's.
 stats, client, module, mark = run("silent", 9.0)
