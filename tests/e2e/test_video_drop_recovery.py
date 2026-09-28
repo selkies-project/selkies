@@ -180,21 +180,26 @@ def loop_thread(pid: int) -> int:
 class Load:
     """Busy processes that share one CPU with the server's event loop.
 
-    The loop thread is pinned beside them at the lowest scheduling priority,
-    so while they run it barely does; raising a thread's niceness needs no
-    privilege, lowering it back does, so the thread keeps it. Alone on the
-    CPU that costs it nothing.
+    The loop thread is pinned beside them while they run and goes back to
+    every CPU it had between bursts. At its own priority it gets their
+    share of the one CPU while they run, which is short of what it needs,
+    so a burst slows it and frames drop; `stall` also sets it to the lowest
+    priority, where a burst stops it outright. Raising a thread's niceness
+    needs no privilege and lowering it back does, so a stalled loop keeps
+    that priority to the end, and on a busy host it then starves behind
+    whatever else runs beside it between bursts as well.
     """
 
-    def __init__(self, pid: int) -> None:
+    def __init__(self, pid: int, stall: bool = True) -> None:
         self.tid = loop_thread(pid)
         self.original = os.sched_getaffinity(self.tid)
         self.cpu = max(self.original)
+        self.stall = stall
         self.hogs: list = []
 
     def start(self) -> None:
-        os.sched_setaffinity(self.tid, {self.cpu})
-        os.setpriority(os.PRIO_PROCESS, self.tid, 19)
+        if self.stall:
+            os.setpriority(os.PRIO_PROCESS, self.tid, 19)
         for _ in range(HOGS):
             hog = H.spawn([sys.executable, "-c", "while True: pass"],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -205,8 +210,10 @@ class Load:
     def pause(self) -> None:
         for hog in self.hogs:
             hog.send_signal(signal.SIGSTOP)
+        os.sched_setaffinity(self.tid, self.original)
 
     def resume(self) -> None:
+        os.sched_setaffinity(self.tid, {self.cpu})
         for hog in self.hogs:
             hog.send_signal(signal.SIGCONT)
 

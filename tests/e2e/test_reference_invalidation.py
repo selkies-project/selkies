@@ -12,8 +12,8 @@ index, so a decoded picture can be compared with the frame it claims to be.
 Counted throughout: the frames the server dropped, those of them the encoder
 was told to predict past, the keyframes decoded, and the picture-loss
 indications the receiver sent. Measured against the same load without the
-repair, which spends a keyframe for every six frames it drops: 286 drops and 49
-keyframes there, 260 drops and none here.
+repair, which spends a keyframe for about every eight frames it drops: 456 and
+621 drops and 69 and 72 keyframes there, 173 to 264 drops and none here.
 
     python3 tests/e2e/test_reference_invalidation.py
 
@@ -35,7 +35,8 @@ from playwright.sync_api import sync_playwright
 
 WIDTH, HEIGHT = 1280, 720
 ENGINE = os.environ.get("E2E_ENGINE", "chromium")
-# Short stalls, well inside the ~400 ms a receiver waits before asking for a
+# Short bursts, inside the eight frames of references the encoder keeps (133 ms
+# at 60 fps) and well inside the ~400 ms a receiver waits before asking for a
 # keyframe itself: each drops a handful of frames and nothing else.
 BURST_ON_S, BURST_OFF_S = 0.08, 0.42
 LOAD_S = 24.0
@@ -76,8 +77,8 @@ def sample_for(page: Any, seconds: float) -> list:
 def report(res: H.Results, tag: str, samples: list, dropped: int, named: int,
            keyframes: int, plis: Optional[int], frames: int) -> None:
     """The checks both transports share: the drops happened, the encoder was told which
-    frames to predict past, the recovery cost no keyframe, and every decoded picture was
-    the frame it claimed to be."""
+    frames to predict past, the recovery cost no keyframe beyond the frame_num wraps the
+    losses covered, and every decoded picture was the frame it claimed to be."""
     bad = [s for s in samples if D.corrupt(s)]
     detail = (f"dropped {dropped}, named {named}, keyframes +{keyframes}, "
               f"{'plis +%d, ' % plis if plis is not None else ''}frames +{frames}, "
@@ -85,16 +86,17 @@ def report(res: H.Results, tag: str, samples: list, dropped: int, named: int,
     print(f"      [{tag}] {detail}", flush=True)
     res.check(f"{tag}: the load really dropped frames", dropped > 0, detail)
     res.check(f"{tag}: the encoder was told which frames to predict past", named > 0, detail)
-    # One of each is the measured ceiling: a stall that lands badly still trips the
+    # One of each is the measured ceiling: a burst that lands badly still trips the
     # receiver's own keyframe timer now and then. Without the repair the same load
-    # spends one keyframe per six drops. x264 sizes frame_num for sixteen frames, so a
-    # loss covering its wrap is answered with the keyframe the browsers' FFmpeg decoder
-    # needs: with the few frames a stall drops at a time, that is a share of the losses
-    # named.
+    # spends one keyframe per eight drops. A loss covering the frame where frame_num
+    # wraps is answered with the keyframe the browsers' FFmpeg decoder needs. x264 sizes
+    # frame_num for sixteen frames, so with the few frames a burst drops at a time that
+    # is a share of the losses named; NVENC sizes it for 256, a wrap every four seconds
+    # at 60 fps, and with a loss every few frames most wraps the load spans are covered.
     software = "Encoder: software H264" in H.server_log()
-    ceiling = max(1, named // 2) if software else 1
-    res.check(f"{tag}: the drops cost at most {'the wrap share of' if software else 'one'} keyframe",
-              keyframes <= ceiling, detail)
+    ceiling = max(1, named // 2) if software else 1 + -(-(frames + dropped) // 256)
+    res.check(f"{tag}: the drops cost at most one keyframe beyond the frame_num wraps",
+              keyframes <= ceiling, f"{detail}, ceiling {ceiling}")
     if plis is not None:
         res.check(f"{tag}: and the receiver asked for at most one", plis <= 1, detail)
     res.check(f"{tag}: the stream kept flowing", frames >= 20 * LOAD_S, detail)
@@ -135,13 +137,18 @@ def webrtc(res: H.Results) -> None:
 
             before = page.evaluate(D.STATS_JS)
             drops0, named0 = bridge_counter("dropped"), bridge_counter("invalidated")
-            load = D.Load(pid)
+            # Slowed, not stopped: a stall longer than the encoder's references
+            # costs a keyframe however it is repaired.
+            load = D.Load(pid, stall=False)
             load.start()
             samples = []
             end = time.time() + LOAD_S
             while time.time() < end:
                 load.resume()
-                samples += sample_for(page, BURST_ON_S)
+                # Timed on its own: a sample still running when the burst should end
+                # would stretch it past those references, and a broken reference shows
+                # in every picture after it, which the samples between bursts see.
+                time.sleep(BURST_ON_S)
                 load.pause()
                 samples += sample_for(page, BURST_OFF_S)
             load.stop()
