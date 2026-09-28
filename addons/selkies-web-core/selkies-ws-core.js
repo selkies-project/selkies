@@ -77,10 +77,11 @@
  * `systemApps`, `stats` (to the parent window), `clientRoleUpdate`,
  * `effectiveCursorState`, `scalingDpiFollowed`, `trackpadModeUpdate`,
  * `clipboardContentUpdate`, the clipboard preview of lib/clipboard-sync.js,
- * `fileUpload`,
- * `toggleDashboard`, and `toggleTouchGamepad`. The `window` globals it
- * publishes for the dashboards and the tests are `webrtcInput` (the Input
- * handler), `fps`, `videoChunksReceived`, `videoDivertOn`, `videoStripeRows`
+ * `fileUpload`, `displayRefresh` (the display's measured refresh,
+ * lib/display-refresh.js), `toggleDashboard`, and `toggleTouchGamepad`. The
+ * `window` globals it publishes for the dashboards and the tests are
+ * `webrtcInput` (the Input handler), `fps`, `displayRefreshRate` (the same
+ * refresh, null until measured), `videoChunksReceived`, `videoDivertOn`, `videoStripeRows`
  * (the row layout the video worker is decoding), `webcamCodec`,
  * `stream_info`, `stream_client`, and `stream_stats` (lib/stream-stats.js),
  * `currentAudioBufferSize`,
@@ -97,7 +98,9 @@
  * defaults stay re-pushable; only genuine user actions, and
  * sanitizeAndStoreSettings for keys the user already overrode, write
  * localStorage. Keys in `PER_DISPLAY_SETTINGS` carry a `_display2` suffix on
- * the secondary display.
+ * the secondary display. The frame rate asked for follows the display's
+ * refresh where the stored choice is `display` or where there is none
+ * (`requestedStreamFramerate`).
  * @module
  */
 
@@ -140,6 +143,7 @@ import { StreamStats, DecodeCapability, webcodecsDecoder, FIRST_SAMPLE_MS } from
 import decodeGateSource from './lib/decode-gate.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
+import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 
@@ -1039,6 +1043,12 @@ fetch('manifest.json')
   });
 
 let framerate = 60;
+/** The server's framerate setting (`min`, `max`, `default`, `overridden`), once its settings arrived. */
+let framerateSpan = null;
+/** The measurement of this page's display (lib/display-refresh.js); null on a shared viewer. */
+let displayRefresh = null;
+/** The frame rate the last SETTINGS asked for, null where it named none. */
+let framerateAsked = null;
 let video_crf = 25;
 let video_fullcolor = false;
 let video_streaming_mode = false;
@@ -1513,7 +1523,7 @@ function sanitizeAndStoreSettings(serverSettings) {
   }
   return changes;
 }
-framerate = getIntParam('framerate', framerate);
+framerate = getFloatParam('framerate', framerate);
 video_crf = getIntParam('video_crf', video_crf);
 video_fullcolor = getBoolParam('video_fullcolor', video_fullcolor);
 video_streaming_mode = getBoolParam('video_streaming_mode', video_streaming_mode);
@@ -3320,6 +3330,29 @@ function currentDisplayScale(dpr) {
 }
 
 /**
+ * The frame rate this page asks the server for: the stored choice, or the
+ * display's own refresh where that is chosen or nothing is
+ * (lib/display-refresh.js); null asks for nothing.
+ * @returns {?number}
+ */
+function requestedStreamFramerate() {
+    return requestedFramerate(window.localStorage.getItem(prefixedStorageKey('framerate')),
+        displayRefresh ? displayRefresh.rate() : null, framerateSpan);
+}
+
+/**
+ * Asks the server for the rate `requestedStreamFramerate` names where it moved:
+ * the display measured or remeasured, or the server's span arrived.
+ * @param {string} reason
+ */
+function followDisplayFramerate(reason) {
+    const rate = requestedStreamFramerate();
+    if (rate === null || rate === framerateAsked) return;
+    framerate = rate;
+    sendFullSettingsUpdateToServer(reason);
+}
+
+/**
  * Builds the SETTINGS payload. Only keys with a stored (user-set) value are
  * included, so the fallbacks here never override server-configured defaults
  * for an untouched setting; `scaling_dpi` is the exception, being
@@ -3345,7 +3378,6 @@ function getCurrentSettingsPayload() {
         && (!EXPLICIT_ONLY_SETTINGS.includes(key)
             || window.localStorage.getItem(`${storedKey(key)}_explicit_choice`) === 'true');
     const storedEntries = [
-        ['framerate', () => getIntParam('framerate', 60)],
         ['video_crf', () => getIntParam('video_crf', 25)],
         ['encoder', () => getStringParam('encoder', 'h264enc')],
         ['manual_resolution', () => getBoolParam('manual_resolution', false)],
@@ -3367,6 +3399,8 @@ function getCurrentSettingsPayload() {
     for (const [key, read] of storedEntries) {
         if (hasStoredParam(key)) settingsToSend[key] = read();
     }
+    framerateAsked = requestedStreamFramerate();
+    if (framerateAsked !== null) settingsToSend['framerate'] = framerateAsked;
     settingsToSend['scaling_dpi'] = effectiveScalingDpi();
     if (detectedKeyboardLayout) {
         settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
@@ -5437,8 +5471,10 @@ function handleSettingsMessage(settings, fromServer) {
   console.log('Applying settings:', settings);
   let settingsChanged = false;
   if (settings.framerate !== undefined) {
-    framerate = parseInt(settings.framerate);
-    storeInt('framerate', framerate);
+    const followsDisplay = settings.framerate === FRAMERATE_DISPLAY;
+    storeString('framerate', followsDisplay ? FRAMERATE_DISPLAY : String(parseFloat(settings.framerate)));
+    const rate = followsDisplay ? requestedStreamFramerate() : parseFloat(settings.framerate);
+    if (Number.isFinite(rate)) framerate = rate;
     settingsChanged = true;
   }
   if (settings.webcam_encoder !== undefined) {
@@ -5671,6 +5707,14 @@ function sendStatsMessage() {
 function initWebsockets() {
   if (!runPreflightChecks()) {
     return;
+  }
+  if (!isSharedMode) {
+    window.displayRefreshRate = null;
+    displayRefresh = watchDisplayRefresh((rate) => {
+      window.displayRefreshRate = rate;
+      window.postMessage({ type: 'displayRefresh', rate }, window.location.origin);
+      followDisplayFramerate('display refresh');
+    });
   }
 
   const pathname = getRoutePrefix() + '/';
@@ -7380,7 +7424,7 @@ class WorkerWebSocket {
       const dpr = streamDensity();
 
       const knownSettings = [
-        'framerate', 'video_crf', 'encoder', 'manual_resolution',
+        'video_crf', 'encoder', 'manual_resolution',
         'audio_bitrate', 'video_fullcolor', 'video_streaming_mode',
         'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'video_paintover_crf',
         'video_paintover_burst_frames', 'use_paint_over_quality', 'scaling_dpi',
@@ -7393,7 +7437,7 @@ class WorkerWebSocket {
         'force_aligned_resolution'
       ];
       const integerSettingKeys = [
-        'framerate', 'video_crf', 'audio_bitrate', 'jpeg_quality',
+        'video_crf', 'audio_bitrate', 'jpeg_quality',
         'paint_over_jpeg_quality', 'video_paintover_crf',
         'video_paintover_burst_frames', 'scaling_dpi', 'video_bitrate'
       ];
@@ -7443,6 +7487,8 @@ class WorkerWebSocket {
       if (settingsToSend['scaling_dpi'] === undefined) {
         settingsToSend['scaling_dpi'] = effectiveScalingDpi();
       }
+      framerateAsked = requestedStreamFramerate();
+      if (framerateAsked !== null) settingsToSend['framerate'] = framerateAsked;
       if (detectedKeyboardLayout) {
         settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
       }
@@ -8118,9 +8164,12 @@ class WorkerWebSocket {
                   cleanupJpegStripeQueue();
                   clearDecodedStripesQueue();
               }
-              if (Number.isFinite(parseInt(window['framerate'], 10))) {
-                  framerate = parseInt(window['framerate'], 10);
+              if (Number.isFinite(parseFloat(window['framerate']))) {
+                  framerate = parseFloat(window['framerate']);
               }
+              const fr = obj.settings.framerate;
+              framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max, default: fr.default, overridden: !!fr.overridden } : null;
+              followDisplayFramerate('server framerate span');
               if (typeof window['video_fullcolor'] === 'boolean') {
                   video_fullcolor = window['video_fullcolor'];
               }

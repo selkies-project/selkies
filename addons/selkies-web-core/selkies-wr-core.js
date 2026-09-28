@@ -55,7 +55,9 @@
  * runs one pipeline per display, and the position rides the connect metadata.
  *
  * Contract with the dashboards. Globals published on `window`: `selkiesLogs`
- * (capped log ring buffers), `fps`, `stream_info`, `stream_client`, and
+ * (capped log ring buffers), `fps`, `displayRefreshRate` (the display's
+ * measured refresh, lib/display-refresh.js; null until measured),
+ * `stream_info`, `stream_client`, and
  * `stream_stats` (lib/stream-stats.js), `currentAudioBufferSize`, `manualResolution`,
  * `enable_resize`, `streamResolutionDiverged`, `webrtcInput`, and every server
  * setting as `window[key]`. Window messages handled (same origin):
@@ -68,7 +70,10 @@
  * event. Window messages posted: `sidebarButtonStatusUpdate`,
  * `pipelineStatusUpdate`, `effectiveCursorState`, `scalingDpiFollowed`,
  * `serverSettings`, `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
- * `clientRoleUpdate`, `toggleDashboard`, `toggleTouchGamepad`. Flags read:
+ * `clientRoleUpdate`, `displayRefresh` (the same refresh), `toggleDashboard`,
+ * `toggleTouchGamepad`. The frame rate asked for follows the display's refresh
+ * where the stored choice is `display` or where there is none
+ * (`requestedStreamFramerate`). Flags read:
  * `window.__selkiesModeSwitching` (a mode switch in progress suppresses the
  * recovery reconnects), `window.__selkiesAuthProbe` (re-presents the
  * login after an auth drop), `window.clipboard_enabled`.
@@ -93,6 +98,7 @@ import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 import { StreamStats, DecodeCapability, webrtcDecoder, FIRST_SAMPLE_MS } from './lib/stream-stats.js';
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
+import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -237,6 +243,12 @@ export default function webrtc() {
 	/** Video bitrate in kbps. */
 	let videoBitRate = 8000;
 	let videoFramerate = 60;
+	/** The server's framerate setting (`min`, `max`, `default`, `overridden`), once its settings arrived. */
+	let framerateSpan = null;
+	/** The measurement of this page's display (lib/display-refresh.js); null on a shared viewer. */
+	let displayRefresh = null;
+	/** The frame rate this peer last asked for, null where it named none. */
+	let framerateAsked = null;
 	/** Audio bitrate in bps. */
 	let audioBitRate = 128000;
 	let showStart = false;
@@ -1207,6 +1219,28 @@ export default function webrtc() {
 		});
 	}
 
+	/**
+	 * The frame rate this page asks the server for: the stored choice, or the
+	 * display's own refresh where that is chosen or nothing is
+	 * (lib/display-refresh.js); null asks for nothing.
+	 * @returns {?number}
+	 */
+	function requestedStreamFramerate() {
+		return requestedFramerate(window.localStorage.getItem(storageKeyFor('framerate')),
+			displayRefresh ? displayRefresh.rate() : null, framerateSpan);
+	}
+
+	/**
+	 * Asks the server for the rate `requestedStreamFramerate` names where it
+	 * moved: the display measured or remeasured, or the server's span arrived.
+	 */
+	function followDisplayFramerate() {
+		const rate = requestedStreamFramerate();
+		if (rate === null || rate === framerateAsked || !persistentSettingsSent) return;
+		videoFramerate = framerateAsked = rate;
+		webrtc.sendDataChannelMessage(`_arg_fps,${rate}`);
+	}
+
 	function sendClientPersistedSettings() {
 		if (isSharedMode) {
 			console.log("Skipping sending client persisted settings in shared mode.");
@@ -1218,7 +1252,7 @@ export default function webrtc() {
 		reportedStreamDensity = dpr;
 
 		const knownSettings = [
-			'framerate', 'encoder', 'manual_resolution',
+			'encoder', 'manual_resolution',
 			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
 			'rate_control_mode', 'video_crf', 'use_cpu', 'force_aligned_resolution',
 			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality',
@@ -1230,7 +1264,7 @@ export default function webrtc() {
 			'force_aligned_resolution'
 		];
 		const integerSettingKeys = [
-			'framerate', 'audio_bitrate', 'scaling_dpi', 'video_crf',
+			'audio_bitrate', 'scaling_dpi', 'video_crf',
 			'video_paintover_crf', 'video_paintover_burst_frames', 'video_bitrate'
 		];
 
@@ -1281,6 +1315,8 @@ export default function webrtc() {
 		if (settingsToSend['scaling_dpi'] === undefined) {
 			settingsToSend['scaling_dpi'] = effectiveScalingDpi();
 		}
+		framerateAsked = requestedStreamFramerate();
+		if (framerateAsked !== null) settingsToSend['framerate'] = framerateAsked;
 		if (detectedKeyboardLayout) {
 			settingsToSend['keyboardLayout'] = detectedKeyboardLayout;
 		}
@@ -2172,9 +2208,13 @@ export default function webrtc() {
 			storeInt('video_bitrate', videoBitRate);
 		}
 		if (settings.framerate !== undefined) {
-			videoFramerate = parseInt(settings.framerate);
-			webrtc.sendDataChannelMessage(`_arg_fps,${videoFramerate}`);
-			storeInt('framerate', videoFramerate);
+			const followsDisplay = settings.framerate === FRAMERATE_DISPLAY;
+			storeString('framerate', followsDisplay ? FRAMERATE_DISPLAY : String(parseFloat(settings.framerate)));
+			const rate = followsDisplay ? requestedStreamFramerate() : parseFloat(settings.framerate);
+			if (Number.isFinite(rate)) {
+				videoFramerate = framerateAsked = rate;
+				webrtc.sendDataChannelMessage(`_arg_fps,${rate}`);
+			}
 		}
 		if (settings.audio_bitrate !== undefined) {
 			audioBitRate = parseInt(settings.audio_bitrate);
@@ -2857,8 +2897,16 @@ export default function webrtc() {
 			resizeRemote = getBoolParam('resize_remote', resizeRemote);
 			scaleLocal = getBoolParam('scaleLocallyManual', !resizeRemote);
 			videoBitRate = getIntParam('video_bitrate', videoBitRate);
-			videoFramerate = getIntParam('framerate', videoFramerate);
+			videoFramerate = getFloatParam('framerate', videoFramerate);
 			audioBitRate = getIntParam('audio_bitrate', audioBitRate);
+			if (!isSharedMode && !displayRefresh) {
+				window.displayRefreshRate = null;
+				displayRefresh = watchDisplayRefresh((rate) => {
+					window.displayRefreshRate = rate;
+					window.postMessage({ type: 'displayRefresh', rate }, window.location.origin);
+					followDisplayFramerate();
+				});
+			}
 			window.manualResolution = getBoolParam('manual_resolution', false);
 			isGamepadEnabled = getBoolParam('isGamepadEnabled', true);
 			manualWidth = getIntParam('manual_width', null);
@@ -3455,6 +3503,9 @@ export default function webrtc() {
 				const changes = sanitizeAndStoreSettings(obj.settings);
 				if (Number.isFinite(window.video_crf)) crf = Math.round(window.video_crf);
 				if (Number.isFinite(window.video_bitrate)) videoBitRate = Math.round(window.video_bitrate);
+				const fr = obj.settings.framerate;
+				framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max, default: fr.default, overridden: !!fr.overridden } : null;
+				followDisplayFramerate();
 				const fcEntry = obj.settings && obj.settings.video_fullcolor;
 				fullColorLocked = !!(fcEntry && fcEntry.locked);
 				if (fcEntry) declineUndecodableFullColor();
@@ -3612,6 +3663,8 @@ export default function webrtc() {
 			appName = null;
 			videoBitRate = 8000;
 			videoFramerate = 60;
+			if (displayRefresh) displayRefresh.stop();
+			displayRefresh = framerateSpan = framerateAsked = null;
 			audioBitRate = 128000;
 			showStart = false;
 			showDrawer = false;

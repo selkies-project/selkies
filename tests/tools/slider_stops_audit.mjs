@@ -10,8 +10,8 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
-const { FRAMERATE_STOPS, BITRATE_STOPS, CRF_STOPS, stopsWithin, stopIndex } = await import(
-    '../../addons/selkies-web-core/lib/slider-stops.js');
+const { FRAMERATE_STOPS, BITRATE_STOPS, CRF_STOPS, stopsWithin, stopIndex, withDisplayStop, framerateStopIndex } =
+    await import('../../addons/selkies-web-core/lib/slider-stops.js');
 
 let failed = 0;
 
@@ -65,6 +65,29 @@ const descending = (list) => list.every((v, i) => i === 0 || v < list[i - 1]);
     check('a CRF between stops maps to the nearer one on the descending list',
         stopIndex(CRF_STOPS, 23) === CRF_STOPS.indexOf(25) && stopIndex(CRF_STOPS, 7) === CRF_STOPS.indexOf(5),
         `${stopIndex(CRF_STOPS, 23)} ${stopIndex(CRF_STOPS, 7)}`);
+}
+
+{
+    const listed = stopsWithin(FRAMERATE_STOPS, 30, 120);
+    const ntsc = 60000 / 1001;
+    const withNtsc = withDisplayStop(listed, ntsc);
+    check("the display's own stop sits where its rate sorts",
+        withNtsc.stops.join(',') === `30,36,40,45,48,50,${ntsc},60,72,75,80,90,100,120` && withNtsc.stops[withNtsc.display] === ntsc,
+        withNtsc.stops.join(','));
+    const with60 = withDisplayStop(listed, 60);
+    check('a display at a listed rate is a stop of its own after that one',
+        with60.stops.length === listed.length + 1 && with60.display === listed.indexOf(60) + 1 && with60.stops[with60.display - 1] === 60,
+        `${with60.display} ${with60.stops.join(',')}`);
+    const none = withDisplayStop(listed, null);
+    check('an unmeasured display adds no stop', none.stops === listed && none.display === -1);
+    check("a rate following the display sits at the display's stop", framerateStopIndex(with60, 60, true) === with60.display);
+    check('a fixed rate sits at its listed stop, never the display\'s',
+        framerateStopIndex(with60, 60, false) === listed.indexOf(60)
+            && framerateStopIndex(withNtsc, ntsc, false) === withNtsc.stops.indexOf(60)
+            && framerateStopIndex(withNtsc, 120, false) === withNtsc.stops.length - 1,
+        `${framerateStopIndex(with60, 60, false)} ${framerateStopIndex(withNtsc, ntsc, false)}`);
+    check('without a display stop the position is the nearest listed stop',
+        framerateStopIndex(none, 56, true) === listed.indexOf(60));
 }
 
 console.log(`\n[slider-stops] ${failed ? 'FAILED' : 'OK'}`);

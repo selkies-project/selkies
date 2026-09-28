@@ -58,3 +58,35 @@ export function stopIndex(stops, value) {
     }
     return nearest;
 }
+
+/**
+ * The frame-rate stops with the display's own among them: the rate a stream
+ * matching the display runs at, placed where it sorts and after a listed stop
+ * of the same rate, so a fixed rate and following the display stay two
+ * choices; `display` is its index, -1 where the display is unmeasured.
+ * @param {number[]} stops
+ * @param {?number} displayRate
+ * @returns {{stops: number[], display: number}}
+ */
+export function withDisplayStop(stops, displayRate) {
+    if (!displayRate) return { stops, display: -1 };
+    const after = stops.findIndex((v) => v > displayRate);
+    const display = after < 0 ? stops.length : after;
+    return { stops: [...stops.slice(0, display), displayRate, ...stops.slice(display)], display };
+}
+
+/**
+ * The slider position of a frame rate among `withDisplayStop`'s stops: the
+ * display's own where the rate follows the display, else the listed stop
+ * nearest the rate.
+ * @param {{stops: number[], display: number}} options
+ * @param {number} framerate
+ * @param {boolean} follows
+ * @returns {number}
+ */
+export function framerateStopIndex({ stops, display }, framerate, follows) {
+    if (display < 0) return stopIndex(stops, framerate);
+    if (follows) return display;
+    const listed = stopIndex(stops.filter((_, i) => i !== display), framerate);
+    return listed >= display ? listed + 1 : listed;
+}

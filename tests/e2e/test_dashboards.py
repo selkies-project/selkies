@@ -694,12 +694,13 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
                 opened = classic_open_video(page)
                 time.sleep(1.0)
                 if page.locator('#framerateSlider').count():
-                    # The slider carries an index into its frame rate stops, so
-                    # one stop down is a change from whatever the default is.
+                    # The slider carries an index into its frame rate stops, and the
+                    # display's own stop sits right after the listed stop of its rate,
+                    # so two stops down is a change of rate from whatever the default is.
                     page.evaluate("""() => {
                       const el = document.getElementById('framerateSlider');
                       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-                      setter.call(el, String(Number(el.value) > 0 ? Number(el.value) - 1 : 1));
+                      setter.call(el, String(Number(el.value) > 1 ? Number(el.value) - 2 : 2));
                       el.dispatchEvent(new Event('input', {bubbles: true}));
                       el.dispatchEvent(new Event('change', {bubbles: true}));
                     }""")

@@ -39,7 +39,9 @@
  * soft keys dispatch synthetic `KeyboardEvent`s on `window`, and the files
  * section dispatches the `requestFileUpload` DOM event.
  *
- * `window` state it reads: `webrtcInput.gamingMode`,
+ * `window` state it reads: `webrtcInput.gamingMode`, `displayRefreshRate`
+ * (with the `displayRefresh` message, the display's measured refresh, which the
+ * frame-rate slider offers as a stop of its own),
  * `__SELKIES_STREAMING_MODE__`, and `__SELKIES_DUAL_MODE__`; it sets
  * `__selkiesModeSwitching` around a transport switch.
  *
@@ -55,7 +57,8 @@ import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react"
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { fragmentWithSessionToken, shareablePageURL, urlFragmentKeyword } from "../../../selkies-web-core/lib/page-url.js";
-import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, stopIndex, stopsWithin } from "../../../selkies-web-core/lib/slider-stops.js";
+import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, framerateStopIndex, stopIndex, stopsWithin, withDisplayStop } from "../../../selkies-web-core/lib/slider-stops.js";
+import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from "../../../selkies-web-core/lib/display-refresh.js";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords } from "../../../selkies-web-core/lib/touch-controls.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
@@ -1320,9 +1323,13 @@ function Sidebar() {
     localStorage.getItem(getPrefixedKey("webcam_encoder"))
   );
   const [framerate, setFramerate] = useState(
-    parseInt(localStorage.getItem(getPrefixedKey("framerate")), 10) ||
+    parseFloat(localStorage.getItem(getPrefixedKey("framerate"))) ||
       DEFAULT_FRAMERATE
   );
+  /** The stored frame-rate choice: a rate, `FRAMERATE_DISPLAY`, or null for none. */
+  const [framerateChoice, setFramerateChoice] = useState(() => readStored("framerate"));
+  /** The display's refresh the core measured, null until it has. */
+  const [displayRate, setDisplayRate] = useState(() => window.displayRefreshRate ?? null);
   const [video_crf, setVideoCRF] = useState(
     parseInt(localStorage.getItem(getPrefixedKey("video_crf")), 10) ||
       DEFAULT_VIDEO_CRF
@@ -1584,7 +1591,7 @@ function Sidebar() {
     }
     const s_framerate = serverSettings.framerate;
     if (s_framerate) {
-      const stored = getStoredInt("framerate");
+      const stored = parseFloat(localStorage.getItem(getPrefixedKey("framerate")));
       const final = !isNaN(stored)
         ? Math.max(s_framerate.min, Math.min(s_framerate.max, stored))
         : s_framerate.default;
@@ -2094,12 +2101,18 @@ function Sidebar() {
   const wceServerValue = webcamEncoderOptions.includes(wceServer?.value) ? wceServer.value : null;
   const wceChoice = webcamEncoderOptions.includes(webcamEncoderChoice) ? webcamEncoderChoice : null;
   const webcamEncoder = (wceServer?.locked && wceServerValue) || wceChoice || wceServerValue || "auto";
-  /** The frame rate, bitrate, and CRF sliders carry an index into their stops. */
+  /**
+   * The frame rate, bitrate, and CRF sliders carry an index into their stops;
+   * the display's own stop asks for the display's refresh wherever it moves.
+   */
   const handleFramerateChange = (event) => {
-    const selectedFramerate = framerateOptions[parseInt(event.target.value, 10)];
+    const index = parseInt(event.target.value, 10);
+    const selectedFramerate = framerateOptions.stops[index];
     if (selectedFramerate === undefined) return;
+    const choice = index === framerateOptions.display ? FRAMERATE_DISPLAY : selectedFramerate;
     setFramerate(selectedFramerate);
-    debouncedPostSetting({ framerate: selectedFramerate });
+    setFramerateChoice(String(choice));
+    debouncedPostSetting({ framerate: choice });
   };
   const handleVideoBitrateChange = (event) => {
     const index = parseInt(event.target.value, 10);
@@ -2816,6 +2829,8 @@ function Sidebar() {
           if (typeof message.enabled === 'boolean') {
             setIsTrackpadModeActive(message.enabled);
           }
+        } else if (message.type === "displayRefresh") {
+          if (Number.isFinite(message.rate)) setDisplayRate(message.rate);
         } else if (message.type === "scalingDpiFollowed") {
           // The core's derived pick; a stored pick is the user's and stays.
           if (Number.isFinite(message.value) && readStored("scaling_dpi") === null) {
@@ -2882,7 +2897,14 @@ function Sidebar() {
    */
   const videoBitrateOptions = stopsWithin(BITRATE_STOPS, serverSettings?.video_bitrate?.min ?? 100, serverSettings?.video_bitrate?.max ?? 1000000);
   const bitrateSliderIndex = stopIndex(videoBitrateOptions, videoBitrate);
-  const framerateOptions = stopsWithin(FRAMERATE_STOPS, serverSettings?.framerate?.min ?? 8, serverSettings?.framerate?.max ?? 240);
+  const framerateSpan = serverSettings?.framerate
+    ? { min: serverSettings.framerate.min, max: serverSettings.framerate.max, default: serverSettings.framerate.default,
+        overridden: !!serverSettings.framerate.overridden }
+    : null;
+  const displayFramerate = displayRate ? matchDisplay(displayRate, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240) : null;
+  const framerateOptions = withDisplayStop(stopsWithin(FRAMERATE_STOPS, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240), displayFramerate);
+  const framerateFollows = followsDisplay(framerateChoice, framerateSpan, displayRate) && displayFramerate !== null;
+  const effectiveFramerate = framerateFollows ? displayFramerate : framerate;
   const videoCRFOptions = stopsWithin(CRF_STOPS, serverSettings?.video_crf?.min ?? 5, serverSettings?.video_crf?.max ?? 50);
   const videoPaintoverCRFOptions = stopsWithin(CRF_STOPS, serverSettings?.video_paintover_crf?.min ?? 5, serverSettings?.video_paintover_crf?.max ?? 50);
   const formatBitrate = (v) => `${v / 1000} Mbps`;
@@ -3336,17 +3358,17 @@ function Sidebar() {
                 {(isWebrtc || showFPS) && (renderableSettings.framerate ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="framerateSlider">
-                      {t("sections.video.framerateLabel", {
-                        framerate: framerate,
+                      {t(framerateFollows ? "sections.video.framerateDisplayLabel" : "sections.video.framerateLabel", {
+                        framerate: framerateLabel(effectiveFramerate),
                       })}
                     </label>
                     <input
                       type="range"
                       id="framerateSlider"
                       min={0}
-                      max={framerateOptions.length - 1}
+                      max={framerateOptions.stops.length - 1}
                       step="1"
-                      value={stopIndex(framerateOptions, framerate)}
+                      value={framerateStopIndex(framerateOptions, framerate, framerateFollows)}
                       onChange={handleFramerateChange}
                       disabled={!serverSettings || serverSettings.framerate?.min === serverSettings.framerate?.max}
                     />
@@ -3926,7 +3948,7 @@ function Sidebar() {
                 </div>
                 {sectionsOpen.stats && (
                   <div className="sidebar-section-content" id="stats-content">
-                    <StreamStats t={t} active={isOpen && sectionsOpen.stats} framerate={framerate} />
+                    <StreamStats t={t} active={isOpen && sectionsOpen.stats} framerate={effectiveFramerate} />
                   </div>
                 )}
               </div>

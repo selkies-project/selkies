@@ -12,7 +12,9 @@
  * `serverSettings` (the server's settings payload, per key a `value`,
  * `allowed`, `min`/`max`, `default`, `locked`, and `overridden`),
  * `effectiveCursorState`, `scalingDpiFollowed` (the UI-scaling default the
- * core re-derived), and `audioDeviceSelected`. Changes go back as
+ * core re-derived), `displayRefresh` (the display's measured refresh, also
+ * `window.displayRefreshRate`, which the frame-rate slider offers as a stop of
+ * its own), and `audioDeviceSelected`. Changes go back as
  * `window.postMessage` messages: `settings` (debounced key/value batches the
  * core forwards to the server), `mode`, `setScaleLocally`,
  * `setManualResolution`, `resetResolutionToWindow`, `setAntiAliasing`, and
@@ -36,7 +38,8 @@
 import { Card, CardContent } from "@/components/ui/card";
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, isMacDesktop } from "../../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders } from "../../../../selkies-web-core/lib/session-token.js";
-import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, stopIndex, stopsWithin } from "../../../../selkies-web-core/lib/slider-stops.js";
+import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, framerateStopIndex, stopIndex, stopsWithin, withDisplayStop } from "../../../../selkies-web-core/lib/slider-stops.js";
+import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from "../../../../selkies-web-core/lib/display-refresh.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
@@ -326,7 +329,15 @@ export function Settings() {
         localStorage.getItem(getPrefixedKey("webcam_encoder"))
     );
     const [framerate, setFramerate] = useState(() =>
-        parseInt(localStorage.getItem(getPrefixedKey("framerate")) ?? "", 10) || 60
+        parseFloat(localStorage.getItem(getPrefixedKey("framerate")) ?? "") || 60
+    );
+    /** The stored frame-rate choice: a rate, `FRAMERATE_DISPLAY`, or null for none. */
+    const [framerateChoice, setFramerateChoice] = useState<string | null>(() =>
+        localStorage.getItem(getPrefixedKey("framerate"))
+    );
+    /** The display's refresh the core measured, null until it has. */
+    const [displayRate, setDisplayRate] = useState<number | null>(() =>
+        (window as any).displayRefreshRate ?? null
     );
     const [videoCRF, setVideoCRF] = useState(() => {
         const saved = localStorage.getItem(getPrefixedKey("video_crf"));
@@ -504,6 +515,9 @@ export function Settings() {
             if (event.data?.type === "effectiveCursorState" && typeof event.data.value === "boolean") {
                 setEffectiveCursor(event.data.value);
             }
+            if (event.data?.type === "displayRefresh" && Number.isFinite(event.data.rate)) {
+                setDisplayRate(event.data.rate);
+            }
             // The core's derived pick; a stored pick is the user's and stays.
             if (event.data?.type === "scalingDpiFollowed" && typeof event.data.value === "number"
                     && localStorage.getItem(getPrefixedKey("scaling_dpi")) === null) {
@@ -544,7 +558,7 @@ export function Settings() {
 
         const s_framerate = serverSettings.framerate;
         if (s_framerate) {
-            const stored = getStoredInt("framerate");
+            const stored = parseFloat(localStorage.getItem(getPrefixedKey("framerate")) ?? "");
             const final = !isNaN(stored)
                 ? Math.max(s_framerate.min, Math.min(s_framerate.max, stored))
                 : s_framerate.default;
@@ -805,10 +819,15 @@ export function Settings() {
     const wceChoice = webcamEncoderOptions.includes(webcamEncoderChoice ?? "") ? webcamEncoderChoice : null;
     const webcamEncoder = (wceServer?.locked && wceServerValue) || wceChoice || wceServerValue || "auto";
 
-    const handleFramerateChange = (selectedFramerate: number) => {
+    /** The display's own stop asks for the display's refresh wherever it moves. */
+    const handleFramerateChange = (index: number) => {
+        const selectedFramerate = framerateOptions.stops[index];
+        if (selectedFramerate === undefined) return;
+        const choice = index === framerateOptions.display ? FRAMERATE_DISPLAY : String(selectedFramerate);
         setFramerate(selectedFramerate);
-        localStorage.setItem(getPrefixedKey('framerate'), selectedFramerate.toString());
-        debouncedPostSetting({ framerate: selectedFramerate });
+        setFramerateChoice(choice);
+        localStorage.setItem(getPrefixedKey('framerate'), choice);
+        debouncedPostSetting({ framerate: choice === FRAMERATE_DISPLAY ? choice : selectedFramerate });
     };
 
     const handleVideoCRFChange = (selectedCRF: number) => {
@@ -1002,8 +1021,14 @@ export function Settings() {
      */
     const videoBitrateOptions = stopsWithin(BITRATE_STOPS, serverSettings?.video_bitrate?.min ?? 100, serverSettings?.video_bitrate?.max ?? 1000000);
     const bitrateIndex = stopIndex(videoBitrateOptions, videoBitRate);
-    const framerateOptions = stopsWithin(FRAMERATE_STOPS, serverSettings?.framerate?.min ?? 8, serverSettings?.framerate?.max ?? 240);
-    const framerateIndex = stopIndex(framerateOptions, framerate);
+    const framerateSpan = serverSettings?.framerate
+        ? { min: serverSettings.framerate.min, max: serverSettings.framerate.max, default: serverSettings.framerate.default,
+            overridden: !!serverSettings.framerate.overridden }
+        : null;
+    const displayFramerate = displayRate ? matchDisplay(displayRate, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240) : null;
+    const framerateOptions = withDisplayStop(stopsWithin(FRAMERATE_STOPS, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240), displayFramerate);
+    const framerateFollows = followsDisplay(framerateChoice, framerateSpan, displayRate) && displayFramerate !== null;
+    const framerateIndex = framerateStopIndex(framerateOptions, framerate, framerateFollows);
     const videoCRFChoices = stopsWithin(CRF_STOPS, serverSettings?.video_crf?.min ?? 5, serverSettings?.video_crf?.max ?? 50);
     const videoCRFIndex = stopIndex(videoCRFChoices, videoCRF);
     const videoPaintoverCRFChoices = stopsWithin(CRF_STOPS, serverSettings?.video_paintover_crf?.min ?? 5, serverSettings?.video_paintover_crf?.max ?? 50);
@@ -1368,20 +1393,17 @@ export function Settings() {
 
                         {(renderableSettings.framerate ?? true) && (
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">{tl('sections.video.framerateLabel', { framerate })}</label>
+                                <label className="text-sm font-medium">
+                                    {tl(framerateFollows ? 'sections.video.framerateDisplayLabel' : 'sections.video.framerateLabel',
+                                        { framerate: framerateLabel(framerateFollows && displayFramerate !== null ? displayFramerate : framerate) })}
+                                </label>
                                 <div className="flex items-center gap-2">
                                     <Slider
                                         min={0}
-                                        max={framerateOptions.length - 1}
+                                        max={framerateOptions.stops.length - 1}
                                         step={1}
                                         value={[framerateIndex]}
-                                        onValueChange={(value) => {
-                                            const index = value[0];
-                                            const selectedFramerate = framerateOptions[index];
-                                            if (selectedFramerate !== undefined) {
-                                                handleFramerateChange(selectedFramerate);
-                                            }
-                                        }}
+                                        onValueChange={(value) => handleFramerateChange(value[0])}
                                         className="flex-1"
                                     />
                                 </div>
