@@ -1272,8 +1272,8 @@ FIRST_FRAME_WAIT_S = 5.0
 
 #: How many dropped frame ids a transport remembers, so it can hold back what
 #: would predict from one. A frame predicts from one of the last few its encoder
-#: produced (pixelflux's reference window), so an older id can never be named
-#: again and nothing is lost by forgetting it.
+#: produced (pixelflux's reference window), so nothing is lost by forgetting an
+#: older one; the ids are 16-bit, so one is named again after 65536 frames.
 LOST_FRAME_MEMORY = 64
 
 

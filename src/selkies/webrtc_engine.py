@@ -283,6 +283,12 @@ class RTCAppError(Exception):
     """Raised for unrecoverable errors in the RTC signaling/pipeline layer."""
     pass
 
+def _encode_start(timing: Optional[tuple]) -> Optional[float]:
+    """When a frame's encode began, in seconds on CLOCK_MONOTONIC, or None for a
+    frame the capture stamped no encode instant on."""
+    return timing[1] / 1e9 if timing and len(timing) > 1 and timing[1] > 0 else None
+
+
 class PipelineBridge:
     """A bridge to asynchronously pass data between Media and the RTC pipeline.
 
@@ -297,7 +303,11 @@ class PipelineBridge:
     websockets relay does. A frame that names what it predicts from is
     dropped with a word to the encoder (`invalidate_reference`), which then
     predicts past it, and only the frames predicting from a dropped one are
-    held back, so the stream resumes on the next frame without a keyframe. A
+    held back, so the stream resumes on the next frame without a keyframe.
+    The ids let go are forgotten once a frame the encoder began after the
+    latest word goes out: frames reach the bridge in encode order, so nothing
+    coded before the word can follow it, while an id recurs every 65536
+    frames, which an infinite GOP outlasts. A
     second frame held back that way although its encode began after the word
     went out says the encoder never heard it (a word sent while the capture is
     still starting is lost) and will keep predicting from what the bridge let
@@ -403,6 +413,10 @@ class PipelineBridge:
             queue.put_nowait(data)
             self._queued_keyframe = False
             self._held = 0
+            if self._lost and self._told_at is not None:
+                encoded = _encode_start(getattr(data, "timing", None))
+                if encoded is not None and encoded > self._told_at:
+                    self._lost.clear()
             return
         now = self._clock()
         if self._gated_at is not None:
@@ -444,7 +458,7 @@ class PipelineBridge:
         keyframe when the encoder coded it after it was told of the drop."""
         self.dropped += 1
         self._lost.append(frame_id)
-        encoded = timing[1] / 1e9 if timing and len(timing) > 1 and timing[1] > 0 else None
+        encoded = _encode_start(timing)
         if encoded is None:
             self._held += 1
             unheard = self._held > LOST_CHAIN_FRAMES

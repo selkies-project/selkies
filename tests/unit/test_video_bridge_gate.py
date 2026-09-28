@@ -227,11 +227,59 @@ async def unheard(res: H.Results) -> None:
     res.check("and one more asks for a keyframe", len(requests) == 1, requests)
 
 
+async def wrap(res: H.Results) -> None:
+    """A drop the encoder predicts past is forgotten once a frame it coded after the word
+    goes out, so the frame id recurring 65536 frames later, with no keyframe between
+    (an infinite GOP), is not taken for what was let go."""
+    clock = Clock()
+    requests, forgotten = [], []
+    bridge = PipelineBridge(request_keyframe=lambda: requests.append(clock.now), clock=clock,
+                            invalidate_reference=forgotten.append)
+    frame = lambda fid, ref, at: SimpleNamespace(
+        name=f"F{fid}", dependency=(fid & 0xFFFF, ref if ref is None else ref & 0xFFFF),
+        timing=(0, int(at * 1e9), 0))
+    names = lambda items: [f.name for f in items]
+
+    bridge.set_data(frame(0, None, clock.now), keyframe=True)
+    await drain(bridge)
+    for fid in range(1, 5):
+        clock.now += 0.016
+        bridge.set_data(frame(fid, fid - 1, clock.now), keyframe=False)
+        await drain(bridge)
+    # The sender stalls with frame 5 queued: 6 evicts it, and 6 and 7, coded before the
+    # word, predict from it.
+    clock.now += 0.016
+    bridge.set_data(frame(5, 4, clock.now), keyframe=False)
+    clock.now += 0.016
+    bridge.set_data(frame(6, 5, clock.now - 0.001), keyframe=False)
+    told = clock.now
+    bridge.set_data(frame(7, 6, told - 0.0005), keyframe=False)
+    res.check("the drop is named and what the encoder coded before the word is held",
+              bridge.empty() and forgotten == [5] and not requests, (forgotten, requests))
+    clock.now += 0.016
+    bridge.set_data(frame(8, 4, clock.now), keyframe=False)
+    res.check("the frame the encoder coded after the word predicts past the drop and flows",
+              names(await drain(bridge)) == ["F8"] and not requests, requests)
+    end = 0x10000 + 8
+    fid = 9
+    while fid < end:
+        clock.now += 0.016
+        bridge.set_data(frame(fid, fid - 1, clock.now), keyframe=False)
+        if bridge.empty():
+            break
+        await drain(bridge)
+        fid += 1
+    res.check("65536 frames later the recurring ids of the frames let go flow like any other",
+              fid == end and bridge.dropped == 3 and forgotten == [5] and not requests,
+              (fid, bridge.dropped, forgotten, requests))
+
+
 def main() -> int:
     res = H.Results("video-bridge-gate")
     asyncio.run(scenario(res))
     asyncio.run(references(res))
     asyncio.run(unheard(res))
+    asyncio.run(wrap(res))
     return 0 if res.summary() else 1
 
 
