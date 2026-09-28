@@ -9,7 +9,9 @@ no underrun (also when the mark trails the queue running dry), the
 standing-depth trim, the clean-stretch decay, the drop-oldest ceiling, and the
 depths sized from the frame duration are pinned without a browser, and so is
 the smoothing of every seam: a continuous tone stays continuous through a
-trim, a ceiling drop, running dry, and the re-prime after it.
+trim, a ceiling drop, running dry, and the re-prime after it. The frame the
+server sends behind the mark, carrying the end of the sound and marked quiet
+too, is appended to that sound and never taken for new sound or a late one.
 """
 import os
 import re
@@ -95,6 +97,25 @@ for (let i = 0; i < 40; i++) run();
 out.dryBeforeMarkPending = p.underrunPending === true;
 p.port.onmessage({ data: { quiet: true } });
 out.markAfterDryKeepsDepth = (!p.underrunPending && p.target === quietTarget && p.underrunSamples === quietUnder);
+
+// The frame that ends a sound, sent right behind the mark and marked too, is
+// appended to that sound: the silence after it is still the sender's, and a
+// queue that ran dry before it arrived is judged silence, not a late delivery.
+for (let i = 0; i < 40; i++) run();
+const endTarget = p.target, endUnder = p.underrunSamples;
+const ending = () => p.port.onmessage({ data: { audioData: new Float32Array(PKT).fill(0.2).buffer, quiet: true } });
+feed(0.3);
+p.port.onmessage({ data: { quiet: true } });
+ending();
+out.endingFramePlays = !silent(run()) && p.audioBufferQueue.length === 1;
+out.endingFrameKeepsQuiet = p.senderQuiet === true;
+for (let i = 0; i < 40; i++) run();
+out.endingFrameKeepsDepth = (p.priming && !p.underrunPending && p.target === endTarget && p.underrunSamples === endUnder);
+for (let i = 0; i < endTarget; i++) feed(0.3);
+for (let i = 0; i < 40; i++) run();
+out.dryBeforeEndingPending = p.underrunPending === true;
+ending();
+out.endingFrameEndsPendingAsSilence = (!p.underrunPending && p.senderQuiet === true && p.target === endTarget && p.underrunSamples === endUnder);
 
 // Standing depth above target trims away and the deepened target decays
 // over proven slack, under arrival exactly rate-matched to consumption

@@ -162,9 +162,12 @@ detectKeyboardLayout().then((layout) => {
 /** Timestamp of the newest Opus frame handed to the decoder; `null` before RED starts. */
 let lastAudioTs = null;
 /**
- * Second byte of the bare two-byte audio message the server sends when its
- * silence gate closes: no Opus follows, and the playback worklet plays out
- * what it holds instead of waiting for more.
+ * Bit of an audio message's second byte that marks where the server's stream
+ * pauses. Alone, `[0x01, AUDIO_QUIET]` carries no Opus and is sent where a
+ * sound ends: the playback worklet plays out what it holds instead of waiting
+ * for more. The silent frame sent right behind it carries the bit too, since
+ * its Opus is the end of that sound: the worklet appends it to the sound
+ * rather than taking it for a new one.
  */
 const AUDIO_QUIET = 0x80;
 /**
@@ -184,7 +187,8 @@ function audioTsNewer(a, b) {
  * a dropped frame rides along as redundancy in the next packet).
  *
  * `[0x01, AUDIO_QUIET]` alone is the server's mark that its silence gate
- * closed, and carries no frame. `n_red == 0` is the plain path:
+ * closed, and carries no frame; in any other message the second byte's
+ * `AUDIO_QUIET` bit is left out of `n_red`. `n_red == 0` is the plain path:
  * `[0x01, 0x00] + opus`. `n_red > 0` is
  * `[0x01, n_red, pts32] + n_red * (4-byte header) + 1-byte primary header +
  * block data`, redundant blocks oldest-first and then the primary; each block's
@@ -197,8 +201,8 @@ function audioTsNewer(a, b) {
  */
 function extractOpusFrames(arrayBuffer) {
   const bytes = new Uint8Array(arrayBuffer);
-  const nRed = bytes[1];
-  if (nRed === AUDIO_QUIET) return [];
+  if (arrayBuffer.byteLength <= 2) return [];
+  const nRed = bytes[1] & ~AUDIO_QUIET;
   if (!nRed) { lastAudioTs = null; return [arrayBuffer.slice(2)]; }
   // With n_red > 0 the bytes after the flag word are headers, not Opus, so a
   // truncated fixed part leaves no primary to salvage.
@@ -6655,7 +6659,10 @@ class WorkerWebSocket {
                 // running dry after it is the sender's silence. An underrun is
                 // judged by what ends it, since the mark can trail the last
                 // packet by up to a frame: a packet means a late delivery,
-                // which deepens the target, and the mark means silence.
+                // which deepens the target, and the mark means silence. The
+                // frame the server sends right behind the mark, carrying the
+                // end of the sound, is marked too (\`ending\`): it is appended
+                // to the sound, and whatever it ends is silence as well.
                 this.senderQuiet = false;
                 this.underrunPending = false;
                 this.pendingUnderrunSamples = 0;
@@ -6677,32 +6684,39 @@ class WorkerWebSocket {
                 this._levelAcc = 0;
                 this._levelCount = 0;
 
-                this.enqueue = (buffer) => {
+                this.enqueue = (buffer, ending) => {
                     const pcmData = new Float32Array(buffer);
                     this._learnFrame(pcmData.length / this.channels);
-                    if (this.underrunPending) {
+                    if (ending) {
                         this.underrunPending = false;
-                        this.target = Math.min(this.target + this.STEP, this.TARGET_MAX);
-                        this.underrunSamples += this.pendingUnderrunSamples;
                         this.pendingUnderrunSamples = 0;
-                        this.cleanCount = 0;
-                        this.shiftSlackMin = Infinity;
-                        this.drainSlackMin = Infinity;
+                        this.senderQuiet = true;
+                    } else {
+                        if (this.underrunPending) {
+                            this.underrunPending = false;
+                            this.target = Math.min(this.target + this.STEP, this.TARGET_MAX);
+                            this.underrunSamples += this.pendingUnderrunSamples;
+                            this.pendingUnderrunSamples = 0;
+                            this.cleanCount = 0;
+                            this.shiftSlackMin = Infinity;
+                            this.drainSlackMin = Infinity;
+                        }
+                        if (this.senderQuiet) this.senderQuiet = false;
+                        else if (this.drainSlackMin < this.shiftSlackMin) this.shiftSlackMin = this.drainSlackMin;
                     }
-                    if (this.senderQuiet) this.senderQuiet = false;
-                    else if (this.drainSlackMin < this.shiftSlackMin) this.shiftSlackMin = this.drainSlackMin;
                     this.drainSlackMin = Infinity;
                     if (this.audioBufferQueue.length >= this.MAX_BUFFER_PACKETS) this._dropHead();
                     this.audioBufferQueue.push(pcmData);
                 };
                 const receive = (data) => {
                     if (!data) return;
-                    if (data.quiet) {
+                    if (data.audioData) {
+                        this.enqueue(data.audioData, !!data.quiet);
+                    } else if (data.quiet) {
                         this.senderQuiet = true;
                         this.underrunPending = false;
                         this.pendingUnderrunSamples = 0;
                     }
-                    if (data.audioData) this.enqueue(data.audioData);
                 };
                 this.port.onmessage = (event) => {
                     if (event.data.audioData || event.data.quiet) {
@@ -6967,9 +6981,9 @@ class WorkerWebSocket {
           const pcmBufferFromWorker = event.data.pcmBuffer;
           if (pcmBufferFromWorker && audioWorkletProcessorPort && audioContext && audioContext.state === 'running') {
             if (window.currentAudioBufferDuration < AUDIO_RELAY_CEILING_MS) {
-              audioWorkletProcessorPort.postMessage({
-                audioData: pcmBufferFromWorker
-              }, [pcmBufferFromWorker]);
+              audioWorkletProcessorPort.postMessage(event.data.quiet
+                ? { audioData: pcmBufferFromWorker, quiet: true }
+                : { audioData: pcmBufferFromWorker }, [pcmBufferFromWorker]);
             }
           }
         } else if (type === 'audioQuiet') {
@@ -7393,13 +7407,13 @@ class WorkerWebSocket {
             if (audioContext && audioContext.state !== 'running') {
               audioContext.resume().catch(e => console.error("Error resuming audio context", e));
             }
-            if (new Uint8Array(arrayBuffer, 1, 1)[0] === AUDIO_QUIET) {
+            const quiet = (new Uint8Array(arrayBuffer, 1, 1)[0] & AUDIO_QUIET) !== 0;
+            if (quiet && arrayBuffer.byteLength <= 2) {
               audioDecoderWorker.postMessage({ type: 'quiet' });
               return;
             }
-            const opusFrames = extractOpusFrames(arrayBuffer);
-            for (const opusDataArrayBuffer of opusFrames) {
-              if (opusDataArrayBuffer.byteLength === 0) continue;
+            const opusFrames = extractOpusFrames(arrayBuffer).filter((opus) => opus.byteLength);
+            for (let i = 0; i < opusFrames.length; i++) {
               if (!isSharedMode && window.currentAudioBufferDuration >= AUDIO_RELAY_CEILING_MS) {
                 window.currentAudioDropped++;
                 break;
@@ -7407,10 +7421,11 @@ class WorkerWebSocket {
               audioDecoderWorker.postMessage({
                 type: 'decode',
                 data: {
-                  opusBuffer: opusDataArrayBuffer,
-                  timestamp: performance.now() * 1000
+                  opusBuffer: opusFrames[i],
+                  timestamp: performance.now() * 1000,
+                  quiet: quiet && i === opusFrames.length - 1
                 }
-              }, [opusDataArrayBuffer]);
+              }, [opusFrames[i]]);
             }
           } else {
             console.warn("AudioDecoderWorker not ready. Attempting to initialize audio pipeline.");
@@ -8598,15 +8613,29 @@ const audioDecoderWorkerCode = `
   let audioIn = null;
   let lastAudioTs = null;
 
-  let quietWaiting = false;
+  // Outputs still due before a pending mark goes out; 0 when none is pending.
+  let quietAfter = 0;
+  // Per decode in flight, in order: whether that frame ends a sound, so its PCM
+  // goes to the worklet marked quiet.
+  const endsSound = [];
 
   // Tells the worklet the server's silence gate closed, behind the PCM of every
-  // packet before the mark: a mark that overtakes a decode waits for it.
+  // packet before the mark and ahead of any after it: a mark that overtakes a
+  // decode waits for the outputs due when it came, and no more.
   function forwardQuiet() {
-    if (currentDecodeQueueSize > 0) { quietWaiting = true; return; }
-    quietWaiting = false;
+    if (currentDecodeQueueSize > 0) { quietAfter = currentDecodeQueueSize; return; }
+    postQuiet();
+  }
+
+  function postQuiet() {
+    quietAfter = 0;
     if (pcmPort) pcmPort.postMessage({ quiet: true });
     else self.postMessage({ type: 'audioQuiet' });
+  }
+
+  // One decode's output has gone to the worklet (or been dropped).
+  function outputDone() {
+    if (quietAfter > 0 && --quietAfter === 0) postQuiet();
   }
 
   function audioTsNewer(a, b) {
@@ -8616,8 +8645,8 @@ const audioDecoderWorkerCode = `
 
   function extractOpusFrames(arrayBuffer) {
     const bytes = new Uint8Array(arrayBuffer);
-    const nRed = bytes[1];
-    if (nRed === ${AUDIO_QUIET}) return [];
+    if (arrayBuffer.byteLength <= 2) return [];
+    const nRed = bytes[1] & ~${AUDIO_QUIET};
     if (!nRed) { lastAudioTs = null; return [arrayBuffer.slice(2)]; }
     // With n_red > 0 the bytes after the flag word are headers, not Opus, so a
     // truncated fixed part leaves no primary to salvage.
@@ -8770,9 +8799,9 @@ const audioDecoderWorkerCode = `
     };
   }
 
-  function postPcm(pcm) {
-    if (pcmPort) pcmPort.postMessage({ audioData: pcm }, [pcm]);
-    else self.postMessage({ type: 'decodedAudioData', pcmBuffer: pcm }, [pcm]);
+  function postPcm(pcm, ending) {
+    if (pcmPort) pcmPort.postMessage(ending ? { audioData: pcm, quiet: true } : { audioData: pcm }, [pcm]);
+    else self.postMessage({ type: 'decodedAudioData', pcmBuffer: pcm, quiet: ending }, [pcm]);
   }
 
   async function initializeDecoderInWorker() {
@@ -8780,21 +8809,23 @@ const audioDecoderWorkerCode = `
       try { decoderAudio.close(); } catch (e) { /* ignore */ }
     }
     currentDecodeQueueSize = 0;
-    quietWaiting = false;
+    endsSound.length = 0;
+    quietAfter = 0;
     const onError = (e) => {
       // A fatal decoder error is not re-initialized from here: a persistent
       // failure would spin. The page drives recovery with its 'reinitialize'
       // message, which also re-checks the codec configuration.
       console.error('[AudioWorker] AudioDecoder error:', e.message, e);
       currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize -1);
-      if (quietWaiting) forwardQuiet();
+      endsSound.shift();
+      outputDone();
     };
     const surround = decoderConfig.numberOfChannels > 2 && decoderConfig.description;
     decoderAudio = surround
       ? surroundDecoder(decoderConfig.description, decoderConfig.numberOfChannels, (pcm) => {
           currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize - 1);
-          postPcm(pcm);
-          if (quietWaiting) forwardQuiet();
+          postPcm(pcm, !!endsSound.shift());
+          outputDone();
         }, onError)
       : new AudioDecoder({ output: handleDecodedAudioFrameInWorker, error: onError });
     try {
@@ -8815,8 +8846,10 @@ const audioDecoderWorkerCode = `
 
   async function handleDecodedAudioFrameInWorker(frame) {
     currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize - 1);
+    const ending = !!endsSound.shift();
     if (!frame || typeof frame.copyTo !== 'function' || typeof frame.allocationSize !== 'function' || typeof frame.close !== 'function') {
         if(frame && typeof frame.close === 'function') { try { frame.close(); } catch(e) { /* ignore */ } }
+        outputDone();
         return;
     }
     let pcmDataArrayBuffer;
@@ -8829,14 +8862,14 @@ const audioDecoderWorkerCode = `
       pcmDataArrayBuffer = new ArrayBuffer(requiredByteLength);
       const pcmDataView = new Float32Array(pcmDataArrayBuffer);
       await frame.copyTo(pcmDataView, { planeIndex: 0, format: 'f32' });
-      postPcm(pcmDataArrayBuffer);
+      postPcm(pcmDataArrayBuffer, ending);
       pcmDataArrayBuffer = null;
     } catch (error) { /* console.error */ }
     finally {
       if (frame && typeof frame.close === 'function') {
         try { frame.close(); } catch (e) { /* ignore */ }
       }
-      if (quietWaiting) forwardQuiet();
+      outputDone();
     }
   }
 
@@ -8860,6 +8893,7 @@ const audioDecoderWorkerCode = `
           try {
             if (currentDecodeQueueSize < 20) {
                  decoderAudio.decode(chunk); currentDecodeQueueSize++;
+                 endsSound.push(!!data.quiet);
             }
           } catch (e) {
               currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize - 1);
@@ -8875,15 +8909,17 @@ const audioDecoderWorkerCode = `
         audioIn = event.data.port;
         audioIn.onmessage = (m) => {
           if (!decoderAudio || decoderAudio.state !== 'configured') return;
-          if (new Uint8Array(m.data.buffer, 1, 1)[0] === ${AUDIO_QUIET}) { forwardQuiet(); return; }
-          for (const opus of extractOpusFrames(m.data.buffer)) {
-            if (!opus.byteLength) continue;
+          const quiet = (new Uint8Array(m.data.buffer, 1, 1)[0] & ${AUDIO_QUIET}) !== 0;
+          if (quiet && m.data.buffer.byteLength <= 2) { forwardQuiet(); return; }
+          const frames = extractOpusFrames(m.data.buffer).filter((opus) => opus.byteLength);
+          frames.forEach((opus, i) => {
             try {
               decoderAudio.decode(new EncodedAudioChunk({
                 type: 'key', timestamp: performance.now() * 1000, data: opus }));
               currentDecodeQueueSize++;
+              endsSound.push(quiet && i === frames.length - 1);
             } catch (err) { /* a reconfiguring decoder drops the packet */ }
-          }
+          });
         };
         break;
       case 'updatePipelineStatus': pipelineActive = data.isActive; break;
