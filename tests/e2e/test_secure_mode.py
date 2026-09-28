@@ -25,8 +25,9 @@ webrtc:      the same page over WebRTC fetches its TURN configuration with
 dashboards:  both dashboards open their file manager with the page's token
              and the listing renders inside the modal, and on a #token= page
              the file manager's URL and the listing's links carry none; the
-             classic one switches transport on that same token, asking the
-             user for nothing (the master token is the operator's, not a
+             classic one's sharing links carry no token, the sharer's own
+             included, and it switches transport on that same token, asking
+             the user for nothing (the master token is the operator's, not a
              session user's, so a prompt for it would be unanswerable).
 legacy:      without a master token nothing changes: the routes are open with
              Basic auth off and Basic-gated, view-only password included,
@@ -640,6 +641,11 @@ def run_dashboards() -> "H.Results":
                     # operator credential a session user does not hold.
                     page.locator('.files-modal-close').first.click()
                     time.sleep(0.5)
+                    page.locator('.sidebar-section-header:has-text("Sharing")').first.click()
+                    time.sleep(0.5)
+                    shared = page.evaluate("() => [...document.querySelectorAll('a.sharing-link')].map(a => a.href)")
+                    res.check("classic: the sharing links carry no token, the sharer's own included",
+                              shared and all("token" not in h for h in shared), shared)
                     page.locator('.sidebar-section-header:has-text("Video")').first.click()
                     time.sleep(0.5)
                     base_navs = len(navigations)

@@ -7,7 +7,8 @@
 // Where the page URL's session token comes from and where it goes. A token in
 // the fragment reaches the server only as a header, a subprotocol, or the
 // cookie, never in a URL; a query token keeps its URL carriers. The fragment's
-// display or sharing keyword reads the same with or without a token beside it.
+// display or sharing keyword reads the same with or without a token beside it,
+// and a sharing link never carries the sharer's token.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -29,7 +30,7 @@ const {
     SESSION_TOKEN_PROTOCOL, SESSION_TOKEN_PROTOCOL_PREFIX, getSessionToken, installSessionCookie,
     sessionAuthHeaders, sessionTokenInFragment, sessionTokenProtocols, withSessionToken,
 } = await import('../../addons/selkies-web-core/lib/session-token.js');
-const { fragmentWithSessionToken, urlFragmentKeyword } =
+const { fragmentWithSessionToken, shareablePageURL, urlFragmentKeyword } =
     await import('../../addons/selkies-web-core/lib/page-url.js');
 
 at('http://host.test/app/#token=f1');
@@ -88,5 +89,10 @@ check('the second display carries a fragment token in its own fragment',
 at('http://host.test/app/?token=q1');
 check('the second display leaves a query token to the query it keeps',
       fragmentWithSessionToken('display2-right') === '#display2-right');
+
+at('http://host.test/app/?token=q1&keep=1#player2');
+check('a sharing link drops a query token', shareablePageURL() === 'http://host.test/app/?keep=1', shareablePageURL());
+at('http://host.test/app/#display2-left&token=f1');
+check('a sharing link drops a fragment token', shareablePageURL() === 'http://host.test/app/', shareablePageURL());
 
 process.exit(failed ? 1 : 0);

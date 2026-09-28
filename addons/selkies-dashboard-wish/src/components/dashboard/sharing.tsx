@@ -13,6 +13,7 @@ import { Info } from "lucide-react";
 import { toast } from "sonner";
 import { computeRenderableSettings, getLastServerSettings } from "@/utils";
 import { t } from "@/i18n";
+import { shareablePageURL } from "../../../../selkies-web-core/lib/page-url.js";
 
 /**
  * The sharing card: copyable links for the viewer (`#shared`) and the
@@ -62,7 +63,7 @@ export const Sharing = ({ show }: SharingProps) => {
 	const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
 
 	const baseUrl =
-		typeof window !== "undefined" ? window.location.href.split("#")[0] : "";
+		typeof window !== "undefined" ? shareablePageURL() : "";
 
 	useEffect(() => {
 		const handleMessage = (event: MessageEvent) => {

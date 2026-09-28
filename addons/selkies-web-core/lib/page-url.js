@@ -11,9 +11,10 @@
  * (`#display2-right`, `#shared`, `#player2`) and may hold the session token as
  * a `token=` item beside it (`#display2-right&token=<t>`), in either order.
  * Everything that reads the fragment reads the keyword alone
- * (`urlFragmentKeyword`), so no hash parser sees the token and none logs it,
- * and a window this page opens for the session carries a fragment token on in
- * its own fragment (`fragmentWithSessionToken`).
+ * (`urlFragmentKeyword`), so no hash parser sees the token and none logs it; a
+ * window this page opens for the session carries a fragment token on in its own
+ * fragment (`fragmentWithSessionToken`), and a sharing link starts from the page
+ * without any token (`shareablePageURL`).
  * @module
  */
 
@@ -65,3 +66,20 @@ export function fragmentWithSessionToken(keyword) {
     return token ? `#${keyword}&token=${encodeURIComponent(token)}` : `#${keyword}`;
 }
 
+/**
+ * The page URL a sharing link starts from: this page without its fragment and
+ * without a `token` query parameter, so a link handed to someone else never
+ * carries the sharer's own credential.
+ * @returns {string}
+ */
+export function shareablePageURL() {
+    if (typeof window === 'undefined' || !window.location) return '';
+    try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete('token');
+        url.hash = '';
+        return url.href;
+    } catch (_) {
+        return `${window.location.origin}${window.location.pathname}`;
+    }
+}

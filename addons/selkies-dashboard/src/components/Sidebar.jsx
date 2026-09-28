@@ -54,7 +54,7 @@
 import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
-import { fragmentWithSessionToken, urlFragmentKeyword } from "../../../selkies-web-core/lib/page-url.js";
+import { fragmentWithSessionToken, shareablePageURL, urlFragmentKeyword } from "../../../selkies-web-core/lib/page-url.js";
 import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, stopIndex, stopsWithin } from "../../../selkies-web-core/lib/slider-stops.js";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords } from "../../../selkies-web-core/lib/touch-controls.js";
@@ -2017,7 +2017,7 @@ function Sidebar() {
     },
     [sectionsOpen, populateAudioDevices]
   );
-  const baseUrl = typeof window !== 'undefined' ? window.location.href.split('#')[0] : '';
+  const baseUrl = typeof window !== 'undefined' ? shareablePageURL() : '';
   const sharingLinks = [
     {
       id: "shared",

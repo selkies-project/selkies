@@ -105,7 +105,7 @@ Input authority is enforced on the server rather than in the page, so a modified
 
 `--enable-sharing=false` (`SELKIES_ENABLE_SHARING`) turns the feature off, and one page then holds the session: a second one takes it over instead of joining. `--enable-shared` and `--enable-player2` through `--enable-player4` drop individual links, and `--ui-sidebar-show-sharing=false` hides the section while leaving the links working.
 
-These fragments apply when the server has no master token. Under [Secure Mode](secure-mode.md) a client presents a provisioned session token that carries its own role and gamepad slot, and the sharing fragments are ignored.
+These fragments apply when the server has no master token. Under [Secure Mode](secure-mode.md) a client presents a provisioned session token that carries its own role and gamepad slot, and the sharing fragments are ignored. A copied link carries no token, the sharer's own included, so each holder needs a token of their own, which follows the fragment after `&token=`.
 
 ## Operator API
 
