@@ -107,7 +107,8 @@ def server_counts(log_text: str) -> dict:
 # Links: a wide one with a half-second blackout every four seconds, the burst a
 # NACK batch of hundreds of packets answers, over a trickle of loss that keeps
 # repairs flowing; and a narrow one the stream cannot fit, which cuts it all
-# through the window and must brake the pace to what it carries.
+# through the window and must brake the pace to what it carries. Congestion
+# control stays off, or it would fit the stream to the narrow link first.
 LINKS = {
     "bursts": dict(rate_bps=6e6, delay_s=0.03, loss=0.01, seed=7, outage=(4.0, 0.5)),
     "narrow": dict(rate_bps=2.5e6, delay_s=0.03),
@@ -169,8 +170,8 @@ def main() -> int:
     try:
         for link in (sys.argv[1:] or LINKS):
             H.server_start("webrtc", extra_env={
-                "SELKIES_WEBRTC_PACER": "true", "SELKIES_STUN_HOST": "", "SELKIES_TURN_REST_URI": "",
-                "SELKIES_VIDEO_BITRATE": "4000", "SELKIES_DEBUG": "true"}, log=log)
+                "SELKIES_WEBRTC_PACER": "true", "SELKIES_CONGESTION_CONTROL": "false", "SELKIES_STUN_HOST": "",
+                "SELKIES_TURN_REST_URI": "", "SELKIES_VIDEO_BITRATE": "4000", "SELKIES_DEBUG": "true"}, log=log)
             seen = asyncio.run(session(res, log, link))
             H.server_stop()
             print(f"      {link}: {seen}")

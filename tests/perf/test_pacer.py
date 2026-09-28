@@ -477,6 +477,7 @@ async def run_cell(pacer_on: bool, regime: str) -> dict:
         "SELKIES_TURN_REST_URI": "",
         "SELKIES_STUN_HOST": "",
         "SELKIES_VIDEO_BITRATE": "8000",
+        "SELKIES_CONGESTION_CONTROL": "false",
         "SELKIES_DEBUG": "true",
     }
     for k in os.environ:
