@@ -14,14 +14,23 @@
  * A `<video>` sink says so itself: requestVideoFrameCallback reports the
  * frames it hands on (`presentationTime`), and getVideoPlaybackQuality counts
  * the frames it showed and those it dropped because a newer one replaced them
- * first (`watchVideo`). A canvas says nothing, so a draw counts as handed on at
- * the next animation frame of the thread that drew it, and every draw before
- * the last one ahead of that frame as replaced. Times are epoch milliseconds
- * (`performance.timeOrigin` plus `performance.now()`), so an arrival stamped
- * on the socket's thread compares with a presentation on whichever thread
- * showed the frame.
+ * first (`watchVideo`). Where the playback quality does the counting, the
+ * callback is asked for once every `DELAY_SAMPLE_MS`: each one makes the
+ * engine run the page's rendering steps for a frame it would otherwise
+ * composite without the page's thread. A canvas says nothing, so a draw
+ * counts as handed on at the next animation frame of the thread that drew it,
+ * and every draw before the last one ahead of that frame as replaced. Times
+ * are epoch milliseconds (`performance.timeOrigin` plus `performance.now()`),
+ * so an arrival stamped on the socket's thread compares with a presentation
+ * on whichever thread showed the frame.
  * @module
  */
+
+/**
+ * Spacing, in ms, of the frames whose receive-to-present delay a `<video>` is
+ * sampled at once its playback quality counts what it shows.
+ */
+export const DELAY_SAMPLE_MS = 100;
 
 /**
  * @typedef {Object} PresentFigures What a meter counted since its last take.
@@ -95,14 +104,16 @@ export function createPresentMeter(nextFrame) {
 }
 
 /**
- * Follows a `<video>` sink until stopped. Each frame it hands on is reported by
+ * Follows a `<video>` sink until stopped. The frames it hands on are reported by
  * requestVideoFrameCallback, whose receive-to-present delay goes to the meter;
  * what it showed and dropped is read from getVideoPlaybackQuality, where a
  * frame replaced by a newer one before a refresh counts as dropped, since
- * Chromium counts such a frame in `presentedFrames` as well. Firefox keeps no
- * playback quality for a live stream, so there the frames the callback
- * reports stand in for the frames shown. A new source restarts the element's
- * counters, which is read as a restart rather than a count going backwards.
+ * Chromium counts such a frame in `presentedFrames` as well. Once that count
+ * moves, the delay is sampled from one frame every `DELAY_SAMPLE_MS` rather
+ * than every frame. Firefox keeps no playback quality for a live stream, so
+ * there every frame is followed and the frames the callback reports stand in
+ * for the frames shown. A new source restarts the element's counters, which
+ * is read as a restart rather than a count going backwards.
  * @param {HTMLVideoElement} video
  * @param {PresentMeter} meter
  * @param {function(VideoFrameCallbackMetadata): number} delayOf The
@@ -118,20 +129,29 @@ export function watchVideo(video, meter, delayOf) {
   const quality = () => (typeof video.getVideoPlaybackQuality === 'function'
     ? video.getVideoPlaybackQuality() : { totalVideoFrames: 0, droppedVideoFrames: 0 });
   const follows = typeof video.requestVideoFrameCallback === 'function';
-  let handle = 0, last = -1, handed = 0, handedRead = 0, reported = false;
+  const start = quality();
+  let total = start.totalVideoFrames, dropped = start.droppedVideoFrames;
+  let handle = 0, timer = 0, last = -1, handed = 0, handedRead = 0, reported = false, counted = false;
+  const follow = () => {
+    timer = 0;
+    handle = video.requestVideoFrameCallback(onFrame);
+  };
   const onFrame = (now, metadata) => {
     handed += last >= 0 && metadata.presentedFrames > last ? metadata.presentedFrames - last : 1;
     last = metadata.presentedFrames;
     reported = true;
     meter.presented(0, delayOf(metadata));
-    handle = video.requestVideoFrameCallback(onFrame);
+    counted = counted || quality().totalVideoFrames !== start.totalVideoFrames;
+    if (counted) timer = setTimeout(follow, DELAY_SAMPLE_MS);
+    else follow();
   };
-  if (follows) handle = video.requestVideoFrameCallback(onFrame);
-  const start = quality();
-  let total = start.totalVideoFrames, dropped = start.droppedVideoFrames;
+  if (follows) follow();
   return {
     reported: () => reported,
-    stop: () => { if (follows) video.cancelVideoFrameCallback(handle); },
+    stop: () => {
+      clearTimeout(timer);
+      if (follows) video.cancelVideoFrameCallback(handle);
+    },
     read() {
       const now = quality();
       const restarted = now.totalVideoFrames < total || now.droppedVideoFrames < dropped;

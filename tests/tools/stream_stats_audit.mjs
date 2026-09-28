@@ -23,7 +23,7 @@ const { StreamStats, HISTORY_MAX, FIRST_SAMPLE_MS, webcodecsDecoder, webrtcDecod
   await import('../../addons/selkies-web-core/lib/stream-stats.js');
 const { streamRows, streamTiles, streamMeters, streamReport, seriesOf, graphPath, GRAPH_POINTS } =
   await import('../../addons/selkies-web-core/lib/stream-stats-view.js');
-const { createPresentMeter, watchVideo } = await import('../../addons/selkies-web-core/lib/present-meter.js');
+const { createPresentMeter, watchVideo, DELAY_SAMPLE_MS } = await import('../../addons/selkies-web-core/lib/present-meter.js');
 
 let failed = 0;
 
@@ -365,5 +365,32 @@ watch.stop();
 check('stopping cancels the callback it had asked for', cancelled === 1 && watch.reported());
 check('an engine without the callback never reports a frame',
   !watchVideo({}, followed, () => NaN).reported());
+const sampled = [];
+let counts = { totalVideoFrames: 100, droppedVideoFrames: 0 };
+const counting = {
+  requestVideoFrameCallback: (cb) => { sampled.push(cb); return sampled.length; },
+  cancelVideoFrameCallback: () => {},
+  getVideoPlaybackQuality: () => counts,
+};
+const spaced = createPresentMeter(null);
+const countingWatch = watchVideo(counting, spaced, (frame) => frame.presentationTime - frame.receiveTime);
+const spacing = () => new Promise((resolve) => setTimeout(resolve, DELAY_SAMPLE_MS + 20));
+counts = { totalVideoFrames: 101, droppedVideoFrames: 0 };
+sampled.shift()(0, { presentedFrames: 101, presentationTime: 100, receiveTime: 95 });
+check('once the playback quality counts the frames, the next callback waits out the sample spacing',
+  sampled.length === 0, String(sampled.length));
+await spacing();
+check('and is asked for after it', sampled.length === 1, String(sampled.length));
+sampled.shift()(0, { presentedFrames: 107, presentationTime: 200, receiveTime: 193 });
+figures = spaced.take();
+check('the sampled frames carry their delays', figures.delays === 2 && figures.delaySum === 12,
+  JSON.stringify(figures));
+counts = { totalVideoFrames: 160, droppedVideoFrames: 2 };
+read = countingWatch.read();
+check('while what it showed stays the playback quality\'s count', read.shown === 58 && read.dropped === 2,
+  JSON.stringify(read));
+countingWatch.stop();
+await spacing();
+check('stopping drops a sample still waiting out the spacing', sampled.length === 0, String(sampled.length));
 
 process.exit(failed ? 1 : 0);
