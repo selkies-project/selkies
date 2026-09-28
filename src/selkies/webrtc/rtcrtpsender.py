@@ -643,6 +643,12 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     last_abs_capture_ns = instant_ns
                     abs_capture_time = clock.ntp_from_monotonic_ns(instant_ns)
 
+                # Every datagram of the frame is built before the first is sent:
+                # building and sending in turn costs a third more per packet, as each
+                # evicts what the other just warmed, and the frame is decodable only
+                # once its last packet is in. Entries: bytes, transport-wide sequence
+                # number, media sequence number (None for FlexFEC), payload length.
+                outgoing: list[tuple[bytes, Optional[int], Optional[int], int]] = []
                 for i, payload in enumerate(enc_frame.payloads):
                     packet = RtpPacket(
                         payload_type=codec.payloadType,
@@ -687,19 +693,12 @@ class RTCRtpSender(AsyncIOEventEmitter):
                             i == 0, bool(packet.marker), described[0], described[1], enc_frame.keyframe)
                     if i == 0 and abs_capture_time is not None:
                         packet.extensions.abs_capture_time = abs_capture_time
-                    # send packet
                     self.__log_debug("> %s", packet)
                     self.__rtp_history.add(
                         packet, frame_time, enc_frame.dependency[0] if described is not None else None)
                     packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
-                    self.__last_sequence = packet.sequence_number
-                    await self._send(packet_bytes, packet.extensions.transport_sequence_number)
-
-                    self.__rtp_timestamp = timestamp
-                    self.__rtp_instant_ns = instant_ns
-                    self.__rtp_clock_rate = codec.clockRate
-                    self.__octet_count += len(payload)
-                    self.__packet_count += 1
+                    outgoing.append((packet_bytes, packet.extensions.transport_sequence_number,
+                                     packet.sequence_number, len(payload)))
                     sequence_number = uint16_add(sequence_number, 1)
 
                     if self.__fec_payload_type is not None:
@@ -724,8 +723,19 @@ class RTCRtpSender(AsyncIOEventEmitter):
                                 self.__fec_sequence_number = uint16_add(
                                     self.__fec_sequence_number, 1
                                 )
-                                await self._send(fec_bytes)
+                                outgoing.append((fec_bytes, None, None, 0))
                             fec_group = []
+
+                for packet_bytes, twcc_seq, media_seq, size in outgoing:
+                    if media_seq is not None:
+                        self.__last_sequence = media_seq
+                    await self._send(packet_bytes, twcc_seq)
+                    if media_seq is not None:
+                        self.__octet_count += size
+                        self.__packet_count += 1
+                self.__rtp_timestamp = timestamp
+                self.__rtp_instant_ns = instant_ns
+                self.__rtp_clock_rate = codec.clockRate
         except (asyncio.CancelledError, ConnectionError, MediaStreamError):
             pass
         except Exception:
