@@ -476,6 +476,10 @@ class RtpPacer:
             logger.debug("pacer keyframe request failed", exc_info=True)
 
     # ------------------------------------------------------------------- send
+    def drain_s(self) -> float:
+        """Seconds until what is queued now has left, at the current pace."""
+        return self._bytes_queued * 8 / max(self._pace_bps, 1)
+
     def _accrue(self) -> None:
         now = time.monotonic()
         self.credit = min(self._debt_cap,

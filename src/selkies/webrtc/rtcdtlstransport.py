@@ -894,6 +894,10 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         if self._pacer is not None:
             self._pacer.note_keyframe(total_payload_bytes, natural)
 
+    def _send_delay(self) -> float:
+        """Seconds until a packet handed over now is on the wire."""
+        return self._pacer.drain_s() if self._pacer is not None else 0.0
+
     def pacer_snapshot(self) -> Optional[dict]:
         return self._pacer.snapshot() if self._pacer is not None else None
 

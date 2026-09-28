@@ -427,7 +427,6 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     )
                 )
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_NACK:
-            lost = None
             gone = False
             for seq in packet.lost:
                 if self.__abandoned is not None and uint16_gte(self.__abandoned, seq):
@@ -437,13 +436,16 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     # A list runs oldest first, so one let go says nothing about the rest.
                     gone = True
                     continue
+                # A NACK after the first, sent once the retransmission and any FlexFEC
+                # repair of the packet had a round trip to reach the peer, says neither
+                # did: the frame is lost to it, and the encoder is told once so the frames
+                # after it stop predicting from it.
+                lost = (times > 1 and frame is not None
+                        and self.__rtp_history.unrepaired(seq, time.time(), self.__rtt or 0.0))
                 if not await self._retransmit(sent):
                     break
-                # A second NACK for the same packet says the retransmission did not reach
-                # the peer either: the frame is lost to it, and the encoder is told so the
-                # frames after it stop predicting from it.
-                if times > 1 and frame is not None and frame != lost:
-                    lost = frame
+                self.__rtp_history.repaired(seq, time.time() + self.transport._send_delay())
+                if lost and self.__rtp_history.newly_lost(frame, time.time()):
                     self.emit("lost_frame", frame)
             if gone:
                 # Gone from the history: only a key frame brings the peer back.
@@ -649,6 +651,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 # once its last packet is in. Entries: bytes, transport-wide sequence
                 # number, media sequence number (None for FlexFEC), payload length.
                 outgoing: list[tuple[bytes, Optional[int], Optional[int], int]] = []
+                # The first sequence number and count of each FlexFEC group it repairs.
+                protected: list[tuple[int, int]] = []
                 for i, payload in enumerate(enc_frame.payloads):
                     packet = RtpPacket(
                         payload_type=codec.payloadType,
@@ -724,6 +728,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                                     self.__fec_sequence_number, 1
                                 )
                                 outgoing.append((fec_bytes, None, None, 0))
+                            protected.append((fec_first_seq, len(fec_group)))
                             fec_group = []
 
                 for packet_bytes, twcc_seq, media_seq, size in outgoing:
@@ -733,6 +738,11 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     if media_seq is not None:
                         self.__octet_count += size
                         self.__packet_count += 1
+                if protected:
+                    repaired = time.time() + self.transport._send_delay()
+                    for first, count in protected:
+                        for offset in range(count):
+                            self.__rtp_history.repaired(uint16_add(first, offset), repaired)
                 self.__rtp_timestamp = timestamp
                 self.__rtp_instant_ns = instant_ns
                 self.__rtp_clock_rate = codec.clockRate

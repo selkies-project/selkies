@@ -1110,13 +1110,14 @@ class RtpPacket:
 
 class RtpHistory:
     """Packets sent on one stream, by sequence number, for retransmission, each with the
-    frame it carried and how many NACKs have named it.
+    frame it carried, how many NACKs have named it, and when the last packet able to
+    restore it went out; and the frames the peer was reported to have lost.
 
     Bounded by RTP_HISTORY_S of sending and RTP_HISTORY_MAX_PACKETS; within
     those a sequence number cannot repeat, so a lookup is exact.
     """
 
-    __slots__ = ("_packets", "_order", "_horizon", "_capacity")
+    __slots__ = ("_packets", "_order", "_horizon", "_capacity", "_lost")
 
     def __init__(self, horizon: float = RTP_HISTORY_S,
                  capacity: int = RTP_HISTORY_MAX_PACKETS) -> None:
@@ -1124,10 +1125,11 @@ class RtpHistory:
         self._order: deque = deque()
         self._horizon = horizon
         self._capacity = capacity
+        self._lost: dict[int, float] = {}
 
     def add(self, packet: RtpPacket, now: float, frame: Optional[int] = None) -> None:
         """Record a sent packet and let go of those past the horizon."""
-        self._packets[packet.sequence_number] = [packet, frame, 0]
+        self._packets[packet.sequence_number] = [packet, frame, 0, now]
         order = self._order
         order.append((now, packet.sequence_number))
         while order and (now - order[0][0] > self._horizon or len(order) > self._capacity):
@@ -1145,6 +1147,37 @@ class RtpHistory:
             return None, None, 0
         entry[2] += 1
         return entry[0], entry[1], entry[2]
+
+    def repaired(self, sequence_number: int, now: float) -> None:
+        """Note that a packet able to restore this one (its retransmission, a FlexFEC
+        repair covering it) reaches the wire at `now`, which counts what the pacer
+        holds ahead of it: the peer measures the round trip over RTCP, which skips
+        that queue, so it NACKs again before a repair waiting there can land."""
+        entry = self._packets.get(sequence_number)
+        if entry is not None:
+            entry[3] = now
+
+    def unrepaired(self, sequence_number: int, now: float, rtt: float) -> bool:
+        """Whether a NACK arriving at `now` left the peer after every packet able to
+        restore this one could have reached it, a round trip after the last went out.
+        A peer that knows the round trip NACKs again within a few milliseconds, before
+        a FlexFEC repair sent at the end of the packet's paced group can have landed."""
+        entry = self._packets.get(sequence_number)
+        return entry is not None and now - entry[3] >= rtt
+
+    def newly_lost(self, frame: int, now: float) -> bool:
+        """Whether `frame` is reported lost for the first time within the horizon. A peer
+        that knows the round trip re-NACKs a packet it still misses every round trip
+        until a later frame decodes, and another of the frame's packets can be NACKed
+        twice too; neither is news, and a report reaching the encoder after the frame
+        left its references is answered with a key frame."""
+        lost = self._lost
+        while lost and now - next(iter(lost.values())) > self._horizon:
+            del lost[next(iter(lost))]
+        if frame in lost:
+            return False
+        lost[frame] = now
+        return True
 
     def __len__(self) -> int:
         return len(self._order)
