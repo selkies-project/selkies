@@ -98,26 +98,31 @@ def record(source: str, seconds: float = 2.0) -> array:
 def analyze(samples: array) -> dict:
     """RMS of the recording and how much of it is the tone.
 
-    A Goertzel filter at TONE_HZ measures the tone's amplitude; against the
-    RMS that gives the fraction of the signal that is the tone, close to 1 for
-    the tone alone and near 0 for silence or noise. Pure Python on purpose: a
-    second of audio is a trivial loop and the suites take no numeric stack.
+    A Goertzel filter at TONE_HZ measures the tone's power in each 20 ms block
+    of the last second; against the RMS that gives the fraction of the signal
+    that is the tone, close to 1 for the tone alone and near 0 for silence or
+    noise. Blocks, not one filter over the second: the microphone path cuts
+    audio standing in its queue to hold its latency, which steps the tone's
+    phase, and a filter spanning the cut adds both sides out of step, reading
+    a fraction of a tone that is all there. Pure Python on purpose: a second
+    of audio is a trivial loop and the suites take no numeric stack.
     """
-    n = min(len(samples), CAPTURE_RATE)
+    block = CAPTURE_RATE // 50
+    n = min(len(samples), CAPTURE_RATE) // block * block
     if n < CAPTURE_RATE // 4:
         return {"samples": len(samples), "rms": 0.0, "tone": 0.0, "ratio": 0.0}
     window = samples[len(samples) - n:]
     coeff = 2.0 * math.cos(2.0 * math.pi * TONE_HZ / CAPTURE_RATE)
-    s1 = s2 = 0.0
-    energy = 0.0
-    for x in window:
-        s0 = x + coeff * s1 - s2
-        s2, s1 = s1, s0
-        energy += x * x
-    power = s1 * s1 + s2 * s2 - coeff * s1 * s2
-    tone_amplitude = 2.0 * math.sqrt(max(power, 0.0)) / n
+    energy = tone_power = 0.0
+    for start in range(0, n, block):
+        s1 = s2 = 0.0
+        for x in window[start:start + block]:
+            s0 = x + coeff * s1 - s2
+            s2, s1 = s1, s0
+            energy += x * x
+        tone_power += 2.0 * max(s1 * s1 + s2 * s2 - coeff * s1 * s2, 0.0) / (block * block)
     rms = math.sqrt(energy / n)
-    tone_rms = tone_amplitude / math.sqrt(2.0)
+    tone_rms = math.sqrt(tone_power / (n // block))
     return {"samples": len(samples), "rms": round(rms, 1), "tone": round(tone_rms, 1),
             "ratio": round(tone_rms / rms, 3) if rms else 0.0}
 
