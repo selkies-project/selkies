@@ -2672,8 +2672,11 @@ class CentralizedStreamServer:
         """The Ogg Opus socket a recording's audio track is read from, served
         by a pcmflux capture of the session's sink that runs for the recorder
         alone with no Python callback, so no frame passes through Python.
-        Empty for a video-only recording: audio off, a pixelflux or pcmflux
-        without the socket, or a capture that does not start."""
+        Unlike the live streams' captures it encodes silence rather than
+        gating it, so the track spans the recording instead of stopping at
+        every silence. Empty for a video-only recording: audio off, a
+        pixelflux or pcmflux without the socket, or a capture that does not
+        start."""
         try:
             if not self.settings.audio_enabled[0] or \
                     "audio_socket" not in inspect.signature(pixelflux.start_recording).parameters:
@@ -2682,6 +2685,7 @@ class CentralizedStreamServer:
             from .audio_control import ensure_capture_sink, opus_capture_settings
             capture_settings = opus_capture_settings(self.settings.audio_device_name, self.settings.audio_channels,
                                                      int(self.settings.audio_bitrate), 20.0)
+            capture_settings.use_silence_gate = False
             runtime = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
             capture_settings.output_socket = os.path.join(runtime, f"selkies-record-audio-{os.getpid()}.sock")
         except (ImportError, AttributeError, ValueError):
