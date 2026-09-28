@@ -90,6 +90,7 @@ async def access_log_cases() -> None:
     check("access line carries the request path", '"GET /api/websockets HTTP/1.1"' in line, line)
     check("access line drops the query string", "s3cret-tok" not in line and "role=viewer" not in line, line)
     check("access line keeps the status and agent", " 200 " in line and "probe/1" in line, line)
+    check("access line drops the Referer's query", "ref-tok" not in line and '"http://example.test/"' in line, line)
 
     sink.lines.clear()
     app = web.Application()

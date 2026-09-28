@@ -71,13 +71,15 @@ UPLOAD_STAGING_PREFIX: str = ".selkies-upload-"
 
 
 class PathOnlyAccessLogger(AbstractAccessLogger):
-    """aiohttp access log whose request line carries the path without its query.
+    """aiohttp access log whose request line and Referer carry no query.
 
-    The secure-mode session token rides the data WebSocket URL as a query
-    parameter, so the stock request-line atom (which logs ``path_qs``) would
-    write credentials into the access log. The line otherwise has the default
-    shape: remote address, start time, method + path + version, status, body
-    size, Referer, and User-Agent.
+    A secure-mode session token rides a query parameter when the page was
+    opened with ``?token=``: on the data WebSocket URL, the file-manager
+    listing, and the Referer of every request that page makes. The stock
+    request-line atom (which logs ``path_qs``) would write it into the access
+    log, and so would the Referer, so both are logged without their query. The
+    line otherwise has the default shape: remote address, start time, method +
+    path + version, status, body size, Referer, and User-Agent.
     """
 
     @property
@@ -97,7 +99,7 @@ class PathOnlyAccessLogger(AbstractAccessLogger):
                 request.version.minor,
                 response.status,
                 response.body_length,
-                request.headers.get("Referer", "-"),
+                request.headers.get("Referer", "-").split("?", 1)[0].split("#", 1)[0],
                 request.headers.get("User-Agent", "-"),
             )
         except Exception:
