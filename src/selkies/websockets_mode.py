@@ -177,9 +177,12 @@ STALLED_CLIENT_TIMEOUT_SECONDS = 4.0
 STRUCTURAL_CAPTURE_SETTINGS = (
     "codec", "use_cpu", "video_fullframe", "video_fullcolor", "video_cbr_mode",
 )
-# How long a stall keeps the gate shut before it reopens on an IDR to probe the
-# client: a stalled client is sent nothing, so nothing could otherwise reach it
-# to ack, and the gate would hold until the page reloaded.
+# How long a gate stays shut with the client's acks standing still before it
+# reopens on an IDR to probe the client: a gated client is sent nothing, so one
+# that stalled has nothing to ack, and one whose acks stopped short of what it
+# was sent (a presenter that stalled, a decoder waiting for the key frame the
+# gate withholds) never catches up; either would hold the gate until the page
+# reloaded.
 STALLED_CLIENT_REPROBE_SECONDS = 2.0
 # A socket whose peer takes nothing of what a send waits on for this long is
 # dead and is aborted. One that keeps taking is a slow path, however long a key
@@ -2708,6 +2711,23 @@ class DataStreamingServer(BaseStreamingService):
         STALLED_CLIENT_REPROBE_SECONDS it reopens on an IDR (the lift's
         resync) and the stall timer restarts from that send, which a client
         that is still gone trips again and a returned one answers.
+
+        A desync gate can hold the same way. Its client's acks keep coming but
+        stop short of what it was sent (a presenter that stalled, a video
+        decoder waiting for a key frame), and a gated client is sent nothing
+        newer to ack, so the count that closed the gate never falls while the
+        screen keeps changing. So a desync gate reopens on an IDR as well once
+        the client's acks have not moved for STALLED_CLIENT_REPROBE_SECONDS
+        after everything sent before the gate closed reached it, with those
+        frames forgiven: the count restarts from that send, which a client
+        still stuck trips again, for a key frame per re-probe rather than a
+        stream, and a returned one answers. Arrival is read end to end, from
+        the pong to a ping written behind the last frame (`socket_gauge`), so a
+        key frame still crossing a slow path, where the acks stand still too,
+        is waited for rather than answered with another; a path that answers
+        no ping is taken as delivered after SEND_STALL_SECONDS. Only a client
+        whose acks resumed is probed this way; one that went silent is the
+        stall branch's.
         """
         data_logger.debug(f"Frame-based backpressure logic task started for display '{display_id}'.")
         display_state = None
@@ -2796,6 +2816,7 @@ class DataStreamingServer(BaseStreamingService):
                                          and now - over_at <= 1.5 * self.backpressure_check_interval_s))
 
                 if unanswered_for > STALLED_CLIENT_TIMEOUT_SECONDS:
+                    display_state['desync_gated'] = None
                     gated_at = display_state.get('stall_gated_at')
                     if display_state.get('backpressure_enabled', True) or gated_at is None:
                         if display_state.get('backpressure_enabled', True):
@@ -2809,11 +2830,34 @@ class DataStreamingServer(BaseStreamingService):
                         self._set_backpressure_enabled(display_id, display_state, True)
                 elif standing:
                     display_state['stall_gated_at'] = None
-                    if display_state.get('backpressure_enabled', True):
-                        data_logger.warning(f"Backpressure TRIGGERED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f > Allowed:{allowed_desync_frames:.1f}f).")
-                    self._set_backpressure_enabled(display_id, display_state, False)
+                    gate = display_state.get('desync_gated')
+                    if display_state.get('backpressure_enabled', True) or gate is None:
+                        if display_state.get('backpressure_enabled', True):
+                            data_logger.warning(f"Backpressure TRIGGERED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f > Allowed:{allowed_desync_frames:.1f}f).")
+                        # The pong to a ping written behind the last frame says it all arrived.
+                        gate = {'acked': acked_sent_at, 'since': now, 'pinged': now, 'delivered': None}
+                        display_state['desync_gated'] = gate
+                        ws = display_state.get('ws')
+                        if ws is not None:
+                            _spawn_background_task(socket_gauge(ws).sample())
+                    elif gate['acked'] != acked_sent_at:
+                        gate['acked'], gate['since'] = acked_sent_at, now
+                    if gate['delivered'] is None and (
+                            now - gate['pinged'] >= SEND_STALL_SECONDS
+                            or _uplink_session_state(display_state.get('ws')).get('answered', 0.0) >= gate['pinged']):
+                        gate['delivered'] = now
+                    if (unacked_since is None and gate['delivered'] is not None
+                            and now - max(gate['since'], gate['delivered']) >= STALLED_CLIENT_REPROBE_SECONDS):
+                        data_logger.info(f"Re-probing desynced client for '{display_id}': no ack past {client_id} in {now - gate['since']:.1f}s; reopening on an IDR.")
+                        display_state['desync_gated'] = None
+                        sent_ts.clear()
+                        display_state['acked_sent_at'] = now
+                        self._set_backpressure_enabled(display_id, display_state, True)
+                    else:
+                        self._set_backpressure_enabled(display_id, display_state, False)
                 else:
                     display_state['stall_gated_at'] = None
+                    display_state['desync_gated'] = None
                     if not display_state.get('backpressure_enabled', True):
                         data_logger.info(f"Backpressure LIFTED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f <= Allowed:{allowed_desync_frames:.1f}f).")
                     self._set_backpressure_enabled(display_id, display_state, True)

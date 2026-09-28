@@ -11,8 +11,12 @@ client either: ids run at the capture cadence, so their distance overstates
 how far behind a client that was sent nothing is. A client that stops acking
 under motion is gated and re-probed on a keyframe, one that stops reading gets
 its stream back once it drains, and one that never acks again costs a
-keyframe per re-probe rather than a stream. The gate is shared by both
-backends and both transports' fan-out, so one X11 run covers it.
+keyframe per re-probe rather than a stream. A client whose acks keep coming
+but stop at one id (a presenter that stalled; the reproducer of the ack
+freezing while the screen changes, at 10 and 60 fps) is re-probed the same
+way rather than held forever, and one whose decoder waits for a keyframe gets
+one from the first re-probe. The gate is shared by both backends and both
+transports' fan-out, so one X11 run covers it.
 
 Uses `E2E_DISPLAY` when set; otherwise starts a throwaway Xvfb.
 Usage: python3 tests/integration/test_stall_recovery.py [h264enc|jpeg|all]
@@ -46,6 +50,7 @@ def events(mark: int) -> dict:
         text = f.read().decode("utf-8", "replace")
     return {"stall": text.count("Client stall for"),
             "reprobe": text.count("Re-probing stalled client"),
+            "desync_reprobe": text.count("Re-probing desynced client"),
             "lifted": text.count("Backpressure LIFTED"),
             "triggered": text.count("Backpressure TRIGGERED"),
             "traceback": text.count("Traceback")}
@@ -60,6 +65,7 @@ class Client:
         self.last_at = 0.0
         self.frames: List[Tuple[float, int, bool]] = []
         self.hb_at = 0.0
+        self.held: Any = None
 
     async def pump(self, seconds: float, ack: str = "new", read: bool = True) -> None:
         """Receive for `seconds`.
@@ -67,13 +73,18 @@ class Client:
         Args:
             seconds: How long to run.
             ack: `new` acks each new frame id, `heartbeat` also repeats the
-                last id every second as the client does, `none` sends nothing.
+                last id every second as the client does, `none` sends nothing,
+                `frozen` repeats the id held when it began every second and
+                acks nothing newer, `keygate` does the same until a keyframe
+                arrives and then acks as `heartbeat`.
             read: False leaves the socket unread, as a suspended app does.
         """
         end = time.monotonic() + seconds
         if not read:
             await asyncio.sleep(seconds)
             return
+        if ack in ("frozen", "keygate") and self.held is None:
+            self.held = (self.last_id, self.last_at)
         while time.monotonic() < end:
             try:
                 m = await asyncio.wait_for(self.ws.recv(), timeout=0.2)
@@ -86,10 +97,17 @@ class Client:
                 if fid != self.last_id:
                     self.last_id, self.last_at = fid, now
                     self.frames.append((now, fid, idr))
-                    if ack != "none":
+                    if ack == "keygate" and idr:
+                        self.held = None
+                    if ack in ("new", "heartbeat") or (ack == "keygate" and self.held is None):
                         await self.ws.send(f"CLIENT_FRAME_ACK {fid} 0")
                         self.hb_at = now
-            if ack == "heartbeat" and self.last_id >= 0 and now - self.hb_at >= 1.0:
+            if ack in ("frozen", "keygate") and self.held is not None:
+                if now - self.hb_at >= 1.0:
+                    held_id, held_at = self.held
+                    await self.ws.send(f"CLIENT_FRAME_ACK {held_id} {int((now - held_at) * 1000)}")
+                    self.hb_at = now
+            elif ack in ("heartbeat", "keygate") and self.last_id >= 0 and now - self.hb_at >= 1.0:
                 held = int((now - self.last_at) * 1000)
                 await self.ws.send(f"CLIENT_FRAME_ACK {self.last_id} {held}")
                 self.hb_at = now
@@ -98,10 +116,10 @@ class Client:
         return [f for f in self.frames if f[0] >= t0]
 
 
-async def connect(encoder: str) -> Client:
+async def connect(encoder: str, fps: int = 60) -> Client:
     ws = await websockets.connect(f"ws://localhost:{H.PORT}/api/websockets", max_size=None)
     await asyncio.wait_for(ws.recv(), timeout=10)
-    await ws.send("SETTINGS," + json.dumps(dict(SETTINGS, encoder=encoder)))
+    await ws.send("SETTINGS," + json.dumps(dict(SETTINGS, encoder=encoder, framerate=fps)))
     return Client(ws)
 
 
@@ -231,6 +249,69 @@ async def dead(res: H.Results, tag: str, encoder: str) -> None:
         churn.stop()
 
 
+async def frozen(res: H.Results, tag: str, encoder: str, fps: int) -> None:
+    """The ack stops at one id, repeated every second, while the screen keeps
+    changing: the gate closes on it and must not stay closed."""
+    churn = C.Churn()
+    churn.start()
+    c = await connect(encoder, fps)
+    try:
+        await c.pump(3, "new")
+        mark = log_mark()
+        t0 = time.monotonic()
+        await c.pump(12, "frozen")
+        ev = events(mark)
+        got = c.since(t0 + 1)
+        stamps = [t0 + 1] + [f[0] for f in got] + [t0 + 12]
+        longest = max(b - a for a, b in zip(stamps, stamps[1:]))
+        idrs = [f for f in got if f[2]]
+        res.check(f"{tag} frozen {fps} fps: the gate closes on an ack that stops", ev["triggered"] >= 1, ev)
+        res.check(f"{tag} frozen {fps} fps: and is re-probed rather than held", ev["desync_reprobe"] >= 2, ev)
+        res.check(f"{tag} frozen {fps} fps: frames keep reaching the client between re-probes", longest < 4.0,
+                  f"longest gap {longest:.2f} s, {len(got)} frames in 11 s")
+        if encoder != "jpeg":
+            res.check(f"{tag} frozen {fps} fps: each re-probe costs a keyframe, not a stream",
+                      ev["desync_reprobe"] - 1 <= len(idrs) <= ev["desync_reprobe"] + 2,
+                      f"{len(idrs)} IDRs for {ev['desync_reprobe']} re-probes")
+        c.held = None
+        t1 = time.monotonic()
+        await c.pump(4, "heartbeat")
+        late = c.since(t1 + 1)
+        gaps = [b[0] - a[0] for a, b in zip(late, late[1:])]
+        res.check(f"{tag} frozen {fps} fps: the stream is whole again once the acks move",
+                  len(late) > fps and bool(gaps) and max(gaps) < 0.5,
+                  f"{len(late)} frames in 3 s, max gap {gaps and round(max(gaps), 2)} s")
+        res.check(f"{tag} frozen {fps} fps: nothing raised in the server", ev["traceback"] == 0, ev)
+    finally:
+        await c.ws.close()
+        churn.stop()
+
+
+async def keygate(res: H.Results, tag: str, encoder: str) -> None:
+    """A decoder that lost its reference: the ack holds until a keyframe
+    arrives, which only a gate that reopens can send."""
+    churn = C.Churn()
+    churn.start()
+    c = await connect(encoder)
+    try:
+        await c.pump(3, "new")
+        mark = log_mark()
+        t0 = time.monotonic()
+        await c.pump(10, "keygate")
+        ev = events(mark)
+        keys = [f for f in c.since(t0) if f[2]]
+        recovered = keys[0][0] - t0 if keys else None
+        late = c.since(t0 + 7)
+        res.check(f"{tag} keygate: the keyframe the client waits for reaches it",
+                  recovered is not None and recovered < 5.0,
+                  f"after {recovered and round(recovered, 2)} s, {ev}")
+        res.check(f"{tag} keygate: and its stream flows on", len(late) > 60,
+                  f"{len(late)} frames in the last 3 s, {ev}")
+    finally:
+        await c.ws.close()
+        churn.stop()
+
+
 async def drive(res: H.Results, encoder: str) -> None:
     tag = f"[{encoder}]"
     await still_screen(res, tag, encoder, "heartbeat")
@@ -238,6 +319,10 @@ async def drive(res: H.Results, encoder: str) -> None:
     await silent(res, tag, encoder)
     await suspended(res, tag, encoder)
     await dead(res, tag, encoder)
+    await frozen(res, tag, encoder, 10)
+    await frozen(res, tag, encoder, 60)
+    if encoder != "jpeg":
+        await keygate(res, tag, encoder)
 
 
 def main(selection: str) -> H.Results:

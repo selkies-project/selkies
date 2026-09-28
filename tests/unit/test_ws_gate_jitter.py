@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H  # noqa: E402
 
 from selkies import websockets_mode as w  # noqa: E402
+from selkies.stream_server import note_pong  # noqa: E402
 from selkies.websockets_mode import DataStreamingServer  # noqa: E402
 
 res = H.Results("ws-gate-jitter")
@@ -38,6 +39,14 @@ class Module:
 
     def request_idr_frame(self) -> None:
         pass
+
+
+class Socket:
+    """The client's socket, as far as the gate reaches it: a browser answers a
+    ping once everything written before it arrived, here at once."""
+
+    async def ping(self, payload: bytes) -> None:
+        note_pong(self, payload)
 
 
 def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -> list:
@@ -54,7 +63,7 @@ def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -
     server.rc_mode = SimpleNamespace(value=w.RateControlMode.CBR.value)
     server.metrics = None
     state = {
-        "ws": object(), "framerate": FPS, "acknowledged_frame_id": 100, "acked_sent_at": None,
+        "ws": Socket(), "framerate": FPS, "acknowledged_frame_id": 100, "acked_sent_at": None,
         "last_sent_frame_id": 100, "has_sent_any_frame": True, "sent_timestamps": OrderedDict(),
         "rtt_samples": deque(maxlen=20), "smoothed_rtt": 0.0, "backpressure_enabled": True,
         "unacked_since": None, "stall_gated_at": None, "rtt_floor_ms": FLOOR_MS,

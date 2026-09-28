@@ -223,7 +223,9 @@ def note_pong(ws: Any, data: Any) -> None:
     The transports' message loops call this for every `WSMsgType.PONG` (their
     sockets run with autoping off so the frames reach them). A payload the
     clock did not send — an answer to an aiohttp heartbeat ping, or a peer's
-    unsolicited pong — misses the pending map and is ignored.
+    unsolicited pong — misses the pending map and is ignored. `answered` keeps
+    when the newest answered ping was sent: everything written to the socket
+    before it has reached the peer.
     """
     state = _UPLINK_SESSIONS.get(ws)
     if state is None:
@@ -236,6 +238,7 @@ def note_pong(ws: Any, data: Any) -> None:
         return
     state["rtt_us"] = int((time.monotonic() - sent) * 1e6)
     state["seq"] += 1
+    state["answered"] = max(state.get("answered", 0.0), sent)
 
 
 def _observe_rtt_floor(state: Dict[str, Any], rtt_us: int, now: float) -> int:
