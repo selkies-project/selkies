@@ -13,7 +13,10 @@ The ``nowebcodecs`` block is the rung below the ladder: an engine with no WebCod
 at all is not refused but pinned to the striped-JPEG encoder at pre-flight, and
 the dashboard offers it nothing else.
 
-Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|ladder|healthy|silent|striped|nowebcodecs|all]
+The ``cleared`` and ``broken`` blocks follow the ladder's JPEG past its tab: a fault that
+clears gives a new tab its video back, and one that stays takes it to JPEG at its first crash.
+
+Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|all]
 """
 import os
 import sys
@@ -31,18 +34,20 @@ STORAGE_KEY_JS = (
     "((location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_')"
     " + '_prefer_software_decode')"
 )
+ENCODER_KEY_JS = STORAGE_KEY_JS.replace("_prefer_software_decode", "_encoder")
 
 
-def shim_js(fail_mode: str) -> str:
+def shim_js(fail_mode: str, loads: int = 0) -> str:
     """Make every VideoDecoder in the page fail on a chosen path and record the acceleration
     each decoder was configured with. ``hardware``/``all`` raise an asynchronous decode error;
     ``silent`` accepts the chunk on the hardware path but never outputs and never errors, the
-    case the no-output watchdog exists for."""
+    case the no-output watchdog exists for. ``loads`` confines the failure to the tab's first
+    that many loads, a fault that clears up; 0 keeps it for every load."""
     return """
     (() => {
       const Real = window.VideoDecoder;
       if (!Real) return;
-      const MODE = '%s';
+      const MODE = %d && Number(sessionStorage.getItem('__navs') || 0) > %d ? 'none' : '%s';
       const errorFor = new WeakMap(), softFor = new WeakMap();
       const record = (accel) => {
         const seen = JSON.parse(sessionStorage.getItem('__cfgs') || '[]');
@@ -83,7 +88,7 @@ def shim_js(fail_mode: str) -> str:
         },
       });
     })();
-    """ % fail_mode
+    """ % (loads, loads, fail_mode)
 
 
 # Every WebCodecs global removed, the way an engine without the API presents.
@@ -155,7 +160,9 @@ def read_state(page, retries: int = 6) -> dict:
       decoded: window.__decoded || 0,
       stored: (() => { try { return localStorage.getItem(%s); } catch (e) { return null; } })(),
       ua: navigator.userAgent,
-    }))()""" % STORAGE_KEY_JS
+      codec: (window.stream_info && window.stream_info.codec) || null,
+      encoder: (() => { try { return localStorage.getItem(%s); } catch (e) { return null; } })(),
+    }))()""" % (STORAGE_KEY_JS, ENCODER_KEY_JS)
     for attempt in range(retries):
         try:
             return page.evaluate(js)
@@ -329,7 +336,8 @@ def block_striped(r: "H.Results") -> None:
 def block_nowebcodecs(r: "H.Results") -> None:
     """No WebCodecs at all: the stream comes up as striped JPEG without a reload,
     the encoder is pinned to jpeg for the session, and the classic dashboard's
-    encoder menu offers only what this engine can play."""
+    encoder menu offers only what this engine can play. A later visit of the same
+    profile with WebCodecs, the way a browser update brings it, streams video."""
     from playwright.sync_api import sync_playwright
     import test_dashboards as TD
     H.server_start(mode="websockets", web_root=H.CLASSIC_DIST)
@@ -364,6 +372,95 @@ def block_nowebcodecs(r: "H.Results") -> None:
                 enabled = [o["value"] for o in options if not o["disabled"]]
                 r.check("dashboard enables only the jpeg encoder", opened and enabled == ["jpeg"], str(options))
                 r.check("no page errors", not errors, "; ".join(errors)[:200])
+                storage = ctx.storage_state()
+                ctx.close()
+                # A fresh server, so what the later visit streams comes from its own storage.
+                H.server_start(mode="websockets", web_root=H.CLASSIC_DIST)
+                later = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
+                                            device_scale_factor=1)
+                later.add_init_script(NAV_JS)
+                page = later.new_page()
+                page.goto(H.BASE_URL + "/", wait_until="load")
+                state = wait_for(page, lambda s: s["codec"] is not None)
+                r.check("a later visit with WebCodecs streams video", state["codec"] not in (None, "jpeg"),
+                        state["codec"])
+                r.check("and asks for no JPEG of its own", state["encoder"] != "jpeg", state["encoder"])
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+
+
+def block_cleared(r: "H.Results") -> None:
+    """Every decoder fails at decode() for a tab's first three loads and then works, as through
+    a GPU process restart or a driver hiccup: the crash ladder still takes that tab to JPEG,
+    which holds for that tab alone, so a new tab of the profile streams video again. The
+    page decodes on the main thread, where the shim reaches its decoders."""
+    from playwright.sync_api import sync_playwright
+    H.server_start(mode="websockets")
+    try:
+        with sync_playwright() as pw:
+            browser = C.chromium_launch(pw)
+            try:
+                ctx = browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
+                ctx.add_init_script(NAV_JS)
+                ctx.add_init_script(shim_js("all", loads=3))
+                page = ctx.new_page()
+                page.goto(H.BASE_URL + "/?offscreen_worker=false", wait_until="load")
+                state = wait_for(page, lambda s: s["navs"] > 3 and s["codec"] == "jpeg", timeout=90)
+                r.check("the failing tab reaches JPEG at its fourth load", state["navs"] == 4
+                        and state["codec"] == "jpeg", {"navs": state["navs"], "codec": state["codec"]})
+                time.sleep(6)
+                after = read_state(page)
+                r.check("and stays there", after["navs"] == 4 and after["codec"] == "jpeg",
+                        {"navs": after["navs"], "codec": after["codec"]})
+                storage = ctx.storage_state()
+                ctx.close()
+                # A fresh server, so what the new tab streams comes from its own storage.
+                H.server_start(mode="websockets")
+                fresh = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
+                                            device_scale_factor=1)
+                fresh.add_init_script(NAV_JS)
+                page = fresh.new_page()
+                page.goto(H.BASE_URL + "/?offscreen_worker=false", wait_until="load")
+                state = wait_for(page, lambda s: s["codec"] is not None)
+                r.check("a new tab streams video once decode works", state["codec"] == "h264", state["codec"])
+                r.check("with the pick the fallback replaced back", state["encoder"] is None, state["encoder"])
+                r.check("and frames present", C.page_fps(page, timeout=15) > 0)
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+
+
+def block_broken(r: "H.Results") -> None:
+    """Every decoder fails at decode() on every load of every tab: the crash ladder still ends
+    on JPEG and stays there, and a new tab of the profile, the fault still there, takes JPEG
+    at its first crash rather than walking the ladder again."""
+    from playwright.sync_api import sync_playwright
+    H.server_start(mode="websockets")
+    try:
+        with sync_playwright() as pw:
+            browser = C.chromium_launch(pw)
+            try:
+                storage = None
+                for tab, loads in (("the first tab", 4), ("a new tab", 2)):
+                    if storage is not None:
+                        # A fresh server, so what the new tab streams comes from its own storage.
+                        H.server_start(mode="websockets")
+                    ctx = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
+                                              device_scale_factor=1)
+                    ctx.add_init_script(NAV_JS)
+                    ctx.add_init_script(shim_js("all"))
+                    page = ctx.new_page()
+                    page.goto(H.BASE_URL + "/?offscreen_worker=false", wait_until="load")
+                    wait_for(page, lambda s, n=loads: s["codec"] == "jpeg" and s["navs"] >= n, timeout=90)
+                    time.sleep(6)
+                    after = read_state(page)
+                    r.check(f"{tab} settles on JPEG at load {loads}", after["navs"] == loads
+                            and after["codec"] == "jpeg", {"navs": after["navs"], "codec": after["codec"]})
+                    storage = ctx.storage_state()
+                    ctx.close()
             finally:
                 browser.close()
     finally:
@@ -408,7 +505,8 @@ def block_silent(r: "H.Results") -> None:
 BLOCKS = {"retry": block_retry, "persisted": block_persisted,
           "ladder": block_ladder, "healthy": block_healthy,
           "silent": block_silent,
-          "striped": block_striped, "nowebcodecs": block_nowebcodecs}
+          "striped": block_striped, "nowebcodecs": block_nowebcodecs,
+          "cleared": block_cleared, "broken": block_broken}
 
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"

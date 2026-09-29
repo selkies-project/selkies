@@ -968,7 +968,9 @@ const decoderConfigFor = (config) =>
  * Storage key of the decoder crash count the fallback ladder escalates on.
  * The count describes the current troubled stretch, not a lifetime total: a
  * session that decodes video for `HEALTHY_SESSION_MS` retires it, otherwise
- * unrelated faults months apart accumulate until the ladder pins jpeg.
+ * unrelated faults months apart accumulate until the ladder pins jpeg. The
+ * pin holds for its tab alone, and the count stands past it, so a new tab on
+ * a decoder that still fails takes JPEG at its first crash.
  */
 const CRASH_COUNT_KEY = `${storageAppName}_crash_count`;
 const HEALTHY_SESSION_MS = 60000;
@@ -976,7 +978,7 @@ let crashCountRetired = false;
 /** Clears the crash count once this session has proven healthy; runs on every metrics tick. */
 const retireCrashCountWhenHealthy = () => {
   if (crashCountRetired || isSharedMode) return;
-  if (!(window.fps > 0) || performance.now() < HEALTHY_SESSION_MS) return;
+  if (!(window.fps > 0) || !isVideoEncoder(currentEncoderMode) || performance.now() < HEALTHY_SESSION_MS) return;
   crashCountRetired = true;
   try {
     window.localStorage.removeItem(CRASH_COUNT_KEY);
@@ -1381,6 +1383,43 @@ const setStringParam = (key, value) => {
     safeSetItem(finalKey, value.toString());
   }
 };
+/**
+ * An encoder a fallback chose (the pre-flight's JPEG, a refusal-ladder rung, a
+ * crash-ladder step) is stored where a pick is, since the payloads and both
+ * dashboards' menus read that key, but the pick it replaced is kept under
+ * `ENCODER_PICK_KEY` (empty for none) and the tab that took it is marked in
+ * its own sessionStorage. The fallback holds for that tab, whose reloads keep
+ * it, the crash ladder's among them; any other tab or later visit puts the
+ * pick back and decides afresh, so a fallback taken for a fault that has since
+ * cleared never outlives the tab that took it.
+ */
+const ENCODER_PICK_KEY = `${prefixedStorageKey('encoder')}_pick`;
+const FALLBACK_TAB_KEY = `${ENCODER_PICK_KEY}_tab`;
+/** Stores `encoder` as this tab's fallback, keeping the pick it replaces. */
+function storeFallbackEncoder(encoder) {
+  try {
+    if (window.localStorage.getItem(ENCODER_PICK_KEY) === null) {
+      safeSetItem(ENCODER_PICK_KEY, getStringParam('encoder', ''));
+    }
+    window.sessionStorage.setItem(FALLBACK_TAB_KEY, '1');
+  } catch (e) { /* storage unavailable */ }
+  setStringParam('encoder', encoder);
+}
+/** Stores `pick` as the user's own encoder, ending any fallback. */
+function storeEncoderPick(pick) {
+  setStringParam('encoder', pick);
+  try {
+    window.localStorage.removeItem(ENCODER_PICK_KEY);
+    window.sessionStorage.removeItem(FALLBACK_TAB_KEY);
+  } catch (e) { /* storage unavailable */ }
+}
+try {
+  const pick = window.localStorage.getItem(ENCODER_PICK_KEY);
+  if (pick !== null && window.sessionStorage.getItem(FALLBACK_TAB_KEY) === null) {
+    setStringParam('encoder', pick || null);
+    window.localStorage.removeItem(ENCODER_PICK_KEY);
+  }
+} catch (e) { /* storage unavailable */ }
 /**
  * Reconciles the stored settings with the server's `server_settings` payload
  * and mirrors the result onto `window[key]` for the runtime.
@@ -3253,7 +3292,7 @@ function stepRefusalLadder(label, codec) {
         codecRefusalPending = next;
         console.warn(`This browser has no decoder for ${label}; switching to the ${next} encoder.`);
         currentEncoderMode = next;
-        setStringParam('encoder', next);
+        storeFallbackEncoder(next);
         // The worker takes the next stream from its first frame, whatever the
         // refused one did to it; the refused stream's stragglers it drops.
         workerDecodeFailed = false;
@@ -5563,12 +5602,14 @@ function handleSettingsMessage(settings, fromServer) {
   if (settings.encoder !== undefined) {
     let newEncoderSetting = settings.encoder;
     // A server-authored value is applied as announced and the settings echo
-    // runs the refusal ladder for it; a dashboard pick this engine cannot
-    // decode takes the ladder's fallback at once.
+    // runs the refusal ladder for it; a dashboard's is the user's pick, and
+    // one this engine cannot decode takes the ladder's fallback at once.
+    if (!fromServer) storeEncoderPick(newEncoderSetting);
     if (!fromServer && !canDecodeEncoder(newEncoderSetting)) {
       const fallback = fallbackEncoder(newEncoderSetting);
       console.warn(`This browser has no decoder for ${newEncoderSetting}; using the ${fallback} encoder.`);
       newEncoderSetting = fallback;
+      storeFallbackEncoder(fallback);
     }
     if (currentEncoderMode !== newEncoderSetting) {
         currentEncoderMode = newEncoderSetting;
@@ -9742,9 +9783,9 @@ function restartDecodersForAcceleration() {
  * that switch replaced are absorbed for a settle period. A failure after that
  * forgets the preference, counts a crash, and reloads: a shared viewer just
  * resyncs, a controller resets its settings to safe defaults, stepping the
- * encoder down to h264enc and, at three crashes, to jpeg. jpeg mode runs no
- * VideoDecoder, so an error there is handover noise from a stream the server
- * has yet to stop and never escalates.
+ * encoder down for its tab (`storeFallbackEncoder`) to h264enc and, at three
+ * crashes, to jpeg. jpeg mode runs no VideoDecoder, so an error there is
+ * handover noise from a stream the server has yet to stop and never escalates.
  * @param {Error|DOMException} error
  * @param {string} context Which decoder failed.
  */
@@ -9805,10 +9846,9 @@ function initiateFallback(error, context) {
         crashCount++;
         safeSetItem(CRASH_COUNT_KEY, crashCount.toString());
         if (crashCount >= 3) {
-            setStringParam('encoder', 'jpeg');
-            safeSetItem(CRASH_COUNT_KEY, '0');
+            storeFallbackEncoder('jpeg');
         } else if (currentEncoderMode !== 'jpeg') {
-            setStringParam('encoder', 'h264enc');
+            storeFallbackEncoder('h264enc');
         } else {
             // Un-escalating from jpeg would loop the ladder on builds whose
             // WebCodecs claims H.264 support but fails at decode().
@@ -9862,7 +9902,7 @@ function runPreflightChecks() {
 /** Pins the jpeg encoder, the fallback ladder's last rung. */
 function pinJpegEncoder() {
     currentEncoderMode = 'jpeg';
-    setStringParam('encoder', 'jpeg');
+    storeFallbackEncoder('jpeg');
 }
 
 window.addEventListener('beforeunload', cleanup);
