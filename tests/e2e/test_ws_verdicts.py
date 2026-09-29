@@ -9,16 +9,20 @@ to, the way WebRTC pushes it at channel open. A viewer holding the mk token
 stays read-only with collab disabled. The session token never reaches the
 server log.
 
-no-resize: with dynamic resizing disabled the first SETTINGS does not resize
-the desktop to the page's window; the server keeps the desktop's current size
-and tells the client the realized geometry to fit. With it enabled the same
-SETTINGS does resize, which is what proves the check can see one.
+no-resize: with dynamic resizing disabled nothing a SETTINGS carries resizes
+the desktop an operator sized with `selkies-resize`: not the page's window in
+the first one, not 16-pixel alignment, and not a manual resolution in the
+first or a later one. The server keeps the desktop's current size and tells
+the client the realized geometry to fit. With it enabled the same SETTINGS
+does resize, which is what proves the check can see one.
 """
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
@@ -151,67 +155,100 @@ def run_mk_access() -> "H.Results":
     return res
 
 
-def _settings_payload(width: int, height: int) -> dict:
+# The desktop a pinned server keeps: a laptop panel, which 16-pixel alignment
+# would cut to 1920x1072.
+PANEL = (1920, 1080)
+# What the page asks for, aligned, so alignment alone never moves it.
+WANT = (1280, 720)
+
+
+def _settings_payload(width: int, height: int, **extra: Any) -> dict:
     return {
         "displayId": "primary", "initialClientWidth": width, "initialClientHeight": height,
         "manual_resolution": False, "framerate": 30, "encoder": "jpeg",
         "video_crf": 25, "video_bitrate": 6000, "audio_bitrate": 128000,
-        "scaling_dpi": 96, "displayPosition": "right",
+        "scaling_dpi": 96, "displayPosition": "right", **extra,
     }
 
 
-async def first_settings(width: int, height: int, seconds: float = 12.0) -> tuple:
-    """Connect, send the first SETTINGS, and wait for the stream_resolution
-    reply; the socket is kept open for `seconds` so the capture runs.
+def _manual_payload(width: int, height: int) -> dict:
+    """A page in manual mode: the manual size in place of its window's."""
+    return _settings_payload(width, height, manual_resolution=True,
+                             manual_width=width, manual_height=height)
+
+
+async def send_settings(*payloads: dict, seconds: float = 8.0) -> tuple:
+    """Connect and send each SETTINGS in turn, `seconds` apart so the capture
+    runs and any reconfigure lands before the root is read.
 
     Returns:
-        `(stream_resolution payload or None, messages)`.
+        `(the first stream_resolution payload or None, the root size read
+        after each SETTINGS)`.
     """
     uri = f"ws://localhost:{H.PORT}/api/websockets"
-    messages = []
     resolution = None
+    roots = []
     async with websockets.connect(uri, max_size=None) as ws:
         await asyncio.wait_for(ws.recv(), timeout=10)
-        await ws.send("SETTINGS," + json.dumps(_settings_payload(width, height)))
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            try:
-                msg = await asyncio.wait_for(ws.recv(), timeout=0.5)
-            except asyncio.TimeoutError:
-                continue
-            if not isinstance(msg, str):
-                continue
-            messages.append(msg)
-            if msg.startswith("{"):
+        for payload in payloads:
+            await ws.send("SETTINGS," + json.dumps(payload))
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
                 try:
-                    payload = json.loads(msg)
-                except ValueError:
+                    msg = await asyncio.wait_for(ws.recv(), timeout=0.5)
+                except asyncio.TimeoutError:
                     continue
-                if payload.get("type") == "stream_resolution" and resolution is None:
-                    resolution = payload
+                if resolution is None and isinstance(msg, str) and msg.startswith("{"):
+                    try:
+                        reply = json.loads(msg)
+                    except ValueError:
+                        continue
+                    if reply.get("type") == "stream_resolution":
+                        resolution = reply
+            roots.append(H.x_root_size())
         await ws.send("STOP_VIDEO")
         await asyncio.sleep(0.5)
-    return resolution, messages
+    return resolution, roots
+
+
+def resize_desktop(width: int, height: int) -> tuple:
+    """Size the test display as an operator sizes a desktop Selkies may not
+    resize (`selkies-resize`, docs/native.md).
+
+    Returns:
+        The root size realized.
+    """
+    subprocess.run([H.PYTHON, "-m", "selkies.display_utils", f"{width}x{height}"],
+                   env={**os.environ, "DISPLAY": H.require_display()},
+                   capture_output=True, timeout=60)
+    return H.x_root_size()
 
 
 def run_no_resize() -> "H.Results":
     res = H.Results("no-resize")
-    root_w, root_h = H.x_root_size()
-    # A different, aligned size the page would ask for.
-    want_w = max(640, (root_w - 256) & ~15)
-    want_h = max(480, (root_h - 128) & ~15)
-    if (want_w, want_h) == (root_w, root_h):
-        want_w, want_h = root_w - 64, root_h - 64
+    start = H.x_root_size()
+    root = resize_desktop(*PANEL)
+    res.check("the desktop is sized to the panel", root == PANEL, root)
 
     H.server_start(mode="websockets", wayland=False,
                    extra_env={"SELKIES_ENABLE_RESIZE": "false"})
-    resolution, messages = asyncio.run(first_settings(want_w, want_h))
-    after = H.x_root_size()
+    resolution, roots = asyncio.run(send_settings(
+        _settings_payload(*WANT),
+        _settings_payload(*WANT, force_aligned_resolution=True),
+        _manual_payload(*WANT)))
     res.check("resize disabled: the desktop keeps its size on first SETTINGS",
-              after == (root_w, root_h), f"root {root_w}x{root_h} -> {after[0]}x{after[1]}")
+              roots[0] == root, f"root {root} -> {roots[0]}")
     res.check("resize disabled: the client is told the realized geometry",
-              resolution is not None and (resolution.get("width"), resolution.get("height")) == (root_w, root_h),
+              resolution is not None and (resolution.get("width"), resolution.get("height")) == root,
               resolution)
+    res.check("resize disabled: 16-pixel alignment keeps the desktop's size",
+              roots[1] == root, f"root {root} -> {roots[1]}")
+    res.check("resize disabled: a manual resolution keeps the desktop's size",
+              roots[2] == root, f"root {root} -> {roots[2]}, asked {WANT}")
+    resize_desktop(*root)
+    _, roots = asyncio.run(send_settings(_manual_payload(*WANT)))
+    res.check("resize disabled: a page connecting in manual mode keeps the desktop's size",
+              roots[0] == root, f"root {root} -> {roots[0]}, asked {WANT}")
     log = H.server_log()
     res.check("resize disabled: the server logs the ignored initial size",
               "dynamic resizing disabled" in log, "")
@@ -220,13 +257,14 @@ def run_no_resize() -> "H.Results":
 
     H.server_start(mode="websockets", wayland=False,
                    extra_env={"SELKIES_ENABLE_RESIZE": "true"})
-    resolution, messages = asyncio.run(first_settings(want_w, want_h))
-    after = H.x_root_size()
+    _, roots = asyncio.run(send_settings(_settings_payload(*WANT)))
     res.check("resize enabled: the same SETTINGS resizes the desktop",
-              after == (want_w, want_h), f"root {root_w}x{root_h} -> {after[0]}x{after[1]}, wanted {want_w}x{want_h}")
-    # Put the shared display back the way it was found.
-    asyncio.run(first_settings(root_w, root_h, seconds=6.0))
-    res.check("display restored", H.x_root_size() == (root_w, root_h), H.x_root_size())
+              roots[0] == WANT, f"root {root} -> {roots[0]}, wanted {WANT}")
+    # Put the shared display back the way it was found, once no server is
+    # left to re-apply its own layout on the way out.
+    H.server_stop()
+    restored = resize_desktop(*start)
+    res.check("display restored", restored == start, restored)
     res.summary()
     return res
 

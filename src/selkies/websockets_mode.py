@@ -3490,8 +3490,9 @@ class DataStreamingServer(BaseStreamingService):
 
         Controller-only (a viewer's payload is ignored). Under
         _reconfigure_lock it resolves the target geometry (server-forced
-        manual, client manual, the initial client size, or — with dynamic
-        resizing disabled — the primary's current size), stores sanitized
+        manual; with dynamic resizing disabled, the primary's current size
+        whatever manual resolution, window size, or alignment the page asks
+        for; else client manual or the initial client size), stores sanitized
         per-display tunables (primary updates also become session seeds for
         later displays), applies DPI/cursor/keyboard-layout side effects, and
         applies video changes live where possible — only structural switches
@@ -3547,23 +3548,29 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.error(f"Server override failed: Could not parse manual resolution from server config. Error: {e}. Falling back.")
                         target_w = 1024
                         target_h = 768
+                elif display_id == 'primary' and not getattr(
+                        self.app, 'server_enable_resize', True):
+                    # The page's window or manual size is a resize like any r,
+                    # message; the initial reconfigure's stream_resolution
+                    # broadcast tells the client to fit.
+                    keeps_current_geometry = True
+                    asked = (f"manual resolution {settings.get('manual_width')}x{settings.get('manual_height')}"
+                             if client_wants_manual else
+                             f"initial size {settings.get('initialClientWidth')}x{settings.get('initialClientHeight')}")
+                    if is_initial_settings:
+                        current = await self._current_primary_geometry()
+                        if current is not None:
+                            target_w, target_h = current
+                        kept = f"{current[0]}x{current[1]}" if current else "its current size"
+                        data_logger.info(
+                            f"Primary {asked} ignored: dynamic resizing disabled; keeping the desktop at {kept}.")
+                    elif client_wants_manual:
+                        # A page in manual mode repeats its size in every SETTINGS.
+                        data_logger.debug(f"Primary {asked} ignored: dynamic resizing disabled.")
                 elif client_wants_manual:
                     data_logger.info(f"Client has requested manual resolution mode for display '{display_id}'.")
                     target_w = sanitize_value("manual_width", settings.get("manual_width"))
                     target_h = sanitize_value("manual_height", settings.get("manual_height"))
-                elif is_initial_settings and display_id == 'primary' and not getattr(
-                        self.app, 'server_enable_resize', True):
-                    # The page's window size is a resize like any later r, message;
-                    # the reconfigure's stream_resolution broadcast tells the client to fit.
-                    keeps_current_geometry = True
-                    current = await self._current_primary_geometry()
-                    if current is not None:
-                        target_w, target_h = current
-                    data_logger.info(
-                        f"Primary initial size {settings.get('initialClientWidth')}x"
-                        f"{settings.get('initialClientHeight')} ignored: dynamic resizing "
-                        f"disabled; keeping the desktop at {current or 'its current size'}."
-                    )
                 elif is_initial_settings:
                     target_w = settings.get("initialClientWidth")
                     target_h = settings.get("initialClientHeight")
