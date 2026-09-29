@@ -145,11 +145,9 @@ const measured = (hz, o) => {
         requestedFramerate(String(NTSC(60)), 144, span) === NTSC(60));
     check('the display, when chosen, is asked for',
         requestedFramerate(FRAMERATE_DISPLAY, NTSC(60), span) === NTSC(60) && requestedFramerate(FRAMERATE_DISPLAY, 144, span) === 144);
-    check('with nothing chosen, a display no faster than the default is asked for',
-        requestedFramerate(null, NTSC(60), span) === NTSC(60) && requestedFramerate(null, 60.02, span) === 60.02
-            && requestedFramerate(null, 50, span) === 50);
-    check('with nothing chosen, a faster display leaves the default',
-        requestedFramerate(null, 144, span) === null && requestedFramerate(null, 120, span) === null);
+    check('with nothing chosen, nothing is asked for',
+        requestedFramerate(null, NTSC(60), span) === null && requestedFramerate(null, 50, span) === null
+            && requestedFramerate(null, 144, span) === null);
     check('nothing is asked before the display is measured',
         requestedFramerate(FRAMERATE_DISPLAY, null, span) === null && requestedFramerate(null, null, span) === null);
     check('nothing is asked before the server says its span', requestedFramerate(null, 60, null) === null);
@@ -158,11 +156,10 @@ const measured = (hz, o) => {
     check("the display, when chosen, overrides the operator's rate",
         requestedFramerate(FRAMERATE_DISPLAY, 144, { ...span, overridden: true }) === 144);
     check('a locked rate asks for nothing', requestedFramerate(FRAMERATE_DISPLAY, 144, { min: 60, max: 60, default: 60, overridden: true }) === null);
-    check('the page follows its display where it is chosen, or nothing is, the server allows it, and it is no faster',
-        followsDisplay(FRAMERATE_DISPLAY, span, 144) && followsDisplay(FRAMERATE_DISPLAY, null, null)
-            && followsDisplay(null, span, NTSC(60)) && !followsDisplay(null, span, 144) && !followsDisplay('60', span, 60)
-            && !followsDisplay(null, null, 60) && !followsDisplay(null, { ...span, overridden: true }, 60)
-            && !followsDisplay(FRAMERATE_DISPLAY, { min: 60, max: 60, default: 60, overridden: true }, 60));
+    check('the page follows its display only where it is chosen and the server allows it',
+        followsDisplay(FRAMERATE_DISPLAY, span) && followsDisplay(FRAMERATE_DISPLAY, null)
+            && !followsDisplay(null, span) && !followsDisplay('60', span) && !followsDisplay(null, null)
+            && !followsDisplay(FRAMERATE_DISPLAY, { min: 60, max: 60, default: 60, overridden: true }));
 }
 
 console.log(`\n[display-refresh] ${failed ? 'FAILED' : 'OK'}`);

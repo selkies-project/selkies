@@ -194,23 +194,16 @@ export function framerateLabel(rate) {
 
 /**
  * Whether a page's frame rate follows its display: where the stored choice is
- * `FRAMERATE_DISPLAY`, or where nothing is stored, the server neither locks
- * the rate nor had its operator choose one, and the display's rate is no faster
- * than the server's default. Following such a display streams no more frames
- * than the default and none it has no refresh for; a faster display is
- * followed only where the user chose it, since that multiplies the server's
- * encoding and the client's decoding.
+ * `FRAMERATE_DISPLAY` and the server does not lock the rate. With nothing
+ * chosen the page asks for nothing, since the server's pacing strays from the
+ * rate asked of it by more than a matched rate would remove.
  * @param {?string} stored The stored value, null where none is.
  * @param {?{min: number, max: number, default: number, overridden: boolean}} span
  *     The server's framerate setting, null before it arrives.
- * @param {?number} displayRate The measured refresh, null where unknown.
  * @returns {boolean}
  */
-export function followsDisplay(stored, span, displayRate) {
-  if (span && span.min === span.max) return false;
-  if (stored === FRAMERATE_DISPLAY) return true;
-  if (stored !== null || !span || span.overridden || !displayRate) return false;
-  return matchDisplay(displayRate, span.min, span.max) <= span.default * (1 + SNAP_TOLERANCE);
+export function followsDisplay(stored, span) {
+  return stored === FRAMERATE_DISPLAY && !(span && span.min === span.max);
 }
 
 /**
@@ -228,7 +221,7 @@ export function requestedFramerate(stored, displayRate, span) {
     const rate = parseFloat(stored);
     return Number.isFinite(rate) ? rate : null;
   }
-  if (!span || !displayRate || !followsDisplay(stored, span, displayRate)) return null;
+  if (!span || !displayRate || !followsDisplay(stored, span)) return null;
   return matchDisplay(displayRate, span.min, span.max);
 }
 

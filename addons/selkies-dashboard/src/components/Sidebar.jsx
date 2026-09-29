@@ -2903,7 +2903,7 @@ function Sidebar() {
     : null;
   const displayFramerate = displayRate ? matchDisplay(displayRate, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240) : null;
   const framerateOptions = withDisplayStop(stopsWithin(FRAMERATE_STOPS, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240), displayFramerate);
-  const framerateFollows = followsDisplay(framerateChoice, framerateSpan, displayRate) && displayFramerate !== null;
+  const framerateFollows = followsDisplay(framerateChoice, framerateSpan) && displayFramerate !== null;
   const effectiveFramerate = framerateFollows ? displayFramerate : framerate;
   const videoCRFOptions = stopsWithin(CRF_STOPS, serverSettings?.video_crf?.min ?? 5, serverSettings?.video_crf?.max ?? 50);
   const videoPaintoverCRFOptions = stopsWithin(CRF_STOPS, serverSettings?.video_paintover_crf?.min ?? 5, serverSettings?.video_paintover_crf?.max ?? 50);

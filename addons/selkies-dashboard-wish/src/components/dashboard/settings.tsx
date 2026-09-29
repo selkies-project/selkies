@@ -1028,7 +1028,7 @@ export function Settings() {
         : null;
     const displayFramerate = displayRate ? matchDisplay(displayRate, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240) : null;
     const framerateOptions = withDisplayStop(stopsWithin(FRAMERATE_STOPS, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240), displayFramerate);
-    const framerateFollows = followsDisplay(framerateChoice, framerateSpan, displayRate) && displayFramerate !== null;
+    const framerateFollows = followsDisplay(framerateChoice, framerateSpan) && displayFramerate !== null;
     const framerateIndex = framerateStopIndex(framerateOptions, framerate, framerateFollows);
     const videoCRFChoices = stopsWithin(CRF_STOPS, serverSettings?.video_crf?.min ?? 5, serverSettings?.video_crf?.max ?? 50);
     const videoCRFIndex = stopIndex(videoCRFChoices, videoCRF);
