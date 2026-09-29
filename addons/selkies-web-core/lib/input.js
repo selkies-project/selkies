@@ -1948,7 +1948,8 @@ export class Input {
      * an Alt code holding Control_L, and macOS Command holds Alt_L on a Meta
      * code, or the Control_L it stands for in a chord. Asking only one of them
      * releases a modifier mid-chord, which the server then sees as the chord
-     * ending.
+     * ending. A macOS Command found up this way lost its keyup, which the keys
+     * held under it follow (`_releaseLostKey`).
      */
     _releaseDesyncedModifiers(event) {
         if (typeof event.getModifierState !== 'function' || this._isSynth) return;
@@ -1961,8 +1962,30 @@ export class Input {
             const byKeysym = MODIFIER_STATE_BY_KEYSYM[keysym];
             if (!byCode && !byKeysym) continue;
             if (_modifierStateHeld(event, byCode) || _modifierStateHeld(event, byKeysym)) continue;
-            this._sendKeyEvent(keysym, code, false);
-            delete this._keyDownList[code];
+            this._releaseLostKey(code);
+        }
+    }
+
+    /**
+     * Releases a held key whose keyup never arrived, as that keyup would have.
+     * @param {string} code Physical `event.code`.
+     */
+    _releaseLostKey(code) {
+        this._sendKeyEvent(this._keyDownList[code], code, false);
+        if (browser.isMac() && MODIFIER_STATE_BY_CODE[code] === 'Meta') this._releaseUnderCommand();
+    }
+
+    /**
+     * Releases every held key but the modifiers once macOS Command is up.
+     * Blink and WebKit never deliver the keyup of a key released while Command
+     * is down, so no key held under Command is known to be down any more; one
+     * still held goes down again with its next autorepeat.
+     */
+    _releaseUnderCommand() {
+        for (const code of Object.keys(this._keyDownList)) {
+            if (MODIFIER_STATE_BY_CODE[code]) continue;
+            console.log(`macOS: Force-releasing stuck key: ${code}`);
+            this._sendKeyEvent(this._keyDownList[code], code, false);
         }
     }
 
@@ -2262,19 +2285,7 @@ export class Input {
 
         if (browser.isMac() && (code === 'MetaLeft' || code === 'MetaRight')) {
             console.log(`macOS: Command key ('${code}') released. Cleaning up potentially stuck keys.`);
-
-            const pressedCodes = Object.keys(this._keyDownList);
-            for (const pressedCode of pressedCodes) {
-                if (pressedCode === 'ShiftLeft' || pressedCode === 'ShiftRight' ||
-                    pressedCode === 'ControlLeft' || pressedCode === 'ControlRight' ||
-                    pressedCode === 'AltLeft' || pressedCode === 'AltRight' ||
-                    pressedCode === 'MetaLeft' || pressedCode === 'MetaRight') {
-                    continue;
-                }
-
-                console.log(`macOS: Force-releasing stuck key: ${pressedCode}`);
-                this._sendKeyEvent(this._keyDownList[pressedCode], pressedCode, false);
-            }
+            this._releaseUnderCommand();
         }
 
         // Abort the armed AltGr sequence: this key-up is not AltRight.

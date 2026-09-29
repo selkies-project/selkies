@@ -29,8 +29,10 @@ client takes the platform's own path.
 
 Its Command chords go through Chromium, Firefox, and WebKit, with keyups arriving
 as Blink and WebKit deliver them on macOS: none for a key let go while Command is
-down. A second chord under the same Command has to keep the Control it stands
-for. A key held ten seconds with no Command has to stay held all the while.
+down, and none for Command itself when Spotlight takes it. A second chord under
+the same Command has to keep the Control it stands for, and the application has
+to hold nothing Command withheld once an event shows Command up. A key held ten
+seconds with no Command has to stay held all the while.
 
     python3 tests/e2e/test_keyboard_layout.py ws-x11|wr-x11|ws-wl|wr-wl
 """
@@ -80,15 +82,20 @@ MAC_INIT = ("Object.defineProperty(navigator, 'platform', "
 XK_ALT_L = 0xFFE9
 XK_TAB = 0xFF09
 # What Blink and WebKit on macOS keep from the page: the keyup of a key let go
-# while Command is down.
+# while Command is down, and Command's own once Spotlight has taken it.
 MAC_COMMAND_KEYUPS = """
+window.__loseCommandUp = false;
 window.addEventListener('keyup', (e) => {
   const command = e.code === 'MetaLeft' || e.code === 'MetaRight';
-  if (!command && e.metaKey) e.stopImmediatePropagation();
+  if (command ? window.__loseCommandUp : e.metaKey) {
+    if (command) window.__loseCommandUp = false;
+    e.stopImmediatePropagation();
+  }
 }, true);
 """
 COMMAND_ENGINES = ("chromium", "firefox", "webkit")
-XK_CONTROL_L, XK_A, XK_C, XK_W = 0xFFE3, 0x61, 0x63, 0x77
+XK_CONTROL_L, XK_SPACE, XK_RETURN = 0xFFE3, 0x20, 0xFF0D
+XK_A, XK_C, XK_W = 0x61, 0x63, 0x77
 LONG_HOLD_S = 10.0
 
 
@@ -323,7 +330,38 @@ def check_command_chords(res: "H.Results", label: str, page: Any, held: Held,
     held.presses()
     res.check(f"{label}: Command's keyup lets go of the chord",
               not held.down & {XK_A, XK_C, XK_CONTROL_L}, [hex(k) for k in held.down])
+
+    def rolled() -> None:
+        kb.down(" ")
+        kb.down("Meta")
+        kb.up(" ")
+
+    def chorded() -> None:
+        kb.down("Meta")
+        kb.press("Enter")
+
+    spotlight(res, f"{label}: a space rolled into Cmd+Space goes at the next key", page, held,
+              XK_SPACE, rolled, lambda: kb.press("Escape"))
+    spotlight(res, f"{label}: a Cmd+Return's Return goes at a click", page, held,
+              XK_RETURN, chorded, lambda: page.mouse.click(640, 360))
     long_hold(res, label, kb, held, repeats)
+
+
+def spotlight(res: "H.Results", name: str, page: Any, held: Held, keysym: int,
+              before: Any, after: Any) -> None:
+    """`before` leaves `keysym` down under Command, Spotlight takes Command's
+    keyup, and `after` is the first the page hears of Command being up."""
+    before()
+    page.evaluate("window.__loseCommandUp = true")
+    page.keyboard.up("Meta")
+    time.sleep(0.3)
+    held.presses()
+    stuck = keysym in held.down
+    after()
+    time.sleep(0.3)
+    held.presses()
+    res.check(f"{name} once Spotlight took Command's keyup", stuck and keysym not in held.down,
+              f"held before {stuck}, after {keysym in held.down}")
 
 
 def long_hold(res: "H.Results", label: str, kb: Any, held: Held, repeats: bool) -> None:

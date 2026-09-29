@@ -165,7 +165,7 @@ function wire(engineName, steps, opts = {}) {
 
 const XK = { Alt_L: 65513, Mode_switch: 65406, ISO_Level3_Shift: 65027, Control_L: 65507,
              Control_R: 65508, Super_L: 65515, Meta_L: 65511, Omega: 0x7d9, lstroke: 435,
-             Tab: 65289, Left: 65361, BackSpace: 65288 };
+             Tab: 65289, Left: 65361, BackSpace: 65288, Escape: 65307, Return: 65293 };
 
 /**
  * One physical action, the engines that can perform it, and the wire it means.
@@ -213,7 +213,7 @@ const ACTIONS = [
       steps: [['down', 'MetaLeft'], ['down', 'KeyC', 'c']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,99` },
     // -- macOS Command: under Blink and WebKit a key let go while it is down is
-    // -- lost.
+    // -- lost, and Spotlight can take Command's own keyup as it opens.
     { name: 'Cmd+A then Cmd+C keeps the Control Command stands for',
       engines: ['blink-mac', 'webkit-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'KeyA', 'a'], ['lost', 'KeyA'],
@@ -229,6 +229,17 @@ const ACTIONS = [
       steps: [['down', 'MetaLeft'], ['down', 'Backspace'],
               ['down', 'Backspace', undefined, { repeat: true }]],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.BackSpace}` },
+    { name: 'a space rolled into Cmd+Space lets go at the next key once Spotlight took Command',
+      engines: ['blink-mac', 'webkit-mac'],
+      steps: [['down', 'Space', ' '], ['down', 'MetaLeft'], ['lost', 'Space'], ['lost', 'MetaLeft'],
+              ['down', 'Escape']],
+      wire: `kd,32 kd,${XK.Alt_L} ku,${XK.Alt_L} ku,32 kd,${XK.Escape}` },
+    { name: 'so does the Return of a Cmd+Return before it',
+      engines: ['blink-mac', 'webkit-mac'],
+      steps: [['down', 'MetaLeft'], ['down', 'Enter'], ['lost', 'Enter'], ['lost', 'MetaLeft'],
+              ['down', 'Escape']],
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.Return} ku,${XK.Control_L} `
+          + `ku,${XK.Return} kd,${XK.Escape}` },
     // -- PC: AltGr is the level-3 shift and Alt is the action modifier, whether
     // -- or not the engine has an AltGraph flag to say so.
     { name: 'AltGr+L types the Polish l-stroke',
