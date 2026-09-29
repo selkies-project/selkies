@@ -116,19 +116,19 @@ const DECODER_PROBE_TIMEOUT_MS = 10000;
 
 /**
  * Whether a `VideoDecoder` here accepts `codec` at `width` x `height`. False
- * without WebCodecs, and when the engine throws on the question.
+ * without WebCodecs, and when the engine throws on the question; null when it
+ * gives no answer within `DECODER_PROBE_TIMEOUT_MS`, which is not a refusal.
  * @param {string} codec A WebCodecs codec string.
  * @param {number} width
  * @param {number} height
- * @returns {Promise<boolean>}
+ * @returns {Promise<?boolean>}
  */
 async function decoderAccepts(codec, width, height) {
     if (typeof VideoDecoder === "undefined") return false;
     // The runtime falls back to a software decoder where the hardware one refuses, so an
     // encoder software can play is still offered: a refused default probe is retried on
-    // software before it counts as unsupported. The timer stands in for the refusal a decoder
-    // without the profile gives, and an engine that never answers is not asked twice: the
-    // session waits on this, and the second question would only double the wait.
+    // software before it counts as unsupported. An engine that never answers is not asked
+    // twice: the session waits on this, and the second question would only double the wait.
     for (const accel of [undefined, "prefer-software"]) {
         try {
             const config = { codec, codedWidth: width, codedHeight: height };
@@ -138,7 +138,7 @@ async function decoderAccepts(codec, width, height) {
                 new Promise((resolve) => setTimeout(resolve, DECODER_PROBE_TIMEOUT_MS)),
             ]);
             if (support && support.supported) return true;
-            if (support === undefined) return false;
+            if (support === undefined) return null;
         } catch (err) {
             // Fall through to the next acceleration preference.
         }
@@ -151,8 +151,9 @@ async function decoderAccepts(codec, width, height) {
  * configuration, once the probe has run; `null` until then. A decoder can
  * accept a configuration and still fail at `decode()`, which the core's
  * fallback ladder answers; this only keeps the settings from offering what the
- * engine refuses outright.
- * @type {Object<string, boolean>|null}
+ * engine refuses outright, so a codec it gave no answer on (`null`) stays
+ * offered, as every codec is before the probe has run.
+ * @type {Object<string, ?boolean>|null}
  */
 let decoderSupport = null;
 
@@ -160,7 +161,7 @@ let decoderSupport = null;
  * Resolves once every codec has been asked of the decoder. Menus built before
  * it resolves offer every codec an engine with WebCodecs might play, and are
  * rebuilt from the answer.
- * @type {Promise<Object<string, boolean>>}
+ * @type {Promise<Object<string, ?boolean>>}
  */
 export const decoderSupportReady = (async () => {
     const answers = {};
@@ -289,7 +290,9 @@ export function canDecodeFullColor(codec = "h264") {
     const string = PROBE_FULLCOLOR_STRINGS[codec];
     if (!string) return Promise.resolve(false);
     if (!fullColorProbes[codec]) {
-        fullColorProbes[codec] = decoderAccepts(string, 320, 240).then((ok) => {
+        // An engine that gives no answer is shown no stream only its 4:4:4 profile decodes.
+        fullColorProbes[codec] = decoderAccepts(string, 320, 240).then((answer) => {
+            const ok = answer === true;
             fullColorAnswers[codec] = ok;
             return ok;
         });
