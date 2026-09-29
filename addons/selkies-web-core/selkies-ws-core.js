@@ -127,7 +127,7 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, serverAnswers } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS,
@@ -1742,6 +1742,7 @@ let statsOpen = false, statsBytes = 0, statsDecodeMs = 0, statsFrames = 0;
 // at this thread's next animation frame, and the arrival the socket's thread
 // dated a frame with is kept by its decode timestamp until then.
 const createPresentMeter = ${createPresentMeter.toString()};
+const isSkiaWebKit = ${isSkiaWebKit.toString()};
 const shown = createPresentMeter(typeof requestAnimationFrame === 'function' ? (land) => requestAnimationFrame(land) : null);
 const arrivedAt = new Map();
 let compositeArrival = -Infinity;
@@ -2241,7 +2242,14 @@ if (typeof VideoTrackGenerator !== 'undefined') {
 
 self.onmessage = (e) => {
   const m = e.data;
-  if (m.canvas) { oc = m.canvas; ctx = oc.getContext('2d', { desynchronized: true }); if (!mode) mode = 'canvas'; return; }
+  // WebKit's Skia ports race the page's paint on an accelerated worker canvas and crash
+  // the web process; an unaccelerated one stays out of the race.
+  if (m.canvas) {
+    oc = m.canvas;
+    ctx = oc.getContext('2d', { desynchronized: true, willReadFrequently: isSkiaWebKit(navigator.userAgent, navigator.platform) });
+    if (!mode) mode = 'canvas';
+    return;
+  }
   if (m.type === 'decoderConfig') { configureDecoder(m.codec, m.codedWidth, m.codedHeight, m.software, m.description || null); return; }
   if (m.type === 'closeDecoder') { closeDecoder(); return; }
   if (m.type === 'statsOpen') { setStatsOpen(!!m.open); return; }

@@ -394,6 +394,21 @@ export function isMacDesktop() {
 }
 
 /**
+ * WebKit's Linux ports (WPE, WebKitGTK), which draw a canvas through Skia's GPU
+ * context, as against Safari, which draws through CoreGraphics. No capability
+ * tells the two apart and WebKit on Linux can carry Safari's macOS user agent,
+ * so the engine is read from the user agent and the OS from the platform, both
+ * of which a worker has too.
+ * @param {string} userAgent `navigator.userAgent`.
+ * @param {string} platform `navigator.platform`.
+ * @returns {boolean}
+ */
+export function isSkiaWebKit(userAgent, platform) {
+    return /AppleWebKit\//.test(userAgent || '') && !/Chrom(e|ium)\/|Edg\/|OPR\//.test(userAgent || '')
+        && /^Linux/.test(platform || '');
+}
+
+/**
  * Whether the client is touch-first: its primary pointer is coarse. True on
  * phones and tablets, false on desktops -- including touch-screen laptops,
  * whose primary pointer is still the pointing device. The form factor is

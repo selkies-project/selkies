@@ -126,6 +126,7 @@ SUITES: list = [
     {"path": "unit/test_rtp_history.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_reference_invalidation.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_decode_gate.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_worker_canvas.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_color_range.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_flexfec_repair.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_flexfec_normalization.py", "tier": "unit", "timeout": 120},
