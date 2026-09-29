@@ -1131,6 +1131,13 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             if sent is not None and sent[0] > 0:
                 received += 1
                 bytes_acked += sent[0]
+                window = self._twcc_window
+                key = (at, seq)
+                if window["first_arrival"] is None or key < window["first_arrival"]:
+                    window["first_arrival"] = key
+                    window["first_bytes"] = sent[0]
+                last = window["last_arrival_us"]
+                window["last_arrival_us"] = at if last is None else max(last, at)
                 matched.append((at, sent[0]))
                 in_order.append((sent[1], at, sent[0]))
                 delay_last = at / 1e6 - sent[1]
@@ -1158,8 +1165,6 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         window["received"] += received
         window["lost"] += lost
         window["bytes_acked"] += bytes_acked
-        window["bytes_spanned"] += spanned
-        window["span_s"] += span_s
         if delay_min is not None:
             if window["delay_min"] is None or delay_min < window["delay_min"]:
                 window["delay_min"] = delay_min
@@ -1183,7 +1188,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
 
     @staticmethod
     def _twcc_window_zero() -> dict:
-        return {"received": 0, "lost": 0, "bytes_acked": 0, "bytes_spanned": 0, "span_s": 0.0,
+        return {"received": 0, "lost": 0, "bytes_acked": 0,
+                "first_arrival": None, "first_bytes": 0, "last_arrival_us": None,
                 "delay_min": None, "delay_last": None, "feedback_mins": []}
 
     def take_twcc_window(self) -> Optional[dict]:
@@ -1196,6 +1202,17 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         feedback is the measurement. Draining also means an interval that
         carried no feedback yields nothing to steer from, rather than the last
         window to apply again.
+
+        Aggregate goodput spans the earliest through the latest unique known
+        arrival, excluding only the earliest packet's bytes. Gaps between
+        feedback reports and idle periods count as elapsed time: this is
+        delivered throughput, not a measure of available capacity. Summing the
+        spans inside individual reports omits their intervening gaps and makes
+        batching inflate the rate. Equal-time arrivals use the transport
+        sequence as a deterministic tie-breaker; late positives can extend the
+        envelope, while duplicates add nothing. The three envelope fields are
+        constant-size and reset on drain. Per-report pacer rates keep their
+        separate idle-exclusion semantics.
 
         The interval's least one-way delay over the least of the last
         `TWCC_DELAY_FLOOR_S` is the queue that stood through all of it: a key
@@ -1244,13 +1261,15 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
                 newest_ms = (min(mins[len(mins) // 2:]) - least) * 1000.0
                 if newest_ms > TWCC_QUEUE_MS:
                     rising_ms = newest_ms
+        first = window["first_arrival"]
+        span_s = (window["last_arrival_us"] - first[0]) / 1e6 if first is not None else 0.0
         return {
             "received": window["received"],
             "lost": window["lost"],
             "loss_fraction": window["lost"] / packets,
             "bytes_acked": window["bytes_acked"],
-            "goodput_bps": (int(window["bytes_spanned"] * 8 / window["span_s"])
-                            if window["span_s"] > 0 else 0),
+            "goodput_bps": (int((window["bytes_acked"] - window["first_bytes"]) * 8 / span_s)
+                            if span_s > 0 else 0),
             "queue_ms": queue_ms,
             "queue_rising_ms": rising_ms,
             "queue_depth_ms": depth_ms,
