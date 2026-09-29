@@ -87,7 +87,7 @@ class TransportCallerTests(unittest.IsolatedAsyncioTestCase):
         service._display_setting = lambda did, key: 6000
         service.display_pipelines = {"primary": pipeline}
         service._ensure_pacer = Mock()
-        window = dict(goodput_bps=1797770, loss_fraction=138 / 339,
+        window = dict(goodput_bps=1797770, sent_bps=1797770, loss_fraction=138 / 339,
                       queue_ms=188.41666666666512, queue_rising_ms=None,
                       queue_depth_ms=188.41666666666512)
         transport = SimpleNamespace(take_twcc_window=lambda: dict(window))
@@ -112,6 +112,7 @@ class TransportCallerTests(unittest.IsolatedAsyncioTestCase):
         acks = deque((31.5 + i * .05, 208.41666666666512, i * .05 * 1797770 / 8)
                      for i in range(1, 11))
         state = dict(video_bitrate=6000, link_kbps=1407, link_tick_at=31.5,
+                     sent_bytes=int(.5 * 1797770 / 8), link_tick_sent=0,
                      backpressure_enabled=True, rtt_floor_ms=20, link_acks=acks,
                      link_jitter_ms=0, link_steer=self.queued())
         with patch.object(websockets_mode, "app_settings", SimpleNamespace(video_bitrate=(1000, 12000))):
