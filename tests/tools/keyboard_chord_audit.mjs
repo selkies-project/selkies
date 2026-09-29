@@ -240,6 +240,28 @@ const ACTIONS = [
               ['down', 'Escape']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.Return} ku,${XK.Control_L} `
           + `ku,${XK.Return} kd,${XK.Escape}` },
+    { name: 'and the next Command press lets go of them as well',
+      engines: ['blink-mac', 'webkit-mac'],
+      steps: [['down', 'MetaLeft'], ['down', 'Enter'], ['lost', 'Enter'], ['lost', 'MetaLeft'],
+              ['down', 'MetaLeft']],
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.Return} ku,${XK.Control_L} `
+          + `ku,${XK.Return} kd,${XK.Alt_L}` },
+    { name: 'Cmd+Backspace pressed twice deletes twice',
+      engines: ['blink-mac', 'webkit-mac'],
+      steps: [['down', 'MetaLeft'], ['down', 'Backspace'], ['lost', 'Backspace'],
+              ['down', 'Backspace'], ['lost', 'Backspace'], ['up', 'MetaLeft']],
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.BackSpace} ku,${XK.BackSpace} `
+          + `kd,${XK.BackSpace} ku,${XK.BackSpace} ku,${XK.Control_L}` },
+    // -- Anywhere: a key pressed again with no keyup between them was let go,
+    // -- and its autorepeat is not a press.
+    { name: 'a key pressed again with no keyup between goes down again',
+      engines: ['blink-mac', 'gecko-mac', 'webkit-mac', 'blink-pc', 'gecko-pc'],
+      steps: [['down', 'Space', ' '], ['lost', 'Space'], ['down', 'Space', ' '], ['up', 'Space', ' ']],
+      wire: 'kd,32 ku,32 kd,32 ku,32' },
+    { name: 'a held key\'s autorepeat stays one press',
+      engines: ['blink-mac', 'gecko-mac', 'webkit-mac', 'blink-pc', 'gecko-pc'],
+      steps: [['down', 'Space', ' '], ['down', 'Space', ' ', { repeat: true }], ['up', 'Space', ' ']],
+      wire: 'kd,32 ku,32' },
     // -- PC: AltGr is the level-3 shift and Alt is the action modifier, whether
     // -- or not the engine has an AltGraph flag to say so.
     { name: 'AltGr+L types the Polish l-stroke',

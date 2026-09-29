@@ -30,9 +30,10 @@ client takes the platform's own path.
 Its Command chords go through Chromium, Firefox, and WebKit, with keyups arriving
 as Blink and WebKit deliver them on macOS: none for a key let go while Command is
 down, and none for Command itself when Spotlight takes it. A second chord under
-the same Command has to keep the Control it stands for, and the application has
-to hold nothing Command withheld once an event shows Command up. A key held ten
-seconds with no Command has to stay held all the while.
+the same Command has to keep the Control it stands for, a key pressed twice under
+it has to arrive twice, and the application has to hold nothing Command withheld
+once an event shows Command up. A key held ten seconds with no Command has to
+stay held all the while.
 
     python3 tests/e2e/test_keyboard_layout.py ws-x11|wr-x11|ws-wl|wr-wl
 """
@@ -94,7 +95,7 @@ window.addEventListener('keyup', (e) => {
 }, true);
 """
 COMMAND_ENGINES = ("chromium", "firefox", "webkit")
-XK_CONTROL_L, XK_SPACE, XK_RETURN = 0xFFE3, 0x20, 0xFF0D
+XK_CONTROL_L, XK_SPACE, XK_BACKSPACE, XK_RETURN = 0xFFE3, 0x20, 0xFF08, 0xFF0D
 XK_A, XK_C, XK_W = 0x61, 0x63, 0x77
 LONG_HOLD_S = 10.0
 
@@ -344,6 +345,17 @@ def check_command_chords(res: "H.Results", label: str, page: Any, held: Held,
               XK_SPACE, rolled, lambda: kb.press("Escape"))
     spotlight(res, f"{label}: a Cmd+Return's Return goes at a click", page, held,
               XK_RETURN, chorded, lambda: page.mouse.click(640, 360))
+    kb.down("Meta")
+    kb.press("Backspace")
+    kb.press("Backspace")
+    time.sleep(0.3)
+    pressed = held.presses()
+    res.check(f"{label}: Cmd+Backspace pressed twice deletes twice",
+              pressed.count(XK_BACKSPACE) == 2 and XK_CONTROL_L in held.down,
+              f"pressed {[hex(k) for k in pressed]}, held {sorted(hex(k) for k in held.down)}")
+    kb.up("Meta")
+    time.sleep(0.3)
+    held.presses()
     long_hold(res, label, kb, held, repeats)
 
 

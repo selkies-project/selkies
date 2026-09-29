@@ -2029,7 +2029,8 @@ export class Input {
      * class, modifier healing (`_releaseDesyncedModifiers`), CapsLock, repeat
      * suppression, the IME path, keysym resolution with the Windows AltGr and
      * macOS remaps, and the send, wrapped in any chord modifiers the server
-     * is not holding.
+     * is not holding. A key pressed again while held, and not as a repeat,
+     * lost its keyup, and is released before it goes down again.
      *
      * Hotkeys come before the native-input class, which exempts plain typing,
      * not the chords. CapsLock is swallowed: case is already resolved into
@@ -2089,8 +2090,11 @@ export class Input {
             return;
         }
         if (keycode in this._keyDownList) {
-            _stopEvent(event);
-            return;
+            if (event.repeat) {
+                _stopEvent(event);
+                return;
+            }
+            this._releaseLostKey(keycode);
         }
         if (this.isComposing || event.isComposing || event.keyCode === 229) {
             const armedCtrl = this._altGrArmed;
