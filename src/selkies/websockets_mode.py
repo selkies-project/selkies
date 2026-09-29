@@ -3408,7 +3408,8 @@ class DataStreamingServer(BaseStreamingService):
         `audioRedundancy` advertises Opus+RED de-RED capability for the audio
         path; `keyboardLayout` is an optional xkb layout hint (`de`, `ch(fr)`)
         that becomes the compositor's base layout on Wayland and is
-        informational on X11.
+        informational on X11; `encoderFallback` marks an `encoder` the page
+        fell back to on its own rather than one its user picked.
 
         Raises:
             json.JSONDecodeError: When the payload is not valid JSON.
@@ -3476,6 +3477,7 @@ class DataStreamingServer(BaseStreamingService):
         parsed["force_aligned_resolution"] = get_bool("force_aligned_resolution")
         parsed["audioRedundancy"] = get_bool("audioRedundancy")
         parsed["keyboardLayout"] = get_str("keyboardLayout")
+        parsed["encoderFallback"] = get_bool("encoderFallback")
         data_logger.debug(f"Parsed client settings: {parsed}")
         return parsed
 
@@ -3494,7 +3496,8 @@ class DataStreamingServer(BaseStreamingService):
         whatever manual resolution, window size, or alignment the page asks
         for; else client manual or the initial client size), stores sanitized
         per-display tunables (primary updates also become session seeds for
-        later displays), applies DPI/cursor/keyboard-layout side effects, and
+        later displays, save an encoder the page fell back to, which stays that
+        page's), applies DPI/cursor/keyboard-layout side effects, and
         applies video changes live where possible — only structural switches
         (encoder, use_cpu, fullcolor, rate-control, Wayland capture scale)
         restart the display's capture. Dimensional or initial changes trigger a
@@ -3524,8 +3527,15 @@ class DataStreamingServer(BaseStreamingService):
         def sanitize_value(name, client_value):
             """One-transport wrapper over the shared sanitizer (settings.py)."""
             return sanitize_client_setting(name, client_value, self.cli_args, data_logger)
+        fallback_reset = False
         try:
             async with self._reconfigure_lock:
+                # A controller arriving without an encoder of its own is not left on
+                # the one another page fell back to.
+                if (is_initial_settings and settings.get("encoder") is None
+                        and display_state.get("encoder_fallback")):
+                    fallback_reset = True
+                    settings = dict(settings, encoder=self.app.encoder)
                 old_settings = display_state.copy()
                 old_display_width = display_state.get("width", 0)
                 old_display_height = display_state.get("height", 0)
@@ -3633,6 +3643,8 @@ class DataStreamingServer(BaseStreamingService):
                             "video_paintover_burst_frames", "video_bitrate"):
                     if settings.get(key) is not None:
                         display_state[key] = sanitize_value(key, settings.get(key))
+                if settings.get("encoder") is not None:
+                    display_state["encoder_fallback"] = bool(settings.get("encoderFallback"))
                 if settings.get("use_cpu") is not None or settings.get("encoder") is not None:
                     # The request is stored apart from the effective flag, so a spell on a
                     # CPU-only encoder does not pin the display to software afterwards.
@@ -3675,6 +3687,8 @@ class DataStreamingServer(BaseStreamingService):
                     seed_sources = {'use_cpu': 'use_cpu_requested'}
                     for key, targets in session_seeds.items():
                         if settings.get(key) is None:
+                            continue
+                        if key == 'encoder' and (fallback_reset or display_state.get("encoder_fallback")):
                             continue
                         value = display_state.get(seed_sources.get(key, key))
                         if value is None:
@@ -3852,6 +3866,9 @@ class DataStreamingServer(BaseStreamingService):
         elif client_scale_changed:
             # No reconfigure ran to carry the new scale; announce it alone.
             await self.broadcast_display_config()
+        if fallback_reset:
+            # The page keyed its demux to the fallback it was told of on connecting.
+            await self._broadcast_live_server_settings(display_id)
         if is_initial_settings and self.client_settings_received and not self.client_settings_received.is_set():
             self.client_settings_received.set()
 

@@ -1401,10 +1401,16 @@ const setStringParam = (key, value) => {
  * its own sessionStorage. The fallback holds for that tab, whose reloads keep
  * it, the crash ladder's among them; any other tab or later visit puts the
  * pick back and decides afresh, so a fallback taken for a fault that has since
- * cleared never outlives the tab that took it.
+ * cleared never outlives the tab that took it. It is sent beside
+ * `encoderFallback`, so the server keeps it to this display and seeds no later
+ * page or session with it.
  */
 const ENCODER_PICK_KEY = `${prefixedStorageKey('encoder')}_pick`;
 const FALLBACK_TAB_KEY = `${ENCODER_PICK_KEY}_tab`;
+/** Whether the stored encoder is a fallback rather than the user's pick. */
+function encoderIsFallback() {
+  try { return window.localStorage.getItem(ENCODER_PICK_KEY) !== null; } catch (e) { return false; }
+}
 /** Stores `encoder` as this tab's fallback, keeping the pick it replaces. */
 function storeFallbackEncoder(encoder) {
   try {
@@ -3421,8 +3427,9 @@ function followDisplayFramerate(reason) {
  * client-authoritative (the derived default or the dashboard's pick, sent
  * live so it reaches the running server; the desktop DPI is independent of
  * the resolution). The payload also carries the keyboard layout, the client
- * geometry or manual resolution, the display identity, and the audio-RED
- * capability that makes the server enable Opus redundancy.
+ * geometry or manual resolution, the display identity, the audio-RED
+ * capability that makes the server enable Opus redundancy, and
+ * `encoderFallback` beside an encoder a fallback chose.
  * @returns {Object<string, *>}
  */
 function getCurrentSettingsPayload() {
@@ -3461,6 +3468,7 @@ function getCurrentSettingsPayload() {
     for (const [key, read] of storedEntries) {
         if (hasStoredParam(key)) settingsToSend[key] = read();
     }
+    if (settingsToSend.encoder !== undefined && encoderIsFallback()) settingsToSend.encoderFallback = true;
     framerateAsked = requestedStreamFramerate();
     if (framerateAsked !== null) settingsToSend['framerate'] = framerateAsked;
     settingsToSend['scaling_dpi'] = effectiveScalingDpi();
@@ -7483,6 +7491,7 @@ class WorkerWebSocket {
         }
       }
 
+      if (settingsToSend.encoder !== undefined && encoderIsFallback()) settingsToSend.encoderFallback = true;
       if (manual_resolution && manual_width != null && manual_height != null) {
         settingsToSend['manual_resolution'] = true;
         settingsToSend['manual_width'] = alignResolution(manual_width);
