@@ -8,9 +8,9 @@ seat's input goes through the portal by keysym and stream coordinates. This suit
 KDE stack on a private bus — `kwin_wayland --virtual`, PipeWire, xdg-desktop-portal, and its KDE
 backend — starts the server against it over either transport, and checks the rung was taken,
 the stream negotiated, and that a browser's pointer moves, clicks, scrolls, and keys land on a
-client window inside KWin. KWin's virtual backend records no screencast frames (only its DRM
-and nested Wayland backends emit the output damage the stream is fed from), so the frame checks
-report skipped there and pass where a backend that does emit them is captured.
+client window inside KWin. Plasma 6.6's virtual backend streams its frames as GPU dmabufs; a KWin
+whose virtual backend emits no output damage streams none, and the frame check reports skipped
+there.
 
 Usage: python3 tests/e2e/test_wayland_host_portal.py [websockets|webrtc]
 """
@@ -184,7 +184,7 @@ def run(mode: str) -> "H.Results":
                 if C.wait_log("first portal frame", 8):
                     res.check("video reaches the browser", bool(wait_video(page, mode, 30)), "")
                 else:
-                    res.skip("video reaches the browser", "the compositor emitted no screencast frame (KWin's virtual backend never does)")
+                    res.skip("video reaches the browser", "the compositor emitted no screencast frame")
 
                 # Input from the browser: pointer motion, a click, a wheel notch, and a key,
                 # each of which the KDE client inside KWin must report.
