@@ -27,6 +27,11 @@ arrive as the character it produced, and an Option over a key that produced none
 has to stay the Alt shortcut it is. The page announces itself as macOS, so the
 client takes the platform's own path.
 
+Its Command chords go through Chromium, Firefox, and WebKit, with keyups arriving
+as Blink and WebKit deliver them on macOS: none for a key let go while Command is
+down. A second chord under the same Command has to keep the Control it stands
+for. A key held ten seconds with no Command has to stay held all the while.
+
     python3 tests/e2e/test_keyboard_layout.py ws-x11|wr-x11|ws-wl|wr-wl
 """
 import ctypes
@@ -74,6 +79,17 @@ MAC_INIT = ("Object.defineProperty(navigator, 'platform', "
             "{ get: () => 'MacIntel', configurable: true });")
 XK_ALT_L = 0xFFE9
 XK_TAB = 0xFF09
+# What Blink and WebKit on macOS keep from the page: the keyup of a key let go
+# while Command is down.
+MAC_COMMAND_KEYUPS = """
+window.addEventListener('keyup', (e) => {
+  const command = e.code === 'MetaLeft' || e.code === 'MetaRight';
+  if (!command && e.metaKey) e.stopImmediatePropagation();
+}, true);
+"""
+COMMAND_ENGINES = ("chromium", "firefox", "webkit")
+XK_CONTROL_L, XK_A, XK_C, XK_W = 0xFFE3, 0x61, 0x63, 0x77
+LONG_HOLD_S = 10.0
 
 
 def opt(kind: str, key: str, code: str, text: Optional[str] = None,
@@ -249,6 +265,81 @@ def check_option_chords(res: "H.Results", label: str, xkb: Xkb, events_after: An
                       XK_ALT_L in pressed and keysym in pressed, seen)
 
 
+class Held:
+    """The keys an application holds, followed through the press and release
+    events it is delivered: `read` returns `(pressed, keysym)` for those that
+    arrived since it last ran."""
+
+    def __init__(self, read: Any) -> None:
+        self.read, self.down = read, set()
+
+    def presses(self) -> list:
+        """Keysyms pressed since the last call, repeats included."""
+        out = []
+        for pressed, keysym in self.read():
+            if pressed:
+                out.append(keysym)
+                self.down.add(keysym)
+            else:
+                self.down.discard(keysym)
+        return out
+
+
+def command_page(p: Any, chromium: Any, engine: str, mode: str) -> tuple:
+    """A macOS page on `engine` whose keyups arrive as macOS Blink and WebKit
+    deliver them; `(page, closer)`, the closer ending what was opened for it."""
+    if engine == "firefox":
+        ctx = closer = C.firefox_persistent_context(p, viewport={"width": 1280, "height": 720})
+    else:
+        browser = chromium if engine == "chromium" else C.launch_browser(p, engine)
+        ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+        closer = ctx if engine == "chromium" else browser
+    for script in (f"window.__SELKIES_STREAMING_MODE__ = '{mode}';", MAC_INIT, MAC_COMMAND_KEYUPS):
+        ctx.add_init_script(script)
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    page.goto(H.BASE_URL + "/", wait_until="load")
+    return page, closer
+
+
+def check_command_chords(res: "H.Results", label: str, page: Any, held: Held,
+                         repeats: bool) -> None:
+    """Command chords with the macOS keyups missing, then a long plain hold.
+
+    Args:
+        repeats: Whether the server repeats a held key itself (X11), which
+            the long hold then has to show.
+    """
+    kb = page.keyboard
+    kb.down("Meta")
+    kb.press("a")
+    kb.press("c")
+    time.sleep(0.3)
+    pressed = held.presses()
+    res.check(f"{label}: Cmd+A then Cmd+C holds Control for the C",
+              XK_C in pressed and XK_CONTROL_L in held.down,
+              f"pressed {[hex(k) for k in pressed]}, held {sorted(hex(k) for k in held.down)}")
+    kb.up("Meta")
+    time.sleep(0.3)
+    held.presses()
+    res.check(f"{label}: Command's keyup lets go of the chord",
+              not held.down & {XK_A, XK_C, XK_CONTROL_L}, [hex(k) for k in held.down])
+    long_hold(res, label, kb, held, repeats)
+
+
+def long_hold(res: "H.Results", label: str, kb: Any, held: Held, repeats: bool) -> None:
+    """A key held for LONG_HOLD_S stays held, and repeats where the server repeats."""
+    kb.down("w")
+    time.sleep(LONG_HOLD_S)
+    pressed = held.presses()
+    res.check(f"{label}: a key held {LONG_HOLD_S:.0f} s stays held",
+              XK_W in held.down and (not repeats or pressed.count(XK_W) > 1),
+              f"{pressed.count(XK_W)} presses")
+    kb.up("w")
+    time.sleep(0.3)
+    held.presses()
+    res.check(f"{label}: and goes at its keyup", XK_W not in held.down, "")
+
+
 def wait_video(page: Any, mode: str) -> Optional[dict]:
     return C.wait_ws_video(page, timeout=30) if mode == "websockets" else C.wait_wr_video(page)
 
@@ -305,6 +396,15 @@ def run_x11(mode: str, res: "H.Results") -> None:
                     check_option_chords(res, "x11", xkb,
                                         x11_chorder(page.context.new_cdp_session(page), obs))
                     page.context.close()
+                    for engine in COMMAND_ENGINES:
+                        page, closer = command_page(p, browser, engine, mode)
+                        res.check(f"macOS {engine}: video flowing", bool(wait_video(page, mode)))
+                        page.mouse.click(640, 360)
+                        time.sleep(0.5)
+                        obs.drain(0.1)
+                        held = Held(lambda: [(down, ks) for down, _kc, _g, ks in obs.drain(0.05)])
+                        check_command_chords(res, f"x11 {engine}", page, held, repeats=True)
+                        closer.close()
                 finally:
                     browser.close()
         finally:
@@ -317,7 +417,7 @@ def run_x11(mode: str, res: "H.Results") -> None:
 def run_wayland(mode: str, res: "H.Results") -> None:
     xkb = Xkb()
     H.server_start(mode=mode, wayland=True)
-    obs = H.WlObs(WL_SOCKET)
+    obs = H.WlObs(WL_SOCKET, WLOBS_DURATION="600")
     keys = WlKeys(obs, xkb)
     try:
         res.check("wl observer mapped", obs.ready(20))
@@ -340,6 +440,15 @@ def run_wayland(mode: str, res: "H.Results") -> None:
                 check_option_chords(res, "wayland", xkb,
                                     wl_chorder(page.context.new_cdp_session(page), keys))
                 page.context.close()
+                for engine in COMMAND_ENGINES:
+                    page, closer = command_page(p, browser, engine, mode)
+                    res.check(f"macOS {engine}: video flowing", bool(wait_video(page, mode)))
+                    page.mouse.click(640, 360)
+                    time.sleep(0.5)
+                    keys.since(0)
+                    held = Held(lambda: [(down, ks) for down, _key, ks in keys.since(0)])
+                    check_command_chords(res, f"wayland {engine}", page, held, repeats=False)
+                    closer.close()
             finally:
                 browser.close()
     finally:

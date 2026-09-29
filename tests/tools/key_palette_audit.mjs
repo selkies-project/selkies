@@ -42,7 +42,6 @@ function makeInput() {
     input._altKeysymByCode = new Map();
     input._altGrArmed = false;
     input._altGrTimeout = null;
-    input._macCmdSwapped = false;
     input.isComposing = false;
     input.gamingMode = false;
     input._isSynth = true;

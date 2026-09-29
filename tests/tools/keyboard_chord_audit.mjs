@@ -15,6 +15,9 @@
 // Reading those flags to tell a level shift from a shortcut therefore gives a
 // different answer per browser, which is the defect this matrix exists to catch.
 //
+// They disagree about macOS Command too: Blink and WebKit never deliver the keyup
+// of a key let go while Command is down, where Gecko does.
+//
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
 import { Input } from '../../addons/selkies-web-core/lib/input.js';
@@ -103,7 +106,6 @@ function makeInput() {
     input._altKeysymByCode = new Map();
     input._altGrArmed = false;
     input._altGrTimeout = null;
-    input._macCmdSwapped = false;
     input.isComposing = false;
     input.gamingMode = false;
     input._isSynth = false;
@@ -116,13 +118,14 @@ function makeInput() {
 /**
  * Run one action under one engine and return the wire it produced.
  *
- * An action is physical: `['down'|'up', code, character?, forced?]` steps, with
- * the character the layout produces for that key under the modifiers then down.
- * The engine supplies everything else the browser would say about it; `forced`
- * overrides a flag, for a modifier whose own keydown never reached the page, or
- * carries `replay` for a step clipboard-sync re-dispatched and `physical` for a
- * real keypress among page-built ones. `opts.synth` raises synthetic mode, as
- * the dashboards do while a soft modifier is held.
+ * An action is physical: `['down'|'up'|'lost', code, character?, forced?]` steps,
+ * with the character the layout produces for that key under the modifiers then
+ * down; a `lost` key comes up with no event reaching the page. The engine
+ * supplies everything else the browser would say about it; `forced` overrides a
+ * flag, for a modifier whose own keydown never reached the page, or carries
+ * `replay` for a step clipboard-sync re-dispatched, `physical` for a real
+ * keypress among page-built ones, and `repeat` for an autorepeat. `opts.synth`
+ * raises synthetic mode, as the dashboards do while a soft modifier is held.
  */
 function wire(engineName, steps, opts = {}) {
     const engine = ENGINES[engineName];
@@ -132,7 +135,8 @@ function wire(engineName, steps, opts = {}) {
     const down = new Set();
     for (const [action, code, char, forced] of steps) {
         if (action === 'down') down.add(code); else down.delete(code);
-        const { replay, physical, ...override } = forced || {};
+        if (action === 'lost') continue;
+        const { replay, physical, repeat, ...override } = forced || {};
         const flags = {
             shift: held(down, 'Shift'), ctrl: held(down, 'Control'),
             alt: held(down, 'Alt'), meta: held(down, 'Meta'),
@@ -144,7 +148,7 @@ function wire(engineName, steps, opts = {}) {
                         Shift: flags.shift, AltGraph: flags.altGraph };
         const event = {
             key, code, location: LOCATION[code] || 0, keyCode: 0, isComposing: false,
-            timeStamp: 0,
+            timeStamp: 0, repeat: !!repeat,
             isTrusted: physical === true || (!replay && engine.trusted !== false),
             altKey: flags.alt, ctrlKey: flags.ctrl, metaKey: flags.meta, shiftKey: flags.shift,
             target: { classList: { contains: () => false }, parentElement: null },
@@ -161,7 +165,7 @@ function wire(engineName, steps, opts = {}) {
 
 const XK = { Alt_L: 65513, Mode_switch: 65406, ISO_Level3_Shift: 65027, Control_L: 65507,
              Control_R: 65508, Super_L: 65515, Meta_L: 65511, Omega: 0x7d9, lstroke: 435,
-             Tab: 65289, Left: 65361 };
+             Tab: 65289, Left: 65361, BackSpace: 65288 };
 
 /**
  * One physical action, the engines that can perform it, and the wire it means.
@@ -208,6 +212,23 @@ const ACTIONS = [
       engines: ['blink-mac', 'gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'KeyC', 'c']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,99` },
+    // -- macOS Command: under Blink and WebKit a key let go while it is down is
+    // -- lost.
+    { name: 'Cmd+A then Cmd+C keeps the Control Command stands for',
+      engines: ['blink-mac', 'webkit-mac'],
+      steps: [['down', 'MetaLeft'], ['down', 'KeyA', 'a'], ['lost', 'KeyA'],
+              ['down', 'KeyC', 'c'], ['lost', 'KeyC'], ['up', 'MetaLeft']],
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,97 kd,99 ku,97 ku,99 ku,${XK.Control_L}` },
+    { name: 'Cmd+A then Cmd+C keeps it where the keyups arrive',
+      engines: ['gecko-mac'],
+      steps: [['down', 'MetaLeft'], ['down', 'KeyA', 'a'], ['up', 'KeyA', 'a'],
+              ['down', 'KeyC', 'c'], ['up', 'KeyC', 'c'], ['up', 'MetaLeft']],
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,97 ku,97 kd,99 ku,99 ku,${XK.Control_L}` },
+    { name: 'a held Cmd+Backspace keeps its Control through the autorepeat',
+      engines: ['blink-mac', 'gecko-mac', 'webkit-mac'],
+      steps: [['down', 'MetaLeft'], ['down', 'Backspace'],
+              ['down', 'Backspace', undefined, { repeat: true }]],
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.BackSpace}` },
     // -- PC: AltGr is the level-3 shift and Alt is the action modifier, whether
     // -- or not the engine has an AltGraph flag to say so.
     { name: 'AltGr+L types the Polish l-stroke',

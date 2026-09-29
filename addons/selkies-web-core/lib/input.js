@@ -1577,7 +1577,6 @@ export class Input {
         this._altGrArmed = false;
         this._altGrTimeout = null;
         this._altGrCtrlTime = 0;
-        this._macCmdSwapped = false;
 
         this._isSynth = false;
         /**
@@ -1947,8 +1946,9 @@ export class Input {
      * it holds is reported down, because a remap can leave the two disagreeing
      * and either one still means the key is held: an xkb Ctrl/Alt swap leaves
      * an Alt code holding Control_L, and macOS Command holds Alt_L on a Meta
-     * code. Asking only one of them releases a modifier mid-chord, which the
-     * server then sees as the chord ending.
+     * code, or the Control_L it stands for in a chord. Asking only one of them
+     * releases a modifier mid-chord, which the server then sees as the chord
+     * ending.
      */
     _releaseDesyncedModifiers(event) {
         if (typeof event.getModifierState !== 'function' || this._isSynth) return;
@@ -2132,17 +2132,19 @@ export class Input {
         }
 
         if (browser.isMac() && Input.macCmdAsCtrl && _isPhysicalKey(event) && code !== "MetaLeft" &&
-            code !== "MetaRight" && event.metaKey && !event.ctrlKey && !event.altKey) {
+            code !== "MetaRight" && event.metaKey && !event.ctrlKey && !event.altKey &&
+            !this._commandIsControl()) {
             if (this._keyDownList["MetaLeft"] || this._keyDownList["MetaRight"]) {
                 console.log(`macOS: Cmd+key detected for code '${code}'. Remapping Cmd to Ctrl.`);
+                const command = this._keyDownList["MetaLeft"] ? "MetaLeft" : "MetaRight";
                 if (this._keyDownList["MetaLeft"]) {
                     this._sendKeyEvent(this._keyDownList["MetaLeft"], "MetaLeft", false);
                 }
                 if (this._keyDownList["MetaRight"]) {
                     this._sendKeyEvent(this._keyDownList["MetaRight"], "MetaRight", false);
                 }
-                this._sendKeyEvent(KeyTable.XK_Control_L, "ControlLeft", true);
-                this._macCmdSwapped = true;
+                // Held on Command's code, whose state _releaseDesyncedModifiers reads for it.
+                this._sendKeyEvent(KeyTable.XK_Control_L, command, true);
             }
         }
 
@@ -2208,7 +2210,7 @@ export class Input {
             const missingMods = this._missingChordModifiers({
                 ctrl: event.ctrlKey,
                 alt: event.altKey,
-                meta: event.metaKey && !this._macCmdSwapped,
+                meta: event.metaKey && !this._commandIsControl(),
                 shift: event.shiftKey,
             });
             if (missingMods.length > 0) {
@@ -2272,14 +2274,6 @@ export class Input {
 
                 console.log(`macOS: Force-releasing stuck key: ${pressedCode}`);
                 this._sendKeyEvent(this._keyDownList[pressedCode], pressedCode, false);
-            }
-            
-            if (this._macCmdSwapped) {
-                console.log("macOS: Releasing the swapped virtual Ctrl key.");
-                if ('ControlLeft' in this._keyDownList) {
-                    this._sendKeyEvent(this._keyDownList['ControlLeft'], 'ControlLeft', false);
-                }
-                this._macCmdSwapped = false;
             }
         }
 
@@ -2635,6 +2629,12 @@ export class Input {
             if (keysyms.includes(this._keyDownList[code])) return true;
         }
         return false;
+    }
+
+    /** True while a macOS Command key holds the Control a chord made it stand for. */
+    _commandIsControl() {
+        return this._keyDownList["MetaLeft"] === KeyTable.XK_Control_L ||
+            this._keyDownList["MetaRight"] === KeyTable.XK_Control_L;
     }
 
     /**
@@ -3779,11 +3779,10 @@ export class Input {
         if (Input.macCmdAsCtrl === want) return;
         Input.macCmdAsCtrl = want;
         console.log(`Input: macOS Command sent as ${want ? 'Control' : 'Super'}.`);
-        if (this._macCmdSwapped) {
-            if ('ControlLeft' in this._keyDownList) {
-                this._sendKeyEvent(this._keyDownList['ControlLeft'], 'ControlLeft', false);
+        for (const command of ['MetaLeft', 'MetaRight']) {
+            if (this._keyDownList[command] === KeyTable.XK_Control_L) {
+                this._sendKeyEvent(KeyTable.XK_Control_L, command, false);
             }
-            this._macCmdSwapped = false;
         }
     }
 
