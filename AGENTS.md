@@ -126,10 +126,11 @@ what runs where.
 
 ## Engineering priorities
 
-- Priority: Latency > Resource Usage >= Quality (non-perceptible or statistically insignificant fluctuations of <= 5%
-  in latency for quality or bandwidth consistency is acceptable, and using a slight more GPU resources or CPU cores is
-  also acceptable if without latency impact and substantial quality improvement) >> Overall Bandwidth Efficiency
-  (since encoded frames are only used once unlike .mp4/.mkv)
+- Priority: end-to-end processing latency > resource usage or an unrestricted frame rate >= quality >> overall
+  bandwidth efficiency. Latency may be given up only within noise (a fluctuation that is imperceptible or
+  statistically insignificant, and at most 5 %), and only to gain quality or bandwidth consistency; somewhat more GPU
+  or CPU is acceptable when it costs no latency and buys a substantial quality improvement. Bandwidth efficiency comes
+  last because an encoded frame is shown once and discarded, unlike a stored .mp4 or .mkv.
 - Parity between X11 and Wayland, WebSockets and WebRTC, and the default and wish dashboards: anything wired up on
   one side but not the other is a bug. Prefer deduplicating code that serves the same purpose across modes over
   keeping parallel copies, when you are confident there is no regression or can validate it.
