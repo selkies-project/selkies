@@ -124,8 +124,9 @@ function makeInput() {
  * supplies everything else the browser would say about it; `forced` overrides a
  * flag, for a modifier whose own keydown never reached the page, or carries
  * `replay` for a step clipboard-sync re-dispatched, `physical` for a real
- * keypress among page-built ones, and `repeat` for an autorepeat. `opts.synth`
- * raises synthetic mode, as the dashboards do while a soft modifier is held.
+ * keypress among page-built ones, `repeat` for an autorepeat, and `native` for
+ * an event on a control the dashboards keep native. `opts.synth` raises
+ * synthetic mode, as the dashboards do while a soft modifier is held.
  */
 function wire(engineName, steps, opts = {}) {
     const engine = ENGINES[engineName];
@@ -136,7 +137,7 @@ function wire(engineName, steps, opts = {}) {
     for (const [action, code, char, forced] of steps) {
         if (action === 'down') down.add(code); else down.delete(code);
         if (action === 'lost') continue;
-        const { replay, physical, repeat, ...override } = forced || {};
+        const { replay, physical, repeat, native, ...override } = forced || {};
         const flags = {
             shift: held(down, 'Shift'), ctrl: held(down, 'Control'),
             alt: held(down, 'Alt'), meta: held(down, 'Meta'),
@@ -151,7 +152,8 @@ function wire(engineName, steps, opts = {}) {
             timeStamp: 0, repeat: !!repeat,
             isTrusted: physical === true || (!replay && engine.trusted !== false),
             altKey: flags.alt, ctrlKey: flags.ctrl, metaKey: flags.meta, shiftKey: flags.shift,
-            target: { classList: { contains: () => false }, parentElement: null },
+            target: { classList: { contains: (name) => !!native && name === 'allow-native-input' },
+                      parentElement: null },
             getModifierState: (name) => !!state[name],
             preventDefault() {}, stopPropagation() {},
         };
@@ -262,6 +264,12 @@ const ACTIONS = [
       engines: ['blink-mac', 'gecko-mac', 'webkit-mac', 'blink-pc', 'gecko-pc'],
       steps: [['down', 'Space', ' '], ['down', 'Space', ' ', { repeat: true }], ['up', 'Space', ' ']],
       wire: 'kd,32 ku,32' },
+    // -- A key the stream holds is let go wherever focus has moved meanwhile.
+    { name: 'a key let go in a dashboard field is released, and typing there is not sent',
+      engines: ['blink-mac', 'gecko-mac', 'webkit-mac', 'blink-pc', 'gecko-pc'],
+      steps: [['down', 'KeyW', 'w'], ['up', 'KeyW', 'w', { native: true }],
+              ['down', 'KeyQ', 'q', { native: true }], ['up', 'KeyQ', 'q', { native: true }]],
+      wire: 'kd,119 ku,119' },
     // -- PC: AltGr is the level-3 shift and Alt is the action modifier, whether
     // -- or not the engine has an AltGraph flag to say so.
     { name: 'AltGr+L types the Polish l-stroke',

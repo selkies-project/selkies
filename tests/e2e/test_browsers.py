@@ -14,6 +14,17 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 
+# A field of the class the dashboards put on their root, whose keys the input
+# core leaves to the page, and a point on it.
+NATIVE_FIELD_JS = """(() => {
+  const f = document.createElement('input');
+  f.id = 'native-field';
+  f.className = 'allow-native-input';
+  f.style.cssText = 'position:fixed;left:20px;top:20px;width:200px;height:30px;z-index:9999';
+  document.body.appendChild(f);
+})()"""
+NATIVE_FIELD_AT = (120, 35)
+
 DECODER_ERROR_PATTERNS = (
     "Failed to load resource", "Unexpected server response:", "ResizeObserver",
     "Error getting media devices", "AudioContext was not allowed",
@@ -38,6 +49,24 @@ def engine_launch(p, engine: str):
         return None, ctx
     b = getattr(p, engine).launch(headless=True)
     return b, b.new_context(viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1})
+
+
+def hold(page, key: str):
+    """Press `key` and leave it down; whether the X keymap then shows it held.
+
+    Headless WebKit drops synthetic keydowns under load, so the whole press is
+    retried rather than waited on.
+    """
+    pressed = False
+    for _ in range(4):
+        page.keyboard.down(key)
+        time.sleep(0.8)
+        pressed = C.x11_keymap_pressed(key)
+        if pressed is True:
+            break
+        page.keyboard.up(key)
+        time.sleep(0.6)
+    return pressed
 
 
 def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
@@ -123,22 +152,22 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
                     res.check("audio: packets reach playback", depth > 0, depth)
                 finally:
                     H.pulse_unload(tone)
-            pressed = False
-            for _ in range(4):
-                # Headless WebKit drops synthetic keydowns under load, so the whole
-                # press is retried rather than waited on.
-                page.keyboard.down("x")
-                time.sleep(0.8)
-                pressed = C.x11_keymap_pressed("x")
-                if pressed is True:
-                    break
-                page.keyboard.up("x")
-                time.sleep(0.6)
+            pressed = hold(page, "x")
             res.check("input: key held in X keymap", pressed is True, pressed)
             page.keyboard.up("x")
             time.sleep(0.3)
             res.check("input: key released in X keymap",
                       C.x11_keymap_pressed("x") is False, "")
+            page.evaluate(NATIVE_FIELD_JS)
+            pressed = hold(page, "x")
+            page.mouse.click(*NATIVE_FIELD_AT)
+            page.keyboard.up("x")
+            time.sleep(0.5)
+            res.check("input: a key let go in a dashboard field is released",
+                      pressed is True and C.x11_keymap_pressed("x") is False, pressed)
+            page.evaluate("document.getElementById('native-field').remove()")
+            page.mouse.click(640, 360)
+            time.sleep(0.3)
 
             push = f"e2e-{tag}-s2c"
             ext, stop = H.x_own_clipboard(push.encode())

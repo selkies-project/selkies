@@ -1967,7 +1967,8 @@ export class Input {
     }
 
     /**
-     * Releases a held key whose keyup never arrived, as that keyup would have.
+     * Releases a held key whose keyup the stream never handled, as that keyup
+     * would have.
      * @param {string} code Physical `event.code`.
      */
     _releaseLostKey(code) {
@@ -2275,7 +2276,12 @@ export class Input {
     }
 
     _handleKeyUp(event) {
-        if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
+        if (this._targetHasClass(event.target, WHITELIST_CLASS)) {
+            // Focus moved to a native control while the stream held the key.
+            const code = KeyboardUtil.getKeyCode(event);
+            if (code in this._keyDownList) this._releaseLostKey(code);
+            return;
+        }
         if (!this._guac_markEvent(event)) return;
         
         _stopEvent(event);
