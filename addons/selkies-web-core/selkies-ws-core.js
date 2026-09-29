@@ -3236,9 +3236,11 @@ const HARDWARE_ORDER = ['av1enc', 'h265enc', 'vp9enc', 'h264enc', 'vp8enc'];
  * and the codec carries it; JPEG is the last rung, and the only one when
  * nothing else is left.
  * @param {string} [refused] The codec just refused.
+ * @param {string} [leaving] The encoder stepped off: the current one, or a
+ *     pick being answered, for which the stream already playing is a rung.
  * @returns {string|null} The encoder, or `null` when nothing is left.
  */
-function nextRung(refused) {
+function nextRung(refused, leaving = currentEncoderMode) {
     if (refused) refusedCodecs.add(refused);
     const allowed = Array.isArray(encoderAllowed) && encoderAllowed.length ? encoderAllowed : LADDER_ORDER;
     const rungs = LADDER_ORDER.filter((e) => allowed.includes(e));
@@ -3249,7 +3251,7 @@ function nextRung(refused) {
         && !!(encoderBackends && (encoderBackends[codecOfEncoder(enc)] || {}).hardware);
     const hardware = HARDWARE_ORDER.filter((e) => rungs.includes(e) && accelerated(e));
     for (const enc of [...hardware, ...rungs.filter((e) => !accelerated(e))]) {
-        if (enc === currentEncoderMode) continue;
+        if (enc === leaving) continue;
         if (enc === 'jpeg') return enc;
         const codec = codecOfEncoder(enc);
         if (refusedCodecs.has(codec) || !canDecodeEncoder(enc)) continue;
@@ -3261,7 +3263,7 @@ function nextRung(refused) {
 }
 
 /** The encoder a pick this engine cannot decode falls back to: the ladder's first rung past it. */
-const fallbackEncoder = (pick) => nextRung(codecOfEncoder(pick)) || 'jpeg';
+const fallbackEncoder = (pick) => nextRung(codecOfEncoder(pick), pick) || 'jpeg';
 
 /**
  * Answers a stream this engine will not decode, and reports it.
