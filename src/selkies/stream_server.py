@@ -280,6 +280,9 @@ class CongestionSteer:
     cut is emptying reads as a queue meanwhile; cutting again on it would take
     the target to the floor while the path only drains. Without a measured
     delivery the backoff is BACKOFF of the target, held for HOLD_S.
+    The pending cruise resumes after the drain only when no queue is
+    reported. While a queue remains, keep the current target through the hold
+    and let the next eligible tick back it off again.
 
     Loss backs the target off only on the second lossy tick in a row: one tick
     of a thin stream is too few packets for its loss fraction to mean anything.
@@ -334,7 +337,11 @@ class CongestionSteer:
         """
         dt = 1.0 if self._tick_at is None else min(max(now - self._tick_at, 0.0), 2.0)
         self._tick_at = now
-        drained = self._cruise_kbps is not None and now >= self._drain_until
+        drained = (
+            self._cruise_kbps is not None
+            and now >= self._drain_until
+            and not queue_s
+        )
         if drained:
             current, self._cruise_kbps = self._cruise_kbps, None
         if queue_s:
