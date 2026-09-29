@@ -2898,8 +2898,7 @@ function Sidebar() {
   const videoBitrateOptions = stopsWithin(BITRATE_STOPS, serverSettings?.video_bitrate?.min ?? 100, serverSettings?.video_bitrate?.max ?? 1000000);
   const bitrateSliderIndex = stopIndex(videoBitrateOptions, videoBitrate);
   const framerateSpan = serverSettings?.framerate
-    ? { min: serverSettings.framerate.min, max: serverSettings.framerate.max, default: serverSettings.framerate.default,
-        overridden: !!serverSettings.framerate.overridden }
+    ? { min: serverSettings.framerate.min, max: serverSettings.framerate.max }
     : null;
   const displayFramerate = displayRate ? matchDisplay(displayRate, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240) : null;
   const framerateOptions = withDisplayStop(stopsWithin(FRAMERATE_STOPS, framerateSpan?.min ?? 8, framerateSpan?.max ?? 240), displayFramerate);

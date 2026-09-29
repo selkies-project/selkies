@@ -198,7 +198,7 @@ export function framerateLabel(rate) {
  * chosen the page asks for nothing, since the server's pacing strays from the
  * rate asked of it by more than a matched rate would remove.
  * @param {?string} stored The stored value, null where none is.
- * @param {?{min: number, max: number, default: number, overridden: boolean}} span
+ * @param {?{min: number, max: number}} span
  *     The server's framerate setting, null before it arrives.
  * @returns {boolean}
  */
@@ -212,7 +212,7 @@ export function followsDisplay(stored, span) {
  * server's span; null asks for nothing, as does a display not measured yet.
  * @param {?string} stored The stored value, null where none is.
  * @param {?number} displayRate The measured refresh, null where unknown.
- * @param {?{min: number, max: number, default: number, overridden: boolean}} span
+ * @param {?{min: number, max: number}} span
  *     The server's framerate setting, null before it arrives.
  * @returns {?number}
  */

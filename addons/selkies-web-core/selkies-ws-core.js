@@ -8115,7 +8115,7 @@ class WorkerWebSocket {
                   framerate = parseFloat(window['framerate']);
               }
               const fr = obj.settings.framerate;
-              framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max, default: fr.default, overridden: !!fr.overridden } : null;
+              framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max } : null;
               followDisplayFramerate('server framerate span');
               if (typeof window['video_fullcolor'] === 'boolean') {
                   video_fullcolor = window['video_fullcolor'];

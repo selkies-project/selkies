@@ -3504,7 +3504,7 @@ export default function webrtc() {
 				if (Number.isFinite(window.video_crf)) crf = Math.round(window.video_crf);
 				if (Number.isFinite(window.video_bitrate)) videoBitRate = Math.round(window.video_bitrate);
 				const fr = obj.settings.framerate;
-				framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max, default: fr.default, overridden: !!fr.overridden } : null;
+				framerateSpan = fr && fr.min !== undefined ? { min: fr.min, max: fr.max } : null;
 				followDisplayFramerate();
 				const fcEntry = obj.settings && obj.settings.video_fullcolor;
 				fullColorLocked = !!(fcEntry && fcEntry.locked);
