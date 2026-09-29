@@ -99,6 +99,10 @@ NAV_JS = """
   (() => {
     const n = Number(sessionStorage.getItem('__navs') || 0) + 1;
     sessionStorage.setItem('__navs', String(n));
+    // Where each load's decoders start in the configure record.
+    const at = JSON.parse(sessionStorage.getItem('__navAt') || '[]');
+    at.push(JSON.parse(sessionStorage.getItem('__cfgs') || '[]').length);
+    sessionStorage.setItem('__navAt', JSON.stringify(at));
   })();
 """
 
@@ -147,6 +151,7 @@ def read_state(page, retries: int = 6) -> dict:
     js = """(() => ({
       navs: Number(sessionStorage.getItem('__navs') || 0),
       cfgs: JSON.parse(sessionStorage.getItem('__cfgs') || '[]'),
+      navAt: JSON.parse(sessionStorage.getItem('__navAt') || '[]'),
       decoded: window.__decoded || 0,
       stored: (() => { try { return localStorage.getItem(%s); } catch (e) { return null; } })(),
       ua: navigator.userAgent,
@@ -241,8 +246,8 @@ def block_ladder(r: "H.Results") -> None:
                 # two and the ladder looks like it stopped at software.
                 state = wait_for(
                     page,
-                    lambda s: s["navs"] > 1 and "prefer-software" in s["cfgs"]
-                    and s["cfgs"][s["cfgs"].index("prefer-software") + 1:],
+                    lambda s: s["navs"] > 1 and len(s["navAt"]) > 1
+                    and len(s["cfgs"]) > s["navAt"][1],
                     timeout=60)
                 r.check("software was tried first",
                         "prefer-software" in state["cfgs"], state["cfgs"][:6])
@@ -251,10 +256,12 @@ def block_ladder(r: "H.Results") -> None:
                 # The preference is dropped on the way into the ladder, so the reloaded
                 # page re-probes hardware rather than being pinned by a failure software
                 # did not cause; it then arms its own retry, which sets the key again.
-                after_software = state["cfgs"][state["cfgs"].index("prefer-software") + 1:]
+                # The first page may configure more than one software decoder before the
+                # ladder reloads it, so the reloaded page's own first decoder is read.
+                reloaded = state["cfgs"][state["navAt"][1]:] if len(state["navAt"]) > 1 else []
                 r.check("next load re-probes hardware",
-                        bool(after_software) and after_software[0] == "default",
-                        state["cfgs"][:6])
+                        bool(reloaded) and reloaded[0] == "default",
+                        {"cfgs": state["cfgs"][:6], "navAt": state["navAt"]})
             finally:
                 browser.close()
     finally:
