@@ -1208,7 +1208,8 @@ export function Settings() {
                             </>
                         )}
 
-                        {!serverSettings?.manual_resolution?.locked && (
+                        {!serverSettings?.manual_resolution?.locked
+                            && (isSecondaryDisplay || serverSettings?.enable_resize?.value !== false) && (
                             <>
                                 <div className="space-y-2">
                                     <label className="text-sm font-medium">{tl('sections.screen.presetLabel')}</label>

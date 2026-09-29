@@ -1794,7 +1794,9 @@ export default function webrtc() {
 	 * Handles a same-origin dashboard window message; the module docblock
 	 * lists the types. A shared page ignores the resolution, command, and
 	 * clipboard cases: a viewer never drives resolution policy, never reaches
-	 * the server's command execution path, and never writes its clipboard.
+	 * the server's command execution path, and never writes its clipboard. A
+	 * primary whose size the server keeps (`enable_resize` false) ignores a
+	 * manual resolution, which the server would refuse.
 	 * @param {MessageEvent} event
 	 */
 	function handleMessage(event) {
@@ -1839,6 +1841,10 @@ export default function webrtc() {
 				break;
 			case "setManualResolution":
 				if (isSharedMode) { break; }
+				if (window.enable_resize === false && storageDisplayId !== 'display2') {
+					console.log("setManualResolution ignored: the server keeps this display's size (enable_resize=false).");
+					break;
+				}
 				const width = parseInt(message.width, 10);
 				const height = parseInt(message.height, 10);
 				if (isNaN(width) || width <= 0 || isNaN(height) || height <= 0) {

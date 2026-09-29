@@ -11,7 +11,9 @@ request by the UI-scaling pick for the browser to stretch back — never both. C
 disabled must not arm the focus read (Chromium's permission prompt) or send any
 clipboard payload. Gamepad: a pad present before the channel opens honors the
 persisted gamepad toggle, and one pad's disconnect does not stop polling the
-others.
+others. Resize policy: with dynamic resizing disabled a manual resolution
+posted to the primary's page is neither requested nor applied, and the
+desktop keeps its size.
 
 The checks read the wire: r,WxH / js,* / cw,cb messages are tapped at
 WebSocket.send and RTCDataChannel.send inside the page, clipboard reads at
@@ -473,6 +475,28 @@ def clipboard_disabled_block(browser: Any, mode: str, res: "H.Results") -> None:
         page.context.close()
 
 
+def pinned_block(browser: Any, mode: str, res: "H.Results") -> None:
+    """enable_resize=false: a manual resolution posted to the primary's page,
+    as an embedding front end posts one, is neither requested nor applied, and
+    the desktop keeps its size."""
+    page = new_page(browser, mode)
+    try:
+        res.check("pinned page: video flowing", bool(wait_video(page, mode)))
+        time.sleep(1.0)
+        root = H.x_root_size()
+        seen = len(page.evaluate("window.__resSent"))
+        post(page, {"type": "setManualResolution", "width": PRESET_W, "height": PRESET_H})
+        time.sleep(4.0)
+        sent = page.evaluate("window.__resSent")[seen:]
+        res.check("pinned: a manual resolution is not requested", not sent, sent)
+        manual = page.evaluate("window.manualResolution || window.manual_resolution || false")
+        res.check("pinned: the page stays out of manual mode", manual is False, manual)
+        after = H.x_root_size()
+        res.check("pinned: the desktop keeps its size", after == root, f"{root} -> {after}")
+    finally:
+        page.context.close()
+
+
 def run(mode: str) -> bool:
     """Drive every block over one transport; True when all checks passed."""
     res = H.Results(f"core-parity-{mode}")
@@ -492,11 +516,13 @@ def run(mode: str) -> bool:
                 gamepad_block(browser, mode, res)
             finally:
                 browser.close()
-        H.server_start(mode=mode, extra_env={"SELKIES_ENABLE_CLIPBOARD": "false"})
+        H.server_start(mode=mode, extra_env={"SELKIES_ENABLE_CLIPBOARD": "false",
+                                             "SELKIES_ENABLE_RESIZE": "false"})
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
             try:
                 clipboard_disabled_block(browser, mode, res)
+                pinned_block(browser, mode, res)
             finally:
                 browser.close()
     finally:

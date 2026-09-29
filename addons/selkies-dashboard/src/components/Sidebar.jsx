@@ -3738,7 +3738,8 @@ function Sidebar() {
                     )}
                   </>
                 )}
-                {(!serverSettings?.manual_resolution?.locked) && (
+                {!serverSettings?.manual_resolution?.locked
+                  && (isSecondaryDisplay || serverSettings?.enable_resize?.value !== false) && (
                   <>
                     <div className="dev-setting-item">
                       <label htmlFor="resolutionPresetSelect">

@@ -799,7 +799,9 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
     """ui_sidebar_show_shortcuts=false and ui_sidebar_show_webcam=false must
     hide the shortcuts UI and the webcam toggle on BOTH dashboards;
     ui_sidebar_show_gamepads=false hides the gamepads section (the visualizer
-    card in Wish) and nothing else, so the gamepad input toggle stays."""
+    card in Wish) and nothing else, so the gamepad input toggle stays; and
+    enable_resize=false offers no resolution to pick on the primary, whose
+    size the server keeps."""
     res = H.Results(f"gates-{dashboard}")
     H.server_start(mode="websockets", wayland=False, web_root=dist,
                    extra_env={
@@ -822,6 +824,7 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
                        "SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false",
                        "SELKIES_UI_SIDEBAR_SHOW_WEBCAM": "false",
                        "SELKIES_UI_SIDEBAR_SHOW_GAMEPADS": "false",
+                       "SELKIES_ENABLE_RESIZE": "false",
                    })
     with sync_playwright() as p:
         browser = C.chromium_launch(p)
@@ -871,6 +874,19 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
         res.check("ui_sidebar_show_webcam=false hides webcam toggle", not cam, cam)
         res.check("ui_sidebar_show_gamepads=false keeps the gamepad input toggle", pad, pad)
         res.check("ui_sidebar_show_gamepads=false hides the gamepads section", not section, section)
+        if dashboard == "classic":
+            header = page.locator('.sidebar-section-header:has-text("Screen")').first
+            header.scroll_into_view_if_needed()
+            header.click()
+            time.sleep(0.8)
+            preset = page.locator('#resolutionPresetSelect').count()
+        else:
+            open_wish_settings_tab(page, "Resolution")
+            preset = page.locator('button:has-text("Select Preset")').count()
+        # The button beside the resolution controls, so an unopened panel cannot pass.
+        scale = page.locator('button:has-text("Scale Locally")').count()
+        res.check("screen settings reachable (scale-locally button present)", scale > 0, scale)
+        res.check("enable_resize=false offers no resolution preset on the primary", preset == 0, preset)
         browser.close()
     res.summary()
     return res

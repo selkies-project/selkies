@@ -5066,6 +5066,10 @@ function receiveMessage(event) {
         console.log("Shared mode: setManualResolution message ignored.");
         break;
       }
+      if (window.enable_resize === false && displayId !== 'display2') {
+        console.log("setManualResolution ignored: the server keeps this display's size (enable_resize=false).");
+        break;
+      }
       const width = parseInt(message.width, 10);
       const height = parseInt(message.height, 10);
       if (isNaN(width) || width <= 0 || isNaN(height) || height <= 0) {
