@@ -1,6 +1,6 @@
 /**
  * Conditional settings: settings whose default depends on other state (HiDPI
- * defers to whether a manual resolution is set, ...), and
+ * defers to whether a manual resolution is set, paint-over to Turbo, ...), and
  * the plain ones that share the ladder so a locked or overridden server value
  * reaches the UI.
  *
@@ -178,12 +178,18 @@ export const VIDEO_FULLCOLOR_SPEC = boolSpec("video_fullcolor", false,
 export const VIDEO_STREAMING_MODE_SPEC = boolSpec("video_streaming_mode", false,
     (value, _ctx, io) => io.postSetting({ video_streaming_mode: value }));
 /**
- * Paint-over cleans up a still screen whatever Turbo sends and whatever the
- * rate control, so it takes the server's value (on unless an operator set it)
- * until the user picks one.
+ * Paint-over cleans up a still screen, which a video encoder under Turbo never
+ * leaves (it sends every frame), so it defaults off under Turbo and on without
+ * it, JPEG included, whatever the rate control; a stored choice or an
+ * operator's value overrides it. `ctx.encoder` and `ctx.videoStreamingMode`
+ * carry the encoder and Turbo.
  */
-export const USE_PAINT_OVER_QUALITY_SPEC = boolSpec("use_paint_over_quality", true,
-    (value, _ctx, io) => io.postSetting({ use_paint_over_quality: value }));
+export const USE_PAINT_OVER_QUALITY_SPEC = {
+    ...boolSpec("use_paint_over_quality", true,
+        (value, _ctx, io) => io.postSetting({ use_paint_over_quality: value })),
+    conditional: (ctx) => (ctx.videoStreamingMode === undefined ? undefined
+        : ctx.encoder === "jpeg" || !ctx.videoStreamingMode),
+};
 export const USE_CPU_SPEC = boolSpec("use_cpu", false,
     (value, _ctx, io) => io.postSetting({ use_cpu: value }));
 export const FORCE_ALIGNED_RESOLUTION_SPEC = boolSpec("force_aligned_resolution", false,

@@ -262,7 +262,7 @@ SUITES: list = [
                    "ws-default", "wr-default", "ws-chromium-vp9", "wr-chromium-vp9"]},
     {"path": "e2e/test_dashboards.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["classic", "wish", "gates", "hidpi", "hidpi-webrtc", "raw-motion",
-                   "raw-motion-webrtc", "rate-control", "rate-control-webrtc", "dpi-resolution",
+                   "raw-motion-webrtc", "rate-control", "rate-control-webrtc", "paint-over", "dpi-resolution",
                    "second-screen"]},
     {"path": "e2e/test_mixed_dpi.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc"]},

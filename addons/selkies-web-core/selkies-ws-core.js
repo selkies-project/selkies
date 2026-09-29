@@ -380,10 +380,14 @@ let displayPosition = 'right';
  * Stored settings sent to the server only beside the explicit-choice marker a
  * dashboard writes when the user picks them. The core stores every value it
  * applies, so an unmarked one may be the echo of a default an older dashboard
- * derived -- paint-over off under Turbo -- which sent at connect would switch
- * the server's cleanup off while the dashboard shows it on.
+ * derived under rules it no longer runs, which sent at connect would set the
+ * server's cleanup against what the dashboard shows. One this page's dashboard
+ * posted is its own, derived under the rules it runs now, and goes whatever
+ * the marker (`postedExplicitOnly`).
  */
 const EXPLICIT_ONLY_SETTINGS = ['use_paint_over_quality'];
+/** The explicit-only settings this page's dashboard has posted. */
+const postedExplicitOnly = new Set();
 
 const PER_DISPLAY_SETTINGS = [
     'framerate', 'video_crf', 'video_fullcolor',
@@ -3384,7 +3388,7 @@ function getCurrentSettingsPayload() {
         return finalKey;
     };
     const hasStoredParam = (key) => window.localStorage.getItem(storedKey(key)) !== null
-        && (!EXPLICIT_ONLY_SETTINGS.includes(key)
+        && (!EXPLICIT_ONLY_SETTINGS.includes(key) || postedExplicitOnly.has(key)
             || window.localStorage.getItem(`${storedKey(key)}_explicit_choice`) === 'true');
     const storedEntries = [
         ['video_crf', () => getIntParam('video_crf', 25)],
@@ -5631,6 +5635,7 @@ function handleSettingsMessage(settings, fromServer) {
   if (settings.use_paint_over_quality !== undefined) {
     use_paint_over_quality = !!settings.use_paint_over_quality;
     storeBool('use_paint_over_quality', use_paint_over_quality);
+    if (!fromServer) postedExplicitOnly.add('use_paint_over_quality');
     settingsChanged = true;
   }
   if (settings.scaling_dpi !== undefined) {
@@ -7411,7 +7416,7 @@ class WorkerWebSocket {
             continue;
           }
           if (knownSettings.includes(baseKey)) {
-            if (EXPLICIT_ONLY_SETTINGS.includes(baseKey)
+            if (EXPLICIT_ONLY_SETTINGS.includes(baseKey) && !postedExplicitOnly.has(baseKey)
                 && localStorage.getItem(`${key}_explicit_choice`) !== 'true') {
               continue;
             }

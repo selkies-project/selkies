@@ -1317,6 +1317,104 @@ def rate_control_block(dashboard: str, dist: str, mode: str = "websockets") -> "
     return res
 
 
+def paint_over_switches(page, dashboard: str):
+    """The Turbo and paint-over switches of either dashboard, opening its video
+    settings first."""
+    if dashboard == "classic":
+        if not page.locator('#videoStreamingModeToggle').count():
+            classic_open_video(page)
+        return page.locator('#videoStreamingModeToggle'), page.locator('#usePaintOverQualityToggle')
+    if not page.locator("label:text-is('Use Paint-Overs')").count():
+        open_wish_settings_tab(page, "Video")
+
+    def row(label: str):
+        return page.locator(f"div.justify-between:has(> div > label:text-is('{label}')) button[role='switch']").first
+    return row("Turbo"), row("Use Paint-Overs")
+
+
+def switch_on(switch) -> bool:
+    """Whether a dashboard switch reads on (the classic toggle's aria-pressed, the wish Switch's aria-checked)."""
+    return (switch.get_attribute("aria-pressed") or switch.get_attribute("aria-checked")) == "true"
+
+
+def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
+    """Paint-over follows Turbo where nothing pins it.
+
+    A video encoder under Turbo sends every frame and leaves no still screen to
+    clean up, so the dashboard shows paint-over off under Turbo and on without
+    it, and sends the server each value it derives. A pick the user makes, or
+    an operator's value, holds through a Turbo change.
+    """
+    res = H.Results(f"paint-over-{dashboard}-{engine}")
+    for operator in (None, "true"):
+        who = "operator on" if operator else "unset"
+        H.server_start(mode="websockets", wayland=False, web_root=dist,
+                       extra_env={"SELKIES_USE_PAINT_OVER_QUALITY": operator} if operator else {})
+        try:
+            with sync_playwright() as p:
+                browser = C.launch_browser(p, engine)
+                ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+                ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+                # The settings the core sends. Playwright reports the worker socket's frames
+                # in Chromium and WebKit but no WebSocket frames at all in Firefox, whose
+                # socket therefore stays on the page (`socket_worker=false`), where its sends
+                # are recorded.
+                ctx.add_init_script("""(() => {
+                    const send = WebSocket.prototype.send;
+                    window.__settingsSent = [];
+                    WebSocket.prototype.send = function (data) {
+                        if (typeof data === 'string' && data.startsWith('SETTINGS,')) window.__settingsSent.push(data);
+                        return send.call(this, data);
+                    };
+                })();""")
+                page = ctx.new_page()
+                frames = []
+                page.on("websocket", lambda ws, frames=frames: ws.on(
+                    "framesent", lambda f: frames.append(f) if isinstance(f, str) else None))
+
+                def pushed(page=page, frames=frames):
+                    sent = frames + page.evaluate("window.__settingsSent || []")
+                    return [json.loads(m[len("SETTINGS,"):]).get("use_paint_over_quality") for m in sent
+                            if m.startswith("SETTINGS,") and "use_paint_over_quality" in m]
+
+                def flip(switch):
+                    switch.click(timeout=5000)
+                    time.sleep(2.0)
+
+                page.goto(f"{H.BASE_URL}?socket_worker=false" if engine == "firefox" else H.BASE_URL,
+                          wait_until="load")
+                C.wait_ws_video(page, timeout=45)
+                time.sleep(2.0)
+                turbo, paint = paint_over_switches(page, dashboard)
+                res.check(f"{who}: Turbo starts on", switch_on(turbo), "")
+                if operator:
+                    res.check(f"{who}: paint-over shows the operator's value under Turbo", switch_on(paint), "")
+                    flip(turbo)
+                    flip(turbo)
+                    res.check(f"{who}: a Turbo change leaves it on", switch_on(paint), "")
+                    res.check(f"{who}: and never sends it off", False not in pushed(), pushed())
+                else:
+                    res.check(f"{who}: paint-over defaults off under Turbo", not switch_on(paint), "")
+                    res.check(f"{who}: and the server is sent off", pushed()[-1:] == [False], pushed())
+                    flip(turbo)
+                    res.check(f"{who}: turning Turbo off turns paint-over on", switch_on(paint), "")
+                    res.check(f"{who}: and sends it on", pushed()[-1:] == [True], pushed())
+                    flip(turbo)
+                    res.check(f"{who}: turning Turbo on turns it off again", not switch_on(paint), "")
+                    res.check(f"{who}: and sends it off", pushed()[-1:] == [False], pushed())
+                    flip(paint)
+                    mark = len(pushed())
+                    flip(turbo)
+                    flip(turbo)
+                    res.check(f"{who}: a user's pick holds through a Turbo change", switch_on(paint), "")
+                    res.check(f"{who}: and nothing sends it off after", False not in pushed()[mark:], pushed())
+                C.close_browser(browser)
+        finally:
+            H.server_stop()
+    res.summary()
+    return res
+
+
 def wait_second_display(timeout: float = 15.0) -> bool:
     """Whether the server logs a second display client joining."""
     deadline = time.time() + timeout
@@ -1356,6 +1454,10 @@ def main() -> None:
     if which in ("all", "rate-control-webrtc"):
         blocks.append(rate_control_block("classic", H.CLASSIC_DIST, "webrtc"))
         blocks.append(rate_control_block("wish", H.WISH_DIST, "webrtc"))
+    if which in ("all", "paint-over"):
+        for engine in ("chromium", "firefox", "webkit"):
+            blocks.append(paint_over_block("classic", H.CLASSIC_DIST, engine))
+            blocks.append(paint_over_block("wish", H.WISH_DIST, engine))
     if which in ("all", "dpi-resolution"):
         blocks.append(dpi_for_resolution_block("classic", H.CLASSIC_DIST))
     if which in ("all", "second-screen"):

@@ -1370,6 +1370,16 @@ function Sidebar() {
     macDesktop: isMacDesktop(),
   };
   /**
+   * Paint-over also reads the encoder and Turbo, Turbo resolved here rather
+   * than taken from its state, which trails the `serverSettings` sync by a
+   * render.
+   */
+  const paintOverCtx = {
+    ...conditionalCtx,
+    encoder,
+    videoStreamingMode: resolveSpec(VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, readStored),
+  };
+  /**
    * Each conditional setting is one hook call over a shared spec. The hook
    * owns init and server sync; client-driven changes (an explicit toggle, or
    * a dependency such as the encoder or resolution) flow through
@@ -1380,7 +1390,7 @@ function Sidebar() {
   const [rateControlMode, setRateControlMode] = useConditionalSetting(
     RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
   const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
-    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, [serverSettings], readPaintOverStored);
+    USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings], readPaintOverStored);
   const [videoFullColor, setVideoFullColor] = useConditionalSetting(
     VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   // Full color is 4:4:4 H.264; where the decoder has no such profile the core
@@ -1750,7 +1760,7 @@ function Sidebar() {
   useEffect(() => {
     if (!serverSettings) return;
     const key = USE_PAINT_OVER_QUALITY_SPEC.storageKey;
-    const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, conditionalCtx, readPaintOverStored);
+    const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
     if (!isExplicitChoice(USE_PAINT_OVER_QUALITY_SPEC)
       && readStored(key) !== null
       && readStored(key) !== String(resolved)) {
@@ -1763,6 +1773,16 @@ function Sidebar() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverSettings]);
+
+  /** A later encoder or Turbo change re-derives paint-over where nothing pins it. */
+  useEffect(() => {
+    if (!serverSettings || isSettingPinned(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, readPaintOverStored)) return;
+    const resolved = resolveSpec(USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, readPaintOverStored);
+    if (resolved !== usePaintOverQuality) {
+      writeConditional(USE_PAINT_OVER_QUALITY_SPEC, resolved, setUsePaintOverQuality, { persist: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [encoder, videoStreamingMode]);
 
   /** UI scaling pick: persisted, so it pins across reloads and stops the startup derived-default post. */
   const handleDpiScalingChange = (event) => {
