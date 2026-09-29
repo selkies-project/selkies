@@ -279,7 +279,12 @@ class CongestionSteer:
     follows until the drain and SETTLE_S more have passed, because the queue the
     cut is emptying reads as a queue meanwhile; cutting again on it would take
     the target to the floor while the path only drains. Without a measured
-    delivery the backoff is BACKOFF of the target, held for HOLD_S.
+    delivery the backoff is BACKOFF of the target, held for HOLD_S. A tick whose
+    stream offered the path less than APP_LIMITED of the target, a still
+    screen's trickle, cuts nothing on a queue: what the path delivered is then
+    what the stream sent rather than what the path carries, and a cut to it
+    would put the next motion at the floor while draining nothing the stream
+    queued.
 
     Loss backs the target off only on the second lossy tick in a row: one tick
     of a thin stream is too few packets for its loss fraction to mean anything.
@@ -308,6 +313,7 @@ class CongestionSteer:
     DRAIN_S = 1.0
     DRAIN_FLOOR = 0.5
     SETTLE_S = 0.5
+    APP_LIMITED = 0.5
 
     def __init__(self) -> None:
         self.strikes = 0
@@ -319,7 +325,8 @@ class CongestionSteer:
 
     def target(self, current: float, ceiling: float, floor: float,
                goodput_bps: float, loss: float, now: float,
-               queue_s: Optional[float] = None) -> float:
+               queue_s: Optional[float] = None,
+               offered_bps: Optional[float] = None) -> float:
         """The next target in kbps for one tick.
 
         Args:
@@ -331,6 +338,8 @@ class CongestionSteer:
             now: Monotonic time of the tick.
             queue_s: The queue standing on the path through the tick, in seconds:
                 0 for a clean tick, None where the transport measures no delay.
+            offered_bps: What the stream sent over the tick, or None when
+                unmeasured.
         """
         dt = 1.0 if self._tick_at is None else min(max(now - self._tick_at, 0.0), 2.0)
         self._tick_at = now
@@ -339,7 +348,8 @@ class CongestionSteer:
             current, self._cruise_kbps = self._cruise_kbps, None
         if queue_s:
             self.strikes = 0
-            if now >= self.hold_until:
+            limited = offered_bps is not None and offered_bps < current * 1_000 * self.APP_LIMITED
+            if now >= self.hold_until and not limited:
                 current = self._queue_backoff(current, goodput_bps / 1_000, queue_s, now)
             return max(floor, min(ceiling, current))
         if drained:

@@ -988,6 +988,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_seq = (self._twcc_seq + 1) & 0xFFFF
         now = time.monotonic()
         self._twcc_history[seq] = (size, now)
+        self._twcc_window["bytes_sent"] += size
         # Bounded by age, not count: a retransmission storm allocates thousands
         # of numbers a second, and one let go before its feedback arrives would
         # read as wire loss. Insertion order is allocation order.
@@ -1154,7 +1155,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
     @staticmethod
     def _twcc_window_zero() -> dict:
         return {"received": 0, "lost": 0, "bytes_acked": 0, "bytes_spanned": 0, "span_s": 0.0,
-                "delay_min": None, "delay_last": None, "feedback_mins": []}
+                "delay_min": None, "delay_last": None, "feedback_mins": [], "bytes_sent": 0,
+                "opened": time.monotonic()}
 
     def take_twcc_window(self) -> Optional[dict]:
         """Drain the transport-cc feedback accumulated since the last call.
@@ -1186,11 +1188,12 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         growing one has grown into.
 
         Returns:
-            Loss and goodput over the drained interval, with the standing queue,
-            the queue still building (None unless the newest half of the
-            interval stood past `TWCC_QUEUE_MS`), and the depth, in milliseconds
-            (None without a delay measured or with too few feedback packets to
-            read one), or None when no feedback arrived in it.
+            Loss, goodput and the rate sent over the drained interval, with the
+            standing queue, the queue still building (None unless the newest
+            half of the interval stood past `TWCC_QUEUE_MS`), and the depth, in
+            milliseconds (None without a delay measured or with too few
+            feedback packets to read one), or None when no feedback arrived in
+            it.
         """
         window = self._twcc_window
         packets = window["received"] + window["lost"]
@@ -1198,8 +1201,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             return None
         self._twcc_window = self._twcc_window_zero()
         queue_ms = rising_ms = depth_ms = None
+        now = time.monotonic()
         if window["delay_min"] is not None:
-            now = time.monotonic()
             floor = self._twcc_delay_floor
             floor.append((now, window["delay_min"]))
             while floor[0][0] < now - TWCC_DELAY_FLOOR_S:
@@ -1223,6 +1226,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             "queue_ms": queue_ms,
             "queue_rising_ms": rising_ms,
             "queue_depth_ms": depth_ms,
+            "sent_bps": (int(window["bytes_sent"] * 8 / (now - window["opened"]))
+                         if now > window["opened"] else 0),
         }
 
     def _set_role(self, role: str) -> None:

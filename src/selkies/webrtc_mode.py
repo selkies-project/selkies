@@ -2710,7 +2710,8 @@ class WebRTCService(BaseStreamingService):
         per display, follow the slowest of ITS peers' goodput estimates with
         headroom, back off on the first tick whose one-way delay shows a queue
         standing, or still building, `TWCC_QUEUE_MS` past the path's own
-        (`take_twcc_window`), to what the path delivered meanwhile, or
+        (`take_twcc_window`), to what the path delivered meanwhile unless the
+        display sent too little for that to measure the path, or
         multiplicatively on two ticks of loss in a
         row, and hold there before recovering (`CongestionSteer`), and retarget
         that display's encoder within the allowed video_bitrate range — one
@@ -2770,9 +2771,10 @@ class WebRTCService(BaseStreamingService):
                 if sender is not None:
                     sender.steer_fec(window["loss_fraction"])
                 bucket = per_display.setdefault(
-                    did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0})
+                    did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0, "sent_bps": 0})
                 if window["goodput_bps"]:
                     bucket["goodputs"].append(window["goodput_bps"])
+                bucket["sent_bps"] = max(bucket["sent_bps"], window["sent_bps"])
                 bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
                 if window["queue_ms"] is not None:
                     standing = max(window["queue_ms"], window["queue_rising_ms"] or 0.0)
@@ -2801,7 +2803,8 @@ class WebRTCService(BaseStreamingService):
                 # Goodput may lift the target, never drag it down (see docstring).
                 steer = self._congestion_steer.setdefault(did, CongestionSteer())
                 target = round(steer.target(
-                    current, ceiling, lo_kbps, min(goodputs), worst_loss, time.monotonic(), queue_s))
+                    current, ceiling, lo_kbps, min(goodputs), worst_loss, time.monotonic(), queue_s,
+                    bucket["sent_bps"]))
                 if target != round(current):
                     (logger.info if target < current else logger.debug)(
                         f"Congestion control[{did}]: video bitrate {current:.0f} -> {target:.0f} kbps "

@@ -189,6 +189,13 @@ def main() -> int:
     tr._twcc_pruned_at = 0.0
     tr._twcc_next(PACKET_BYTES)
     res.check("and is let go once older than the feedback could be", len(tr._twcc_history) == 1, len(tr._twcc_history))
+    tr = transport()
+    for _ in range(20):
+        tr._twcc_next(PACKET_BYTES)
+    tr._twcc_window["opened"] -= 0.5
+    tr._twcc_process_feedback(feedback(0, 20, 0))
+    sent = tr.take_twcc_window()["sent_bps"]
+    res.check("a window reports the rate sent over it", 0.95 * 384_000 <= sent <= 384_000, sent)
     estimate = arrivals(transport(), [100.0 + i for i in range(10)] + [900.0 + i for i in range(10)], [])
     res.check("an outage inside a window is silence, not a rate: the stretches on either side measure",
               round(estimate["recv_span_s"], 6) == 0.018 and estimate["goodput_bps"] == 9_600_000, estimate)

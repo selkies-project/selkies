@@ -2753,6 +2753,8 @@ class DataStreamingServer(BaseStreamingService):
         """
         prev_enabled = display_state.get('backpressure_enabled', True)
         display_state['backpressure_enabled'] = enabled
+        if enabled != prev_enabled:
+            display_state['gate_moved_at'] = time.monotonic()
         if enabled and not prev_enabled:
             self._schedule_idr_for_display(display_id)
             _expect_key_frame(display_state)
@@ -3031,7 +3033,10 @@ class DataStreamingServer(BaseStreamingService):
         path, and a path carries at least what it just delivered unless it is
         losing capacity, which the next window then shows. Both go to the
         transports' shared `CongestionSteer`, which backs off on the first such
-        window. A display the backpressure gate holds is judged by the frames
+        window, with what the display sent over the tick, so a still screen's
+        trickle is not taken for what the path carries; a tick the gate held
+        any of goes without, since the path, not the stream, set what it sent.
+        A display the backpressure gate holds is judged by the frames
         still acked from before the gate shut, like any window, since a
         moment's delay trips the gate without a queue behind it; once none
         are, it counts as a queue of unknown depth. A window with nothing acked
@@ -3046,6 +3051,9 @@ class DataStreamingServer(BaseStreamingService):
         """
         last_tick = display_state.get('link_tick_at', 0.0)
         display_state['link_tick_at'] = now
+        sent = display_state.get('sent_bytes', 0)
+        sent_then = display_state.get('link_tick_sent', sent)
+        display_state['link_tick_sent'] = sent
         window = [a for a in display_state.get('link_acks', ()) if a[0] > last_tick]
         gated = not display_state.get('backpressure_enabled', True)
         if not window and not gated:
@@ -3084,8 +3092,11 @@ class DataStreamingServer(BaseStreamingService):
                 delivered_bps = max(delivered_bps, previous_bps)
         lo_kbps, _ = app_settings.video_bitrate
         current = self._video_bitrate_kbps(display_state)
+        held = gated or display_state.get('gate_moved_at', 0.0) > last_tick
+        offered_bps = (sent - sent_then) * 8 / (now - last_tick) if last_tick and not held else None
         steer = display_state.setdefault('link_steer', CongestionSteer())
-        rate = round(steer.target(current, target, float(lo_kbps), delivered_bps, 0.0, now, queue_s))
+        rate = round(steer.target(current, target, float(lo_kbps), delivered_bps, 0.0, now, queue_s,
+                                  offered_bps))
         display_state['link_kbps'] = rate
         if rate != round(current):
             (data_logger.info if rate < current else data_logger.debug)(

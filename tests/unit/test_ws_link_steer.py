@@ -11,7 +11,8 @@ A round trip at its floor never moves the rate, one key frame's burst does not
 either, round trips a jittering path spreads or a lossy one holds back never do,
 a gate shut on a moment's delay or frames held back a moment and delivered
 together do not either, while a queue behind an encoder running over its target
-still does; a window with nothing acked moves nothing, a page taking the
+still does; a window with nothing acked moves nothing, nor does a queue under a
+still screen's trickle unless the gate held some of it, a page taking the
 display over is measured against its own path, and whatever else applies a
 bitrate applies the steered one.
 """
@@ -50,31 +51,33 @@ server._initial_video_bitrate = 4000
 
 
 def fresh_state():
-    return {"video_bitrate": 4000, "backpressure_enabled": True, "sent_bytes": 0,
+    return {"video_bitrate": 4000, "backpressure_enabled": True, "sent_bytes": 0, "acked_bytes": 0,
             "rtt_samples": deque(maxlen=20)}
 
 
 state = fresh_state()
 
 
-def run(rtt_ms, start, seconds, delivered_kbps=None, acks=True, spike_at=None, every=1):
+def run(rtt_ms, start, seconds, delivered_kbps=None, acks=True, spike_at=None, every=1, sent_kbps=None):
     """Ack every 50 ms (every `every` x 50 ms) at `rtt_ms` with the path
-    delivering `delivered_kbps` (by default the rate in force: the stream, not
-    the path, is the limit), running the steer every half second as the
-    backpressure loop does."""
+    delivering `delivered_kbps` of the `sent_kbps` the stream sends (by default
+    both the rate in force: the stream, not the path, is the limit), running
+    the steer every half second as the backpressure loop does."""
     t = start
     step = 0.05
     n = 0
     while t < start + seconds - 1e-9:
         t = round(t + step, 3)
         n += 1
+        sending = sent_kbps if sent_kbps is not None else server._video_bitrate_kbps(state)
+        state["sent_bytes"] += sending * 125 * step
         if acks and n % every == 0:
-            rate = delivered_kbps if delivered_kbps is not None else server._video_bitrate_kbps(state)
-            state["sent_bytes"] += rate * 125 * step
+            rate = delivered_kbps if delivered_kbps is not None else sending
+            state["acked_bytes"] += rate * 125 * step
             rtt = rtt_ms(t) if callable(rtt_ms) else rtt_ms
             if spike_at is not None and abs(t - spike_at) < 1e-6:
                 rtt += 150.0
-            _note_round_trip(state, rtt, state["sent_bytes"], t)
+            _note_round_trip(state, rtt, state["acked_bytes"], t)
         if abs((t * 2) - round(t * 2)) < 1e-6:
             server._steer_bitrate_to_link("display2", state, t)
     return t
@@ -187,6 +190,21 @@ t = run(20.0, 0.0, 5)
 run(320.0, t, 0.5, delivered_kbps=1000.0)
 check("a window whose frames a stall acked late and together backs off from what the path just "
       "delivered, not from the stall's trickle", module.rates == [2200], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5, sent_kbps=40.0)
+run(320.0, t, 1, sent_kbps=40.0)
+check("a still screen's trickle moves nothing on a queue, whatever it delivered", module.rates == [],
+      module.rates)
+
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5)
+state["gate_moved_at"] = t + 0.2
+run(320.0, t, 0.5, delivered_kbps=3000.0, sent_kbps=0.0)
+check("a tick the gate held part of is not taken for a trickle: its queue backs off", module.rates == [2200],
+      module.rates)
 
 state = fresh_state()
 module.rates.clear()

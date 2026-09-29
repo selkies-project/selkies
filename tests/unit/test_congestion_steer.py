@@ -11,7 +11,8 @@ headroom of what the path delivered, lower still for the time the queue takes
 to drain; no second cut follows while that drain runs, and the target then
 settles at the headroom. A raise is slow while the path delivers near the
 capacity it showed and fast far from it, and a path that delivers clear past
-it forgets it.
+it forgets it. A queue under a stream sending a trickle of its target, which
+says nothing of the path, cuts nothing.
 """
 import os
 import sys
@@ -115,6 +116,12 @@ check("a queue with no measured delivery backs off by 30%", got == 5600, got)
 check("and holds", steer.target(5600, CEILING, FLOOR, 0.0, 0.0, 1.9, queue_s=0.0) == 5600)
 got = steer.target(200, CEILING, FLOOR, 150_000.0, 0.0, 10.0, queue_s=0.5)
 check("a queue backoff stops at the floor", got == 100, got)
+
+steer = CongestionSteer()
+got = steer.target(8000, CEILING, FLOOR, 24_000.0, 0.0, 0.0, queue_s=0.03, offered_bps=24_000.0)
+check("a queue under a stream sending a trickle of its target cuts nothing", got == 8000, got)
+got = steer.target(8000, CEILING, FLOOR, DELIVERED, 0.0, 1.0, queue_s=0.1, offered_bps=7_600_000.0)
+check("the queue under a stream sending its target backs off as before", round(got) == 3750, got)
 
 print(f"[congestion-steer] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)
