@@ -33,7 +33,6 @@ The static web client (`/`, its scripts and assets) is served without credential
 | Route | Credential |
 |---|---|
 | `/api/websockets` (WebSocket data transport) | the `selkies.token.<token, base64url without padding>` subprotocol offered beside `selkies`, which the handshake selects, or `?token=` |
-| `/api/downlink/<kind>` (a WebSocket session's audio and video, streamed to a Gecko page's socket worker) | session or master token (the Bearer header, cookie, or `?token=` the page carries); it serves only the data socket that announced the nonce it names |
 | `/api/webrtc/signaling` (WebRTC signaling) | `client_token` in the HELLO message; the in-process server peer presents the master token |
 | `/api/tokens` | master token only (`Authorization` Bearer, or the `Selkies-Authorization` fallback) |
 | `/api/switch` | session or master token (either header); viewer tokens are refused (403) |

@@ -16,11 +16,7 @@
  * row and composited there, acked from the socket worker (received id for
  * full frames, presented id for stripes) -- and carries the microphone and
  * webcam encoders' frames out over their own ports: nothing occupying the
- * page's thread can interrupt any of them. On Gecko, which delivers a worker's
- * socket through the page's thread all the same, the worker takes audio and
- * video from streamed `<route prefix>/api/downlink/<kind>` responses instead,
- * each confirmed by `DOWNLINK,<kind>,<nonce>`, `DOWNLINK,<kind>,ok`, and the
- * server's `DOWNLINK,<kind>,switch` (`SOCKET_WORKER_SRC`).
+ * page's thread can interrupt any of them.
  * Binary messages are typed by their first byte. From the server: `0x01`
  * audio (Opus, with the RED redundancy layout documented on
  * extractOpusFrames), `0x03` a JPEG stripe (`u8 reserved`, `u16 frame id`,
@@ -494,12 +490,6 @@ const BACKPRESSURE_INTERVAL_MS = 50;
 const ACK_HEARTBEAT_MS = 1000;
 /** How often the socket worker re-reports a draining send buffer. */
 const BUFFERED_DRAIN_MS = 20;
-/**
- * How long the socket worker waits for the hello of a streamed downlink before
- * leaving that kind of message on the socket: a proxy that buffers the
- * response never delivers it.
- */
-const DOWNLINK_HELLO_MS = 2000;
 /**
  * Raw bytes per clipboard chunk, before base64 expansion, and the socket
  * backlog a transfer waits below before queueing the next.
@@ -6339,22 +6329,13 @@ function initWebsockets() {
  * overtake that audio, and everything else is handed to the page unchanged.
  * Sends arrive from the page and keep their order, since one port delivers in
  * sequence. Gecko still routes a worker's WebSocket delivery through the
- * page's main thread, so a stall there would hold audio back past what the
- * playback worklet's jitter depth covers and video frames past their turn; the
- * body of a fetch the worker reads is delivered off that thread, so on Gecko
- * the worker moves audio and video onto streamed responses from the server
- * (`openDownlink`, `socketWaitsOnPage`), keeping each on the socket wherever
- * its response does not arrive promptly. Chromium and WebKit deliver both to
- * the worker alike, and keep them on the socket.
+ * page's main thread, so there a stall costs what the playback worklet's
+ * jitter depth cannot cover; Chromium and WebKit deliver to the worker
+ * directly.
  */
 const SOCKET_WORKER_SRC = `
 let ws = null, audioPort = null, audioOn = true, primary = true;
 let lastTick = 0;
-
-// Streamed downlinks (the server's _StreamDownlink), by kind: the fetch in
-// flight, and the records it delivered before the socket's switch mark, which
-// wait for it so nothing the socket carried before them is handled after them.
-const downlinks = {};
 
 // Encoded webcam frames sent while the socket was down would corrupt the
 // server's decoder as deltas; held back until a keyframe restores the chain.
@@ -6407,118 +6388,6 @@ function syncVideoAckTimer() {
     clearInterval(videoAckTimer);
     videoAckTimer = null;
   }
-}
-
-// One audio message to the decoder, or to the page when the decoder is not
-// wired to this worker.
-function takeAudio(d, at) {
-  if (audioPort && audioOn && primary) {
-    // The page still owns the AudioContext, which only it can resume, so it
-    // is told audio is arriving -- rarely, since this runs per packet.
-    const now = Date.now();
-    if (now - lastTick > 1000) { lastTick = now; self.postMessage({ type: 'audioTick' }); }
-    audioPort.postMessage({ buffer: d }, [d]);
-  } else {
-    self.postMessage({ type: 'message', data: d, at }, [d]);
-  }
-}
-
-// One video message (0x03/0x04) straight to the video worker while the page
-// diverts video there; false when it is the page's to handle.
-function takeVideo(d, at) {
-  if (!videoPort || !videoDivert || d.byteLength <= 6) return false;
-  const t = new Uint8Array(d, 0, 1)[0];
-  if (t !== 0x03 && (t !== 0x04 || d.byteLength <= 10)) return false;
-  if (videoAckSource === 'receive') {
-    const head = new Uint8Array(d, 2, 2);
-    videoLastId = (head[0] << 8) | head[1];
-    videoLastIdAt = performance.now();
-  }
-  if (at) videoPort.postMessage({ buffer: d, at }, [d]);
-  else videoPort.postMessage(d, [d]);
-  return true;
-}
-
-// Opens a streamed downlink for one kind of message: announces a nonce on the
-// socket, fetches the downlink it names, and once the hello arrives, confirms
-// it, after which the server sends that kind there, each record handed to
-// \`deliver\`, with the credentials the page's own API calls carry (\`headers\`).
-// Records are a u32 length and the message the socket would have carried; a
-// zero length is the hello or a keepalive. No hello within the timeout, or a
-// downlink that fails, leaves the kind on the socket.
-function openDownlink(kind, wsUrl, deliver, headers) {
-  const id = new Uint8Array(16);
-  crypto.getRandomValues(id);
-  const nonce = Array.from(id, (b) => b.toString(16).padStart(2, '0')).join('');
-  const url = new URL(wsUrl);
-  url.protocol = url.protocol === 'wss:' ? 'https:' : 'http:';
-  url.pathname = url.pathname.slice(0, url.pathname.lastIndexOf('/api/websockets')) + '/api/downlink/' + kind;
-  url.searchParams.set('stream', nonce);
-  const abort = new AbortController();
-  const link = { abort, switched: false, held: [], deliver };
-  downlinks[kind] = link;
-  try { ws.send('DOWNLINK,' + kind + ',' + nonce); } catch (err) { delete downlinks[kind]; return; }
-  const hello = setTimeout(() => abort.abort(), ${DOWNLINK_HELLO_MS});
-  let confirmed = false;
-  (async () => {
-    const res = await fetch(url.href, { cache: 'no-store', signal: abort.signal, headers });
-    if (!res.ok || !res.body) return;
-    const reader = res.body.getReader();
-    // Unparsed bytes as the reads delivered them, so a record spanning many
-    // reads (a key frame) is copied once, when it is whole.
-    const parts = [];
-    let have = 0;
-    const take = (n, into) => {
-      let got = 0;
-      while (got < n) {
-        const p = parts[0];
-        const k = Math.min(n - got, p.length);
-        if (into) into.set(k === p.length ? p : p.subarray(0, k), got);
-        got += k;
-        if (k === p.length) parts.shift();
-        else parts[0] = p.subarray(k);
-      }
-      have -= n;
-      return into;
-    };
-    const length = () => {
-      let n = 0, i = 0;
-      for (const p of parts) {
-        for (let j = 0; j < p.length && i < 4; j++, i++) n = n * 256 + p[j];
-        if (i === 4) break;
-      }
-      return n;
-    };
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) return;
-      parts.push(value);
-      have += value.length;
-      while (have >= 4) {
-        const n = length();
-        if (have - 4 < n) break;
-        take(4, null);
-        if (!confirmed) {
-          confirmed = true;
-          clearTimeout(hello);
-          if (!ws || ws.readyState !== 1) return;
-          ws.send('DOWNLINK,' + kind + ',ok');
-        }
-        if (n) {
-          const rec = take(n, new Uint8Array(n)).buffer;
-          if (link.switched) deliver(rec);
-          else link.held.push(rec);
-        }
-      }
-    }
-  })().catch(() => {}).finally(() => {
-    clearTimeout(hello);
-    if (downlinks[kind] !== link) return;
-    delete downlinks[kind];
-    if (confirmed && ws && ws.readyState === 1) {
-      try { ws.send('DOWNLINK,' + kind + ',off'); } catch (err) { /* onclose reports */ }
-    }
-  });
 }
 
 self.onmessage = (e) => {
@@ -6584,40 +6453,37 @@ self.onmessage = (e) => {
       return;
     }
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => {
-      self.postMessage({ type: 'open' });
-      if (m.downlinks && primary) openDownlink('audio', m.url, (rec) => takeAudio(rec, 0), m.headers || {});
-      if (m.downlinks) {
-        openDownlink('video', m.url, (rec) => {
-          const at = statsOn ? performance.timeOrigin + performance.now() : 0;
-          if (!takeVideo(rec, at)) self.postMessage({ type: 'message', data: rec, at }, [rec]);
-        }, m.headers || {});
-      }
-    };
+    ws.onopen = () => self.postMessage({ type: 'open' });
     ws.onerror = () => self.postMessage({ type: 'error' });
     ws.onclose = (ev) => {
       self.postMessage({ type: 'close', code: ev.code, reason: ev.reason, wasClean: ev.wasClean });
       ws = null;
-      for (const kind of Object.keys(downlinks)) downlinks[kind].abort.abort();
     };
     ws.onmessage = (ev) => {
       const d = ev.data;
       const at = statsOn ? performance.timeOrigin + performance.now() : 0;
       if (audioPort && audioOn && primary && d instanceof ArrayBuffer &&
           d.byteLength >= 2 && new Uint8Array(d, 0, 1)[0] === 0x01) {
-        takeAudio(d, at);
+        // The page still owns the AudioContext, which only it can resume, so it
+        // is told audio is arriving -- rarely, since this runs per packet.
+        const now = Date.now();
+        if (now - lastTick > 1000) { lastTick = now; self.postMessage({ type: 'audioTick' }); }
+        audioPort.postMessage({ buffer: d }, [d]);
         return;
       }
-      if (typeof d === 'string' && d.startsWith('DOWNLINK,') && d.endsWith(',switch')) {
-        const link = downlinks[d.slice(9, -7)];
-        if (link) {
-          link.switched = true;
-          for (const rec of link.held) link.deliver(rec);
-          link.held = [];
+      if (videoPort && videoDivert && d instanceof ArrayBuffer && d.byteLength > 6) {
+        const t = new Uint8Array(d, 0, 1)[0];
+        if (t === 0x03 || (t === 0x04 && d.byteLength > 10)) {
+          if (videoAckSource === 'receive') {
+            const head = new Uint8Array(d, 2, 2);
+            videoLastId = (head[0] << 8) | head[1];
+            videoLastIdAt = performance.now();
+          }
+          if (at) videoPort.postMessage({ buffer: d, at }, [d]);
+          else videoPort.postMessage(d, [d]);
+          return;
         }
-        return;
       }
-      if (d instanceof ArrayBuffer && takeVideo(d, at)) return;
       if (d instanceof ArrayBuffer) self.postMessage({ type: 'message', data: d, at }, [d]);
       else self.postMessage({ type: 'message', data: d });
     };
@@ -6648,10 +6514,8 @@ class WorkerWebSocket {
    *     that one takes the audio short-circuit.
    * @param {string[]} [protocols] Subprotocols the handshake offers
    *     (`sessionTokenProtocols`).
-   * @param {boolean} [downlinks] Whether the worker moves audio and video onto
-   *     streamed fetches once the socket is open (`socketWaitsOnPage`).
    */
-  constructor(url, primary, protocols = [], downlinks = false) {
+  constructor(url, primary, protocols = []) {
     this.readyState = WebSocket.CONNECTING;
     this.binaryType = 'arraybuffer';
     this.onopen = this.onmessage = this.onerror = this.onclose = null;
@@ -6692,9 +6556,7 @@ class WorkerWebSocket {
         return;
       }
     };
-    this._worker.postMessage({
-      type: 'open', url, primary, protocols, downlinks, headers: downlinks ? sessionAuthHeaders() : {},
-    });
+    this._worker.postMessage({ type: 'open', url, primary, protocols });
   }
 
   /**
@@ -7353,19 +7215,6 @@ class WorkerWebSocket {
   // Under /api like the signaling socket, so one proxy rule covers everything.
   websocketEndpointURL.pathname += 'api/websockets';
 
-  /**
-   * Whether this engine hands a worker's WebSocket messages to the worker
-   * through the page's main thread, so the socket worker moves its streams onto
-   * streamed fetches, whose bodies it reads off that thread: Gecko does,
-   * Chromium and WebKit deliver both alike (so do the iOS browsers, WebKit
-   * whatever their name). `?downlink=` overrides it.
-   * @returns {boolean}
-   */
-  const socketWaitsOnPage = () => {
-    const param = urlParams.get('downlink');
-    if (param !== null) return param.toLowerCase() === 'true';
-    return /\bGecko\/\d/.test(navigator.userAgent);
-  };
   // `?socket_worker=false` keeps the socket on the page, which is also what a
   // policy forbidding blob workers leaves; the fallback below is the same path.
   const socketWorkerParam = urlParams.get('socket_worker');
@@ -7380,8 +7229,7 @@ class WorkerWebSocket {
   const openSessionSocket = () => {
     try {
       if (!socketWorkerEnabled) throw new Error('socket_worker=false');
-      websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols,
-        socketWaitsOnPage());
+      websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols);
       if (streamStats.open) websocket.setStats(true);
     } catch (e) {
       // No worker to be had (a policy forbidding blob workers, say). The socket

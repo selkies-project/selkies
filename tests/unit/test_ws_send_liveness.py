@@ -129,7 +129,6 @@ def relay_server(ws: Socket) -> DataStreamingServer:
     server.clients = {ws}
     server.display_clients = {"primary": {"ws": ws, "sent_timestamps": OrderedDict(), "sent_bytes": 0}}
     server.video_relay_groups = {"primary": {}}
-    server._downlinks = {}
     return server
 
 
@@ -184,7 +183,6 @@ async def audio_run(slow: Socket, seconds: float) -> dict:
     server = DataStreamingServer.__new__(DataStreamingServer)
     server.clients = {fast, slow}
     server.display_clients = {}
-    server._downlinks = {}
     server.pcmflux_audio_queue = asyncio.Queue(maxsize=120)
     task = asyncio.ensure_future(server._pcmflux_send_audio_chunks())
     enqueued = []

@@ -3,8 +3,7 @@
 websockets transport (flow, audio, input, clipboard, resize, console health),
 plus a reduced WebRTC flow on Firefox (parity with the Chrome reference) and
 WebKit. Over WebSockets, video and audio reach the page and playback on every
-engine, over streamed responses on Firefox (whose worker socket waits on the
-page's thread) and over the socket elsewhere."""
+engine."""
 import os
 import sys
 import time
@@ -124,13 +123,6 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
                     res.check("audio: packets reach playback", depth > 0, depth)
                 finally:
                     H.pulse_unload(tone)
-                log = open(H.LOG, errors="replace").read()
-                streamed = "takes audio over a streamed response" in log
-                res.check("audio: over a streamed response on Firefox, over the socket elsewhere",
-                          streamed == (engine == "firefox"), streamed)
-                streamed = "takes video over a streamed response" in log
-                res.check("video: over a streamed response on Firefox, over the socket elsewhere",
-                          streamed == (engine == "firefox"), streamed)
             pressed = False
             for _ in range(4):
                 # Headless WebKit drops synthetic keydowns under load, so the whole
