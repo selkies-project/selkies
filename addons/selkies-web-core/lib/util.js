@@ -107,12 +107,14 @@ export const DISPLAY_LABELS = {
 export const displayLabel = (value) => DISPLAY_LABELS[value] ?? value;
 
 /**
- * How long an engine is given to answer a decoder probe. A decoder that stalls
- * instead of answering must not hold the session up: the answer settles one
- * setting, while a session waits on it to start. Measured answers are
- * immediate, the first in a page costing a media stack its warm-up.
+ * How long an engine is given to answer a decoder probe, and a page's first
+ * stream decoder configuration before the core's no-output watchdog counts
+ * the wait. A decoder that stalls instead of answering must not hold
+ * the session up: the answer settles one setting, while a session waits on it
+ * to start. Measured answers are immediate, the first in a page costing a
+ * media stack its warm-up.
  */
-const DECODER_PROBE_TIMEOUT_MS = 10000;
+export const DECODER_PROBE_TIMEOUT_MS = 10000;
 
 /**
  * Whether a `VideoDecoder` here accepts `codec` at `width` x `height`. False

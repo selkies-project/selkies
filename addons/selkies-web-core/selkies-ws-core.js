@@ -127,7 +127,7 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, serverAnswers } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, serverAnswers } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS,
@@ -341,6 +341,8 @@ let lastVideoOutputAt = 0;
 let lastVideoChunkAt = 0;
 let noOutputStalledSince = 0;
 const NO_OUTPUT_WATCHDOG_MS = 4000;
+/** When this page first asked the engine to take a stream decoder's configuration; 0 until then. */
+let firstConfigAskedAt = 0;
 let initializationComplete = false;
 let audioEnabled = true;
 /**
@@ -995,7 +997,10 @@ const retireCrashCountWhenHealthy = () => {
  * and a real decoder error still gets there first. A still screen sends no chunks, so it never
  * triggers, and the retry is spent once so an engine that ignores the software hint cannot loop.
  * A stream this engine has said it cannot decode produces no output by definition, and neither
- * a retry nor the reset the escalation ends in changes that, so the notice stands instead.
+ * a retry nor the reset the escalation ends in changes that, so the notice stands instead. A
+ * decoder still waiting on the engine's answer to its configuration is not silent but unfed:
+ * the page's first answer, which pays for the media stack's warm-up, gets the bound a probe
+ * does (`DECODER_PROBE_TIMEOUT_MS`) before the wait counts.
  */
 function checkVideoOutputWatchdog() {
   // A software retry that is also silent has to be able to trip this again, or the
@@ -1011,6 +1016,11 @@ function checkVideoOutputWatchdog() {
     return;
   }
   const now = performance.now();
+  if (now - firstConfigAskedAt < DECODER_PROBE_TIMEOUT_MS
+      && Object.values(vncStripeDecoders).some((info) => info && info.decoder.state === 'unconfigured')) {
+    noOutputStalledSince = 0;
+    return;
+  }
   // Chunks are still arriving, and the newest one is well ahead of the newest decoded frame:
   // the decoder is ingesting without producing. A still screen sends no fresh chunk, and a
   // healthy decoder's output keeps pace with the chunks, so neither trips this.
@@ -7820,6 +7830,7 @@ class WorkerWebSocket {
                 };
                 decoderInfo = vncStripeDecoders[vncStripeYStart];
 
+                if (!firstConfigAskedAt) firstConfigAskedAt = performance.now();
                 VideoDecoder.isConfigSupported(decoderConfig)
                     .then(support => {
                         if (support.supported) {
