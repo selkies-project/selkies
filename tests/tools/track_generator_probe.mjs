@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { createStripeClock } from '../../addons/selkies-web-core/lib/stripe-clock.js';
 import { createPresentMeter } from '../../addons/selkies-web-core/lib/present-meter.js';
+import { isSkiaWebKit } from '../../addons/selkies-web-core/lib/util.js';
 
 const TOOLS = dirname(fileURLToPath(import.meta.url));
 const WEB = join(TOOLS, '..', '..', 'addons', 'selkies-web-core');
@@ -81,7 +82,7 @@ function literal(text, name) {
 }
 
 /** Helpers a worker source splices in that its own module imports. */
-const IMPORTED = { createStripeClock, createPresentMeter };
+const IMPORTED = { createStripeClock, createPresentMeter, isSkiaWebKit };
 
 /** Module sources a worker splices in whole, by their `?raw` import name. */
 const RAW_SOURCES = {
@@ -170,7 +171,7 @@ function runWorker({ withGenerator, globals = {} }) {
         WritableStream, ReadableStream, MessageChannel,
         createImageBitmap: () => Promise.resolve({}),
         performance, setInterval: () => 0, clearInterval: () => {}, setTimeout, clearTimeout,
-        console,
+        console, navigator: { userAgent: '', platform: '' },
     };
     if (withGenerator) scope.VideoTrackGenerator = generatorStub(state);
     Object.assign(scope, globals);
