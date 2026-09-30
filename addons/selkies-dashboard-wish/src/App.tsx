@@ -8,11 +8,13 @@ import React from 'react';
 import DashboardOverlay from './components/DashboardOverlay';
 import { ThemeProvider } from './components/ui/theme-provider';
 import { UploadNotifications } from './components/dashboard/upload-notifications';
+import { TransportNotice } from './components/dashboard/transport-notice';
 import { Toaster } from 'sonner';
 
 /**
  * Root of the primary-display dashboard: the theme provider, the overlay
- * portaled into the dashboard root, upload notifications, and the toaster.
+ * portaled into the dashboard root, upload and transport notices, and the
+ * toaster.
  * @module
  */
 
@@ -27,6 +29,7 @@ function App({ dashboardRoot }: AppProps): React.ReactElement {
     <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
       <DashboardOverlay container={dashboardRoot} />
       <UploadNotifications />
+      <TransportNotice />
       <Toaster
         position="bottom-right"
         richColors

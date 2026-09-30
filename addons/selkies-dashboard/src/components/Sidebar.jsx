@@ -25,7 +25,9 @@
  * `audioDeviceSelected` (its own selection mirrored back, so the dropdowns
  * show what the core was told), `gamepadButtonUpdate` and
  * `gamepadAxisUpdate`, `fileUpload` (upload progress and every notification
- * the core raises), and `trackpadModeUpdate`.
+ * the core raises), `trackpadModeUpdate`, and `transportAdvice` (a notice
+ * offering WebSockets while WebRTC's media path keeps failing, with the
+ * switch where the mode menu would offer it).
  *
  * Messages it posts: `settings` (debounced), `pipelineControl`,
  * `gamepadControl`, `setManualResolution`, `resetResolutionToWindow`,
@@ -42,8 +44,8 @@
  * `window` state it reads: `webrtcInput.gamingMode`, `displayRefreshRate`
  * (with the `displayRefresh` message, the display's measured refresh, which the
  * frame-rate slider offers as a stop of its own),
- * `__SELKIES_STREAMING_MODE__`, and `__SELKIES_DUAL_MODE__`; it sets
- * `__selkiesModeSwitching` around a transport switch.
+ * `__SELKIES_STREAMING_MODE__`, and `__SELKIES_DUAL_MODE__`; its transport
+ * switch (`switchStreamMode`) sets `__selkiesModeSwitching`.
  *
  * Persistence: every setting lives in `localStorage` under
  * `<storageAppName>_<key>`, the keys in `PER_DISPLAY_SETTINGS` gaining a
@@ -54,8 +56,9 @@
  * @module
  */
 import { useState, useEffect, useCallback, useId, useMemo, useRef, useSyncExternalStore } from "react";
-import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
-import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
+import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
+import { withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
+import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.js";
 import { fragmentWithSessionToken, shareablePageURL, urlFragmentKeyword } from "../../../selkies-web-core/lib/page-url.js";
 import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, framerateStopIndex, stopIndex, stopsWithin, withDisplayStop } from "../../../selkies-web-core/lib/slider-stops.js";
 import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from "../../../selkies-web-core/lib/display-refresh.js";
@@ -185,6 +188,8 @@ const METADATA_FETCH_TIMEOUT_MS = 10000;
 const MAX_NOTIFICATIONS = 3;
 const NOTIFICATION_TIMEOUT_SUCCESS = 5000;
 const NOTIFICATION_TIMEOUT_ERROR = 8000;
+/** The one notice `transportAdvice` raises and withdraws. */
+const TRANSPORT_NOTICE_ID = "transport-advice";
 const NOTIFICATION_FADE_DURATION = 500;
 
 const TOUCH_GAMEPAD_HOST_DIV_ID = "touch-gamepad-host";
@@ -2511,63 +2516,13 @@ function Sidebar() {
     setTheme(newTheme);
     localStorage.setItem("theme", newTheme);
   };
-  /**
-   * Switches the transport through `/api/switch`, then posts `mode` so the
-   * core reloads into it. `window.__selkiesModeSwitching` is set before the
-   * request because the server tears down the old peer before it responds,
-   * and without the flag the active core would start recovering the
-   * connection the switch replaces, reloading on its own. The request carries this
-   * client's own session token, which a controller's is enough for; a stored
-   * master token overrides it, and where neither is accepted a 401 prompts for
-   * the master token once, keeps it in sessionStorage and retries, dropping one
-   * the server rejects so the next attempt re-prompts. A viewer is refused 403
-   * and is not asked for anything. A failed switch clears the flag again, since
-   * no reload follows and a kept flag would hide a real disconnect.
-   */
+  /** Switches the transport (`switchStreamMode`); the core reloads into it. */
   const handleStreamModeChange = async (event) => {
     const newMode = event.target.value;
     console.log("Change of stream mode requested:", newMode);
-    window.__selkiesModeSwitching = true;
-    try {
-      const MASTER_TOKEN_KEY = "selkies_master_token";
-      const doSwitch = () => {
-        const headers = sessionAuthHeaders({ "Content-Type": "application/json" });
-        let storedToken = null;
-        try { storedToken = sessionStorage.getItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ }
-        if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;
-        return fetch(`${getRoutePrefix()}/api/switch`, {
-          method: "POST",
-          headers,
-          credentials: "same-origin",
-          body: JSON.stringify({ mode: newMode }),
-        });
-      };
-      let response = await doSwitch();
-      if (response.status === 401) {
-        const entered = (typeof window !== "undefined" && window.prompt)
-          ? window.prompt("Switching the stream mode requires the Selkies master token:")
-          : null;
-        if (entered && entered.trim()) {
-          try { sessionStorage.setItem(MASTER_TOKEN_KEY, entered.trim()); } catch { /* sessionStorage unavailable */ }
-          response = await doSwitch();
-        }
-      }
-
-      if (!response.ok) {
-        if (response.status === 401) { try { sessionStorage.removeItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ } }
-        throw new Error(`Request failed with status ${response.status}`);
-      }
-      await response.json();
-      setStreamMode(newMode);
-      window.postMessage(
-        { type: "mode", mode: newMode },
-        window.location.origin
-      );
-    } catch (error) {
-        window.__selkiesModeSwitching = false;
-        console.error("Error switching stream mode:", error);
-    }
-  }
+    if (await switchStreamMode(newMode)) setStreamMode(newMode);
+  };
+  const canSwitchMode = ((renderableSettings.enableDualMode ?? window.__SELKIES_DUAL_MODE__) ?? false) && !isViewerRole;
   /** Touch gamepad toggle: `TOUCH_GAMEPAD_SETUP` on first activation, `TOUCH_GAMEPAD_VISIBILITY` afterwards. */
   const handleToggleTouchGamepad = useCallback(() => {
     const newActiveState = !isTouchGamepadActive;
@@ -2864,6 +2819,14 @@ function Sidebar() {
           if (Number.isFinite(message.value) && readStored("scaling_dpi") === null) {
             setSelectedDpi(message.value);
           }
+        } else if (message.type === "transportAdvice") {
+          setNotifications((prev) => {
+            const rest = prev.filter((n) => n.id !== TRANSPORT_NOTICE_ID);
+            return message.offer === "websockets"
+              ? [...rest, { id: TRANSPORT_NOTICE_ID, fileName: t("notifications.webrtcFailedTitle"),
+                            status: "transport", message: null, timestamp: Date.now(), fadingOut: false }]
+              : rest;
+          });
         }
       }
     };
@@ -3303,7 +3266,7 @@ function Sidebar() {
             </div>
             {sectionsOpen.settings && (
                 <div className="sidebar-section-content" id="settings-content">
-                  {((renderableSettings.enableDualMode ?? window.__SELKIES_DUAL_MODE__) ?? false) && !isViewerRole && (
+                  {canSwitchMode && (
                     <div className="dev-setting-item">
                       {" "}
                       <label htmlFor="streamModeSelect">
@@ -4636,6 +4599,24 @@ function Sidebar() {
                   <span className="notification-status-text warn-text">
                     {n.message ? n.message : t("notifications.warningPrefix")}
                   </span>{" "}
+                </>
+              )}
+              {n.status === "transport" && (
+                <>
+                  <span className="notification-status-text">
+                    {canSwitchMode ? t("notifications.webrtcFailedSwitch") : t("notifications.webrtcFailedNoSwitch")}
+                  </span>
+                  {canSwitchMode && (
+                    <button
+                      className="resolution-button notification-action notification-transport-switch"
+                      onClick={() => {
+                        removeNotification(n.id);
+                        handleStreamModeChange({ target: { value: "websockets" } });
+                      }}
+                    >
+                      {t("notifications.switchToWebsockets")}
+                    </button>
+                  )}
                 </>
               )}
               {n.status === "print" && (

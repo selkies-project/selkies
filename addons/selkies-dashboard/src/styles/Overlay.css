@@ -1392,6 +1392,10 @@ body {
     text-decoration: none;
 }
 
+.notification-transport-switch {
+    align-self: flex-start;
+}
+
 .notification-print-icon {
     flex: none;
     display: flex;

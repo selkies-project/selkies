@@ -937,6 +937,89 @@ def hidpi_default_block(dashboard: str, dist: str, mode: str = "websockets") -> 
     return res
 
 
+# Sends every server candidate the browser learns to a black hole and keeps the
+# browser's own from the server, as a network that drops UDP both ways leaves
+# the two agents: each session's checks go unanswered until the browser gives
+# it up as failed, while the signaling socket, like the page, still reaches the
+# server.
+UDP_BLACKHOLE_JS = """
+  (() => {
+    const Orig = window.RTCPeerConnection;
+    if (!Orig) return;
+    const hole = (c) => c.replace(/(candidate:\\S+ \\d+ \\S+ \\d+ )\\S+( \\d+ typ)/, (m, head, tail) => head + '192.0.2.1' + tail);
+    const setRemote = Orig.prototype.setRemoteDescription;
+    Orig.prototype.setRemoteDescription = function(desc) {
+      if (desc && desc.sdp) {
+        desc = {type: desc.type, sdp: desc.sdp.split('\\r\\n').map((l) => l.startsWith('a=candidate:') ? hole(l) : l).join('\\r\\n')};
+      }
+      return setRemote.call(this, desc);
+    };
+    const addCandidate = Orig.prototype.addIceCandidate;
+    Orig.prototype.addIceCandidate = function(c) {
+      if (c && c.candidate) c = {candidate: hole(c.candidate), sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex};
+      return addCandidate.call(this, c);
+    };
+    const handler = Object.getOwnPropertyDescriptor(Orig.prototype, 'onicecandidate');
+    Object.defineProperty(Orig.prototype, 'onicecandidate', {
+      configurable: true,
+      get() { return handler.get.call(this); },
+      set(fn) { handler.set.call(this, (e) => (e.candidate && e.candidate.candidate) ? undefined : fn(e)); },
+    });
+  })();
+"""
+
+
+def transport_advice_block(dashboard: str, dist: str, dual: bool, engine: str = "chromium") -> "H.Results":
+    """A WebRTC session whose media path fails beside a working signaling
+    socket raises a notice offering WebSockets, whichever engine gives the
+    path up. With dual mode on, its button switches the server and the page
+    comes back streaming over WebSockets; with it off, the notice has no
+    button and says who can switch."""
+    res = H.Results(f"transport-advice-{dashboard}-{'dual' if dual else 'single'}"
+                    + ("" if engine == "chromium" else f"-{engine}"))
+    H.server_start(mode="webrtc", wayland=False, web_root=dist,
+                   extra_env={"SELKIES_ENABLE_DUAL_MODE": "true" if dual else "false"})
+    if dashboard == "classic":
+        notice, button = ".notification-item.transport", ".notification-transport-switch"
+    else:
+        notice = '[data-sonner-toast]:has-text("WebRTC cannot connect")'
+        button = '[data-sonner-toast] button:has-text("Switch to WebSockets")'
+    try:
+        with sync_playwright() as p:
+            browser = C.chromium_launch(p) if engine == "chromium" else C.launch_browser(p, engine)
+            ctx = browser.new_context(viewport={"width": 1280, "height": 800})
+            ctx.add_init_script(UDP_BLACKHOLE_JS)
+            page = ctx.new_page()
+            t0 = time.time()
+            page.goto(H.BASE_URL, wait_until="load")
+            try:
+                page.wait_for_selector(notice, timeout=90000)
+                shown = True
+            except Exception:
+                shown = False
+            res.check("a failing media path raises the WebSockets notice", shown,
+                      f"after {time.time() - t0:.1f}s")
+            text = page.locator(notice).first.inner_text() if shown else ""
+            has_button = shown and page.locator(button).count() > 0
+            res.check("the notice has the switch exactly where the mode menu would",
+                      shown and has_button == dual, f"button={has_button} dual={dual}")
+            res.check("its text says what the reader can do",
+                      ("administrator" in text) != dual, text.replace("\n", " | ")[:160])
+            if dual and has_button:
+                # The switch answers, then the core reloads the page into the new mode.
+                with page.expect_navigation(wait_until="load", timeout=30000):
+                    page.locator(button).first.click()
+                ok = C.wait_ws_video(page, timeout=45) is not None
+                mode = page.evaluate("window.__SELKIES_STREAMING_MODE__ || null")
+                res.check("its switch brings the page back streaming over WebSockets",
+                          ok and mode == "websockets", f"video={ok} mode={mode}")
+            browser.close()
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
 # A preset the local density would never ask for, and the pick its own size
 # derives: the shorter side against the 1080 rows 96 DPI is for.
 DPI_PRESET = "2560x1440"
@@ -1490,6 +1573,12 @@ def main() -> None:
             blocks.append(page_socket_block("wish", H.WISH_DIST, engine))
     if which in ("all", "dpi-resolution"):
         blocks.append(dpi_for_resolution_block("classic", H.CLASSIC_DIST))
+    if which in ("all", "transport-advice"):
+        for dual in (True, False):
+            blocks.append(transport_advice_block("classic", H.CLASSIC_DIST, dual))
+            blocks.append(transport_advice_block("wish", H.WISH_DIST, dual))
+        for engine in ("firefox", "webkit"):
+            blocks.append(transport_advice_block("classic", H.CLASSIC_DIST, True, engine))
     if which in ("all", "second-screen"):
         blocks.append(second_screen_block("classic", H.CLASSIC_DIST))
         blocks.append(second_screen_block("wish", H.WISH_DIST))

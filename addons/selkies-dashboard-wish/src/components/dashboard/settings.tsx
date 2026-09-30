@@ -19,8 +19,8 @@
  * core forwards to the server), `mode`, `setScaleLocally`,
  * `setManualResolution`, `resetResolutionToWindow`, `setAntiAliasing`, and
  * whatever the shared conditional-setting specs post. The transport is seeded
- * from `window.__SELKIES_STREAMING_MODE__`, and `window.__selkiesModeSwitching`
- * is raised around a transport switch.
+ * from `window.__SELKIES_STREAMING_MODE__`, and a switch goes through the
+ * shared `switchStreamMode`.
  *
  * Every value persists under a localStorage key from `getPrefixedKey`, which
  * adds the `_display2` suffix for per-display settings on a secondary display;
@@ -37,7 +37,7 @@
 
 import { Card, CardContent } from "@/components/ui/card";
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, isMacDesktop } from "../../../../selkies-web-core/lib/util.js";
-import { sessionAuthHeaders } from "../../../../selkies-web-core/lib/session-token.js";
+import { switchStreamMode } from "../../../../selkies-web-core/lib/mode-switch.js";
 import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, framerateStopIndex, stopIndex, stopsWithin, withDisplayStop } from "../../../../selkies-web-core/lib/slider-stops.js";
 import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from "../../../../selkies-web-core/lib/display-refresh.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
@@ -57,7 +57,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { ChevronUp } from "lucide-react";
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { getPrefixedKey, getRoutePrefix, computeRenderableSettings, getLastServerSettings,
+import { getPrefixedKey, computeRenderableSettings, getLastServerSettings,
     getLastEffectiveCursorState, getLastAudioDevices, isSecondaryDisplay } from "@/utils";
 import { t, tl } from "@/i18n";
 
@@ -243,16 +243,6 @@ function settingsPoster(delay: number) {
             window.postMessage({ type: "settings", settings }, window.location.origin);
         }, delay);
     };
-}
-
-/**
- * Sets the cross-script flag the cores read around a transport switch, so the
- * old peer's teardown does not set off the core's own recovery reloads. Kept
- * outside the component: it is a signal to the runtime core, not component
- * state.
- */
-function setModeSwitching(active: boolean) {
-    window.__selkiesModeSwitching = active;
 }
 
 /**
@@ -767,58 +757,10 @@ export function Settings() {
         debouncedPostSetting({ scaling_dpi: newDpi });
     };
 
-    /**
-     * Asks the server to swap transports, then lets the core loader persist
-     * the mode and reload the page into the new stack.
-     *
-     * The request carries this client's own session token, which a controller's
-     * is enough for; a stored master token overrides it, and where neither is
-     * accepted a 401 prompts for the master token once, keeps it in
-     * sessionStorage, and retries. A viewer is refused 403 and asked nothing.
-     */
+    /** Switches the transport (`switchStreamMode`); the core reloads into it. */
     const handleStreamModeChange = async (mode: string) => {
         if (mode === streamMode) return;
-        // /api/switch tears down the old peer before responding, so the flag must
-        // precede the request or the core starts recovering the old connection.
-        setModeSwitching(true);
-        try {
-            const MASTER_TOKEN_KEY = "selkies_master_token";
-            const doSwitch = () => {
-                const headers: Record<string, string> = sessionAuthHeaders(
-                    { "Content-Type": "application/json" });
-                let storedToken: string | null = null;
-                try { storedToken = sessionStorage.getItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ }
-                if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;
-                return fetch(`${getRoutePrefix()}/api/switch`, {
-                    method: "POST",
-                    headers,
-                    credentials: "same-origin",
-                    body: JSON.stringify({ mode }),
-                });
-            };
-            let response = await doSwitch();
-            if (response.status === 401) {
-                const entered = (typeof window !== "undefined" && window.prompt)
-                    ? window.prompt("Switching the stream mode requires the Selkies master token:")
-                    : null;
-                if (entered && entered.trim()) {
-                    try { sessionStorage.setItem(MASTER_TOKEN_KEY, entered.trim()); } catch { /* sessionStorage unavailable */ }
-                    response = await doSwitch();
-                }
-            }
-            if (!response.ok) {
-                // Drop a stale token on 401 so the next attempt re-prompts.
-                if (response.status === 401) { try { sessionStorage.removeItem(MASTER_TOKEN_KEY); } catch { /* sessionStorage unavailable */ } }
-                throw new Error(`Request failed with status ${response.status}`);
-            }
-            setStreamMode(mode);
-            window.postMessage({ type: "mode", mode }, window.location.origin);
-        } catch (error) {
-            // The switch failed, so no reload follows; clear the flag or a real
-            // disconnect afterwards would be silently suppressed.
-            setModeSwitching(false);
-            console.error("Error switching stream mode:", error);
-        }
+        if (await switchStreamMode(mode)) setStreamMode(mode);
     };
 
     const handleEncoderChange = (selectedEncoder: string) => {

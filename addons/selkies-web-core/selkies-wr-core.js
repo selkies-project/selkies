@@ -71,7 +71,7 @@
  * `pipelineStatusUpdate`, `effectiveCursorState`, `scalingDpiFollowed`,
  * `serverSettings`, `clipboardContentUpdate`, `fileUpload` warnings, `trackpadModeUpdate`,
  * `clientRoleUpdate`, `displayRefresh` (the same refresh), `toggleDashboard`,
- * `toggleTouchGamepad`. The frame rate asked for follows the display's refresh
+ * `toggleTouchGamepad`, `transportAdvice`. The frame rate asked for follows the display's refresh
  * where the stored choice is `display` or where there is none
  * (`requestedStreamFramerate`). Flags read:
  * `window.__selkiesModeSwitching` (a mode switch in progress suppresses the
@@ -317,6 +317,18 @@ export default function webrtc() {
 	 */
 	const PC_FAILED_GRACE_MS = 400;
 	const PC_DISCONNECTED_GRACE_MS = 8000;
+	/**
+	 * Sessions that ended `failed` in a row while the signaling socket stayed
+	 * up, and whether one ever connected. A socket to this page's server that
+	 * works beside a media path that does not is what WebSockets streams over,
+	 * so the page's first session failing, or two in a row after one that
+	 * connected, posts `transportAdvice` offering it; a connected session
+	 * withdraws the offer.
+	 */
+	let failedSessions = 0;
+	let sessionEverConnected = false;
+	let transportAdvised = false;
+	const ADVICE_FAILED_SESSIONS = 2;
 	/**
 	 * Last stream resolution asked of the server, in physical pixels; compared
 	 * with the track's intrinsic size to detect a realized size that differs
@@ -3137,6 +3149,12 @@ export default function webrtc() {
 				videoConnected = state;
 				if (videoConnected === "connected") {
 					status = state;
+					failedSessions = 0;
+					sessionEverConnected = true;
+					if (transportAdvised) {
+						transportAdvised = false;
+						window.postMessage({ type: 'transportAdvice', offer: null }, window.location.origin);
+					}
 					try { sessionStorage.removeItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
 					entryPageTag(sessionAuthHeaders()).then((tag) => {
 						if (tag === null) return;
@@ -3154,6 +3172,16 @@ export default function webrtc() {
 					applyOutputDevice();
 				} else if (state === "failed" || state === "disconnected") {
 					if (input) input.stopRumble();
+					if (state === "failed" && !fatalConnectionHalt && signaling.state === 'connected'
+							&& !window.__selkiesModeSwitching) {
+						failedSessions++;
+						if (!transportAdvised
+								&& failedSessions >= (sessionEverConnected ? ADVICE_FAILED_SESSIONS : 1)) {
+							transportAdvised = true;
+							console.warn(`[webrtc] ${failedSessions} session(s) failed with signaling up; offering WebSockets.`);
+							window.postMessage({ type: 'transportAdvice', offer: 'websockets' }, window.location.origin);
+						}
+					}
 					if (!fatalConnectionHalt && pcRecoveryTimer === null) {
 						const graceMs = state === "failed" ? PC_FAILED_GRACE_MS : PC_DISCONNECTED_GRACE_MS;
 						pcRecoveryTimer = setTimeout(() => {
