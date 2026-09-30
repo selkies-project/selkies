@@ -1418,6 +1418,10 @@ class DataStreamingServer(BaseStreamingService):
         self.co_controllers: Dict[str, "OrderedDict[Any, Optional[str]]"] = {}
         self.video_relay_groups = {}
         self.capture_instances = {}
+        # A display's capture while its start is awaited: its module takes rate,
+        # tunable and key-frame requests meanwhile, and the settings registered
+        # once it runs carry what was applied (`_opcode_display_module`).
+        self._starting_captures: Dict[str, Dict[str, Any]] = {}
         self.display_layouts = {}
         self._persistent_capture_modules = {}
         self._wayland_ctl_module = None
@@ -1565,8 +1569,10 @@ class DataStreamingServer(BaseStreamingService):
             await self.reconfigure_displays()
 
     def _opcode_display_module(self, display_id: str) -> Optional[Any]:
-        """The display's live ScreenCapture module, or None if not capturing."""
-        inst = self.capture_instances.get(display_id)
+        """The display's ScreenCapture module, running or starting, or None if
+        not capturing: pixelflux takes rate, tunable and key-frame requests while
+        a capture starts."""
+        inst = self.capture_instances.get(display_id) or self._starting_captures.get(display_id)
         return inst.get('module') if inst else None
 
     def _track_capture_settings(self, display_id: str, fresh: Optional[Any] = None,
@@ -1581,7 +1587,7 @@ class DataStreamingServer(BaseStreamingService):
         change that skipped it would be applied to the encoder and then silently
         reverted.
         """
-        inst = self.capture_instances.get(display_id)
+        inst = self.capture_instances.get(display_id) or self._starting_captures.get(display_id)
         if inst is None:
             return
         if fresh is not None:
@@ -2606,8 +2612,7 @@ class DataStreamingServer(BaseStreamingService):
         request_idr_frame is non-blocking in pixelflux (an atomic flag or a
         channel send) and idempotent, so it runs inline on the event loop.
         """
-        instance = self.capture_instances.get(display_id)
-        module = instance.get('module') if instance else None
+        module = self._opcode_display_module(display_id)
         if module:
             try:
                 module.request_idr_frame()
@@ -2618,8 +2623,7 @@ class DataStreamingServer(BaseStreamingService):
         """Tell the display's encoder a client lost `frame_id`, so the frames after it stop
         predicting from it. Non-blocking in pixelflux, like the keyframe request; logged
         once per display per five seconds with the count of the rest."""
-        instance = self.capture_instances.get(display_id)
-        module = instance.get('module') if instance else None
+        module = self._opcode_display_module(display_id)
         if not module:
             return
         try:
@@ -6294,17 +6298,22 @@ class DataStreamingServer(BaseStreamingService):
             capture_module.set_cursor_callback(pixelflux_cursor_handler)
 
             self._framed_displays.discard(display_id)
-            await self.capture_loop.run_in_executor(
-                None,
-                capture_module.start_capture,
-                queue_data_for_display,
-                settings
-            )
+            starting = {'module': capture_module, 'settings': settings}
+            self._starting_captures[display_id] = starting
+            try:
+                await self.capture_loop.run_in_executor(
+                    None,
+                    capture_module.start_capture,
+                    queue_data_for_display,
+                    settings
+                )
+            finally:
+                self._starting_captures.pop(display_id, None)
 
             self.capture_instances[display_id] = {
                 'module': capture_module,
                 'callback': queue_data_for_display,
-                'settings': settings,
+                'settings': starting['settings'],
             }
             self.capture_loop.call_later(
                 FIRST_FRAME_WAIT_S, self._warn_if_unframed, display_id, capture_module)

@@ -25,6 +25,7 @@ SUITES: list = [
     {"path": "unit/test_input_interposer_signals.py", "tier": "unit", "timeout": 180},
     {"path": "unit/test_uinput_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gamepad_authority.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_ws_capture_starting.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_mode_switch_teardown.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_metrics_reregister.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gpu_probe_facts.py", "tier": "unit", "timeout": 120},
