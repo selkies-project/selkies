@@ -202,7 +202,8 @@ def run(mode: str, wayland: bool) -> bool:
                          "wmctrl not installed; cannot list X11 windows")
             elif (desktop := desktop_window()) is None:
                 res.skip("desktop window covers the layout",
-                         "no X11 desktop window (a native Wayland session has none)")
+                         "a native Wayland session has no X11 desktop window" if wayland
+                         else "no pcmanfm-qt desktop window runs on this display")
             else:
                 x, y, w, h = desktop
                 root_w, root_h = H.x_root_size()
