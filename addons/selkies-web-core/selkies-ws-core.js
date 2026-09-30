@@ -619,9 +619,9 @@ let lastFollowedDpr = window.devicePixelRatio || 1;
 /**
  * Follows a live devicePixelRatio change while `scaling_dpi` sits on its
  * automatic default, re-deriving and pushing it so the remote UI density
- * matches the display the window is on. Called from both the resize handler
- * and the matchMedia density watcher: an OS scaling change can surface as
- * either, and emulated density changes fire only the resize.
+ * matches the display the window is on. Called from the resize handler and
+ * the density watcher: an OS scaling change can surface as either, and an
+ * emulated one as neither, which only the watcher's poll sees.
  * @returns {void}
  */
 function maybeFollowDpr() {
@@ -4755,7 +4755,7 @@ const initializeInput = () => {
     arm();
     // An emulated density change fires neither the query nor a resize;
     // a slow poll of the live value catches those too.
-    setInterval(maybeFollowDpr, 1000);
+    setInterval(() => { if ((window.devicePixelRatio || 1) !== lastFollowedDpr) onDprChange(); }, 1000);
   };
   watchDevicePixelRatio();
 

@@ -6,7 +6,8 @@ manual preset is requested as exact framebuffer pixels and shown, with "scale
 locally" off, at one stream pixel per device pixel, reset-to-window returns to
 the physical window size, and turning "scale locally" on in auto mode leaves
 the window-resize listener armed. The WebRTC video is drawn nearest-sampled
-exactly while it is shown 1:1, and smoothed once scaled to fit. HiDPI: the
+exactly while it is shown 1:1, and smoothed once scaled to fit. A pixel ratio
+changed through DevTools emulation re-requests the stream at it. HiDPI: the
 flag either streams physical pixels and scales the desktop, or leaves the
 desktop unscaled and divides the request by the UI-scaling pick for the
 browser to stretch back — never both. Clipboard: a server with the clipboard
@@ -360,6 +361,29 @@ def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
               root_matches(realized, RESIZED_W * DPR, RESIZED_H * DPR), f"root={realized}")
 
 
+def emulated_density_block(page: Any, mode: str, res: "H.Results") -> None:
+    """A pixel ratio changed through DevTools emulation re-requests the stream
+    at the new density, as a real display change does, and changing it back
+    restores the physical size. Such a change fires no resize and, in
+    Chromium, no resolution media query, so only the page's poll of the live
+    value sees it."""
+    cdp = page.context.new_cdp_session(page)
+    events = page.evaluate("""(() => { window.__dprEvents = [];
+      addEventListener('resize', () => __dprEvents.push('resize'));
+      matchMedia(`(resolution: ${devicePixelRatio}dppx)`).addEventListener('change', () => __dprEvents.push('query'));
+      return true; })()""")
+    for dsf, want in ((1, f"{RESIZED_W}x{RESIZED_H}"), (DPR, f"{RESIZED_W * DPR}x{RESIZED_H * DPR}")):
+        seen = len(page.evaluate("window.__resSent"))
+        cdp.send("Emulation.setDeviceMetricsOverride",
+                 {"width": RESIZED_W, "height": RESIZED_H, "deviceScaleFactor": dsf, "mobile": False})
+        sent = wait_new_request(page, seen)
+        fired = page.evaluate("window.__dprEvents.splice(0)") if events else None
+        res.check(f"an emulated pixel ratio of {dsf} re-requests the stream at it",
+                  len(sent) > seen and sent[-1] == want, f"{sent[seen:]} want {want}; events {fired}")
+    # Left attached at the context's own metrics: detaching drops the override,
+    # and the page with it to the bare window's size.
+
+
 def hidpi_block(page: Any, mode: str, res: "H.Results") -> None:
     """The HiDPI flag decides one thing, on either transport.
 
@@ -564,6 +588,7 @@ def run(mode: str) -> bool:
                 res.check("video flowing", bool(wait_video(page, mode)))
                 time.sleep(1.0)
                 resolution_block(page, mode, res)
+                emulated_density_block(page, mode, res)
                 hidpi_block(page, mode, res)
                 clipboard_enabled_block(page, res)
                 soft_keyboard_block(page, res)
