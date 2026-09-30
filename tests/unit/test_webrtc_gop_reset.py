@@ -129,8 +129,8 @@ async def sender_repairs() -> None:
     nack = lambda *lost: RtcpRtpfbPacket(fmt=RTCP_RTPFB_NACK, ssrc=1, media_ssrc=2, lost=list(lost))
 
     await RTCRtpSender._handle_rtcp_packet(sender, nack(1, 2))
-    res.check("repairs the pacer takes leave nothing abandoned",
-              len(wire) == 2 and sender._RTCRtpSender__abandoned is None, (len(wire), sender._RTCRtpSender__abandoned))
+    res.check("repairs the pacer takes leave nothing abandoned, a first NACK's each sent twice",
+              len(wire) == 4 and sender._RTCRtpSender__abandoned is None, (len(wire), sender._RTCRtpSender__abandoned))
     refusals[:] = [False, True, False]
     wire.clear()
     await RTCRtpSender._handle_rtcp_packet(sender, nack(1, 2, 3, 4, 5))
@@ -148,7 +148,7 @@ async def sender_repairs() -> None:
     sender._RTCRtpSender__last_sequence = 7
     await RTCRtpSender._handle_rtcp_packet(sender, nack(5, 7))
     res.check("a packet sent after the abandonment is repaired as before",
-              len(wire) == 1 and events == [], (len(wire), events))
+              len(wire) == 2 and events == [], (len(wire), events))
     sender._RTCRtpSender__abandoned = 65535
     wire.clear()
     await RTCRtpSender._handle_rtcp_packet(sender, nack(7))

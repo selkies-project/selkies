@@ -466,6 +466,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         and self.__rtp_history.unrepaired(seq, time.time(), self.__rtt or 0.0))
                 if not await self._retransmit(sent):
                     break
+                # A first repair goes out twice, back to back: lost with the original, it would
+                # cost the frame a second NACK a round trip later and a prediction past it.
+                if times == 1 and not await self._retransmit(sent):
+                    break
                 self.__rtp_history.repaired(seq, time.time() + self.transport._send_delay())
                 if lost and self.__rtp_history.newly_lost(frame, time.time()):
                     self.emit("lost_frame", frame)

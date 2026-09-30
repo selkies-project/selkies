@@ -5,15 +5,14 @@ The RTP sender writes the dependency descriptor the AV1 RTP specification
 defines on every packet of a stream whose encoder names what each frame
 predicts from: the frame's number, its edges, and how far back it predicts,
 with the dependency structure on a key frame's first packet. The bytes are
-read back with a reader built to libwebrtc's. A second NACK for one packet
-says the retransmission was lost too, once it and any FlexFEC repair of the
-packet had a round trip to arrive, and the sender then names the frame lost,
-once however often the peer NACKs its packets again, and the engine routes
-that to the encoder of the peer's own display. The
-websockets relay is
-left as it was: it drops seconds of backlog at a time, which no reference
-window reaches back over, so it still skips ahead to a keyframe. Driven with
-stand-ins; no peer.
+read back with a reader built to libwebrtc's. A first NACK is answered with
+the packet twice, back to back. A second NACK for one packet says the
+retransmission was lost too, once it and any FlexFEC repair of the packet had
+a round trip to arrive, and the sender then names the frame lost, once however
+often the peer NACKs its packets again, and the engine routes that to the
+encoder of the peer's own display. The websockets relay is left as it was: it
+drops seconds of backlog at a time, which no reference window reaches back
+over, so it still skips ahead to a keyframe. Driven with stand-ins; no peer.
 """
 import asyncio
 import os
@@ -215,16 +214,17 @@ async def nacks() -> None:
                                emit=lambda name, *args: events.append((name,) + args))
     nack = lambda *lost: RtcpRtpfbPacket(fmt=RTCP_RTPFB_NACK, ssrc=1, media_ssrc=2, lost=list(lost))
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(2, 3))
-    res.check("a first NACK is answered with the packets alone", sent == [2, 3] and not events, (sent, events))
+    res.check("a first NACK is answered with each packet twice and nothing else",
+              sent == [2, 2, 3, 3] and not events, (sent, events))
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(2))
-    res.check("a second NACK for a packet names its frame lost, and retransmits again",
-              sent == [2, 3, 2] and events == [("lost_frame", 10)], (sent, events))
+    res.check("a second NACK for a packet names its frame lost, and retransmits it once",
+              sent == [2, 2, 3, 3, 2] and events == [("lost_frame", 10)], (sent, events))
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(1, 3))
     res.check("one NACK names each lost frame once, and only frames NACKed twice",
-              events == [("lost_frame", 10), ("lost_frame", 11)] and sent == [2, 3, 2, 1, 3], events)
+              events == [("lost_frame", 10), ("lost_frame", 11)] and sent == [2, 2, 3, 3, 2, 1, 1, 3], events)
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(99, 3))
     res.check("a NACK past the history asks for a keyframe and still repairs the rest",
-              events[-1] == "pli" and sent == [2, 3, 2, 1, 3, 3], (events, sent))
+              events[-1] == "pli" and sent == [2, 2, 3, 3, 2, 1, 1, 3, 3], (events, sent))
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(2, 1))
     res.check("a frame is named lost once: a packet NACKed again, or another of its packets NACKed twice, "
               "is only repaired", events == [("lost_frame", 10), ("lost_frame", 11), "pli"]
@@ -241,7 +241,7 @@ async def nacks() -> None:
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(6))
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(6))
     res.check("a NACK sent before the retransmission had a round trip to arrive names nothing",
-              ("lost_frame", 12) not in events and sent[-2:] == [6, 6], (events, sent))
+              ("lost_frame", 12) not in events and sent[-3:] == [6, 6, 6], (events, sent))
     history._packets[6][3] -= 0.1
     history.repaired(6, time.time())
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(6))
