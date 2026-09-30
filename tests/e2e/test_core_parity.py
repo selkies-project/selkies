@@ -41,6 +41,8 @@ SELECTORS = ("webrtc", "websockets")
 VIEW_W, VIEW_H = 1000, 700
 DPR = 2
 PRESET_W, PRESET_H = 1280, 720
+# A size X11's modes round up (to 8-pixel cells), which the stream still carries exactly.
+ODD_W, ODD_H = 1278, 712
 RESIZED_W, RESIZED_H = 1100, 680
 # A manual resolution the local density would never ask for, and the pick it
 # derives: its shorter side against the 1080 rows 96 DPI is for. Neither 96 nor
@@ -240,6 +242,23 @@ def sink_box(page: Any, mode: str) -> Optional[dict]:
     }})()""")
 
 
+def stream_size(page: Any, mode: str, want: tuple, timeout: float = 15) -> Optional[tuple]:
+    """The stream's own pixel size, polled until it is `want` or time runs out:
+    the WebRTC video's intrinsic size, or the websockets canvas's."""
+    probe = ("(() => { const v = document.getElementById('stream'); return v ? [v.videoWidth, v.videoHeight] : null; })()"
+             if mode == "webrtc" else
+             "(() => { const c = document.getElementById('videoCanvas'); return c ? [c.width, c.height] : null; })()")
+    deadline = time.time() + timeout
+    size = None
+    while time.time() < deadline:
+        got = page.evaluate(probe)
+        size = tuple(got) if got else None
+        if size == want:
+            break
+        time.sleep(0.3)
+    return size
+
+
 def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
     """Auto -> preset -> exact box -> reset -> scale-locally + resize, at dpr 2."""
     phys_w, phys_h = VIEW_W * DPR, VIEW_H * DPR
@@ -277,6 +296,15 @@ def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
               f"{off_box} after HiDPI off, {box} before")
     post(page, {"type": "setUseCssScaling", "value": False})
     time.sleep(0.3)
+    sent = page.evaluate("window.__resSent")
+
+    seen = len(sent)
+    post(page, {"type": "setManualResolution", "width": ODD_W, "height": ODD_H})
+    wait_new_request(page, seen)
+    realized = wait_root(ODD_W, ODD_H)
+    size = stream_size(page, mode, (ODD_W, ODD_H))
+    res.check("a size the mode rounds up streams at the size asked for",
+              size == (ODD_W, ODD_H), f"stream {size}, root {realized}")
     sent = page.evaluate("window.__resSent")
 
     seen = len(sent)

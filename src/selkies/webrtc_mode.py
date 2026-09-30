@@ -1042,22 +1042,32 @@ class WebRTCService(BaseStreamingService):
                     )
                 else:
                     logger.debug(f"resize_display('{target_w}x{target_h}') reported success")
-                # A zero-size region re-reads the live root now and keeps root-follow;
-                # the auto-adjust poll trails ~30 frames, leaving new bands out of frame.
-                capture_module = getattr(self.media_pipeline, "capture_module", None)
-                if capture_module is not None:
-                    try:
-                        await asyncio.to_thread(
-                            capture_module.update_capture_region, 0, 0, 0, 0
-                        )
-                    except Exception as e:
-                        logger.warning(f"Capture re-follow after resize failed: {e}")
-                self.media_pipeline.width = realized_w
-                self.media_pipeline.height = realized_h
+                if (realized_w, realized_h) != (target_w, target_h) and (
+                        realized_w >= target_w and realized_h >= target_h):
+                    # A mode rounded past the request (RandR's 8-pixel cells) streams the
+                    # requested size from its origin, as WebSockets does, so the page draws
+                    # it 1:1 rather than scaled down by the rounding.
+                    await self.media_pipeline.update_capture_region(0, 0, target_w, target_h)
+                    stream_w, stream_h = target_w, target_h
+                else:
+                    self.media_pipeline.capture_region = None
+                    # A zero-size region re-reads the live root now and keeps root-follow;
+                    # the auto-adjust poll trails ~30 frames, leaving new bands out of frame.
+                    capture_module = getattr(self.media_pipeline, "capture_module", None)
+                    if capture_module is not None:
+                        try:
+                            await asyncio.to_thread(
+                                capture_module.update_capture_region, 0, 0, 0, 0
+                            )
+                        except Exception as e:
+                            logger.warning(f"Capture re-follow after resize failed: {e}")
+                    stream_w, stream_h = realized_w, realized_h
+                self.media_pipeline.width = stream_w
+                self.media_pipeline.height = stream_h
                 self.media_pipeline.last_resize_success = True
                 self._last_resize_request = (target_w, target_h)
                 if self.rtc_app is not None:
-                    self.rtc_app.send_remote_resolution(f"{realized_w}x{realized_h}", "primary")
+                    self.rtc_app.send_remote_resolution(f"{stream_w}x{stream_h}", "primary")
             else:
                 logger.error(
                     f"resize_display('{target_w}x{target_h}') reported failure"
