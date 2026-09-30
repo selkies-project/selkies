@@ -1429,11 +1429,55 @@ function storeEncoderPick(pick) {
     window.sessionStorage.removeItem(FALLBACK_TAB_KEY);
   } catch (e) { /* storage unavailable */ }
 }
+/**
+ * The settings the crash ladder resets, with their safe values (null clears
+ * the setting). They are held for the crashing tab the way the encoder
+ * fallback is: each safe value is stored where the pick is, the pick kept
+ * under `<key>_pick` (empty for none), and any other tab or later visit puts
+ * the picks back. A setting the user picks again in that tab is theirs, which
+ * ends its hold (`releaseCrashSafeSettings`).
+ */
+const CRASH_SAFE_SETTINGS = {
+  video_fullcolor: 'false', framerate: '60', video_crf: '25',
+  manual_resolution: 'false', manual_width: null, manual_height: null,
+};
+/** Stores the crash ladder's safe values for this tab, keeping the picks they replace. */
+function holdCrashSafeSettings() {
+  try {
+    for (const [name, value] of Object.entries(CRASH_SAFE_SETTINGS)) {
+      const key = prefixedStorageKey(name);
+      if (window.localStorage.getItem(`${key}_pick`) === null) {
+        safeSetItem(`${key}_pick`, window.localStorage.getItem(key) ?? '');
+      }
+      if (value === null) window.localStorage.removeItem(key);
+      else safeSetItem(key, value);
+    }
+    window.sessionStorage.setItem(FALLBACK_TAB_KEY, '1');
+  } catch (e) { /* storage unavailable */ }
+}
+/** Ends the hold of each held setting in `names`: the user picked it. */
+function releaseCrashSafeSettings(names) {
+  try {
+    for (const name of names) {
+      if (name in CRASH_SAFE_SETTINGS) window.localStorage.removeItem(`${prefixedStorageKey(name)}_pick`);
+    }
+  } catch (e) { /* storage unavailable */ }
+}
 try {
   const pick = window.localStorage.getItem(ENCODER_PICK_KEY);
   if (pick !== null && window.sessionStorage.getItem(FALLBACK_TAB_KEY) === null) {
     setStringParam('encoder', pick || null);
     window.localStorage.removeItem(ENCODER_PICK_KEY);
+  }
+  if (window.sessionStorage.getItem(FALLBACK_TAB_KEY) === null) {
+    for (const name of Object.keys(CRASH_SAFE_SETTINGS)) {
+      const key = prefixedStorageKey(name);
+      const held = window.localStorage.getItem(`${key}_pick`);
+      if (held === null) continue;
+      if (held === '') window.localStorage.removeItem(key);
+      else safeSetItem(key, held);
+      window.localStorage.removeItem(`${key}_pick`);
+    }
   }
 } catch (e) { /* storage unavailable */ }
 /**
@@ -5152,6 +5196,7 @@ function receiveMessage(event) {
       manual_width = alignResolution(width);
       manual_height = alignResolution(height);
       console.log(`Rounded logical resolution to even numbers: ${manual_width}x${manual_height}`);
+      releaseCrashSafeSettings(['manual_resolution', 'manual_width', 'manual_height']);
       setIntParam('manual_width', manual_width);
       setIntParam('manual_height', manual_height);
       setBoolParam('manual_resolution', true);
@@ -5179,6 +5224,7 @@ function receiveMessage(event) {
       window.manual_resolution = false;
       manual_width = null;
       manual_height = null;
+      releaseCrashSafeSettings(['manual_resolution', 'manual_width', 'manual_height']);
       setIntParam('manual_width', null);
       setIntParam('manual_height', null);
       setBoolParam('manual_resolution', false);
@@ -5599,6 +5645,7 @@ function handleSettingsMessage(settings, fromServer) {
   const storeInt = fromServer ? () => {} : setIntParam;
   const storeBool = fromServer ? () => {} : setBoolParam;
   const storeString = fromServer ? () => {} : setStringParam;
+  if (!fromServer) releaseCrashSafeSettings(Object.keys(settings));
   console.log('Applying settings:', settings);
   let settingsChanged = false;
   if (settings.framerate !== undefined) {
@@ -9804,9 +9851,9 @@ function restartDecodersForAcceleration() {
  * error retries the same encoder on software decode; errors from the decoders
  * that switch replaced are absorbed for a settle period. A failure after that
  * forgets the preference, counts a crash, and reloads: a shared viewer just
- * resyncs, a controller resets its settings to safe defaults, stepping the
- * encoder down for its tab (`storeFallbackEncoder`) to h264enc and, at three
- * crashes, to jpeg. jpeg mode runs no VideoDecoder, so an error there is
+ * resyncs, a controller resets its settings to safe defaults for its tab
+ * (`holdCrashSafeSettings`), stepping the encoder down for the tab too
+ * (`storeFallbackEncoder`) to h264enc and, at three crashes, to jpeg. jpeg mode runs no VideoDecoder, so an error there is
  * handover noise from a stream the server has yet to stop and never escalates.
  * @param {Error|DOMException} error
  * @param {string} context Which decoder failed.
@@ -9876,13 +9923,7 @@ function initiateFallback(error, context) {
             // WebCodecs claims H.264 support but fails at decode().
             safeSetItem(CRASH_COUNT_KEY, '0');
         }
-        setBoolParam('video_fullcolor', false);
-        setIntParam('framerate', 60);
-        setIntParam('video_crf', 25);
-        setBoolParam('manual_resolution', false);
-        setIntParam('manual_width', null);
-        setIntParam('manual_height', null);
-        
+        holdCrashSafeSettings();
         if (statusDisplayElement) {
             statusDisplayElement.textContent = 'A critical video error occurred. Resetting to default settings and reloading...';
             statusDisplayElement.classList.remove('hidden');

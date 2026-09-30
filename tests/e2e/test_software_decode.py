@@ -15,9 +15,12 @@ the dashboard offers it nothing else.
 
 The ``cleared`` and ``broken`` blocks follow the ladder's JPEG past its tab: a fault that
 clears gives a new tab its video back, and one that stays takes it to JPEG at its first crash.
+The ``held`` block follows the settings a crash resets the same way: the user's own come back
+in a new tab, and one picked again in the crashing tab stays picked.
 
-Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|all]
+Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|held|all]
 """
+import json
 import os
 import sys
 import time
@@ -444,6 +447,68 @@ def block_cleared(r: "H.Results") -> None:
         H.server_stop()
 
 
+PICKS = {"framerate": "120", "video_crf": "18", "manual_resolution": "true",
+         "manual_width": "1280", "manual_height": "720"}
+STORAGE_PREFIX_JS = "(location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_')"
+SEED_PICKS_JS = """(() => {
+  if (sessionStorage.getItem('__picked')) return;
+  sessionStorage.setItem('__picked', '1');
+  const prefix = %s;
+  for (const [k, v] of Object.entries(%s)) localStorage.setItem(prefix + '_' + k, v);
+})();""" % (STORAGE_PREFIX_JS, json.dumps(PICKS))
+READ_PICKS_JS = """(() => {
+  const prefix = %s, out = {};
+  for (const k of %s) out[k] = localStorage.getItem(prefix + '_' + k);
+  return out;
+})()""" % (STORAGE_PREFIX_JS, json.dumps(list(PICKS)))
+
+
+def block_held(r: "H.Results") -> None:
+    """A crash's safe settings hold for the crashing tab alone. With the user's frame rate,
+    quality and manual size stored, every decoder fails for the tab's first load: it reloads
+    on the ladder's safe values, a quality picked again there stays picked, and a new tab of
+    the profile has the rest of the user's settings back."""
+    from playwright.sync_api import sync_playwright
+    H.server_start(mode="websockets")
+    try:
+        with sync_playwright() as pw:
+            browser = C.chromium_launch(pw)
+            try:
+                ctx = browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
+                ctx.add_init_script(NAV_JS)
+                ctx.add_init_script(SEED_PICKS_JS)
+                ctx.add_init_script(shim_js("all", loads=1))
+                page = ctx.new_page()
+                page.goto(H.BASE_URL + "/?offscreen_worker=false", wait_until="load")
+                state = wait_for(page, lambda s: s["navs"] >= 2 and s["codec"] is not None, timeout=60)
+                r.check("the crash reloads the tab", state["navs"] >= 2, {"navs": state["navs"]})
+                held = page.evaluate(READ_PICKS_JS)
+                r.check("on the ladder's safe values", held == {"framerate": "60", "video_crf": "25",
+                        "manual_resolution": "false", "manual_width": None, "manual_height": None}, held)
+                page.evaluate("window.postMessage({type: 'settings', settings: {video_crf: 30}}, window.location.origin)")
+                time.sleep(1)
+                storage = ctx.storage_state()
+                ctx.close()
+                # A fresh server, so what the new tab streams comes from its own storage.
+                H.server_start(mode="websockets")
+                fresh = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
+                                            device_scale_factor=1)
+                fresh.add_init_script(NAV_JS)
+                page = fresh.new_page()
+                page.goto(H.BASE_URL + "/?offscreen_worker=false", wait_until="load")
+                wait_for(page, lambda s: s["codec"] is not None)
+                picks = page.evaluate(READ_PICKS_JS)
+                r.check("a new tab has the user's frame rate and manual size back",
+                        {k: picks[k] for k in ("framerate", "manual_resolution", "manual_width", "manual_height")}
+                        == {k: PICKS[k] for k in ("framerate", "manual_resolution", "manual_width", "manual_height")},
+                        picks)
+                r.check("and the quality picked again in the crashing tab", picks["video_crf"] == "30", picks)
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+
+
 def block_broken(r: "H.Results") -> None:
     """Every decoder fails at decode() on every load of every tab: the crash ladder still ends
     on JPEG and stays there, and a new tab of the profile, the fault still there, takes JPEG
@@ -517,7 +582,7 @@ BLOCKS = {"retry": block_retry, "persisted": block_persisted,
           "ladder": block_ladder, "healthy": block_healthy,
           "silent": block_silent,
           "striped": block_striped, "nowebcodecs": block_nowebcodecs,
-          "cleared": block_cleared, "broken": block_broken}
+          "cleared": block_cleared, "broken": block_broken, "held": block_held}
 
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
