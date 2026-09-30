@@ -2181,6 +2181,12 @@ export class Input {
                 }
                 // Held on Command's code, whose state _releaseDesyncedModifiers reads for it.
                 this._sendKeyEvent(KeyTable.XK_Control_L, command, true);
+            } else {
+                // Command went down before the page had the keyboard (held through
+                // Cmd+Tab back to it): it stands for Control from this chord on, held
+                // on the left Command's code for its keyup, or the next event showing
+                // it up, to release.
+                this._sendKeyEvent(KeyTable.XK_Control_L, "MetaLeft", true);
             }
         }
 
