@@ -6,8 +6,8 @@ header, shorter packets padded with zeros to the longest, and the recovery
 fields fold in the header bits, the lengths, and the timestamps. The builder
 is checked against a plain byte loop over packets of unequal lengths, several
 interleaved repairs against the receiver's one-missing-at-a-time recovery,
-the repair density against the loss it follows, and the NTP clock against the
-datetime it replaced.
+the repair density against the loss it follows, the repairs a group gets
+against its packets, the loss, and the queue, and the NTP clock against the datetime it replaced.
 """
 import os
 import random
@@ -133,16 +133,53 @@ def main() -> int:
     res.check("one repair recovers a single loss",
               recover(one, {seq: pkt for seq, pkt in ((100 + i, p) for i, p in enumerate(group)) if seq != 107}) == {107: group[7]})
 
-    # The density steer is a method over two attributes, driven here on a
+    # The density steer is a method over a few attributes, driven here on a
     # stand-in for a sender, which needs a transport to be built.
     from selkies.webrtc.rtcrtpsender import RTCRtpSender
-    stand_in = types.SimpleNamespace(_fec_loss=0.0, fec_repair_packets=1)
+    stand_in = types.SimpleNamespace(_fec_loss=0.0, _fec_clear_loss=0.0, _fec_clear=0,
+                                     fec_repair_packets=1, _fec_full=False)
     steps = []
     for loss in (0.0, 0.0, 0.03, 0.03, 0.03, 0.03, 0.15, 0.15, 0.15, 0.15, 0.15, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0):
         RTCRtpSender.steer_fec(stand_in, loss)
         steps.append(stand_in.fec_repair_packets)
     res.check("no loss keeps one repair; a few windows past 2% add a second and past 8% a third; a clean spell takes them back",
               steps[:2] == [1, 1] and 2 in steps[2:6] and steps[10] == 3 and steps[-1] == 1, steps)
+
+    # With nothing lost, or a queue standing, a group's repairs are the density's
+    # share of its media packets, what a group falls short of carried on, so a
+    # stream of one-packet frames pays the density and not a repair per packet;
+    # loss with no queue gives every group its repairs.
+    def repairs(density: int, groups: list, full: bool = False) -> list:
+        sender = types.SimpleNamespace(_fec_credit=0, fec_repair_packets=density, _fec_full=full)
+        return [RTCRtpSender._fec_repairs(sender, n) for n in groups]
+    lone = {d: sum(repairs(d, [1] * 100)) for d in (1, 2, 3)}
+    res.check("a hundred one-packet frames take 10, 20 or 30 repairs at the three densities",
+              lone == {1: 10, 2: 20, 3: 30}, lone)
+    res.check("and one each where every group is repaired",
+              sum(repairs(2, [1] * 100, full=True)) == 100)
+    full = repairs(2, [10] * 5)
+    res.check("a full group of ten takes the density's repairs either way",
+              full == [2] * 5 and repairs(2, [10] * 5, full=True) == [2] * 5, full)
+    mixed = repairs(3, [2, 1, 10, 1, 2, 2])
+    res.check("no group takes more repairs than it has packets, and the share holds over them",
+              all(r <= n for r, n in zip(mixed, [2, 1, 10, 1, 2, 2])) and sum(mixed) == 5, mixed)
+
+    def repaired(windows: list) -> list:
+        sender = types.SimpleNamespace(_fec_loss=0.0, _fec_clear_loss=0.0, _fec_clear=0,
+                                       fec_repair_packets=1, _fec_full=False)
+        out = []
+        for loss, queued in windows:
+            RTCRtpSender.steer_fec(sender, loss, queued)
+            out.append(sender._fec_full)
+        return out
+    clear = repaired([(0.01, False)] * 8)
+    res.check("random loss with no queue repairs every group, once windows clear of a queue read it",
+              not any(clear[:3]) and all(clear[4:]), clear)
+    overflow = repaired([(0.0, True), (0.05, True), (0.05, False), (0.02, False), (0.0, False), (0.0, False)] * 3)
+    res.check("a queue's overflow, in its windows and the ones just after, never does", not any(overflow), overflow)
+    queued = repaired([(0.01, False)] * 6 + [(0.01, True)] * 2 + [(0.0, False)] * 14)
+    res.check("a standing queue goes back to the share at once, and a clean spell after it too",
+              all(queued[4:6]) and not any(queued[6:8]) and not queued[-1], queued)
 
     a = clock.datetime_to_ntp(clock.current_datetime())
     b = clock.current_ntp_time()

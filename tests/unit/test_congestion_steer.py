@@ -122,6 +122,10 @@ got = steer.target(8000, CEILING, FLOOR, 24_000.0, 0.0, 0.0, queue_s=0.03, offer
 check("a queue under a stream sending a trickle of its target cuts nothing", got == 8000, got)
 got = steer.target(8000, CEILING, FLOOR, DELIVERED, 0.0, 1.0, queue_s=0.1, offered_bps=7_600_000.0)
 check("the queue under a stream sending its target backs off as before", round(got) == 3750, got)
+steer = CongestionSteer()
+got = steer.target(8000, CEILING, FLOOR, 733_000.0, 0.25, 0.0, queue_s=0.48, offered_bps=1_083_000.0)
+check("a queue under a stream offering the path more than it delivers backs off, though the stream offers under half its target",
+      got < 733, got)
 
 print(f"[congestion-steer] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

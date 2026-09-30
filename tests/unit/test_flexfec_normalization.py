@@ -162,6 +162,9 @@ async def run_sender(fec_enabled: bool) -> tuple:
     sender._RTCRtpSender__send_codec = RTCRtpCodecParameters(
         mimeType="video/H264", clockRate=90000, payloadType=96)
     sender._RTCRtpSender__fec_payload_type = 118 if fec_enabled else None
+    # Every group repaired, as a path losing packets with no queue has it; a clean
+    # path's frame of two packets takes a share of a repair (`_fec_repairs`).
+    sender._fec_full = fec_enabled
     frame = RTCEncodedFrame([b"\x7c\x81" + b"a" * 128, b"\x7c\x41" + b"b" * 128], 0, None)
     sender._next_encoded_frame = AsyncMock(side_effect=[frame, MediaStreamError()])
     with patch("selkies.webrtc.rtcrtpsender.video_timing_legs", return_value=(1, 3, 5, 7, 2, 0, 0)):

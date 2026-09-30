@@ -96,6 +96,13 @@ RRTR_REPORTERS_MAX = 50
 # consent would keep the stream going to it for half a minute.
 PEER_SILENCE_S = 10.0
 
+# Media packets per FlexFEC group at most; a group also closes with its frame.
+FEC_GROUP_PACKETS = 10
+# Smoothed loss past which every FlexFEC group takes its repairs, read on windows no queue
+# stood in for FEC_CLEAR_WINDOWS before them, so a queue's own overflow never counts.
+FEC_FULL_LOSS = 0.002
+FEC_CLEAR_WINDOWS = 3
+
 
 def random_sequence_number() -> int:
     """
@@ -227,6 +234,14 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # loss `steer_fec` is told about.
         self.fec_repair_packets = 1
         self._fec_loss = 0.0
+        # The loss of windows clear of a queue, and how many windows in a row
+        # have been (`steer_fec`).
+        self._fec_clear_loss = 0.0
+        self._fec_clear = 0
+        # Whether every group takes its repairs (`steer_fec`), and the repairs
+        # owed otherwise, in FEC_GROUP_PACKETS-ths (`_fec_repairs`).
+        self._fec_full = False
+        self._fec_credit = 0
         self.__started = False
         self.__stats = RTCStatsReport()
         self.__transport = transport
@@ -504,13 +519,40 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 self._emit_pli_event()
         return silent
 
-    def steer_fec(self, loss_fraction: float) -> None:
+    def _fec_repairs(self, packets: int) -> int:
+        """How many repairs a FlexFEC group of `packets` media packets gets:
+        `fec_repair_packets`, never more than it has packets, where `steer_fec`
+        wants every group repaired. Otherwise `fec_repair_packets` per
+        FEC_GROUP_PACKETS media packets, what a group falls short of carried to
+        the next: a group closes at every frame, so a low-rate stream's frames
+        of one or two packets would each take a repair and double what the
+        path carries."""
+        if self._fec_full:
+            self._fec_credit = 0
+            return min(self.fec_repair_packets, packets)
+        self._fec_credit += packets * self.fec_repair_packets
+        repairs = min(packets, self._fec_credit // FEC_GROUP_PACKETS)
+        self._fec_credit -= repairs * FEC_GROUP_PACKETS
+        return repairs
+
+    def steer_fec(self, loss_fraction: float, queued: bool = False) -> None:
         """Set the FlexFEC repair density from a measured loss fraction: one
         repair per group under 2% loss, two under 8%, three above, read on a
         smoothed loss so a single small window neither adds nor drops a
-        repair on its own."""
+        repair on its own. Every group takes them while the path loses
+        packets with no queue standing (`queued`), a loss a repair recovers
+        without a retransmission's round trip: the loss read on windows
+        FEC_CLEAR_WINDOWS past the last queue, since a queue's overflow shows
+        in the windows it stood in and the ones just after. With nothing lost
+        that way, or while a queue stands, whose overflow a repair per frame
+        would only deepen, the repairs follow the media packets
+        (`_fec_repairs`)."""
         self._fec_loss += (loss_fraction - self._fec_loss) * 0.3
+        self._fec_clear = 0 if queued else self._fec_clear + 1
+        if self._fec_clear > FEC_CLEAR_WINDOWS:
+            self._fec_clear_loss += (loss_fraction - self._fec_clear_loss) * 0.3
         self.fec_repair_packets = 1 + (self._fec_loss > 0.02) + (self._fec_loss > 0.08)
+        self._fec_full = self._fec_clear_loss > FEC_FULL_LOSS and not queued
 
     async def _next_encoded_frame(self) -> Optional[RTCEncodedFrame]:
         data = await self.__track.recv()
@@ -610,7 +652,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         last_video_timing = 0.0
         last_abs_capture_ns = 0
         # FlexFEC group: serialized media packets awaiting their XOR repair
-        # packets (flushed per frame, or every 10 packets within a large frame).
+        # packets (flushed per frame, or every FEC_GROUP_PACKETS within a large frame).
         fec_group: list[bytes] = []
         fec_first_seq = 0
         try:
@@ -732,8 +774,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         fec_group.append(
                             self.__rtp_header_extensions_map.for_fec(packet_bytes)
                         )
-                        if packet.marker or len(fec_group) == 10:
-                            repairs = min(self.fec_repair_packets, len(fec_group))
+                        if packet.marker or len(fec_group) == FEC_GROUP_PACKETS:
+                            repairs = self._fec_repairs(len(fec_group))
                             for repair in range(repairs):
                                 fec_bytes = build_flexfec_03(
                                     fec_group,
@@ -749,7 +791,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                                     self.__fec_sequence_number, 1
                                 )
                                 outgoing.append((fec_bytes, None, None, 0))
-                            protected.append((fec_first_seq, len(fec_group)))
+                            if repairs:
+                                protected.append((fec_first_seq, len(fec_group)))
                             fec_group = []
 
                 for packet_bytes, twcc_seq, media_seq, size in outgoing:

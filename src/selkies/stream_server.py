@@ -284,11 +284,13 @@ class CongestionSteer:
     the drain left keeps the drain's target through the hold, and the tick
     after the hold backs off again. Without a measured
     delivery the backoff is BACKOFF of the target, held for HOLD_S. A tick whose
-    stream offered the path less than APP_LIMITED of the target, a still
-    screen's trickle, cuts nothing on a queue: what the path delivered is then
-    what the stream sent rather than what the path carries, and a cut to it
-    would put the next motion at the floor while draining nothing the stream
-    queued.
+    stream offered the path less than APP_LIMITED of the target, and whose
+    path delivered at least APP_LIMITED_DELIVERED of it, a still screen's
+    trickle, cuts nothing on a queue: what the path delivered is then what the
+    stream sent rather than what the path carries, and a cut to it would put
+    the next motion at the floor while draining nothing the stream queued. A
+    stream the path delivers less of than it offers is filling the queue,
+    whatever its target, and backs off.
 
     Loss backs the target off only on the second lossy tick in a row: one tick
     of a thin stream is too few packets for its loss fraction to mean anything.
@@ -318,6 +320,7 @@ class CongestionSteer:
     DRAIN_FLOOR = 0.5
     SETTLE_S = 0.5
     APP_LIMITED = 0.5
+    APP_LIMITED_DELIVERED = 0.8
 
     def __init__(self) -> None:
         self.strikes = 0
@@ -357,7 +360,9 @@ class CongestionSteer:
             current, self._cruise_kbps = self._cruise_kbps, None
         if queue_s:
             self.strikes = 0
-            limited = offered_bps is not None and offered_bps < current * 1_000 * self.APP_LIMITED
+            limited = (offered_bps is not None
+                       and offered_bps < current * 1_000 * self.APP_LIMITED
+                       and (goodput_bps <= 0 or offered_bps <= goodput_bps / self.APP_LIMITED_DELIVERED))
             if now >= self.hold_until and not limited:
                 current = self._queue_backoff(current, goodput_bps / 1_000, queue_s, now)
             return max(floor, min(ceiling, current))

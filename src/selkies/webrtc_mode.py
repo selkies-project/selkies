@@ -2824,8 +2824,8 @@ class WebRTCService(BaseStreamingService):
         display's congested link never steers another's stream. The queue is
         the deepest any of its peers shows, so a deep buffer is found before it
         overflows into loss. Only CBR mode has a target to steer. Each peer's
-        own loss also sets how many FlexFEC repair packets its sender adds per
-        group (`RTCRtpSender.steer_fec`).
+        own loss and queue also set how many FlexFEC repair packets its sender
+        adds per group (`RTCRtpSender.steer_fec`).
 
         Each peer's feedback is drained per tick, so a decision is taken over a
         tick's worth of it rather than whichever window landed last: a single
@@ -2873,17 +2873,18 @@ class WebRTCService(BaseStreamingService):
                 window = transport.take_twcc_window() if transport is not None else None
                 if window is None:
                     continue
+                standing = None if window["queue_ms"] is None else max(
+                    window["queue_ms"], window["queue_rising_ms"] or 0.0)
                 sender = peer.get("video_sender")
                 if sender is not None:
-                    sender.steer_fec(window["loss_fraction"])
+                    sender.steer_fec(window["loss_fraction"], standing is not None and standing > TWCC_QUEUE_MS)
                 bucket = per_display.setdefault(
                     did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0, "sent_bps": 0})
                 if window["goodput_bps"]:
                     bucket["goodputs"].append(window["goodput_bps"])
                 bucket["sent_bps"] = max(bucket["sent_bps"], window["sent_bps"])
                 bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
-                if window["queue_ms"] is not None:
-                    standing = max(window["queue_ms"], window["queue_rising_ms"] or 0.0)
+                if standing is not None:
                     bucket["queue_ms"] = max(bucket["queue_ms"] or 0.0, standing)
                     bucket["depth_ms"] = max(bucket["depth_ms"], window["queue_depth_ms"])
             if self.metrics is not None:
