@@ -270,7 +270,7 @@ SUITES: list = [
      "selectors": ["websockets-x11", "webrtc-x11", "websockets-wl", "webrtc-wl"]},
     {"path": "e2e/test_browsers.py", "tier": "e2e", "timeout": 1800,
      "selectors": ["chromium-ws", "firefox-ws", "webkit-ws", "chromium-wr", "firefox-wr",
-                   "striped", "sink", "wasm"]},
+                   "striped", "sink", "wasm", "output"]},
     {"path": "e2e/test_full_color.py", "tier": "e2e", "timeout": 900,
      "selectors": ["ws-chromium", "ws-firefox", "ws-webkit", "wr-chromium", "wr-webkit",
                    "ws-locked", "ws-pinned", "ws-stalled", "wr-stalled",

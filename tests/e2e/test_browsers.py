@@ -3,9 +3,10 @@
 websockets transport (flow, audio, input, clipboard, resize, console health),
 plus a reduced WebRTC flow on Firefox (parity with the Chrome reference) and
 WebKit. Over WebSockets, video and audio reach the page and playback on every
-engine, through libopus in WASM where the engine has no WebCodecs audio. Over
-WebRTC, a manual resolution shown 1:1 is drawn nearest-sampled in Chromium only,
-since Firefox's compositor draws that slower than a smoothed video."""
+engine, through libopus in WASM where the engine has no WebCodecs audio, and
+play on the output device the page picks. Over WebRTC, a manual resolution
+shown 1:1 is drawn nearest-sampled in Chromium only, since Firefox's compositor
+draws that slower than a smoothed video."""
 import os
 import sys
 import time
@@ -419,6 +420,76 @@ def wasm_block(engine: str, channels: int = 2) -> "H.Results":
     return res
 
 
+def output_block(engine: str) -> "H.Results":
+    """The output device a page picks carries its sound. Two null sinks stand in
+    for speakers; the page is told to play to one and then the other
+    (`audioDeviceSelected`), and the desktop's tone is heard on that sink's
+    monitor and not on the other's. Chromium picks through
+    AudioContext.setSinkId, Firefox, which has none, through a media element's."""
+    import test_microphone_audio as M
+    res = H.Results(f"output-{engine}")
+    names = ("selkies_pick_a", "selkies_pick_b")
+    sinks = [H.pulse_null_sink(n, sink_properties=f"device.description={n}") for n in names]
+    tone = None
+    H.server_start(mode="websockets", wayland=False)
+    try:
+        with sync_playwright() as p:
+            if engine == "chromium":
+                # Heard, not muted: the shared flags mute Chromium's output, and headless
+                # Chromium plays nothing to the sound server, so it runs on the test display.
+                kw = {"headless": False, "args": [a for a in C.BROWSER_ARGS if a != "--mute-audio"],
+                      "env": {**os.environ, "DISPLAY": H.TEST_DISPLAY}}
+                if C.CHROME_PATH:
+                    kw["executable_path"] = C.CHROME_PATH
+                browser = p.chromium.launch(**kw)
+                ctx = browser.new_context(viewport={"width": 1280, "height": 720})
+                ctx.grant_permissions(["microphone"], origin=H.BASE_URL)
+            else:
+                browser, ctx = engine_launch(p, engine)
+            try:
+                page = ctx.pages[0] if (engine == "firefox" and ctx.pages) else ctx.new_page()
+                errors, said = [], []
+                page.on("pageerror", lambda e: errors.append(str(e)))
+                page.on("console", lambda m: said.append(m.text) if "output" in m.text.lower() else None)
+                page.goto(H.BASE_URL, wait_until="load")
+                res.check(f"[{engine}] video up", bool(C.wait_ws_video(page, timeout=45)), "")
+                page.mouse.click(640, 360)
+                tone = H.pulse_sine()
+                # Output devices are named to a page that holds a microphone grant.
+                outputs = page.evaluate("""async () => {
+                  try { const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        s.getTracks().forEach((t) => t.stop()); } catch (e) { /* named or not, list them */ }
+                  return (await navigator.mediaDevices.enumerateDevices())
+                    .filter((d) => d.kind === 'audiooutput').map((d) => [d.deviceId, d.label]);
+                }""")
+                for target in names:
+                    other = names[1 - names.index(target)]
+                    device = next((d for d in outputs if target in d[1]), None)
+                    res.check(f"[{engine}] {target} is offered as an output", device is not None, outputs)
+                    if device is None:
+                        continue
+                    page.evaluate("(id) => window.postMessage({ type: 'audioDeviceSelected', context: 'output', "
+                                  "deviceId: id }, location.origin)", device[0])
+                    time.sleep(2.5)
+                    heard = {n: M.analyze(M.record(f"{n}.monitor", 2.0), 440) for n in names}
+                    res.check(f"[{engine}] picked, {target} plays the desktop's tone",
+                              heard[target]["rms"] > 150 and heard[target]["ratio"] > 0.5, (heard[target], said[-2:]))
+                    res.check(f"[{engine}] and {other} goes quiet", heard[other]["rms"] < 50, heard[other])
+                res.check(f"[{engine}] no page errors", not errors, "; ".join(errors)[:200])
+            finally:
+                if browser:
+                    browser.close()
+                else:
+                    ctx.close()
+    finally:
+        H.pulse_unload(tone)
+        for module in sinks:
+            H.pulse_unload(module)
+        H.server_stop()
+    res.summary()
+    return res
+
+
 def main() -> None:
     """Run the engine blocks named on argv (default: all available)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -433,6 +504,9 @@ def main() -> None:
         if which in ("all", "sink"):
             blocks.append(sink_block("webkit"))
             blocks.append(sink_block("chromium"))
+        if which in ("all", "output"):
+            blocks.append(output_block("chromium"))
+            blocks.append(output_block("firefox"))
         if which in ("all", "wasm"):
             blocks.append(wasm_block("chromium"))
             blocks.append(wasm_block("firefox"))
