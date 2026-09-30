@@ -20,9 +20,9 @@ npm_install() {
     npm ci --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000
 }
 
-# The core is built first: both dashboards take it, and the gamepad DB built
-# alongside it, out of its dist through their own copy-core.js/copy-jsdb.js
-# build steps.
+# The core is built first: both dashboards take it, and the gamepad DB and WASM
+# codecs built alongside it, out of its dist through their own
+# copy-core.js/copy-assets.js build steps.
 (cd addons/selkies-web-core && npm_install && npm run build)
 
 # The Wish dashboard is an alternative front end the wheel does not ship, built

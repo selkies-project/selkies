@@ -290,6 +290,15 @@ NO_WEBCODECS_JS = """
   })();
 """
 
+# And OffscreenCanvas, as Safari before 16.4 and Firefox before 105 lack it: the
+# JPEG rung then draws on a page canvas.
+NO_OFFSCREEN_JS = """
+  (() => {
+    try { Object.defineProperty(window, 'OffscreenCanvas', { value: undefined, configurable: true, writable: true }); } catch (e) {}
+    try { delete HTMLCanvasElement.prototype.transferControlToOffscreen; } catch (e) {}
+  })();
+"""
+
 
 def launch(p, engine: str, cam_sock: str, mode: str, init_js: Optional[str] = None):
     """Open the dashboard in `engine` with the published camera as its only device.
@@ -361,17 +370,19 @@ def jpeg_center(path: str):
         return None
 
 
-def nowebcodecs_block() -> "H.Results":
+def nowebcodecs_block(offscreen: bool = True) -> "H.Results":
     """Chromium with every WebCodecs global removed: the screen degrades to striped
     JPEG, the camera goes up the JPEG rung, and the server's default device format
-    follows that uplink into an MJPEG device whose frames carry the camera picture."""
-    res = H.Results("webcam-nowebcodecs")
+    follows that uplink into an MJPEG device whose frames carry the camera picture.
+    Without `offscreen` OffscreenCanvas goes too, and the rung draws on a page canvas."""
+    res = H.Results("webcam-nowebcodecs" + ("" if offscreen else "-canvas"))
     cam = PublishedCamera(flat_frames()).start()
     dump = os.path.join(cam.sock_dir, "frame.jpg")
     H.server_start(mode="websockets", wayland=False, extra_env={"SELKIES_WEBCAM_ENABLED": "false"})
     try:
         with sync_playwright() as p:
-            browser, page, errors = launch(p, "chromium", cam.sock_dir, "websockets", init_js=NO_WEBCODECS_JS)
+            browser, page, errors = launch(p, "chromium", cam.sock_dir, "websockets",
+                                           init_js=NO_WEBCODECS_JS + ("" if offscreen else NO_OFFSCREEN_JS))
             logs = []
             page.on("console", lambda m: logs.append(m.text) if "[Webcam]" in m.text else None)
             video = C.wait_ws_video(page, timeout=30)
@@ -396,6 +407,9 @@ def nowebcodecs_block() -> "H.Results":
                       px is not None and px[0] == (1280, 720) and px[1][1] > 200 and px[1][0] < 60 and px[1][2] < 60
                       and max(px[2]) < 40, str(px))
             res.check("client took the JPEG rung", any("JPEG" in line for line in logs), "; ".join(logs)[:200])
+            drawn = "OffscreenCanvas" if offscreen else "a page canvas"
+            res.check(f"drawn on {drawn}", any(f"encoder: JPEG through {drawn}" in line for line in logs),
+                      "; ".join(logs)[:200])
             toggle(page, False)
             res.check("webcam reports inactive", wait_status(page, False), str(page.evaluate("window.__camStatus")))
             res.check("no page errors", not errors, "; ".join(errors)[:200])
@@ -939,6 +953,8 @@ def main() -> int:
         ok = locked_block().summary()
     elif sel == "nowebcodecs":
         ok = nowebcodecs_block().summary()
+    elif sel == "nowebcodecs-canvas":
+        ok = nowebcodecs_block(offscreen=False).summary()
     elif sel == "reformat":
         ok = reformat_block().summary()
     elif sel == "detail":

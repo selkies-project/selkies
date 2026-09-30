@@ -58,8 +58,9 @@
  * `<video>`, the worker's OffscreenCanvas, or the page canvas, with the
  * striped modes composited on a back-buffer and blitted whole at frame
  * boundaries. Audio is decoded in a worker and played through an
- * AudioWorklet, the microphone is encoded to Opus in a worker, and the webcam
- * is lib/webcam-capture.js.
+ * AudioWorklet, the microphone is encoded to Opus in a worker, both on
+ * libopus in WASM where the engine has no WebCodecs audio, and the webcam is
+ * lib/webcam-capture.js.
  *
  * Dashboards talk to the core over same-origin window messages. The core
  * handles `setVolume`, `setMute`, `setScaleLocally`, `setSynth`,
@@ -7318,7 +7319,9 @@ class WorkerWebSocket {
         } else if (type === 'decoderError') {
           console.error(`[Main] Audio Decoder Worker reported error: ${message}`);
         } else if (type === 'decoderInitialized') {
-          console.log('[Main] Audio Decoder Worker confirmed its decoder is initialized.');
+          console.log(event.data.wasm
+            ? '[Main] Audio Decoder Worker decodes on libopus in WASM, the engine having no AudioDecoder.'
+            : '[Main] Audio Decoder Worker confirmed its decoder is initialized.');
         } else if (type === 'decodedAudioData') {
           const pcmBufferFromWorker = event.data.pcmBuffer;
           if (pcmBufferFromWorker && audioWorkletProcessorPort && audioContext && audioContext.state === 'running') {
@@ -7346,7 +7349,8 @@ class WorkerWebSocket {
           data: {
             initialPipelineStatus: isAudioPipelineActive,
             channels: initChannels,
-            description: initChannels > 2 ? buildMultiopusDescription(initChannels) : null
+            description: initChannels > 2 ? buildMultiopusDescription(initChannels) : null,
+            opusUrl: opusWasmUrl()
           }
         });
         console.log('[Main] Audio Decoder Worker created and init message sent.');
@@ -9051,6 +9055,16 @@ function getAudioChannelCount() {
 }
 
 /**
+ * Where the web build serves libopus-wasm, which the audio workers import
+ * where the engine has no WebCodecs audio; resolved against the page, as the
+ * gamepad DB is, since a worker's own URL is a blob.
+ * @returns {string}
+ */
+function opusWasmUrl() {
+  return new URL('codecs/libopus-wasm/index.js', document.baseURI).href;
+}
+
+/**
  * Builds the OpusHead description for a surround layout: magic, version 1,
  * channel count, a zero pre-skip (a live stream has nothing to trim), the
  * 48 kHz input rate, zero output gain, mapping family 1 (multistream), then
@@ -9091,12 +9105,18 @@ function buildMultiopusDescription(channels) {
  * Gecko), while plain mono and stereo Opus decode alike everywhere, and the
  * stream table of the description puts each channel back where the server's
  * encoder read it -- the order the worklet's output takes as the speaker
- * layout.
+ * layout. An engine without AudioDecoder decodes on libopus in WASM
+ * (`wasmDecoder`) loaded from the `opusUrl` of `init`.
  */
 const audioDecoderWorkerCode = `
   let decoderAudio;
   let pipelineActive = true;
   let currentDecodeQueueSize = 0;
+  // libopus-wasm, where the engine has no AudioDecoder, and whether no decoder
+  // can be had, which leaves packets undecoded until the page asks again.
+  let opusUrl = null;
+  let opusModule = null;
+  let decoderUnavailable = false;
   // Set once the page hands over the worklet's line; until then decoded packets
   // go back through the page, which is also the path a worklet-less build takes.
   let pcmPort = null;
@@ -9289,6 +9309,62 @@ const audioDecoderWorkerCode = `
     };
   }
 
+  // libopus in WASM for an engine with no AudioDecoder: mono and stereo decode
+  // as they are, surround one elementary stream at a time into the order of
+  // the description's mapping table, as surroundDecoder does. A packet's PCM
+  // goes out a microtask after its decode call, as a WebCodecs output would,
+  // so the caller's queue accounting has run first.
+  function wasmDecoder(config, onPcm, onError) {
+    const channels = config.numberOfChannels;
+    const head = channels > 2 && config.description ? new Uint8Array(config.description) : null;
+    const streams = head ? head[19] : 1, coupled = head ? head[20] : 0;
+    const mapping = head ? Array.from(head.subarray(21, 21 + channels)) : null;
+    const decoders = [];
+    const dec = {
+      state: 'configuring',
+      decode(buffer) {
+        const parts = head ? splitStreams(buffer, streams) : [buffer];
+        if (!parts) throw new Error('malformed multistream packet');
+        queueMicrotask(() => {
+          if (dec.state !== 'configured') return;
+          let outs;
+          try { outs = parts.map((part, k) => decoders[k].decodeFloat(new Uint8Array(part))); }
+          catch (e) { onError(e); return; }
+          if (!head) { onPcm(outs[0].buffer); return; }
+          const frames = outs[0].length / (coupled ? 2 : 1);
+          const pcm = new Float32Array(frames * channels);
+          mapping.forEach((coded, c) => {
+            if (coded === 255) return;
+            const paired = coded < 2 * coupled;
+            const out = outs[paired ? coded >> 1 : coded - coupled];
+            for (let f = 0; f < frames; f++) pcm[f * channels + c] = paired ? out[2 * f + (coded & 1)] : out[f];
+          });
+          onPcm(pcm.buffer);
+        });
+      },
+      close() {
+        dec.state = 'closed';
+        for (const d of decoders) { try { d.free(); } catch (e) { /* freed */ } }
+      },
+    };
+    dec.ready = (async () => {
+      if (!opusUrl) throw new Error('no AudioDecoder and no WASM decoder to fall back on');
+      opusModule = opusModule || import(opusUrl);
+      const opus = await opusModule;
+      for (let k = 0; k < streams; k++) {
+        decoders.push(await opus.createDecoder({ sampleRate: 48000, channels: head ? (k < coupled ? 2 : 1) : channels }));
+      }
+      if (dec.state === 'closed') dec.close();
+      else dec.state = 'configured';
+    })();
+    return dec;
+  }
+
+  // A packet as the decoder takes it: a chunk for WebCodecs, the bytes for WASM.
+  function packet(buffer, timestamp) {
+    return typeof AudioDecoder === 'undefined' ? buffer : new EncodedAudioChunk({ type: 'key', timestamp, data: buffer });
+  }
+
   function postPcm(pcm, ending) {
     if (pcmPort) pcmPort.postMessage(ending ? { audioData: pcm, quiet: true } : { audioData: pcm }, [pcm]);
     else self.postMessage({ type: 'decodedAudioData', pcmBuffer: pcm, quiet: ending }, [pcm]);
@@ -9301,6 +9377,7 @@ const audioDecoderWorkerCode = `
     currentDecodeQueueSize = 0;
     endsSound.length = 0;
     quietAfter = 0;
+    decoderUnavailable = false;
     const onError = (e) => {
       // A fatal decoder error is not re-initialized from here: a persistent
       // failure would spin. The page drives recovery with its 'reinitialize'
@@ -9310,13 +9387,30 @@ const audioDecoderWorkerCode = `
       endsSound.shift();
       outputDone();
     };
+    const onPcm = (pcm) => {
+      currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize - 1);
+      postPcm(pcm, !!endsSound.shift());
+      outputDone();
+    };
+    const failed = (reason) => {
+      decoderAudio = null;
+      decoderUnavailable = true;
+      self.postMessage({ type: 'decoderInitFailed', reason });
+    };
+    if (typeof AudioDecoder === 'undefined') {
+      const wasm = wasmDecoder(decoderConfig, onPcm, onError);
+      decoderAudio = wasm;
+      try {
+        await wasm.ready;
+        if (decoderAudio === wasm) self.postMessage({ type: 'decoderInitialized', wasm: true });
+      } catch (e) {
+        if (decoderAudio === wasm) failed(String((e && e.message) || e));
+      }
+      return;
+    }
     const surround = decoderConfig.numberOfChannels > 2 && decoderConfig.description;
     decoderAudio = surround
-      ? surroundDecoder(decoderConfig.description, decoderConfig.numberOfChannels, (pcm) => {
-          currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize - 1);
-          postPcm(pcm, !!endsSound.shift());
-          outputDone();
-        }, onError)
+      ? surroundDecoder(decoderConfig.description, decoderConfig.numberOfChannels, onPcm, onError)
       : new AudioDecoder({ output: handleDecodedAudioFrameInWorker, error: onError });
     try {
       const support = await AudioDecoder.isConfigSupported(
@@ -9325,12 +9419,10 @@ const audioDecoderWorkerCode = `
         await decoderAudio.configure(decoderConfig);
         self.postMessage({ type: 'decoderInitialized' });
       } else {
-        decoderAudio = null;
-        self.postMessage({ type: 'decoderInitFailed', reason: 'configNotSupported' });
+        failed('configNotSupported');
       }
     } catch (e) {
-      decoderAudio = null;
-      self.postMessage({ type: 'decoderInitFailed', reason: e.message });
+      failed(e.message);
     }
   }
 
@@ -9374,12 +9466,13 @@ const audioDecoderWorkerCode = `
         if (data.description) {
           decoderConfig.description = data.description;
         }
+        if (data.opusUrl) opusUrl = data.opusUrl;
         await initializeDecoderInWorker();
         break;
       case 'quiet': forwardQuiet(); break;
       case 'decode':
         if (decoderAudio && decoderAudio.state === 'configured') {
-          const chunk = new EncodedAudioChunk({ type: 'key', timestamp: data.timestamp || (performance.now() * 1000), data: data.opusBuffer });
+          const chunk = packet(data.opusBuffer, data.timestamp || (performance.now() * 1000));
           try {
             if (currentDecodeQueueSize < 20) {
                  decoderAudio.decode(chunk); currentDecodeQueueSize++;
@@ -9389,7 +9482,7 @@ const audioDecoderWorkerCode = `
               currentDecodeQueueSize = Math.max(0, currentDecodeQueueSize - 1);
               if (decoderAudio.state === 'closed' || decoderAudio.state === 'unconfigured') await initializeDecoderInWorker();
           }
-        } else if (!decoderAudio || (decoderAudio && decoderAudio.state !== 'configuring')) {
+        } else if (!decoderUnavailable && (!decoderAudio || decoderAudio.state !== 'configuring')) {
           await initializeDecoderInWorker();
         }
         break;
@@ -9404,8 +9497,7 @@ const audioDecoderWorkerCode = `
           const frames = extractOpusFrames(m.data.buffer).filter((opus) => opus.byteLength);
           frames.forEach((opus, i) => {
             try {
-              decoderAudio.decode(new EncodedAudioChunk({
-                type: 'key', timestamp: performance.now() * 1000, data: opus }));
+              decoderAudio.decode(packet(opus, performance.now() * 1000));
               currentDecodeQueueSize++;
               endsSound.push(quiet && i === frames.length - 1);
             } catch (err) { /* a reconfiguring decoder drops the packet */ }
@@ -9423,7 +9515,9 @@ const audioDecoderWorkerCode = `
 
 /**
  * Source of the microphone AudioWorklet: converts captured frames to s16 and
- * posts them to the page, going quiet after a run of silent chunks.
+ * posts them to the page, going quiet after a run of silent chunks. A context
+ * left at the engine's own rate is brought to 24 kHz first
+ * (`startMicrophoneCapture`).
  */
 const micWorkletProcessorCode = `
 class MicWorkletProcessor extends AudioWorkletProcessor {
@@ -9432,6 +9526,22 @@ class MicWorkletProcessor extends AudioWorkletProcessor {
     this.SILENCE_THRESHOLD_CHUNKS = 300;
     this.silentChunkCounter = 0;
     this.isSending = true;
+    // Resampling to 24 kHz: a Hann-windowed sinc low-pass under the new
+    // Nyquist, then linear interpolation between its outputs.
+    this.step = sampleRate / 24000;
+    if (this.step !== 1) {
+      const n = 31, cut = Math.min(0.5, 10800 / sampleRate);
+      const taps = Array.from({ length: n }, (_, i) => {
+        const x = i - (n - 1) / 2;
+        const sinc = x === 0 ? 2 * cut : Math.sin(2 * Math.PI * cut * x) / (Math.PI * x);
+        return sinc * (0.5 - 0.5 * Math.cos(2 * Math.PI * i / (n - 1)));
+      });
+      const sum = taps.reduce((a, b) => a + b, 0);
+      this.taps = Float32Array.from(taps, (t) => t / sum);
+      this.history = new Float32Array(n);
+      this.prev = 0;
+      this.at = 1;
+    }
     // The encode worker's own line in: capture then reaches it whatever the
     // page's thread is doing. Until it is handed over, the page relays.
     this.out = this.port;
@@ -9439,10 +9549,24 @@ class MicWorkletProcessor extends AudioWorkletProcessor {
       if (e.data && e.data.port) this.out = e.data.port;
     };
   }
+  resample(input) {
+    const out = [];
+    const h = this.history, taps = this.taps;
+    for (let i = 0; i < input.length; i++) {
+      h.copyWithin(0, 1);
+      h[h.length - 1] = input[i];
+      let y = 0;
+      for (let k = 0; k < h.length; k++) y += taps[k] * h[k];
+      for (; this.at <= 1; this.at += this.step) out.push(this.prev + (y - this.prev) * this.at);
+      this.at -= 1;
+      this.prev = y;
+    }
+    return out;
+  }
   process(inputs, outputs, parameters) {
     const input = inputs[0];
     if (input && input[0]) {
-      const inputChannelData = input[0];
+      const inputChannelData = this.step === 1 ? input[0] : this.resample(input[0]);
       const int16Array = Int16Array.from(inputChannelData, x => x * 32767);
       const isCurrentChunkSilent = int16Array.every(item => item === 0);
       if (!isCurrentChunkSilent) {
@@ -9468,13 +9592,50 @@ registerProcessor('mic-worklet-processor', MicWorkletProcessor);
  * Source of the microphone encode worker, which hosts the Opus AudioEncoder
  * off the main thread, mirroring the decode worker. The page forwards s16 PCM
  * as `pcm` messages and receives ready-to-send `0x02 + Opus` frames as
- * `chunk`; the restricted low-delay application is probed first.
+ * `chunk`; the restricted low-delay application is probed first. An engine
+ * without AudioEncoder encodes alike on libopus in WASM, loaded from the
+ * `opusUrl` of `init`.
  */
 const micEncodeWorkerCode = `
-  let encoder = null, tsUs = 0, active = true, wirePort = null;
+  let encoder = null, tsUs = 0, active = true, wirePort = null, wasm = false;
+  // One Opus packet out as a 0x02 frame.
+  const send = (opus) => {
+    if (!active) return;
+    const buf = new ArrayBuffer(1 + opus.byteLength);
+    const frame = new Uint8Array(buf);
+    frame[0] = 0x02;
+    frame.set(opus, 1);
+    if (wirePort) wirePort.postMessage(buf, [buf]);
+    else self.postMessage({ type: 'chunk', buffer: buf }, [buf]);
+  };
+  // libopus in WASM for an engine with no AudioEncoder: the settings the
+  // WebCodecs path asks for, in its default 20 ms frames, which the worklet's
+  // render quanta are gathered into here.
+  const wasmEncoder = async (url) => {
+    const opus = await import(url);
+    const enc = await opus.createEncoder({ sampleRate: 24000, channels: 1, frameSize: 480,
+      application: opus.Application.RestrictedLowDelay, bitrate: ${MIC_BITRATE} });
+    const frame = new Int16Array(enc.frameSize);
+    let fill = 0;
+    return {
+      state: 'configured',
+      encode(buffer) {
+        const pcm = new Int16Array(buffer);
+        for (let i = 0; i < pcm.length;) {
+          const n = Math.min(frame.length - fill, pcm.length - i);
+          frame.set(pcm.subarray(i, i + n), fill);
+          fill += n;
+          i += n;
+          if (fill === frame.length) { fill = 0; send(enc.encode(frame)); }
+        }
+      },
+      close() { this.state = 'closed'; enc.free(); },
+    };
+  };
   const onPcm = (buffer) => {
     if (!active || !encoder || encoder.state !== 'configured') return;
     if (!buffer || !(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) return;
+    if (wasm) { try { encoder.encode(buffer); } catch (err) {} return; }
     const numFrames = buffer.byteLength / 2;
     const audioData = new AudioData({ format: 's16', sampleRate: 24000, numberOfFrames: numFrames, numberOfChannels: 1, timestamp: tsUs, data: buffer });
     tsUs += Math.round(numFrames * 1e6 / 24000);
@@ -9486,18 +9647,26 @@ const micEncodeWorkerCode = `
     if (m.type === 'pcmPort') { m.port.onmessage = (ev) => onPcm(ev.data); return; }
     if (m.type === 'wirePort') { wirePort = m.port; return; }
     if (m.type === 'init') {
+      if (typeof AudioEncoder === 'undefined') {
+        try {
+          if (!m.opusUrl) throw new Error('no AudioEncoder and no WASM encoder to fall back on');
+          const enc = await wasmEncoder(m.opusUrl);
+          if (!active) { enc.close(); return; }
+          encoder = enc;
+          wasm = true;
+          self.postMessage({ type: 'ready', wasm: true });
+        } catch (err) { self.postMessage({ type: 'error', message: String(err && err.message) }); }
+        return;
+      }
       const base = { codec: 'opus', sampleRate: 24000, numberOfChannels: 1, bitrate: ${MIC_BITRATE} };
       let cfg = { ...base, opus: { application: 'lowdelay' } };
       try { const s = await AudioEncoder.isConfigSupported(cfg); if (!s || !s.supported) cfg = base; } catch (err) { cfg = base; }
       try {
         encoder = new AudioEncoder({
           output: (chunk) => {
-            if (!active) return;
-            const buf = new ArrayBuffer(1 + chunk.byteLength);
-            new Uint8Array(buf)[0] = 0x02;
-            chunk.copyTo(new Uint8Array(buf, 1));
-            if (wirePort) wirePort.postMessage(buf, [buf]);
-            else self.postMessage({ type: 'chunk', buffer: buf }, [buf]);
+            const opus = new Uint8Array(chunk.byteLength);
+            chunk.copyTo(opus);
+            send(opus);
           },
           error: (err) => self.postMessage({ type: 'error', message: String(err && err.message) }),
         });
@@ -9590,6 +9759,18 @@ async function startMicrophoneCapture(askedByServer = false) {
     micAudioContext = new AudioContext({
       sampleRate: 24000
     });
+    try {
+      micSourceNode = micAudioContext.createMediaStreamSource(micStream);
+    } catch (e) {
+      // An engine that cannot resample a stream into a context of another
+      // rate (Firefox before 148) refuses it at 24 kHz; at its default rate the
+      // context runs at the stream's, and the capture worklet resamples.
+      if (e.name !== 'NotSupportedError') throw e;
+      await micAudioContext.close();
+      micAudioContext = new AudioContext();
+      micSourceNode = micAudioContext.createMediaStreamSource(micStream);
+      console.info(`[Main] Microphone captured at ${micAudioContext.sampleRate} Hz and resampled to 24 kHz, the engine refusing a 24 kHz context.`);
+    }
     if (micAudioContext.state === 'suspended') await micAudioContext.resume();
     if (typeof micWorkletProcessorCode === 'undefined' || !micWorkletProcessorCode) throw new Error("micWorkletProcessorCode undefined");
     const micWorkletBlob = new Blob([micWorkletProcessorCode], {
@@ -9601,7 +9782,6 @@ async function startMicrophoneCapture(askedByServer = false) {
     } finally {
       URL.revokeObjectURL(micWorkletURL);
     }
-    micSourceNode = micAudioContext.createMediaStreamSource(micStream);
     micWorkletNode = new AudioWorkletNode(micAudioContext, 'mic-worklet-processor');
     const micEncodeWorkerURL = URL.createObjectURL(new Blob([micEncodeWorkerCode], { type: 'application/javascript' }));
     micEncodeWorker = new Worker(micEncodeWorkerURL);
@@ -9611,12 +9791,14 @@ async function startMicrophoneCapture(askedByServer = false) {
       if (m.type === 'chunk') {
         if (!(websocket && websocket.readyState === WebSocket.OPEN && isMicrophoneActive)) return;
         try { websocket.send(m.buffer); } catch (e) { console.error("Error sending mic Opus:", e); }
+      } else if (m.type === 'ready' && m.wasm) {
+        console.log('[Main] Microphone encodes Opus on libopus in WASM, the engine having no AudioEncoder.');
       } else if (m.type === 'error') {
         console.error("Mic AudioEncoder error:", m.message);
       }
     };
     micEncodeWorker.onerror = (e) => console.error("Mic encode worker error:", e && e.message);
-    micEncodeWorker.postMessage({ type: 'init' });
+    micEncodeWorker.postMessage({ type: 'init', opusUrl: opusWasmUrl() });
     if (websocket && websocket.connectSend) {
       // Capture worklet -> encode worker -> socket worker, no page hop: a
       // stalled page then delays outgoing voice no more than incoming.

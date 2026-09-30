@@ -101,6 +101,22 @@ PC_TAP_JS = """
 })();
 """
 
+# WebCodecs audio taken from the page and from every script it starts from a
+# blob (its workers and worklets), the way an engine without the API presents,
+# so the audio workers fall back on libopus in WASM.
+NO_WEBCODECS_AUDIO_JS = """
+(() => {
+  const strip = "for (const n of ['AudioDecoder', 'AudioEncoder', 'AudioData', 'EncodedAudioChunk']) {" +
+    " try { Object.defineProperty(globalThis, n, { value: undefined, configurable: true, writable: true }); } catch (e) {} }\\n";
+  new Function(strip)();
+  const create = URL.createObjectURL;
+  URL.createObjectURL = function (obj) {
+    if (obj instanceof Blob && /javascript/.test(obj.type)) obj = new Blob([strip, obj], { type: obj.type });
+    return create.call(URL, obj);
+  };
+})();
+"""
+
 # Text messages the page sent, in `window.__wireSent`. Only strings are kept:
 # a binary payload is transferred to the socket worker and detached, so a
 # reference held here would read as empty.

@@ -16,6 +16,7 @@
   "author": "Selkies",
   "license": "MPL-2.0",
   "dependencies": {
+    "libopus-wasm": "^0.4.1",
     "vite": "^8.2.0",
     "vite-plugin-minify": "^3.0.0"
   }

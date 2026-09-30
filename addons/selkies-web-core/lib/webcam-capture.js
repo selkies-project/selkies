@@ -1653,10 +1653,10 @@ export class WebcamCapture {
   }
 
   /**
-   * Encodes a frame as JPEG through `OffscreenCanvas.convertToBlob`, one in
-   * flight at a time. A JPEG leaves upright with no transform on the wire:
-   * drawImage bakes in the engine's, a derived one is applied as a canvas
-   * transform.
+   * Encodes a frame as JPEG through `OffscreenCanvas.convertToBlob`, or a page
+   * canvas's `toBlob` where the engine has no OffscreenCanvas, one in flight at
+   * a time. A JPEG leaves upright with no transform on the wire: drawImage
+   * bakes in the engine's, a derived one is applied as a canvas transform.
    * @param {VideoFrame|HTMLVideoElement} frame
    * @param {number} now `performance.now()` at receipt.
    */
@@ -1672,8 +1672,15 @@ export class WebcamCapture {
     const w = sideways ? dh : dw;
     const h = sideways ? dw : dh;
     if (!this._canvas) {
-      this._logPath("encoder: JPEG through OffscreenCanvas");
-      this._canvas = new OffscreenCanvas(w, h);
+      if (typeof OffscreenCanvas !== "undefined") {
+        this._logPath("encoder: JPEG through OffscreenCanvas");
+        this._canvas = new OffscreenCanvas(w, h);
+      } else {
+        this._logPath("encoder: JPEG through a page canvas");
+        this._canvas = document.createElement("canvas");
+        this._canvas.width = w;
+        this._canvas.height = h;
+      }
       this._ctx = this._canvas.getContext("2d", { alpha: false, desynchronized: true });
     } else if (this._canvas.width !== w || this._canvas.height !== h) {
       this._canvas.width = w;
@@ -1696,8 +1703,12 @@ export class WebcamCapture {
     closeFrame(frame);
     this._jpegBusy = true;
     const generation = this._generation;
-    this._canvas
-      .convertToBlob({ type: "image/jpeg", quality: this.quality })
+    const canvas = this._canvas;
+    const jpeg = canvas.convertToBlob
+      ? canvas.convertToBlob({ type: "image/jpeg", quality: this.quality })
+      : new Promise((resolve, reject) => canvas.toBlob(
+        (blob) => (blob ? resolve(blob) : reject(new Error("the canvas gave no JPEG"))), "image/jpeg", this.quality));
+    jpeg
       .then((blob) => blob.arrayBuffer())
       .then((buf) => {
         if (this._active && this._generation === generation) {

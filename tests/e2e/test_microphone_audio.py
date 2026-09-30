@@ -7,11 +7,14 @@ reserved sendonly transceiver) — and go quiet again when switched off.
 Chromium captures a WAV of a known tone as its fake microphone, so the PCM
 recorded from the server's PulseAudio/PipeWire source is checked for that
 tone (a Goertzel detector against the signal's RMS), not merely for a source
-that exists. The operator lock (``microphone_enabled=false|locked``) must
+that exists; with WebCodecs audio taken away the WebSocket uplink encodes on
+libopus in WASM, and where the engine refuses a 24 kHz context for the stream
+(Firefox before 148) it captures at its own rate and resamples, and either way
+must carry the tone alike. The operator lock (``microphone_enabled=false|locked``) must
 withhold the uplink on both transports. Audio is independent of the capture
 backend, so the blocks run against the X test display only.
 
-    python3 tests/e2e/test_microphone_audio.py websockets|webrtc|locked
+    python3 tests/e2e/test_microphone_audio.py websockets|websockets-wasm|websockets-rate|webrtc|locked
 """
 import math
 import os
@@ -30,6 +33,8 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 TONE_HZ = 1000
+# What WebKit's mock microphone mostly carries; it takes no file of its own.
+WEBKIT_MOCK_HZ = 150
 CAPTURE_RATE = 48000
 # The recordable source the server provisions; PipeWire's pulse server prefixes
 # virtual sources with the sink they hang off, PulseAudio does not.
@@ -95,10 +100,10 @@ def record(source: str, seconds: float = 2.0) -> array:
     return samples
 
 
-def analyze(samples: array) -> dict:
-    """RMS of the recording and how much of it is the tone.
+def analyze(samples: array, hz: int = TONE_HZ) -> dict:
+    """RMS of the recording and how much of it is the tone at `hz`.
 
-    A Goertzel filter at TONE_HZ measures the tone's power in each 20 ms block
+    A Goertzel filter at `hz` measures the tone's power in each 20 ms block
     of the last second; against the RMS that gives the fraction of the signal
     that is the tone, close to 1 for the tone alone and near 0 for silence or
     noise. Blocks, not one filter over the second: the microphone path cuts
@@ -112,7 +117,7 @@ def analyze(samples: array) -> dict:
     if n < CAPTURE_RATE // 4:
         return {"samples": len(samples), "rms": 0.0, "tone": 0.0, "ratio": 0.0}
     window = samples[len(samples) - n:]
-    coeff = 2.0 * math.cos(2.0 * math.pi * TONE_HZ / CAPTURE_RATE)
+    coeff = 2.0 * math.cos(2.0 * math.pi * hz / CAPTURE_RATE)
     energy = tone_power = 0.0
     for start in range(0, n, block):
         s1 = s2 = 0.0
@@ -141,22 +146,28 @@ def wait_status(page, value: bool, timeout: float = 20) -> bool:
     return False
 
 
-def launch(p, wav: str, mode: str):
-    """Chromium with the tone as its microphone, on the stream page.
+def launch(p, wav: str, mode: str, init_js: Optional[str] = None, engine: str = "chromium"):
+    """Chromium with the tone as its microphone, on the stream page; or WebKit
+    with its own mock microphone, which takes no file.
 
     The headless shell has no media capture; the full Chromium build (new
     headless mode) or the system Chrome named by E2E_CHROME is needed.
     """
-    args = C.BROWSER_ARGS + ["--use-fake-device-for-media-stream", f"--use-file-for-fake-audio-capture={wav}"]
-    kw = {"headless": True, "args": args}
-    if C.CHROME_PATH:
-        kw["executable_path"] = C.CHROME_PATH
+    if engine == "webkit":
+        browser = p.webkit.launch(headless=True)
     else:
-        kw["channel"] = "chromium"
-    browser = p.chromium.launch(**kw)
+        args = C.BROWSER_ARGS + ["--use-fake-device-for-media-stream", f"--use-file-for-fake-audio-capture={wav}"]
+        kw = {"headless": True, "args": args}
+        if C.CHROME_PATH:
+            kw["executable_path"] = C.CHROME_PATH
+        else:
+            kw["channel"] = "chromium"
+        browser = p.chromium.launch(**kw)
     ctx = browser.new_context(viewport={"width": 1280, "height": 720}, permissions=["microphone"])
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
     ctx.add_init_script(MIC_JS)
+    if init_js:
+        ctx.add_init_script(init_js)
     page = ctx.new_page()
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
@@ -168,18 +179,44 @@ def wait_video(page, mode: str):
     return C.wait_ws_video(page, timeout=30) if mode == "websockets" else C.wait_wr_video(page)
 
 
-def transport_block(mode: str) -> "H.Results":
-    res = H.Results(f"microphone-audio-{mode}")
+# A context that refuses a stream at another rate, as Firefox before 148 does
+# the 24 kHz one the client first asks for.
+FIXED_RATE_JS = """
+(() => {
+  const create = AudioContext.prototype.createMediaStreamSource;
+  AudioContext.prototype.createMediaStreamSource = function (stream) {
+    if (this.sampleRate === 24000) {
+      throw new DOMException('Connecting AudioNodes from AudioContexts with different sample-rate is currently not supported.', 'NotSupportedError');
+    }
+    return create.call(this, stream);
+  };
+})();
+"""
+
+
+def transport_block(mode: str, wasm: bool = False, fixed_rate: bool = False, engine: str = "chromium") -> "H.Results":
+    res = H.Results(f"microphone-audio-{mode}{'-wasm' if wasm else ''}{'-rate' if fixed_rate else ''}"
+                    f"{'' if engine == 'chromium' else '-' + engine}")
     wav = os.path.join(tempfile.mkdtemp(prefix="selkies-mic-"), "tone.wav")
     tone_wav(wav)
     H.server_start(mode=mode, wayland=False)
     try:
         with sync_playwright() as p:
-            browser, page, errors = launch(p, wav, mode)
+            browser, page, errors = launch(p, wav, mode, (C.NO_WEBCODECS_AUDIO_JS if wasm else "")
+                                           + (FIXED_RATE_JS if fixed_rate else "") or None, engine)
+            said = []
+            page.on("console", lambda m: said.append(m.text))
             res.check("stream up", bool(wait_video(page, mode)))
             before = [s for s in sources() if s.endswith(VIRTUAL_MIC)]
             toggle(page, True)
             res.check("microphone reports active", wait_status(page, True), str(page.evaluate("window.__micStatus")))
+            if fixed_rate:
+                res.check("the capture fell back on the engine's rate and resamples",
+                          any("resampled to 24 kHz" in t for t in said), [t for t in said if "icrophone" in t][:3])
+            if wasm:
+                res.check("the encode worker fell back on libopus in WASM",
+                          any("Microphone encodes Opus on libopus in WASM" in t for t in said),
+                          [t for t in said if "icrophone" in t][:3])
             source = virtual_mic_source()
             res.check("virtual microphone source provisioned on first mic data",
                       source is not None and not before, f"{source} (before: {before})")
@@ -188,7 +225,7 @@ def transport_block(mode: str) -> "H.Results":
                 # chunk arrives; the sound server then has to route it through the
                 # virtual source before the tone can be heard there.
                 time.sleep(2.0)
-                got = analyze(record(source))
+                got = analyze(record(source), WEBKIT_MOCK_HZ if engine == "webkit" else TONE_HZ)
                 res.check("recorded PCM carries the browser's tone",
                           got["rms"] > 150 and got["ratio"] > 0.5, str(got))
             toggle(page, False)
@@ -232,7 +269,16 @@ def main() -> int:
         if not shutil.which(tool):
             H.skip_suite(f"{tool} is not installed")
     sel = sys.argv[1] if len(sys.argv) > 1 else "websockets"
-    ok = locked_block().summary() if sel == "locked" else transport_block(sel).summary()
+    if sel == "locked":
+        ok = locked_block().summary()
+    elif sel == "websockets-wasm":
+        ok = transport_block("websockets", wasm=True).summary()
+    elif sel == "websockets-rate":
+        ok = transport_block("websockets", fixed_rate=True).summary()
+    elif sel == "websockets-wasm-webkit":
+        ok = transport_block("websockets", wasm=True, engine="webkit").summary()
+    else:
+        ok = transport_block(sel).summary()
     return 0 if ok else 1
 
 

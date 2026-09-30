@@ -3,9 +3,9 @@
 websockets transport (flow, audio, input, clipboard, resize, console health),
 plus a reduced WebRTC flow on Firefox (parity with the Chrome reference) and
 WebKit. Over WebSockets, video and audio reach the page and playback on every
-engine. Over WebRTC, a manual resolution shown 1:1 is drawn nearest-sampled in
-Chromium only, since Firefox's compositor draws that slower than a smoothed
-video."""
+engine, through libopus in WASM where the engine has no WebCodecs audio. Over
+WebRTC, a manual resolution shown 1:1 is drawn nearest-sampled in Chromium only,
+since Firefox's compositor draws that slower than a smoothed video."""
 import os
 import sys
 import time
@@ -370,6 +370,55 @@ def sink_block(engine: str) -> "H.Results":
     return res
 
 
+def wasm_block(engine: str, channels: int = 2) -> "H.Results":
+    """An engine without WebCodecs audio plays the stream's sound through
+    libopus in WASM: the decode worker says it fell back, and the playback
+    worklet is fed PCM that carries the desktop's tone. Surround comes as
+    pcmflux's multistream packets, split and decoded a stream at a time."""
+    res = H.Results(f"wasm-{engine}-{channels}ch")
+    H.server_start(mode="websockets", wayland=False,
+                   extra_env={"SELKIES_AUDIO_CHANNELS": str(channels)} if channels != 2 else None)
+    try:
+        with sync_playwright() as p:
+            browser, ctx = engine_launch(p, engine)
+            try:
+                ctx.add_init_script(C.NO_WEBCODECS_AUDIO_JS)
+                page = ctx.pages[0] if (engine == "firefox" and ctx.pages) else ctx.new_page()
+                said, errors = [], []
+                page.on("console", lambda m: said.append(m.text))
+                page.on("pageerror", lambda e: errors.append(str(e)))
+                page.goto(H.BASE_URL, wait_until="load")
+                res.check(f"[{engine}] video up", bool(C.wait_ws_video(page, timeout=45)), "")
+                page.mouse.click(640, 360)
+                tone = H.pulse_sine()
+                depth = level = 0
+                try:
+                    deadline = time.time() + 15
+                    while time.time() < deadline:
+                        depth = page.evaluate("window.currentAudioBufferSize || 0") or 0
+                        level = page.evaluate("window.currentAudioLevel || 0") or 0
+                        if depth > 0 and level > 0:
+                            break
+                        time.sleep(0.5)
+                finally:
+                    H.pulse_unload(tone)
+                res.check(f"[{engine}] the decode worker fell back on libopus in WASM",
+                          any("decodes on libopus in WASM" in t for t in said),
+                          [t for t in said if "Audio Decoder" in t][:3])
+                res.check(f"[{engine}] {channels}-channel packets reach playback", depth > 0, depth)
+                res.check(f"[{engine}] and play as sound, not silence", level > 0, level)
+                res.check(f"[{engine}] no page errors", not errors, "; ".join(errors)[:200])
+            finally:
+                if browser:
+                    browser.close()
+                else:
+                    ctx.close()
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
 def main() -> None:
     """Run the engine blocks named on argv (default: all available)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -384,6 +433,11 @@ def main() -> None:
         if which in ("all", "sink"):
             blocks.append(sink_block("webkit"))
             blocks.append(sink_block("chromium"))
+        if which in ("all", "wasm"):
+            blocks.append(wasm_block("chromium"))
+            blocks.append(wasm_block("firefox"))
+            blocks.append(wasm_block("webkit"))
+            blocks.append(wasm_block("chromium", channels=6))
         if which in ("all", "striped"):
             blocks.append(striped_block("chromium"))
             blocks.append(striped_block("firefox"))
