@@ -1121,10 +1121,11 @@ async def _resize_display_xrandr(
     the requested geometry at the refresh `_target_refresh` makes of
     ``refresh``, the stream's frame rate, chosen by name and rate since a
     driver lists several modes under one name. A missing one is made with cvt
-    at that refresh, its clock rounded up to the next quarter megahertz so it
-    never runs slower than asked, and named for the geometry the modeline
-    really carries (cvt snaps width up to the 8-pixel CVT cell, so it can be
-    wider than requested), with the rate appended where that name is taken;
+    at that refresh, its clock rounded up to the next 10 kHz so it never runs
+    slower than asked nor fast enough to beat against it, and named for the
+    geometry the modeline really carries (cvt snaps width up to the 8-pixel
+    CVT cell, so it can be wider than requested), with the rate appended
+    where that name is taken;
     a mode so named is found again by that name, so the next resize to the
     size and rate reuses it rather than making another.
     The mode is set together with ``--fb`` sized from that realized geometry:
@@ -1178,8 +1179,8 @@ async def _resize_display_xrandr(
         params = modeline_params.split()
         try:
             realized_w, realized_h = int(params[1]), int(params[5])
-            clock_steps = -(-int(params[4]) * int(params[8]) * target // 250_000)
-            params[0] = f"{clock_steps / 4:.2f}"
+            clock_steps = -(-int(params[4]) * int(params[8]) * target // 10_000)
+            params[0] = f"{clock_steps / 100:.2f}"
         except (IndexError, ValueError):
             realized_w, realized_h = w_req, h_req
         geometry = f"{realized_w}x{realized_h}"

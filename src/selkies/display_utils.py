@@ -414,8 +414,11 @@ def _mode_at(
         raise RuntimeError(f"no free name for a {w}x{h} mode at {refresh:.2f} Hz")
     info = _cvt_rb_mode_info(w, h, refresh)
     # CVT rounds the clock down to its quarter-megahertz step, which leaves the
-    # mode slower than asked; the step up keeps it from capping the stream.
-    info["dot_clock"] = -(-int(info["h_total"] * info["v_total"] * refresh) // 250_000) * 250_000
+    # mode slower than asked, and a quarter megahertz up runs a small mode fast
+    # (60.21 Hz at 1280x720), so vsynced frames beat against the stream's rate.
+    # The next 10 kHz up, an EDID timing's step, keeps it neither slower than
+    # asked nor faster by more than 0.01 Hz.
+    info["dot_clock"] = -(-int(info["h_total"] * info["v_total"] * refresh) // 10_000) * 10_000
     info["width"] = w
     info["id"] = 0
     info["name_length"] = len(mode_name)

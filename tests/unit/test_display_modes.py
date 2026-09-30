@@ -95,7 +95,7 @@ def run() -> H.Results:
         res.check("the refresh reported is the created mode's own",
                   abs(srv.rate - rate) < 1e-6, f"{srv.rate:.3f} vs {rate:.3f}")
         res.check("a size the pool holds only at 60 Hz gets a mode at the configured refresh",
-                  got != 0x1ee and name == "1600x900_120" and 119.88 <= rate <= 119.88 * 1.01
+                  got != 0x1ee and name == "1600x900_120" and 119.88 <= rate <= 119.89
                   and got in srv.attached and info.get("width") == 1600,
                   f"{name} {rate:.3f} Hz")
 
@@ -106,11 +106,14 @@ def run() -> H.Results:
         got = srv.pick(1280, 720, 60, "1280x720")
         res.check("an interlaced mode never serves, even at the rate asked",
                   got != 0x1ef and srv.created[-1][0] == "1280x720_120", srv.created[-1][0])
+        rate = du._mode_refresh(next(m for m in srv.res.modes if m.id == got))
+        res.check("a small mode is made at the rate asked, not a quarter megahertz fast",
+                  119.88 <= rate <= 119.89, f"{rate:.4f} Hz")
 
         got = srv.pick(1920, 1080, 144, "1920x1080")
         rate = du._mode_refresh(next(m for m in srv.res.modes if m.id == got))
         res.check("a stream faster than the configured refresh raises the mode to it",
-                  srv.created[-1][0] == "1920x1080_144" and 144 <= rate <= 144 * 1.01,
+                  srv.created[-1][0] == "1920x1080_144" and 144 <= rate <= 144.01,
                   f"{srv.created[-1][0]} {rate:.3f} Hz")
 
         got = srv.pick(1366, 768, 60, "selkies-1366x768")
