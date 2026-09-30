@@ -53,7 +53,7 @@
  * because it is a per-browser preference.
  * @module
  */
-import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useId, useMemo, useRef, useSyncExternalStore } from "react";
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { sessionAuthHeaders, withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { fragmentWithSessionToken, shareablePageURL, urlFragmentKeyword } from "../../../selkies-web-core/lib/page-url.js";
@@ -413,6 +413,30 @@ const SelkiesLogo = ({ width = 30, height = 30, className, t, ...props }) => {
  * mounted, so each open is a fresh mount, and a hit here skips the network.
  */
 let cachedAppData = null;
+
+/**
+ * The last `serverSettings` the core posted, kept from module load and read by
+ * the sidebar as an external store. The core connects before the sidebar
+ * renders, and a socket on the page (WebKit's above all) can deliver the
+ * settings before any effect of the sidebar's would listen.
+ */
+let latestServerSettings = null;
+const serverSettingsListeners = new Set();
+if (typeof window !== "undefined") {
+  window.addEventListener("message", (event) => {
+    if (event.origin === window.location.origin && event.data?.type === "serverSettings") {
+      console.log("Dashboard received server settings:", event.data.payload);
+      latestServerSettings = event.data.payload;
+      serverSettingsListeners.forEach((listener) => listener());
+    }
+  });
+}
+/** `useSyncExternalStore` subscription to `latestServerSettings`. */
+const subscribeServerSettings = (listener) => {
+  serverSettingsListeners.add(listener);
+  return () => serverSettingsListeners.delete(listener);
+};
+const readServerSettings = () => latestServerSettings;
 
 /**
  * Catalog of proot-apps with install, remove, update, and launch actions,
@@ -954,28 +978,12 @@ function Sidebar() {
   const [isTouchGamepadActive, setIsTouchGamepadActive] = useState(false);
   const [isTouchGamepadSetup, setIsTouchGamepadSetup] = useState(false);
   const [availablePlacements, setAvailablePlacements] = useState(null);
-  const [serverSettings, setServerSettings] = useState(null);
+  const serverSettings = useSyncExternalStore(subscribeServerSettings, readServerSettings);
   /** The derived default, marked in the picker so the two never disagree. */
   const currentDeviceDpi = deriveDpi(manualResolution(serverSettings));
 
   const [uiTitle, setUiTitle] = useState('Selkies');
   const [uiShowLogo, setUiShowLogo] = useState(true);
-
-  useEffect(() => {
-    const handleMessage = (event) => {
-      if (
-        event.origin === window.location.origin &&
-        event.data?.type === "serverSettings"
-      ) {
-        console.log("Dashboard received server settings:", event.data.payload);
-        setServerSettings(event.data.payload);
-      }
-    };
-    window.addEventListener("message", handleMessage);
-    return () => {
-      window.removeEventListener("message", handleMessage);
-    };
-  }, []);
 
   /**
    * Which sidebar controls the server's settings allow: a pure projection of

@@ -1425,6 +1425,32 @@ def wait_second_display(timeout: float = 15.0) -> bool:
     return False
 
 
+def page_socket_block(dashboard: str, dist: str, engine: str) -> "H.Results":
+    """With the session socket on the page (`socket_worker=false`, or a policy that forbids
+    blob workers), the settings the server sends at connect can arrive before the dashboard's
+    listeners are up, WebKit's first among them; the dashboard still starts from them, so the
+    controls they gate come up enabled."""
+    res = H.Results(f"page-socket-{dashboard}-{engine}")
+    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    try:
+        with sync_playwright() as p:
+            browser = C.launch_browser(p, engine)
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+            ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+            page = ctx.new_page()
+            page.goto(f"{H.BASE_URL}?socket_worker=false", wait_until="load")
+            C.wait_ws_video(page, timeout=45)
+            time.sleep(2.0)
+            turbo, _ = paint_over_switches(page, dashboard)
+            res.check("the settings the server sent reach the dashboard", turbo.is_enabled(),
+                      f"Turbo switch disabled={turbo.get_attribute('disabled')}")
+            C.close_browser(browser)
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
 def main() -> None:
     """Run the dashboard blocks named on argv (default: all)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -1458,6 +1484,10 @@ def main() -> None:
         for engine in ("chromium", "firefox", "webkit"):
             blocks.append(paint_over_block("classic", H.CLASSIC_DIST, engine))
             blocks.append(paint_over_block("wish", H.WISH_DIST, engine))
+    if which in ("all", "page-socket"):
+        for engine in ("chromium", "firefox", "webkit"):
+            blocks.append(page_socket_block("classic", H.CLASSIC_DIST, engine))
+            blocks.append(page_socket_block("wish", H.WISH_DIST, engine))
     if which in ("all", "dpi-resolution"):
         blocks.append(dpi_for_resolution_block("classic", H.CLASSIC_DIST))
     if which in ("all", "second-screen"):
