@@ -11,6 +11,11 @@
  * gamepad announces its own changes (`touchgamepadinput`), and is read the
  * moment it does rather than on the next tick.
  *
+ * A client drives one server slot, so of its local pads one drives it at a
+ * time (`GamepadManager._choose`): a lone pad at once, and among several the
+ * one last taken up, so a second device's resting or noisy controls (a flight
+ * stick's pots, a throttle parked at an end) never write over the pad in use.
+ *
  * Rumble goes the other way (`rumble`): the dual-rumble effect of the
  * Gamepad API's `vibrationActuator` (Chromium, WebKit), else Gecko's
  * `hapticActuators` pulse.
@@ -52,6 +57,15 @@ const STICK_DEADZONE = 0.05;
 /** The standard-layout axis pairs that are one stick each. */
 const STICK_AXES = [[0, 1], [2, 3]];
 
+/** How far a button or a centered stick goes before it takes a pad up (`GamepadManager._takenUp`). */
+const TAKE_UP = 0.5;
+
+/** The bit of standard axis 0 in a `_takenUp` mask; the buttons take the bits below it. */
+const TAKE_UP_AXIS_BIT = 24;
+
+/** A pad's state before anything it holds has been reported. */
+const DPAD_REST = () => ({ 12: false, 13: false, 14: false, 15: false });
+
 /** The longest effect the Gamepad API plays at once, in milliseconds. */
 const RUMBLE_MAX_MS = 5000;
 
@@ -81,12 +95,21 @@ export class GamepadManager {
      * @param {(() => void)=} onHeld Called about ten times a second while any
      *     control is away from rest, so the server can neutralize a held pad
      *     whose client died without a transport close.
+     * @param {((gamepad: Gamepad|null, switched: boolean) => void)=} onActive
+     *     Called with the pad that now drives the slot, or null when none
+     *     does; `switched` when it replaces another, whose held controls the
+     *     slot must drop, rather than announcing the same pad again.
      */
-    constructor(gamepad, onButton, onAxis, onHeld) {
+    constructor(gamepad, onButton, onAxis, onHeld, onActive) {
         this.gamepad = gamepad;
         this.onButton = onButton;
         this.onAxis = onAxis;
         this.onHeld = onHeld || null;
+        this.onActive = onActive || null;
+        /** The browser index of the pad that drives the slot, or null. */
+        this.active = null;
+        /** Per pad, the controls that held it taken up at the last tick (`_takenUp`). */
+        this._takenUpAt = {};
         this._lastHeldBeat = 0;
         this.state = {};
         this._active = true;
@@ -177,6 +200,7 @@ export class GamepadManager {
             return;
         }
         const gamepads = navigator.getGamepads();
+        this._choose(gamepads);
         for (let i = 0; i < MAX_GAMEPADS; i++) {
             const currentGp = gamepads[i];
             if (currentGp) {
@@ -186,7 +210,7 @@ export class GamepadManager {
                     gpState = this.state[i] = {
                         axes: new Array(currentGp.axes.length).fill(0),
                         buttons: new Array(currentGp.buttons.length).fill(0),
-                        dpadAxisState: { 12: false, 13: false, 14: false, 15: false },
+                        dpadAxisState: DPAD_REST(),
                         remapProfile: null,
                         loadingProfile: false,
                     };
@@ -201,6 +225,7 @@ export class GamepadManager {
                         }
                     }
                 }
+                if (i !== this.active) continue;
 
                 if (gpState.buttons.length !== currentGp.buttons.length) {
                     gpState.buttons = new Array(currentGp.buttons.length).fill(0);
@@ -296,6 +321,110 @@ export class GamepadManager {
                 this.onHeld();
             }
         }
+    }
+
+    /**
+     * Picks the pad that drives the slot. A lone pad drives it; among several,
+     * the one whose control was taken up last (`_takenUp`) takes over, and
+     * until one is, none does. A pad that went away gives the slot up.
+     * @param {(Gamepad|null)[]} gamepads
+     */
+    _choose(gamepads) {
+        let count = 0;
+        let lone = null;
+        let takenUp = null;
+        for (let i = 0; i < MAX_GAMEPADS; i++) {
+            const gp = gamepads[i];
+            if (!gp) {
+                delete this._takenUpAt[i];
+                continue;
+            }
+            count++;
+            lone = i;
+            const now = this._takenUp(gp);
+            if ((now & ~(this._takenUpAt[i] || 0)) && takenUp === null && i !== this.active) takenUp = i;
+            this._takenUpAt[i] = now;
+        }
+        let next = (this.active !== null && gamepads[this.active]) ? this.active : null;
+        if (takenUp !== null) next = takenUp;
+        else if (next === null && count === 1) next = lone;
+        if (next !== this.active) this._setActive(next, next === null ? null : gamepads[next]);
+    }
+
+    /**
+     * The controls a pad is being used with, as a mask: each button pressed
+     * past `TAKE_UP`, and, on a standard-mapped pad, whose stick axes rest
+     * centered, each stick axis pushed past it. An unmapped pad's axes are
+     * left out, since they may rest anywhere. A control that joins the mask
+     * takes the pad up, whatever else it holds.
+     * @param {Gamepad} gp
+     * @returns {number}
+     */
+    _takenUp(gp) {
+        let mask = 0;
+        for (let x = 0; x < gp.buttons.length && x < TAKE_UP_AXIS_BIT; x++) {
+            const b = gp.buttons[x];
+            if (b && b.value >= TAKE_UP) mask |= 1 << x;
+        }
+        if (gp.mapping === 'standard') {
+            for (let x = 0; x < 4 && x < gp.axes.length; x++) {
+                if (Math.abs(gp.axes[x] || 0) >= TAKE_UP) mask |= 1 << (TAKE_UP_AXIS_BIT + x);
+            }
+        }
+        return mask;
+    }
+
+    /**
+     * Hands the slot to pad `next` (null: to none). Neither pad's controls
+     * count as reported any more, so the next tick sends the new pad's whole
+     * state onto the slot the switch cleared.
+     * @param {number|null} next
+     * @param {Gamepad|null} gp The pad at `next`.
+     */
+    _setActive(next, gp) {
+        const switched = this.active !== null;
+        for (const i of [this.active, next]) {
+            this._unreport(i);
+        }
+        this.active = next;
+        if (this.onActive) this.onActive(gp, switched);
+    }
+
+    /** Forgets what pad `i` reported, as if it had held nothing. */
+    _unreport(i) {
+        const s = i === null ? null : this.state[i];
+        if (!s) return;
+        s.buttons.fill(0);
+        s.axes.fill(0);
+        s.dpadAxisState = DPAD_REST();
+    }
+
+    /**
+     * A pad the browser reports gone: if it drove the slot, the slot is given
+     * up at once, even while polling is paused.
+     * @param {number} index
+     */
+    padGone(index) {
+        delete this._takenUpAt[index];
+        delete this.state[index];
+        if (this.active === index) this._setActive(null, null);
+    }
+
+    /**
+     * Announces the pad that drives the slot again, and has its whole state
+     * sent anew: the slot changed, or a channel reopened.
+     */
+    reannounce() {
+        if (this.active === null) return;
+        let gp = null;
+        try {
+            gp = navigator.getGamepads()[this.active];
+        } catch (e) {
+            return;
+        }
+        if (!gp) return;
+        this._unreport(this.active);
+        if (this.onActive) this.onActive(gp, false);
     }
 
     /**

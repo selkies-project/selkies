@@ -1504,6 +1504,8 @@ export class Input {
         this._geometryTimer = null;
         this.buttonMask = 0;
         this.gamepadManager = null;
+        /** The server slot a `js,c` was last sent on, which a `js,d` releases (`_gamepadActive`). */
+        this._gamepadAnnounced = null;
         /** Pads play the rumble the server relays (`setGamepadRumble`). */
         this.gamepadRumble = true;
         this.x = 0;
@@ -1630,11 +1632,17 @@ export class Input {
         this.isSharedMode = !!enabled;
     }
 
-    /** Assigns the one-based controller slot the server gave this client. */
+    /**
+     * Assigns the one-based controller slot the server gave this client, and
+     * announces the pad that drives it there: a `js,c` sent before the slot
+     * was known was refused by the server's slot gate, which left the pad
+     * unassociated.
+     */
     updateControllerSlot(newSlot) {
         if (this.controllerSlot !== newSlot) {
             console.log(`Input class: Controller slot updated to: ${newSlot}`);
             this.controllerSlot = newSlot;
+            if (this.gamepadManager) this.gamepadManager.reannounce();
         }
     }
     /** Tracks the dashboard's `sidebarVisibilityChanged` message so gamepad state is only mirrored while it is open. */
@@ -4515,36 +4523,59 @@ export class Input {
     }
 
     /**
-     * Announces a pad (`js,c`) on this client's slot and creates the shared
-     * manager. A negative slot (a controller slot of 0) is refused, as the
-     * button and axis sends refuse it, so no phantom slot is created. The
-     * axis and button counts are advisory: the server presents a fixed Xbox
-     * pad, and Firefox's non-standard axis layout is normalized on the way.
+     * The zero-based server slot this client's pad drives: its controller
+     * slot, else its player index; null for a negative slot (a controller
+     * slot of 0), which every gamepad send refuses, so no phantom slot is
+     * created.
+     * @returns {number|null}
      */
+    _gamepadIndex() {
+        const index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
+        return (Number.isInteger(index) && index >= 0) ? index : null;
+    }
+
+    /** Creates the shared manager on the first pad; which pad drives the slot is its call (`_gamepadActive`). */
     _gamepadConnected(event) {
-        const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
+        if (this._gamepadIndex() === null) return;
         if (!this.gamepadManager) {
-            this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this), this._gamepadHeartbeat.bind(this));
+            this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this),
+                this._gamepadHeartbeat.bind(this), this._gamepadActive.bind(this));
             this.gamepadManager.setRumbleEnabled(this.gamepadRumble);
         }
-        const connectMsg = "js,c," + server_gp_index + "," + this._encodeGamepadId(event.gamepad.id) + "," + event.gamepad.axes.length + "," + event.gamepad.buttons.length;
-        this.send(connectMsg);
         if (this.ongamepadconnected !== null) { this.ongamepadconnected(event.gamepad.id); }
     }
 
-    /** Announces a pad's disconnection (`js,d`). */
+    /**
+     * Announces the pad that now drives the slot (`js,c`). The slot drops what
+     * it held (`js,d`) first when another pad drove it, when none drives it
+     * any more, or when the slot itself moved. The axis and button counts are
+     * advisory: the server presents a fixed Xbox pad, and Firefox's
+     * non-standard axis layout is normalized on the way.
+     * @param {Gamepad|null} gamepad
+     * @param {boolean} switched
+     */
+    _gamepadActive(gamepad, switched) {
+        const index = this._gamepadIndex();
+        const announced = this._gamepadAnnounced;
+        this._gamepadAnnounced = null;
+        if (announced !== null && (switched || !gamepad || announced !== index)) {
+            this.send("js,d," + announced);
+        }
+        if (!gamepad || index === null) return;
+        this.send("js,c," + index + "," + this._encodeGamepadId(gamepad.id) + "," + gamepad.axes.length + "," + gamepad.buttons.length);
+        this._gamepadAnnounced = index;
+    }
+
+    /** A pad gone: the slot is released only if that pad drove it. */
     _gamepadDisconnect(event) {
-         if (this.ongamepaddisconnected !== null) { this.ongamepaddisconnected(); }
-         const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-         if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
-         this.send("js,d," + server_gp_index);
+        if (this.ongamepaddisconnected !== null) { this.ongamepaddisconnected(); }
+        if (this.gamepadManager && event && event.gamepad) this.gamepadManager.padGone(event.gamepad.index);
     }
 
     /** Sends a button change (`js,b`) and mirrors it to the dashboard while the sidebar is open. */
     _gamepadButton(gp_num, btn_num, val) {
-        const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
+        const server_gp_index = this._gamepadIndex();
+        if (server_gp_index === null) return;
         this.send("js,b," + server_gp_index + "," + btn_num + "," + val);
         if (this._isSidebarOpen) {
             window.postMessage({ type: 'gamepadButtonUpdate', gamepadIndex: server_gp_index, buttonIndex: btn_num, value: val }, window.location.origin);
@@ -4560,8 +4591,7 @@ export class Input {
      * @param {number} durationMs How long to hold it.
      */
     rumble(slot, strong, weak, durationMs) {
-        const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (slot !== server_gp_index || !this.gamepadManager) return;
+        if (slot !== this._gamepadIndex() || !this.gamepadManager) return;
         this.gamepadManager.rumble(strong, weak, durationMs);
     }
 
@@ -4582,15 +4612,15 @@ export class Input {
 
     /** Sends the held-pad heartbeat (`js,h`). */
     _gamepadHeartbeat() {
-        const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
+        const server_gp_index = this._gamepadIndex();
+        if (server_gp_index === null) return;
         this.send("js,h," + server_gp_index);
     }
 
     /** Sends an axis change (`js,a`); Firefox's non-standard layout reports the triggers on axes 4 and 5, sent as buttons 6 and 7. */
     _gamepadAxis(gp_num, axis_num, val) {
-        const server_gp_index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
-        if (!Number.isInteger(server_gp_index) || server_gp_index < 0) return;
+        const server_gp_index = this._gamepadIndex();
+        if (server_gp_index === null) return;
         if (navigator.userAgent.toLowerCase().includes('firefox')) {
             if (axis_num === 4) {
                 const buttonVal = (val + 1.0) / 2.0;
@@ -4861,6 +4891,12 @@ export class Input {
      * dropped, leaving the server no association to release when the peer goes.
      */
     resyncGamepads() {
+        if (this.gamepadManager) {
+            // The association was the dead channel's, and the server released it.
+            this._gamepadAnnounced = null;
+            this.gamepadManager.reannounce();
+            return;
+        }
         let pads = [];
         try {
             pads = navigator.getGamepads ? Array.from(navigator.getGamepads()) : [];
@@ -4869,8 +4905,8 @@ export class Input {
         }
         for (const pad of pads) {
             if (pad && pad.connected) {
+                // One manager polls all pads and announces the one that drives the slot.
                 this._gamepadConnected({ gamepad: pad });
-                // One manager polls all pads; the connect message is per-slot.
                 break;
             }
         }
@@ -4887,6 +4923,7 @@ export class Input {
             this.gamepadManager.destroy();
             this.gamepadManager = null;
         }
+        this._gamepadAnnounced = null;
         this._watchScreenGeometry(false);
         this.detach_context();
     }

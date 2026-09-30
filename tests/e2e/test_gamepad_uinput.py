@@ -2,11 +2,16 @@
 """Kernel gamepad end-to-end: a real browser client with a synthetic Gamepad API
 drives selkies over each transport; the /dev/uinput emulator records what the
 kernel would receive. A `#player2` client repeats it on the sharing path, where
-the slot comes from the connection rather than the message."""
+the slot comes from the connection rather than the message. A client with two
+local pads, a flight stick whose pots jitter beside the pad in use, drives its
+one slot with the pad it takes up, with and without a token that binds it to a
+slot."""
+import json
 import os
 import struct
 import sys
 import time
+import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
@@ -33,6 +38,37 @@ window.__padAxis = (i, v) => {
 };
 """
 
+TWO_PADS_INIT: str = """
+(() => {
+  const blank = (n) => Array.from({length: n}, () => ({pressed: false, touched: false, value: 0}));
+  window.__pads = [
+    {index: 0, id: "Logitech Extreme 3D (Vendor: 046d Product: c215)", mapping: "", connected: true,
+     timestamp: 1, buttons: blank(12), axes: [0.07, -0.06, 0, 0, 0, 0, -1, 0, 0, 1.2857]},
+    {index: 1, id: "Xbox Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)", mapping: "standard",
+     connected: true, timestamp: 1, buttons: blank(17), axes: [0, 0, 0, 0]},
+  ];
+  navigator.getGamepads = () => [window.__pads[0], window.__pads[1], null, null];
+  let t = 0;
+  setInterval(() => {
+    window.__pads[0].axes[0] = (t++ % 2) ? 0.09 : 0.06;
+    window.__pads[0].timestamp = performance.now();
+  }, 4);
+  window.__padPress = (p, i, v) => {
+    window.__pads[p].buttons[i] = {pressed: v > 0, touched: v > 0, value: v};
+    window.__pads[p].timestamp = performance.now();
+  };
+  window.__padAxis = (p, i, v) => {
+    window.__pads[p].axes[i] = v;
+    window.__pads[p].timestamp = performance.now();
+  };
+})();
+"""
+MASTER = "e2e-gamepad-master"
+SLOT_TOKEN = "e2e-gamepad-slot1-Rk7"
+# The stick's jitter, 0.06 to 0.09 of full scale on the kernel device's axis.
+JITTER = range(1500, 3500)
+
+
 def decode(path: str) -> list[tuple[int, int, int]]:
     """Decode a uinput-shim event stream into (type, code, value) tuples.
 
@@ -46,13 +82,14 @@ def decode(path: str) -> list[tuple[int, int, int]]:
     blob = open(path, "rb").read()
     return [struct.unpack("=qqHHi", blob[o:o + 24])[2:] for o in range(0, len(blob) - 23, 24)]
 
-def launch(pw, mode: str, fragment: str = ""):
+def launch(pw, mode: str, fragment: str = "", init: str = PAD_INIT):
     """Launch Chromium with the synthetic pad injected and open the stream page.
 
     Args:
         pw: Active Playwright instance.
         mode: Transport mode, ``websockets`` or ``webrtc``.
-        fragment: Sharing fragment to open the page with ("#player2"), or "".
+        fragment: Fragment to open the page with ("#player2", "#token=..."), or "".
+        init: The synthetic Gamepad API to inject.
 
     Returns:
         Tuple of (browser, page, console-error list).
@@ -61,7 +98,7 @@ def launch(pw, mode: str, fragment: str = ""):
     ctx = browser.new_context(viewport={"width": 1280, "height": 720})
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
     ctx.add_init_script(C.WIRE_TAP_JS)
-    ctx.add_init_script(PAD_INIT)
+    ctx.add_init_script(init)
     page = ctx.new_page()
     errors = []
     page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
@@ -168,8 +205,76 @@ def run_player_slot(mode: str, results: "H.Results") -> None:
                   H.shim_created(SHIMLOG, ih.STANDARD_XPAD_CONFIG["name"]) == 1)
 
 
+def post_slot_token() -> int:
+    """Provision a controller token bound to player slot 1; returns the HTTP status."""
+    req = urllib.request.Request(
+        H.BASE_URL + "/api/tokens", method="POST",
+        data=json.dumps({SLOT_TOKEN: {"role": "controller", "slot": 1}}).encode(),
+        headers={"Authorization": f"Bearer {MASTER}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.status
+
+
+def run_two_pads(mode: str, results: "H.Results", token: bool) -> None:
+    """Two local pads drive the client's one slot with the pad taken up.
+
+    A flight stick at the first index jitters past the stick deadzone, parks
+    its throttle at an end and rests its hat off-center, beside a standard pad
+    the user presses. The pad in use must drive the slot alone: its press and
+    its held stick reach the kernel device, and nothing of the stick does. With
+    `token`, the page holds a controller token bound to slot 1, so the server
+    gives it the slot only with its verdict, after the page first saw its pads.
+
+    Args:
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+        results: Results accumulator shared across both transports.
+        token: Whether the client holds a slot-bound token (secure mode).
+    """
+    label = f"{mode}{' with a slot token' if token else ''}"
+    shim_env, STREAM, SHIMLOG = H.uinput_shim_env(f"e2e-two-{mode}-{int(token)}")
+    extra = dict(shim_env, **({"SELKIES_MASTER_TOKEN": MASTER} if token else {}))
+    H.server_start(mode=mode, extra_env=extra)
+    try:
+        if token:
+            results.check(f"{label}: token provisioned", post_slot_token() == 200)
+        with sync_playwright() as pw:
+            browser, page, errors = launch(pw, mode, fragment=f"#token={SLOT_TOKEN}" if token else "",
+                                           init=TWO_PADS_INIT)
+            video = C.wait_wr_video(page) if mode == "webrtc" else C.wait_ws_video(page)
+            results.check(f"{label}: video flowing", bool(video), str(video))
+            time.sleep(1.0)
+            for action in ("__padPress(1, 0, 1)", "__padPress(1, 0, 0)"):
+                page.evaluate(f"window.{action}")
+                time.sleep(0.25)
+            mark = len(decode(STREAM))
+            page.evaluate("window.__padAxis(1, 0, -1)")
+            time.sleep(1.0)
+            held = decode(STREAM)[mark:]
+            page.evaluate("window.__padAxis(1, 0, 0)")
+            time.sleep(0.5)
+            browser.close()
+    finally:
+        server_log = H.server_log()
+        H.server_stop()
+
+    events = decode(STREAM)
+    xs = [v for (t, c, v) in held if (t, c) == (ih.EV_ABS, ih.ABS_X)]
+    results.check(f"{label}: the pad in use is the slot's controller",
+                  "'Xbox Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)' (17b, 4a) is now associated"
+                  " with persistent virtual gamepad slot 0" in server_log)
+    results.check(f"{label}: its press reached the kernel device",
+                  (ih.EV_KEY, ih.BTN_A, 1) in events and (ih.EV_KEY, ih.BTN_A, 0) in events)
+    results.check(f"{label}: its stick stayed where it was held", bool(xs) and all(v == -32767 for v in xs),
+                  f"ABS_X while held: {xs[:6]}{'...' if len(xs) > 6 else ''} ({len(xs)})")
+    results.check(f"{label}: nothing of the flight stick reached it",
+                  not any(t == ih.EV_ABS and abs(v) in JITTER for (t, c, v) in events),
+                  f"{sum(1 for (t, c, v) in events if t == ih.EV_ABS and abs(v) in JITTER)} jitter events")
+
+
 results = H.Results("uinput")
 for mode in ("websockets", "webrtc"):
     run(mode, results)
     run_player_slot(mode, results)
+    run_two_pads(mode, results, token=False)
+    run_two_pads(mode, results, token=True)
 sys.exit(0 if results.summary() else 1)

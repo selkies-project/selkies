@@ -12,7 +12,9 @@
 // cutting each axis on its own pins the minor axis of a push near a cardinal
 // direction to zero and then jumps it. Rumble the server relays plays on every
 // pad that has a motor to play it with, unless the user turned it off, and
-// stops when the manager goes.
+// stops when the manager goes. A client drives one server slot, so of several
+// local pads the one taken up drives it, and the others' resting or noisy
+// controls never reach it.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -47,7 +49,9 @@ function makeManager() {
     const sent = [];
     const manager = new GamepadManager(null,
         (i, b, v) => sent.push(['b', b, v]),
-        (i, a, v) => sent.push(['a', a, v]));
+        (i, a, v) => sent.push(['a', a, v]),
+        null,
+        (gp, switched) => sent.push(['active', gp ? gp.id : null, switched]));
     return { manager, sent };
 }
 
@@ -151,6 +155,78 @@ function makeManager() {
     manager.destroy();
     check('tearing the manager down stops what plays',
           calls.length === 4 && calls[2][1] === 'reset' && calls[3][2] === 0, JSON.stringify(calls));
+}
+
+// --- of several local pads, the one taken up drives the slot --------------
+{
+    const press = (p, b, v) => { p.buttons[b] = { pressed: v > 0, touched: v > 0, value: v }; };
+    // A flight stick the browser cannot map: its pots jitter past the stick
+    // deadzone, its throttle is parked at an end and its hat rests at 1.2857.
+    const stick = pad('', [0.07, -0.06, 0, 0, 0, 0, -1, 0, 0, 1.2857], 12);
+    stick.id = 'Logitech Extreme 3D (Vendor: 046d Product: c215)';
+    const xbox = pad('standard', [0, 0, 0, 0]);
+    xbox.id = 'Xbox Controller (STANDARD GAMEPAD Vendor: 045e Product: 0b13)';
+    pads = [xbox, null, null, null];
+    let { manager, sent } = makeManager();
+    manager._poll();
+    check('a lone pad drives the slot at once', JSON.stringify(sent[0]) === JSON.stringify(['active', xbox.id, false]),
+          JSON.stringify(sent));
+    manager.destroy();
+
+    pads = [stick, xbox, null, null];
+    ({ manager, sent } = makeManager());
+    for (let t = 0; t < 5; t++) {
+        stick.axes[0] = t % 2 ? 0.09 : 0.06;
+        manager._poll();
+    }
+    check('with two pads and neither taken up, nothing reaches the slot', sent.length === 0, JSON.stringify(sent));
+    press(xbox, 0, 1);
+    manager._poll();
+    check('a press takes the pad up and drives the slot, the press with it',
+          JSON.stringify(sent) === JSON.stringify([['active', xbox.id, false], ['b', 0, 1]]), JSON.stringify(sent));
+    sent.length = 0;
+    press(xbox, 0, 0);
+    xbox.axes = [-1, 0, 0, 0];
+    for (let t = 0; t < 5; t++) {
+        stick.axes[0] = t % 2 ? 0.06 : 0.09;
+        manager._poll();
+    }
+    check('the other pad\'s noise, throttle and hat never reach the slot while it drives',
+          JSON.stringify(sent) === JSON.stringify([['b', 0, 0], ['a', 0, -1]]), JSON.stringify(sent));
+    sent.length = 0;
+    press(stick, 0, 1);
+    manager._poll();
+    check('a press on the other pad hands the slot over, as a switch',
+          JSON.stringify(sent[0]) === JSON.stringify(['active', stick.id, true]), JSON.stringify(sent));
+    check('and its whole state is sent onto the cleared slot',
+          sent.some(([k, b, v]) => k === 'b' && b === 0 && v === 1) && sent.some(([k, a, v]) => k === 'a' && a === 6 && v === -1),
+          JSON.stringify(sent));
+    sent.length = 0;
+    press(xbox, 1, 1);
+    press(stick, 0, 0);
+    manager._poll();
+    check('a new press takes it back, though that pad\'s stick was held all along',
+          sent.length > 0 && JSON.stringify(sent[0]) === JSON.stringify(['active', xbox.id, true]), JSON.stringify(sent));
+    sent.length = 0;
+    manager.padGone(0);
+    check('the pad that does not drive going away changes nothing', sent.length === 0, JSON.stringify(sent));
+    manager.padGone(1);
+    check('the pad that drives going away gives the slot up at once',
+          JSON.stringify(sent) === JSON.stringify([['active', null, true]]), JSON.stringify(sent));
+    sent.length = 0;
+    pads = [stick, null, null, null];
+    manager._poll();
+    check('and the pad left alone drives it next',
+          sent.length > 0 && JSON.stringify(sent[0]) === JSON.stringify(['active', stick.id, false]), JSON.stringify(sent));
+    press(stick, 3, 1);
+    manager._poll();
+    sent.length = 0;
+    manager.reannounce();
+    manager._poll();
+    check('an announcement again resends what the pad holds',
+          JSON.stringify(sent[0]) === JSON.stringify(['active', stick.id, false]) && sent.some(([k, b, v]) => k === 'b' && b === 3 && v === 1),
+          JSON.stringify(sent));
+    manager.destroy();
 }
 
 process.exit(failed === 0 ? 0 : 1);
