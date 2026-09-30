@@ -18,10 +18,12 @@ repair, which spends a keyframe for about every eight frames it drops: 456 and
 What the repair itself may spend depends on the encoder that coded the load, read
 from the server log since a host whose NVENC sessions run out falls back to x264:
 a loss covering the frame where H.264's frame_num wraps is answered with a
-keyframe, every 256 frames on NVENC and every sixteen on x264, so the ceiling is
-worked out from what each burst lost (`keyframe_ceiling`). On NVENC a repaired
-load cost 0 to 3 keyframes against ceilings of 5 to 17, one that asked a
-keyframe for every loss 46 to 64; on x264 5 to 23 against 12 to 26, and 44 to 62.
+keyframe, every 256 frames on NVENC and every 4096 on x264, whose own sixteen
+values pixelflux carries a byte wider, so the ceiling is worked out from what each
+burst lost (`keyframe_ceiling`). On NVENC a repaired load cost 0 to 3 keyframes
+against ceilings of 5 to 17, and one that asked a keyframe for every loss 46 to
+64. On x264 it cost 0 against ceilings of 2; x264's own sixteen values cost 0 and
+3 there, and a keyframe for every loss 44 to 62.
 
     python3 tests/e2e/test_reference_invalidation.py
 
@@ -53,7 +55,7 @@ TOLD = "the encoder predicts past it"
 # How many values frame_num takes before it wraps in each H.264 encoder's
 # stream, by the name the capture's settings line gives the encoder, and the
 # frames of references each keeps at this size.
-FRAME_NUM_RANGE = {"NVENC": 256, "CPU (x264)": 16}
+FRAME_NUM_RANGE = {"NVENC": 256, "CPU (x264)": 4096}
 REFERENCES = 8
 SETTINGS = re.compile(r"Stream settings active -> .*?\| Encoder: ([^|]+?) \|")
 
@@ -111,12 +113,8 @@ def keyframe_ceiling(bursts: list, frame_num_range: int) -> int:
     frames had the encoder about n frames past the first of them: its odds of
     covering a wrap are taken as (n + REFERENCES) / frame_num_range, a span longer
     than any loss the references still hold, and a burst that named REFERENCES or
-    more counts as one. Where frame_num wraps within twice the references, as
-    x264's sixteen do, a loss the references hold may cover a wrap at any depth,
-    and every burst counts as one.
+    more counts as one.
     """
-    if frame_num_range <= 2 * REFERENCES:
-        return len(bursts)
     odds = [1.0 if n >= REFERENCES else (n + REFERENCES) / frame_num_range for n in bursts]
     return min(len(bursts), math.ceil(sum(odds) + 3 * math.sqrt(sum(p * (1 - p) for p in odds))))
 
@@ -137,8 +135,8 @@ def report(res: H.Results, tag: str, samples: list, dropped: int, named: int, bu
     # Beyond what the wraps and the deep bursts cost (keyframe_ceiling), one is the
     # measured allowance -- a burst that lands badly still trips the receiver's own
     # keyframe timer now and then -- and every capture restart opens with one. A
-    # repair that spends a keyframe on every loss costs NVENC about one per burst,
-    # against a ceiling of a handful, and x264 more than one per burst.
+    # repair that spends a keyframe on every loss costs about one per burst, against
+    # a ceiling of a handful.
     ranges = [FRAME_NUM_RANGE.get(e) for e in encoders]
     known = bool(ranges) and None not in ranges
     res.check(f"{tag}: the load ran on an encoder whose frame_num range is known", known, encoders)
