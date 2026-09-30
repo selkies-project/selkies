@@ -11,11 +11,14 @@ character bound to a spare vendor keycode never arrived, or reloaded or
 navigated the page instead. Each string is typed into a textarea of Chrome on
 pixelflux's compositor, and of Chrome and Firefox on a headless labwc, and read
 back; the longest has more distinct characters than either overlay has keys for
-one swap, and the mixed one types ASCII on keys an earlier string bound.
+one swap, and the mixed one types ASCII on keys an earlier string bound. A long
+session of short commits follows, as pinyin input types them, each read back:
+the keys an overlay recycles over hundreds of characters have to stay good too.
 Firefox reads a key for its keysym alone, and on pixelflux's output with no
 capture running it takes no keys at all, so the seat half runs Chrome only.
 """
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -48,6 +51,10 @@ CASES = [
     ("Latin-1 and beyond", "é ü ñ £ ¿ ÿ Ω ф"),
 ]
 PAGE = '<textarea id="t" style="width:600px;height:300px" autofocus></textarea>'
+# The long session: commits of 1-4 characters, half from a few common ones and half
+# from many, so characters repeat and new ones keep arriving, as running text does.
+SESSION_COMMITS = 300
+_COMMON = [chr(0x4E00 + i) for i in range(0, 20992, 7)][:2400]
 
 
 def boot_labwc(runtime: str) -> tuple:
@@ -120,6 +127,13 @@ def typed_back(page, type_text, text: str, seconds: float = 6.0) -> str:
     return "<navigated>"
 
 
+def session(seed: int = 7) -> list:
+    """The long session's commits, the same on every run."""
+    rng = random.Random(seed)
+    return ["".join(rng.choice(_COMMON[:60]) if rng.random() < 0.5 else rng.choice(_COMMON)
+                    for _ in range(rng.choice((1, 2, 2, 2, 3, 4)))) for _ in range(SESSION_COMMITS)]
+
+
 def run(res: "H.Results", pw, where: str, socket: str, runtime: str, type_text,
         engines: tuple = ("chromium", "firefox")) -> None:
     """Every case into each of `engines` on the compositor at `socket`."""
@@ -134,6 +148,17 @@ def run(res: "H.Results", pw, where: str, socket: str, runtime: str, type_text,
             for label, text in CASES:
                 got = typed_back(page, type_text, text)
                 res.check(f"{where}, {engine}: {label} arrives whole", got == text, repr(got[:80]))
+            commits = session()
+            wrong = []
+            for i, text in enumerate(commits):
+                got = typed_back(page, type_text, text, seconds=4.0)
+                if got != text:
+                    wrong.append((i, text, got))
+                    if len(wrong) >= 5:
+                        break
+            distinct = len(set("".join(commits)))
+            res.check(f"{where}, {engine}: {len(commits)} short commits, {distinct} distinct characters, arrive whole",
+                      not wrong, repr(wrong[:3]))
         finally:
             browser.close()
 
