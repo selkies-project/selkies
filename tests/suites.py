@@ -255,6 +255,7 @@ SUITES: list = [
 
     # e2e
     {"path": "e2e/test_ime_composition.py", "tier": "e2e", "timeout": 300},
+    {"path": "e2e/test_wayland_typed_text.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_matrix.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/test_scroll.py", "tier": "e2e", "timeout": 900,

@@ -167,6 +167,22 @@ def main() -> "H.Results":
     res.check("type_text swaps at most once", handle4.swaps <= 1,
               f"swaps={handle4.swaps}")
 
+    # Chromium types text only on a spare its key tables name as a plain key, so the
+    # overlay takes those first, and a commit with more new characters than they
+    # number goes out in runs on them, each run's taps before the next swap.
+    spares = owner4._overlay_codes[:owner4._text_codes]
+    res.check("the overlay takes the text spares first",
+              len(spares) >= 9 and set(spares) <= set(_WaylandKeymapOwner._TEXT_SPARES), str(spares))
+    handle9 = Recorder(capture)
+    owner9 = _WaylandKeymapOwner(handle9, base)
+    long_commit = "".join(chr(0x4E00 + 3 * i) for i in range(40))
+    runs = -(-len(long_commit) // owner9._text_codes)
+    typed = owner9.type_text(long_commit)
+    res.check("a commit longer than the text spares types in runs on them",
+              typed is True and handle9.swaps == runs
+              and set(owner9._overlay.values()) <= set(spares),
+              f"swaps={handle9.swaps} runs={runs} codes={sorted(set(owner9._overlay.values()))}")
+
     # Each entry names an X11 keysym block the layout must actually deliver, so a
     # keymap that silently lost its script fails instead of passing vacuously.
     SCRIPTS = {

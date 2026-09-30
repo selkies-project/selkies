@@ -216,18 +216,22 @@ class _WaylandKeymapOwner:
     Overlay keycodes are chosen from the live keymap (`_build_map`), not a
     fixed range: an X11 keycode is a byte, so a bind above 255 reaches Wayland
     apps only and XWayland clients never see it. The sub-256 range is nearly
-    full on a pc105 keymap, so unbound keycodes are taken first, then keycodes
-    carrying only XF86 vendor keysyms (media/browser keys a streamed session
-    does not need); everything else down there is load bearing (modifiers,
-    F-keys, punctuation, Print) and never touched. An overflow band past the
-    ceiling keeps a layout with no room working for Wayland clients instead
-    of failing outright.
+    full on a pc105 keymap, so only unbound keycodes and keycodes carrying
+    only XF86 vendor keysyms (media/browser keys a streamed session does not
+    need) are taken; everything else down there is load bearing (modifiers,
+    F-keys, punctuation, Print) and never touched. Of those, the text spares
+    (`_TEXT_SPARES`) come first and are recycled before any other is taken,
+    and `type_text` types a longer run in chunks that fit them. An overflow
+    band past the ceiling keeps a layout with no room working for Wayland
+    clients instead of failing outright.
 
     Attributes:
         _map: Keysym to (keycode, level) in the base keymap.
         _overlay: Keysym to overlay keycode.
         _overlay_order: Overlay keysyms in bind order, for round-robin recycling.
-        _overlay_codes: Overlay keycode pool in preference order.
+        _overlay_codes: Overlay keycode pool in preference order, the text
+            spares first.
+        _text_codes: How many of `_overlay_codes` are text spares.
         _pressed: Held keysym to (keycode, synthesized modifier keycodes).
         _mod_refs: Synthesized modifier keycode to holder count.
         _down: Every keycode currently injected down; the one live view that
@@ -238,6 +242,13 @@ class _WaylandKeymapOwner:
     _SUB256_CEILING = 256
     _OVERFLOW_BASE_KEYCODE = 257
     _OVERFLOW_SLOTS = 64
+    # Spare keycodes every client types a character on: F13 to F24, then the JIS
+    # IntlRo and IntlYen keys. A Wayland client may read a key's code as the
+    # physical key it names before the keysym the keymap gives, and Chromium
+    # drops a code naming no key it knows and runs its browser, media, and
+    # launcher keys as commands, so a character on another spare reaches every
+    # client but Chromium.
+    _TEXT_SPARES = (*range(191, 203), 97, 132)
 
     def __init__(self, wayland_input: Any, base_keymap_text: str) -> None:
         if libxkb is None:
@@ -294,7 +305,10 @@ class _WaylandKeymapOwner:
                             unbound.append(kc)
                         elif seen == spare:
                             shadowable.append(kc)
-                self._overlay_codes = unbound + shadowable + list(range(
+                spares = unbound + shadowable
+                text = [kc for kc in self._TEXT_SPARES if kc in spares]
+                self._text_codes = len(text)
+                self._overlay_codes = text + [kc for kc in spares if kc not in text] + list(range(
                     self._OVERFLOW_BASE_KEYCODE,
                     self._OVERFLOW_BASE_KEYCODE + self._OVERFLOW_SLOTS))
             finally:
@@ -395,32 +409,44 @@ class _WaylandKeymapOwner:
 
         A swap costs milliseconds on the compositor thread (which also drives
         input and rendering), so binding a burst one at a time would stall it
-        proportionally. A full pool recycles the oldest slot not held down:
-        rebinding a pressed keycode would make its release report a different
-        symbol than its press did. The swap rides the same command channel as
-        the key events and never awaits a reply, so it drains before the keys
-        that need it while this loop is never blocked on the compositor;
-        `set_keymap_overlay` hands over just the binds, the `set_keymap_string`
-        fallback re-sends the whole keymap text (a redundant compile far side).
+        proportionally. Once the text spares are bound, the oldest bind on one
+        not held down is recycled before any other keycode is taken, and a full
+        pool recycles the oldest slot not held down: rebinding a pressed keycode
+        would make its release report a different symbol than its press did.
+        The swap rides the same command channel as the key events and never
+        awaits a reply, so it drains before the keys that need it while this
+        loop is never blocked on the compositor; `set_keymap_overlay` hands
+        over just the binds, the `set_keymap_string` fallback re-sends the
+        whole keymap text (a redundant compile far side).
 
         Returns:
             `{keysym: keycode}` for every requested keysym; a keysym that could
             not be bound (every slot held down) maps to 0.
         """
+        keysyms = list(dict.fromkeys(keysyms))
+        # The batch's own binds are as untouchable as a held key: one swap binds
+        # them all, so a recycled one would type the other keysym.
         held = {kc for kc, _ in self._pressed.values()}
+        held.update(self._overlay[k] for k in keysyms if k in self._overlay)
         out = {}
         fresh = False
-        for keysym in dict.fromkeys(keysyms):
+        for keysym in keysyms:
             kc = self._overlay.get(keysym)
             if kc is None:
-                if len(self._overlay) >= len(self._overlay_codes):
-                    victim = next(
-                        (s for s in self._overlay_order if self._overlay[s] not in held),
-                        None,
-                    )
-                    if victim is None:
-                        out[keysym] = 0
-                        continue
+                victim = None
+                if len(self._overlay) >= self._text_codes:
+                    text = self._overlay_codes[:self._text_codes]
+                    victim = next((s for s in self._overlay_order
+                                   if self._overlay[s] in text and self._overlay[s] not in held), None)
+                    if victim is None and len(self._overlay) >= len(self._overlay_codes):
+                        victim = next(
+                            (s for s in self._overlay_order if self._overlay[s] not in held),
+                            None,
+                        )
+                        if victim is None:
+                            out[keysym] = 0
+                            continue
+                if victim is not None:
                     self._overlay_order.remove(victim)
                     kc = self._overlay.pop(victim)
                 else:
@@ -488,11 +514,14 @@ class _WaylandKeymapOwner:
             self._input.inject_key(kc, state)
 
     def type_text(self, text: str, neutralize: bool = False) -> bool:
-        """Type text as momentary taps with at most ONE keymap swap.
+        """Type text as momentary taps, with one keymap swap per run.
 
-        Every missing keysym resolves in a single swap (no per-char swap storm).
-        Each char prefers its canonical layout keysym (a ru layout types ф on
-        its own key) before falling to the overlay.
+        Every missing keysym of a run resolves in a single swap (no per-char
+        swap storm). A run holds as many missing keysyms as there are text
+        spares not held down, so a longer text goes out in runs that fit them,
+        each swap riding the channel behind the taps before it. Each char
+        prefers its canonical layout keysym (a ru layout types ф on its own
+        key) before falling to the overlay.
 
         Args:
             text: Characters to tap out in order.
@@ -500,8 +529,9 @@ class _WaylandKeymapOwner:
                 so the taps land on their resolved levels.
 
         Returns:
-            False, having typed nothing, when a char cannot be bound at all;
-            True once the full run is injected.
+            False, having typed nothing, when a char cannot be bound at all
+            (every overlay keycode is held down, which only the first run can
+            meet); True once the full text is injected.
         """
         keysyms = []
         for ch in text:
@@ -511,27 +541,43 @@ class _WaylandKeymapOwner:
                 if ks is None:
                     continue
             keysyms.append(ks)
-        missing = [ks for ks in dict.fromkeys(keysyms) if ks not in self._map]
-        overlay = self._overlay_bind_many(missing) if missing else {}
-        # Resolve everything before touching state: the False path must have
-        # typed nothing and charged no modifier refs.
-        resolved_keys = []
+        held = {kc for kc, _ in self._pressed.values()}
+        room = sum(kc not in held for kc in self._overlay_codes[:self._text_codes])
+        runs = [([], {})]
         for ks in keysyms:
-            resolved = self._map.get(ks)
-            if resolved is None and overlay.get(ks):
-                resolved = (overlay[ks], 0)
-            if resolved is None:
-                return False
-            resolved_keys.append(resolved)
-        # Lift conflicts before building the taps so _down reflects the lift and
-        # a shifted char inside the run synthesizes its Shift normally.
-        lifted = self._held_conflicts(()) if neutralize else []
-        for kc in lifted:
-            self._inject(kc, 0)
-        events = []
-        for kc, level in resolved_keys:
-            self._tap(kc, self._mods_for_level(level), into=events)
-        self._inject_run(events + [(kc, 1) for kc in reversed(lifted)])
+            run, missing = runs[-1]
+            if ks not in self._map and ks not in missing:
+                if room and len(missing) >= room:
+                    run, missing = [], {}
+                    runs.append((run, missing))
+                missing[ks] = None
+            run.append(ks)
+        lifted = []
+        for i, (run, missing) in enumerate(runs):
+            overlay = self._overlay_bind_many(missing) if missing else {}
+            # Resolve the run before touching state: the False path must have
+            # typed nothing and charged no modifier refs.
+            resolved_keys = []
+            for ks in run:
+                resolved = self._map.get(ks)
+                if resolved is None and overlay.get(ks):
+                    resolved = (overlay[ks], 0)
+                if resolved is None:
+                    return False
+                resolved_keys.append(resolved)
+            if not i and neutralize:
+                # Lift conflicts before building the taps so _down reflects the
+                # lift and a shifted char inside the run synthesizes its Shift
+                # normally.
+                lifted = self._held_conflicts(())
+                for kc in lifted:
+                    self._inject(kc, 0)
+            events = []
+            for kc, level in resolved_keys:
+                self._tap(kc, self._mods_for_level(level), into=events)
+            if i == len(runs) - 1:
+                events += [(kc, 1) for kc in reversed(lifted)]
+            self._inject_run(events)
         return True
 
     def press(self, keysym: int, neutralize: bool = False) -> None:
