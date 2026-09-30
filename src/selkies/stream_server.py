@@ -280,8 +280,9 @@ class CongestionSteer:
     cut is emptying reads as a queue meanwhile; cutting again on it would take
     the target to the floor while the path only drains. The target returns to
     HEADROOM of the capacity on the first tick past the drain that reads no
-    queue: a queue the drain left keeps the drain's target through the hold, and
-    the tick after the hold backs off again. Without a measured
+    queue and no loss past LOSS, and that return clears a loss strike: a queue
+    the drain left keeps the drain's target through the hold, and the tick
+    after the hold backs off again. Without a measured
     delivery the backoff is BACKOFF of the target, held for HOLD_S. A tick whose
     stream offered the path less than APP_LIMITED of the target, a still
     screen's trickle, cuts nothing on a queue: what the path delivered is then
@@ -291,8 +292,6 @@ class CongestionSteer:
 
     Loss backs the target off only on the second lossy tick in a row: one tick
     of a thin stream is too few packets for its loss fraction to mean anything.
-    Pending cruise waits for loss at or below LOSS before resuming, and that
-    clean restoration clears the loss streak so separated losses do not back off.
     That backoff is BACKOFF of the target, held for HOLD_S, so the recovery does
     not climb straight back onto the loss that caused it.
 

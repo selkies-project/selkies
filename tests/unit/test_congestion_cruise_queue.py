@@ -62,7 +62,7 @@ class CruiseResumeTests(unittest.TestCase):
         self.assertIsNone(steer._cruise_kbps)
 
     def test_unknown_queue_keeps_compatibility(self) -> None:
-        self.assertEqual(self.tick(self.queued(), queue=None), 1803)
+        self.assertEqual(self.tick(self.queued(), queue=None, loss=0.0), 1803)
 
     def test_changed_floor_is_respected(self) -> None:
         self.assertEqual(self.tick(self.queued(), floor=1600), 1600)
