@@ -80,6 +80,9 @@ class Peer:
         display_position: Where a secondary display sits relative to the
             primary ("right"/"left"/"up"/"down"), carried to the server side
             so it lays the framebuffer out like websockets mode.
+        tab_id: The browser tab the page runs in, which tells a page taking
+            its own controller back from another page's controller joining
+            beside it; None for a page that names none.
     """
 
     uid: str
@@ -94,6 +97,7 @@ class Peer:
     display_id: str = "primary"
     display_position: str = "right"
     fullcolor_codecs: Optional[List[str]] = None
+    tab_id: Optional[str] = None
 
 
 class WebRTCPeerManagement:
@@ -610,6 +614,15 @@ class WebRTCPeerManagement:
     _EVICTION_STORM_WINDOW_S: float = 5.0
     _EVICTION_STORM_LIMIT: int = 3
 
+    def _beside(self, peer: Any, client_type: Optional[str], tab_id: Optional[str]) -> bool:
+        """Whether a controller joining with `tab_id` stays beside `peer`, a
+        controller of the same display, rather than superseding it: with
+        sharing on, a page of another tab. A page that names no tab, or the
+        peer's own tab reconnecting, supersedes it as before."""
+        return (self.enable_sharing and client_type == "controller"
+                and getattr(peer, "client_type", None) == "controller"
+                and bool(tab_id) and bool(getattr(peer, "tab_id", None)) and peer.tab_id != tab_id)
+
     def _eviction_storm(self, key: Any) -> bool:
         """Return True when the identity ``key`` (slot/controller) has been
         taken over LIMIT+ times inside the window: two live auto-reconnecting
@@ -726,6 +739,7 @@ class WebRTCPeerManagement:
         client_type = None
         client_slot = None
         client_strict_viewer = None
+        client_tab_id = None
         client_token = None
         server_token = None
         display_id = "primary"
@@ -765,6 +779,9 @@ class WebRTCPeerManagement:
                         display_id = json_metadata.get("display_id") or "primary"
                         pos = json_metadata.get("display_position")
                         display_position = pos if pos in ("right", "left", "up", "down") else "right"
+                        tab = json_metadata.get("client_tab_id")
+                        if isinstance(tab, str) and tab:
+                            client_tab_id = tab[:64]
                         codecs = json_metadata.get("fullcolor_codecs")
                         if isinstance(codecs, list):
                             fullcolor_codecs = [str(c) for c in codecs if isinstance(c, str) and c.isalnum()]
@@ -857,6 +874,7 @@ class WebRTCPeerManagement:
                                 for pid, peer in self.peers.items()
                                 if getattr(peer, "client_slot", None) == client_slot
                                 and getattr(peer, "display_id", "primary") == display_id
+                                and not self._beside(peer, client_type, client_tab_id)
                             ]
                             if colliding and self._eviction_storm(("slot", display_id, client_slot)):
                                 await ws.close(
@@ -902,6 +920,26 @@ class WebRTCPeerManagement:
                     )
                     peer_controller = controller_entry[1] if controller_entry else None
                     if client_type == "controller":
+                        # A controller of another tab stays beside the newcomer; the
+                        # one it supersedes is its own page's, or any where either
+                        # names no tab.
+                        rival_entry = next(
+                            (
+                                (pid, peer)
+                                for pid, peer in self.peers.items()
+                                if getattr(peer, "client_type", None) == "controller"
+                                and getattr(peer, "display_id", "primary") == display_id
+                                and not self._beside(peer, client_type, client_tab_id)
+                            ),
+                            None,
+                        )
+                        if rival_entry is not None:
+                            controller_entry = rival_entry
+                            peer_controller = rival_entry[1]
+                        elif peer_controller is not None:
+                            logger.info("Controller from {!r} joins display {!r} beside {!r}".format(
+                                raddr, display_id, controller_entry[0]))
+                            peer_controller = None
                         if peer_controller is not None:
                             if self._eviction_storm(("controller", display_id)):
                                 await ws.close(
@@ -964,6 +1002,7 @@ class WebRTCPeerManagement:
                     display_id=display_id,
                     display_position=display_position,
                     fullcolor_codecs=fullcolor_codecs,
+                    tab_id=client_tab_id,
                 )
                 result = (puid, peer_type, client_type, client_slot, client_strict_viewer)
         finally:

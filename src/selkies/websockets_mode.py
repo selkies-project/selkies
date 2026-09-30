@@ -1411,6 +1411,11 @@ class DataStreamingServer(BaseStreamingService):
         self._framed_displays: set = set()
 
         self.display_clients = {}
+        # Controllers of a display beside its owner, oldest first: a page of
+        # another tab takes the stream and input with it, where the owner keeps
+        # the display's size and encoding, and the oldest owns it once the owner
+        # is gone for good (`_promote_co_controller`).
+        self.co_controllers: Dict[str, "OrderedDict[Any, Optional[str]]"] = {}
         self.video_relay_groups = {}
         self.capture_instances = {}
         self.display_layouts = {}
@@ -1587,6 +1592,40 @@ class DataStreamingServer(BaseStreamingService):
             return
         for name, value in live_fields.items():
             setattr(cs, name, value)
+
+    def _joins_beside_owner(self, websocket: Any, tab_id: Optional[str]) -> bool:
+        """Whether a controller's SETTINGS for the primary makes it a controller
+        beside the display's owner rather than its owner: with sharing on, a
+        page of another tab than the live owner's, or one already beside it. A
+        page that names no tab (an older client), or the owner's own tab
+        reloading, takes the display over as before.
+        """
+        if websocket in self.co_controllers.get('primary', ()):
+            return True
+        if not getattr(self.cli_args, 'enable_sharing', (True,))[0]:
+            return False
+        owner = self.display_clients.get('primary')
+        owner_ws = owner.get('ws') if owner else None
+        return (owner_ws is not None and owner_ws is not websocket and not owner_ws.closed
+                and bool(tab_id) and bool(owner.get('tab_id')) and tab_id != owner.get('tab_id'))
+
+    async def _promote_co_controller(self, display_id: str) -> bool:
+        """Hand a display whose owner is gone for good to the oldest controller
+        beside it: told `DISPLAY_OWNER <display>`, the page sends its settings
+        again, and that SETTINGS takes the entry over. False when none is left
+        to tell."""
+        joiners = self.co_controllers.get(display_id)
+        while joiners:
+            ws, _tab = joiners.popitem(last=False)
+            if ws.closed:
+                continue
+            try:
+                await asyncio.wait_for(ws.send_str(f"DISPLAY_OWNER {display_id}"), timeout=2.0)
+            except (asyncio.TimeoutError, ConnectionResetError, OSError, RuntimeError):
+                continue
+            data_logger.info(f"The controller beside '{display_id}' owns it now.")
+            return True
+        return False
 
     async def _handle_resize(self, res_str: str, display_id: str = 'primary') -> None:
         """Route a client resize once the displays have been laid out.
@@ -3409,7 +3448,8 @@ class DataStreamingServer(BaseStreamingService):
         path; `keyboardLayout` is an optional xkb layout hint (`de`, `ch(fr)`)
         that becomes the compositor's base layout on Wayland and is
         informational on X11; `encoderFallback` marks an `encoder` the page
-        fell back to on its own rather than one its user picked.
+        fell back to on its own rather than one its user picked; `tabId` names
+        the browser tab the page runs in.
 
         Raises:
             json.JSONDecodeError: When the payload is not valid JSON.
@@ -3476,6 +3516,8 @@ class DataStreamingServer(BaseStreamingService):
         parsed["video_bitrate"] = get_number("video_bitrate")
         parsed["force_aligned_resolution"] = get_bool("force_aligned_resolution")
         parsed["audioRedundancy"] = get_bool("audioRedundancy")
+        # The page's tab, which tells its own reload from another page (`co_controllers`).
+        parsed["tabId"] = (get_str("tabId") or "")[:64] or None
         parsed["keyboardLayout"] = get_str("keyboardLayout")
         parsed["encoderFallback"] = get_bool("encoderFallback")
         data_logger.debug(f"Parsed client settings: {parsed}")
@@ -4358,6 +4400,22 @@ class DataStreamingServer(BaseStreamingService):
                                         pass
                                     return
                             client_display_id = display_id
+                            tab_id = parsed_settings.get("tabId")
+                            if display_id == 'primary' and self._joins_beside_owner(websocket, tab_id):
+                                # Streamed as a viewer is, with its input taken as a
+                                # controller's; the owner keeps the display.
+                                joiners = self.co_controllers.setdefault('primary', OrderedDict())
+                                if websocket not in joiners:
+                                    joiners[websocket] = tab_id
+                                    data_logger.info(
+                                        f"Controller {remote_address} joins 'primary' beside its owner.")
+                                    await self.broadcast_stream_resolution()
+                                    try:
+                                        await websocket.send_str("PIPELINE_RESETTING primary")
+                                    except (ConnectionResetError, OSError, RuntimeError):
+                                        pass
+                                    self._schedule_idr_for_display('primary')
+                                continue
                             if display_id in ['primary', 'display2']:
                                 existing_client_info = self.display_clients.get(display_id)
                                 if existing_client_info:
@@ -4414,6 +4472,7 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.debug(f"Registering new client for display: {display_id}")
                                 self.display_clients[display_id] = {
                                     'ws': websocket, 
+                                    'tab_id': tab_id,
                                     'width': 0, 'height': 0, 'position': 'right',
                                     'acknowledged_frame_id': -1,
                                     'acked_sent_at': None,
@@ -4465,6 +4524,7 @@ class DataStreamingServer(BaseStreamingService):
                                 data_logger.debug(f"Client is taking over existing display '{display_id}'. Updating state for new connection.")
                                 display_state = self.display_clients[display_id]
                                 display_state['ws'] = websocket
+                                display_state['tab_id'] = tab_id
                                 # Only a page's first SETTINGS reactivates video; a later one
                                 # must not resurrect a stream stopped with STOP_VIDEO.
                                 if not initial_settings_processed:
@@ -4839,6 +4899,11 @@ class DataStreamingServer(BaseStreamingService):
                             if not self._holds_input_authority(websocket):
                                 continue
 
+                        if (message.startswith(("r,", "s,"))
+                                and websocket in self.co_controllers.get(client_display_id, ())):
+                            # The display's owner sizes it and sets its density.
+                            continue
+
                         if self.input_handler and hasattr(
                             self.input_handler, "on_message"
                         ):
@@ -4896,6 +4961,8 @@ class DataStreamingServer(BaseStreamingService):
                 stale_relay = relay_group.pop(websocket, None)
                 if stale_relay is not None:
                     stale_relay.stop()
+            for joiners in self.co_controllers.values():
+                joiners.pop(websocket, None)
             if self.data_ws is websocket:
                 self.data_ws = None
             # A departing non-capable client may let the rest enable RED.
@@ -4931,6 +4998,11 @@ class DataStreamingServer(BaseStreamingService):
                         # (audio setup precedes its claim): held until the deadline.
                         latest_connect = max(self.last_connection_times.values(), default=0.0)
                         if latest_connect > disconnect_ts and time.monotonic() < deadline:
+                            continue
+                        if await self._promote_co_controller(did):
+                            # Its SETTINGS claims the entry; waited for as a reconnect is.
+                            disconnect_ts = time.monotonic()
+                            deadline = disconnect_ts + 15.0
                             continue
                         break
                     entry = self.display_clients.get(did)

@@ -257,6 +257,12 @@ class WebRTCService(BaseStreamingService):
         self._last_resize_request: Optional[Tuple[int, int]] = None
         self._wm_swap = MultiMonitorWindowManager()
         self._congestion_steer: Dict[str, CongestionSteer] = {}
+        # The browser tab of each peer (its signaling HELLO), and per display the
+        # tab whose controller owns it: a controller of another tab streams and
+        # drives input beside it, and what would size or configure the display
+        # waits until it owns it (`_on_peer_data_message`, `_succeed_display_owner`).
+        self._peer_tabs: Dict[str, Optional[str]] = {}
+        self._display_owner_tabs: Dict[str, str] = {}
         self.RECONNECT_GRACE_S = 3.0
         self._primary_stop_grace_task: Optional[asyncio.Task] = None
 
@@ -493,6 +499,11 @@ class WebRTCService(BaseStreamingService):
         # the claim is this process, and the relay's fields are positional.
         peer = self.peer_manager.peers.get(session_peer_id) if self.peer_manager else None
         client_slot = getattr(peer, "client_slot", None) if peer else None
+        tab_id = getattr(peer, "tab_id", None) if peer else None
+        self._peer_tabs[session_peer_id] = tab_id
+        if client_type == "controller" and tab_id and self._display_owner_tabs.get(display_id) not in (
+                self._display_tabs(display_id, but=session_peer_id)):
+            self._display_owner_tabs[display_id] = tab_id
         logger.debug(
             f"starting session for client peer id: {session_peer_id} of type: {client_type} (display '{display_id}')"
         )
@@ -606,7 +617,7 @@ class WebRTCService(BaseStreamingService):
         self.rtc_app.on_data_open = self.handle_data_channel_open
         self.rtc_app.on_data_close = lambda: logger.info("Data channel closed")
         self.rtc_app.on_data_error = lambda e: logger.error(f"Data channel error: {e}")
-        self.rtc_app.on_data_message = self.input_handler.on_message
+        self.rtc_app.on_data_message = self._on_peer_data_message
         self.rtc_app.on_peer_gone = self.handle_peer_gone
         self.input_handler.on_request_keyframe = self.request_idr_for_display
 
@@ -1543,6 +1554,53 @@ class WebRTCService(BaseStreamingService):
             if (p.get("display_id") or "primary") == display_id
         ]
 
+    # What sizes or configures the display a peer streams: its owner's alone apply.
+    OWNER_ONLY_PREFIXES = ("SETTINGS,", "r,", "s,")
+
+    def _display_tabs(self, display_id: str, but: Optional[str] = None) -> set:
+        """The tabs of the peers streaming `display_id`, leaving out peer `but`."""
+        peers = self.rtc_app.peer_connections if self.rtc_app else {}
+        return {tab for pid, tab in self._peer_tabs.items()
+                if tab and pid != but and ((peers.get(pid) or {}).get("display_id") or "primary") == display_id}
+
+    def _on_peer_data_message(self, msg: Any, display_id: str = "primary", conn_id: Optional[str] = None) -> Any:
+        """Hand a peer's data-channel message to the input handler, holding back
+        what would size or configure the display from a controller beside its
+        owner: the latest of each kind is kept, and replayed once that
+        controller owns the display (`_succeed_display_owner`)."""
+        if isinstance(msg, str) and msg.startswith(self.OWNER_ONLY_PREFIXES):
+            tab = self._peer_tabs.get(conn_id)
+            owner = self._display_owner_tabs.get(display_id or "primary")
+            if tab and owner and tab != owner:
+                peer = self.rtc_app.peer_connections.get(conn_id) if self.rtc_app else None
+                if peer is not None:
+                    peer.setdefault("held_owner_messages", {})[msg.split(",", 1)[0]] = msg
+                return None
+        return self.input_handler.on_message(msg, display_id, conn_id=conn_id)
+
+    async def _succeed_display_owner(self, display_id: str, tab: str) -> None:
+        """Once the owner's tab has been gone through the reconnect grace, hand
+        the display to its oldest controller: the settings, density and size
+        that controller asked for meanwhile apply now."""
+        await asyncio.sleep(self.RECONNECT_GRACE_S)
+        if self._display_owner_tabs.get(display_id) != tab or tab in self._display_tabs(display_id):
+            return
+        peers = self.rtc_app.peer_connections if self.rtc_app else {}
+        heir = next((pid for pid, p in peers.items()
+                     if (p.get("display_id") or "primary") == display_id
+                     and p.get("client_type") == "controller" and self._peer_tabs.get(pid)), None)
+        if heir is None:
+            self._display_owner_tabs.pop(display_id, None)
+            return
+        self._display_owner_tabs[display_id] = self._peer_tabs[heir]
+        logger.info(f"Controller {heir} owns display '{display_id}' now.")
+        held = peers[heir].pop("held_owner_messages", {})
+        for kind in ("SETTINGS", "s", "r"):
+            if kind in held:
+                result = self.input_handler.on_message(held[kind], display_id, conn_id=heir)
+                if asyncio.iscoroutine(result):
+                    await result
+
     async def handle_peer_gone(
         self, peer_id: str, peer: Optional[Dict[str, Any]] = None
     ) -> None:
@@ -1553,7 +1611,15 @@ class WebRTCService(BaseStreamingService):
         drive input and no input-capable peer is left, so a viewer (or a second
         display's peer) leaving never drops the controller's held keys or its
         in-flight drag. A controller that vanishes while others remain is covered
-        by the input handler's heartbeat stale-sweep."""
+        by the input handler's heartbeat stale-sweep. A departing owner's display
+        passes to the controller beside it unless its tab comes back within the
+        reconnect grace."""
+        tab = self._peer_tabs.pop(peer_id, None)
+        gone_from = ((peer or {}).get("display_id") or "primary")
+        if tab and self._display_owner_tabs.get(gone_from) == tab and self.input_handler is not None:
+            task = asyncio.create_task(self._succeed_display_owner(gone_from, tab))
+            self.tasks.append(task)
+            task.add_done_callback(lambda t: self.tasks.remove(t) if t in self.tasks else None)
         if self.input_handler is None:
             return
         try:

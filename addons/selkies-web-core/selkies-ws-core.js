@@ -127,7 +127,7 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, serverAnswers } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS,
@@ -3540,6 +3540,7 @@ function getCurrentSettingsPayload() {
     }
     settingsToSend['useCssScaling'] = useCssScaling;
     settingsToSend['displayId'] = displayId;
+    settingsToSend['tabId'] = pageTabId();
     settingsToSend['displayScale'] = currentDisplayScale(dpr);
     if (displayId === 'display2') {
         settingsToSend['displayPosition'] = displayPosition;
@@ -7566,6 +7567,7 @@ class WorkerWebSocket {
       }
       settingsToSend['useCssScaling'] = useCssScaling;
       settingsToSend['displayId'] = displayId;
+      settingsToSend['tabId'] = pageTabId();
       settingsToSend['displayScale'] = currentDisplayScale(dpr);
       reportedStreamDensity = dpr;
       if (displayId === 'display2') {
@@ -7963,6 +7965,13 @@ class WorkerWebSocket {
         console.warn('Unknown binary data payload type received:', dataTypeByte);
       }
     } else if (typeof event.data === 'string') {
+      if (event.data.startsWith('DISPLAY_OWNER ')) {
+        // The owner beside which this page controlled the display is gone:
+        // its settings, the window size among them, lay the display out now.
+        console.log('[websockets] This page owns the display now.');
+        sendFullSettingsUpdateToServer('display owner');
+        return;
+      }
       if (event.data.startsWith('KILL ')) {
         const reason = event.data.substring(5);
         console.error(`Received KILL message from server: ${reason}`);

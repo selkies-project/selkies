@@ -399,6 +399,27 @@ export function isMacDesktop() {
 }
 
 /**
+ * This browser tab's id, kept in its sessionStorage: a reload of the page keeps
+ * it and another tab has its own, which is how the server tells a page taking
+ * its own display back from another page joining it.
+ * @returns {string|null} Null where the tab has no storage.
+ */
+export function pageTabId() {
+  const key = 'selkies_tab_id';
+  try {
+    let id = window.sessionStorage.getItem(key);
+    if (!id) {
+      id = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID()
+        : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+      window.sessionStorage.setItem(key, id);
+    }
+    return id;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
  * WebKit's Linux ports (WPE, WebKitGTK), which draw a canvas through Skia's GPU
  * context, as against Safari, which draws through CoreGraphics. No capability
  * tells the two apart and WebKit on Linux can carry Safari's macOS user agent,

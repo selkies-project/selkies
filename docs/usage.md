@@ -103,6 +103,8 @@ The side menu's sharing section hands out links to the running session. Each one
 
 Input authority is enforced on the server rather than in the page, so a modified client cannot exceed its role: a viewer's keyboard, mouse, and settings messages are refused whatever it sends, and its gamepad messages are refused unless they drive the slot its own link carries — a `#shared` viewer holds none and drives no gamepad at all.
 
+A second page on the session's own address, in another tab or browser, joins as a controller beside the first rather than taking the session over: both stream and both drive input, while the first keeps the display's size, density, and stream settings. Once it closes, the page that joined after it takes those over, at its own window size. A page reloaded in its tab takes its own place back.
+
 `--enable-sharing=false` (`SELKIES_ENABLE_SHARING`) turns the feature off, and one page then holds the session: a second one takes it over instead of joining. `--enable-shared` and `--enable-player2` through `--enable-player4` drop individual links, and `--ui-sidebar-show-sharing=false` hides the section while leaving the links working.
 
 These fragments apply when the server has no master token. Under [Secure Mode](secure-mode.md) a client presents a provisioned session token that carries its own role and gamepad slot, and the sharing fragments are ignored. A copied link carries no token, the sharer's own included, so each holder needs a token of their own, which follows the fragment after `&token=`.

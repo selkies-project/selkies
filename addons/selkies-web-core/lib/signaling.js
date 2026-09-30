@@ -41,6 +41,8 @@
  * @module
  */
 
+import { pageTabId } from './util.js';
+
 /** First signaling retry after a failure, doubled per failure up to RETRY_MAX_MS. */
 const RETRY_FIRST_MS = 400;
 const RETRY_MAX_MS = 1000;
@@ -226,6 +228,7 @@ export class WebRTCSignaling {
             'client_token': this.client_token,
             'display_id': this.display_id,
             'display_position': this.display_position,
+            'client_tab_id': pageTabId(),
         }
         if (this.capabilities) {
             try { meta.fullcolor_codecs = await this.capabilities(); } catch (e) { /* the server takes silence as decodable */ }
