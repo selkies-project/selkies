@@ -1843,10 +1843,15 @@ const gate = new DecodeGate();
 let statsOpen = false, statsBytes = 0, statsDecodeMs = 0, statsFrames = 0;
 // What reaches the screen from here (lib/present-meter.js): a canvas draw lands
 // at this thread's next animation frame, and the arrival the socket's thread
-// dated a frame with is kept by its decode timestamp until then.
+// dated a frame with is kept by its decode timestamp until then. WebKit's Linux
+// ports commit a worker canvas by a task queued behind the draw and run a busy
+// worker's animation frames only once its queue drains, which would fold draws
+// it committed one by one into one; there a draw lands at the next task.
 const createPresentMeter = ${createPresentMeter.toString()};
 const isSkiaWebKit = ${isSkiaWebKit.toString()};
-const shown = createPresentMeter(typeof requestAnimationFrame === 'function' ? (land) => requestAnimationFrame(land) : null);
+const shown = createPresentMeter(typeof requestAnimationFrame !== 'function' ? null
+  : isSkiaWebKit(navigator.userAgent, navigator.platform) ? (land) => setTimeout(land, 0)
+  : (land) => requestAnimationFrame(land));
 const arrivedAt = new Map();
 let compositeArrival = -Infinity;
 const arrivalOf = (timestamp) => {
