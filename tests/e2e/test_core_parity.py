@@ -5,9 +5,11 @@ Resolution: an auto-mode HiDPI client asks for the window's physical size, a
 manual preset is requested as exact framebuffer pixels and shown, with "scale
 locally" off, at one stream pixel per device pixel, reset-to-window returns to
 the physical window size, and turning "scale locally" on in auto mode leaves
-the window-resize listener armed. HiDPI: the flag either streams physical
-pixels and scales the desktop, or leaves the desktop unscaled and divides the
-request by the UI-scaling pick for the browser to stretch back — never both. Clipboard: a server with the clipboard
+the window-resize listener armed. The WebRTC video is drawn nearest-sampled
+exactly while it is shown 1:1, and smoothed once scaled to fit. HiDPI: the
+flag either streams physical pixels and scales the desktop, or leaves the
+desktop unscaled and divides the request by the UI-scaling pick for the
+browser to stretch back — never both. Clipboard: a server with the clipboard
 disabled must not arm the focus read (Chromium's permission prompt) or send any
 clipboard payload. Gamepad: a pad present before the channel opens honors the
 persisted gamepad toggle, and one pad's disconnect does not stop polling the
@@ -259,6 +261,20 @@ def stream_size(page: Any, mode: str, want: tuple, timeout: float = 15) -> Optio
     return size
 
 
+def video_rendering(page: Any, want: str, timeout: float = 8) -> Optional[str]:
+    """The WebRTC video's `image-rendering`, polled until it is `want`: the
+    rule reruns when the stream's own size settles after the box."""
+    deadline = time.time() + timeout
+    got = None
+    while time.time() < deadline:
+        got = page.evaluate("(() => { const v = document.getElementById('stream'); "
+                            "return v ? v.style.imageRendering : null; })()")
+        if got == want:
+            break
+        time.sleep(0.3)
+    return got
+
+
 def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
     """Auto -> preset -> exact box -> reset -> scale-locally + resize, at dpr 2."""
     phys_w, phys_h = VIEW_W * DPR, VIEW_H * DPR
@@ -268,6 +284,9 @@ def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
               root_matches(realized, phys_w, phys_h), f"root={realized}")
     sent = page.evaluate("window.__resSent")
     res.check("auto request on the wire is WxH * dpr", f"{phys_w}x{phys_h}" in sent, sent)
+    if mode == "webrtc":
+        got = video_rendering(page, "pixelated")
+        res.check("a stream at the window's device pixels is drawn 1:1", got == "pixelated", got)
 
     seen = len(sent)
     post(page, {"type": "setManualResolution", "width": PRESET_W, "height": PRESET_H})
@@ -296,6 +315,14 @@ def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
               f"{off_box} after HiDPI off, {box} before")
     post(page, {"type": "setUseCssScaling", "value": False})
     time.sleep(0.3)
+    if mode == "webrtc":
+        got = video_rendering(page, "pixelated")
+        res.check("an exact manual box is drawn 1:1", got == "pixelated", got)
+        post(page, {"type": "setScaleLocally", "value": True})
+        got = video_rendering(page, "auto")
+        res.check("a manual resolution scaled to fit is smoothed", got == "auto", got)
+        post(page, {"type": "setScaleLocally", "value": False})
+        time.sleep(0.3)
     sent = page.evaluate("window.__resSent")
 
     seen = len(sent)

@@ -3,7 +3,9 @@
 websockets transport (flow, audio, input, clipboard, resize, console health),
 plus a reduced WebRTC flow on Firefox (parity with the Chrome reference) and
 WebKit. Over WebSockets, video and audio reach the page and playback on every
-engine."""
+engine. Over WebRTC, a manual resolution shown 1:1 is drawn nearest-sampled in
+Chromium only, since Firefox's compositor draws that slower than a smoothed
+video."""
 import os
 import sys
 import time
@@ -212,6 +214,25 @@ def engine_block(engine: str, mode: str = "websockets") -> "H.Results":
                     time.sleep(0.5)
                 res.check("resize: X root follows browser", realized and abs(realized[0] - req_w) <= 16,
                           f"req={req_w}x{req_h} actual={realized}")
+
+            if mode == "webrtc":
+                # Inside the window: the page caps the video at its container.
+                for message in ({"type": "setScaleLocally", "value": False},
+                                {"type": "setManualResolution", "width": 1024, "height": 576}):
+                    page.evaluate("(m) => window.postMessage(m, window.location.origin)", message)
+                deadline = time.time() + 15
+                size = None
+                while time.time() < deadline:
+                    size = page.evaluate("(() => { const v = document.getElementById('stream'); "
+                                         "return v ? [v.videoWidth, v.videoHeight] : null; })()")
+                    if size == [1024, 576]:
+                        break
+                    time.sleep(0.5)
+                time.sleep(1.0)
+                got = page.evaluate("document.getElementById('stream').style.imageRendering")
+                want = "pixelated" if engine == "chromium" else "auto"
+                res.check("render: a 1:1 manual resolution is nearest-sampled in Chromium only",
+                          size == [1024, 576] and got == want, f"stream={size} rendering={got} want={want}")
 
             real_errors = [e for e in console_errors
                            if not any(p_ in e for p_ in DECODER_ERROR_PATTERNS)]

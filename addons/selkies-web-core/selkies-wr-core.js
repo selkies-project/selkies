@@ -999,15 +999,13 @@ export default function webrtc() {
 
 	/**
 	 * Picks the video's `image-rendering`: pixelated with anti-aliasing off or
-	 * at 1:1, `auto` (smoothed) when CSS-scaled above 1 dpr. Off a manual
-	 * resolution the box follows the window and the stream follows it only as
-	 * far as the server does, so 1:1 also takes the stream's own size to match
-	 * the box to within the resize alignment (a mode's cell, the 16-pixel
-	 * aligned request): a pinned resolution, or one not yet realized, is
-	 * scaled into the box and stays smoothed. There only Chromium takes it:
-	 * its compositor resamples a smoothed video every frame, which costs a
-	 * software compositor a frame of latency, while Firefox's draws a
-	 * nearest-sampled video slower than a smoothed one.
+	 * at 1:1, `auto` (smoothed) when scaled. 1:1 is the stream's own size
+	 * matching the box in device pixels to within the resize alignment (a
+	 * mode's cell, the 16-pixel aligned request), so a pinned resolution, one
+	 * not yet realized, or a manual one scaled to fit stays smoothed. Only
+	 * Chromium takes it: its compositor resamples a smoothed video every frame,
+	 * which costs a software compositor a frame of latency, while Firefox's
+	 * draws a nearest-sampled video slower than a smoothed one.
 	 */
 	function updateVideoImageRendering(){
 		if (!videoElement) return;
@@ -1019,10 +1017,9 @@ export default function webrtc() {
 			return;
 		}
 		const dpr = window.devicePixelRatio || 1;
-		const box = window.manualResolution ? null : videoElement.getBoundingClientRect();
-		const isOneToOne = Math.abs(streamDensity() - dpr) < 1e-6 && (!box
-			|| (isChromium && Math.abs(videoElement.videoWidth - box.width * dpr) <= 16
-				&& Math.abs(videoElement.videoHeight - box.height * dpr) <= 16));
+		const box = videoElement.getBoundingClientRect();
+		const isOneToOne = isChromium && Math.abs(videoElement.videoWidth - box.width * dpr) <= 16
+			&& Math.abs(videoElement.videoHeight - box.height * dpr) <= 16;
 		if (isOneToOne) {
 			if (videoElement.style.imageRendering !== 'pixelated') {
 				console.log("Setting video rendering to 'pixelated' for sharp display.");
