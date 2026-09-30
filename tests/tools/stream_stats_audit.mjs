@@ -11,7 +11,8 @@
 // announced once. A row warns where the session fell short of what it asked for,
 // never for a choice, for a server with no GPU, for a client with no hardware
 // decoder, or for the path the network gave it, and the decoder is called
-// hardware or software only on evidence.
+// software only on evidence, hardware where the engine has one and nothing said
+// software.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -196,9 +197,9 @@ check('frames of one format whatever decodes them leave it to the engine\'s capa
   webcodecsDecoder({ format: 'BGRX' }).decoder_evidence === 'BGRX frames'
   && webcodecsDecoder({ format: 'BGRX' }).decoder === 'unknown'
   && webcodecsDecoder({ format: 'BGRX', capable: false }).decoder === 'software'
-  && webcodecsDecoder({ format: 'BGRX', capable: true }).decoder === 'unknown'
+  && webcodecsDecoder({ format: 'BGRX', capable: true }).decoder === 'hardware'
   && rowOf(streamRows(null, { ...client, ...webcodecsDecoder({ format: 'BGRX', capable: true }) }, null, words),
-    'decoder').status === 'neutral');
+    'decoder').status === 'good');
 // One rule on both transports: software falls short where the engine says it
 // decodes the stream efficiently, whichever rung named the decoder.
 const efficient = webcodecsDecoder({ forcedSoftware: false, hardwareSupported: true, format: 'I420', capable: true });
@@ -218,8 +219,9 @@ for (const format of ['I420', 'I444', 'NV12', null, undefined]) {
 check('the same frames and engine answer give both transports the same verdict', same.length === 0, same.join(', '));
 check('WebRTC takes the engine at its word', webrtcDecoder({ implementation: 'ExternalDecoder', powerEfficient: true }).decoder === 'hardware'
   && webrtcDecoder({ implementation: 'FFmpeg' }).decoder === 'software');
-check('and claims nothing where the engine withholds the decoder',
-  webrtcDecoder({ implementation: 'unknown', capable: true }).decoder === 'unknown');
+check('and where the engine withholds the decoder its capability is the word',
+  webrtcDecoder({ implementation: 'unknown', capable: true }).decoder === 'hardware'
+  && webrtcDecoder({ implementation: 'unknown', capable: null }).decoder === 'unknown');
 check('a frame read from the track is the decoder\'s own',
   webrtcDecoder({ trackFormat: 'NV12', capable: true }).decoder === 'hardware'
   && webrtcDecoder({ trackFormat: null }).decoder === 'hardware'
@@ -227,7 +229,7 @@ check('a frame read from the track is the decoder\'s own',
 check('the element\'s picture proves software alone, a GPU copy of it proving nothing',
   webrtcDecoder({ elementFormat: 'I420' }).decoder === 'software'
   && webrtcDecoder({ elementFormat: 'NV12' }).decoder === 'unknown'
-  && webrtcDecoder({ elementFormat: null, capable: true }).decoder === 'unknown');
+  && webrtcDecoder({ elementFormat: null, capable: true }).decoder === 'hardware');
 
 // What presents the picture is troubleshooting data in its own right: two engines
 // decoding the same stream can differ only in the sink they allowed.

@@ -135,14 +135,17 @@ function verdict(decoder, evidence, expected, shortfall = 'hardware_available') 
 
 /**
  * The last word where nothing names the decoder: whether the engine has an
- * efficient one for the stream at all (`DecodeCapability`), which falls short of
- * naming the one it took.
+ * efficient one for the stream at all (`DecodeCapability`). An engine that has
+ * one is taken to be using it, since every sign of a software decode (a
+ * preference after a fallback, a refused hardware configuration, planar frames)
+ * has been read first and none was there; a verdict of unknown here would leave
+ * a working hardware decoder unmarked on the engines whose frames say nothing.
  * @param {boolean|null|undefined} capable
  * @param {string} evidence What little there is otherwise.
  * @returns {Pick<StreamClient, 'decoder'|'decoder_evidence'|'hardware_expected'|'decoder_reason'>}
  */
 function capabilityVerdict(capable, evidence) {
-  if (capable === true) return verdict('unknown', 'A hardware decoder is available', true);
+  if (capable === true) return verdict('hardware', 'A hardware decoder is available', true);
   if (capable === false) return verdict('software', 'No hardware decoder for this stream', false);
   return verdict('unknown', evidence, false);
 }
@@ -182,7 +185,8 @@ export class DecodeCapability {
  * an engine that refuses the stream's configuration with hardware preferred has
  * none, the frames say which kind made them where their format tells, and an
  * engine whose frames are all one format whatever decodes them (Gecko hands out
- * BGRX) is left to `capabilityVerdict`. Software falls short, as over WebRTC,
+ * BGRX) is left to `capabilityVerdict`, which calls an engine with an efficient
+ * decoder hardware. Software falls short, as over WebRTC,
  * where the engine says it decodes this configuration efficiently; that it
  * accepts the hardware preference says nothing, since some engines take it as
  * a hint and decode in software.
@@ -207,7 +211,7 @@ export function webcodecsDecoder({ forcedSoftware, hardwareSupported, format, ca
  * reads it; the element's current frame is not, since an engine may copy a
  * software picture into GPU memory to composite it, so only a planar one says
  * anything (software). Last is whether the engine has an efficient decoder for
- * the stream at all, which falls short of naming the one it took.
+ * the stream at all, taken as the one in use where nothing said software.
  * @param {{implementation: (string|undefined), powerEfficient: (boolean|undefined),
  *     trackFormat: (string|null|undefined), elementFormat: (string|null|undefined),
  *     capable: (boolean|null|undefined)}} evidence `trackFormat` is a
