@@ -92,7 +92,7 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers, rememberCcStart, forgetCcStart } from './lib/util.js';
 import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
@@ -2212,6 +2212,7 @@ export default function webrtc() {
 			videoBitRate = parseInt(settings.video_bitrate, 10);
 			webrtc.sendDataChannelMessage(`vb,${videoBitRate}`);
 			storeInt('video_bitrate', videoBitRate);
+			if (!fromServer) forgetCcStart(storageDisplayId);
 		}
 		if (settings.framerate !== undefined) {
 			const followsDisplay = settings.framerate === FRAMERATE_DISPLAY;
@@ -3304,6 +3305,7 @@ export default function webrtc() {
 			 * (snapped or clamped), which manual-mode bookkeeping follows so the UI
 			 * stops re-requesting a size the server cannot produce.
 			 */
+			webrtc.onccrate = (kbps) => rememberCcStart(storageDisplayId, kbps);
 			webrtc.onprintdocument = (doc) => {
 				// A second display page is the same browser as the primary one.
 				if (printJobs && !urlFragmentKeyword().startsWith('#display2')) printJobs.announce(doc.name, doc.size_bytes);

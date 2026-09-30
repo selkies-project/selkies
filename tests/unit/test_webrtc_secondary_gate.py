@@ -49,7 +49,7 @@ def make_service(second_screen: bool) -> tuple:
     app.on_ice = _no_ice
     svc.peer_manager = FakePeerManager()
     # The service's settings snapshot: enough for the gate and the seed.
-    svc.args = SimpleNamespace(enable_webrtc_statistics=False, **{
+    svc.args = SimpleNamespace(enable_webrtc_statistics=False, congestion_control=False, **{
         k: None for k in list(svc._VIDEO_SETTING_APPLIERS) + ["force_aligned_resolution"]})
     return svc, app
 

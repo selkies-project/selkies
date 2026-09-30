@@ -45,8 +45,8 @@
  * unordered `pointer` channel, JSON messages downstream, routed by `type` to
  * the `on*` callbacks (`pipeline`,
  * `stream_info`, `stream_stats`, `cursor`, `system`, `ping`,
- * `latency_measurement`, `server_settings`, `display_config_update`, and
- * `clipboard-msg*`). Either side may gzip a message once the `_gz,1`
+ * `latency_measurement`, `server_settings`, `display_config_update`, `cc_rate`,
+ * and `clipboard-msg*`). Either side may gzip a message once the `_gz,1`
  * handshake has been exchanged; the multipart clipboard and
  * `server_settings` kinds keep their arrival order across asynchronous
  * inflation, the rest route as soon as they are readable.
@@ -101,9 +101,9 @@ export function takeMultiopus(offer, answer) {
  * `ondatachannelopen` and `ondatachannelclose` nothing, `onplaystreamrequired`
  * fires when autoplay was refused and a user gesture is needed, and
  * `onclipboardcontent`, `oncursorchange`, `onsystemaction`, `onstreaminfo`,
- * `onstreamstats`, `onlatencymeasurement`, `onserversettings`, and
- * `ondisplayconfig` receive the payload of the data channel message of the
- * same kind.
+ * `onstreamstats`, `onlatencymeasurement`, `onserversettings`,
+ * `ondisplayconfig`, and `onccrate` receive the payload of the data channel
+ * message of the same kind.
  */
 export class WebRTCClient {
 	/**
@@ -225,6 +225,9 @@ export class WebRTCClient {
 
 		/** @type {?function(Object): void} */
 		this.onprintdocument = null;
+
+		/** @type {?function(number): void} */
+		this.onccrate = null;
 	}
 
 	/** Forwards a status message to `onstatus`. */
@@ -780,6 +783,10 @@ export class WebRTCClient {
 		} else if (msg.type === 'print_document') {
 			if (this.onprintdocument !== null) {
 				this.onprintdocument(msg.data);
+			}
+		} else if (msg.type === 'cc_rate') {
+			if (this.onccrate !== null && msg.data) {
+				this.onccrate(msg.data.kbps);
 			}
 		} else {
 			this._setError("Unhandled message received: " + msg.type);

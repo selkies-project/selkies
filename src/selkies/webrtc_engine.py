@@ -923,6 +923,12 @@ class RTCApp:
         for ch in channels:
             self.send_message_to_channel(ch, "stream_info", info)
 
+    def send_cc_rate(self, display_id: str, kbps: int) -> None:
+        """Tell a display's controllers the rate congestion control has held it
+        at, which each page keeps to start its next stream there (`RateHold`)."""
+        for _, channel in self._controller_channels(display_id):
+            self.send_message_to_channel(channel, "cc_rate", {"kbps": kbps})
+
     def send_stream_stats(self, display_id: str, stats: Dict[str, Any]) -> None:
         """Send one second's figures to the display's controllers watching them."""
         for _, channel in self._controller_channels(display_id, subscribed=True):

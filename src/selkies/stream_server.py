@@ -399,6 +399,46 @@ class CongestionSteer:
         return min(current, delivered_kbps * fraction)
 
 
+class RateHold:
+    """Whether a display's steered rate has held long enough for its page to
+    keep: a rate that stays within HOLD_BAND of where it settled for HOLD_S is
+    returned by `note` once, and a move out of the band starts over. The page
+    sends it back when it next connects (`start_kbps`), so a restarted server
+    starts that page's stream at what its path carried rather than at the
+    configured rate and the queue a start at the configured rate builds."""
+
+    HOLD_S = 10.0
+    HOLD_BAND = 0.05
+
+    def __init__(self) -> None:
+        self.kbps: Optional[float] = None
+        self.since = 0.0
+        self.told = False
+
+    def note(self, kbps: float, now: float) -> Optional[int]:
+        """Fold in the rate in force at `now`; the rate to tell the page, or None."""
+        if self.kbps is None or abs(kbps - self.kbps) > self.HOLD_BAND * self.kbps:
+            self.kbps, self.since, self.told = kbps, now, False
+            return None
+        if self.told or now - self.since < self.HOLD_S:
+            return None
+        self.told = True
+        return round(self.kbps)
+
+
+def start_kbps(remembered: Any, lo_kbps: float, ceiling_kbps: float) -> Optional[float]:
+    """The rate a steered stream starts at from the one its page remembered
+    (`RateHold`): within the configured range and under the ceiling, or None
+    where the page sent no positive number."""
+    try:
+        kbps = float(remembered)
+    except (TypeError, ValueError):
+        return None
+    if not kbps > 0 or kbps == float("inf"):
+        return None
+    return max(lo_kbps, min(ceiling_kbps, kbps))
+
+
 class UplinkGauge:
     """Congestion verdicts for one client's bulk transfer, timed end to end
     over that client's own session websocket(s).

@@ -127,7 +127,7 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers } from './lib/util.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers, rememberCcStart, recalledCcStart, forgetCcStart } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS,
@@ -3541,6 +3541,8 @@ function getCurrentSettingsPayload() {
     settingsToSend['useCssScaling'] = useCssScaling;
     settingsToSend['displayId'] = displayId;
     settingsToSend['tabId'] = pageTabId();
+    const ccStart = recalledCcStart(displayId);
+    if (ccStart !== null) settingsToSend['ccStartKbps'] = ccStart;
     settingsToSend['displayScale'] = currentDisplayScale(dpr);
     if (displayId === 'display2') {
         settingsToSend['displayPosition'] = displayPosition;
@@ -5821,6 +5823,7 @@ function handleSettingsMessage(settings, fromServer) {
   if (settings.video_bitrate !== undefined) {
     videoBitrate = parseInt(settings.video_bitrate, 10);
     storeInt('video_bitrate', videoBitrate);
+    if (!fromServer) forgetCcStart(displayId);
     settingsChanged = true;
   }
   if (settings.audio_bitrate !== undefined) {
@@ -7568,6 +7571,8 @@ class WorkerWebSocket {
       settingsToSend['useCssScaling'] = useCssScaling;
       settingsToSend['displayId'] = displayId;
       settingsToSend['tabId'] = pageTabId();
+      const ccStart = recalledCcStart(displayId);
+      if (ccStart !== null) settingsToSend['ccStartKbps'] = ccStart;
       settingsToSend['displayScale'] = currentDisplayScale(dpr);
       reportedStreamDensity = dpr;
       if (displayId === 'display2') {
@@ -7965,6 +7970,11 @@ class WorkerWebSocket {
         console.warn('Unknown binary data payload type received:', dataTypeByte);
       }
     } else if (typeof event.data === 'string') {
+      if (event.data.startsWith('CC_RATE ')) {
+        // The rate congestion control has held this display at, for a restarted server to start at.
+        rememberCcStart(displayId, parseFloat(event.data.substring(8)));
+        return;
+      }
       if (event.data.startsWith('DISPLAY_OWNER ')) {
         // The owner beside which this page controlled the display is gone:
         // its settings, the window size among them, lay the display out now.

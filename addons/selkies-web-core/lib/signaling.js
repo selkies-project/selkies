@@ -27,7 +27,8 @@
  *
  * Speaks the line protocol of the server's signaling WebSocket. `HELLO
  * <peer type> <json>` registers the client, the JSON carrying its type, slot,
- * strict-viewer flag, secure-mode token, display id, and display position;
+ * strict-viewer flag, secure-mode token, display id, display position, tab,
+ * and the start rate congestion control last held its display at;
  * `SESSION server` asks for the server peer and is answered with
  * `SESSION_OK <peer id>`; from then on the SDP and the ICE candidates travel
  * as `<peer id> {"sdp": ...}` and `<peer id> {"ice": ...}` lines, and
@@ -41,7 +42,7 @@
  * @module
  */
 
-import { pageTabId } from './util.js';
+import { pageTabId, recalledCcStart } from './util.js';
 
 /** First signaling retry after a failure, doubled per failure up to RETRY_MAX_MS. */
 const RETRY_FIRST_MS = 400;
@@ -229,6 +230,7 @@ export class WebRTCSignaling {
             'display_id': this.display_id,
             'display_position': this.display_position,
             'client_tab_id': pageTabId(),
+            'cc_start_kbps': recalledCcStart(this.display_id),
         }
         if (this.capabilities) {
             try { meta.fullcolor_codecs = await this.capabilities(); } catch (e) { /* the server takes silence as decodable */ }

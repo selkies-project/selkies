@@ -16,7 +16,8 @@ Wire protocol (text frames, space-separated): a peer opens with
 `HELLO <server|client> [<json-metadata>]` (`client_type`, `client_slot`,
 `client_strict_viewer`, `client_token`, `server_token`, `display_id`,
 `display_position`, `fullcolor_codecs`: the codec names the client decodes at
-4:4:4) and is answered `HELLO`. `SESSION <peer-id|server>` pairs
+4:4:4, `client_tab_id`, `cc_start_kbps`: the rate congestion control last held
+the page's display at) and is answered `HELLO`. `SESSION <peer-id|server>` pairs
 the caller with the callee: the caller gets `SESSION_OK <callee-id>`, the callee
 `SESSION_START <caller-id> <client_type> <display_id> <display_position>
 [<client_token>] [fullcolor=<codec,...>]`, and a disconnect sends the partner `SESSION_END <peer-id>
@@ -83,6 +84,8 @@ class Peer:
         tab_id: The browser tab the page runs in, which tells a page taking
             its own controller back from another page's controller joining
             beside it; None for a page that names none.
+        cc_start_kbps: The rate congestion control last held this page's
+            display at, as the page kept it (`RateHold`); None for none.
     """
 
     uid: str
@@ -98,6 +101,7 @@ class Peer:
     display_position: str = "right"
     fullcolor_codecs: Optional[List[str]] = None
     tab_id: Optional[str] = None
+    cc_start_kbps: Any = None
 
 
 class WebRTCPeerManagement:
@@ -740,6 +744,7 @@ class WebRTCPeerManagement:
         client_slot = None
         client_strict_viewer = None
         client_tab_id = None
+        cc_start_kbps = None
         client_token = None
         server_token = None
         display_id = "primary"
@@ -782,6 +787,7 @@ class WebRTCPeerManagement:
                         tab = json_metadata.get("client_tab_id")
                         if isinstance(tab, str) and tab:
                             client_tab_id = tab[:64]
+                        cc_start_kbps = json_metadata.get("cc_start_kbps")
                         codecs = json_metadata.get("fullcolor_codecs")
                         if isinstance(codecs, list):
                             fullcolor_codecs = [str(c) for c in codecs if isinstance(c, str) and c.isalnum()]
@@ -1003,6 +1009,7 @@ class WebRTCPeerManagement:
                     display_position=display_position,
                     fullcolor_codecs=fullcolor_codecs,
                     tab_id=client_tab_id,
+                    cc_start_kbps=cc_start_kbps,
                 )
                 result = (puid, peer_type, client_type, client_slot, client_strict_viewer)
         finally:

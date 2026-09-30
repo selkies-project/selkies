@@ -26,6 +26,7 @@ SUITES: list = [
     {"path": "unit/test_uinput_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gamepad_authority.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ws_capture_starting.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_cc_start_rate.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_mode_switch_teardown.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_metrics_reregister.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gpu_probe_facts.py", "tier": "unit", "timeout": 120},
@@ -256,6 +257,7 @@ SUITES: list = [
     # e2e
     {"path": "e2e/test_ime_composition.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_wayland_typed_text.py", "tier": "e2e", "timeout": 300},
+    {"path": "e2e/test_cc_start_rate.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_matrix.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["ws-x11", "wr-x11", "ws-wl", "wr-wl"]},
     {"path": "e2e/test_scroll.py", "tier": "e2e", "timeout": 900,

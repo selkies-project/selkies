@@ -73,7 +73,7 @@ from .settings import (settings, AppSettings, SETTING_DEFINITIONS, RateControlMo
                        build_client_settings_payload, sanitize_client_setting, socket_dir)
 from types import SimpleNamespace
 from .webrtc_ice_config import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
-from .stream_server import BaseStreamingService, CentralizedStreamServer, CongestionSteer
+from .stream_server import BaseStreamingService, CentralizedStreamServer, CongestionSteer, RateHold, start_kbps
 from .audio_control import AudioControl
 
 logger = logging.getLogger("webrtc")
@@ -201,6 +201,8 @@ class WebRTCService(BaseStreamingService):
             when self-compositing (outputs are minted on demand there).
         _congestion_steer: Each display's `CongestionSteer`, the state its
             CBR target is steered with.
+        _rate_holds: Each display's `RateHold`, which tells its controllers
+            a steered rate that held.
         _wm_swap: Swaps heavy DEs, which tile poorly across the per-display
             regions, for a minimal Openbox once a secondary joins.
         _primary_stop_grace_task: The pending deferred primary-capture stop.
@@ -257,6 +259,7 @@ class WebRTCService(BaseStreamingService):
         self._last_resize_request: Optional[Tuple[int, int]] = None
         self._wm_swap = MultiMonitorWindowManager()
         self._congestion_steer: Dict[str, CongestionSteer] = {}
+        self._rate_holds: Dict[str, RateHold] = {}
         # The browser tab of each peer (its signaling HELLO), and per display the
         # tab whose controller owns it: a controller of another tab streams and
         # drives input beside it, and what would size or configure the display
@@ -526,6 +529,9 @@ class WebRTCService(BaseStreamingService):
             await self.rtc_app.start_rtc_connection(
                 session_peer_id, client_type, client_token, display_id, client_slot,
                 fullcolor_codecs=fullcolor_codecs)
+            if client_type == "controller":
+                await self._seed_start_rate(session_peer_id, display_id,
+                                            getattr(peer, "cc_start_kbps", None) if peer else None)
             if self.args.enable_webrtc_statistics and self.metrics:
                 await self.metrics.initialize_webrtc_csv_file(self.args.webrtc_statistics_dir)
             logger.info(f"Session started for peer {session_peer_id} ({client_type}, display '{display_id}').")
@@ -535,6 +541,30 @@ class WebRTCService(BaseStreamingService):
                 exc_info=True,
             )
             await self.rtc_app.stop_rtc_connection(session_peer_id, client_type)
+
+    async def _seed_start_rate(self, peer_id: str, display_id: str, remembered: Any) -> None:
+        """Start a steered display at the rate its page last held it at
+        (`RateHold`) rather than at the configured one, when this page is the
+        display's only controller: another's stream carries a steer fresher
+        than any page's memory."""
+        if not self.args.congestion_control or not self.rtc_app:
+            return
+        pipeline = self.display_pipelines.get(display_id)
+        if pipeline is None or getattr(pipeline, "rc_mode", None) != RateControlMode.CBR:
+            return
+        others = [pid for pid, obj in self.rtc_app.peer_connections.items()
+                  if pid != peer_id and obj.get("client_type") == ClientType.CONTROLLER
+                  and (obj.get("display_id") or "primary") == display_id]
+        lo_kbps, hi_kbps = settings.video_bitrate
+        seeded = start_kbps(remembered, float(lo_kbps), float(hi_kbps))
+        if others or seeded is None:
+            return
+        ceiling = float(self._display_setting(display_id, "video_bitrate") or hi_kbps)
+        seeded = min(seeded, ceiling)
+        if round(seeded) < round(float(pipeline.video_bitrate)):
+            logger.info(f"Congestion control[{display_id}]: starting at {seeded:.0f} kbps, "
+                        f"from the rate its page last held")
+            await pipeline.set_video_bitrate(round(seeded))
 
     async def handle_session_end(self, session_peer_id: str, client_type: str) -> None:
         """Handle end of a session initiated by a client.
@@ -2878,9 +2908,13 @@ class WebRTCService(BaseStreamingService):
                     max(queue_ms, bucket["depth_ms"]) / 1000.0 if queue_ms > TWCC_QUEUE_MS else 0.0)
                 # Goodput may lift the target, never drag it down (see docstring).
                 steer = self._congestion_steer.setdefault(did, CongestionSteer())
+                now = time.monotonic()
                 target = round(steer.target(
-                    current, ceiling, lo_kbps, min(goodputs), worst_loss, time.monotonic(), queue_s,
+                    current, ceiling, lo_kbps, min(goodputs), worst_loss, now, queue_s,
                     bucket["sent_bps"]))
+                held_kbps = self._rate_holds.setdefault(did, RateHold()).note(target, now)
+                if held_kbps is not None:
+                    rtc_app.send_cc_rate(did, held_kbps)
                 if target != round(current):
                     (logger.info if target < current else logger.debug)(
                         f"Congestion control[{did}]: video bitrate {current:.0f} -> {target:.0f} kbps "

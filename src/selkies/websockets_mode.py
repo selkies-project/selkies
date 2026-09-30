@@ -128,9 +128,9 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
-from .stream_server import (SESSION_TOKEN_PROTOCOL, BaseStreamingService, CongestionSteer, TransferPacer, UplinkGauge,
-                            _observe_rtt_floor, _uplink_session_state, handshake_session_token, note_pong,
-                            uplink_rtt_ms, socket_gauge)
+from .stream_server import (SESSION_TOKEN_PROTOCOL, BaseStreamingService, CongestionSteer, RateHold, TransferPacer,
+                            UplinkGauge, _observe_rtt_floor, _uplink_session_state, handshake_session_token, note_pong,
+                            start_kbps, uplink_rtt_ms, socket_gauge)
 from .metrics import Metrics
 
 # How much stream may stand queued past the path's own round trip before the
@@ -3141,6 +3141,11 @@ class DataStreamingServer(BaseStreamingService):
         rate = round(steer.target(current, target, float(lo_kbps), delivered_bps, 0.0, now, queue_s,
                                   offered_bps))
         display_state['link_kbps'] = rate
+        held_kbps = display_state.setdefault('link_hold', RateHold()).note(rate, now)
+        ws = display_state.get('ws')
+        if held_kbps is not None and ws is not None:
+            _spawn_background_task(_broadcast_to_clients(
+                self.clients, f"CC_RATE {held_kbps}", watched=True, only=id(ws)))
         if rate != round(current):
             (data_logger.info if rate < current else data_logger.debug)(
                 f"Congestion control[{display_id}]: video bitrate {current:.0f} -> {rate} kbps "
@@ -3453,7 +3458,8 @@ class DataStreamingServer(BaseStreamingService):
         that becomes the compositor's base layout on Wayland and is
         informational on X11; `encoderFallback` marks an `encoder` the page
         fell back to on its own rather than one its user picked; `tabId` names
-        the browser tab the page runs in.
+        the browser tab the page runs in; `ccStartKbps` is the rate congestion
+        control last held the display at for this page (`RateHold`).
 
         Raises:
             json.JSONDecodeError: When the payload is not valid JSON.
@@ -3524,6 +3530,7 @@ class DataStreamingServer(BaseStreamingService):
         parsed["tabId"] = (get_str("tabId") or "")[:64] or None
         parsed["keyboardLayout"] = get_str("keyboardLayout")
         parsed["encoderFallback"] = get_bool("encoderFallback")
+        parsed["ccStartKbps"] = settings_data.get("ccStartKbps")
         data_logger.debug(f"Parsed client settings: {parsed}")
         return parsed
 
@@ -4515,6 +4522,17 @@ class DataStreamingServer(BaseStreamingService):
                                      'scale': 1.0,
                                 }
                                 _expect_key_frame(self.display_clients[display_id])
+                                # A steered display starts at the rate its path last carried
+                                # for this page, not at the configured one.
+                                if self.cli_args.congestion_control[0] and self.rc_mode == RateControlMode.CBR:
+                                    lo_kbps, hi_kbps = app_settings.video_bitrate
+                                    seeded = start_kbps(parsed_settings.get("ccStartKbps"),
+                                                        float(lo_kbps), float(hi_kbps))
+                                    if seeded is not None and seeded < float(self._initial_video_bitrate):
+                                        self.display_clients[display_id]['link_kbps'] = seeded
+                                        data_logger.info(
+                                            f"Congestion control[{display_id}]: starting at {seeded:.0f} kbps, "
+                                            f"from the rate its page last held")
                                 # The page stops being a capture candidate with its socket still open.
                                 await capture_demand.sync(self)
                                 if IS_WAYLAND and self.input_handler is not None:

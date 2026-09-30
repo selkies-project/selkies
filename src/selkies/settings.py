@@ -1054,7 +1054,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "congestion_control",
         "type": "bool",
         "default": True,
-        "help": "Adapt a CBR display's bitrate to what its path carries, below the bitrate the client chose: over WebRTC from the transport-wide-cc receiver feedback (loss, and one-way delay standing past the path's own), over WebSockets from the queue a display's frame round trip shows past the path's own and its jitter. False holds the chosen bitrate whatever the path carries, so a path slower than it lags or drops frames. Has no effect in CRF rate-control mode.",
+        "help": "Adapt a CBR display's bitrate to what its path carries, below the bitrate the client chose: over WebRTC from the transport-wide-cc receiver feedback (loss, and one-way delay standing past the path's own), over WebSockets from the queue a display's frame round trip shows past the path's own and its jitter. A page keeps the rate its display held for 10 s, and a restarted server starts that page's stream there, for a day or until the user sets a bitrate. False holds the chosen bitrate whatever the path carries, so a path slower than it lags or drops frames. Has no effect in CRF rate-control mode.",
     },
     {
         "name": "audio_channels",

@@ -419,6 +419,52 @@ export function pageTabId() {
   }
 }
 
+/** How long a remembered start rate stands: a path's capacity a day later is anyone's guess. */
+const CC_START_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** The localStorage key of a display's remembered start rate, per origin as every key is. */
+function ccStartKey(displayId) {
+  return `${getStorageAppName()}_cc_start${displayId && displayId !== 'primary' ? `_${displayId}` : ''}`;
+}
+
+/**
+ * Keep the rate congestion control held a display at, as its server reports it, so a
+ * restarted server starts the page's next stream there rather than at the configured rate.
+ * @param {string} displayId
+ * @param {number} kbps
+ */
+export function rememberCcStart(displayId, kbps) {
+  if (!Number.isFinite(kbps) || kbps <= 0) return;
+  try {
+    window.localStorage.setItem(ccStartKey(displayId), JSON.stringify({ kbps: Math.round(kbps), at: Date.now() }));
+  } catch (e) { /* no storage: every start is the configured rate */ }
+}
+
+/**
+ * The display's remembered start rate, or null: none kept, a day old, or unreadable.
+ * @param {string} displayId
+ * @returns {number|null}
+ */
+export function recalledCcStart(displayId) {
+  try {
+    const kept = JSON.parse(window.localStorage.getItem(ccStartKey(displayId)) || 'null');
+    if (kept && Number.isFinite(kept.kbps) && kept.kbps > 0 && Date.now() - kept.at < CC_START_TTL_MS) {
+      return kept.kbps;
+    }
+  } catch (e) { /* unreadable reads as none */ }
+  return null;
+}
+
+/**
+ * Drop the display's remembered start rate, once the user sets a bitrate of their own.
+ * @param {string} displayId
+ */
+export function forgetCcStart(displayId) {
+  try {
+    window.localStorage.removeItem(ccStartKey(displayId));
+  } catch (e) { /* nothing kept */ }
+}
+
 /**
  * WebKit's Linux ports (WPE, WebKitGTK), which draw a canvas through Skia's GPU
  * context, as against Safari, which draws through CoreGraphics. No capability

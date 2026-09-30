@@ -117,6 +117,7 @@ class TransportCallerTests(unittest.IsolatedAsyncioTestCase):
                 service.metrics = None
                 service.args = SimpleNamespace(congestion_control=True)
                 service._congestion_steer = {"primary": steer}
+                service._rate_holds = {}
                 service._display_setting = lambda did, key: 6000
                 service.display_pipelines = {"primary": pipeline}
                 service._ensure_pacer = Mock()
@@ -127,7 +128,7 @@ class TransportCallerTests(unittest.IsolatedAsyncioTestCase):
                 transport = SimpleNamespace(take_twcc_window=Mock(side_effect=windows))
                 service.rtc_app = SimpleNamespace(peer_connections={"peer": dict(
                     peer_conn=SimpleNamespace(sctp=SimpleNamespace(transport=transport)),
-                    display_id="primary", video_sender=None)})
+                    display_id="primary", video_sender=None)}, send_cc_rate=lambda did, kbps: None)
                 sleep = AsyncMock(side_effect=[None] * len(losses) + [asyncio.CancelledError()])
                 clock = Mock(side_effect=range(1, len(losses) + 1))
                 with patch.object(webrtc_mode, "asyncio", SimpleNamespace(sleep=sleep)), \
