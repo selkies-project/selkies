@@ -291,6 +291,8 @@ class CongestionSteer:
 
     Loss backs the target off only on the second lossy tick in a row: one tick
     of a thin stream is too few packets for its loss fraction to mean anything.
+    Pending cruise waits for loss at or below LOSS before resuming, and that
+    clean restoration clears the loss streak so separated losses do not back off.
     That backoff is BACKOFF of the target, held for HOLD_S, so the recovery does
     not climb straight back onto the loss that caused it.
 
@@ -350,6 +352,7 @@ class CongestionSteer:
             self._cruise_kbps is not None
             and now >= self._drain_until
             and not queue_s
+            and loss <= self.LOSS
         )
         if drained:
             current, self._cruise_kbps = self._cruise_kbps, None
@@ -360,6 +363,7 @@ class CongestionSteer:
                 current = self._queue_backoff(current, goodput_bps / 1_000, queue_s, now)
             return max(floor, min(ceiling, current))
         if drained:
+            self.strikes = 0
             return max(floor, min(ceiling, current))
         if loss > self.LOSS:
             self.strikes += 1
