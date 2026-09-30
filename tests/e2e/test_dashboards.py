@@ -785,8 +785,11 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
             classic_viewer_check(page3, res)
         page3.close()
 
+        # The signaling handshake is refused (409, 503) while the server the
+        # page streams from switches modes, and the page reconnects past it.
         real_errors = [e for e in console_errors if not any(
             bp in e for bp in ("Failed to load resource", "Unexpected server response:",
+                               "Unexpected response code: 409", "Unexpected response code: 503",
                                "ResizeObserver", "server shutting down",
                                "Error getting media devices"))]
         res.check("no console errors", len(real_errors) == 0, "; ".join(real_errors)[:150])
