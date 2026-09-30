@@ -11,9 +11,13 @@ predicts from is dropped with a word to the encoder instead, and only the
 frames predicting from a dropped one are held back, so the stream resumes on
 the encoder's next frame with no keyframe, unless the encoder never hears of the
 drop: a second held frame it coded after the word went out asks for a keyframe
-until one arrives (without encode instants, a run of held frames does). The audio
-bridge is a deeper FIFO with no request path and keeps dropping oldest. Driven
-with stand-in frames and a manual clock; no encoder, no peer.
+until one arrives (without encode instants, a run of held frames does). A bridge
+held to its display's steered rate drops, with the word, the delta frames an
+encoder overshoots the rate by, lets a stream within it through whole, and
+passes a keyframe uncharged, and never drops the frames where an H.264
+frame_num can wrap, whose drop the encoder answers with a keyframe. The audio bridge is a deeper FIFO with no
+request path and keeps dropping oldest. Driven with stand-in frames and a manual
+clock; no encoder, no peer.
 """
 import asyncio
 import os
@@ -25,7 +29,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 
-from selkies.webrtc_engine import GATE_TIMEOUT_S, IDR_REQUEST_FLOOR_S, LOST_CHAIN_FRAMES, PipelineBridge
+from selkies.webrtc_engine import (BUDGET_WINDOW_S, FRAME_NUM_WRAP, GATE_TIMEOUT_S, IDR_REQUEST_FLOOR_S,
+                                   LOST_CHAIN_FRAMES, PipelineBridge)
 
 
 class Clock:
@@ -274,12 +279,91 @@ async def wrap(res: H.Results) -> None:
               (fid, bridge.dropped, forgotten, requests))
 
 
+async def budget(res: H.Results) -> None:
+    """The frames let through follow the steered rate: a stream within it passes whole,
+    one three times over it is held to it by delta frames dropped with the word, a
+    keyframe passes uncharged, so the delta frames behind it pass too, and frames that
+    name nothing, which only a keyframe could repair, are never dropped for it."""
+    clock = Clock()
+    requests, forgotten = [], []
+    rate = 80_000
+    window = rate / 8 * BUDGET_WINDOW_S
+
+    async def stream(bridge, first, size, seconds, fps=60, ref=None):
+        """Frames of `size` bytes for `seconds`, each predicting from the newest let
+        through; the bytes and ids let through."""
+        passed, sent, last, fid = [], 0, ref, first
+        for _ in range(int(seconds * fps)):
+            clock.now += 1 / fps
+            item = SimpleNamespace(name=f"F{fid}", dependency=(fid, last),
+                                   timing=(0, int(clock.now * 1e9), 0), data=b"x" * size)
+            bridge.set_data(item, keyframe=False)
+            if not bridge.empty():
+                await bridge.get_data()
+                passed.append(fid)
+                sent += size
+                last = fid
+            fid += 1
+        return sent, passed, fid, last
+
+    bridge = PipelineBridge(request_keyframe=lambda: requests.append(clock.now), clock=clock,
+                            invalidate_reference=forgotten.append)
+    bridge.set_budget(rate)
+    bridge.set_data(SimpleNamespace(name="K0", dependency=(0, None), data=b"x" * 100), keyframe=True)
+    await drain(bridge)
+    sent, passed, fid, last = await stream(bridge, 1, 150, 2.0, ref=0)
+    res.check("a stream within the rate passes whole", len(passed) == 120 and not forgotten,
+              (len(passed), forgotten[:3]))
+    sent, passed, fid, last = await stream(bridge, fid, 500, 10.0, ref=last)
+    want = rate / 8 * 10.0
+    res.check("a stream three times over the rate is held to it",
+              want <= sent <= want + window + 500 and not requests, (sent, want))
+    res.check("each frame it drops is named to the encoder",
+              bridge.over_budget == 600 - len(passed) == len(forgotten) > 0,
+              (bridge.over_budget, len(passed), len(forgotten)))
+    wraps = [f for f in range(121, 721) if (f % FRAME_NUM_WRAP) == 0]
+    res.check("a frame where frame_num can wrap is never dropped for it",
+              not set(wraps) & set(forgotten) and set(wraps) <= set(passed),
+              sorted(set(wraps) & set(forgotten))[:4])
+
+    clock.now += 5.0
+    bridge.set_data(SimpleNamespace(name="K1", dependency=(fid, None), data=b"x" * 8000), keyframe=True)
+    res.check("a keyframe past the window passes", [f.name for f in await drain(bridge)] == ["K1"])
+    key = fid
+    dropped = len(forgotten)
+    behind = []
+    for n in (1, 2):
+        clock.now += 1 / 60
+        bridge.set_data(SimpleNamespace(name=f"D{n}", dependency=(key + n, key + n - 1), data=b"x" * 100),
+                        keyframe=False)
+        behind += [f.name for f in await drain(bridge)]
+    res.check("it is not charged, so the delta frames behind it pass",
+              behind == ["D1", "D2"] and len(forgotten) == dropped, (behind, forgotten[dropped:]))
+
+    bridge.set_budget(None)
+    sent, passed, fid, last = await stream(bridge, key + 3, 500, 2.0, ref=key + 2)
+    res.check("a lifted budget lets every frame through", len(passed) == 120, len(passed))
+
+    plain = PipelineBridge(request_keyframe=lambda: requests.append(clock.now), clock=clock)
+    plain.set_budget(rate)
+    plain.set_data(SimpleNamespace(name="K", data=b"x" * 100), keyframe=True)
+    await drain(plain)
+    delivered = 0
+    for n in range(120):
+        clock.now += 1 / 60
+        plain.set_data(SimpleNamespace(name=f"P{n}", data=b"x" * 500), keyframe=False)
+        delivered += len(await drain(plain))
+    res.check("frames that name nothing are never dropped for the rate",
+              delivered == 120 and plain.over_budget == 0, (delivered, plain.over_budget))
+
+
 def main() -> int:
     res = H.Results("video-bridge-gate")
     asyncio.run(scenario(res))
     asyncio.run(references(res))
     asyncio.run(unheard(res))
     asyncio.run(wrap(res))
+    asyncio.run(budget(res))
     return 0 if res.summary() else 1
 
 

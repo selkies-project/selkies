@@ -205,6 +205,13 @@ GATE_TIMEOUT_S = 1.0
 # Frames without an encode instant a bridge holds back, predicting from one it
 # let go, before it takes the encoder for one that never predicted past the drop.
 LOST_CHAIN_FRAMES = 3
+# How far past its display's steered rate a video bridge lets frames run, in
+# seconds of that rate, before it drops delta frames (`PipelineBridge.set_budget`).
+BUDGET_WINDOW_S = 0.25
+# The shortest H.264 frame_num range, which every longer one is a multiple of:
+# the frames a multiple of it past a keyframe are where a stream's frame_num can
+# wrap to 0.
+FRAME_NUM_WRAP = 16
 
 
 async def drain_data_channel(channel: RTCDataChannel,
@@ -284,6 +291,13 @@ class RTCAppError(Exception):
     """Raised for unrecoverable errors in the RTC signaling/pipeline layer."""
     pass
 
+
+def _frame_bytes(item: Any) -> int:
+    """The encoded size of a bridge item, 0 for one carrying no buffer."""
+    data = getattr(item, "data", None)
+    return memoryview(data).nbytes if data is not None else 0
+
+
 def _encode_start(timing: Optional[tuple]) -> Optional[float]:
     """When a frame's encode began, in seconds on CLOCK_MONOTONIC, or None for a
     frame the capture stamped no encode instant on."""
@@ -321,6 +335,21 @@ class PipelineBridge:
     keyframe is asked for until one arrives and reopens it, and a queued
     keyframe is never evicted by a delta frame. A gate no keyframe answers
     within GATE_TIMEOUT_S reopens on its own.
+
+    A bridge given its display's steered rate (`set_budget`) also holds the
+    stream to it. An encoder meets a rate by coarser quantizers, down to the
+    coarsest it has, and content the coarsest cannot fit (noise, film grain)
+    overshoots, which a path sized for the rate queues and loses, and
+    whatever repairs the loss adds more. The frames let through fill a bucket
+    that drains at the rate, and while it holds more than BUDGET_WINDOW_S of
+    the rate a delta frame that names what it predicts from is dropped with
+    the word to the encoder, so the frame rate falls instead of the latency
+    rising. Keyframes pass uncharged: charged, a large one would drop the
+    delta frames behind it for as long as it takes on a slow path. Neither is
+    a frame FRAME_NUM_WRAP frames or a multiple of it past a keyframe dropped:
+    an H.264 decoder that misses the frame whose frame_num wraps to 0 cannot
+    be predicted past the gap, so the encoder answers such a drop with a
+    keyframe.
     """
     def __init__(self, maxsize: int = 1,
                  request_keyframe: Optional[Callable[[], None]] = None,
@@ -365,6 +394,39 @@ class PipelineBridge:
         self._held = 0
         self.dropped = 0
         self.invalidated = 0
+        self._budget_bps: Optional[float] = None
+        self._budget_bytes = 0.0
+        self._budget_at = 0.0
+        self.over_budget = 0
+        # Frames the encoder coded since the last keyframe, as they arrive.
+        self._since_key = 0
+
+    def set_budget(self, bps: Optional[float]) -> None:
+        """Hold the frames let through to `bps`, the display's steered rate;
+        None lets every frame through."""
+        if not bps:
+            self._budget_bps = None
+            self._budget_bytes = 0.0
+            return
+        if self._budget_bps is None:
+            self._budget_at = self._clock()
+        self._budget_bps = float(bps)
+
+    def _budget_level(self) -> float:
+        """The bytes the frames let through still stand at, drained to now."""
+        now = self._clock()
+        self._budget_bytes = max(0.0, self._budget_bytes - (now - self._budget_at) * self._budget_bps / 8.0)
+        self._budget_at = now
+        return self._budget_bytes
+
+    def _budget_full(self) -> bool:
+        """Whether the frames let through stand past BUDGET_WINDOW_S of the rate."""
+        return (self._budget_bps is not None
+                and self._budget_level() > self._budget_bps / 8.0 * BUDGET_WINDOW_S)
+
+    def _charge(self, item: Any) -> None:
+        if self._budget_bps is not None:
+            self._budget_bytes = self._budget_level() + _frame_bytes(item)
 
     def set_data(self, data: Any, keyframe: bool = True) -> None:
         """Enqueue an item, dropping the oldest one when the queue is full.
@@ -396,12 +458,18 @@ class PipelineBridge:
             self._gated_at = None
             self._lost.clear()
             self._held = 0
+            self._since_key = 0
             return
+        self._since_key += 1
         dependency = data.dependency if self._invalidate is not None else None
         if dependency is not None:
             frame_id, reference = dependency
             if reference in self._lost:
                 self._hold(frame_id, getattr(data, "timing", None))
+                return
+            if self._since_key % FRAME_NUM_WRAP and self._budget_full():
+                self.over_budget += 1
+                self._drop(data)
                 return
             if queue.full():
                 if self._queued_keyframe:
@@ -412,6 +480,7 @@ class PipelineBridge:
                     self._hold(frame_id, getattr(data, "timing", None))
                     return
             queue.put_nowait(data)
+            self._charge(data)
             self._queued_keyframe = False
             self._held = 0
             if self._lost and self._told_at is not None:
@@ -564,7 +633,8 @@ class RTCApp:
         on_sdp: SDP offer to send over signaling.
         request_idr_frame: Async keyframe request for a display.
         invalidate_reference: Tells a display's encoder a peer lost a frame,
-            so the frames after it stop predicting from it.
+            or its video bridge dropped one (`dropped`), so the frames after
+            it stop predicting from it.
         on_video_consumer_active: Per-peer video pause (tab-hide STOP_VIDEO /
             START_VIDEO), display-scoped; left None the verbs fall through to
             the input dispatcher, which ignores them.
@@ -618,7 +688,7 @@ class RTCApp:
         self.on_sdp = lambda sdp_type, sdp, client_peer_id: logger.warning('unhandled sdp event')
 
         self.request_idr_frame = lambda display_id='primary': logger.warning('unhandled request_idr_frame')
-        self.invalidate_reference = lambda display_id, frame_id: logger.warning('unhandled invalidate_reference')
+        self.invalidate_reference = lambda display_id, frame_id, dropped=False: logger.warning('unhandled invalidate_reference')
 
         self.on_video_consumer_active = None
         self.on_audio_consumer_active = None
@@ -1382,6 +1452,14 @@ class RTCApp:
             out.extend(section)
 
         return "\r\n".join(out)
+
+    def set_video_budget(self, display_id: str, bps: Optional[float]) -> None:
+        """Hold a display's video to the rate congestion control steered it to, or
+        lift the hold (None); see `PipelineBridge.set_budget`."""
+        graph = self.displays.get(display_id or "primary")
+        bridge = graph.get("video_bridge") if graph else None
+        if bridge is not None:
+            bridge.set_budget(bps)
 
     def consume_data(self, buf: Any, pts: Optional[int], kind: str,
                      keyframe: bool = True, display_id: str = "primary",
@@ -2305,7 +2383,7 @@ class RTCApp:
             graph = {"relay": MediaRelay()}
             graph["video_bridge"] = PipelineBridge(
                 request_keyframe=self._keyframe_request(display_id),
-                invalidate_reference=lambda frame_id, did=display_id: self.invalidate_reference(did, frame_id))
+                invalidate_reference=lambda frame_id, did=display_id: self.invalidate_reference(did, frame_id, True))
             graph["video_media"] = VideoMedia(graph["video_bridge"])
             if display_id == "primary":
                 graph["audio_bridge"] = PipelineBridge(maxsize=8)

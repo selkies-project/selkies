@@ -639,7 +639,7 @@ class WebRTCService(BaseStreamingService):
 
         self.rtc_app.request_idr_frame = self.request_idr_for_display
         self.rtc_app.invalidate_reference = self.invalidate_reference_for_display
-        self._invalidation_log: Dict[str, tuple] = {}
+        self._invalidation_log: Dict[tuple, tuple] = {}
         self.rtc_app.start_display_media = self.start_display_media
         self.rtc_app.stop_display_media = self.stop_display_media
         self.rtc_app.on_sdp = self.signaling_client.send_sdp
@@ -1140,23 +1140,27 @@ class WebRTCService(BaseStreamingService):
         self._last_idr_request_times[display_id] = now
         await pipeline.dynamic_idr_frame()
 
-    def invalidate_reference_for_display(self, display_id: str, frame_id: int) -> None:
-        """Tell the display's encoder a peer lost `frame_id`, so the frames after it stop
-        predicting from it (websockets LOST_FRAME parity). Logged once per display per
-        five seconds with the count of the rest, since loss comes in bursts."""
+    def invalidate_reference_for_display(self, display_id: str, frame_id: int,
+                                         dropped: bool = False) -> None:
+        """Tell the display's encoder a peer lost `frame_id`, or its video bridge dropped
+        it (`dropped`), so the frames after it stop predicting from it (websockets
+        LOST_FRAME parity). Logged once per display and cause per five seconds with the
+        count of the rest, since both come in bursts."""
         display_id = display_id or "primary"
         pipeline = self.display_pipelines.get(display_id)
         if pipeline is None:
             return
         pipeline.invalidate_reference(frame_id)
         now = time.monotonic()
-        last, more = self._invalidation_log.get(display_id, (0.0, 0))
+        key = (display_id, dropped)
+        last, more = self._invalidation_log.get(key, (0.0, 0))
         if now - last >= 5.0:
             suffix = f" (+{more} more in the last 5 s)" if more else ""
-            logger.info(f"Display '{display_id}': frame {frame_id} lost by a peer; the encoder predicts past it.{suffix}")
-            self._invalidation_log[display_id] = (now, 0)
+            cause = "dropped before sending" if dropped else "lost by a peer"
+            logger.info(f"Display '{display_id}': frame {frame_id} {cause}; the encoder predicts past it.{suffix}")
+            self._invalidation_log[key] = (now, 0)
         else:
-            self._invalidation_log[display_id] = (last, more + 1)
+            self._invalidation_log[key] = (last, more + 1)
 
     async def _provision_webrtc_virtual_mic(self) -> None:
         """Bring up the SelkiesVirtualMic once for the WebRTC transport (shared
@@ -2831,7 +2835,9 @@ class WebRTCService(BaseStreamingService):
         tick's worth of it rather than whichever window landed last: a single
         window is a few tens of packets, too few for its loss fraction to mean
         anything, and a display that sends little (a still second screen) is
-        made of such windows. A tick that drains nothing steers nothing.
+        made of such windows. A tick that drains nothing steers nothing. The
+        target is also the display's video budget (`PipelineBridge.set_budget`),
+        which drops the frames an encoder overshoots it by.
 
         The user-selected bitrate is the ceiling: control only backs off below
         it and recovers up to it. Clamping to the allowed range instead let a
@@ -2897,6 +2903,7 @@ class WebRTCService(BaseStreamingService):
                     pipeline is None
                     or getattr(pipeline, "rc_mode", None) != RateControlMode.CBR
                 ):
+                    rtc_app.set_video_budget(did, None)
                     continue
                 goodputs, worst_loss = bucket["goodputs"], bucket["worst_loss"]
                 if not goodputs:
@@ -2913,6 +2920,7 @@ class WebRTCService(BaseStreamingService):
                 target = round(steer.target(
                     current, ceiling, lo_kbps, min(goodputs), worst_loss, now, queue_s,
                     bucket["sent_bps"]))
+                rtc_app.set_video_budget(did, target * 1000)
                 held_kbps = self._rate_holds.setdefault(did, RateHold()).note(target, now)
                 if held_kbps is not None:
                     rtc_app.send_cc_rate(did, held_kbps)

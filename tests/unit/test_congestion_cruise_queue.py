@@ -92,9 +92,11 @@ class TransportCallerTests(unittest.IsolatedAsyncioTestCase):
                       queue_ms=188.41666666666512, queue_rising_ms=None,
                       queue_depth_ms=188.41666666666512)
         transport = SimpleNamespace(take_twcc_window=lambda: dict(window))
+        budgets = []
         service.rtc_app = SimpleNamespace(peer_connections={"peer": dict(
             peer_conn=SimpleNamespace(sctp=SimpleNamespace(transport=transport)),
-            display_id="primary", video_sender=None)}, send_cc_rate=lambda did, kbps: None)
+            display_id="primary", video_sender=None)}, send_cc_rate=lambda did, kbps: None,
+            set_video_budget=lambda did, bps: budgets.append((did, bps)))
         sleep = AsyncMock(side_effect=[None, asyncio.CancelledError()])
         with patch.object(webrtc_mode, "asyncio", SimpleNamespace(sleep=sleep)), \
                 patch.object(webrtc_mode, "time", SimpleNamespace(monotonic=lambda: 32.0)), \
@@ -104,6 +106,8 @@ class TransportCallerTests(unittest.IsolatedAsyncioTestCase):
                 await service._congestion_control_loop()
         pipeline.set_video_bitrate.assert_not_awaited()
         service._ensure_pacer.assert_called_once()
+        # The kept target is the display's video budget too.
+        self.assertEqual(budgets, [("primary", 1407 * 1000)])
 
     async def test_websocket_tick_keeps_queued_target(self) -> None:
         module = SimpleNamespace(update_video_bitrate=Mock())
