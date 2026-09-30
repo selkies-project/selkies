@@ -20,6 +20,7 @@ from typing import Iterator, Optional, Sequence
 
 SUITES: list = [
     # unit
+    {"path": "unit/test_dtls_records.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_uinput_abi.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_fake_udev_enumeration.py", "tier": "unit", "timeout": 300},
     {"path": "unit/test_input_interposer_signals.py", "tier": "unit", "timeout": 180},
@@ -185,6 +186,7 @@ SUITES: list = [
     {"path": "unit/test_audio_control.py", "tier": "unit", "timeout": 120},
 
     # integration
+    {"path": "integration/test_dtls_record_delivery.py", "tier": "integration", "timeout": 120},
     {"path": "integration/test_uinput_backend.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_cursor_callback_handoff.py", "tier": "integration", "timeout": 300,
      "selectors": ["x11", "wayland"]},
