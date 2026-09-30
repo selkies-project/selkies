@@ -58,8 +58,12 @@ logger = logging.getLogger(__name__)
 ICE_COMPLETED = 1
 ICE_FAILED = 2
 
-CONSENT_FAILURES = 6
 CONSENT_INTERVAL = 5
+# A check's retransmissions (0.5, 1 and 2 s apart) let an answer come back
+# from behind a standing queue; consent lapses only after CONSENT_TIMEOUT
+# without one (RFC 7675).
+CONSENT_RETRANSMISSIONS = 2
+CONSENT_TIMEOUT = 30
 # Seconds a connection waits for a path only the peer can open (its nomination
 # of an ICE-lite agent, its connection to a passive TCP candidate).
 INBOUND_CHECK_TIMEOUT = 30
@@ -1370,7 +1374,7 @@ class Connection:
         """
         Periodically check consent (RFC 7675).
         """
-        failures = 0
+        consented_at = time.monotonic()
         while True:
             # randomize between 0.8 and 1.2 times CONSENT_INTERVAL
             await asyncio.sleep(CONSENT_INTERVAL * (0.8 + 0.4 * random.random()))
@@ -1382,12 +1386,12 @@ class Connection:
                         request,
                         pair.remote_addr,
                         integrity_key=self.remote_password.encode("utf8"),
-                        retransmissions=0,
+                        retransmissions=CONSENT_RETRANSMISSIONS,
                     )
-                    failures = 0
+                    consented_at = time.monotonic()
                 except stun.TransactionError:
-                    failures += 1
-                if failures >= CONSENT_FAILURES:
+                    pass
+                if time.monotonic() - consented_at >= CONSENT_TIMEOUT:
                     self.__log_info("Consent to send expired")
                     self._query_consent_task = None
                     return await self.close()
