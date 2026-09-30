@@ -776,6 +776,12 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             await receiver._handle_rtp_packet(packet, arrival_time_ms=arrival_time_ms)
 
     async def _recv_next(self) -> None:
+        """Receive a datagram and drain its complete DTLS application records.
+
+        OpenSSL can retain unprocessed records while pending() reports zero.
+        Read until it needs input so a complete SCTP packet never waits for
+        an unrelated later datagram.
+        """
         # get timeout
         timeout = None
         if not self.encrypted:
@@ -800,18 +806,21 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         if first_byte > 19 and first_byte < 64:
             # DTLS
             self._ssl.bio_write(data)
-            try:
-                data = self._ssl.recv(1500)
-            except SSL.ZeroReturnError:
-                data = None
-            except SSL.Error:
-                data = b""
-            await self._write_ssl()
-            if data is None:
-                self.__log_debug("- DTLS shutdown by remote party")
-                raise ConnectionError
-            elif data and self._data_receiver:
-                await self._data_receiver._handle_data(data)
+            while True:
+                try:
+                    data = self._ssl.recv(1500)
+                except SSL.ZeroReturnError:
+                    data = None
+                except SSL.Error:
+                    data = b""
+                await self._write_ssl()
+                if data is None:
+                    self.__log_debug("- DTLS shutdown by remote party")
+                    raise ConnectionError
+                elif not data:
+                    break
+                elif self._data_receiver:
+                    await self._data_receiver._handle_data(data)
         elif first_byte > 127 and first_byte < 192 and self._rx_srtp:
             # SRTP / SRTCP
             arrival_time_ms = clock.current_ms()
