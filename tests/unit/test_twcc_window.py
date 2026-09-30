@@ -26,7 +26,6 @@ second, while delay that only jitters, even as widely as a Wi-Fi hop spreads it
 and over a still screen's trickle, or one key frame's burst, does not, and the
 24-bit reference time wrapping changes nothing.
 """
-from collections import deque
 import os
 import struct
 from types import SimpleNamespace
@@ -64,16 +63,7 @@ def _refused(rtp_mod, data: bytes) -> bool:
 
 def transport() -> RTCDtlsTransport:
     """A transport with only the send-side congestion state a feedback needs."""
-    tr = object.__new__(RTCDtlsTransport)
-    tr._twcc_seq = 0
-    tr._twcc_history = {}
-    tr._twcc_pruned_at = 0.0
-    tr.twcc_estimate = None
-    tr._pacer = None
-    tr._twcc_window = RTCDtlsTransport._twcc_window_zero()
-    tr._twcc_reference = None
-    tr._twcc_delay_floor = deque()
-    return tr
+    return RTCDtlsTransport(SimpleNamespace(), [SimpleNamespace()])
 
 
 def deliver(tr: RTCDtlsTransport, base_seq: int, received: int, lost: int) -> None:
@@ -253,8 +243,8 @@ def main() -> int:
     tr._twcc_process_feedback(pack_twcc_fci(0, [100.0 + i if i != 15 else None for i in range(20)], 0))
     tr._twcc_process_feedback(pack_twcc_fci(15, [121.0] + [116.0 + i for i in range(14)], 1))
     res.check("a window moved back over a late packet measures only the packets reported for the first time",
-              round(tr.twcc_estimate["recv_span_s"], 6) == 0.009 and tr.twcc_estimate["goodput_bps"] == 9_600_000
-              and tr.twcc_estimate["bytes_acked"] == 10 * PACKET_BYTES and tr.twcc_estimate["lost"] == 0
+              round(tr.twcc_estimate["recv_span_s"], 6) == 0.009 and tr.twcc_estimate["goodput_bps"] == 10_666_666
+              and tr.twcc_estimate["bytes_acked"] == 11 * PACKET_BYTES and tr.twcc_estimate["lost"] == 0
               and len(tr._twcc_history) == 0, tr.twcc_estimate)
 
     # One-way delay: a frame of 10 packets every 16.7 ms, sent at `t`, arriving

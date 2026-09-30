@@ -165,7 +165,7 @@ async def main_async(res: H.Results) -> None:
 
     fed = RtpPacer(8_000_000, send)
     try:
-        tr = object.__new__(RTCDtlsTransport)
+        tr = RTCDtlsTransport(None, [None])
         tr._twcc_reference, tr.twcc_estimate, tr._pacer = None, None, fed
         tr._twcc_window = RTCDtlsTransport._twcc_window_zero()
         for gap_ms, lost, cap, what in ((0.0, False, MAX_BURST_BYTES, "a burst arriving at once widens the budget"),
