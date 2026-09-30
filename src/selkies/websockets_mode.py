@@ -1701,6 +1701,35 @@ class DataStreamingServer(BaseStreamingService):
         except Exception as e_dpi:
             data_logger.error(f"Error applying DPI {dpi_value}: {e_dpi}", exc_info=True)
 
+    def _capture_fps(self, display_state: dict) -> float:
+        """The rate a display's capture runs at: the rate its client chose, or
+        the session's, held to what that client's decoder keeps up with
+        (`DECODE_PACE`)."""
+        rate = float(display_state.get('framerate') or self.app.framerate)
+        pace = display_state.get('decode_pace')
+        return min(rate, pace) if pace else rate
+
+    def _apply_decode_pace(self, display_id: str, display_state: dict, pace: Optional[float]) -> None:
+        """Hold a display's capture to `pace`, the rate its client's decoder
+        keeps up with, or lift the hold (None), live where the capture runs. The
+        pace lives in the display's entry: a new connection taking the entry
+        over starts without it, and the rate the client chose stays stored."""
+        before = self._capture_fps(display_state)
+        display_state['decode_pace'] = pace
+        after = self._capture_fps(display_state)
+        if after == before:
+            return
+        data_logger.info(
+            f"Display '{display_id}': its client's decoder keeps up with {fps_label(pace)} fps; capturing at that."
+            if pace else f"Display '{display_id}': capturing at the chosen {fps_label(after)} fps again.")
+        module = self.capture_instances.get(display_id, {}).get('module')
+        if module is not None:
+            try:
+                module.update_framerate(after)
+                self._track_capture_settings(display_id, target_fps=after)
+            except Exception as e:
+                data_logger.warning(f"Live framerate update failed for '{display_id}' ({e}).")
+
     async def _handle_opcode_fps(self, fps: Any, display_id: str = 'primary') -> None:
         """Live framerate for the shared '_arg_fps' verb (WebRTC-mode parity):
         sanitize against the server range, store, and live-update the display's
@@ -1718,8 +1747,9 @@ class DataStreamingServer(BaseStreamingService):
         module = self._opcode_display_module(display_id)
         if module is not None:
             try:
-                module.update_framerate(float(sanitized))
-                self._track_capture_settings(display_id, target_fps=float(sanitized))
+                live = self._capture_fps(display_state) if display_state is not None else float(sanitized)
+                module.update_framerate(live)
+                self._track_capture_settings(display_id, target_fps=live)
                 data_logger.info(f"Applied framerate live via '_arg_fps': {fps_label(sanitized)} fps for '{display_id}'")
             except Exception as e:
                 data_logger.warning(f"Live framerate update failed for '{display_id}' ({e}).")
@@ -2911,7 +2941,7 @@ class DataStreamingServer(BaseStreamingService):
                     display_state['stall_gated_at'] = None
                     continue
 
-                configured_fps = display_state.get('framerate', 60)
+                configured_fps = self._capture_fps(display_state)
                 if configured_fps <= 0:
                     configured_fps = 60
                 client_fps = self._estimate_client_fps(
@@ -3857,7 +3887,7 @@ class DataStreamingServer(BaseStreamingService):
                             fresh = self._get_capture_settings(
                                 display_id, layout['w'], layout['h'], layout['x'], layout['y']
                             )
-                            module.update_framerate(float(display_state.get('framerate') or self.app.framerate))
+                            module.update_framerate(self._capture_fps(display_state))
                             module.update_video_bitrate(int(round(self._video_bitrate_kbps(display_state))))
                             module.update_tunables(fresh)
                             self._track_capture_settings(display_id, fresh=fresh)
@@ -4441,6 +4471,7 @@ class DataStreamingServer(BaseStreamingService):
                                         # handler only tears down an entry its socket still owns,
                                         # and must not stop the capture being taken over.
                                         existing_client_info['ws'] = websocket
+                                        self._apply_decode_pace(display_id, existing_client_info, None)
                                         try:
                                             # The superseded socket is the one most likely frozen;
                                             # unbounded, the takeover would hang here.
@@ -4484,6 +4515,7 @@ class DataStreamingServer(BaseStreamingService):
                                 self.display_clients[display_id] = {
                                     'ws': websocket, 
                                     'tab_id': tab_id,
+                                    'decode_pace': None,
                                     'width': 0, 'height': 0, 'position': 'right',
                                     'acknowledged_frame_id': -1,
                                     'acked_sent_at': None,
@@ -4547,6 +4579,7 @@ class DataStreamingServer(BaseStreamingService):
                                 display_state = self.display_clients[display_id]
                                 display_state['ws'] = websocket
                                 display_state['tab_id'] = tab_id
+                                self._apply_decode_pace(display_id, display_state, None)
                                 # Only a page's first SETTINGS reactivates video; a later one
                                 # must not resurrect a stream stopped with STOP_VIDEO.
                                 if not initial_settings_processed:
@@ -4796,6 +4829,22 @@ class DataStreamingServer(BaseStreamingService):
                                 await websocket.send_str("VIDEO_STOPPED")
                             except (ConnectionResetError, OSError, RuntimeError):
                                 pass
+
+                    elif message.startswith("DECODE_PACE "):
+                        # The rate this client's decoder keeps up with, 0 for any: the
+                        # display it owns captures no faster. A viewer's is its own
+                        # gate's to answer, since the capture is everyone's.
+                        try:
+                            pace = float(message.split(" ", 1)[1])
+                        except ValueError:
+                            continue
+                        target_display_id = client_display_id or 'primary'
+                        entry = self.display_clients.get(target_display_id)
+                        if entry is None or entry.get('ws') is not websocket:
+                            continue
+                        if pace > 0:
+                            pace = sanitize_client_setting("framerate", pace, self.cli_args, data_logger)
+                        self._apply_decode_pace(target_display_id, entry, float(pace) if pace else None)
 
                     elif message.startswith("LOST_FRAME "):
                         # The client's decoder dropped a frame it could not keep up with:
@@ -6483,7 +6532,7 @@ class DataStreamingServer(BaseStreamingService):
             is_wayland=IS_WAYLAND,
             display_name=display_id,
             scale=display_state.get('scale', 1.0),
-            framerate=display_state.get('framerate', self.app.framerate),
+            framerate=self._capture_fps(display_state),
             encoder=encoder,
             use_cpu=display_state.get(
                 'use_cpu', effective_use_cpu(encoder, None, self._initial_use_cpu)),

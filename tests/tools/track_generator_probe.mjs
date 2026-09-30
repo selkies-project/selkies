@@ -88,6 +88,7 @@ const IMPORTED = { createStripeClock, createPresentMeter, isSkiaWebKit };
 const RAW_SOURCES = {
     wireCodecsSource: () => readFileSync(join(WEB, 'lib', 'wire-codecs.js'), 'utf8').replace(/^export /gm, ''),
     decodeGateSource: () => readFileSync(join(WEB, 'lib', 'decode-gate.js'), 'utf8').replace(/^export /gm, ''),
+    decodePaceSource: () => readFileSync(join(WEB, 'lib', 'decode-pace.js'), 'utf8').replace(/^export /gm, ''),
 };
 
 /** Resolves one `${...}` the client would have interpolated. */

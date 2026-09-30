@@ -31,7 +31,8 @@
  * are control. The client sends `SETTINGS,{json}`, `r,WxH,displayId`,
  * `START_VIDEO`, `STOP_VIDEO`, `START_AUDIO`, `STOP_AUDIO`,
  * `REQUEST_KEYFRAME`, `LOST_FRAME <id>` (a frame the decoder dropped, which
- * the encoder then predicts past), `CLIENT_FRAME_ACK <id> <heldMs>`, `cr`, `REQUEST_CLIPBOARD`, the
+ * the encoder then predicts past), `DECODE_PACE <fps>` (the rate the decoder
+ * keeps up with, 0 for any; lib/decode-pace.js), `CLIENT_FRAME_ACK <id> <heldMs>`, `cr`, `REQUEST_CLIPBOARD`, the
  * chunked clipboard upload of lib/clipboard-worker-bridge.js,
  * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>`,
  * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
@@ -137,9 +138,11 @@ import wireCodecsSource from './lib/wire-codecs.js?raw';
 import { StreamStats, DecodeCapability, webcodecsDecoder, FIRST_SAMPLE_MS } from './lib/stream-stats.js';
 // The decode gate, likewise by source, for the worker's own copy of it.
 import decodeGateSource from './lib/decode-gate.js?raw';
+import decodePaceSource from './lib/decode-pace.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
+import { DecodePace } from './lib/decode-pace.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 
@@ -1058,6 +1061,31 @@ let framerateSpan = null;
 let displayRefresh = null;
 /** The frame rate the last SETTINGS asked for, null where it named none. */
 let framerateAsked = null;
+/**
+ * The rate this page's decoder keeps up with (lib/decode-pace.js), null where
+ * it keeps up with any: the video worker's where it decodes, else `pagePace`,
+ * the page's own full-frame decoder's. The server runs the display's capture
+ * no faster (`DECODE_PACE`) while this page's socket lasts, and the rate the
+ * page chose stays what it asks for.
+ */
+let decodePace = null;
+const pagePace = new DecodePace();
+/** Tells the server the pace, or that there is none. */
+function sendDecodePace() {
+  if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(`DECODE_PACE ${decodePace || 0}`);
+}
+/** Takes a pace a decoder asked for; null lifts it. */
+function followDecodePace(fps) {
+  decodePace = fps;
+  console.info(fps === null ? '[decode] the decoder keeps up; the frame rate is the chosen one again.'
+    : `[decode] the decoder keeps up with ${fps} fps; asking for that.`);
+  sendDecodePace();
+}
+setInterval(() => {
+  if (decodeInWorker || !isFullFrameVideo(currentEncoderMode)) return;
+  const fps = pagePace.second();
+  if (fps !== undefined) followDecodePace(fps);
+}, 1000);
 let video_crf = 25;
 let video_fullcolor = false;
 let video_streaming_mode = false;
@@ -1832,6 +1860,7 @@ function checkWorkerSinkAlive() {
 }
 const VIDEO_WORKER_SRC = `
 ${decodeGateSource.replace(/^export /gm, '')}
+${decodePaceSource.replace(/^export /gm, '')}
 // Video sink and optional in-worker decoder. The sink is a worker-only
 // VideoTrackGenerator (its track transferred to the page for <video>.srcObject) or a
 // transferred OffscreenCanvas. Encoded chunks are decoded here so no decoded frame
@@ -1839,6 +1868,13 @@ ${decodeGateSource.replace(/^export /gm, '')}
 let mode = null, oc = null, ctx = null, writer = null, closed = false, presented = false;
 let dec = null, decConfig = null;
 const gate = new DecodeGate();
+// The frame rate the page asks the server for while the decoder cannot keep up (lib/decode-pace.js).
+const pace = new DecodePace();
+function resetPace() {
+  const was = pace.cap;
+  pace.reset();
+  if (was !== null) self.postMessage({ type: 'decodePace', fps: null });
+}
 // Decode figures, gathered only while the page has its stats open and posted as it samples.
 let statsOpen = false, statsBytes = 0, statsDecodeMs = 0, statsFrames = 0;
 // What reaches the screen from here (lib/present-meter.js): a canvas draw lands
@@ -1985,9 +2021,12 @@ function closeDecoder() {
 }
 
 function configureDecoder(codec, w, h, software, description) {
+  // Another picture size costs the decoder another rate; a new codec string
+  // alone, such as the level a lower rate declares, does not.
+  if (decConfig && (decConfig.codedWidth !== w || decConfig.codedHeight !== h)) resetPace();
   closeDecoder();
   try {
-    dec = new VideoDecoder({ output: (f) => { statsFormat = f.format; tellFacts(); present(f, statsOpen ? arrivalOf(f.timestamp) : NaN); },
+    dec = new VideoDecoder({ output: (f) => { pace.decoded(); statsFormat = f.format; tellFacts(); present(f, statsOpen ? arrivalOf(f.timestamp) : NaN); },
                              error: () => { closeDecoder(); self.postMessage({ type: 'decoderError' }); } });
     // configure() is synchronous, so the next chunk decodes without an async gap and
     // an unsupported config surfaces via error(). The page owns the acceleration
@@ -2011,6 +2050,7 @@ function configureDecoder(codec, w, h, software, description) {
 function decodeChunk(key, data, timestamp, frameId, reference, at) {
   if (!dec || dec.state !== 'configured') return;
   const decision = gate.decide(key, frameId, reference, dec.decodeQueueSize);
+  pace.decided(dec.decodeQueueSize, decision !== 'decode');
   if (decision === 'lost') { self.postMessage({ type: 'lostFrame', id: frameId }); return; }
   if (decision === 'flush') {
     try { dec.reset(); dec.configure(decConfig); }
@@ -2360,6 +2400,7 @@ self.onmessage = (e) => {
   }
   if (m.type === 'decoderConfig') { configureDecoder(m.codec, m.codedWidth, m.codedHeight, m.software, m.description || null); return; }
   if (m.type === 'closeDecoder') { closeDecoder(); return; }
+  if (m.type === 'decodePaceReset') { pace.reset(); return; }
   if (m.type === 'statsOpen') { setStatsOpen(!!m.open); return; }
   if (m.type === 'decodeStats') { postDecodeStats(); return; }
   if (m.type === 'chunk') {
@@ -2387,6 +2428,10 @@ self.onmessage = (e) => {
         }
         self.postMessage({ type: 'wireStats', chunks: wireChunks, frames: wireFrames, lastId: wireLastId, presents: presentedFrames, rows: rows });
         wireChunks = 0; wireFrames = 0; presentedFrames = 0;
+        if (!stripedOn && dec) {
+          const fps = pace.second();
+          if (fps !== undefined) self.postMessage({ type: 'decodePace', fps: fps });
+        }
       }, 1000);
     }
     return;
@@ -2733,6 +2778,10 @@ function ensureVideoWorker() {
           websocket.send(`LOST_FRAME ${m.id}`);
           requests.lost++;
         }
+        return;
+      }
+      if (m.type === 'decodePace') {
+        followDecodePace(m.fps);
         return;
       }
       if (m.type === 'decoderError') {
@@ -4449,6 +4498,7 @@ function handleDecodedVncStripeFrame(yPos, frame) {
   pageDecode.format = frame.format;
   if (streamStats.open) notePageDecoded(frame);
   if (isFullFrameVideo(currentEncoderMode) && yPos === 0) {
+    pagePace.decoded();
     if (document.hidden || (clientMode === 'websockets' && !isSharedMode && !isVideoPipelineActive)) {
       try { frame.close(); } catch (e) {}
       return;
@@ -5658,6 +5708,12 @@ function handleSettingsMessage(settings, fromServer) {
   let settingsChanged = false;
   if (settings.framerate !== undefined) {
     const followsDisplay = settings.framerate === FRAMERATE_DISPLAY;
+    if (!fromServer) {
+      // A rate the user chose is tried as chosen; the decoder asks again if it cannot keep up.
+      pagePace.reset();
+      if (videoWorker) videoWorker.postMessage({ type: 'decodePaceReset' });
+      if (decodePace !== null) followDecodePace(null);
+    }
     storeString('framerate', followsDisplay ? FRAMERATE_DISPLAY : String(parseFloat(settings.framerate)));
     const rate = followsDisplay ? requestedStreamFramerate() : parseFloat(settings.framerate);
     if (Number.isFinite(rate)) framerate = rate;
@@ -7590,6 +7646,8 @@ class WorkerWebSocket {
         const message = `SETTINGS,${settingsJson}`;
         websocket.send(message);
         initialSettingsSent = true;
+        // A new socket starts the display unpaced; the pace follows the settings that claim it.
+        if (decodePace !== null) sendDecodePace();
         console.log('[websockets] Sent initial settings (resolutions are physical) to server:', settingsToSend);
       } catch (e) {
         console.error('[websockets] Error constructing or sending initial settings:', e);
@@ -7876,6 +7934,11 @@ class WorkerWebSocket {
                     output: handleDecodedVncStripeFrame.bind(null, vncStripeYStart),
                     error: (e) => handleStripeDecodeError(e, vncStripeYStart)
                 });
+                if (isFullFrameVideo(currentEncoderMode) && pagePace.cap !== null && !decodeInWorker && decoderInfo
+                    && (decoderInfo.width !== stripeWidth || decoderInfo.height !== stripeHeight)) {
+                    pagePace.reset();
+                    followDecodePace(null);
+                }
                 const dynamicCodec = wireCodecString(video_frame_type_byte, h264Payload, stripeWidth, stripeHeight);
                 const framed = h264Framing() === 'avcc' && dynamicCodec.startsWith('avc1');
                 const description = framed ? avcDescription(new Uint8Array(h264Payload)) : null;
@@ -7930,13 +7993,16 @@ class WorkerWebSocket {
                     requestKeyframe();
                     return;
                 }
+                const fullFrame = isFullFrameVideo(currentEncoderMode);
                 if (chunkType === 'key') {
                     decoderInfo.hasReceivedKeyframe = true;
                 } else if (decoderInfo.decoder.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
+                    if (fullFrame) pagePace.decided(decoderInfo.decoder.decodeQueueSize, true);
                     decoderInfo.hasReceivedKeyframe = false;
                     requestKeyframe();
                     return;
                 }
+                if (fullFrame) pagePace.decided(decoderInfo.decoder.decodeQueueSize, false);
                 // Striped H.264 carries the frame id in the timestamp so the paint
                 // loop can present whole frames; full-frame keeps a monotonic clock.
                 const chunkTimestamp = (currentEncoderMode === 'h264enc-striped')
