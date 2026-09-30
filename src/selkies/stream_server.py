@@ -278,7 +278,10 @@ class CongestionSteer:
     DRAIN_FLOOR of the capacity, for as long as that takes at that rate. No cut
     follows until the drain and SETTLE_S more have passed, because the queue the
     cut is emptying reads as a queue meanwhile; cutting again on it would take
-    the target to the floor while the path only drains. Without a measured
+    the target to the floor while the path only drains. The target returns to
+    HEADROOM of the capacity on the first tick past the drain that reads no
+    queue: a queue the drain left keeps the drain's target through the hold, and
+    the tick after the hold backs off again. Without a measured
     delivery the backoff is BACKOFF of the target, held for HOLD_S. A tick whose
     stream offered the path less than APP_LIMITED of the target, a still
     screen's trickle, cuts nothing on a queue: what the path delivered is then
@@ -343,7 +346,11 @@ class CongestionSteer:
         """
         dt = 1.0 if self._tick_at is None else min(max(now - self._tick_at, 0.0), 2.0)
         self._tick_at = now
-        drained = self._cruise_kbps is not None and now >= self._drain_until
+        drained = (
+            self._cruise_kbps is not None
+            and now >= self._drain_until
+            and not queue_s
+        )
         if drained:
             current, self._cruise_kbps = self._cruise_kbps, None
         if queue_s:
