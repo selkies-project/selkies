@@ -811,10 +811,6 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 self.__lsr = (ntp_timestamp >> 16) & 0xFFFFFFFF
                 self.__lsr_time = time.time()
 
-                # RTCP XR DLRR
-                if self.__rrtrs:
-                    packets.append(self._dlrr_report(time.monotonic_ns()))
-
                 # RTCP SDES
                 if self.__cname is not None:
                     packets.append(
@@ -827,6 +823,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
                             ]
                         )
                     )
+
+                # RTCP XR DLRR, after the SDES as libwebrtc sends it
+                if self.__rrtrs:
+                    packets.append(self._dlrr_report(time.monotonic_ns()))
 
                 await self._send_rtcp(packets)
         except asyncio.CancelledError:

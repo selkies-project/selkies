@@ -138,6 +138,9 @@ async def answer() -> None:
     check("every sender report carries the DLRR", reports and all(
         any(isinstance(p, rtp.RtcpXrPacket) and p.dlrr and p.dlrr[0][1] == 0x12355678 for p in c)
         for c in reports), len(reports))
+    check("after the SDES, as libwebrtc sends it", reports and all(
+        [type(p).__name__ for p in c] == ["RtcpSrPacket", "RtcpSdesPacket", "RtcpXrPacket"] for c in reports),
+        [[type(p).__name__ for p in c] for c in reports][:1])
 
 
 def offer() -> None:
