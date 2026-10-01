@@ -32,15 +32,13 @@ const descending = (list) => list.every((v, i) => i === 0 || v < list[i - 1]);
         BITRATE_STOPS.length);
     // A finger settles on a band of the track; on a phone-width track of some
     // 300 pixels, forty stops is where a band shrinks below a fingertip.
-    check('each list is short enough for a fingertip to land between stops',
-        FRAMERATE_STOPS.length <= 40 && BITRATE_STOPS.length <= 40 && CRF_STOPS.length <= 40,
-        `${FRAMERATE_STOPS.length} ${BITRATE_STOPS.length} ${CRF_STOPS.length}`);
-    // Below 1 Mbps the steps are the few rates a constrained link is sized in.
-    check('from 1 Mbps up, no step is over half the stop it follows',
-        BITRATE_STOPS.every((v, i) => i === 0 || v < 1000 || v <= BITRATE_STOPS[i - 1] * 1.5 + 1e-9),
+    check('the frame rate list is short enough for a fingertip to land between stops',
+        FRAMERATE_STOPS.length <= 40, FRAMERATE_STOPS.length);
+    check('every Mbps from 1 to 100 is a bitrate stop',
+        Array.from({ length: 100 }, (_, i) => (i + 1) * 1000).every((v) => BITRATE_STOPS.includes(v)),
         BITRATE_STOPS.join(','));
-    check('CRF stops descend so the right end is the higher quality',
-        descending(CRF_STOPS) && CRF_STOPS[0] === 50 && CRF_STOPS.at(-1) === 5, CRF_STOPS.join(','));
+    check('CRF stops descend by one so the right end is the higher quality',
+        descending(CRF_STOPS) && CRF_STOPS[0] === 50 && CRF_STOPS.at(-1) === 5 && CRF_STOPS.length === 46, CRF_STOPS.join(','));
     check('the encoder defaults are stops', FRAMERATE_STOPS.includes(60) && BITRATE_STOPS.includes(8000) && CRF_STOPS.includes(25));
 }
 
@@ -51,7 +49,7 @@ const descending = (list) => list.every((v, i) => i === 0 || v < list[i - 1]);
     check('a span between two stops offers its floor alone',
         stopsWithin(FRAMERATE_STOPS, 61, 71).join(',') === '61', stopsWithin(FRAMERATE_STOPS, 61, 71).join(','));
     check('a descending list keeps its order inside a span',
-        stopsWithin(CRF_STOPS, 10, 30).join(',') === '30,25,20,15,10', stopsWithin(CRF_STOPS, 10, 30).join(','));
+        stopsWithin(CRF_STOPS, 26, 30).join(',') === '30,29,28,27,26', stopsWithin(CRF_STOPS, 26, 30).join(','));
 }
 
 {
@@ -59,11 +57,11 @@ const descending = (list) => list.every((v, i) => i === 0 || v < list[i - 1]);
     check('a value between stops maps to the nearer one',
         stopIndex(FRAMERATE_STOPS, 56) === FRAMERATE_STOPS.indexOf(60) && stopIndex(FRAMERATE_STOPS, 52) === FRAMERATE_STOPS.indexOf(50),
         `${stopIndex(FRAMERATE_STOPS, 56)} ${stopIndex(FRAMERATE_STOPS, 52)}`);
-    check('a tie goes to the earlier stop', stopIndex(BITRATE_STOPS, 7000) === BITRATE_STOPS.indexOf(6000), stopIndex(BITRATE_STOPS, 7000));
+    check('a tie goes to the earlier stop', stopIndex(BITRATE_STOPS, 125000) === BITRATE_STOPS.indexOf(100000), stopIndex(BITRATE_STOPS, 125000));
     check('a value past either end maps to that end',
         stopIndex(FRAMERATE_STOPS, 1) === 0 && stopIndex(FRAMERATE_STOPS, 1000) === FRAMERATE_STOPS.length - 1);
-    check('a CRF between stops maps to the nearer one on the descending list',
-        stopIndex(CRF_STOPS, 23) === CRF_STOPS.indexOf(25) && stopIndex(CRF_STOPS, 7) === CRF_STOPS.indexOf(5),
+    check('a CRF maps to its own index on the descending list',
+        stopIndex(CRF_STOPS, 23) === 27 && stopIndex(CRF_STOPS, 7) === 43,
         `${stopIndex(CRF_STOPS, 23)} ${stopIndex(CRF_STOPS, 7)}`);
 }
 

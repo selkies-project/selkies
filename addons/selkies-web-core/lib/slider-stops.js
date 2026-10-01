@@ -2,12 +2,12 @@
  * The stops the settings sliders offer for the stream's frame rate, bitrate,
  * and CRF.
  *
- * Each of those sliders carries an index into one of these lists, so a stop
- * owns a wide band of the track instead of a pixel or two, and a thumb moved
- * by a finger or a mouse settles on a value worth choosing: a slider over
+ * Each of those sliders carries an index into one of these lists. The frame
+ * rate's is sparse, so a stop owns a wide band of the track and a thumb moved
+ * by a finger or a mouse settles on a rate worth choosing: a slider over
  * every frame rate from 8 to 240 changed by a frame or two on the smallest
- * move. The lists are dense where a step is worth choosing and sparse where
- * it is not.
+ * move. The CRF's and the bitrate's are single steps, since one CRF or one
+ * Mbps is a difference worth choosing.
  */
 
 /**
@@ -18,17 +18,16 @@ export const FRAMERATE_STOPS = [8, 10, 12, 15, 18, 20, 24, 25, 30, 36, 40, 45, 4
 
 /**
  * CBR bitrates in kbps, ascending: sub-Mbps steps for constrained links,
- * steps of a fifth to a third up to 100 Mbps, then coarse steps to 1 Gbps.
+ * every Mbps up to 100 Mbps, then coarse steps to 1 Gbps.
  */
 export const BITRATE_STOPS = [
     100, 250, 500, 750,
-    1000, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 8000, 10000, 12000, 15000,
-    20000, 25000, 30000, 40000, 50000, 60000, 80000, 100000,
+    ...Array.from({ length: 100 }, (_, i) => (i + 1) * 1000),
     150000, 200000, 300000, 400000, 500000, 750000, 1000000,
 ];
 
-/** CRF values in fives, descending, so the slider's right end is the higher quality. */
-export const CRF_STOPS = [50, 45, 40, 35, 30, 25, 20, 15, 10, 5];
+/** Every CRF from 50 to 5, descending, so the slider's right end is the higher quality. */
+export const CRF_STOPS = Array.from({ length: 46 }, (_, i) => 50 - i);
 
 /**
  * The stops inside the span a server allows, in the list's order; the span's
