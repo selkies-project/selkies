@@ -2864,11 +2864,6 @@ function Sidebar() {
   /** One encoder knob serves both transports; CBR/CRF applies to every H.264 encoder on both. */
   const activeEncoder = encoder;
   const VIDEO_ENCODERS = ["h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc", "h264enc-striped"];
-  const showFPS = [
-    "jpeg",
-    "h264enc-striped",
-    "h264enc",
-  ].includes(encoder);
   const showCRF = VIDEO_ENCODERS.includes(activeEncoder);
   const showH264Options = VIDEO_ENCODERS.includes(activeEncoder);
   const showFullColor = showH264Options && codecCarriesFullColor(codecOfEncoder(activeEncoder));
@@ -3345,7 +3340,7 @@ function Sidebar() {
                     </select>
                   </div>
                 )}
-                {(isWebrtc || showFPS) && (renderableSettings.framerate ?? true) && (
+                {(renderableSettings.framerate ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="framerateSlider">
                       {t(framerateFollows ? "sections.video.framerateDisplayLabel" : "sections.video.framerateLabel", {
