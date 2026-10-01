@@ -699,6 +699,7 @@ class WebRTCService(BaseStreamingService):
         self.resource_monitor.on_tick = self.handle_resource_tick
         self.resource_monitor.watched = lambda: bool(self.rtc_app and self.rtc_app.stats_displays())
         self.rtc_app.on_stats_open = self._rush_stream_stats
+        self.rtc_app.on_frame_sent = self._note_frame_sent
 
     def _second_screen_availability(self) -> Tuple[bool, str]:
         """Whether this session can actually attach a second display, and the
@@ -2443,9 +2444,16 @@ class WebRTCService(BaseStreamingService):
         if self.resource_monitor is not None:
             asyncio.ensure_future(self.resource_monitor.rush())
 
+    def _note_frame_sent(self, display_id: str, capture_ns: int, size: int) -> None:
+        """A display's frame is on the wire to its controller (`RTCApp.on_frame_sent`)."""
+        watch = getattr(self.display_pipelines.get(display_id), "stream_watch", None)
+        if watch is not None:
+            watch.note_send(capture_ns, size)
+
     def _send_stream_stats(self) -> None:
         """One `stream_stats` to the controllers with their stats open: the host's
-        figures and their display's encode. The link is the page's own to measure."""
+        figures, their display's encode and delivery, and its CBR target. The link
+        is the page's own to measure."""
         host = stream_stats.host_stats(self.resource_monitor)
         for did in self.rtc_app.stats_displays():
             stats = dict(host)
@@ -2453,6 +2461,8 @@ class WebRTCService(BaseStreamingService):
             watch = getattr(pipeline, "stream_watch", None)
             if watch is not None:
                 stats.update(watch.rates())
+            if getattr(pipeline, "rc_mode", None) == RateControlMode.CBR and pipeline.video_bitrate:
+                stats["target_mbps"] = round(pipeline.video_bitrate / 1000, 2)
             self.rtc_app.send_stream_stats(did, stats)
 
     async def handle_resource_tick(self, t: float) -> None:

@@ -22,7 +22,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 const { StreamStats, HISTORY_MAX, FIRST_SAMPLE_MS, webcodecsDecoder, webrtcDecoder } =
   await import('../../addons/selkies-web-core/lib/stream-stats.js');
-const { streamRows, streamTiles, streamMeters, streamReport, seriesOf, graphPath, GRAPH_POINTS } =
+const { streamRows, streamTiles, streamStrip, streamMeters, streamReport, seriesOf, graphPath, GRAPH_POINTS, OVERSHOOT } =
   await import('../../addons/selkies-web-core/lib/stream-stats-view.js');
 const { createPresentMeter, watchVideo, DELAY_SAMPLE_MS } = await import('../../addons/selkies-web-core/lib/present-meter.js');
 
@@ -251,12 +251,30 @@ check('and how a JPEG stripe was decoded, with where it ran',
 const latest = { encode_ms: 1.2, decode_ms: 2, encoded_kbps: 900, audio_dropped: 0, cpu_percent: 20, mem_used: 2 ** 30, mem_total: 2 ** 32, fps: 60 };
 const tiles = streamTiles(latest, 'websockets');
 check('the tiles are a fixed set that repeats no graph', tiles.map((tile) => tile.key).join()
-  === 'encode_ms,pipeline_ms,decode_ms,present_ms,audio_buffer_ms,received_mb,lost_frames,frames_not_shown,keyframe_requests');
+  === 'encode_ms,pipeline_ms,send_ms,decode_ms,present_ms,audio_buffer_ms,video_mbps,peak_mbps,received_mb,'
+  + 'lost_frames,frames_not_shown,keyframe_requests');
 check('the round trip is not also a tile, the latency graph being where it is read',
   !tiles.some((tile) => tile.key === 'rtt_ms'));
 check('a figure not measured this second reads as a dash', tiles[0].value === '1.2 ms' && tiles[1].value === '\u2013');
-check('the same set stands before any sample', streamTiles(null, 'websockets').length === 9
-  && streamTiles(null, 'websockets').every((tile) => tile.value === '\u2013'));
+check('the same set stands before any sample', streamTiles(null, 'websockets').length === 12
+  && streamTiles(null, 'websockets').every((tile) => tile.value === '\u2013' && !tile.warn));
+const timed = streamTiles({ pipeline_ms: 1.9, pipeline_min_ms: 1.8, pipeline_max_ms: 4.3, send_ms: 2.1 }, 'websockets');
+check('a host time carries its second\'s range where the server measured one, and none where it did not',
+  timed[1].detail === '1.8\u20134.3' && timed[2].value === '2.1 ms' && timed[2].detail === '',
+  JSON.stringify(timed.slice(1, 3)));
+const rate = (video, target) => streamTiles({ video_mbps: video, target_mbps: target, peak_mbps: 30 }, 'webrtc')
+  .find((tile) => tile.key === 'video_mbps');
+check('the video rate reads against its CBR target, and a burst\'s peak beside it does not warn',
+  rate(8.4, 8).value === '8.4 / 8 Mbps' && !rate(8.4, 8).warn && !rate(8.8, 8).warn, JSON.stringify(rate(8.4, 8)));
+check('past the policy\'s 10% it warns', OVERSHOOT === 1.1 && rate(8.9, 8).warn);
+check('and a stream held to a quality, which has no target, never does',
+  !rate(30, undefined).warn && rate(30, undefined).value === '30 Mbps');
+const strip = streamStrip({ fps: 60, video_mbps: 9, target_mbps: 8, send_ms: 3, rtt_ms: 20 }, 'websockets');
+check('the strip over the stream carries the frame rate, the video rate against its target, and the time to the wire',
+  strip.map((f) => f.key).join() === 'fps,video_mbps,send_ms,rtt_ms' && strip[0].value === '60 fps' && strip[1].warn,
+  JSON.stringify(strip));
+check('with the round trip over WebSockets only, a WebRTC page measuring its own link',
+  streamStrip(null, 'webrtc').map((f) => f.key).join() === 'fps,video_mbps,send_ms');
 check('both transports show how long a frame took to the screen and how many never got there',
   ['websockets', 'webrtc'].every((transport) => ['present_ms', 'frames_not_shown']
     .every((key) => streamTiles(null, transport).some((tile) => tile.key === key))));

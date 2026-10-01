@@ -71,6 +71,7 @@ import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
 import GamepadVisualizer from "./GamepadVisualizer";
 import PlayerGamepadButton from "./PlayerGamepadButton.jsx";
 import StreamStats from "./StreamStats.jsx";
+import StreamStrip from "./StreamStrip.jsx";
 import { getTranslator } from "../translations";
 import {
   APP_COMMAND_STATE_EVENT,
@@ -1485,6 +1486,12 @@ function Sidebar() {
   const [isLoadingAudioDevices, setIsLoadingAudioDevices] = useState(false);
   const [gamepadStates, setGamepadStates] = useState({});
   const [hasReceivedGamepadData, setHasReceivedGamepadData] = useState(false);
+  // The stats strip over the stream, which the stats section's switch keeps on.
+  const [statsStrip, setStatsStrip] = useState(() => readStored("stats_strip") === "true");
+  const handleStatsStripToggle = () => {
+    localStorage.setItem(getPrefixedKey("stats_strip"), String(!statsStrip));
+    setStatsStrip(!statsStrip);
+  };
   const [sectionsOpen, setSectionsOpen] = useState({
     settings: false,
     audioSettings: false,
@@ -3934,6 +3941,17 @@ function Sidebar() {
                 </div>
                 {sectionsOpen.stats && (
                   <div className="sidebar-section-content" id="stats-content">
+                    <div className="dev-setting-item toggle-item">
+                      <label htmlFor="statsStripToggle">{t("sections.stats.stripLabel")}</label>
+                      <button
+                        id="statsStripToggle"
+                        className={`toggle-button-sidebar ${statsStrip ? "active" : ""}`}
+                        onClick={handleStatsStripToggle}
+                        aria-pressed={statsStrip}
+                      >
+                        <span className="toggle-button-sidebar-knob"></span>
+                      </button>
+                    </div>
                     <StreamStats t={t} active={isOpen && sectionsOpen.stats} framerate={effectiveFramerate} />
                   </div>
                 )}
@@ -4688,6 +4706,7 @@ function Sidebar() {
           <KeyboardIcon />
         </button>
       )}
+      {statsStrip && !isViewerRole && (renderableSettings.stats ?? true) && <StreamStrip t={t} />}
     </>
   );
 }

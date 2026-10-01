@@ -131,5 +131,64 @@ capture.frames += 29
 rates = watch.rates()
 res.check("and keeps growing, so the next call covers both", 0 < rates.get("encoded_fps", 0) <= 30 / SS.RATE_WINDOW_MIN_S
           and rates.get("encode_ms") == 2.0, rates)
+res.check("a capture whose pixelflux reports no extremes and a display nothing was sent on add no figures for them",
+          not {"pipeline_min_ms", "pipeline_max_ms", "frame_max_kb", "send_ms", "peak_mbps"} & set(rates), rates)
+
+
+class Peaking(Counting):
+    """A capture that reports each read's extremes and starts them again, as
+    pixelflux's report does."""
+
+    def __init__(self):
+        super().__init__()
+        self.peaks = {}
+
+    def stream_stats(self):
+        totals = dict(super().stream_stats(), **self.peaks)
+        self.peaks = {}
+        return totals
+
+
+watch = SS.StreamWatch("primary", None)
+watch._module = capture = Peaking()
+watch.rates()
+capture.frames += 10
+capture.peaks = {"pipeline_min_ns": 2_500_000, "pipeline_max_ns": 9_000_000, "frame_max_bytes": 180_000}
+res.check("a read too soon for a window", watch.rates() == {})
+time.sleep(SS.RATE_WINDOW_MIN_S)
+capture.frames += 10
+capture.peaks = {"pipeline_min_ns": 3_000_000, "pipeline_max_ns": 4_000_000, "frame_max_bytes": 20_000}
+now = time.monotonic_ns()
+for age_ms, size in ((4.0, 30_000), (12.0, 250_000), (8.0, 20_000)):
+    watch.note_send(now - int(age_ms * 1e6), size)
+watch.note_send(0, 10_000)
+rates = watch.rates()
+res.check("keeps the extremes it read, so the window's fastest and slowest frame are the whole window's",
+          rates.get("pipeline_min_ms") == 2.5 and rates.get("pipeline_max_ms") == 9.0
+          and rates.get("frame_max_kb") == 180.0, rates)
+res.check("a frame's way to the wire is timed from its capture, least, mean, and most, "
+          "a frame the capture stamped no time on counting only its bytes",
+          4.0 <= rates.get("send_min_ms", 0) < 5.0 and 8.0 <= rates.get("send_ms", 0) < 9.0
+          and 12.0 <= rates.get("send_max_ms", 0) < 13.0, rates)
+res.check("and the peak rate is the fullest quarter second's bytes as a rate, what a key frame's burst sends",
+          rates.get("peak_mbps") == round(310_000 * 8 / 0.25 / 1e6, 2), rates)
+res.check("while the video rate spreads them over the stream's first second, the least it averages over",
+          rates.get("video_mbps") == round(310_000 * 8 / 1e6, 2), rates)
+capture.frames += 10
+time.sleep(SS.RATE_WINDOW_MIN_S)
+rates = watch.rates()
+res.check("the next window starts afresh for the times, while the peak looks back over ten seconds",
+          "send_ms" not in rates and "pipeline_max_ms" not in rates
+          and rates.get("peak_mbps") == round(310_000 * 8 / 0.25 / 1e6, 2), rates)
+watch._buckets.appendleft([watch._buckets[0][0] - 4 * 10**9, 90_000])
+span_s = (time.monotonic_ns() - watch._buckets[0][0]) / 1e9
+res.check("and over as much of ten seconds as it has run",
+          abs(watch.sent_mbps()["video_mbps"] - 400_000 * 8 / span_s / 1e6) < 0.01, (watch.sent_mbps(), span_s))
+for bucket in watch._buckets:
+    bucket[0] -= int(SS.PEAK_WINDOW_S * 1e9)
+res.check("past them it is gone", watch.sent_mbps() == {}, list(watch._buckets))
+watch.note_send(time.monotonic_ns() - 5_000_000, 1000)
+watch.stop()
+res.check("a stopped watch forgets the window it was in", watch._sends is None and watch._peaks == {})
 
 sys.exit(0 if res.summary() else 1)

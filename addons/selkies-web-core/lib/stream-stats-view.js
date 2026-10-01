@@ -168,10 +168,13 @@ export function streamRows(info, client, latest, words) {
 const TILES = {
   encode_ms: ['Encode', 'ms'],
   pipeline_ms: ['Capture to encoded', 'ms'],
+  send_ms: ['Capture to sent', 'ms'],
   decode_ms: ['Decode', 'ms'],
   present_ms: ['Arrival to screen', 'ms'],
   jitter_buffer_ms: ['Jitter buffer', 'ms'],
   audio_buffer_ms: ['Audio buffer', 'ms'],
+  video_mbps: ['Video rate', 'Mbps'],
+  peak_mbps: ['Peak, 250 ms', 'Mbps'],
   packet_loss_percent: ['Packet loss', '%'],
   received_mb: ['Received', 'MB'],
   frames_dropped: ['Frames dropped', ''],
@@ -184,29 +187,75 @@ const TILES = {
 
 /** The figures each transport shows, in order. */
 const TRANSPORT_TILES = {
-  websockets: ['encode_ms', 'pipeline_ms', 'decode_ms', 'present_ms', 'audio_buffer_ms',
-    'received_mb', 'lost_frames', 'frames_not_shown', 'keyframe_requests'],
-  webrtc: ['encode_ms', 'pipeline_ms', 'decode_ms', 'jitter_buffer_ms', 'present_ms', 'audio_buffer_ms',
-    'received_mb', 'packet_loss_percent',
+  websockets: ['encode_ms', 'pipeline_ms', 'send_ms', 'decode_ms', 'present_ms', 'audio_buffer_ms',
+    'video_mbps', 'peak_mbps', 'received_mb', 'lost_frames', 'frames_not_shown', 'keyframe_requests'],
+  webrtc: ['encode_ms', 'pipeline_ms', 'send_ms', 'decode_ms', 'jitter_buffer_ms', 'present_ms', 'audio_buffer_ms',
+    'video_mbps', 'peak_mbps', 'received_mb', 'packet_loss_percent',
     'frames_dropped', 'frames_not_shown', 'freezes', 'nacks', 'keyframe_requests'],
 };
 
+/** The server's least and most of a time over the same second, by the time's key. */
+const RANGES = { pipeline_ms: ['pipeline_min_ms', 'pipeline_max_ms'], send_ms: ['send_min_ms', 'send_max_ms'] };
+
+/** How far above its CBR target a stream may run, the policy's bound, before its rate warns. */
+export const OVERSHOOT = 1.1;
+
+/**
+ * What a figure reads: its value with the unit, and for a time the server
+ * measured its range, as `least–most`, and whether it warns: the video rate
+ * when it runs past `OVERSHOOT` of its CBR target, which it is shown against.
+ * @param {StreamSample|null} latest
+ * @param {string} key
+ * @returns {{value: string, detail: string, warn: boolean}}
+ */
+function figure(latest, key) {
+  const [, unit] = TILES[key];
+  const of = (k) => (latest && typeof latest[k] === 'number' ? latest[k] : null);
+  const value = of(key);
+  if (value === null) return { value: '\u2013', detail: '', warn: false };
+  const range = RANGES[key] && RANGES[key].map(of);
+  const target = key === 'video_mbps' ? of('target_mbps') : null;
+  return {
+    value: `${value}${target ? ` / ${target}` : ''}${unit === '%' ? '%' : unit ? ` ${unit}` : ''}`,
+    detail: range && range[0] !== null && range[1] !== null ? `${range[0]}\u2013${range[1]}` : '',
+    warn: !!target && value > OVERSHOOT * target,
+  };
+}
+
 /**
  * The figures under the graphs: one fixed set per transport, so the layout
- * holds still. A time is the last second's, and everything else counts from
- * the opening: the data received, the packet loss, and each drop and repair. A
- * figure with nothing measured this second, an encode time on an idle screen,
- * reads as a dash rather than leaving.
+ * holds still. A time is the last second's, its range under it where the
+ * server measured one, and the video rate the last ten seconds' against the
+ * CBR target with its fullest quarter second beside it; everything else counts
+ * from the opening: the data received, the packet loss, and each drop and
+ * repair. A figure with nothing measured this second, an encode time on an
+ * idle screen, reads as a dash rather than leaving.
  * @param {StreamSample|null} latest
  * @param {'websockets'|'webrtc'} transport
- * @returns {Array<{key: string, label: string, value: string}>}
+ * @returns {Array<{key: string, label: string, value: string, detail: string, warn: boolean}>}
  */
 export function streamTiles(latest, transport) {
-  return (TRANSPORT_TILES[transport] || TRANSPORT_TILES.websockets).map((key) => {
-    const [label, unit] = TILES[key];
-    const measured = latest && typeof latest[key] === 'number';
-    return { key, label, value: measured ? `${latest[key]}${unit === '%' ? '%' : unit ? ` ${unit}` : ''}` : '\u2013' };
-  });
+  return (TRANSPORT_TILES[transport] || TRANSPORT_TILES.websockets).map((key) => (
+    { key, label: TILES[key][0], ...figure(latest, key) }));
+}
+
+/**
+ * The strip a dashboard lays over the stream: how fast frames reach the
+ * screen, the video rate against its target, and how long a frame takes from
+ * its capture to the wire, with the round trip over WebSockets, where the
+ * server measures one. Each names the tile, or graph, whose label captions it.
+ * @param {StreamSample|null} latest
+ * @param {'websockets'|'webrtc'} transport
+ * @returns {Array<{key: string, value: string, warn: boolean}>}
+ */
+export function streamStrip(latest, transport) {
+  const fps = latest && typeof latest.fps === 'number' ? `${latest.fps} fps` : '\u2013';
+  const keys = transport === 'webrtc' ? ['video_mbps', 'send_ms'] : ['video_mbps', 'send_ms', 'rtt_ms'];
+  return [{ key: 'fps', value: fps, warn: false }, ...keys.map((key) => {
+    if (key !== 'rtt_ms') return { key, ...figure(latest, key) };
+    const rtt = latest && typeof latest.rtt_ms === 'number' ? `${latest.rtt_ms} ms` : '\u2013';
+    return { key, value: rtt, warn: false };
+  })];
 }
 
 /** @param {number} bytes @returns {string} */
@@ -300,7 +349,8 @@ export function streamReport(info, client, latest) {
   if (latest) {
     const shown = ['fps', 'encoded_fps', 'mbps', 'rtt_ms'].filter((key) => typeof latest[key] === 'number')
       .map((key) => `${key} ${latest[key]}`);
-    lines.push(joined(shown), ...streamTiles(latest, client ? client.transport : 'websockets').map((tile) => `${tile.label}: ${tile.value}`),
+    lines.push(joined(shown), ...streamTiles(latest, client ? client.transport : 'websockets').map((tile) =>
+      `${tile.label}: ${tile.value}${tile.detail ? ` (${tile.detail})` : ''}${tile.warn ? ' [!]' : ''}`),
       ...streamMeters(latest).map((meter) => `${meter.key}: ${joined([meter.text, meter.detail])}`));
     if (latest.mic) lines.push(`mic: ${latest.mic}`);
     if (latest.webcam) lines.push(`webcam: ${latest.webcam}`);

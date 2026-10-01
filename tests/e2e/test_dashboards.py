@@ -46,6 +46,47 @@ def classic_open_video(page) -> bool:
     return False
 
 
+def classic_stats_strip_check(page, res: "H.Results") -> None:
+    """The stats section's switch lays the strip over the stream, which keeps the
+    numbers coming with the sidebar shut, shows the server's figures, takes no
+    pointer input, and goes with the switch."""
+    strip = """() => {
+      const el = document.querySelector('.stream-strip');
+      const latest = window.stream_stats && window.stream_stats.latest;
+      return el ? { text: el.innerText, pointer: getComputedStyle(el).pointerEvents,
+                    figures: el.querySelectorAll('.stream-strip-figure').length,
+                    t: latest && latest.t, server: !!(latest && latest.server),
+                    sent: !!(latest && typeof latest.send_ms === 'number') } : null;
+    }"""
+    try:
+        page.locator('.toggle-handle').first.click()
+        time.sleep(0.8)
+        page.locator('.sidebar-section-header:has-text("Stats")').first.click()
+        time.sleep(0.8)
+        page.locator('#statsStripToggle').click()
+        time.sleep(0.5)
+        page.locator('.toggle-handle').first.click()
+        time.sleep(4.0)
+        first = page.evaluate(strip)
+        time.sleep(2.5)
+        later = page.evaluate(strip)
+        res.check("the stats section's switch lays a strip over the stream that takes no pointer input",
+                  bool(first) and first["figures"] >= 3 and first["pointer"] == "none", first)
+        res.check("which keeps the server's figures coming with the sidebar shut, the time to the wire among them",
+                  bool(later) and later["server"] and later["sent"] and later["t"] != first["t"], later)
+        page.locator('.toggle-handle').first.click()
+        time.sleep(0.8)
+        page.locator('#statsStripToggle').click()
+        time.sleep(0.5)
+        gone = page.evaluate(strip)
+        page.locator('.sidebar-section-header:has-text("Stats")').first.click()
+        page.locator('.toggle-handle').first.click()
+        time.sleep(0.8)
+        res.check("and goes with the switch", gone is None, gone)
+    except Exception as e:
+        res.check("the stats strip check ran", False, str(e)[:200])
+
+
 def set_range_slider(page, idx: int, value) -> None:
     """Set an HTML range input slider by index via native setters + events."""
     page.evaluate("""([idx, value]) => {
@@ -684,6 +725,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         gaming_mode_check(page, res, dashboard)
         if dashboard == "classic":
             classic_layout_check(page, res)
+            classic_stats_strip_check(page, res)
         touch_gamepad_layer_check(page, res, dashboard)
         clipboard_image_check(page, res, dashboard)
 

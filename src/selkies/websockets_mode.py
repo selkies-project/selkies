@@ -950,10 +950,14 @@ class _VideoRelay:
                 data = item['data']
                 self.backlog_bytes -= len(data)
                 # Stamped before the await, and only for the display's
-                # registered client: that is what the ACK RTT math measures.
+                # registered client: that is what the ACK RTT math measures, and
+                # the hand to the socket is where its stats read a frame as sent.
                 ds = self.server.display_clients.get(self.display_id)
                 if ds is not None and ds.get('ws') is self.ws:
                     _note_send(ds, item['frame_id'], len(data))
+                    watch = self.server._stream_watches.get(self.display_id)
+                    if watch is not None:
+                        watch.note_send(getattr(item.get('owner'), 'capture_ns', 0), len(data))
                 try:
                     await _send_live(self.ws, data, f"Video relay for '{self.display_id}'")
                 except (ConnectionResetError, OSError, RuntimeError):
@@ -2548,6 +2552,9 @@ class DataStreamingServer(BaseStreamingService):
                 stats.update(watch.rates())
             stats["rtt_ms"] = round(state.get('smoothed_rtt', 0.0), 1)
             stats["throttled"] = not state.get('backpressure_enabled', True)
+            target = self._cbr_target_kbps(display_id)
+            if target:
+                stats["target_mbps"] = round(target / 1000, 2)
             asyncio.ensure_future(self._send_stream_message(
                 ws, {"type": "stream_stats", "displayId": display_id, "stats": stats}))
 
@@ -3051,6 +3058,15 @@ class DataStreamingServer(BaseStreamingService):
             if display_state:
                 display_state['backpressure_enabled'] = True
             data_logger.debug(f"Backpressure logic task for '{display_id}' finished.")
+
+    def _cbr_target_kbps(self, display_id: str) -> int:
+        """The rate a display's running capture encodes at, as last applied to it,
+        or 0 for a capture that holds a quality rather than a rate."""
+        inst = self.capture_instances.get(display_id)
+        cs = inst.get('settings') if inst else None
+        if cs is None or not getattr(cs, 'video_cbr_mode', False):
+            return 0
+        return int(getattr(cs, 'video_bitrate_kbps', 0) or 0)
 
     def _video_bitrate_kbps(self, display_state: dict) -> float:
         """The CBR rate a display's encoder runs at: its target, held down to

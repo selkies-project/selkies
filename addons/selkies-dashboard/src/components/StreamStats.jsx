@@ -16,7 +16,8 @@
  * `lib/stream-stats-view.js`, shared with the wish dashboard. Being on screen
  * is what turns the numbers on: the component posts `statsOpen` to the core,
  * which asks the server for them, and posts it again with `open: false` when
- * the section folds, the sidebar shuts, or the tab hides.
+ * the section folds, the sidebar shuts, or the tab hides, unless the strip
+ * over the stream (`StreamStrip.jsx`) still holds them (`holdStats`).
  * @module
  */
 import { useEffect, useMemo, useState } from "react";
@@ -29,22 +30,11 @@ import {
   graphPath,
 } from "../../../selkies-web-core/lib/stream-stats-view.js";
 import { STATS_EVENT } from "../../../selkies-web-core/lib/stream-stats.js";
+import StatusIcon from "./StatusIcon.jsx";
+import { holdStats } from "./stats-hold.js";
 
 const GRAPH_WIDTH = 240;
 const GRAPH_HEIGHT = 44;
-
-const STATUS_ICONS = {
-  good: <path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z" />,
-  warn: <path d="M1 21h22L12 2zm12-3h-2v-2h2zm0-4h-2v-4h2z" />,
-  neutral: <circle cx="12" cy="12" r="4" />,
-};
-
-/** The mark beside a row: its state as a shape, so color never carries it alone. */
-const StatusIcon = ({ status }) => (
-  <svg className={`stream-status-icon ${status}`} viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-    {STATUS_ICONS[status]}
-  </svg>
-);
 
 const CopyIcon = () => (
   <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
@@ -145,7 +135,7 @@ export default function StreamStats({ t, active, framerate }) {
 
   useEffect(() => {
     if (!shown) return undefined;
-    window.postMessage({ type: "statsOpen", open: true }, window.location.origin);
+    holdStats(1);
     const read = () => {
       const stats = window.stream_stats || { latest: null, history: [] };
       setSnapshot({
@@ -160,7 +150,7 @@ export default function StreamStats({ t, active, framerate }) {
     window.addEventListener(STATS_EVENT, read);
     return () => {
       window.removeEventListener(STATS_EVENT, read);
-      window.postMessage({ type: "statsOpen", open: false }, window.location.origin);
+      holdStats(-1);
     };
   }, [shown]);
 
@@ -248,8 +238,10 @@ export default function StreamStats({ t, active, framerate }) {
       {(
         <div className="stream-tiles">
           {tiles.map((tile) => (
-            <div key={tile.key} className="stream-tile">
-              <b>{tile.value}</b>
+            <div key={tile.key} className={`stream-tile${tile.warn ? " warn" : ""}`}
+              title={tile.warn ? t("sections.stats.overshoot") : undefined}>
+              <b>{tile.warn && <StatusIcon status="warn" />}{tile.value}</b>
+              {tile.detail && <small className="stream-tile-detail">{tile.detail}</small>}
               <span>{t(`sections.stats.tiles.${tile.key}`, tile.label)}</span>
             </div>
           ))}

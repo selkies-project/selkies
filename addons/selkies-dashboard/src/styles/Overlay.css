@@ -857,6 +857,50 @@
     color: var(--text-muted);
     font-size: 11px;
 }
+.stream-tile-detail {
+    color: var(--text-muted);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+}
+.stream-tile.warn { border-color: var(--stat-warn); }
+.stream-tile.warn .stream-status-icon,
+.stream-strip-figure.warn .stream-status-icon {
+    vertical-align: -2px;
+    margin-right: 3px;
+}
+
+/* The strip over the stream: never in the way of the pointer, and quiet enough
+   to read through. Its ground is dark whatever the theme, so it takes the dark
+   theme's marks. */
+.stream-strip {
+    --stat-good: #0ca30c;
+    --stat-warn: #fab219;
+    position: fixed;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 900;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 4px 12px;
+    max-width: calc(100vw - 16px);
+    box-sizing: border-box;
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    user-select: none;
+}
+.stream-strip-marks { display: flex; gap: 2px; }
+.stream-strip-figure { display: flex; flex-direction: column; line-height: 1.15; }
+.stream-strip-figure b { font-size: 13px; white-space: nowrap; }
+.stream-strip-figure small { font-size: 10px; opacity: 0.75; white-space: nowrap; }
+.stream-strip-figure.warn b { color: var(--stat-warn); }
 
 .stream-meters {
     display: flex;

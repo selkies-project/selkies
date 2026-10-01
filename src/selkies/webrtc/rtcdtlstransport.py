@@ -43,7 +43,7 @@ import time
 import traceback
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Protocol, Type, TypeVar, Union
+from typing import Any, Callable, Dict, Optional, Protocol, Type, TypeVar, Union
 
 import pylibsrtp
 from cryptography import x509
@@ -61,6 +61,7 @@ from .pacer import (
     CLASS_DC,
     CLASS_RTCP,
     CLASS_VIDEO,
+    FRAME_ENDS_MAX,
     MIN_GOODPUT_SAMPLE_BYTES,
     RtpPacer,
 )
@@ -512,6 +513,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         # with an IDR-aware budget and GOP-reset recovery. Off unless enabled by
         # the application with enable_pacer().
         self._pacer: Optional[RtpPacer] = None
+        # `frame_end` without a pacer: the packets it waits on, by sequence number.
+        self._frame_ends: Dict[int, tuple] = {}
 
         # counters
         self.__rx_bytes = 0
@@ -940,9 +943,24 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             sent = await self._pacer.send(data, cls, twcc_seq)
         else:
             await self.transport._send(data)
+            end = self._frame_ends.pop(twcc_seq, None) if self._frame_ends else None
+            if end is not None:
+                end[0](*end[1])
         self.__tx_bytes += len(data)
         self.__tx_packets += 1
         return sent
+
+    def frame_end(self, twcc_seq: int, sink: Callable[..., None], *args: Any) -> None:
+        """Call `sink(*args)` once the RTP packet with transport-wide sequence number
+        `twcc_seq`, the last of its frame, is on the wire: past the pacer where one
+        paces, else as it is written to the socket."""
+        if self._pacer is not None:
+            self._pacer.frame_end(twcc_seq, sink, *args)
+            return
+        ends = self._frame_ends
+        ends[twcc_seq] = (sink, args)
+        if len(ends) > FRAME_ENDS_MAX:
+            del ends[next(iter(ends))]
 
     async def _twcc_received(self, seq: int, arrival_ms: float, media_ssrc: int,
                              rtcp_ssrc: Optional[int]) -> None:

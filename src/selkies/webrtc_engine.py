@@ -644,6 +644,9 @@ class RTCApp:
             or a peer's audio settling on the surround or stereo stream).
         on_stats_open: A controller's page opened its stats, called with its
             display id so the first figures need not wait for the next period.
+        on_frame_sent: A frame of a display is on the wire to its controller,
+            called with the display id, the frame's capture instant, and its
+            payload bytes once its last packet leaves the pacer.
         provision_virtual_mic: Brings up the shared SelkiesVirtualMic (null
             sinks, module-virtual-source, default source) before a mic
             playback opens its `input` stream, so an app recording the default
@@ -694,6 +697,7 @@ class RTCApp:
         self.on_audio_consumer_active = None
         self.on_consumers_changed = None
         self.on_stats_open = None
+        self.on_frame_sent = None
 
         self.provision_virtual_mic = None
 
@@ -2404,6 +2408,10 @@ class RTCApp:
         media_relay = graph["relay"]
 
         rtp_video_sender = peer_connection.addTrack(media_relay.subscribe(graph["video_media"]))
+        if client_type is ClientType.CONTROLLER:
+            rtp_video_sender.on_frame_sent = (
+                lambda capture_ns, size, did=display_id:
+                    self.on_frame_sent and self.on_frame_sent(did, capture_ns, size))
         rtp_video_sender.on("pli", lambda cid=client_peer_id, ct=client_type: self.on_pli(cid, ct))
         rtp_video_sender.on("lost_frame", lambda frame_id, cid=client_peer_id: self.on_lost_frame(cid, frame_id))
         rtp_audio_sender = None

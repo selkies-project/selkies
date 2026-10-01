@@ -51,7 +51,7 @@ import logging
 import os
 import statistics
 import time
-from typing import Awaitable, Callable, Dict, Deque, Optional
+from typing import Any, Awaitable, Callable, Dict, Deque, Optional
 from collections import deque
 
 logger = logging.getLogger("selkies_webrtc_pacer")
@@ -113,6 +113,8 @@ KEYREQ_MIN_INTERVAL_S = 0.5
 MIN_PACE_BPS = 100_000
 # Defensive cap on drain sleeps; pokes handle the rest.
 DRAIN_MAX_SLEEP_S = 0.05
+# Frames whose end `frame_end` waits on at once; more than are ever in flight.
+FRAME_ENDS_MAX = 64
 # Post-enable grace: ignore goodput braking so the first (audio-only/startup)
 # feedback windows cannot slam the pace before video even ramps.
 GOODPUT_WARMUP_S = 5.0
@@ -193,6 +195,9 @@ class RtpPacer:
         # transport's loss accounting can leave them out.
         self._on_dropped = on_dropped
         self._loop = loop or asyncio.get_running_loop()
+        # Tag of a frame's last packet -> what to call, and with what, once it is
+        # on the wire (`frame_end`); a dropped one is forgotten with its packet.
+        self.frame_ends: Dict[int, tuple] = {}
 
         self._queues: Dict[int, Deque[bytes]] = {c: deque() for c in _QUEUED_CLASSES}
         self._poke = asyncio.Event()
@@ -560,6 +565,8 @@ class RtpPacer:
                 self.stats["fastpath_bytes"] += n
                 sender = self._send_now_data if cls == CLASS_DC else self._send_now
                 await sender(data)
+                if self.frame_ends and tag is not None:
+                    self._left(tag)
                 return True
 
         # Video queue budget: a packet the budget cannot hold abandons the GOP,
@@ -592,9 +599,26 @@ class RtpPacer:
         self._reset_gop("video backlog stale (>%.0fms)" % (deadline_s * 1000))
         self.stats["stale_resets"] += 1
 
+    def frame_end(self, tag: int, sink: Callable[..., None], *args: Any) -> None:
+        """Call `sink(*args)` once the video packet tagged `tag`, the last of its
+        frame, leaves for the wire: how long a frame took to get there includes the
+        time it queued here. At most FRAME_ENDS_MAX are held; the oldest goes first."""
+        ends = self.frame_ends
+        ends[tag] = (sink, args)
+        if len(ends) > FRAME_ENDS_MAX:
+            del ends[next(iter(ends))]
+
+    def _left(self, tag: Optional[int]) -> None:
+        """A video packet went out: call what its frame's end was waiting on."""
+        end = self.frame_ends.pop(tag, None)
+        if end is not None:
+            end[0](*end[1])
+
     def _drop(self, tag: Optional[int]) -> None:
-        if tag is not None and self._on_dropped is not None:
-            self._on_dropped(tag)
+        if tag is not None:
+            self.frame_ends.pop(tag, None)
+            if self._on_dropped is not None:
+                self._on_dropped(tag)
 
     def _purge_video(self) -> int:
         """Drop the whole video queue, keeping the byte counters and the
@@ -677,10 +701,11 @@ class RtpPacer:
                                     "bucket", size, int(self._debt_cap))
                         data = dq.popleft()
                         self._bytes_queued -= size
+                        tag = None
                         if cls == CLASS_VIDEO:
                             self._video_bytes -= size
                             self._video_ts.popleft()
-                            self._video_tags.popleft()
+                            tag = self._video_tags.popleft()
                         self.credit -= size
                         try:
                             await sender(data)
@@ -697,6 +722,8 @@ class RtpPacer:
                             self._release_senders()
                             return
                         self.stats["paced_bytes"] += size
+                        if tag is not None and self.frame_ends:
+                            self._left(tag)
                 if self._bytes_queued <= DC_LOW_WATER_BYTES:
                     self._release_senders()
                 if not self._bytes_queued:

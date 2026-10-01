@@ -386,8 +386,11 @@ export function SystemMonitoring() {
 				{(
 					<div className="grid grid-cols-2 gap-1.5 pointer-events-none">
 						{tiles.map((tile) => (
-							<div key={tile.key} className="flex flex-col rounded-md border bg-muted/40 px-1.5 py-1">
-								<b className="text-[13px]">{tile.value}</b>
+							<div key={tile.key}
+								className={`flex flex-col rounded-md border bg-muted/40 px-1.5 py-1${tile.warn ? ' border-[var(--stat-warn)]' : ''}`}
+								title={tile.warn ? t('sections.stats.overshoot') : undefined}>
+								<b className="flex items-center gap-1 text-[13px]">{tile.warn && <StatusMark status="warn" />}{tile.value}</b>
+								{tile.detail && <small className="text-[10px] tabular-nums text-muted-foreground">{tile.detail}</small>}
 								<span className="text-[10.5px] text-muted-foreground">{t(`sections.stats.tiles.${tile.key}`, tile.label)}</span>
 							</div>
 						))}
