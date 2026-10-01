@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Scroll (wheel) input parity e2e: Chromium over websockets and webrtc, both
 X11 and Wayland. Verifies REL_WHEEL buttons reach the X server (X11) or the
-compositor seat sees scroll (Wayland, via WlObs)."""
+compositor seat sees scroll (Wayland, via WlObs). On Wayland a touchpad's
+stroke reaches the seat as a finger's: fractional values from a finger source,
+as far as the page scrolled, then an axis stop once the stroke pauses."""
 import os
 import sys
 import time
@@ -79,6 +81,31 @@ def wheel_block(mode: str, wayland: bool, block: str) -> "H.Results":
                 time.sleep(0.8)
                 res.check("Wayland: second pointer axis reached compositor",
                           wl_obs.wait_for("ptr_axis", timeout=5) is not None)
+                # The page has a wheel's samples only at its fourth notch;
+                # the ones before are a wheel's all the same.
+                wheel_sources = [l["source"] for l in wl_obs.lines if l.get("kind") == "ptr_axis_source"]
+                res.check("Wayland: a wheel's notches come from a wheel source, its first ones too",
+                          bool(wheel_sources) and set(wheel_sources) == {0}, wheel_sources[:8])
+                # Past the page's one-second wheel reset, a stroke of small pixel
+                # deltas is a touchpad's.
+                time.sleep(1.3)
+                mark = len(wl_obs.lines)
+                stroke = [3.5, 6.25, 9.0, 4.75, 2.5]
+                for d in stroke:
+                    page.mouse.wheel(0, d)
+                    time.sleep(0.016)
+                time.sleep(0.5)
+                seen = [l for l in wl_obs.lines[mark:]
+                        if l.get("kind") in ("ptr_axis", "ptr_axis_source", "ptr_axis_stop")]
+                values = [l["value"] for l in seen if l["kind"] == "ptr_axis" and l.get("axis") == 0]
+                sources = {l["source"] for l in seen if l["kind"] == "ptr_axis_source"}
+                last_axis = max((i for i, l in enumerate(seen) if l["kind"] == "ptr_axis"), default=-1)
+                stopped = any(l["kind"] == "ptr_axis_stop" for l in seen[last_axis + 1:])
+                res.check("Wayland: a touchpad's stroke comes from a finger source", sources == {1}, seen[:4])
+                res.check("Wayland: in fractional values, as far as the page scrolled",
+                          any(v != int(v) for v in values) and abs(sum(values) - sum(stroke)) < 0.1,
+                          f"{values} against {sum(stroke)}")
+                res.check("Wayland: and stops once the stroke pauses", stopped, seen[-3:])
             real, bad = C.benign_console(console_errors, not_found)
             res.check("no console errors", len(real) == 0, "; ".join(real)[:120])
         finally:

@@ -65,7 +65,9 @@
  * `js,d`, `js,b`, `js,a`, and `js,h` for gamepads, whose
  * rumble comes back as the system action `rumble,<slot>,<strong>,<weak>,<ms>`
  * (`rumble`); `_pointer_echo,<0|1>` in trackpad mode, answered by the system
- * action `pointer,<display>,<x>,<y>,<scale>,<seq>` or `pointer,none`.
+ * action `pointer,<display>,<x>,<y>,<scale>,<seq>` or `pointer,none`; and,
+ * where the session takes a touchpad's scroll as a finger's, `sf,<dx>,<dy>`
+ * in stream pixels and `sfe` at its end (`setFingerScroll`).
  * @module
  */
 
@@ -130,6 +132,21 @@ const TRACKPAD_SPEED_TAU_MS = 25;
 /** The range `Input.setTrackpadSpeed` takes. */
 const TRACKPAD_SPEED_MIN = 0.25;
 const TRACKPAD_SPEED_MAX = 4;
+
+/**
+ * The smallest pixel delta a wheel notch reports: a smaller one is a
+ * touchpad's (`_isDiscreteWheel`, `_isFingerScroll`).
+ */
+const WHEEL_NOTCH_MIN_PX = 80;
+
+/**
+ * How long a touchpad's scroll may pause before it counts as ended (`sfe`), in
+ * milliseconds: the page sees no lift, and a moving finger, or the client's own
+ * momentum after one, sends its next wheel event within a frame or two. Past
+ * the 150 ms GTK 4 takes a fling's velocity over, so a toolkit adds no fling to
+ * that momentum, nor to a finger held still or a wheel taken for a touchpad.
+ */
+const FINGER_SCROLL_END_MS = 200;
 
 /**
  * How long trackpad mode waits for the server's first pointer echo before it
@@ -1517,6 +1534,9 @@ export class Input {
         this._echoDeltas = [];
         /** Whether this page has the server composite the cursor, where no echo came. */
         this._echoComposited = false;
+        /** Whether the session takes a touchpad's scroll as a finger's (`setFingerScroll`). */
+        this.fingerScroll = false;
+        this._fingerScrollTimer = null;
         this._echoTimer = null;
         this._echoAsking = false;
         this.useCssScaling = useCssScaling;
@@ -1576,6 +1596,8 @@ export class Input {
          * would emit its gesture's opening deltas as scroll clicks.
          */
         this._allowThreshold = true;
+        /** Whether the detector has had its samples since the last wheel reset. */
+        this._wheelClassified = false;
         this._smallestDeltaY = 10000;
         this._smallestLineDeltaY = 10000;
         this._scrollMagnitude = 10;
@@ -4424,7 +4446,7 @@ export class Input {
         if (vals.length < 2) { return true; }
         var quantum = Math.min.apply(null, vals);
         // A wheel notch is a large pixel jump; small pixel deltas are a trackpad.
-        if (quantum < 80) { return false; }
+        if (quantum < WHEEL_NOTCH_MIN_PX) { return false; }
         for (var i = 0; i < vals.length; i++) {
             var ratio = vals[i] / quantum;
             if (Math.abs(ratio - Math.round(ratio)) > 0.15) { return false; }
@@ -4442,6 +4464,7 @@ export class Input {
         this._smallestDeltaY = 10000;
         this._smallestLineDeltaY = 10000;
         this._allowThreshold = true;
+        this._wheelClassified = false;
         while (!this._queue.isEmpty()) { this._queue.dequeue(); }
         this._wheelAccumY = 0;
         this._wheelDirY = null;
@@ -4483,6 +4506,7 @@ export class Input {
         if (deltaY !== 0 && this._queue.size() < 4) { this._queue.enqueue(deltaY); }
         if (this._queue.size() == 4) {
             this._allowThreshold = !this._isDiscreteWheel();
+            this._wheelClassified = true;
         }
         this._mouseWheel(event);
         event.preventDefault();
@@ -4601,8 +4625,67 @@ export class Input {
         this._sendZoomNotches(notches);
     }
 
-    /** Accumulates and emits both axes of one wheel event. */
+    /**
+     * Sets whether the session takes a touchpad's scroll as a finger's: the
+     * display config's `finger_scroll`, a Wayland session's. There a wheel
+     * classified as a touchpad sends its travel instead of notches
+     * (`_isFingerScroll`); a wheel's notches, line and page deltas, and X11
+     * stay as they are.
+     * @param {boolean} enabled
+     */
+    setFingerScroll(enabled) {
+        const want = !!enabled;
+        if (this.fingerScroll === want) return;
+        if (!want) this._endFingerScroll();
+        this.fingerScroll = want;
+    }
+
+    /**
+     * Sends a touchpad's scroll as the finger's travel in stream pixels,
+     * `sf,<dx>,<dy>`, and `sfe` once no wheel event has come for
+     * `FINGER_SCROLL_END_MS`, the axis stop a finger's scroll ends with.
+     * @param {WheelEvent} event
+     */
+    _fingerScroll(event) {
+        const scale = this._pointerScale();
+        const dx = event.deltaX * scale.x;
+        const dy = event.deltaY * scale.y;
+        if (dx === 0 && dy === 0) return;
+        this.send(`sf,${dx.toFixed(2)},${dy.toFixed(2)}`);
+        clearTimeout(this._fingerScrollTimer);
+        this._fingerScrollTimer = setTimeout(() => this._endFingerScroll(), FINGER_SCROLL_END_MS);
+    }
+
+    /** Ends a touchpad's scroll still going, if one is. */
+    _endFingerScroll() {
+        if (this._fingerScrollTimer === null) return;
+        clearTimeout(this._fingerScrollTimer);
+        this._fingerScrollTimer = null;
+        this.send('sfe');
+    }
+
+    /**
+     * Whether a wheel event goes out as a finger's: pixel deltas, on a session
+     * that takes one, from a device the detector calls a touchpad or, before
+     * it has its samples, smaller than a notch's, so a wheel's first notches
+     * stay notches. A stroke under way stays one until it pauses, whatever its
+     * momentum reports.
+     * @param {WheelEvent} event
+     * @returns {boolean}
+     */
+    _isFingerScroll(event) {
+        if (!this.fingerScroll || event.deltaMode !== 0) return false;
+        if (this._fingerScrollTimer !== null) return true;
+        if (this._wheelClassified) return this._allowThreshold;
+        return Math.abs(event.deltaX) < WHEEL_NOTCH_MIN_PX && Math.abs(event.deltaY) < WHEEL_NOTCH_MIN_PX;
+    }
+
+    /** Accumulates and emits both axes of one wheel event, or sends a touchpad's as a finger's. */
     _mouseWheel(event) {
+        if (this._isFingerScroll(event)) {
+            this._fingerScroll(event);
+            return;
+        }
         this._accumulateWheelY(event);
         this._emitWheelY();
         this._accumulateWheelX(event);
@@ -5140,6 +5223,7 @@ export class Input {
         // A queued move must not send after detach; the scheduled flush then no-ops.
         this._pendingMove = null;
         this._rawMotionSeen = false;
+        this._endFingerScroll();
         this._relCarryX = 0;
         this._relCarryY = 0;
         if ((this.buttonMask & 1) === 1) {

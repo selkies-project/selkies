@@ -69,6 +69,7 @@ import fcntl
 from collections import deque
 import functools
 import logging
+import math
 import select
 import struct
 import threading
@@ -171,6 +172,7 @@ VIEWER_COLLAB_EXTRA_PREFIXES = (
     "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr",
     "REQUEST_CLIPBOARD",
     "_pointer_echo,",
+    "sf",
 )
 VIEWER_SILENT_DROP_PREFIXES = ("kr", "cr", "_pointer_echo")
 
@@ -2182,6 +2184,9 @@ INPUT_X_REPLY_TIMEOUT_S = 20.0
 # Poll interval for the X event consumers while no loop reader is armed on the
 # input connection, so cursor and keymap changes still land promptly.
 INPUT_X_EVENT_POLL_S = 0.02
+
+# The largest finger scroll one `sf` message moves, in pixels each way.
+FINGER_SCROLL_MAX_PX = 4096.0
 
 # A trackpad page draws the pointer where the server echoes it (`_pointer_echo`),
 # moved on by its own deltas, so an echo goes out where the pointer is not where
@@ -8526,6 +8531,27 @@ class WebRTCInput:
         else:
             self.wayland_input.inject_mouse_scroll(dx, dy)
 
+    def finger_scroll_available(self) -> bool:
+        """Whether this session takes a touchpad's scroll as a finger's: Wayland,
+        with a pixelflux that injects one. The display config tells the page
+        (`finger_scroll`); X11 scrolls by the page's wheel notches."""
+        return bool(self.is_wayland and self.wayland_input is not None
+                    and hasattr(self.wayland_input, "inject_finger_scroll"))
+
+    def _wl_finger_scroll(self, delta: Optional[Tuple[float, float]]) -> None:
+        """A touchpad's scroll on the Wayland seat, or its end with None, behind
+        any key still waiting in the keyboard worker, as `_wl_scroll` is."""
+        if self.keyboard_queue.qsize() or self._keyboard_busy:
+            self._keyboard_enqueue(("finger_scroll", delta))
+        else:
+            self._inject_finger_scroll(delta)
+
+    def _inject_finger_scroll(self, delta: Optional[Tuple[float, float]]) -> None:
+        if delta is None:
+            self.wayland_input.inject_finger_scroll_end()
+        else:
+            self.wayland_input.inject_finger_scroll(*delta)
+
     def _keyboard_enqueue_chord(self, keys: Iterable[tuple]) -> None:
         """Enqueue a server-synthesized press/release sequence as ONE entry, so
         overflow eviction can only lose it whole.
@@ -8665,6 +8691,10 @@ class WebRTCInput:
                     elif msg_type == "scroll":
                         await flush_buffer()
                         self.wayland_input.inject_mouse_scroll(*data)
+
+                    elif msg_type == "finger_scroll":
+                        await flush_buffer()
+                        self._inject_finger_scroll(data)
 
                     elif msg_type == "chord":
                         # Back-to-back, so no other queued key lands inside the chord.
@@ -8870,6 +8900,22 @@ class WebRTCInput:
             except Exception as e: logger_webrtc_input.warning(f"Failed to set mouse cursor: {e}")
             if self._pointer_echoes:
                 self._pointer_moved(conn_id, seq, x if relative else 0, y if relative else 0)
+        elif msg_type in ("sf", "sfe"):
+            # A touchpad's scroll in stream pixels (`sf,<dx>,<dy>`) and the
+            # finger's lift (`sfe`), sent only where `finger_scroll_available`.
+            if not self.finger_scroll_available():
+                return
+            if msg_type == "sfe":
+                self._wl_finger_scroll(None)
+                return
+            try:
+                dx, dy = float(toks[1]), float(toks[2])
+            except (ValueError, IndexError):
+                return
+            if not (math.isfinite(dx) and math.isfinite(dy)):
+                return
+            self._wl_finger_scroll((max(-FINGER_SCROLL_MAX_PX, min(FINGER_SCROLL_MAX_PX, dx)),
+                                    max(-FINGER_SCROLL_MAX_PX, min(FINGER_SCROLL_MAX_PX, dy))))
         elif msg_type == "_pointer_echo":
             await self._set_pointer_echo(conn_id, len(toks) > 1 and toks[1].strip() == "1")
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))

@@ -155,6 +155,14 @@ def ptr_axis(ptr, time_ms, axis, value):
     emit("ptr_axis", axis=axis, value=value)
 
 
+def ptr_axis_source(ptr, source):
+    emit("ptr_axis_source", source=int(source))
+
+
+def ptr_axis_stop(ptr, time_ms, axis):
+    emit("ptr_axis_stop", axis=int(axis))
+
+
 def offer_mimes(offer) -> dict:
     """Attach dispatchers that accumulate the offer's advertised mime types."""
     out = {"mimes": []}
@@ -199,6 +207,8 @@ def take_devices() -> None:
         ptr.dispatcher["motion"] = ptr_motion
         ptr.dispatcher["button"] = ptr_button
         ptr.dispatcher["axis"] = ptr_axis
+        ptr.dispatcher["axis_source"] = ptr_axis_source
+        ptr.dispatcher["axis_stop"] = ptr_axis_stop
 
 
 def seat_capabilities(_s, c) -> None:

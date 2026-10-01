@@ -545,6 +545,8 @@ const isVideoEncoder = (mode) => mode !== 'jpeg';
 let useCssScaling = false;
 /** Whether the server runs on Wayland, as the last display-config update named it. */
 let serverWayland = false;
+/** Whether the session takes a touchpad's scroll as a finger's (the display config's `finger_scroll`). */
+let serverFingerScroll = false;
 /** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 function streamDensity() {
   return streamDensityOf({ useCssScaling, localScale: scalingDPI / 96, manual: window.manual_resolution,
@@ -4640,6 +4642,7 @@ const initializeInput = () => {
   const initialSlot = clientSlot;
   inputInstance = new Input(overlayInput, sendInputFunction, isSharedMode, playerInputTargetIndex, useCssScaling, initialSlot);
   inputInstance.displayId = displayId;
+  inputInstance.setFingerScroll(serverFingerScroll);
   inputInstance.motionBacklog = () => (websocket ? websocket.bufferedAmount : 0);
   inputInstance.setShortcutsEnabled(keyboardShortcuts);
 
@@ -8660,6 +8663,10 @@ class WorkerWebSocket {
 
                 latestDisplayLayouts = payload.layouts || null;
                 serverWayland = !!payload.wayland;
+                serverFingerScroll = !!payload.finger_scroll;
+                if (window.webrtcInput && window.webrtcInput.setFingerScroll) {
+                    window.webrtcInput.setFingerScroll(serverFingerScroll);
+                }
                 if (window.webrtcInput && window.webrtcInput.setDisplayLayouts) {
                     window.webrtcInput.setDisplayLayouts(latestDisplayLayouts, displayId);
                 }

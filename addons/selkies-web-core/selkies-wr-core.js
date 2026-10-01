@@ -608,6 +608,8 @@ export default function webrtc() {
 	let latestDisplayLayouts = null;
 	/** Whether the server runs on Wayland, as the last display-config update named it. */
 	let serverWayland = false;
+	/** Whether the session takes a touchpad's scroll as a finger's (the display config's `finger_scroll`). */
+	let serverFingerScroll = false;
 	/** Stream pixels per CSS pixel this page requests and draws at (lib/stream-density.js). */
 	function streamDensity() {
 		return streamDensityOf({ useCssScaling, localScale: scalingDPI / 96, manual: window.manualResolution,
@@ -3005,6 +3007,7 @@ export default function webrtc() {
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
 			input.displayId = displayId;
+			input.setFingerScroll(serverFingerScroll);
 			input.sendMotion = (data) => {
 				if (isSharedMode && isStrictViewer && !collabInputGranted) return;
 				webrtc.sendMotionMessage(data);
@@ -3304,6 +3307,8 @@ export default function webrtc() {
 				const displays = (config && config.displays) || [];
 				latestDisplayLayouts = (config && config.layouts) || null;
 				serverWayland = !!(config && config.wayland);
+				serverFingerScroll = !!(config && config.finger_scroll);
+				if (input && input.setFingerScroll) input.setFingerScroll(serverFingerScroll);
 				if (input && input.setDisplayLayouts) {
 					input.setDisplayLayouts(latestDisplayLayouts, displayId);
 				}

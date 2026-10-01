@@ -34,6 +34,7 @@ def ws_service() -> tuple:
     svc = object.__new__(DataStreamingServer)
     svc.display_clients = {"primary": {}, "display2": {}}
     svc.display_layouts = {k: dict(v) for k, v in LAYOUTS.items()}
+    svc.input_handler = None
     sent: list = []
 
     async def broadcast() -> None:
@@ -50,6 +51,7 @@ def wr_service() -> tuple:
     svc.display_layouts = {k: dict(v) for k, v in LAYOUTS.items()}
     svc._client_scales = {}
     svc._client_stream_boxes = {}
+    svc.input_handler = None
     sent: list = []
     svc._broadcast_display_config = lambda: sent.append(svc._display_config_payload())
     return svc, sent

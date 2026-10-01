@@ -209,6 +209,24 @@ def run(mode: str) -> "H.Results":
                           and obs.wait_for("kbd_key", timeout=8, key=48, state=1) is not None
                           and obs.wait_for("kbd_key", timeout=8, key=42, state=1) is not None,
                           keys)
+                # Past the page's one-second wheel reset, a stroke of small pixel deltas is a
+                # touchpad's, which goes to the portal as smooth scroll ending in a finish.
+                time.sleep(1.3)
+                mark = len(obs.lines)
+                stroke = [3.5, 6.25, 9.0, 4.75, 2.5]
+                for d in stroke:
+                    page.mouse.wheel(0, d)
+                    time.sleep(0.016)
+                time.sleep(1.0)
+                seen = [l for l in obs.lines[mark:]
+                        if l.get("kind") in ("ptr_axis", "ptr_axis_source", "ptr_axis_stop")]
+                values = [l["value"] for l in seen if l["kind"] == "ptr_axis" and l.get("axis") == 0]
+                last_axis = max((i for i, l in enumerate(seen) if l["kind"] == "ptr_axis"), default=-1)
+                res.check("a touchpad's stroke reaches the KDE client unstepped, as far as the page scrolled",
+                          any(v != int(v) for v in values) and abs(sum(values) - sum(stroke)) < 0.5,
+                          f"{values} against {sum(stroke)}")
+                res.check("and stops once the stroke pauses",
+                          any(l["kind"] == "ptr_axis_stop" for l in seen[last_axis + 1:]), seen[-3:])
                 res.check("the portal cursor sprite is delivered when the client draws the cursor",
                           C.wait_log("portal cursor sprites arrive", 10), H.server_log(tail=4))
                 real_errors, bad404 = C.benign_console(console_errors, not_found)
