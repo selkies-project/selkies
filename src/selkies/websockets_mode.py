@@ -4177,7 +4177,8 @@ class DataStreamingServer(BaseStreamingService):
 
         gpu_id_for_stats = getattr(self.app, "gpu_id", GPU_ID_DEFAULT)
         # Stats must describe the GPU the pipeline captures/encodes on.
-        dri_node_for_stats = str(getattr(self.cli_args, "encode_dri", "") or "")
+        dri_node_for_stats = resource_stats.gpu_node(
+            _EXPLICIT_GPU_ID, str(getattr(self.cli_args, "encode_dri", "") or ""))
 
         try:
             # This socket is in the audio fan-out before its SETTINGS (a viewer never

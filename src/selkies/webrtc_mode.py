@@ -432,7 +432,7 @@ class WebRTCService(BaseStreamingService):
         stats_gpu_id = parse_gpu_id(getattr(self.args, "gpu_id", ""))
         self.resource_monitor = resource_stats.ResourceMonitor(
             gpu_id=stats_gpu_id if (stats_gpu_id or 0) > 0 else 0,
-            dri_node=getattr(self.args, "encode_dri", "") or "",
+            dri_node=resource_stats.gpu_node(stats_gpu_id, getattr(self.args, "encode_dri", "") or ""),
             metrics=self.metrics,
         )
 

@@ -181,6 +181,23 @@ try:
     res.check("a device that is not a GPU and has no engines is not a card",
               "0000:12:00.0" not in gpus, sorted(gpus))
 
+    # amdgpu's own figure counts graphics alone: an encode its clients report
+    # running longer than that is what the card is busy with.
+    client(4004, 6, "renderD129", gfx=0, enc=0)
+    RS._drm_clients_at = 0.0
+    RS._drm_gpus()
+    clock.now += 0.5
+    client(4004, 6, "renderD129", gfx=50 * MS, enc=400 * MS)
+    gpus = {g.pci: g for g in RS._drm_gpus()}
+    res.check("an amdgpu card busier encoding than drawing reads its encoder's share",
+              gpus["0000:04:00.0"].load == 0.8, gpus.get("0000:04:00.0"))
+    client(4004, 6, "renderD129", gfx=50 * MS, enc=400 * MS)
+    clock.now += 0.5
+    gpus = {g.pci: g for g in RS._drm_gpus()}
+    res.check("and its graphics figure once the encoder idles", gpus["0000:04:00.0"].load == 0.37,
+              gpus.get("0000:04:00.0"))
+    shutil.rmtree(os.path.join(ROOT, "proc", "4004"))
+
     # The long tail: every SoC GPU is read the same way, off the engine time its
     # clients report, and a driver this table has never heard of is read too --
     # nothing about the reading is keyed to the three desktop vendors.
@@ -240,6 +257,98 @@ try:
     res.check("on a board whose GPU only devfreq counts, that is the one reading of it",
               len(nvidia) == 1 and nvidia[0].load == 0.642,
               [(g.load, g.vendor, g.pci) for g in merged])
+
+    # The gauge follows the node the GPU ID points the encoder at, so a host handed
+    # one card under its own number still reads it.
+    real_exists = RS.os.path.exists
+    RS.os.path.exists = lambda path: path == "/dev/dri/renderD132" or real_exists(path)
+    try:
+        res.check("the GPU ID's render node is the gauge's, the encode node's ahead of it",
+                  RS.gpu_node(4) == "/dev/dri/renderD132"
+                  and RS.gpu_node(4, "/dev/dri/renderD129") == "/dev/dri/renderD129",
+                  (RS.gpu_node(4), RS.gpu_node(4, "/dev/dri/renderD129")))
+        res.check("and none where the node is absent or no ID was given",
+                  RS.gpu_node(9) == "" and RS.gpu_node(None) == "" and RS.gpu_node(-1) == "")
+    finally:
+        RS.os.path.exists = real_exists
+
+    # NVML and nvidia-smi give the graphics engine apart from NVENC and NVDEC, so
+    # an encoder-bound card is read at its encoder's share.
+    class NvmlError(Exception):
+        pass
+
+    class Nvml:
+        """Two GPUs: one encoding at 65% while drawing 10%, one with no NVENC."""
+
+        def __init__(self):
+            self.cards = [(10, 65, 3), (40, None, None)]
+
+        def nvmlInit(self):
+            pass
+
+        def nvmlDeviceGetCount(self):
+            return len(self.cards)
+
+        def nvmlDeviceGetHandleByIndex(self, idx):
+            return idx
+
+        def nvmlDeviceGetUtilizationRates(self, h):
+            return type("Rates", (), {"gpu": self.cards[h][0]})()
+
+        def _codec(self, value):
+            if value is None:
+                raise NvmlError("not supported")
+            return [value, 167000]
+
+        def nvmlDeviceGetEncoderUtilization(self, h):
+            return self._codec(self.cards[h][1])
+
+        def nvmlDeviceGetDecoderUtilization(self, h):
+            return self._codec(self.cards[h][2])
+
+        def nvmlDeviceGetMemoryInfo(self, h):
+            return type("Memory", (), {"total": 8 * GIB, "used": GIB})()
+
+        def nvmlDeviceGetPciInfo(self, h):
+            return type("Pci", (), {"busId": f"00000000:{0x85 + h:02X}:00.0".encode()})()
+
+    real_nvml, real_ready = RS.pynvml, RS._nvml_ready
+    RS.pynvml, RS._nvml_ready = Nvml(), None
+    try:
+        found = RS._nvml_gpus()
+    finally:
+        RS.pynvml, RS._nvml_ready = real_nvml, real_ready
+    res.check("NVML: an encoder busier than the graphics engine is the card's load, "
+              "and a card without one reads its graphics",
+              [g.load for g in found] == [0.65, 0.4], [(g.load, g.pci) for g in found])
+
+    asked = []
+
+    def smi(answers):
+        def run(argv, **kwargs):
+            query = next(a for a in argv if a.startswith("--query-gpu="))
+            asked.append(query)
+            code, out = answers[len(asked) - 1]
+            return type("Done", (), {"returncode": code, "stdout": out})()
+        return run
+
+    real_run, real_which = RS.subprocess.run, RS.shutil.which
+    RS.shutil.which = lambda name: "/usr/bin/nvidia-smi"
+    try:
+        RS.subprocess.run = smi([(0, "10, 8192, 425, 00000000:85:00.0, 70, 5\n"
+                                     "30, 4096, 100, 00000000:86:00.0, [N/A], [N/A]\n")])
+        found = RS._nvidia_gpus()
+        res.check("nvidia-smi: the same, a codec engine the card lacks reading [N/A]",
+                  [g.load for g in found] == [0.7, 0.3] and asked[0].endswith("utilization.decoder"),
+                  ([g.load for g in found], asked))
+        asked.clear()
+        RS.subprocess.run = smi([(6, ""), (0, "20, 8192, 425, 00000000:85:00.0\n")])
+        found = RS._nvidia_gpus()
+        res.check("and a driver that refuses the codec fields is asked again without them",
+                  [g.load for g in found] == [0.2] and asked[1].endswith("pci.bus_id"),
+                  ([g.load for g in found], asked))
+    finally:
+        RS.subprocess.run, RS.shutil.which = real_run, real_which
 finally:
     RS.time, RS._SYSFS_DRM_ROOT, RS._PROC_ROOT = real_time, real_drm_root, real_proc_root
     shutil.rmtree(ROOT, ignore_errors=True)
