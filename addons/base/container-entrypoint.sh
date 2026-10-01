@@ -213,9 +213,10 @@ fi
 # With no DRM render node, the NVIDIA EGL/GBM vendor library the container
 # runtime injects segfaults inside Xwayland's EGL init, and glamor would have
 # nothing to accelerate anyway. wlroots honors WLR_XWAYLAND, so XWayland is
-# started through a wrapper pinning EGL to Mesa and shared-memory buffers.
+# started through a wrapper pinning EGL to Mesa and shared-memory buffers, and
+# loading no EGL external platform for a driver libEGL that comes before glvnd's.
 if [ "${SELKIES_WAYLAND}" = "true" ] && ! ls /dev/dri/renderD* > /dev/null 2>&1; then
-  printf '#!/bin/sh\nexport __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json\nexec /usr/bin/Xwayland -shm "$@"\n' > /tmp/selkies-xwayland
+  printf '#!/bin/sh\nexport __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json\nexport __EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES=\nexec /usr/bin/Xwayland -shm "$@"\n' > /tmp/selkies-xwayland
   chmod 755 /tmp/selkies-xwayland
   export WLR_XWAYLAND="/tmp/selkies-xwayland"
 fi

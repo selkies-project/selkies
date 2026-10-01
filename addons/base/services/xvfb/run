@@ -35,8 +35,10 @@ unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2
 # device leaves behind. Without a usable node the server is the software
 # framebuffer, whose GLX probing is kept on Mesa's EGL: a vendor library's GBM
 # has nothing to offer it, and NVIDIA's takes the server down where the
-# container has no /dev/dri at all. The session's own EGL selection is
-# untouched either way.
+# container has no /dev/dri at all. A runtime can also put the driver's own
+# libEGL ahead of glvnd's, where no vendor selection reaches, so the server
+# loads no EGL external platform either: NVIDIA's EGL then has no GBM platform
+# to be asked for. The session's own EGL selection is untouched either way.
 VFB_DEVICE=""
 RENDER_DRI="${SELKIES_RENDER_DRI:-${DRINODE:-}}"
 if [ "${SELKIES_GPU_ACCELERATED:-}" != "false" ] && /usr/bin/Xvfb -help 2>&1 | grep -q -- '-glamor'; then
@@ -51,8 +53,9 @@ if [ "${SELKIES_GPU_ACCELERATED:-}" != "false" ] && /usr/bin/Xvfb -help 2>&1 | g
   fi
 fi
 MESA_EGL_VENDOR="/usr/share/glvnd/egl_vendor.d/50_mesa.json"
-if [ -z "${VFB_DEVICE}" ] && [ -f "${MESA_EGL_VENDOR}" ]; then
-  export __EGL_VENDOR_LIBRARY_FILENAMES="${MESA_EGL_VENDOR}"
+if [ -z "${VFB_DEVICE}" ]; then
+  [ -f "${MESA_EGL_VENDOR}" ] && export __EGL_VENDOR_LIBRARY_FILENAMES="${MESA_EGL_VENDOR}"
+  export __EGL_EXTERNAL_PLATFORM_CONFIG_FILENAMES=""
 fi
 
 # A server that died leaves its lock and socket behind, and the replacement then
