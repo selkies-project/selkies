@@ -53,15 +53,19 @@
  * classified as discrete wheel or trackpad and accumulated in fractional
  * notches so no distance is lost. A pinch, on the touchscreen or a touchpad,
  * reaches the session as Ctrl+wheel. The server-drawn cursor is painted on a
- * page canvas or applied as a CSS cursor.
+ * page canvas or applied as a CSS cursor; in trackpad mode the canvas is drawn
+ * where the server echoes the pointer, moved on by the deltas sent since
+ * (`onPointerEcho`).
  *
  * Wire messages: `kd,<keysym>`, `ku,<keysym>`, `kh,<keysym>,...`, `kr`;
  * `m,<x>,<y>,<mask>,<magnitude>` (absolute) and
  * `m2,<dx>,<dy>,<mask>,<magnitude>` (relative; scroll pulses ride mask bits
  * 3 to 7); `p,<0|1>` and `SET_NATIVE_CURSOR_RENDERING,<0|1>` on pointer lock
- * changes; `js,c`, `js,d`, `js,b`, `js,a`, and `js,h` for gamepads, whose
+ * changes, the latter also where trackpad mode gets no pointer echo; `js,c`,
+ * `js,d`, `js,b`, `js,a`, and `js,h` for gamepads, whose
  * rumble comes back as the system action `rumble,<slot>,<strong>,<weak>,<ms>`
- * (`rumble`).
+ * (`rumble`); `_pointer_echo,<0|1>` in trackpad mode, answered by the system
+ * action `pointer,<display>,<x>,<y>,<scale>,<seq>` or `pointer,none`.
  * @module
  */
 
@@ -126,6 +130,20 @@ const TRACKPAD_SPEED_TAU_MS = 25;
 /** The range `Input.setTrackpadSpeed` takes. */
 const TRACKPAD_SPEED_MIN = 0.25;
 const TRACKPAD_SPEED_MAX = 4;
+
+/**
+ * How long trackpad mode waits for the server's first pointer echo before it
+ * has the cursor composited into the video instead, in milliseconds: a server
+ * without the echo never answers.
+ */
+const POINTER_ECHO_WAIT_MS = 2000;
+
+/**
+ * Deltas trackpad mode keeps past the last echo at most; older ones are
+ * counted into it, so a server that stops echoing, or has not echoed yet,
+ * costs no memory.
+ */
+const POINTER_ECHO_DELTAS_MAX = 256;
 
 /**
  * The trackpad's gain at a finger speed: 1, rising along a smoothstep to
@@ -1478,6 +1496,8 @@ export class Input {
         this.cursorDiv.style.display = 'none';
         this.cursorDiv.style.left = '0px';
         this.cursorDiv.style.top = '0px';
+        // Moved on every pointer move: a layer of its own repaints nothing under it.
+        this.cursorDiv.style.willChange = 'transform';
         this.cursorImg = this.cursorDiv.getContext('2d');
         document.body.appendChild(this.cursorDiv);
         this.cursorHotspot = { x: 0, y: 0 };
@@ -1487,6 +1507,18 @@ export class Input {
         this.use_browser_cursors = false;
         this._latestMouseX = 0;
         this._latestMouseY = 0;
+        /** The display this page renders, which the pointer echo names (`onPointerEcho`). */
+        this.displayId = 'primary';
+        /**
+         * Trackpad mode's cursor: the last pointer echo, as
+         * `{display, x, y, scale, seq}`, and each `[seq, dx, dy]` sent past it.
+         */
+        this._echo = null;
+        this._echoDeltas = [];
+        /** Whether this page has the server composite the cursor, where no echo came. */
+        this._echoComposited = false;
+        this._echoTimer = null;
+        this._echoAsking = false;
         this.useCssScaling = useCssScaling;
         this._streamDensity = null;
         this.m = null;
@@ -1727,12 +1759,16 @@ export class Input {
         this.cursorImg.drawImage(img, 0, 0);
         this.cursorHotspot.x = this._rawHotspotX / dpr;
         this.cursorHotspot.y = this._rawHotspotY / dpr;
-        this._updateCursorPosition(this._latestMouseX, this._latestMouseY);
+        if (this._trackpadMode) {
+            this._placeEchoCursor();
+        } else {
+            this._updateCursorPosition(this._latestMouseX, this._latestMouseY);
+        }
     }
 
     /** Hides the page-drawn cursor when a press lands outside the stream. */
     _handleOutsideClick(event) {
-        if (!this.use_browser_cursors && !this.element.contains(event.target)) {
+        if (!this.use_browser_cursors && !this._trackpadMode && !this.element.contains(event.target)) {
             this.cursorDiv.style.display = 'none';
         }
     }
@@ -1801,15 +1837,15 @@ export class Input {
     }
 
     /**
-     * Applies a cursor update from the server; an empty or null-handle update,
-     * and trackpad mode, hide the cursor.
+     * Applies a cursor update from the server; an empty or null-handle update
+     * hides the cursor. Trackpad mode always paints the canvas, at the pointer
+     * echo, since no local pointer shows where the remote one is.
      * @param {{curdata?: string, handle: string|number, hotx?: string|number, hoty?: string|number}} cursorData
      *     Base64 PNG and hotspot as the server sends them.
      */
     async updateServerCursor(cursorData) {
         if (!cursorData.curdata ||
-            parseInt(cursorData.handle, 10) === 0 ||
-            this._trackpadMode)
+            parseInt(cursorData.handle, 10) === 0)
         {
             this._cursorImageBitmap = null;
             this._cursorBase64Data = null;
@@ -1827,7 +1863,10 @@ export class Input {
             this.element.style.cursor = 'auto';
             return;
         }
-        if (this.use_browser_cursors) {
+        if (this._trackpadMode) {
+            this._cursorImageBitmap = await this._cursorBitmapFromBase64(this._cursorBase64Data);
+            this._drawAndScaleCursor();
+        } else if (this.use_browser_cursors) {
             this.cursorDiv.style.display = 'none';
             this._updateBrowserCursor();
         } else {
@@ -2723,7 +2762,7 @@ export class Input {
         }
         this._noteScreenAnchor(event);
         if (!raw) {
-            if (this.inputAttached && !this.use_browser_cursors) {
+            if (this.inputAttached && !this.use_browser_cursors && !this._trackpadMode) {
                 this.cursorDiv.style.display = 'block';
                 this.element.style.setProperty('cursor', 'none', 'important');
             }
@@ -2737,7 +2776,7 @@ export class Input {
                     visualClientY = lastPredictedEvent.clientY;
                 }
             }
-            if (this.inputAttached && !this.use_browser_cursors) {
+            if (this.inputAttached && !this.use_browser_cursors && !this._trackpadMode) {
                 this._updateCursorPosition(visualClientX, visualClientY);
             }
             this._latestMouseX = visualClientX;
@@ -2968,6 +3007,15 @@ export class Input {
         this._pointerSeq += 1;
         const message = fields.join(",") + "," + this._pointerSeq;
         ((motion && this.sendMotion) || this.send)(message);
+        if (this._trackpadMode && !this._echoComposited && fields[0] === "m2" &&
+            (fields[1] !== 0 || fields[2] !== 0)) {
+            this._echoDeltas.push([this._pointerSeq, fields[1], fields[2]]);
+            if (this._echoDeltas.length > POINTER_ECHO_DELTAS_MAX) {
+                const [, dx, dy] = this._echoDeltas.shift();
+                if (this._echo) [this._echo.x, this._echo.y] = this._echoStep(this._echo.x, this._echo.y, dx, dy);
+            }
+            this._placeEchoCursor();
+        }
     }
 
     /** Pen pointer events feed the mouse path; other pointer types arrive as mouse events. */
@@ -3329,13 +3377,14 @@ export class Input {
      * This page's stream box in its own CSS pixels, with the remote pixels per
      * CSS pixel that map into it: the sink box where one applies, else the
      * window math. Both absolute paths are `(client - left) * scale`.
-     * @returns {{left: number, top: number, scaleX: number, scaleY: number}|null}
+     * @returns {{left: number, top: number, width: number, height: number,
+     *     scaleX: number, scaleY: number}|null}
      */
     _streamBox() {
         const box = this._sinkBox(document.getElementById('videoCanvas'),
                                   document.getElementById('stream'));
         if (box) {
-            return { left: box.boxLeft, top: box.boxTop,
+            return { left: box.boxLeft, top: box.boxTop, width: box.boxW, height: box.boxH,
                      scaleX: box.sinkW / box.boxW, scaleY: box.sinkH / box.boxH };
         }
         if (!this.m) {
@@ -3347,6 +3396,7 @@ export class Input {
         const dpr = this._inputDpr();
         return { left: this.m.elementClientX + this.m.mouseOffsetX,
                  top: this.m.elementClientY + this.m.mouseOffsetY,
+                 width: this.m.frameW / this.m.mouseMultiX, height: this.m.frameH / this.m.mouseMultiY,
                  scaleX: this.m.mouseMultiX * dpr, scaleY: this.m.mouseMultiY * dpr };
     }
 
@@ -3746,6 +3796,11 @@ export class Input {
 
         console.log(`Input: Trackpad mode ${newMode ? 'enabled' : 'disabled'}.`);
         this._trackpadMode = newMode;
+        if (newMode) {
+            this._startPointerEcho();
+        } else {
+            this._stopPointerEcho();
+        }
 
         this._activeTouches.clear();
         this._activeTouchIdentifier = null;
@@ -3767,13 +3822,144 @@ export class Input {
             this._sendMouseState();
         }
 
-        if (this._trackpadMode || this.use_browser_cursors) {
+        if (this._trackpadMode) {
             this.element.style.setProperty('cursor', 'none', 'important');
             this.element.style.cursor = 'default';
+        } else if (this.use_browser_cursors) {
+            this.cursorDiv.style.display = 'none';
+            this._updateBrowserCursor();
         } else {
             this.element.style.setProperty('cursor', 'none', 'important');
             this.cursorDiv.style.display = 'none';
         }
+    }
+
+    /**
+     * The transport connected again: a trackpad page asks the new connection
+     * for the pointer echo, since the last one's ended with it.
+     */
+    resumePointerEcho() {
+        if (this._trackpadMode) this._startPointerEcho();
+    }
+
+    /**
+     * Asks the server to echo the pointer, which trackpad mode draws the
+     * cursor from (`onPointerEcho`), and has it composited into the video
+     * instead when no echo comes within `POINTER_ECHO_WAIT_MS`. A toggle and a
+     * reconnect in the same task ask once.
+     */
+    _startPointerEcho() {
+        this._echo = null;
+        this._echoDeltas = [];
+        this._placeEchoCursor();
+        if (this._echoAsking) return;
+        this._echoAsking = true;
+        queueMicrotask(() => {
+            this._echoAsking = false;
+            if (!this._trackpadMode) return;
+            this.send('_pointer_echo,1');
+            clearTimeout(this._echoTimer);
+            this._echoTimer = setTimeout(() => {
+                this._echoTimer = null;
+                if (this._trackpadMode && !this._echo) this._compositeCursor();
+            }, POINTER_ECHO_WAIT_MS);
+            if (!this._cursorImageBitmap && this._cursorBase64Data) {
+                this._cursorBitmapFromBase64(this._cursorBase64Data).then((bitmap) => {
+                    if (!this._cursorImageBitmap && this._trackpadMode) {
+                        this._cursorImageBitmap = bitmap;
+                        this._drawAndScaleCursor();
+                    }
+                }, () => {});
+            }
+        });
+    }
+
+    /** Leaves trackpad mode's echo, and the compositing that stood in for it. */
+    _stopPointerEcho() {
+        clearTimeout(this._echoTimer);
+        this._echoTimer = null;
+        this._echo = null;
+        this._echoDeltas = [];
+        this.send('_pointer_echo,0');
+        if (this._echoComposited) {
+            this._echoComposited = false;
+            this.send('SET_NATIVE_CURSOR_RENDERING,0');
+        }
+    }
+
+    /** Has the server composite the cursor, for a session that sends no echo. */
+    _compositeCursor() {
+        this._echoComposited = true;
+        this._echoDeltas = [];
+        this.send('SET_NATIVE_CURSOR_RENDERING,1');
+        this._placeEchoCursor();
+    }
+
+    /**
+     * Takes a pointer echo: the system action
+     * `pointer,<display>,<x>,<y>,<scale>,<seq>`, the position in that
+     * display's server pixels, the physical pixels a relative one moves it
+     * there, and the last pointer message of this page the position includes;
+     * or `pointer,none` from a session that cannot say where its pointer is.
+     * @param {string} action
+     */
+    onPointerEcho(action) {
+        if (!this._trackpadMode) return;
+        const fields = action.split(',');
+        if (fields[1] === 'none') {
+            clearTimeout(this._echoTimer);
+            this._echoTimer = null;
+            this._compositeCursor();
+            return;
+        }
+        const [x, y, scale, seq] = fields.slice(2, 6).map(Number);
+        if (fields.length < 6 || ![x, y, scale, seq].every(Number.isFinite)) return;
+        clearTimeout(this._echoTimer);
+        this._echoTimer = null;
+        if (this._echoComposited) {
+            this._echoComposited = false;
+            this.send('SET_NATIVE_CURSOR_RENDERING,0');
+        }
+        this._echo = { display: fields[1], x, y, scale: scale > 0 ? scale : 1, seq,
+                       maxX: Infinity, maxY: Infinity };
+        this._echoDeltas = this._echoDeltas.filter((delta) => delta[0] > seq);
+        this._placeEchoCursor();
+    }
+
+    /**
+     * One delta past the echo, in the echo's display: scaled as the echo says
+     * and held inside the display after it, as the session holds its pointer
+     * after each move. The server follows the same steps to tell whether an
+     * echo would move the drawn cursor at all (`_PointerEcho` in
+     * input_handler.py).
+     */
+    _echoStep(x, y, dx, dy) {
+        const echo = this._echo;
+        return [Math.min(Math.max(x + dx * echo.scale, 0), echo.maxX),
+                Math.min(Math.max(y + dy * echo.scale, 0), echo.maxY)];
+    }
+
+    /**
+     * Draws trackpad mode's cursor at the last echo moved on by the deltas
+     * sent past it (`_echoStep`), and hides it while no echo has come, while
+     * the echo names another display (whose page draws it), and while the
+     * server composites it.
+     */
+    _placeEchoCursor() {
+        const echo = this._echo;
+        const box = (this._trackpadMode && echo && !this._echoComposited && this.inputAttached &&
+                     this._cursorImageBitmap && echo.display === this.displayId) ? this._streamBox() : null;
+        if (!box || !(box.scaleX > 0) || !(box.scaleY > 0)) {
+            if (this.cursorDiv.style.display !== 'none') this.cursorDiv.style.display = 'none';
+            return;
+        }
+        echo.maxX = Math.max(0, box.width * box.scaleX - 1);
+        echo.maxY = Math.max(0, box.height * box.scaleY - 1);
+        let x = echo.x;
+        let y = echo.y;
+        for (const [, dx, dy] of this._echoDeltas) [x, y] = this._echoStep(x, y, dx, dy);
+        if (this.cursorDiv.style.display !== 'block') this.cursorDiv.style.display = 'block';
+        this._updateCursorPosition(box.left + x / box.scaleX, box.top + y / box.scaleY);
     }
 
     /**
@@ -3830,7 +4016,6 @@ export class Input {
         console.log(`Input: Use browser cursors ${newMode ? 'enabled' : 'disabled'}.`);
         this.use_browser_cursors = newMode;
         if (this._trackpadMode) {
-            this.cursorDiv.style.display = 'none';
             this.element.style.setProperty('cursor', 'none', 'important');
         } else if (this.use_browser_cursors) {
             this.cursorDiv.style.display = 'none';
@@ -4800,6 +4985,7 @@ export class Input {
         this.listeners.push(addListener(document, 'pointerlockchange', this._pointerLock, this));
         this.listeners.push(addListener(document, 'fullscreenchange', this._onFullscreenChange, this));
         this.listeners.push(addListener(window, 'resize', this._windowMath, this));
+        this.listeners.push(addListener(window, 'resize', this._placeEchoCursor, this));
         this.listeners.push(addListener(window, 'gamepadconnected', this._gamepadConnected, this));
         this.listeners.push(addListener(window, 'gamepaddisconnected', this._gamepadDisconnect, this));
         this.listeners.push(addListener(window, 'message', this._handleVisibilityMessage, this));
@@ -4887,6 +5073,7 @@ export class Input {
              this._pointerLock();
         }
         this._windowMath();
+        this._placeEchoCursor();
     }
 
     /**

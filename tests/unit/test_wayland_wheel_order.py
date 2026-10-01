@@ -134,6 +134,7 @@ def make_handler(seat: FakeSeat) -> WebRTCInput:
     h.SHORTCUT_MODIFIER_XKEY_NAMES = {"Control_L", "Control_R", "Alt_L", "Alt_R", "Super_L", "Super_R"}
     h.keyboard_worker_task = None
     h._pointer_seq = {}
+    h._pointer_echoes = {}
     h.button_mask = 0
     h.last_x = 0
     h.last_y = 0

@@ -31,6 +31,7 @@ applied: List[tuple] = []
 def make_handler() -> WebRTCInput:
     h = WebRTCInput.__new__(WebRTCInput)
     h._pointer_seq = {}
+    h._pointer_echoes = {}
     h.button_mask = 0
 
     async def record(x, y, button_mask, scroll_magnitude, relative=False, display_id="primary"):

@@ -45,7 +45,8 @@
  * cursor and display-config updates, stats, and system actions (`reload`,
  * `mk_access,0|1`, `command_error,text`, `auth_success,{json}` /
  * `role_update,{json}`, `resolution,WxH`, `video_declined,mime`,
- * `capture_demand,<subject>,0|1`).
+ * `capture_demand,<subject>,0|1`, and the `pointer,` echo trackpad mode asks
+ * for with `_pointer_echo,0|1`, lib/input.js).
  *
  * The page hash selects the role: none is the controller, `#shared` a strict
  * viewer, `#playerN` a viewer with gamepad slot N, and `#display2-<position>`
@@ -1657,7 +1658,7 @@ export default function webrtc() {
 	 *
 	 * The DPI goes through the server's idempotent `set_dpi` path, the same one
 	 * the initial SETTINGS seed takes, so whichever lands first wins. Persisted
-	 * trackpad mode re-asserts cursor compositing (touch has no hover cursor).
+	 * trackpad mode asks the new channel for the pointer echo it draws from.
 	 * A manual-mode secondary display reports its size on connect because a
 	 * secondary lays out from what it reports; a pinned primary
 	 * (`enable_resize` false) is styled to the window but keeps the server's
@@ -1669,9 +1670,7 @@ export default function webrtc() {
 			return;
 		}
 		if (webrtc) pushScalingDpi();
-		if (trackpadMode && webrtc) {
-			try { webrtc.sendDataChannelMessage('SET_NATIVE_CURSOR_RENDERING,1'); } catch (_) {}
-		}
+		if (input) input.resumePointerEcho();
 		if (window.manualResolution && manualWidth && manualHeight) {
 			console.log(`Applying manual resolution: ${manualWidth}x${manualHeight}`);
 			applyManualStyle(manualWidth, manualHeight, scaleLocal);
@@ -2150,10 +2149,6 @@ export default function webrtc() {
 					trackpadMode = true;
 					setBoolParam('trackpadMode', true);
 					input.setTrackpadMode(true);
-					// Touch has no hover cursor: the pointer is composited into the video.
-					if (webrtc) {
-						try { webrtc.sendDataChannelMessage('SET_NATIVE_CURSOR_RENDERING,1'); } catch (_) {}
-					}
 				}
 				break;
 			case 'touchinput:touch':
@@ -2161,9 +2156,6 @@ export default function webrtc() {
 					trackpadMode = false;
 					setBoolParam('trackpadMode', false);
 					input.setTrackpadMode(false);
-					if (webrtc) {
-						try { webrtc.sendDataChannelMessage('SET_NATIVE_CURSOR_RENDERING,0'); } catch (_) {}
-					}
 				}
 				break;
 			default:
@@ -3012,6 +3004,7 @@ export default function webrtc() {
 				webrtc.sendDataChannelMessage(data);
 			}
 			input = new Input(overlayInput, send, isSharedMode, playerInputTargetIndex, useCssScaling);
+			input.displayId = displayId;
 			input.sendMotion = (data) => {
 				if (isSharedMode && isStrictViewer && !collabInputGranted) return;
 				webrtc.sendMotionMessage(data);
@@ -3339,6 +3332,10 @@ export default function webrtc() {
 				if (action.startsWith('rumble,')) {
 					const [slot, strong, weak, ms] = action.split(',').slice(1).map(Number);
 					if (input) input.rumble(slot, strong, weak, ms);
+					return;
+				}
+				if (action.startsWith('pointer,')) {
+					if (input) input.onPointerEcho(action);
 					return;
 				}
 				if (action.startsWith('video_declined,')) {

@@ -52,8 +52,9 @@ holding the active mk token while `enable_collab` is on (a read-write
 collaborator) may additionally send `VIEWER_COLLAB_EXTRA_PREFIXES` — the
 keyboard, mouse, and clipboard set, including `co,` because IME commits and
 atomic typing arrive that way. `cmd` and every settings-mutating message stay
-controller-only. Blur/visibility lifecycle noise (`VIEWER_SILENT_DROP_PREFIXES`)
-from a read-only viewer is normal operation and is dropped without a warning.
+controller-only. Blur/visibility lifecycle noise and a trackpad page's
+pointer echo request (`VIEWER_SILENT_DROP_PREFIXES`) from a read-only viewer
+are normal operation and are dropped without a warning.
 A `js,` message names its own gamepad index, so `gamepad_slot_denied` decides
 separately whether its sender holds that slot.
 
@@ -169,8 +170,9 @@ VIEWER_COLLAB_EXTRA_PREFIXES = (
     "co,",
     "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr",
     "REQUEST_CLIPBOARD",
+    "_pointer_echo,",
 )
-VIEWER_SILENT_DROP_PREFIXES = ("kr", "cr")
+VIEWER_SILENT_DROP_PREFIXES = ("kr", "cr", "_pointer_echo")
 
 
 def gamepad_slot_denied(msg: str, role: Optional[str], slot: Optional[int],
@@ -1932,6 +1934,92 @@ class _XTestKeyboard:
             logger_webrtc_input.debug(f"group lock restore failed: {e}")
 
 
+class _PointerEcho:
+    """One trackpad page's pointer echo. The page draws the pointer at the last
+    echo it was sent, moved on by each delta it sent past the message that echo
+    includes and held inside that display after each, as the pointer is, so an
+    echo that would leave it drawn where it is goes unsent: where the page draws
+    it, with the deltas the position includes, is followed here and compared with
+    the position. On Wayland a message counts once the compositor has applied the
+    move numbered when it was injected (`pointer_location`); X11 applies a move
+    before the next request it reads."""
+
+    def __init__(self, seq: int) -> None:
+        self.seq = seq
+        self._sent: Optional[Tuple[str, float, float, float]] = None
+        self._x = 0.0
+        self._y = 0.0
+        self._pending: deque = deque()
+
+    def applied(self, motion: Optional[int], seq: int, dx: float, dy: float) -> None:
+        """One of the page's pointer messages applied, with its delta (zero for an
+        absolute position, which the page does not draw ahead of the echo) and the
+        number of the move it ended at, None on X11."""
+        if motion is None:
+            self._include(seq, dx, dy)
+        else:
+            self._pending.append((motion, seq, dx, dy))
+
+    def _include(self, seq: int, dx: float, dy: float) -> None:
+        self.seq = max(self.seq, seq)
+        if self._sent is not None:
+            _, scale, w, h = self._sent
+            self._x = min(max(self._x + dx * scale, 0.0), max(0.0, w - 1))
+            self._y = min(max(self._y + dy * scale, 0.0), max(0.0, h - 1))
+
+    def through(self, motion: Optional[int]) -> int:
+        """The last message the position of move number `motion` includes."""
+        if motion is not None:
+            while self._pending and self._pending[0][0] <= motion:
+                self._include(*self._pending.popleft()[1:])
+        return self.seq
+
+    def drawn_at(self, did: str, x: float, y: float) -> bool:
+        """Whether the page already draws the pointer at (x, y) on `did`."""
+        return (self._sent is not None and self._sent[0] == did
+                and abs(self._x - x) < 0.5 and abs(self._y - y) < 0.5)
+
+    def echoed(self, did: str, x: float, y: float, scale: float, w: float, h: float) -> None:
+        self._sent = (did, scale, w, h)
+        self._x = x
+        self._y = y
+
+
+class _XPointerReader:
+    """The X server's pointer, asked on a connection of its own from a worker
+    thread, so a display server slow to answer holds that thread and never the
+    event loop. The connection opens on first use and again after a failure."""
+
+    def __init__(self) -> None:
+        self._d: Any = None
+        self._lock = threading.Lock()
+
+    def read(self) -> Optional[Tuple[int, int]]:
+        """Blocking. The root position, or None when the server cannot be asked."""
+        with self._lock:
+            try:
+                if self._d is None:
+                    self._d = display.Display(blocking_timeout=INPUT_X_REPLY_TIMEOUT_S)
+                p = self._d.screen().root.query_pointer()
+                return p.root_x, p.root_y
+            except Exception as e:
+                logger_webrtc_input.debug(f"pointer position read failed: {e}")
+                self._close()
+                return None
+
+    def close(self) -> None:
+        with self._lock:
+            self._close()
+
+    def _close(self) -> None:
+        d, self._d = self._d, None
+        if d is not None:
+            try:
+                d.close()
+            except Exception:
+                pass
+
+
 class _XTestMouse:
     """Mouse controller backed by the bundled python-xlib XTEST extension."""
 
@@ -2094,6 +2182,13 @@ INPUT_X_REPLY_TIMEOUT_S = 20.0
 # Poll interval for the X event consumers while no loop reader is armed on the
 # input connection, so cursor and keymap changes still land promptly.
 INPUT_X_EVENT_POLL_S = 0.02
+
+# A trackpad page draws the pointer where the server echoes it (`_pointer_echo`),
+# moved on by its own deltas, so an echo goes out where the pointer is not where
+# the page draws it, at most once per POINTER_ECHO_MIN_S. A resting pointer is read
+# again every POINTER_ECHO_POLL_S, for a move no page sent (an application's warp).
+POINTER_ECHO_MIN_S = 0.008
+POINTER_ECHO_POLL_S = 0.025
 
 
 # Event, button, and axis codes from linux/input-event-codes.h.
@@ -4388,6 +4483,14 @@ class WebRTCInput:
         self.gamepad_heartbeats = {}
         # The highest pointer message number each connection has sent.
         self._pointer_seq: Dict[Any, int] = {}
+        self._pointer_echoes: Dict[Any, _PointerEcho] = {}
+        self._pointer_echo_at = 0.0
+        self._pointer_moved_at = 0.0
+        self._pointer_echo_trailing: Optional[asyncio.TimerHandle] = None
+        self._pointer_echo_poll: Optional[asyncio.Task] = None
+        self._x_pointer_reader: Optional[_XPointerReader] = None
+        # The number pixelflux gave the last Wayland move (`pointer_location`).
+        self._wl_motion = 0
         self.uinput_gamepads = uinput_gamepads_enabled(uinput_gamepad)
 
         self.clipboard_running = False
@@ -4809,26 +4912,167 @@ class WebRTCInput:
         conn_id = (self.client_gamepad_associations.get(gamepad_idx) or {}).get("conn_id")
         if conn_id is None:
             return
-        action = f"rumble,{gamepad_idx},{strong:.3f},{weak:.3f},{duration_ms}"
+        self._send_system_to(conn_id, f"rumble,{gamepad_idx},{strong:.3f},{weak:.3f},{duration_ms}")
+
+    def _send_system_to(self, conn_id: Any, action: str) -> None:
+        """Send a system action to one connection alone, addressed as its
+        transport knows it (`send_command_status`); nobody once it is gone."""
         try:
             if self._ws_transport():
                 self.rtc_app.send_system_action(action, conn_id=conn_id)
             else:
                 self.rtc_app.send_system_action(action, peer_id=conn_id, only=True)
         except Exception:
-            logger_webrtc_input.debug("rumble relay failed", exc_info=True)
+            logger_webrtc_input.debug(f"system action {action[:16]!r} not sent", exc_info=True)
 
     async def release_gamepads_for_conn(self, conn_id: Any) -> None:
         """Disassociate (and neutralize, via reset_state) every gamepad slot whose
         association was made by this transport connection, and forget its pointer
-        message count. This is the ungraceful path — a tab that dies mid-press
+        message count and echo. This is the ungraceful path — a tab that dies mid-press
         never sends 'js,d', and only the transport knows the connection is gone."""
         if conn_id is None:
             return
         self._pointer_seq.pop(conn_id, None)
+        self._drop_pointer_echo(conn_id)
         for idx, info in list(self.client_gamepad_associations.items()):
             if info.get("conn_id") == conn_id:
                 await self.__gamepad_disconnect(idx)
+
+    async def _set_pointer_echo(self, conn_id: Any, on: bool) -> None:
+        """Start or stop echoing the pointer to a trackpad page, which draws it
+        from the echo: `pointer,<display>,<x>,<y>,<scale>,<seq>`, the position in
+        that display's server pixels, the physical pixels a relative pixel moves
+        it there, and the last of the page's pointer messages it includes. A
+        session that cannot say where its pointer is (host capture, a pixelflux
+        without `pointer_location`) answers `pointer,none`, and the page has the
+        cursor composited instead."""
+        self._drop_pointer_echo(conn_id)
+        if not on or conn_id is None:
+            return
+        at = await self._pointer_at_rest()
+        if at is None:
+            self._send_system_to(conn_id, "pointer,none")
+            return
+        echo = _PointerEcho(self._pointer_seq.get(conn_id, 0))
+        self._pointer_echoes[conn_id] = echo
+        self._echo_pointer_to(conn_id, echo, at)
+        if self._pointer_echo_poll is None:
+            self._pointer_echo_poll = self.loop.create_task(self._poll_pointer_echoes())
+
+    def _drop_pointer_echo(self, conn_id: Any) -> None:
+        self._pointer_echoes.pop(conn_id, None)
+        if not self._pointer_echoes and self._pointer_echo_trailing is not None:
+            self._pointer_echo_trailing.cancel()
+            self._pointer_echo_trailing = None
+
+    def _pointer_moved(self, conn_id: Any, seq: Optional[int], dx: int, dy: int) -> None:
+        """Echo a pointer message's move to every trackpad page whose drawn
+        pointer it leaves behind: at once unless an echo went out under
+        POINTER_ECHO_MIN_S ago, else when that interval ends."""
+        echo = self._pointer_echoes.get(conn_id)
+        if echo is not None and seq is not None:
+            echo.applied(self._wl_motion if self.is_wayland else None, seq, dx, dy)
+        now = self.loop.time()
+        self._pointer_moved_at = now
+        due = self._pointer_echo_at + POINTER_ECHO_MIN_S
+        if now >= due:
+            self._echo_pointer(self._pointer_at())
+        elif self._pointer_echo_trailing is None:
+            self._pointer_echo_trailing = self.loop.call_at(due, self._echo_pointer_trailing)
+
+    def _echo_pointer_trailing(self) -> None:
+        self._pointer_echo_trailing = None
+        self._echo_pointer(self._pointer_at())
+
+    async def _poll_pointer_echoes(self) -> None:
+        """Read a resting pointer again while a trackpad page watches it, so a
+        move no page sent reaches them too."""
+        try:
+            while self._pointer_echoes:
+                await asyncio.sleep(POINTER_ECHO_POLL_S)
+                if self._pointer_echoes and self.loop.time() - self._pointer_moved_at >= POINTER_ECHO_POLL_S:
+                    self._echo_pointer(await self._pointer_at_rest())
+        finally:
+            self._pointer_echo_poll = None
+            reader, self._x_pointer_reader = self._x_pointer_reader, None
+            if reader is not None:
+                try:
+                    self.loop.run_in_executor(None, reader.close)
+                except RuntimeError:
+                    pass
+
+    def _echo_pointer(self, at: Optional[Tuple[float, float, float, Optional[int]]]) -> None:
+        self._pointer_echo_at = self.loop.time()
+        if at is None:
+            return
+        for conn_id, echo in list(self._pointer_echoes.items()):
+            self._echo_pointer_to(conn_id, echo, at)
+
+    def _echo_pointer_to(self, conn_id: Any, echo: _PointerEcho,
+                         at: Tuple[float, float, float, Optional[int]]) -> None:
+        x, y, scale, motion = at
+        did, local_x, local_y, w, h = self._display_at(x, y)
+        seq = echo.through(motion)
+        # As the page reads them back.
+        local_x, local_y, scale = float(f"{local_x:.1f}"), float(f"{local_y:.1f}"), float(f"{scale:g}")
+        if echo.drawn_at(did, local_x, local_y):
+            return
+        echo.echoed(did, local_x, local_y, scale, w, h)
+        self._send_system_to(conn_id, f"pointer,{did},{local_x:.1f},{local_y:.1f},{scale:g},{seq}")
+
+    def _pointer_at(self) -> Optional[Tuple[float, float, float, Optional[int]]]:
+        """Where the pointer is on the desktop while it moves, as (x, y, scale,
+        move number), waiting on nothing: Wayland's compositor position
+        (`pointer_location`), X11's tracked one."""
+        if self.is_wayland:
+            read = getattr(self.wayland_input, "pointer_location", None)
+            at = read() if read is not None else None
+            return (float(at[0]), float(at[1]), float(at[2]), int(at[3])) if at else None
+        return (float(self.last_x), float(self.last_y), 1.0, None)
+
+    async def _pointer_at_rest(self) -> Optional[Tuple[float, float, float, Optional[int]]]:
+        """`_pointer_at` for a pointer at rest, which on X11 asks the server
+        (`_XPointerReader`), so a warp of an application's own shows; the
+        answer comes after every move sent before it, and the tracking goes on
+        from it unless the pointer moved while it was asked. None where the
+        session cannot say where its pointer is."""
+        if self.is_wayland:
+            return self._pointer_at()
+        if self.mouse is None:
+            return None
+        if self._x_pointer_reader is None:
+            self._x_pointer_reader = _XPointerReader()
+        asked = self._pointer_moved_at
+        xy = await asyncio.to_thread(self._x_pointer_reader.read)
+        if xy is None:
+            return None
+        if self._pointer_moved_at != asked:
+            return self._pointer_at()
+        self.last_x, self.last_y = xy
+        return (float(xy[0]), float(xy[1]), 1.0, None)
+
+    def _display_at(self, x: float, y: float) -> Tuple[str, float, float, float, float]:
+        """The display whose laid-out rectangle holds a desktop point, the point
+        in that display's coordinates, and the display's size; for a point outside
+        them all (the framebuffer can be a little wider than the layout), the
+        nearest one, clamped into it."""
+        layouts = getattr(self.data_server_instance, "display_layouts", None) or {}
+        best = None
+        for did, rect in list(layouts.items()):
+            rx, ry = rect.get("x") or 0, rect.get("y") or 0
+            rw, rh = rect.get("w") or 0, rect.get("h") or 0
+            if rw <= 0 or rh <= 0:
+                continue
+            if rx <= x < rx + rw and ry <= y < ry + rh:
+                return did, x - rx, y - ry, rw, rh
+            cx = min(max(x, rx), rx + rw - 1)
+            cy = min(max(y, ry), ry + rh - 1)
+            d = (x - cx) ** 2 + (y - cy) ** 2
+            if best is None or d < best[0]:
+                best = (d, did, cx - rx, cy - ry, rw, rh)
+        if best is None:
+            return "primary", x, y, float("inf"), float("inf")
+        return best[1:]
 
     async def __gamepad_disconnect(self, gamepad_idx: Optional[int] = None) -> None:
         """Disassociate one slot (or all, with None), releasing anything held.
@@ -5079,6 +5323,11 @@ class WebRTCInput:
         handler.
         """
         logger_webrtc_input.debug("Releasing gamepad associations (persistent instances stay up).")
+        for conn_id in list(self._pointer_echoes):
+            self._drop_pointer_echo(conn_id)
+        if self._pointer_echo_poll is not None:
+            self._pointer_echo_poll.cancel()
+            self._pointer_echo_poll = None
         await self.__gamepad_disconnect()
         self.gamepad_instances = {}
         self.gamepad_heartbeats.clear()
@@ -6124,11 +6373,13 @@ class WebRTCInput:
             if not is_static_relative:
                 if relative:
                     if hasattr(self.wayland_input, 'inject_relative_mouse_move'):
-                        self.wayland_input.inject_relative_mouse_move(float(x), float(y))
+                        motion = self.wayland_input.inject_relative_mouse_move(float(x), float(y))
                     else:
-                        self.wayland_input.inject_mouse_move(float(final_x), float(final_y))
+                        motion = self.wayland_input.inject_mouse_move(float(final_x), float(final_y))
                 else:
-                    self.wayland_input.inject_mouse_move(float(final_x), float(final_y))
+                    motion = self.wayland_input.inject_mouse_move(float(final_x), float(final_y))
+                if isinstance(motion, int):
+                    self._wl_motion = motion
             
             if button_mask != self.button_mask:
                 for bit_index in range(8):
@@ -8595,6 +8846,7 @@ class WebRTCInput:
             # Dropped rather than defaulted: a default would warp to the origin.
             try: x, y, button_mask, scroll_magnitude = [int(i) for i in toks[1:5]]
             except (ValueError, IndexError): return
+            seq = None
             if len(toks) > 5:
                 # Motion may travel a channel that keeps no order, so pointer
                 # messages are numbered: an absolute position older than the
@@ -8616,6 +8868,10 @@ class WebRTCInput:
                     button_mask = (self.button_mask & ~pulse) | (button_mask & pulse)
             try: await self.send_x11_mouse(x, y, button_mask, scroll_magnitude, relative, display_id=display_id)
             except Exception as e: logger_webrtc_input.warning(f"Failed to set mouse cursor: {e}")
+            if self._pointer_echoes:
+                self._pointer_moved(conn_id, seq, x if relative else 0, y if relative else 0)
+        elif msg_type == "_pointer_echo":
+            await self._set_pointer_echo(conn_id, len(toks) > 1 and toks[1].strip() == "1")
         elif msg_type == "p": await self.on_mouse_pointer_visible(bool(int(toks[1])))
         elif msg_type == "vp":
             # Where this display's page shows its stream on the user's desktop,

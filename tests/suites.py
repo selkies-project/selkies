@@ -116,6 +116,8 @@ SUITES: list = [
     {"path": "unit/test_ws_gate_reprobe.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ws_send_liveness.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_sequence.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_pointer_echo.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_pointer_echo_client.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_video_timing_legs.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rtp_capture_clock.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webrtc_peer_silence.py", "tier": "unit", "timeout": 60},

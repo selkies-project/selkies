@@ -15,6 +15,10 @@ On Wayland the pinch is also a check of the server: keys reach the seat through
 the keyboard worker and wheel clicks straight from the message, so the Control a
 pinch is wrapped in has to be down before its click arrives.
 
+Trackpad mode draws the cursor on the page, where the server echoes the pointer,
+with nothing composited into the video: the drawn cursor has to sit where the
+session's pointer is after the finger moves it, and follow a warp no page sent.
+
     python3 tests/e2e/test_touch.py x11|wl
 """
 import os
@@ -42,6 +46,18 @@ SYNTHETIC_TOUCH_JS = """(a) => {
   const list = (ps) => legacy ? document.createTouchList(...ps.map(mk)) : ps.map(mk);
   el.dispatchEvent(new TouchEvent(a.type, {touches: list(a.touches), targetTouches: list(a.touches),
       changedTouches: list(a.changed), bubbles: true, cancelable: true}));
+}"""
+
+# Where the page draws trackpad mode's cursor, in the stream's pixels, and
+# whether it had the cursor composited instead; null while none is drawn.
+PAGE_CURSOR_JS = r"""() => {
+  const input = window.webrtcInput;
+  if (!input || input.cursorDiv.style.display !== 'block') return null;
+  const m = /translate\(([-\d.]+)px, ([-\d.]+)px\)/.exec(input.cursorDiv.style.transform || '');
+  const box = input._streamBox();
+  if (!m || !box) return null;
+  const x = Number(m[1]) + input.cursorHotspot.x, y = Number(m[2]) + input.cursorHotspot.y;
+  return [(x - box.left) * box.scaleX, (y - box.top) * box.scaleY, !!input._echoComposited];
 }"""
 
 # Firefox exposes touch events on a desktop without a touch screen only when
@@ -151,6 +167,19 @@ class XWatcher:
             self.d.close()
         except Exception:
             pass
+
+
+def near(drawn: Optional[list], at: Tuple[float, float], slack: float = 2) -> bool:
+    return drawn is not None and abs(drawn[0] - at[0]) <= slack and abs(drawn[1] - at[1]) <= slack
+
+
+def trackpad_stroke(f: Fingers, x: float = 300, y: float = 300) -> None:
+    """One finger drawn slowly down and to the right across the trackpad."""
+    f.down((1, x, y))
+    for i in range(1, 11):
+        time.sleep(0.016)
+        f.move((1, x + 8 * i, y + 4 * i))
+    f.up(1)
 
 
 def set_mode(page: Any, trackpad: bool) -> None:
@@ -291,6 +320,25 @@ def x11_block(res: "H.Results", engine: str, mode: str) -> None:
             res.check(f"{tag}: a trackpad pinch out is Ctrl+wheel up",
                       4 <= len(zoom) <= 6 and inside, f"{len(zoom)} notches, control held {inside}")
 
+            trackpad_stroke(f)
+            time.sleep(0.4)
+            drawn = page.evaluate(PAGE_CURSOR_JS)
+            xd = H.x_display()
+            p = xd.screen().root.query_pointer()
+            res.check(f"{tag}: trackpad mode draws the cursor on the page, where the pointer is",
+                      near(drawn, (p.root_x, p.root_y)), f"page {drawn}, server {(p.root_x, p.root_y)}")
+            res.check(f"{tag}: with nothing composited into the video", drawn is not None and not drawn[2], drawn)
+            xd.screen().root.warp_pointer(320, 200)
+            xd.sync()
+            xd.close()
+            t0 = time.monotonic()
+            warped = None
+            while time.monotonic() - t0 < 1.5 and not near(warped, (320, 200), 1):
+                time.sleep(0.01)
+                warped = page.evaluate(PAGE_CURSOR_JS)
+            res.check(f"{tag}: a warp no page sent moves it too", near(warped, (320, 200), 1),
+                      f"page {warped} after {round((time.monotonic() - t0) * 1000)} ms")
+
             # --- direct touch ----------------------------------------------
             set_mode(page, False)
             counts = []
@@ -371,6 +419,14 @@ def wayland_block(res: "H.Results", mode: str) -> None:
                 time.sleep(0.002)
             res.check(f"{tag}: a trackpad tap clicks on the seat as the finger lifts",
                       lag is not None and lag < 100, f"press seen after {lag and round(lag)} ms")
+            trackpad_stroke(f)
+            time.sleep(0.4)
+            drawn = page.evaluate(PAGE_CURSOR_JS)
+            seat = [l for l in obs.lines if l.get("kind") == "ptr_motion"]
+            at = (seat[-1]["x"], seat[-1]["y"]) if seat else None
+            res.check(f"{tag}: trackpad mode draws the cursor on the page, where the seat's pointer is",
+                      at is not None and near(drawn, at), f"page {drawn}, seat {at}")
+            res.check(f"{tag}: with nothing composited into the video", drawn is not None and not drawn[2], drawn)
         finally:
             if obs is not None:
                 obs.stop()

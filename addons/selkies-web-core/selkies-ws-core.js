@@ -37,7 +37,9 @@
  * `cmd,<command>`, `SET_NATIVE_CURSOR_RENDERING,<0|1>`,
  * `vp,<originX>,<originY>,<scaleX>,<scaleY>` (this page's stream box on the
  * user's desktop, relayed to the other displays), and the input verbs of
- * lib/input.js. The server sends `MODE websockets`, `AUTH_SUCCESS,{json}`,
+ * lib/input.js, its trackpad mode's `_pointer_echo,<0|1>` among them, which
+ * the server answers with `pointer,` system actions. The server sends
+ * `MODE websockets`, `AUTH_SUCCESS,{json}`,
  * `ROLE_UPDATE,{json}`, `MK_ACCESS,<0|1>`, `VIDEO_STARTED`, `VIDEO_STOPPED`,
  * `AUDIO_STARTED`, `AUDIO_STOPPED`, `AUDIO_DISABLED`, `MICROPHONE_DISABLED`,
  * `WEBCAM_DISABLED`, `WEBCAM_KEYFRAME`, `CAPTURE_DEMAND <subject> <0|1>`,
@@ -4637,6 +4639,7 @@ const initializeInput = () => {
 
   const initialSlot = clientSlot;
   inputInstance = new Input(overlayInput, sendInputFunction, isSharedMode, playerInputTargetIndex, useCssScaling, initialSlot);
+  inputInstance.displayId = displayId;
   inputInstance.motionBacklog = () => (websocket ? websocket.bufferedAmount : 0);
   inputInstance.setShortcutsEnabled(keyboardShortcuts);
 
@@ -5561,9 +5564,6 @@ function receiveMessage(event) {
         trackpadMode = true;
         setBoolParam('trackpadMode', true);
         window.webrtcInput.setTrackpadMode(true);
-        if (websocket && websocket.readyState === WebSocket.OPEN) {
-          websocket.send("SET_NATIVE_CURSOR_RENDERING,1");
-        }
       }
       break;
     case 'touchinput:touch':
@@ -5571,9 +5571,6 @@ function receiveMessage(event) {
         trackpadMode = false;
         setBoolParam('trackpadMode', false);
         window.webrtcInput.setTrackpadMode(false);
-        if (websocket && websocket.readyState === WebSocket.OPEN) {
-          websocket.send("SET_NATIVE_CURSOR_RENDERING,0");
-        }
       }
       break;
     default:
@@ -8231,12 +8228,9 @@ class WorkerWebSocket {
 
         if (window.webrtcInput && typeof window.webrtcInput.setTrackpadMode === 'function') {
           window.webrtcInput.setTrackpadMode(trackpadMode);
-        }
-        if (trackpadMode) {
-          if (websocket && websocket.readyState === WebSocket.OPEN) {
-            websocket.send("SET_NATIVE_CURSOR_RENDERING,1");
-            console.log('[websockets] Applied trackpad mode on initialization.');
-          }
+          // The page keeps its Input across a reconnect, and the echo it asked
+          // for ended with the old socket.
+          window.webrtcInput.resumePointerEcho();
         }
 
         if (playButtonElement) playButtonElement.classList.add('hidden');
@@ -8624,6 +8618,10 @@ class WorkerWebSocket {
                 systemMsg.action.startsWith('rumble,') && window.webrtcInput) {
               const [slot, strong, weak, ms] = systemMsg.action.split(',').slice(1).map(Number);
               window.webrtcInput.rumble(slot, strong, weak, ms);
+            }
+            else if (typeof systemMsg.action === 'string' &&
+                systemMsg.action.startsWith('pointer,') && window.webrtcInput) {
+              window.webrtcInput.onPointerEcho(systemMsg.action);
             }
           } catch (e) {
             console.error('Error parsing system data:', e);
