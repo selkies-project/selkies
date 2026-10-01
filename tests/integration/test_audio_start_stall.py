@@ -7,7 +7,9 @@ sink. A sound server that accepts the connection and then never answers is
 read to the control layer's own bounds, tens of seconds, so the start runs off
 the websockets receive loop: a pad announced while it is outstanding is
 associated at once, as it is over the WebRTC data channel, whose audio start
-was never on its message path.
+was never on its message path. The start holds only the audio lock, so a later
+SETTINGS, which the receive loop applies inline under the reconfigure lock,
+goes ahead too, and a pad announced behind it is not held either.
 
 Usage: python3 tests/integration/test_audio_start_stall.py
 """
@@ -27,15 +29,16 @@ import websockets  # noqa: E402
 
 SETTINGS_PROCESSED = "settings applied for 'primary'"
 ASSOCIATED = "associated with persistent virtual gamepad slot 0"
+ASSOCIATED_BEHIND_SETTINGS = "associated with persistent virtual gamepad slot 1"
 AUDIO_ATTEMPTED = "Initial setup: Primary client connected, audio not active, attempting start."
 
 
-def settings_payload() -> str:
-    """The initial SETTINGS a primary page sends."""
+def settings_payload(framerate: int = 60) -> str:
+    """The SETTINGS a primary page sends."""
     return "SETTINGS," + json.dumps({
         "displayId": "primary",
         "initialClientWidth": 1280, "initialClientHeight": 720,
-        "manual_resolution": False, "framerate": 60, "encoder": "h264enc",
+        "manual_resolution": False, "framerate": framerate, "encoder": "h264enc",
         "scaling_dpi": 96,
     })
 
@@ -114,6 +117,14 @@ def run() -> "H.Results":
                       else f"{associated - processed:.1f}s after the settings")
             res.check("the audio start was still attempted",
                       await wait_log(AUDIO_ATTEMPTED, 20) is not None)
+            await ws.send(settings_payload(framerate=30))
+            sent = time.monotonic()
+            name = base64.b64encode(b"Stall Test Pad 2").decode()
+            await ws.send(f"js,c,1,{name},4,17")
+            associated = await wait_log(ASSOCIATED_BEHIND_SETTINGS, 20)
+            res.check("a pad announced behind a later SETTINGS, during the same start, is associated within 5 s",
+                      associated is not None and associated - sent < 5.0,
+                      "never" if associated is None else f"{associated - sent:.1f}s after it")
 
     try:
         asyncio.run(announce_behind_the_audio_start())

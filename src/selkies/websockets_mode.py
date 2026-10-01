@@ -1261,10 +1261,14 @@ class DataStreamingServer(BaseStreamingService):
     forwarding, stats collectors, and the display layout/reconfiguration
     engine (X11 xrandr monitors or Wayland compositor outputs).
 
-    Concurrency contracts: `_reconfigure_lock` serializes reconfiguration and
-    audio pipeline start/stop (with `_reconfigure_pending` coalescing requests
-    that arrive during a hold); `_video_capture_lock` serializes per-display
-    capture start/stop underneath it. Native capture objects are persistent
+    Concurrency contracts: `_reconfigure_lock` serializes reconfiguration (with
+    `_reconfigure_pending` coalescing requests that arrive during a hold);
+    `_audio_lock` serializes the audio pipeline's start, stop and re-gating,
+    taken inside `_reconfigure_lock` where a path holds both and never around
+    it, so a sound server slow to answer holds up the audio alone (pcmflux's
+    start waits up to its handshake window while its connect retries run);
+    `_video_capture_lock` serializes per-display capture start/stop underneath
+    the reconfigure lock. Native capture objects are persistent
     per display so restarts keep the encoder backend warm.
 
     Attributes:
@@ -1399,6 +1403,7 @@ class DataStreamingServer(BaseStreamingService):
         self._last_adjustment_timestamp = 0.0
         self.client_settings_received = asyncio.Event()
         self._reconfigure_lock = asyncio.Lock()
+        self._audio_lock = asyncio.Lock()
         self._video_capture_lock = asyncio.Lock()
         self._is_reconfiguring = False
         self._reconfigure_pending = False
@@ -1806,9 +1811,9 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.info(f"Applied audio bitrate live: {self.app.audio_bitrate} bps")
             except Exception as e:
                 data_logger.warning(f"Live audio bitrate update failed ({e}); restarting audio pipeline.")
-                # Under the guard like every audio start/stop, and re-checked there:
-                # a concurrent guarded op must not orphan a second AudioCapture.
-                async with self._reconfigure_guard():
+                # Under the audio lock like every audio start/stop, and re-checked
+                # there: a concurrent one must not orphan a second AudioCapture.
+                async with self._audio_lock:
                     if self.is_pcmflux_capturing:
                         await self._stop_pcmflux_pipeline()
                         await self._start_pcmflux_pipeline()
@@ -2037,9 +2042,9 @@ class DataStreamingServer(BaseStreamingService):
         _spawn_background_task(self._restart_failed_pcmflux(module), name="pcmflux-restart")
 
     async def _restart_failed_pcmflux(self, failed_module: Any) -> None:
-        """Stop and start the audio pipeline under the reconfigure guard, unless
-        the failed capture was already replaced or stopped meanwhile."""
-        async with self._reconfigure_guard():
+        """Stop and start the audio pipeline under the audio lock, unless the
+        failed capture was already replaced or stopped meanwhile."""
+        async with self._audio_lock:
             if self.pcmflux_module is not failed_module or not self.is_pcmflux_capturing:
                 return
             data_logger.info("Restarting the audio pipeline after its capture failed.")
@@ -2131,10 +2136,10 @@ class DataStreamingServer(BaseStreamingService):
     async def _regate_audio_redundancy(self) -> None:
         """Recompute the RED gate for the shared audio stream and, if it flipped
         while capturing, restart the pipeline so the new red_distance takes
-        effect. Callers hold the reconfigure guard (pipeline start/stop must be
-        serialized against reconfigure_displays). A missing app means teardown
-        (the last client leaving drops RED to 0, and the disconnect path stops
-        the pipeline itself), so no restart is attempted then."""
+        effect. Callers hold `_audio_lock`, which serializes pipeline start and
+        stop. A missing app means teardown (the last client leaving drops RED
+        to 0, and the disconnect path stops the pipeline itself), so no restart
+        is attempted then."""
         desired = self._compute_audio_red_distance()
         if desired == self._active_audio_red_distance:
             return
@@ -2155,7 +2160,7 @@ class DataStreamingServer(BaseStreamingService):
         page's first SETTINGS is in: started for a primary page that starts with
         audio on, stopped when nobody left listens to a capture that policy
         keeps off, and otherwise re-gated for the client set that just grew."""
-        async with self._reconfigure_guard():
+        async with self._audio_lock:
             audio_is_active = self.is_pcmflux_capturing
             if not pipeline_starts_on('audio', display_id):
                 if audio_is_active and not self._audio_listeners(exclude=websocket):
@@ -2174,7 +2179,7 @@ class DataStreamingServer(BaseStreamingService):
 
         Resolves the RED distance for the current client set at start, so a
         gate change while running requires a restart (see
-        _regate_audio_redundancy). Callers serialize via the reconfigure guard.
+        _regate_audio_redundancy). Callers hold `_audio_lock`.
 
         Returns:
             True when capturing afterwards (already-running counts); False when
@@ -2286,26 +2291,28 @@ class DataStreamingServer(BaseStreamingService):
 
         Deadlock-proof by construction: reconfigure_displays() self-acquires
         the reconfigure lock, so it runs first and outside the guard; the
-        audio/backpressure teardown then runs under the guard (a
-        disconnect/connect race could otherwise tear down audio a new client
-        just started), and none of the awaited teardowns re-acquire the lock.
+        backpressure teardown then runs under the guard and the audio teardown
+        under the audio lock inside it (a disconnect/connect race could
+        otherwise tear down audio a new client just started), and none of the
+        awaited teardowns re-acquire either lock.
         """
         logger.debug("Initiating unified pipeline shutdown...")
         await self.reconfigure_displays()
         async with self._reconfigure_guard():
-            await self._stop_pcmflux_pipeline()
+            async with self._audio_lock:
+                await self._stop_pcmflux_pipeline()
+                if self.pcmflux_send_task and not self.pcmflux_send_task.done():
+                    self.pcmflux_send_task.cancel()
+                    try:
+                        await self.pcmflux_send_task
+                    except asyncio.CancelledError:
+                        pass
             if self.display_clients:
                 stop_bp_tasks = [
                     self._ensure_backpressure_task_is_stopped(disp_id)
                     for disp_id in self.display_clients.keys()
                 ]
                 await asyncio.gather(*stop_bp_tasks, return_exceptions=True)
-            if self.pcmflux_send_task and not self.pcmflux_send_task.done():
-                self.pcmflux_send_task.cancel()
-                try:
-                    await self.pcmflux_send_task
-                except asyncio.CancelledError:
-                    pass
         logger.debug("Unified pipeline shutdown complete.")
 
     async def _ensure_backpressure_task_is_stopped(self, display_id: str, notify: bool = True) -> bool:
@@ -3880,8 +3887,10 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.info(f"Applied audio bitrate live: {self.app.audio_bitrate} bps")
                     except Exception as e:
                         data_logger.warning(f"Live audio bitrate update failed ({e}); restarting audio pipeline.")
-                        await self._stop_pcmflux_pipeline()
-                        await self._start_pcmflux_pipeline()
+                        async with self._audio_lock:
+                            if self.is_pcmflux_capturing:
+                                await self._stop_pcmflux_pipeline()
+                                await self._start_pcmflux_pipeline()
                 needs_fallback_reconfigure = False
                 if not (is_initial_settings or dimensional_change) and video_params_changed:
                     restart_video_params = ['encoder', 'use_cpu', 'video_fullcolor', 'rate_control_mode']
@@ -4200,7 +4209,7 @@ class DataStreamingServer(BaseStreamingService):
             # This socket is in the audio fan-out before its SETTINGS (a viewer never
             # sends one): absent means not RED-capable, so re-gate a mid-capture join.
             if self.is_pcmflux_capturing:
-                async with self._reconfigure_guard():
+                async with self._audio_lock:
                     await self._regate_audio_redundancy()
 
             if self._resource_monitor is None:
@@ -4912,7 +4921,7 @@ class DataStreamingServer(BaseStreamingService):
                     elif message == "START_AUDIO":
                         async def _handle_start_audio_request():
                             await self.client_settings_received.wait()
-                            async with self._reconfigure_guard():
+                            async with self._audio_lock:
                                 data_logger.debug(
                                     "Received START_AUDIO command from client for server-to-client audio."
                                 )
@@ -4946,12 +4955,17 @@ class DataStreamingServer(BaseStreamingService):
                         start_audio_task_ws = asyncio.create_task(_handle_start_audio_request())
 
                     elif message == "STOP_AUDIO":
-                        async with self._reconfigure_guard():
-                            data_logger.debug("Received STOP_AUDIO")
-                            if self.is_pcmflux_capturing:
-                                await self._stop_pcmflux_pipeline()
-                            if self.clients:
-                                await _broadcast_to_clients(self.clients, "AUDIO_STOPPED", watched=True)
+                        # Off the loop like START_AUDIO: a start the sound server is slow
+                        # to answer holds the audio lock, and this socket's input with it.
+                        # Taken in order behind that start, and left to finish on disconnect.
+                        async def _handle_stop_audio_request():
+                            async with self._audio_lock:
+                                data_logger.debug("Received STOP_AUDIO")
+                                if self.is_pcmflux_capturing:
+                                    await self._stop_pcmflux_pipeline()
+                                if self.clients:
+                                    await _broadcast_to_clients(self.clients, "AUDIO_STOPPED", watched=True)
+                        _spawn_background_task(_handle_stop_audio_request(), name="stop-audio")
 
                     elif message.startswith("SET_NATIVE_CURSOR_RENDERING,"):
                         # Taken as it comes: before any capture it is only recorded, for the
@@ -5056,7 +5070,7 @@ class DataStreamingServer(BaseStreamingService):
             # A departing non-capable client may let the rest enable RED.
             self.audio_redundancy_by_ws.pop(websocket, None)
             if self.is_pcmflux_capturing:
-                async with self._reconfigure_guard():
+                async with self._audio_lock:
                     await self._regate_audio_redundancy()
 
             disconnected_display_id = None
@@ -5640,8 +5654,9 @@ class DataStreamingServer(BaseStreamingService):
  
     @contextlib.asynccontextmanager
     async def _reconfigure_guard(self):
-        """Hold _reconfigure_lock for a direct critical section (audio pipeline
-        ops) and, on release, run any reconfigure coalesced meanwhile.
+        """Hold _reconfigure_lock for a direct critical section (a capture
+        restart outside reconfigure_displays()) and, on release, run any
+        reconfigure coalesced meanwhile.
 
         reconfigure_displays()'s own re-run loop only consumes requests that
         arrive through it; a reconfigure coalesced during a direct hold would
@@ -6158,7 +6173,7 @@ class DataStreamingServer(BaseStreamingService):
         """Start the audio capture a viewer-driven primary capture is owed, unless
         every client left while the sound server was being asked."""
         try:
-            async with self._reconfigure_guard():
+            async with self._audio_lock:
                 if self.clients:
                     await self._start_pcmflux_pipeline()
         except Exception as e:

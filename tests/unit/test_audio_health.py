@@ -53,6 +53,7 @@ def server():
     srv._pcmflux_reported_failure = None
     srv._pcmflux_last_restart = 0.0
     srv._reconfigure_lock = asyncio.Lock()
+    srv._audio_lock = asyncio.Lock()
     srv._reconfigure_pending = False
     srv.pcmflux_send_task = None
     srv.pcmflux_audio_queue = None
