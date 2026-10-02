@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
 from playwright.sync_api import sync_playwright
+from typing import Optional
 
 
 # A field of the class the dashboards put on their root, whose keys the input
@@ -39,16 +40,17 @@ FF_E2E_PROFILE = C.FF_E2E_PROFILE
 openh264_version = C.openh264_version
 
 
-def engine_launch(p, engine: str):
+def engine_launch(p, engine: str, prefs: Optional[dict] = None):
     """Return (browser_or_none, ctx). Firefox needs a persistent profile that
     carries the OpenH264 GMP plugin (bundled profile ships without it, so the
-    WebRTC answer rejects the video m-line) plus autoplay/clipboard prefs."""
+    WebRTC answer rejects the video m-line) plus autoplay/clipboard prefs, and
+    `prefs` on top."""
     if engine == "chromium":
         b = C.chromium_launch(p)
         return b, b.new_context(viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1})
     if engine == "firefox":
         ctx = C.firefox_persistent_context(
-            p, viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1})
+            p, viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1}, prefs=prefs)
         return None, ctx
     b = getattr(p, engine).launch(headless=True)
     return b, b.new_context(viewport={"width": 1280, "height": 720, "deviceScaleFactor": 1})
@@ -445,7 +447,8 @@ def output_block(engine: str) -> "H.Results":
                 ctx = browser.new_context(viewport={"width": 1280, "height": 720})
                 ctx.grant_permissions(["microphone"], origin=H.BASE_URL)
             else:
-                browser, ctx = engine_launch(p, engine)
+                # The microphone grant that names the outputs, without a prompt no one answers.
+                browser, ctx = engine_launch(p, engine, prefs={"media.navigator.permission.disabled": True})
             try:
                 page = ctx.pages[0] if (engine == "firefox" and ctx.pages) else ctx.new_page()
                 errors, said = [], []

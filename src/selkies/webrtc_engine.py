@@ -77,6 +77,7 @@ from .settings import (
 from . import audit
 from . import capture_demand
 from . import stream_stats
+from .stream_server import ConnectionVerdict
 from .ice import TcpMux, UdpMux
 from .ice.ice import get_host_addresses
 from .webcam import CODEC_BY_NAME, get_shared_webcam, webcam_locked_off, webcam_uplink_allowed
@@ -2376,6 +2377,24 @@ class RTCApp:
         peer_obj = self.peer_connections.get(client_peer_id) or {}
         self.invalidate_reference(peer_obj.get("display_id") or "primary", frame_id)
 
+    def _note_connection(self, client_peer_id: str, frames: int, missed: int) -> None:
+        """Fold frames into a peer's connection verdict (`ConnectionVerdict`), with
+        those its display's bridge held back for the link's steered rate since the
+        last, and tell the page when the verdict changes."""
+        peer = self.peer_connections.get(client_peer_id)
+        if peer is None:
+            return
+        bridge = (self.displays.get(peer.get("display_id") or "primary") or {}).get("video_bridge")
+        if bridge is not None:
+            held = bridge.over_budget - peer.setdefault("over_budget_seen", bridge.over_budget)
+            peer["over_budget_seen"] = bridge.over_budget
+            frames += held
+            missed += held
+        poor = peer.setdefault("connection", ConnectionVerdict()).note(frames, missed, time.monotonic())
+        channel = peer.get("data_channel")
+        if poor is not None and channel is not None:
+            self.send_message_to_channel(channel, "connection", {"poor": poor})
+
     def _keyframe_request(self, display_id: str) -> Callable[[], None]:
         """Build the keyframe request of a display's video bridge.
 
@@ -2476,12 +2495,23 @@ class RTCApp:
         media_relay = graph["relay"]
 
         rtp_video_sender = peer_connection.addTrack(media_relay.subscribe(graph["video_media"]))
-        if client_type is ClientType.CONTROLLER:
-            rtp_video_sender.on_frame_sent = (
-                lambda capture_ns, size, did=display_id:
-                    self.on_frame_sent and self.on_frame_sent(did, capture_ns, size))
+        controller = client_type is ClientType.CONTROLLER
+
+        def frame_sent(capture_ns: int, size: int, cid: str = client_peer_id, did: str = display_id) -> None:
+            self._note_connection(cid, 0, -1)
+            if controller and self.on_frame_sent:
+                self.on_frame_sent(did, capture_ns, size)
+
+        def frame_lost(frame_id: int, cid: str = client_peer_id) -> None:
+            self.on_lost_frame(cid, frame_id)
+            self._note_connection(cid, 0, 1)
+
+        # A frame counts as missed from the pacer's hand until its last packet leaves,
+        # and again once the peer lost it past repair.
+        rtp_video_sender.on_frame_sent = frame_sent
+        rtp_video_sender.on_frame_queued = lambda cid=client_peer_id: self._note_connection(cid, 1, 1)
         rtp_video_sender.on("pli", lambda cid=client_peer_id, ct=client_type: self.on_pli(cid, ct))
-        rtp_video_sender.on("lost_frame", lambda frame_id, cid=client_peer_id: self.on_lost_frame(cid, frame_id))
+        rtp_video_sender.on("lost_frame", frame_lost)
         rtp_audio_sender = None
         if graph.get("audio_media") is not None:
             rtp_audio_sender = peer_connection.addTrack(media_relay.subscribe(graph["audio_media"]))

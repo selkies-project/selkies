@@ -104,12 +104,18 @@ jobs:
       contents: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
 
+  # Three shards, each the third of the selected cases tests/conftest.py deals
+  # it by budget, so a shard stays inside the job's two hours.
   suites:
-    name: Suites (${{ inputs.tiers || 'integration or e2e' }})
+    name: Suites (${{ inputs.tiers || 'integration or e2e' }}, ${{ matrix.shard }}/3)
     needs: [wheels]
     if: ${{ always() && (needs.wheels.result == 'success' || needs.wheels.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
       - name: Free disk space
@@ -317,7 +323,9 @@ jobs:
         env:
           TIERS: ${{ inputs.tiers || 'integration or e2e' }}
           SUITES: ${{ inputs.suites || '' }}
-        run: python -m pytest tests -m "${TIERS}" -k "${SUITES}" -v --junitxml=suites-report.xml -o junit_logging=system-out
+          SELKIES_SUITE_SHARD: ${{ matrix.shard }}/3
+        # A narrow selection can leave a shard nothing: pytest's 5, not a failure.
+        run: python -m pytest tests -m "${TIERS}" -k "${SUITES}" -v --junitxml=suites-report.xml -o junit_logging=system-out || [ $? = 5 ]
       - name: Fail if any suite skipped
         if: ${{ !cancelled() }}
         run: python tests/tools/assert_no_skips.py suites-report.xml
@@ -331,7 +339,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: suite-logs
+          name: suite-logs-${{ matrix.shard }}
           path: suite-logs/
           if-no-files-found: ignore
           retention-days: 7

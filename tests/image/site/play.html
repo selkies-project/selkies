@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>it-play</title>
+<style>html, body { margin: 0; background: #000; } video { width: 100vw; height: 100vh; }</style>
+<video id="v" src="av.webm" autoplay loop playsinline></video>
+<script src="it.js"></script>
+<script>
+  // A clip with a moving picture and a tone, played by the session's browser.
+  const v = document.getElementById('v');
+  v.play().catch(() => {});
+  setInterval(() => IT.report('play', {t: v.currentTime, paused: v.paused, w: v.videoWidth,
+                                       error: v.error && v.error.code}), 500);
+</script>

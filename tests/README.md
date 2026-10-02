@@ -13,6 +13,7 @@ also work as:
 ```bash
 pytest tests -m unit                      # source tree only
 pytest tests -m "integration or e2e"      # needs a display and browsers
+pytest tests -m image                     # a published image, see Image tier
 pytest tests -k gamepad -v
 ```
 
@@ -36,6 +37,7 @@ every interpreter the package supports.
 | `integration` | An X display named by `E2E_DISPLAY` or the Wayland backend, PulseAudio, and `selkies` importable with `pixelflux`/`pcmflux`. Suites needing a server of their own (the keymap, connection-leak, and session-DPI checks) start a throwaway `Xvfb` on a free display number instead, and need nothing set. The output-layout suite wants the Xvfb the images ship, XLibre's patched to offer pluggable outputs, which `addons/base/build-xvfb.sh` builds (the CI job does exactly that); on a stock one it skips. The XWayland typing check nests `labwc` (which brings `Xwayland`) on a private socket and reads the keys back out of `xev` from `x11-utils`, and skips without them. The Wayland seam and session-screen suites want the labwc the images ship — patched with the control socket and the seam cursor path — which `addons/base/build-labwc.sh` builds (the CI job does exactly that); on a stock labwc the seam suite skips its held-grab checks and the session-screen suite skips whole. The packaging simulation needs neither, only the source tree and a `python3` that can build a virtualenv. |
 | `e2e` | The above plus Playwright browsers (WebKit on Linux also needs GStreamer's `opengl` plugin, `gstreamer1.0-gl`, which `playwright install --with-deps webkit` brings; without it WebKit paints every `<video>` through a software fallback sink, so the harness refuses to launch it), the built web client (`scripts/ci/build-web.sh`), `wl-clipboard` for the Wayland clipboard checks, `wmctrl` for the two-display desktop-window check (skipped with a notice when absent), `tkinter` for the sender-lag recovery suite's scene painter (skipped without it), `tests/tools/fetch-openh264.sh` for the Firefox WebRTC blocks, and a coturn `turnserver` on `PATH` (or named by `E2E_TURNSERVER`) for the TURN relay suite, which skips with the install command when there is none. The pointer-motion suite drives the *installed* Chrome and Firefox on the test display with XTEST, and skips when neither is on `PATH`. The Wayland typed-text suite types into Chrome and Firefox running on pixelflux's compositor and, through pixelflux's virtual keyboard, on a headless `labwc`, whose half it skips without one. The pointer-lock suite's game-view block needs `libsdl2-2.0-0` (skipped without it), and its desktop selectors need `openbox`, `kwin-x11`, and `kwin-wayland` plus `dbus-run-session`, and the `labwc` the Wayland suites already use (each skipped with the missing binary named). The gaming-mode suite drives the installed Chrome, windowed under `openbox` on a private X server, and skips without either. |
 | `perf` | A long constrained-link pacer benchmark, plus `xterm` and `xdotool` for the screen-damage load generator. Run on request. |
+| `image` | A published desktop image and somewhere to run it (Kubernetes, Docker, or a session already up), installed Chrome, release Firefox, Playwright's WebKit, `xdotool` and `xclip` on the client display. Run on request; see [Image tier](#image-tier). |
 | `soak` | The whole `pixelflux`/`pcmflux` API surface, including recording and Wayland. Run on request. |
 
 ## Environment
@@ -124,3 +126,99 @@ ln -sf ../usr/lib32/libc.so.6 root/lib32/libc.so.6
 ln -sf ../usr/lib32/ld-linux.so.2 root/lib/ld-linux.so.2
 MULTILIB_SYSROOT=/tmp/multilib/root tests/packaging/simulate.sh
 ```
+
+## Image tier
+
+The `image` tier runs the maintainer's human-testing checklist (below) against
+a published desktop image rather than this tree. `tests/image/run.py` brings
+the image up by tag or digest once per capture backend (`SELKIES_WAYLAND`),
+switches the streaming mode the way the dashboard's own switch does
+(`POST /api/switch`), and runs every item in every engine: each cell is one
+image x transport x backend x engine.
+
+```bash
+E2E_DISPLAY=:99 E2E_IMAGE_NAMESPACE=selkies \
+E2E_IMAGES="trixie=ghcr.io/selkies-project/selkies/desktop:main-debiantrixie,resolute=ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04" \
+  python3 tests/image/run.py
+python3 tests/image/run.py --items 1,4 --engines chromium --backends x11 \
+  egl=ghcr.io/selkies-project/selkies-egl-desktop@sha256:...
+```
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `E2E_IMAGES` | none; the suite skips | `label=ref` pairs, comma-separated; positional arguments win. A tag is fine: the digest that ran is recorded. |
+| `E2E_IMAGE_WHERE` | `kube` | `kube`: a pod in `E2E_IMAGE_NAMESPACE`, reached at its own address from inside the cluster (a node the runner cannot route to is left out and the pod tried elsewhere), or through `kubectl port-forward` with `E2E_IMAGE_REACH=forward` for a runner outside it, where WebRTC needs `SELKIES_TURN_*` in `E2E_IMAGE_ENV` (`E2E_IMAGE_KUBECTL` replaces the `kubectl` command). `docker` or `ssh:HOST`: a container here or on that host (`E2E_IMAGE_DOCKER_GPUS` is passed to `--gpus`). `url:https://HOST:PORT`: a session already running, with `E2E_IMAGE_EXEC` the prefix that runs `bash -c` inside it and `E2E_IMAGE_LOGS` the command printing its log. |
+| `E2E_IMAGE_GPU` | `none` | `nvidia` (a GPU with NVENC, AV1-capable preferred), `nvidia-av1` (Ada or newer only), or `amd` (`amd.com/gpu`). The NVIDIA classes pick nodes by `nvidia.com/gpu.product`; `E2E_IMAGE_GPU_PRODUCTS` (comma-separated) replaces the list for a cluster that names its GPUs differently. |
+| `E2E_IMAGE_PRIORITY_CLASS` | none | The pods' `priorityClassName`. A preempted pod is brought up again before the next cell. |
+| `E2E_IMAGE_TRANSPORTS`, `E2E_IMAGE_BACKENDS`, `E2E_IMAGE_ENGINES`, `E2E_IMAGE_ITEMS` | all | `websockets,webrtc`; `x11,wayland`; `chromium,firefox,webkit`; `1-10`. |
+| `E2E_IMAGE_ENV`, `E2E_IMAGE_LABELS`, `E2E_IMAGE_NAME` | none, none, `selkies-imagetest` | Extra container environment and pod labels (`K=V,...`), and the pod or container name prefix. |
+| `E2E_IMAGE_DRIFT_SECONDS` | `120` | How long item 8 watches the shared view of a still screen for quality drift; tens of minutes for the long check. |
+| `E2E_IMAGE_KEEP` | unset | `1` leaves each target running after its run. |
+
+Targets are started with `SELKIES_ENABLE_BASIC_AUTH=false` and `CAP_SYS_PTRACE`
+(the apps panel's runner needs it), each from a fresh pod or container: one of
+the same name, a killed run's, is removed first. The client browsers run headed on
+`E2E_DISPLAY`, so focus, the X clipboard, and pointer lock are real there:
+Chrome's focus emulation is off on every page and the Firefox profile drops the
+clipboard testing pref. Inside the session the tier serves a small tester site
+on loopback (`tests/image/site`) and opens it in the session's own Chrome and
+Firefox: a known pattern for the decoded-picture checks, a seeded texture for
+quality, and testers for the microphone and webcam, gamepads, playback, and
+text input, each reporting what it saw back through the target's shell. The
+run ends with `$E2E_WORKDIR/image-tier/<run>/table.md` (a row per cell, a
+column per item, `passed/checked`), `results.json` with every check and its
+detail, the screenshots, and each target's server log.
+
+| Item | Module | Checked |
+| --- | --- | --- |
+| 1 | `i01_encoders` | Every encoder the dashboard's menu offers, under CBR and CRF, on the decoded picture and the stream description; Turbo and paint-over on a still screen at the sliders' floor (frames after the stop, quality against no paint-over); 4:4:4 on one-pixel chroma; CPU encoding where a GPU encodes. |
+| 2 | `i02_media_devices` | The top bar's microphone and webcam toggles with fake client devices, heard and seen by a tester in the session's Chrome and Firefox, and the server's virtual devices up. |
+| 3 | `i03_displays` | `#display2` as a second monitor and a window moved onto it; force-aligned resolution, native cursor, antialiasing, presets with HiDPI turning itself off, manual size, UI scaling (Xft.dpi), and reset, on xrandr and the window's own size. |
+| 4 | `i04_clipboard` | 2.5 MB of text and multi-MB PNGs both ways between the session's and the client's X clipboards, with real focus; Upload Image through the panel's file chooser. |
+| 5 | `i05_transfers` | 150 MiB up through Upload Files and down through the Download Files link, byte for byte, timed against a plain TCP stream over the same link. |
+| 6 | `i06_apps` | `SELKIES_COMMAND_ENABLED` first; then an app installed and removed through the Apps panel. |
+| 7 | `i07_gamepad` | A virtual pad and the touch gamepad: every button and four diagonals per stick, read by testers in the session's Chrome and Firefox. |
+| 8 | `i08_shared` | `#shared` gets the screen and sound and nothing else (pointer, keys, clipboard, uploads, gamepad); its picture holds its quality; `#player2`-`#player4` drive pads. |
+| 9 | `i09_shortcuts` | Ctrl+Shift+M, G, F, X and Left Click, pointer lock alone and in gaming mode's fullscreen, and shortcuts off. |
+| 10 | `i10_media_ime` | A clip playing in the session's Chrome and Firefox, its sound and motion reaching the client; Korean composed through an IME on the client into a session text field. |
+
+What WebKit cannot stand in for: Playwright's WebKit is WebKitGTK on Linux, not
+Safari. Its media stack is GStreamer rather than VideoToolbox, so what decodes
+and how fast says nothing about Safari's hardware decoders; it sends Safari's
+user agent but is not Safari's WebRTC, autoplay, or audio-unlock policy. Here it
+also runs headless (headed WebKitGTK's web process dies on an Xvfb display), so
+it has no real focus, no clipboard of its own (Safari's paste confirmation is
+not modeled at all), no fullscreen or pointer lock, no touch moves (an iPad's or
+iPhone's touch is not covered), no IME composition, and only mock camera and
+microphone sources. Those checks report themselves skipped there; a Mac or an
+iPad is still the only way to cover Safari.
+
+The checklist, verbatim:
+
+> Images: https://github.com/selkies-project/selkies/pkgs/container/selkies%2Fdesktop,
+> https://github.com/selkies-project/docker-selkies-glx-desktop, https://github.com/selkies-project/docker-selkies-egl-desktop
+>
+> Repeat (WebSockets, WebRTC) x (X11, Wayland (`SELKIES_WAYLAND=true`)) - four times total. Trixie and Resolute should
+> both be tested for the example desktop.
+>
+> Moreover, the same tests on Chrome, Firefox, and Safari are appreciated.
+>
+> 1. Check all encoders, CRF/CBR, paintover, video streaming mode, 4:4:4 colors, and CPU encoding working properly.
+> 2. Check that the microphone/webcam works (use a web tester in both Firefox and Chrome). The toggle for the
+>    microphone/webcam is up at the top.
+> 3. Make sure the second display works properly by moving a window to the right. Then, toggle force aligned resolution,
+>    native cursor style, and antialiasing. Try changing resolutions (both preset and manual, UI scaling, and HiDPI (it's
+>    supposed to be disabled automatically when a resolution is set), and the reset button as well. See if the desktops
+>    or windows respond.
+> 4. Use very large text clipboard payloads (>2MB) and image payloads. Check if the Image Upload (clipboard) button works
+>    as well.
+> 5. Test file upload and download, preferably for large files over 100MB. Make sure it's fast enough and uses up the
+>    available bandwidth well.
+> 6. Check app install, but it would only work when `SELKIES_COMMAND_ENABLED` is enabled, so check if it's enabled.
+> 7. Test the gamepad (first, the touch gamepad, and your real gamepad if you happen to have it), both on Firefox and
+>    Chrome (they each use different joypad interfaces) with https://hardwaretester.com/gamepad, or any other native
+>    client. You need to press all buttons and test four diagonal directions for each thumbstick.
+> 8. Test `#shared` and `#player*`. For the shared window, only the screen/audio should work and nothing else. Check no
+>    long-term screen quality degradations. For controllers, the gamepad should also work.
+> 9. Test all of the shortcuts, and especially the pointer lock when `Ctrl + Shift + Left Click` or full screen is used.
+> 10. Test audio/videos or anything else on the web browsers. Moreover, you should test IME in your own language.

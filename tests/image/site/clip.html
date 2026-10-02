@@ -1,0 +1,42 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>it-clip</title>
+<style>html, body { margin: 0; height: 100%; background: rgb(240, 240, 240); } textarea { width: 40vw; height: 30vh; }</style>
+<textarea id="t" readonly></textarea>
+<script src="it.js"></script>
+<script>
+  // A session application's copy and paste: T copies the text below, I the
+  // picture, and a paste reports what arrived. Keys and clicks come through the stream.
+  const seen = {ready: false, copied: [], pasted: []};
+  let png = null;
+  (async () => {
+    document.getElementById('t').value = await (await fetch('clip.txt', {cache: 'no-store'})).text();
+    png = await (await fetch('clip.png', {cache: 'no-store'})).blob();
+    seen.ready = true; IT.report('clip', seen);
+  })();
+  const digest = async (buf) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', buf)))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+  document.addEventListener('keydown', async (e) => {
+    if (e.key === 't' || e.key === 'T') {
+      const t = document.getElementById('t'); t.focus(); t.select();
+      seen.copied.push({kind: 'text', ok: document.execCommand('copy'), size: t.value.length});
+    } else if (e.key === 'i' || e.key === 'I') {
+      try { await navigator.clipboard.write([new ClipboardItem({'image/png': png})]); seen.copied.push({kind: 'image', ok: true, size: png.size}); }
+      catch (err) { seen.copied.push({kind: 'image', ok: false, error: String(err)}); }
+    } else return;
+    e.preventDefault(); IT.report('clip', seen);
+  });
+  document.addEventListener('paste', async (e) => {
+    e.preventDefault();
+    const d = e.clipboardData, out = {types: [...d.types]};
+    const text = d.getData('text/plain');
+    if (text) out.text = {size: new TextEncoder().encode(text).length, sha256: await digest(new TextEncoder().encode(text))};
+    for (const it of d.items) {
+      if (it.type === 'image/png') {
+        const f = it.getAsFile(); const bmp = await createImageBitmap(f);
+        out.image = {size: f.size, w: bmp.width, h: bmp.height};
+      }
+    }
+    seen.pasted.push(out); IT.report('clip', seen);
+  });
+</script>

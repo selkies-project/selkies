@@ -1,0 +1,48 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>it-pattern</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; cursor: crosshair; }
+  .q { position: fixed; width: 50vw; height: 50vh; }
+  #chroma { position: fixed; left: 30vw; top: 40vh; width: 40vw; height: 20vh; }
+</style>
+<div class="q" style="left:0;top:0;background:rgb(40,120,220)"></div>
+<div class="q" style="left:50vw;top:0;background:rgb(255,0,0)"></div>
+<div class="q" style="left:0;top:50vh;background:rgb(20,160,60)"></div>
+<div class="q" style="left:50vw;top:50vh;background:rgb(230,230,230)"></div>
+<canvas id="chroma"></canvas>
+<canvas id="motion" style="position:fixed;left:45vw;top:5vh;width:10vw;height:10vh"></canvas>
+<script src="it.js"></script>
+<script>
+  // One-pixel red and blue columns: 4:4:4 keeps them apart, 4:2:0 cannot.
+  const c = document.getElementById('chroma');
+  function draw() {
+    const r = c.getBoundingClientRect(), dpr = devicePixelRatio;
+    c.width = Math.round(r.width * dpr); c.height = Math.round(r.height * dpr);
+    const g = c.getContext('2d');
+    for (let x = 0; x < c.width; x++) {
+      g.fillStyle = x % 2 ? 'rgb(0,0,255)' : 'rgb(255,0,0)';
+      g.fillRect(x, 0, 1, c.height);
+    }
+    IT.report('pattern', {w: innerWidth, h: innerHeight, dpr, screen: [screen.width, screen.height],
+                          chroma: [r.left * dpr, r.top * dpr, c.width, c.height], at: Date.now()});
+  }
+  addEventListener('resize', draw);
+  draw();
+  // The session's pointer as an application sees it, wherever the pointer comes from.
+  const pointer = {moves: 0, last: null};
+  addEventListener('pointermove', (e) => { pointer.moves++; pointer.last = [e.clientX, e.clientY]; });
+  setInterval(() => IT.report('pointer', pointer), 300);
+  // ?motion=1 keeps a noise block changing every frame, away from the sampled spots.
+  if (new URLSearchParams(location.search).get('motion')) {
+    const m = document.getElementById('motion'), mg = m.getContext('2d');
+    m.width = 64; m.height = 36;
+    const tick = () => {
+      const img = mg.createImageData(64, 36);
+      for (let i = 0; i < img.data.length; i++) img.data[i] = (i % 4 === 3) ? 255 : Math.random() * 255;
+      mg.putImageData(img, 0, 0);
+      requestAnimationFrame(tick);
+    };
+    tick();
+  }
+</script>

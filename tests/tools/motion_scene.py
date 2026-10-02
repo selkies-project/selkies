@@ -9,9 +9,10 @@ looking at and count the pixels that disagree; a picture decoded against the
 wrong reference disagrees everywhere the scene moved. A band of noise along
 the bottom, fresh every frame so no motion search can predict it, costs the
 encoder what real content does and keeps a constant-bitrate stream at its
-configured rate; it is not rebuilt.
+configured rate; it is not rebuilt. A NOISE_HEIGHT of 0 leaves it out, for a
+moving scene every encoder fits a low rate with.
 
-    motion_scene.py DISPLAY WIDTH HEIGHT FPS
+    motion_scene.py DISPLAY WIDTH HEIGHT FPS [NOISE_HEIGHT]
 """
 import random
 import sys
@@ -45,7 +46,7 @@ def geometry() -> dict:
     }
 
 
-def main(display: str, width: int, height: int, fps: int) -> None:
+def main(display: str, width: int, height: int, fps: int, noise_h: int = NOISE_H) -> None:
     root = tk.Tk(screenName=display)
     root.overrideredirect(True)
     root.geometry(f"{width}x{height}+0+0")
@@ -61,18 +62,18 @@ def main(display: str, width: int, height: int, fps: int) -> None:
             for x in range(width + period)) + "}"
         for y in range(BAND_H)), to=(0, 0))
     band_item = canvas.create_image(0, BAND_Y, image=band, anchor="nw")
-    bar_bottom = height - NOISE_H
+    bar_bottom = height - noise_h
     bar_item = canvas.create_rectangle(0, BAND_Y + BAND_H, BAR_W, bar_bottom,
                                        fill=BAR, outline="")
     rng = random.Random(1)
     noises = []
-    for _ in range(NOISE_IMAGES):
-        noise = tk.PhotoImage(width=2 * width, height=NOISE_H)
+    for _ in range(NOISE_IMAGES if noise_h else 0):
+        noise = tk.PhotoImage(width=2 * width, height=noise_h)
         noise.put(" ".join(
             "{" + " ".join("#%06x" % rng.getrandbits(24) for _ in range(2 * width)) + "}"
-            for _ in range(NOISE_H)), to=(0, 0))
+            for _ in range(noise_h)), to=(0, 0))
         noises.append(noise)
-    noise_item = canvas.create_image(0, bar_bottom, image=noises[0], anchor="nw")
+    noise_item = canvas.create_image(0, bar_bottom, image=noises[0], anchor="nw") if noises else None
     squares = [
         canvas.create_rectangle(
             CODE_X + i * (CODE_SIZE + CODE_GAP), CODE_Y,
@@ -91,8 +92,9 @@ def main(display: str, width: int, height: int, fps: int) -> None:
         canvas.coords(band_item, -((index * BAND_STEP) % period), BAND_Y)
         x = (index * BAR_STEP) % (width - BAR_W)
         canvas.coords(bar_item, x, BAND_Y + BAND_H, x + BAR_W, bar_bottom)
-        canvas.itemconfigure(noise_item, image=noises[index % NOISE_IMAGES])
-        canvas.coords(noise_item, -((index * 97) % width), bar_bottom)
+        if noise_item is not None:
+            canvas.itemconfigure(noise_item, image=noises[index % NOISE_IMAGES])
+            canvas.coords(noise_item, -((index * 97) % width), bar_bottom)
         root.after(interval_ms, tick)
 
     root.after(interval_ms, tick)
@@ -100,4 +102,5 @@ def main(display: str, width: int, height: int, fps: int) -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
+    main(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]),
+         int(sys.argv[5]) if len(sys.argv) > 5 else NOISE_H)

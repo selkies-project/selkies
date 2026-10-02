@@ -9,12 +9,13 @@ import DashboardOverlay from './components/DashboardOverlay';
 import { ThemeProvider } from './components/ui/theme-provider';
 import { UploadNotifications } from './components/dashboard/upload-notifications';
 import { TransportNotice } from './components/dashboard/transport-notice';
+import { ConnectionIndicator } from './components/dashboard/connection-indicator';
 import { Toaster } from 'sonner';
 
 /**
  * Root of the primary-display dashboard: the theme provider, the overlay
- * portaled into the dashboard root, upload and transport notices, and the
- * toaster.
+ * portaled into the dashboard root, upload and transport notices, the
+ * poor-connection mark, and the toaster.
  * @module
  */
 
@@ -30,6 +31,7 @@ function App({ dashboardRoot }: AppProps): React.ReactElement {
       <DashboardOverlay container={dashboardRoot} />
       <UploadNotifications />
       <TransportNotice />
+      <ConnectionIndicator />
       <Toaster
         position="bottom-right"
         richColors

@@ -73,6 +73,7 @@ import GamepadVisualizer from "./GamepadVisualizer";
 import PlayerGamepadButton from "./PlayerGamepadButton.jsx";
 import StreamStats from "./StreamStats.jsx";
 import StreamStrip from "./StreamStrip.jsx";
+import ConnectionIndicator from "./ConnectionIndicator.jsx";
 import { getTranslator } from "../translations";
 import {
   APP_COMMAND_STATE_EVENT,
@@ -4746,6 +4747,7 @@ function Sidebar() {
         </button>
       )}
       {statsStrip && !isViewerRole && (renderableSettings.stats ?? true) && <StreamStrip t={t} />}
+      <ConnectionIndicator t={t} />
     </>
   );
 }

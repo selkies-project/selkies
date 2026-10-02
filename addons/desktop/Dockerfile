@@ -226,9 +226,9 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
 # tarball is staged here and linked into each user's ~/.local/bin, because
 # proot-apps runs its tools from there by absolute path. proot traces every
 # process it starts, so a second copy carries CAP_SYS_PTRACE for the hosts that
-# restrict ptrace; it is kept apart because a file capability the container's
-# bounding set does not hold stops that binary from execing at all, and the
-# wrapper picks whichever of the two runs.
+# restrict ptrace (set below as real root); it is kept apart because a file
+# capability the container's bounding set does not hold stops that binary from
+# execing at all, and the wrapper picks whichever of the two runs.
 RUN mkdir -pm755 /opt/proot-apps && \
     PAPPS_RELEASE="$(curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 -o /dev/null -w '%{url_effective}' "https://github.com/linuxserver/proot-apps/releases/latest" | sed 's|.*/||')" && \
     curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://github.com/linuxserver/proot-apps/releases/download/${PAPPS_RELEASE}/proot-apps-$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/aarch64/').tar.gz" \
@@ -239,8 +239,7 @@ RUN mkdir -pm755 /opt/proot-apps && \
         apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*; \
     fi && \
     mkdir -pm755 /opt/proot-apps-cap && \
-    cp /opt/proot-apps/proot /opt/proot-apps-cap/proot && \
-    setcap cap_sys_ptrace+ep /opt/proot-apps-cap/proot
+    cp /opt/proot-apps/proot /opt/proot-apps-cap/proot
 COPY --chown=1000:1000 addons/desktop/selkies-proot /usr/local/bin/selkies-proot
 RUN chmod -f 755 /usr/local/bin/selkies-proot
 
@@ -339,9 +338,12 @@ USER 0
 # file owned by uid 1000, which the kernel refuses to honor. The PolicyKit
 # agent helper and pkexec need theirs to authenticate at all, and xterm's
 # utempter its setgid to record sessions. `restore` covers everything released
-# above, which is the base's own set rather than these.
+# above, which is the base's own set rather than these. A file capability set
+# under fakeroot is lost the same way, so the apps panel's ptrace-capable proot
+# gets its CAP_SYS_PTRACE here.
 SHELL ["/bin/sh", "-c"]
-RUN selkies-privileged-files restore && \
+RUN chown -R root:root /opt/proot-apps-cap && setcap cap_sys_ptrace+ep /opt/proot-apps-cap/proot && \
+    selkies-privileged-files restore && \
     for helper in /usr/lib/polkit-1/polkit-agent-helper-1 /usr/libexec/polkit-agent-helper-1 /usr/bin/pkexec; do \
         if [ -e "$helper" ]; then chown -f root:root "$helper" && chmod -f 4755 "$helper" || echo "Failed to restore setuid for $helper"; fi; \
     done && \

@@ -1,0 +1,11 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>it-ime</title>
+<textarea id="t" autofocus style="position:fixed;inset:10vh 10vw;font-size:28px"></textarea>
+<script src="it.js"></script>
+<script>
+  // What reached a text field on the session's desktop, and whether it came through composition.
+  const t = document.getElementById('t'), seen = {value: '', compositions: 0};
+  t.addEventListener('compositionend', () => { seen.compositions++; });
+  setInterval(() => { t.focus(); seen.value = t.value; IT.report('ime', seen); }, 300);
+</script>

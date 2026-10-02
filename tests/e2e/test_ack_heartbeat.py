@@ -33,9 +33,9 @@ from playwright.sync_api import sync_playwright
 TAP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "ws_tap.py")
 TAP_LOG = os.path.join(H.WORKDIR, "ws-tap.log")
 ENGINES = ("chromium", "firefox", "webkit")
-# The client's persisted software-decode preference, keyed by the browser build.
-SOFTWARE_DECODE_JS = ("try { localStorage.setItem((location.origin + location.pathname)"
-                      ".replace(/[^a-zA-Z0-9._-]/g, '_') + '_prefer_software_decode', navigator.userAgent); }"
+# The software-decode preference the client keeps for its tab.
+SOFTWARE_DECODE_JS = ("try { sessionStorage.setItem((location.origin + location.pathname)"
+                      ".replace(/[^a-zA-Z0-9._-]/g, '_') + '_prefer_software_decode', '1'); }"
                       " catch (e) {}")
 
 

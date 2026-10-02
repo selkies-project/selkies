@@ -197,6 +197,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # Told each frame once its last packet is on the wire, as
         # `(capture_ns, payload bytes)`, where the owner wants it (stream stats).
         self.on_frame_sent: Optional[Callable[[int, int], None]] = None
+        # Told each frame handed to the pacer with that wait, so the owner can count
+        # the frames the pacer drops instead, which call nothing.
+        self.on_frame_queued: Optional[Callable[[], None]] = None
         self.__encoder: Optional[Encoder] = None
         # The negotiated codecs and the one frames go out as; None drops them.
         self.__codecs: list[RTCRtpCodecParameters] = []
@@ -810,6 +813,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         captured = enc_frame.timing[0] if enc_frame.timing else 0
                         self.transport.frame_end(last, sink, captured,
                                                  sum(len(p_) for p_ in enc_frame.payloads))
+                        if self.on_frame_queued is not None:
+                            self.on_frame_queued()
                 for packet_bytes, twcc_seq, media_seq, size in outgoing:
                     if media_seq is not None:
                         self.__last_sequence = media_seq

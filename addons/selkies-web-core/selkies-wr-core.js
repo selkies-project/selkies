@@ -3222,6 +3222,7 @@ export default function webrtc() {
 
 			webrtc.onstreaminfo = (info) => streamStats.setInfo(info);
 			webrtc.onstreamstats = (stats) => streamStats.serverSample(stats);
+			webrtc.onconnection = (poor) => streamStats.setConnection(poor);
 
 			/**
 			 * Once the server tears the pipeline down only a fresh SDP exchange

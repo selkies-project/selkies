@@ -13,12 +13,15 @@ The ``nowebcodecs`` block is the rung below the ladder: an engine with no WebCod
 at all is not refused but pinned to the striped-JPEG encoder at pre-flight, and
 the dashboard offers it nothing else.
 
+The ``newtab`` block follows the preference past its tab: it holds for the tab that met the
+failure, and a new tab of the same profile starts on hardware again.
+
 The ``cleared`` and ``broken`` blocks follow the ladder's JPEG past its tab: a fault that
 clears gives a new tab its video back, and one that stays takes it to JPEG at its first crash.
 The ``held`` block follows the settings a crash resets the same way: the user's own come back
 in a new tab, and one picked again in the crashing tab stays picked.
 
-Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|held|all]
+Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|newtab|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|held|all]
 """
 import json
 import os
@@ -32,7 +35,7 @@ import core_lib as C
 
 from typing import Callable, Optional
 
-# localStorage namespace the client derives from origin + pathname.
+# Storage namespace the client derives from origin + pathname.
 STORAGE_KEY_JS = (
     "((location.origin + location.pathname).replace(/[^a-zA-Z0-9._-]/g, '_')"
     " + '_prefer_software_decode')"
@@ -114,7 +117,7 @@ NAV_JS = """
   })();
 """
 
-SEED_JS = "try { localStorage.setItem(%s, navigator.userAgent); } catch (e) {}" % STORAGE_KEY_JS
+SEED_JS = "try { sessionStorage.setItem(%s, '1'); } catch (e) {}" % STORAGE_KEY_JS
 
 ENCODER_JS = """
   try {
@@ -161,8 +164,7 @@ def read_state(page, retries: int = 6) -> dict:
       cfgs: JSON.parse(sessionStorage.getItem('__cfgs') || '[]'),
       navAt: JSON.parse(sessionStorage.getItem('__navAt') || '[]'),
       decoded: window.__decoded || 0,
-      stored: (() => { try { return localStorage.getItem(%s); } catch (e) { return null; } })(),
-      ua: navigator.userAgent,
+      stored: (() => { try { return sessionStorage.getItem(%s); } catch (e) { return null; } })(),
       codec: (window.stream_info && window.stream_info.codec) || null,
       encoder: (() => { try { return localStorage.getItem(%s); } catch (e) { return null; } })(),
     }))()""" % (STORAGE_KEY_JS, ENCODER_KEY_JS)
@@ -202,8 +204,7 @@ def block_retry(r: "H.Results") -> None:
                         "prefer-software" in state["cfgs"], state["cfgs"][:6])
                 r.check("frames decode after the switch", state["decoded"] > 0,
                         state["decoded"])
-                r.check("preference persisted for this browser build",
-                        state["stored"] == state["ua"], (state["stored"] or "")[:40])
+                r.check("preference stored for this tab", state["stored"] is not None, state["stored"])
                 # The ladder reloads 3s after a fatal error; outlast it.
                 time.sleep(6)
                 after = read_state(page)
@@ -217,8 +218,8 @@ def block_retry(r: "H.Results") -> None:
 
 
 def block_persisted(r: "H.Results") -> None:
-    """A remembered preference is applied to the first decoder, so a client with
-    a broken hardware path pays no failed decode at all."""
+    """A tab's remembered preference is applied to the first decoder of its next
+    load, so a reload on a broken hardware path pays no failed decode."""
     from playwright.sync_api import sync_playwright
     H.server_start(mode="websockets")
     try:
@@ -236,6 +237,39 @@ def block_persisted(r: "H.Results") -> None:
                 time.sleep(6)
                 after = read_state(page)
                 r.check("page never reloaded", after["navs"] == 1, after["navs"])
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+
+
+def block_newtab(r: "H.Results") -> None:
+    """Hardware decode fails in one tab, which switches to software: a new tab of the same
+    profile, the fault gone, configures a hardware decoder first and stores no preference."""
+    from playwright.sync_api import sync_playwright
+    H.server_start(mode="websockets")
+    try:
+        with sync_playwright() as pw:
+            browser, page = open_client(pw, fail_mode="hardware")
+            try:
+                state = wait_for(page, lambda s: s["decoded"] > 0 and "prefer-software" in s["cfgs"])
+                r.check("the failing tab switched to software decode",
+                        "prefer-software" in state["cfgs"], state["cfgs"][:6])
+                storage = page.context.storage_state()
+                page.context.close()
+                # A fresh server, so the new tab is the display's only client.
+                H.server_start(mode="websockets")
+                fresh = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
+                                            device_scale_factor=1)
+                fresh.add_init_script(NAV_JS)
+                fresh.add_init_script(shim_js("none"))
+                page = fresh.new_page()
+                page.goto(H.BASE_URL + "/", wait_until="load")
+                state = wait_for(page, lambda s: s["decoded"] > 0)
+                r.check("a new tab decodes", state["decoded"] > 0, state["decoded"])
+                r.check("on a hardware decoder from the start",
+                        bool(state["cfgs"]) and "prefer-software" not in state["cfgs"], state["cfgs"][:6])
+                r.check("with no preference stored", state["stored"] is None, state["stored"])
             finally:
                 browser.close()
     finally:
@@ -578,7 +612,7 @@ def block_silent(r: "H.Results") -> None:
         H.server_stop()
 
 
-BLOCKS = {"retry": block_retry, "persisted": block_persisted,
+BLOCKS = {"retry": block_retry, "persisted": block_persisted, "newtab": block_newtab,
           "ladder": block_ladder, "healthy": block_healthy,
           "silent": block_silent,
           "striped": block_striped, "nowebcodecs": block_nowebcodecs,

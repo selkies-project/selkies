@@ -431,6 +431,60 @@ class RateHold:
         return round(self.kbps)
 
 
+class ConnectionVerdict:
+    """Whether one page's connection is poor: the share of its display's
+    frames that do not reach it, lost on the way past repair or held back for
+    its link, judged over windows of WINDOW_S with the hysteresis of
+    Moonlight's connection warning. A window at POOR_SHARE, or at TWICE_SHARE
+    after one that was too, makes the verdict poor, and one at OK_SHARE or
+    under makes it good again. A window that ends with fewer than MIN_FRAMES
+    frames held a still screen or a caret (the capture is damage-gated) and is
+    not judged, nor is the first, which a joining page's wait for its key frame
+    takes up. `note` returns the verdict only when it changes, which is when
+    the page is told."""
+
+    WINDOW_S = 3.0
+    POOR_SHARE = 0.30
+    TWICE_SHARE = 0.15
+    OK_SHARE = 0.05
+    MIN_FRAMES = 15
+
+    def __init__(self) -> None:
+        self.poor = False
+        self._since: Optional[float] = None
+        self._frames = 0
+        self._missed = 0
+        self._judged = 0
+        self._share = 0.0
+
+    def note(self, frames: int, missed: int, now: float) -> Optional[bool]:
+        """Count `frames` the display produced for the page and `missed` frames
+        of those or earlier ones that will not reach it; the new verdict, or None."""
+        if self._since is None:
+            self._since = now
+        self._frames += frames
+        self._missed += missed
+        if now - self._since < self.WINDOW_S:
+            return None
+        frames, missed = self._frames, self._missed
+        self._since, self._frames, self._missed = now, 0, 0
+        if frames < self.MIN_FRAMES:
+            return None
+        share, previous = min(1.0, missed / frames), self._share
+        self._share = share
+        self._judged += 1
+        if self._judged == 1:
+            return None
+        if not self.poor and (share >= self.POOR_SHARE
+                              or (share >= self.TWICE_SHARE and previous >= self.TWICE_SHARE)):
+            self.poor = True
+            return True
+        if self.poor and share <= self.OK_SHARE:
+            self.poor = False
+            return False
+        return None
+
+
 def start_kbps(remembered: Any, lo_kbps: float, ceiling_kbps: float) -> Optional[float]:
     """The rate a steered stream starts at from the one its page remembered
     (`RateHold`): within the configured range and under the ceiling, or None

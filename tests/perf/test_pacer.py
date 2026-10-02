@@ -240,7 +240,8 @@ async def rewrite_candidates(sdp_text: str, up: Shaper, down: Shaper, tag: str) 
     return "\r\n".join(out_lines)
 
 async def run_client(ws_url: str, measure_s: float, warmup_s: float,
-                     client_type: str = "controller", client_slot: int = -1) -> dict:
+                     client_type: str = "controller", client_slot: int = -1,
+                     on_message=None) -> dict:
     """Run one headless WebRTC client session and measure a settled window.
 
     Args:
@@ -249,6 +250,7 @@ async def run_client(ws_url: str, measure_s: float, warmup_s: float,
         warmup_s: Maximum time to wait for media before measuring.
         client_type: Role announced in the HELLO message.
         client_slot: Slot announced in the HELLO message.
+        on_message: Called with every data channel message.
 
     Returns:
         The measure_window() summary for the measurement window.
@@ -268,6 +270,8 @@ async def run_client(ws_url: str, measure_s: float, warmup_s: float,
         LOG.info("datachannel: %s", channel.label)
         @channel.on("message")
         def on_msg(msg):
+            if on_message is not None:
+                on_message(msg)
             if isinstance(msg, str) and '"ping"' in msg:
                 try:
                     data = json.loads(msg)
