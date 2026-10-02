@@ -356,7 +356,7 @@ def _target_refresh(stream_fps: Optional[float]) -> float:
     slower than the stream caps what the stream can show, and one slower than
     configured drops what the operator asked for. 60 where neither is known.
     A framebuffer server paces its vblank by the stream on its own
-    (`_FAKE_SCREEN_FPS`), so there the rate only names the mode.
+    (`_FAKE_SCREEN_MILLIHZ`), so there the rate only names the mode.
     """
     return max(_configured_refresh or 0.0, float(stream_fps or 0.0)) or 60.0
 

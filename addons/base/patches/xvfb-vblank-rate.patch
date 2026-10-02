@@ -5,20 +5,24 @@ own -- a Vulkan or GL client presenting FIFO, a compositor that paces itself
 on Present -- draws at that vblank's rate, so the rate follows what a client
 sets and the cadence keeps microseconds.
 
-- A client sets _FAKE_SCREEN_FPS (CARDINAL, 1 to 1000) on the root window,
-  and the screen runs at the faster of that rate and the one it started at
-  (-fakescreenfps, 60 by default); deleting the property returns it to the
-  start rate. The MSC stays continuous across a change, and vblanks already
-  queued are retimed at once.
+- A client sets _FAKE_SCREEN_MILLIHZ (CARDINAL, millihertz, 1000 to
+  1000000), or else _FAKE_SCREEN_FPS (CARDINAL, 1 to 1000), on the root
+  window. The screen runs at the faster of that rate and the one it started
+  at (-fakescreenfps, 60 by default), or at the client's when it is at most
+  0.1% slower, as 59.94 Hz is under 60; deleting the properties returns it to
+  the start rate. The MSC stays continuous across a change, and vblanks
+  already queued are retimed at once.
+- MSC and UST convert at the exact rate: a whole-microsecond interval would
+  run 59.94 Hz 0.002% fast.
 - One timerfd serves the queue, armed for its soonest vblank to the
   microsecond, so a rate whose interval is not a whole millisecond keeps an
   even cadence.
 
 diff --git a/Xext/present/present_fake.c b/Xext/present/present_fake.c
-index a29db24..c38a3d7 100644
+index a29db24..c7e5799 100644
 --- a/Xext/present/present_fake.c
 +++ b/Xext/present/present_fake.c
-@@ -21,25 +21,94 @@
+@@ -21,25 +21,115 @@
   */
  #include <dix-config.h>
  
@@ -43,11 +47,13 @@ index a29db24..c38a3d7 100644
 +static int fake_vblank_fd = -1;
 +
 +/*
-+ * A client raises a screen's rate while the server runs by setting this on
-+ * its root window (CARDINAL, frames per second, 1 to 1000); the screen runs
-+ * at the faster of that and the rate it started at.
++ * A client sets a screen's rate while the server runs by setting these on its
++ * root window, CARDINAL: _FAKE_SCREEN_MILLIHZ in millihertz (1000 to 1000000),
++ * or else _FAKE_SCREEN_FPS in frames per second (1 to 1000). The screen runs at
++ * the faster of that and the rate it started at, or at the client's when it is
++ * at most 0.1% slower, as 59.94 Hz is under 60.
 + */
-+static Atom fake_fps_atom;
++static Atom fake_millihz_atom, fake_fps_atom;
 +
  typedef struct present_fake_vblank {
      struct xorg_list            list;
@@ -57,11 +63,16 @@ index a29db24..c38a3d7 100644
      ScreenPtr                   screen;
  } present_fake_vblank_rec, *present_fake_vblank_ptr;
  
++/*
++ * MSC and UST convert at the exact rate, counted from the last change of it:
++ * a microsecond interval would run a 59.94 Hz screen 0.002% fast.
++ */
 +static uint64_t
 +present_fake_msc(present_screen_priv_ptr screen_priv, uint64_t ust)
 +{
 +    return screen_priv->fake_msc_base +
-+        (ust - screen_priv->fake_ust_base) / screen_priv->fake_interval;
++        (uint64_t) ((unsigned __int128) (ust - screen_priv->fake_ust_base) *
++                    screen_priv->fake_millihz / 1000000000);
 +}
 +
 +static uint64_t
@@ -69,37 +80,51 @@ index a29db24..c38a3d7 100644
 +{
 +    if (msc <= screen_priv->fake_msc_base)
 +        return screen_priv->fake_ust_base;
++    /* Rounded up, so the MSC at that UST is the one asked for. */
 +    return screen_priv->fake_ust_base +
-+        (msc - screen_priv->fake_msc_base) * screen_priv->fake_interval;
++        (uint64_t) (((unsigned __int128) (msc - screen_priv->fake_msc_base) * 1000000000 +
++                     screen_priv->fake_millihz - 1) / screen_priv->fake_millihz);
++}
++
++/* A root window CARDINAL between lo and hi, or 0. */
++static uint32_t
++present_fake_property(ScreenPtr screen, Atom atom, uint32_t lo, uint32_t hi)
++{
++    PropertyPtr                 prop;
++    uint32_t                    value;
++
++    if (!screen->root ||
++        dixLookupProperty(&prop, screen->root, atom, serverClient,
++                          DixReadAccess) != Success ||
++        prop->type != XA_CARDINAL || prop->format != 32 || prop->size != 1)
++        return 0;
++    value = *(uint32_t *) prop->data;
++    return value >= lo && value <= hi ? value : 0;
 +}
 +
 +/*
-+ * The screen's private, its interval brought up to date with the root
-+ * window property. A change restarts the count from the current MSC, so
-+ * MSCs stay continuous across it.
++ * The screen's private, its rate brought up to date with the root window
++ * properties. A change restarts the count from the current MSC, so MSCs stay
++ * continuous across it.
 + */
 +static present_screen_priv_ptr
 +present_fake_priv(ScreenPtr screen)
 +{
 +    present_screen_priv_ptr     screen_priv = present_screen_priv(screen);
-+    uint32_t                    interval = screen_priv->fake_start_interval;
-+    PropertyPtr                 prop;
++    uint32_t                    start = screen_priv->fake_start_millihz;
++    uint32_t                    rate;
 +
-+    if (screen->root &&
-+        dixLookupProperty(&prop, screen->root, fake_fps_atom, serverClient,
-+                          DixReadAccess) == Success &&
-+        prop->type == XA_CARDINAL && prop->format == 32 && prop->size == 1) {
-+        uint32_t fps = *(uint32_t *) prop->data;
-+
-+        if (fps >= 1 && fps <= 1000 && 1000000 / fps < interval)
-+            interval = 1000000 / fps;
-+    }
-+    if (interval != screen_priv->fake_interval) {
++    rate = present_fake_property(screen, fake_millihz_atom, 1000, 1000000);
++    if (!rate)
++        rate = present_fake_property(screen, fake_fps_atom, 1, 1000) * 1000;
++    if ((uint64_t) rate * 1000 < (uint64_t) start * 999)
++        rate = start;
++    if (rate != screen_priv->fake_millihz) {
 +        uint64_t now = GetTimeInMicros();
 +
 +        screen_priv->fake_msc_base = present_fake_msc(screen_priv, now);
 +        screen_priv->fake_ust_base = now;
-+        screen_priv->fake_interval = interval;
++        screen_priv->fake_millihz = rate;
 +    }
 +    return screen_priv;
 +}
@@ -116,7 +141,7 @@ index a29db24..c38a3d7 100644
      return Success;
  }
  
-@@ -52,18 +121,65 @@ present_fake_notify(ScreenPtr screen, uint64_t event_id)
+@@ -52,18 +142,65 @@ present_fake_notify(ScreenPtr screen, uint64_t event_id)
      present_event_notify(event_id, ust, msc);
  }
  
@@ -187,12 +212,12 @@ index a29db24..c38a3d7 100644
 +    static const struct itimerspec at_once = { .it_value = { 0, 1 } };
 +    PropertyFilterParam        *p = calldata;
 +
-+    if (p->property == fake_fps_atom)
++    if (p->property == fake_millihz_atom || p->property == fake_fps_atom)
 +        timerfd_settime(fake_vblank_fd, TFD_TIMER_ABSTIME, &at_once, NULL);
  }
  
  void
-@@ -73,7 +189,6 @@ present_fake_abort_vblank(ScreenPtr screen, uint64_t event_id, uint64_t msc)
+@@ -73,7 +210,6 @@ present_fake_abort_vblank(ScreenPtr screen, uint64_t event_id, uint64_t msc)
  
      xorg_list_for_each_entry_safe(fake_vblank, tmp, &fake_vblank_queue, list) {
          if (fake_vblank->event_id == event_id) {
@@ -200,7 +225,7 @@ index a29db24..c38a3d7 100644
              xorg_list_del(&fake_vblank->list);
              free (fake_vblank);
              break;
-@@ -86,13 +201,9 @@ present_fake_queue_vblank(ScreenPtr     screen,
+@@ -86,13 +222,9 @@ present_fake_queue_vblank(ScreenPtr     screen,
                            uint64_t      event_id,
                            uint64_t      msc)
  {
@@ -215,7 +240,7 @@ index a29db24..c38a3d7 100644
          present_fake_notify(screen, event_id);
          return Success;
      }
-@@ -103,13 +214,9 @@ present_fake_queue_vblank(ScreenPtr     screen,
+@@ -103,13 +235,9 @@ present_fake_queue_vblank(ScreenPtr     screen,
  
      fake_vblank->screen = screen;
      fake_vblank->event_id = event_id;
@@ -231,12 +256,14 @@ index a29db24..c38a3d7 100644
  
      return Success;
  }
-@@ -136,11 +243,18 @@ present_fake_screen_init(ScreenPtr screen)
+@@ -136,11 +264,20 @@ present_fake_screen_init(ScreenPtr screen)
          else
              fake_fps = 60;
      }
 -    screen_priv->fake_interval = 1000000 / fake_fps;
-+    screen_priv->fake_interval = screen_priv->fake_start_interval = 1000000 / fake_fps;
++    screen_priv->fake_millihz = screen_priv->fake_start_millihz = fake_fps * 1000;
++    screen_priv->fake_ust_base = GetTimeInMicros();
++    fake_millihz_atom = MakeAtom("_FAKE_SCREEN_MILLIHZ", strlen("_FAKE_SCREEN_MILLIHZ"), TRUE);
 +    fake_fps_atom = MakeAtom("_FAKE_SCREEN_FPS", strlen("_FAKE_SCREEN_FPS"), TRUE);
  }
  
@@ -252,14 +279,16 @@ index a29db24..c38a3d7 100644
 +    AddCallback(&PropertyFilterCallback, present_fake_property_filter, NULL);
  }
 diff --git a/Xext/present/present_priv.h b/Xext/present/present_priv.h
-index fe1a471..48dedd7 100644
+index fe1a471..eb97c43 100644
 --- a/Xext/present/present_priv.h
 +++ b/Xext/present/present_priv.h
-@@ -172,6 +172,9 @@ struct present_screen_priv {
+@@ -171,7 +171,10 @@ struct present_screen_priv {
+     present_vblank_ptr          flip_pending;
      uint64_t                    unflip_event_id;
  
-     uint32_t                    fake_interval;
-+    uint32_t                    fake_start_interval;
+-    uint32_t                    fake_interval;
++    uint32_t                    fake_millihz;
++    uint32_t                    fake_start_millihz;
 +    uint64_t                    fake_ust_base;
 +    uint64_t                    fake_msc_base;
  
