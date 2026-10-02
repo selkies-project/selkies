@@ -79,10 +79,12 @@ def run(cell: Any) -> None:
     log = cell.target.selkies_log(50000)
     for which in ("chrome", "firefox"):
         cell.clear_report("media")
-        if not session_browser(cell.target, which, "/media.html?kind=audio,video", kiosk=False, profile="media"):
+        # Without the client's camera there is no session camera, and asking for one fails the microphone too.
+        kinds = "audio,video" if camera else "audio"
+        if not session_browser(cell.target, which, f"/media.html?kind={kinds}", kiosk=False, profile="media"):
             R.skip(f"the session's {which}", "not installed in the image")
             continue
-        r = cell.report("media", 30, where=lambda r: (heard(r) and seen(r)) or r.get("error"))
+        r = cell.report("media", 30, where=lambda r: (heard(r) and (seen(r) or not camera)) or r.get("error"))
         r = r or cell.report("media", 1)
         R.check(f"a tester in the session's {which} hears the client's microphone", heard(r),
                 (r or {}).get("audio") or (r or {}).get("error"))
