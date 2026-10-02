@@ -11,12 +11,16 @@ session browser from page to page by writing <root>/next-<channel>.
 """
 import json
 import os
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-ROOT = sys.argv[1]
+ROOT = os.path.realpath(sys.argv[1])
+SITE = os.path.join(ROOT, "site")
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8765
+# Channel and report names: plain words only, never a path.
+NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 TYPES = {".html": "text/html", ".js": "text/javascript", ".png": "image/png",
          ".webm": "video/webm", ".ogg": "audio/ogg", ".json": "application/json"}
 
@@ -36,22 +40,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path.startswith("/next/"):
+            ch = path[len("/next/"):]
+            if not NAME.fullmatch(ch):
+                return self.reply(404)
             try:
-                body = open(os.path.join(ROOT, "next-" + os.path.basename(path)), "rb").read().strip()
+                with open(os.path.join(ROOT, f"next-{ch}"), "rb") as f:
+                    body = f.read().strip()
             except OSError:
                 body = b""
             return self.reply(200, body)
-        name = os.path.normpath(path.lstrip("/") or "pattern.html")
-        full = os.path.join(ROOT, "site", name)
-        if name.startswith("..") or not os.path.isfile(full):
+        full = os.path.realpath(os.path.join(SITE, path.lstrip("/") or "pattern.html"))
+        if not full.startswith(SITE + os.sep) or not os.path.isfile(full):
             return self.reply(404)
         with open(full, "rb") as f:
-            self.reply(200, f.read(), TYPES.get(os.path.splitext(name)[1], "application/octet-stream"))
+            self.reply(200, f.read(), TYPES.get(os.path.splitext(full)[1], "application/octet-stream"))
 
     def do_POST(self):
-        if not self.path.startswith("/report/"):
+        name = self.path[len("/report/"):] if self.path.startswith("/report/") else ""
+        if not NAME.fullmatch(name):
             return self.reply(404)
-        name = os.path.basename(self.path[len("/report/"):]) or "report"
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         try:
             json.loads(body)
