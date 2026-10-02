@@ -1318,12 +1318,13 @@ def software_fullcolor() -> Optional[List[str]]:
 def software_formats() -> Optional[Dict[str, List[str]]]:
     """The formats each software encoder of the installed pixelflux build codes its
     codec in, as `chroma-depth` names (`pixelflux.SOFTWARE_FORMATS`); None where
-    there is no pixelflux to ask."""
+    there is no pixelflux to ask, or one from before the table."""
     try:
         import pixelflux
     except ImportError:
         return None
-    return {str(k): [str(f) for f in v] for k, v in dict(pixelflux.SOFTWARE_FORMATS).items()}
+    table = getattr(pixelflux, "SOFTWARE_FORMATS", None)
+    return None if table is None else {str(k): [str(f) for f in v] for k, v in dict(table).items()}
 
 
 _HARDWARE_ENCODERS: Dict[int, Optional[Dict[str, str]]] = {}
@@ -1357,8 +1358,9 @@ def hardware_encoders(encode_node_index: int, auto_gpu: str = "") -> Optional[Di
             probe = getattr(pixelflux, "hardware_fullcolor", None)
             if probe is not None:
                 fullcolor = [str(codec) for codec in probe(node, auto_gpu)]
-            formats = {str(k): [str(f) for f in v]
-                       for k, v in dict(pixelflux.hardware_formats(node, auto_gpu)).items()}
+            probe = getattr(pixelflux, "hardware_formats", None)
+            if probe is not None:
+                formats = {str(k): [str(f) for f in v] for k, v in dict(probe(node, auto_gpu)).items()}
         except ImportError:
             served = None
         except Exception as e:
