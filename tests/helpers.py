@@ -8,6 +8,7 @@ import faulthandler
 import functools
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -85,6 +86,164 @@ def answers_within(seconds: float, what: str = "the browser") -> Iterator[None]:
         bounds.pop()
 
 
+# Playwright WebKit's processes (UI, web, network, GPU), by name prefix.
+_WEBKIT_PROCESSES = ("MiniBrowser", "WPE", "WebKit")
+# A stall dumps each process at most twice, the second showing whether it moved.
+_dumped: Dict[int, int] = {}
+_GDB_THREAD = re.compile(r"^Thread \d+ \(.*?LWP (\d+)\)")
+_GDB_FRAME = re.compile(r"^#\d+\s+(?:(0x[0-9a-f]+) in )?(\S+)")
+
+
+def _descendants(root: int) -> list:
+    """PIDs below `root`, from /proc."""
+    children: Dict[int, list] = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as f:
+                ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        children.setdefault(ppid, []).append(int(entry))
+    found, todo = [], [root]
+    while todo:
+        kids = children.get(todo.pop(), [])
+        found += kids
+        todo += kids
+    return found
+
+
+def _threads(pid: int) -> Dict[int, list]:
+    """Each thread's [name, state, CPU ticks, kernel wait channel, start tick], by TID."""
+    out = {}
+    try:
+        tids = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return out
+    for tid in tids:
+        try:
+            with open(f"/proc/{pid}/task/{tid}/stat") as f:
+                head, rest = f.read().rsplit(")", 1)
+            fields = rest.split()
+            out[int(tid)] = [head.split("(", 1)[1], fields[0], int(fields[11]) + int(fields[12]),
+                             "?", int(fields[19])]
+            with open(f"/proc/{pid}/task/{tid}/wchan") as f:
+                out[int(tid)][3] = f.read().strip() or "-"
+        except (OSError, IndexError, ValueError):
+            continue
+    return out
+
+
+def _gdb_stacks(pid: int) -> Dict[int, list]:
+    """Every thread's backtrace from gdb, one "function (library)" line a frame,
+    by TID: under `sudo -n` where it works, Yama refusing a non-child otherwise."""
+    gdb = ["timeout", "60", "gdb", "-p", str(pid), "-batch", "-nx",
+           "-iex", "set debuginfod enabled off", "-ex", "thread apply all bt 40"]
+    text = ""
+    for cmd in (["sudo", "-n"] + gdb, gdb):
+        try:
+            text = subprocess.run(cmd, capture_output=True, text=True, timeout=90).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if "(LWP " in text:
+            break
+    # A frame without a symbol is named by its offset in the file mapped there,
+    # which holds across runs of one build; one outside any file is JIT code.
+    maps = []
+    try:
+        with open(f"/proc/{pid}/maps") as f:
+            for row in f:
+                cols = row.split()
+                if len(cols) > 5 and cols[5].startswith("/"):
+                    start, end = (int(x, 16) for x in cols[0].split("-"))
+                    maps.append((start, end, int(cols[2], 16), cols[5].rsplit("/", 1)[-1]))
+    except OSError:
+        pass
+    stacks: Dict[int, list] = {}
+    frames = None
+    for line in text.splitlines():
+        m = _GDB_THREAD.match(line)
+        if m:
+            frames = stacks.setdefault(int(m.group(1)), [])
+            continue
+        m = _GDB_FRAME.match(line)
+        if m and frames is not None:
+            addr, func = m.groups()
+            if func == "??":
+                at = int(addr or "0", 16)
+                hit = next((mp for mp in maps if mp[0] <= at < mp[1]), None)
+                frames.append(f"{hit[3]}+{at - hit[0] + hit[2]:#x}" if hit else f"?? {addr}")
+            else:
+                lib = line.rsplit(" from ", 1)[1].rsplit("/", 1)[-1] if " from " in line else ""
+                frames.append(f"{func} ({lib})" if lib else func)
+    return stacks
+
+
+def report_stall(receiver: Any, why: str) -> None:
+    """Print what an engine that stopped answering was doing: the page's last
+    console lines, the host's load, and every WebKit thread's name, state, CPU
+    share over a second and stack, threads with one stack grouped. Kept in
+    WORKDIR as well, the only record a suite that passes on its retry leaves."""
+    lines = [f"[stall] {why}"]
+    page = getattr(receiver, "page", receiver)
+    if hasattr(page, "console_messages"):
+        lines[0] += f" ({page.url[:200]})"
+        try:
+            with answers_within(10, "the driver"):
+                said = [f"{m.type}: {m.text}" for m in page.console_messages()[-40:]]
+                said += [f"pageerror: {e}" for e in page.page_errors()[-10:]]
+            lines += [f"[stall] console {s[:300]}" for s in said]
+        except Exception as e:
+            lines.append(f"[stall] console unread: {e!r}")
+    try:
+        with open("/proc/loadavg") as f:
+            load = " ".join(f.read().split()[:3])
+        with open("/proc/meminfo") as f:
+            avail = next(int(line.split()[1]) for line in f if line.startswith("MemAvailable"))
+        lines.append(f"[stall] load {load}, {avail // 1024} MB available")
+        procs = []
+        for pid in _descendants(os.getpid()):
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    name = f.read().strip()
+            except OSError:
+                continue
+            if name.startswith(_WEBKIT_PROCESSES) and _dumped.get(pid, 0) < 2:
+                _dumped[pid] = _dumped.get(pid, 0) + 1
+                procs.append((pid, name))
+        before = {pid: _threads(pid) for pid, _ in procs}
+        time.sleep(1 if procs else 0)
+        after = {pid: _threads(pid) for pid, _ in procs}
+        tick = os.sysconf("SC_CLK_TCK")
+        with open("/proc/uptime") as f:
+            now = float(f.read().split()[0]) * tick
+        for pid, name in procs:
+            threads = after[pid]
+            stacks = _gdb_stacks(pid)
+            age = (now - threads[pid][4]) / tick if pid in threads else 0
+            lines.append(f"[stall] {name} {pid}: {len(threads)} threads, up {age:.0f}s"
+                         + ("" if stacks else ", no stacks (gdb absent or refused)"))
+            groups: Dict[tuple, list] = {}
+            for tid in sorted(threads, key=lambda t: t != pid):
+                tname, state, ticks, wchan, _ = threads[tid]
+                cpu = (ticks - before[pid].get(tid, threads[tid])[2]) * 100 // tick
+                groups.setdefault(tuple(stacks.get(tid, ())), []).append(
+                    f"{tname} {tid} {state} {wchan} {cpu}%")
+            for frames, labels in groups.items():
+                lines.append("[stall]   " + "; ".join(labels))
+                lines += [f"[stall]     {frame}" for frame in frames]
+    except Exception as e:
+        lines.append(f"[stall] report cut short: {e!r}")
+    text = "\n".join(lines)
+    print(text, flush=True)
+    try:
+        with open(os.path.join(WORKDIR, f"browser-stall-{os.getpid()}.log"), "a") as f:
+            f.write(text + "\n")
+    except OSError:
+        pass
+
+
 def _bound_browser_calls() -> None:
     """Put every deadline-less Playwright call under `answers_within`.
 
@@ -131,7 +290,9 @@ def _bound_browser_calls() -> None:
             try:
                 with answers_within(PAGE_CALL_TIMEOUT, _what):
                     return _call(self, *args, **kwargs)
-            except PageStalled:
+            except PageStalled as e:
+                if self not in _stalled:
+                    report_stall(self, str(e))
                 _stalled.add(self)
                 raise
 

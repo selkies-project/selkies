@@ -312,6 +312,11 @@ jobs:
         run: |
           sudo apt-get install --no-install-recommends -y gstreamer1.0-gl gstreamer1.0-tools
           gst-inspect-1.0 opengl > /dev/null
+      # A page that stops answering gets every WebKit thread's stack printed
+      # (tests/helpers.py), which takes gdb, run as root to attach under Yama.
+      - name: Install gdb for the stall reports
+        if: contains(inputs.tiers || 'integration or e2e', 'e2e')
+        run: sudo apt-get install --no-install-recommends -y gdb
       # Firefox negotiates H.264 only with the OpenH264 GMP, which its bundled
       # profile never carries; without this the whole firefox-wr block skips.
       - name: Install the OpenH264 plugin for Firefox
