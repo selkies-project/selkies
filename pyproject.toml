@@ -113,6 +113,7 @@ markers = [
     "e2e: additionally needs Playwright browsers and the built web client",
     "perf: long constrained-link benchmark, run on request",
     "soak: full pixelflux and pcmflux API surface, run on request",
+    "image: a published desktop image through the release checklist, run on request",
 ]
 
 # Ruff runs as a bug-finder, not a style enforcer: only rule families that flag

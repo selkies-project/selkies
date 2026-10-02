@@ -1,0 +1,53 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>it-media</title>
+<video id="v" autoplay muted playsinline style="width:320px"></video>
+<script src="it.js"></script>
+<script>
+  // What the session's own browser gets from the microphone and webcam Selkies offers it.
+  const kind = new URLSearchParams(location.search).get('kind') || 'audio,video';
+  const want = {audio: kind.includes('audio'), video: kind.includes('video')};
+  const seen = {want, error: null, devices: [], audio: null, video: null};
+  (async () => {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia(want);
+      seen.devices = (await navigator.mediaDevices.enumerateDevices()).map(d => d.kind + ':' + d.label);
+      const at = s.getAudioTracks()[0], vt = s.getVideoTracks()[0];
+      let an = null, buf = null;
+      if (at) {
+        const ac = new AudioContext();
+        an = ac.createAnalyser(); an.fftSize = 2048; buf = new Float32Array(an.fftSize);
+        ac.createMediaStreamSource(s).connect(an);
+        seen.audio = {label: at.label, peak: 0, rms: 0};
+      }
+      const v = document.getElementById('v');
+      if (vt) { v.srcObject = s; seen.video = {label: vt.label, w: 0, h: 0, frames: 0, mean: 0, spread: 0, changes: 0}; }
+      const cv = document.createElement('canvas'), g = cv.getContext('2d', {willReadFrequently: true});
+      let last = null;
+      setInterval(() => {
+        if (an) {
+          an.getFloatTimeDomainData(buf);
+          let sum = 0, peak = 0;
+          for (const x of buf) { sum += x * x; peak = Math.max(peak, Math.abs(x)); }
+          seen.audio.rms = Math.max(seen.audio.rms, Math.sqrt(sum / buf.length));
+          seen.audio.peak = Math.max(seen.audio.peak, peak);
+        }
+        if (vt && v.videoWidth) {
+          cv.width = 64; cv.height = 36; g.drawImage(v, 0, 0, 64, 36);
+          const d = g.getImageData(0, 0, 64, 36).data;
+          let sum = 0, sq = 0, n = d.length / 4;
+          for (let i = 0; i < d.length; i += 4) { const y = (d[i] + d[i + 1] + d[i + 2]) / 3; sum += y; sq += y * y; }
+          const mean = sum / n, spread = Math.sqrt(Math.max(0, sq / n - mean * mean));
+          const sig = Array.from(d.filter((_, i) => i % 97 === 0)).join(',');
+          if (last !== null && sig !== last) seen.video.changes++;
+          last = sig;
+          Object.assign(seen.video, {w: v.videoWidth, h: v.videoHeight, frames: seen.video.frames + 1, mean, spread});
+        }
+        IT.report('media', seen);
+      }, 250);
+    } catch (e) {
+      seen.error = String(e);
+      IT.report('media', seen);
+    }
+  })();
+</script>

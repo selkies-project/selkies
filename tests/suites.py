@@ -15,6 +15,7 @@ selects tiers from it. Tiers describe what a suite needs:
     e2e          the above plus Playwright browsers and the built web client
     perf         a long constrained-link benchmark, run on request
     soak         the full pixelflux/pcmflux API surface, run on request
+    image        a published desktop image through the release checklist, run on request
 """
 from typing import Iterator, Optional, Sequence
 
@@ -404,9 +405,10 @@ SUITES: list = [
     {"path": "perf/test_transfer_saturation.py", "tier": "perf", "timeout": 1800},
     {"path": "soak/test_capture_api.py", "tier": "soak", "timeout": 2400},
     {"path": "soak/test_capture_api_extra.py", "tier": "soak", "timeout": 2400},
+    {"path": "image/run.py", "tier": "image", "timeout": 6 * 3600},
 ]
 
-TIERS: tuple = ("unit", "integration", "e2e", "perf", "soak")
+TIERS: tuple = ("unit", "integration", "e2e", "perf", "soak", "image")
 
 
 def cases(tiers: Optional[Sequence[str]] = None) -> Iterator[tuple]:

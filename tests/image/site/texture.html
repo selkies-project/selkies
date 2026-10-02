@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>it-texture</title>
+<style>html, body { margin: 0; height: 100%; overflow: hidden; cursor: none; background: #000; }</style>
+<canvas id="c" style="position:fixed;inset:0;width:100vw;height:100vh"></canvas>
+<script src="it.js"></script>
+<script>
+  // Seeded 16 px blocks of colour: detailed enough that a low bitrate leaves it
+  // smeared until a cleanup, and the client recomputes every block to judge.
+  const q = new URLSearchParams(location.search), seed = Number(q.get('seed') || 1);
+  const c = document.getElementById('c'), g = c.getContext('2d');
+  function color(bx, by) {
+    let h = (Math.imul(bx, 73856093) ^ Math.imul(by, 19349663) ^ Math.imul(seed, 83492791)) >>> 0;
+    h = Math.imul(h ^ (h >>> 15), 2246822507) >>> 0;
+    return [h & 255, (h >>> 8) & 255, (h >>> 16) & 255];
+  }
+  function draw(t) {
+    c.width = innerWidth * devicePixelRatio; c.height = innerHeight * devicePixelRatio;
+    for (let by = 0; by * 16 < c.height; by++)
+      for (let bx = 0; bx * 16 < c.width; bx++) {
+        const [r, gg, b] = color(bx, by);
+        g.fillStyle = `rgb(${r},${gg},${b})`; g.fillRect(bx * 16, by * 16, 16, 16);
+      }
+    if (t !== undefined) { g.fillStyle = '#fff'; g.fillRect((t / 4) % c.width, c.height / 2, 200, 120); }
+  }
+  draw();
+  IT.report('texture', {w: c.width, h: c.height, seed, at: Date.now()});
+  if (q.get('motion')) { const tick = (t) => { draw(t); requestAnimationFrame(tick); }; requestAnimationFrame(tick); }
+</script>

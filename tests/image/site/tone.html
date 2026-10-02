@@ -1,0 +1,11 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>it-tone</title>
+<style>html, body { margin: 0; height: 100%; background: rgb(40, 120, 220); }</style>
+<script src="it.js"></script>
+<script>
+  // A steady 440 Hz tone out of the session's speakers, for the clients to hear.
+  const ac = new AudioContext(), o = ac.createOscillator(), g = ac.createGain();
+  g.gain.value = 0.3; o.frequency.value = 440; o.connect(g).connect(ac.destination); o.start();
+  setInterval(() => { if (ac.state !== 'running') ac.resume(); IT.report('tone', {state: ac.state, t: ac.currentTime}); }, 500);
+</script>

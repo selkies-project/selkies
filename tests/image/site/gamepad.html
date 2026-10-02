@@ -1,0 +1,31 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>it-gamepad</title>
+<pre id="o"></pre>
+<script src="it.js"></script>
+<script>
+  // Every pad the session's browser sees, with each button ever pressed and each axis' extremes.
+  const pads = {};
+  function poll() {
+    for (const p of navigator.getGamepads()) {
+      if (!p) continue;
+      const k = p.index;
+      const r = pads[k] = pads[k] || {id: p.id, mapping: p.mapping, buttons: p.buttons.length,
+                                      axes: p.axes.length, pressed: [], min: [], max: [], diagonals: []};
+      p.buttons.forEach((b, i) => { if ((b.pressed || b.value > 0.5) && !r.pressed.includes(i)) r.pressed.push(i); });
+      p.axes.forEach((a, i) => { r.min[i] = Math.min(r.min[i] ?? 0, a); r.max[i] = Math.max(r.max[i] ?? 0, a); });
+      for (let s = 0; s + 1 < p.axes.length; s += 2) {
+        const x = p.axes[s], y = p.axes[s + 1];
+        if (Math.abs(x) > 0.5 && Math.abs(y) > 0.5) {
+          const d = `${s / 2}:${x > 0 ? '+' : '-'}${y > 0 ? '+' : '-'}`;
+          if (!r.diagonals.includes(d)) r.diagonals.push(d);
+        }
+      }
+    }
+    document.getElementById('o').textContent = JSON.stringify(pads, null, 1);
+    requestAnimationFrame(poll);
+  }
+  addEventListener('gamepadconnected', () => {});
+  requestAnimationFrame(poll);
+  setInterval(() => IT.report('gamepad', pads), 250);
+</script>
