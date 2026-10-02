@@ -34,10 +34,11 @@ on:
 # `github.workflow` resolves to the CALLING workflow inside a `workflow_call`,
 # so deriving the group from it would produce ci.yaml's own group and deadlock
 # every run that calls this one. The literal name keeps standalone runs
-# deduplicated, and the event keeps the nightly browser matrix from being
-# canceled by a push to the same ref.
+# deduplicated, the event keeps the nightly browser matrix from being
+# canceled by a push to the same ref, and the selection keeps a dispatch of
+# some tiers or suites from canceling one of others.
 concurrency:
-  group: tests-${{ github.ref }}-${{ github.event_name }}
+  group: tests-${{ github.ref }}-${{ github.event_name }}-${{ inputs.tiers }}-${{ inputs.suites }}
   cancel-in-progress: true
 
 permissions:
