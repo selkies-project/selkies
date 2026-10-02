@@ -15,9 +15,11 @@ switch:   over WebSockets the classic dashboard's encoder select moves a live
           server restarts the capture each way and the picture survives.
           Over WebRTC the same select must not offer the striped encoder.
 
-The picture is a known color the test paints on the server: an X11 window on
-the test display, or the Wayland observer surface filled solid, sampled from
-the decoded frame in the page.
+The picture is two known colors the test paints on the server: X11 windows on
+the test display, or the Wayland observer surface filled with one and carrying
+the other, sampled from the decoded frame in the page. Over WebSockets the page
+runs in Chromium; over WebRTC each block runs in Chromium, Firefox and WebKit,
+whose own RTP receivers decode and paint the stream.
 
     python3 tests/e2e/test_encoders.py ws-x11|wr-x11|ws-wl|wr-wl
 """
@@ -39,16 +41,16 @@ WL_SOCKET = "wayland-1"
 PAINT = (40, 120, 220)
 PAINT_ARGB = "ff2878dc"
 TOLERANCE = 24
-# A saturated second block on X11 guards the color matrix: a stream converted
-# with one matrix and painted with another lands more than twenty levels off
-# here, where the first block barely moves. Red rather than green, because
+# A saturated second block guards the color matrix: a stream converted with one
+# matrix and painted with another lands more than twenty levels off here, where
+# the first block barely moves. Red rather than green, because
 # libyuv -- which Chromium and Firefox both convert through -- clamps the
 # BT.709 Cb-to-blue coefficient to 2.0 from 2.112, which costs a green block
 # eleven levels of blue and this one two.
 SATURATED = (255, 0, 0)
 SATURATED_ARGB = "ffff0000"
 SATURATED_TOLERANCE = 10
-# Where the X11 windows sit, and a spot well outside them.
+# Where the blocks sit, and a spot well outside them.
 BLOCK = (100, 100, 300, 200)
 BLOCK2 = (500, 100, 300, 200)
 INSIDE, OUTSIDE, INSIDE2 = (250, 200), (900, 600), (650, 200)
@@ -133,7 +135,8 @@ def paint_x11() -> Any:
 
 class Picture:
     """The painted picture as the page decodes it: the X11 blocks sit in a
-    black frame, the filled observer surface covers the whole Wayland frame."""
+    black frame, the Wayland observer surface covers the frame in the first
+    color and carries the saturated block."""
 
     def __init__(self, wayland: bool) -> None:
         self.wayland = wayland
@@ -142,6 +145,7 @@ class Picture:
     def paint(self) -> None:
         if self.wayland:
             os.environ["WLOBS_FILL"] = PAINT_ARGB
+            os.environ["WLOBS_BLOCK"] = ",".join(map(str, BLOCK2)) + "," + SATURATED_ARGB
             self.handle = H.WlObs(WL_SOCKET)
             self.handle.ready(20)
         else:
@@ -152,6 +156,7 @@ class Picture:
             return
         if self.wayland:
             os.environ.pop("WLOBS_FILL", None)
+            os.environ.pop("WLOBS_BLOCK", None)
             self.handle.stop()
         else:
             self.handle.close()
@@ -171,9 +176,8 @@ class Picture:
         the stream."""
         if not sample:
             return False
-        if self.wayland:
-            return near(sample["inside"], PAINT) and near(sample["outside"], PAINT)
-        return (near(sample["inside"], PAINT) and near(sample["outside"], (0, 0, 0))
+        ground = PAINT if self.wayland else (0, 0, 0)
+        return (near(sample["inside"], PAINT) and near(sample["outside"], ground)
                 and (not matrix or near(sample["saturated"], SATURATED, SATURATED_TOLERANCE)))
 
     def wait(self, page: Any, timeout: float = 20, matrix: bool = True) -> Optional[dict]:
@@ -187,14 +191,22 @@ class Picture:
         return sample
 
 
-def open_page(p: Any, mode: str) -> Any:
-    browser = C.chromium_launch(p)
-    ctx = browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
+def open_page(p: Any, mode: str, engine: str = "chromium") -> tuple:
+    """A page of `engine` on the core client in `mode`, with its browser or context to close."""
+    if engine == "firefox":
+        ctx = C.firefox_persistent_context(p, viewport={"width": 1280, "height": 720})
+        owner = ctx
+    else:
+        owner = C.launch_browser(p, engine)
+        ctx = owner.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+    # Firefox runs on one persistent profile: the encoder a previous block's
+    # ladder stored must not become this block's pick.
+    ctx.add_init_script("try { localStorage.clear(); } catch (e) {}")
     ctx.add_init_script(STRIPE_TAP)
     page = ctx.new_page()
     page.goto(H.BASE_URL + "/", wait_until="load")
-    return browser, page
+    return owner, page
 
 
 def wait_video(page: Any, mode: str) -> Optional[dict]:
@@ -284,88 +296,91 @@ def cpu_encoder(line: str) -> bool:
     return software and "NVENC" not in line and "VAAPI" not in line
 
 
-def block_striped(mode: str, wayland: bool, res: "H.Results") -> None:
+def block_striped(mode: str, wayland: bool, res: "H.Results", engine: str = "chromium") -> None:
+    tag = "striped" if engine == "chromium" else "striped " + engine
     H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_ENCODER": "h264enc-striped"})
     picture = Picture(wayland)
     try:
         picture.paint()
         with sync_playwright() as p:
-            browser, page = open_page(p, mode)
+            owner, page = open_page(p, mode, engine)
             try:
                 video = wait_video(page, mode)
-                res.check("striped: stream up", bool(video), video)
+                res.check(f"{tag}: stream up", bool(video), video)
                 line = wait_stream_line(0)
                 if mode == "websockets":
                     enc = page.evaluate("window.encoder")
-                    res.check("striped: client follows the server's encoder", enc == "h264enc-striped", enc)
+                    res.check(f"{tag}: client follows the server's encoder", enc == "h264enc-striped", enc)
                     seen = wait_stripes(page, striped=True)
-                    res.check("striped: several H.264 stripes per frame on the wire",
+                    res.check(f"{tag}: several H.264 stripes per frame on the wire",
                               video and is_striped(seen, video["h"]), seen)
-                    res.check("striped: encoded in software", cpu_encoder(line), encoder_field(line))
+                    res.check(f"{tag}: encoded in software", cpu_encoder(line), encoder_field(line))
                     divert = wait_divert(page, True, presented=True)
-                    res.check("striped: the video worker decodes and presents it",
+                    res.check(f"{tag}: the video worker decodes and presents it",
                               divert["on"] and divert["rows"] > 1 and divert["fps"] > 0, divert)
                     page.evaluate("window.__stripes = {}")
                     time.sleep(1.5)
                     leaked = page.evaluate("Object.keys(window.__stripes).length")
-                    res.check("striped: no stripe reaches the page while diverted", leaked == 0, leaked)
+                    res.check(f"{tag}: no stripe reaches the page while diverted", leaked == 0, leaked)
                     vpage = C.new_page(page.context, url_hash="#shared")
                     time.sleep(6.0)
                     vinfo = C.wait_ws_video(vpage, timeout=20)
-                    res.check("striped: a shared viewer gets the stream", vinfo is not None, vinfo)
+                    res.check(f"{tag}: a shared viewer gets the stream", vinfo is not None, vinfo)
                     vsample = Picture.sample_page(vpage)
-                    res.check("striped: the shared picture decodes at inferred geometry",
+                    res.check(f"{tag}: the shared picture decodes at inferred geometry",
                               vsample is not None and near(vsample["inside"], PAINT), vsample)
                     vpage.close()
                 else:
-                    res.check("striped: refused for WebRTC, h264enc used instead",
+                    res.check(f"{tag}: refused for WebRTC, h264enc used instead",
                               C.wait_log("not available for WebRTC", timeout=5)
                               and C.wait_log("using 'h264enc'", timeout=5), "")
                 sample = picture.wait(page)
-                res.check("striped: the painted picture decodes", picture.matches(sample), sample)
+                res.check(f"{tag}: the painted picture decodes", picture.matches(sample), sample)
             finally:
-                browser.close()
+                owner.close()
     finally:
         picture.clear()
         H.server_stop()
 
 
-def block_cpu(mode: str, wayland: bool, res: "H.Results") -> None:
+def block_cpu(mode: str, wayland: bool, res: "H.Results", engine: str = "chromium") -> None:
+    tag = "cpu" if engine == "chromium" else "cpu " + engine
     H.server_start(mode=mode, wayland=wayland,
                    extra_env={"SELKIES_ENCODER": "h264enc", "SELKIES_USE_CPU": "true"})
     picture = Picture(wayland)
     try:
         picture.paint()
         with sync_playwright() as p:
-            browser, page = open_page(p, mode)
+            owner, page = open_page(p, mode, engine)
             try:
                 video = wait_video(page, mode)
-                res.check("cpu: stream up", bool(video), video)
+                res.check(f"{tag}: stream up", bool(video), video)
                 line = wait_stream_line(0)
-                res.check("cpu: software encoder in use", cpu_encoder(line), encoder_field(line))
+                res.check(f"{tag}: software encoder in use", cpu_encoder(line), encoder_field(line))
                 if mode == "websockets":
                     seen = wait_stripes(page, striped=False)
-                    res.check("cpu: one full-frame stripe on the wire",
+                    res.check(f"{tag}: one full-frame stripe on the wire",
                               video and is_fullframe(seen, video["h"]), seen)
                 sample = picture.wait(page)
-                res.check("cpu: the painted picture decodes", picture.matches(sample), sample)
+                res.check(f"{tag}: the painted picture decodes", picture.matches(sample), sample)
             finally:
-                browser.close()
+                owner.close()
     finally:
         picture.clear()
         H.server_stop()
 
 
-def block_switch(mode: str, wayland: bool, res: "H.Results") -> None:
+def block_switch(mode: str, wayland: bool, res: "H.Results", engine: str = "chromium") -> None:
+    tag = "switch" if engine == "chromium" else "switch " + engine
     H.server_start(mode=mode, wayland=wayland, web_root=H.CLASSIC_DIST)
     picture = Picture(wayland)
     try:
         picture.paint()
         with sync_playwright() as p:
-            browser, page = open_page(p, mode)
+            owner, page = open_page(p, mode, engine)
             try:
                 video = wait_video(page, mode)
-                res.check("switch: stream up", bool(video), video)
+                res.check(f"{tag}: stream up", bool(video), video)
                 opened = TD.classic_open_video(page)
                 options = page.evaluate(
                     "Array.from(document.querySelectorAll('#encoderSelect option')).map(o => o.value)") if opened else []
@@ -373,51 +388,52 @@ def block_switch(mode: str, wayland: bool, res: "H.Results") -> None:
                     # WebRTC carries the full-frame encoders alone, those the
                     # engine's RTP receiver takes; the striped framings never show.
                     full_frame = ("h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc")
-                    res.check("switch: the dashboard offers WebRTC only full-frame encoders",
+                    res.check(f"{tag}: the dashboard offers WebRTC only full-frame encoders",
                               opened and "h264enc" in options
                               and all(o in full_frame for o in options), (opened, options))
                     return
-                res.check("switch: the dashboard offers the striped encoder", "h264enc-striped" in options, options)
+                res.check(f"{tag}: the dashboard offers the striped encoder", "h264enc-striped" in options, options)
                 seen = wait_stripes(page, striped=False)
-                res.check("switch: default stream is full-frame", video and is_fullframe(seen, video["h"]), seen)
+                res.check(f"{tag}: default stream is full-frame", video and is_fullframe(seen, video["h"]), seen)
                 before = H.server_log().count("Stream settings active")
                 page.select_option("#encoderSelect", "h264enc-striped")
                 line = wait_stream_line(before)
-                res.check("switch: capture restarted on the striped software encoder", cpu_encoder(line), encoder_field(line))
+                res.check(f"{tag}: capture restarted on the striped software encoder", cpu_encoder(line), encoder_field(line))
                 seen = wait_stripes(page, striped=True)
-                res.check("switch: stripes on the wire after the switch", video and is_striped(seen, video["h"]), seen)
+                res.check(f"{tag}: stripes on the wire after the switch", video and is_striped(seen, video["h"]), seen)
                 sample = picture.wait(page)
-                res.check("switch: the picture decodes striped", picture.matches(sample), sample)
+                res.check(f"{tag}: the picture decodes striped", picture.matches(sample), sample)
                 divert = wait_divert(page, True)
-                res.check("switch: the striped stream diverts to the video worker",
+                res.check(f"{tag}: the striped stream diverts to the video worker",
                           divert["on"] and divert["rows"] > 1, divert)
                 before = H.server_log().count("Stream settings active")
                 page.select_option("#encoderSelect", "jpeg")
                 line = wait_stream_line(before)
-                res.check("switch: capture restarted on jpeg", bool(line), encoder_field(line))
+                res.check(f"{tag}: capture restarted on jpeg", bool(line), encoder_field(line))
                 seen = wait_stripes(page, striped=True)
-                res.check("switch: jpeg stripes on the wire", video and is_striped(seen, video["h"]), seen)
+                res.check(f"{tag}: jpeg stripes on the wire", video and is_striped(seen, video["h"]), seen)
                 divert = wait_divert(page, True)
-                res.check("switch: jpeg decodes in the video worker",
+                res.check(f"{tag}: jpeg decodes in the video worker",
                           divert["on"] and divert["rows"] > 1, divert)
                 sample = picture.wait(page)
-                res.check("switch: the picture decodes as jpeg", picture.matches(sample), sample)
+                res.check(f"{tag}: the picture decodes as jpeg", picture.matches(sample), sample)
                 before = H.server_log().count("Stream settings active")
                 page.select_option("#encoderSelect", "h264enc")
                 line = wait_stream_line(before)
-                res.check("switch: capture restarted back on h264enc", bool(line), encoder_field(line))
+                res.check(f"{tag}: capture restarted back on h264enc", bool(line), encoder_field(line))
                 seen = wait_stripes(page, striped=False)
-                res.check("switch: full-frame again on the wire", video and is_fullframe(seen, video["h"]), seen)
+                res.check(f"{tag}: full-frame again on the wire", video and is_fullframe(seen, video["h"]), seen)
                 sample = picture.wait(page)
-                res.check("switch: the picture decodes full-frame again", picture.matches(sample), sample)
+                res.check(f"{tag}: the picture decodes full-frame again", picture.matches(sample), sample)
             finally:
-                browser.close()
+                owner.close()
     finally:
         picture.clear()
         H.server_stop()
 
 
 SELECTORS = ("ws-x11", "wr-x11", "ws-wl", "wr-wl")
+ENGINES = ("chromium", "firefox", "webkit")
 
 
 def main() -> bool:
@@ -428,8 +444,9 @@ def main() -> bool:
     mode = "websockets" if transport == "ws" else "webrtc"
     wayland = backend == "wl"
     res = H.Results(f"encoders-{which}")
-    for block in (block_striped, block_cpu, block_switch):
-        block(mode, wayland, res)
+    for engine in ENGINES if mode == "webrtc" else ENGINES[:1]:
+        for block in (block_striped, block_cpu, block_switch):
+            block(mode, wayland, res, engine)
     return res.summary()
 
 

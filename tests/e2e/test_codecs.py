@@ -24,6 +24,7 @@ A selector may carry the engine as a third part (``ws-x11-firefox``); without
 one every engine runs.
 """
 import os
+import re
 import sys
 import time
 from typing import Any, Optional
@@ -40,7 +41,7 @@ CODECS = [("h264enc", "H264", "avc1.64001F", "video/H264"),
           ("vp8enc", "VP8", "vp8", "video/VP8"),
           ("vp9enc", "VP9", "vp09.00.31.08", "video/VP9"),
           ("av1enc", "AV1", "av01.0.05M.08", "video/AV1")]
-ENGINES = ("chromium", "firefox", "webkit")
+ENGINES = TENC.ENGINES
 
 PROBE_JS = """async (codec) => {
   if (typeof VideoDecoder === 'undefined') return false;
@@ -74,24 +75,6 @@ def wait_stream_mode(mode_name: str, timeout: float = 15) -> str:
         time.sleep(0.5)
 
 
-def open_engine_page(p: Any, engine: str, mode: str) -> tuple:
-    """A page of `engine` on the core client in `mode`, with its browser or context to close."""
-    if engine == "firefox":
-        ctx = C.firefox_persistent_context(p, viewport={"width": 1280, "height": 720})
-        owner = ctx
-    else:
-        browser = C.launch_browser(p, engine)
-        ctx = browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
-        owner = browser
-    ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
-    # Firefox runs on one persistent profile: the encoder a previous block's
-    # ladder stored must not become this block's pick.
-    ctx.add_init_script("try { localStorage.clear(); } catch (e) {}")
-    page = ctx.new_page()
-    page.goto(H.BASE_URL + "/", wait_until="load")
-    return owner, page
-
-
 def wait_settled_encoder(page: Any, timeout: float = 20) -> Optional[str]:
     """The page's encoder once it has stopped moving for a few seconds: the
     ladder answers a refusal within a second of the first frame."""
@@ -112,10 +95,13 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
     tag = f"{engine} {encoder}"
     # Every stream declares the matrix it converts with -- BT.709, or BT.601 for
     # VP8, whose keyframe header carries a single bit that can name no other.
-    # WebKit's GStreamer ports ignore that for VP8 and paint BT.709 above 576
-    # lines whatever the client is told, which shifts the saturated block by
-    # twenty levels through no fault of the stream.
-    matrix = not (engine == "webkit" and encoder == "vp8enc")
+    # Two engines paint some streams with a matrix of their own, twenty levels
+    # off on the saturated block through no fault of the stream: WebKit's
+    # GStreamer ports take a WebCodecs VP8 stream as BT.709 above 576 lines
+    # (over WebRTC the color-space header extension reaches them), and Firefox
+    # before 157 decodes WebRTC AV1 through libwebrtc's dav1d, whose frames it
+    # paints as BT.601 whatever they declare.
+    matrix = not (engine == "webkit" and encoder == "vp8enc" and mode == "websockets")
     # The codec under test is the default; the ladder's rungs stay allowed.
     H.server_start(mode=mode, wayland=wayland,
                    extra_env={"SELKIES_ENCODER": f"{encoder},h264enc,jpeg"})
@@ -123,7 +109,7 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
     try:
         picture.paint()
         with sync_playwright() as p:
-            owner, page = open_engine_page(p, engine, mode)
+            owner, page = TENC.open_page(p, mode, engine)
             said: list = []
             page.on("console", lambda m: said.append(m.text))
             try:
@@ -131,6 +117,9 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
                     taken = page.evaluate(RTP_PROBE_JS, rtp_mime)
                     video = C.wait_wr_video(page)
                     res.check(f"{tag}: stream up", bool(video), video)
+                    if taken and engine == "firefox" and encoder == "av1enc":
+                        version = re.search(r"Firefox/(\d+)", page.evaluate("navigator.userAgent"))
+                        matrix = bool(version) and int(version.group(1)) >= 157
                     if taken:
                         res.check(f"{tag}: the browser took {mode_name} over RTP",
                                   C.wait_log(f"negotiated {rtp_mime}", timeout=10), "")
@@ -200,8 +189,6 @@ def main() -> bool:
     mode = "websockets" if transport == "ws" else "webrtc"
     wayland = backend == "wl"
     engines = ENGINES if which == "all" else (which,)
-    if mode == "webrtc":
-        engines = tuple(e for e in engines if e == "chromium")
     res = H.Results(f"codecs {cell}")
     for engine in engines:
         for encoder, mode_name, probe, rtp_mime in CODECS:

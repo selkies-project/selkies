@@ -35,6 +35,9 @@ FILL = int(os.environ.get("WLOBS_FILL", "0"), 16)
 # damage-driven capture keeps receiving frames from an otherwise static screen.
 FILL2 = int(os.environ.get("WLOBS_FILL2", "0"), 16)
 BLINK_MS = int(os.environ.get("WLOBS_BLINK_MS", "0"))
+# A rectangle painted over the fill, "x,y,w,h,argb" (e.g. 500,100,300,200,ffff0000), so the
+# picture carries a second known color.
+BLOCK = os.environ.get("WLOBS_BLOCK", "")
 # Keymap files handed to the driver; removed when this observer ends, so a
 # suite that never reads them leaves nothing behind.
 KEYMAP_FILES = []
@@ -279,6 +282,13 @@ def solid_buffer(fill):
     if fill:
         with mmap.mmap(fd, size) as m:
             m.write(struct.pack("<I", fill) * (W * H))
+            if BLOCK:
+                *rect, argb = BLOCK.split(",")
+                bx, by, bw, bh = map(int, rect)
+                row = struct.pack("<I", int(argb, 16)) * max(0, min(bw, W - bx))
+                for y in range(by, min(by + bh, H)):
+                    m.seek(y * stride + bx * 4)
+                    m.write(row)
     pool = handles["shm"].create_pool(fd, size)
     buf = pool.create_buffer(0, W, H, stride, 0)
     pool.destroy()
