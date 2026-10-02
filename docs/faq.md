@@ -16,7 +16,7 @@ First of all, ensure that there is a running PulseAudio or PipeWire-Pulse sessio
 
 **Then, if you are using WebRTC mode, please read [WebRTC and Firewall Issues](firewall.md).**
 
-In WebRTC mode, the browser's own RTP receiver decodes: H.264 and VP8 are taken by every major browser, VP9 and AV1 by Chromium and Firefox, H.265 by Safari and by Chromium where the platform decodes it; a browser that declines the codec is answered with H.264.
+In WebRTC mode, the browser's own RTP receiver decodes: H.264 and VP8 are taken by every major browser, VP9 and AV1 by Chromium and Firefox, H.265 by Safari and by Chromium where the platform decodes it; a browser that declines the codec is answered with H.264. Firefox before 157 (ESR 153 included) paints WebRTC AV1 with the BT.601 matrix whatever the stream declares, which shifts saturated colors by about twenty levels (red 255 shows as 232); Firefox 157 and later paint it exactly.
 
 Moreover, if using HTTP but not HTTPS on a remote host that is not `localhost`, use port forwarding to `localhost` as much as possible. Many browsers do not support WebRTC or relevant features including pointer and keyboard lock in HTTP outside localhost.
 
