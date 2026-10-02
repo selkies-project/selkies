@@ -55,40 +55,34 @@ PAGE_CALL_TIMEOUT = float(os.environ.get("E2E_PAGE_CALL_TIMEOUT", "60"))
 # Receivers that have already outlasted the bound. An engine wedged once stays
 # wedged, so the calls after the first are refused instead of waited out.
 _stalled: "weakref.WeakSet" = weakref.WeakSet()
+# The bounds `answers_within` holds open on each thread: (deadline, seconds, what).
+_bounds = threading.local()
 # Backstop on x_own_clipboard()'s serving thread, for a caller that never sets
 # its stop flag. Every block that owns the clipboard sets it in a `finally`, so
 # this only has to outlast the longest of them: an owner that stopped answering
 # while its block still ran would read as an empty clipboard, which is a
 # passing check away from a real one.
 SELECTION_SERVE_MAX_S = 600.0
-_guarded = 0
 
 
 @contextlib.contextmanager
 def answers_within(seconds: float, what: str = "the browser") -> Iterator[None]:
-    """Raise `PageStalled` if the block outlasts `seconds`.
+    """Raise `PageStalled` from the Playwright call that would carry the block
+    past `seconds`, the earliest of nested bounds applying.
 
-    Only the main thread can take a signal, so a call off it is left plain, as
-    is one already inside a bound: the process has a single interval timer and
-    a nested wait would move the outer deadline.
+    The call is cut off on Playwright's own loop (`_bound_browser_calls`): an
+    exception raised into it from a signal ends the sync API's dispatcher, after
+    which every call on that connection spins until the suite's deadline.
     """
-    global _guarded
-    if seconds <= 0 or _guarded or threading.current_thread() is not threading.main_thread():
+    if seconds <= 0:
         yield
         return
-
-    def expired(signum: int, frame: Any) -> NoReturn:
-        raise PageStalled(f"{what} did not answer within {seconds:.0f}s")
-
-    previous = signal.signal(signal.SIGALRM, expired)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    _guarded += 1
+    bounds = _bounds.__dict__.setdefault("open", [])
+    bounds.append((time.monotonic() + seconds, seconds, what))
     try:
         yield
     finally:
-        _guarded -= 1
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        bounds.pop()
 
 
 def _bound_browser_calls() -> None:
@@ -102,9 +96,28 @@ def _bound_browser_calls() -> None:
     Wrapped here, once, rather than at the hundreds of call sites.
     """
     try:
+        from playwright._impl._sync_base import SyncBase
         from playwright.sync_api import Browser, BrowserContext, Frame, Page
     except ImportError:
         return
+    # Every sync call waits in `_sync`, so the bound is applied there, as a
+    # timeout on the dispatcher's loop that leaves the dispatcher running.
+    plain = SyncBase._sync
+
+    def within(self: Any, coro: Any) -> Any:
+        bounds = getattr(_bounds, "open", None)
+        if not bounds or not asyncio.iscoroutine(coro):
+            return plain(self, coro)
+        deadline, seconds, what = min(bounds)
+
+        async def call() -> Any:
+            try:
+                return await asyncio.wait_for(coro, max(deadline - time.monotonic(), 0))
+            except asyncio.TimeoutError:
+                raise PageStalled(f"{what} did not answer within {seconds:.0f}s") from None
+        return plain(self, call())
+
+    SyncBase._sync = within
     for cls, name, what in ((Page, "evaluate", "the page"),
                             (Frame, "evaluate", "the frame"),
                             (Browser, "close", "the browser"),
