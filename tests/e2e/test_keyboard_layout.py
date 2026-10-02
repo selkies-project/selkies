@@ -248,12 +248,21 @@ def x11_chorder(cdp: Any, obs: Any) -> Any:
 
 
 def wl_chorder(cdp: Any, keys: "WlKeys") -> Any:
-    """A chord runner returning what the Wayland observer resolved it to."""
+    """A chord runner returning what the Wayland observer resolved it to, read
+    once its key events stop for 0.3 s: a loaded host can deliver a chord past
+    any fixed window, and the 5 s bound still fails one that never comes."""
     def events_after(chord: list) -> list:
         start = len(keys.obs.lines)
         for event in chord:
             cdp.send("Input.dispatchKeyEvent", event)
-        time.sleep(0.8)
+        deadline, seen, settled_at = time.monotonic() + 5.0, 0, 0.0
+        while time.monotonic() < deadline:
+            count = sum(1 for line in keys.obs.lines[start:] if line.get("kind") == "kbd_key")
+            if count != seen:
+                seen, settled_at = count, time.monotonic()
+            elif seen and time.monotonic() - settled_at >= 0.3:
+                break
+            time.sleep(0.02)
         return keys.since(start)
     return events_after
 
