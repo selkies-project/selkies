@@ -198,7 +198,9 @@ def run(cell: Any) -> None:
         R.check("4:4:4 off: back to 4:2:0", d.get("fullcolor") is False and chroma_kept(s) is False,
                 {"info": d.get("fullcolor"), "band": s and s["band"][:4]})
 
-    # CPU encoding: the software encoder takes over wherever a GPU encoded.
+    # CPU encoding: the software encoder takes over wherever a GPU encoded, and
+    # the GPU takes the stream back once it is off again.
+    before = info(page)
     cpu = toggle(page, "#useCpuToggle", True)
     if cpu is None:
         R.skip("CPU encoding", f"no CPU switch where nothing encodes on a GPU ({info(page).get('encoder')} already)")
@@ -208,6 +210,9 @@ def run(cell: Any) -> None:
         R.check(f"CPU encoding on: a software encoder ({d.get('encoder')}) streams the picture",
                 cpu and d.get("hardware") is False and pattern_matches(s), d.get("encoder"))
         toggle(page, "#useCpuToggle", False)
-        d = described(page, {"hardware": bool(d.get("hardware_expected"))})
+        back = bool(before.get("hardware"))
+        d = described(page, {"hardware": back})
         s = cell.wait_pattern(page, 25)
-        R.check(f"CPU encoding off: {d.get('encoder')} streams the picture", pattern_matches(s), d.get("encoder"))
+        R.check(f"CPU encoding off: {before.get('encoder')} streams the picture again",
+                pattern_matches(s) and bool(d.get("hardware")) == back,
+                f"{before.get('encoder')} before, {d.get('encoder')} after")

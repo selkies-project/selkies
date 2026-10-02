@@ -168,6 +168,8 @@ class KubePod(Target):
         """Create the pod and wait for its server; a node this host cannot exec
         into or reach is left out of the next try."""
         self.avoid: List[str] = []
+        # A pod left by a run that was killed carries its state; every run starts from the image.
+        run(self.kc + ["delete", "pod", self.name, "--ignore-not-found", "--wait=true", "--timeout=180s"], 200)
         for _ in range(tries):
             if self._up(timeout):
                 return
