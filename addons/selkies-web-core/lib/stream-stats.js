@@ -59,6 +59,7 @@ export const SERVER_FRESH_MS = 3000;
  * @property {string} encoder_reason Why it does not.
  * @property {string} codec
  * @property {boolean} fullcolor Whether the stream is 4:4:4.
+ * @property {number} [bit_depth] Bits per sample of the stream, 8 or 10.
  * @property {boolean} striped
  * @property {string} gpu The GPU a hardware session encodes on.
  * @property {string} driver Its kernel driver.

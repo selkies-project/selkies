@@ -147,6 +147,9 @@ def parse_webrtc_port_range(raw: str) -> Optional[Tuple[int, int]]:
 # The codec whose 4:4:4 an encoder's stream carries when full color is on; the others encode
 # 4:2:0 whatever is asked.
 FULLCOLOR_CODECS = {"h264enc": "h264", "h264enc-striped": "h264", "h265enc": "h265", "vp9enc": "vp9"}
+# The codec whose 10-bit profile an encoder's stream carries when 10-bit is on; the others
+# encode 8 bits whatever is asked.
+TEN_BIT_CODECS = {"h264enc": "h264", "h265enc": "h265", "vp9enc": "vp9", "av1enc": "av1"}
 
 logger = logging.getLogger("webrtc")
 
@@ -616,6 +619,11 @@ class RTCApp:
             peer's offer when the peer's hello names no 4:4:4 for the
             display's codec while the display emits it; returns whether full
             color went off for the display.
+        get_ten_bit_for_display: Whether a display is asked for 10-bit samples,
+            resolved at offer time like its full color.
+        on_ten_bit_declined: Async hook `(display_id)` called before a peer's
+            offer when the peer's hello names no 10-bit decode of the format the
+            display emits; returns whether 10-bit went off for the display.
         get_use_cpu_for_display: Whether a display forces software encoding,
             resolved at offer time like the encoder; with it decides whether a
             4:4:4 profile may be advertised.
@@ -680,6 +688,8 @@ class RTCApp:
         self.get_use_cpu_for_display = lambda display_id: bool(app_settings.use_cpu[0])
         self.on_video_codec_declined = None
         self.on_fullcolor_declined = None
+        self.get_ten_bit_for_display = lambda display_id: bool(app_settings.video_10bit[0])
+        self.on_ten_bit_declined = None
 
         self.on_data_open = lambda channel=None: logger.warning('unhandled on_data_open')
         self.on_data_close = lambda: logger.warning('unhandled on_data_close')
@@ -1293,7 +1303,8 @@ class RTCApp:
 
     def munge_sdp(self, sdp: str, encoder: Optional[str] = None,
                   fullcolor: Optional[bool] = None,
-                  use_cpu: Optional[bool] = None) -> str:
+                  use_cpu: Optional[bool] = None,
+                  ten_bit: bool = False) -> str:
         """Rewrite the local offer SDP for optimal streaming behavior.
 
         Injects a 125 ms rtx-time, `sps-pps-idr-in-keyframe=1` for H.264/H.265,
@@ -1314,7 +1325,10 @@ class RTCApp:
         4:4:4 profile makes decoders misread its color range (visibly darker
         output). A full-color VP9 display offers profile 1, the 4:4:4 profile,
         in place of profile 0; the client asks for full color only where its
-        receiver takes that profile.
+        receiver takes that profile. A 10-bit display offers the 10-bit profile of
+        its codec the same way: VP9 profile 2, or 3 at 4:4:4, H.265 Main 10 in
+        place of Main, and H.264 High 10 (`6e001f`); AV1's main profile carries
+        both depths.
 
         The Opus ptime advertises the real frame duration pcmflux emits
         (`audio_frame_duration_ms`) so the client keys its minptime munge off
@@ -1327,6 +1341,7 @@ class RTCApp:
                 the configured setting.
             use_cpu: Whether the display forces software encoding; None reads
                 the configured setting.
+            ten_bit: Whether the display emits a 10-bit bitstream.
 
         Returns:
             The munged SDP text.
@@ -1361,8 +1376,13 @@ class RTCApp:
                 if ("h264" in encoder or "x264" in encoder) and fullcolor \
                         and not (software_path and software_encoders().get("h264") == "openh264"):
                     section = re.sub(r'profile-level-id=[0-9A-Fa-f]{6}', 'profile-level-id=f4001f', section)
-            if "vp9" in encoder and fullcolor:
-                section = re.sub(r'\bprofile-id=0\b', 'profile-id=1', section)
+            if "vp9" in encoder and (fullcolor or ten_bit):
+                profile = (1 if fullcolor else 0) + (2 if ten_bit else 0)
+                section = re.sub(r'\bprofile-id=0\b', f'profile-id={profile}', section)
+            if "h265" in encoder and ten_bit and not fullcolor:
+                section = re.sub(r'\bprofile-id=1\b', 'profile-id=2', section)
+            if ("h264" in encoder or "x264" in encoder) and ten_bit and not fullcolor:
+                section = re.sub(r'profile-level-id=[0-9A-Fa-f]{6}', 'profile-level-id=6e001f', section)
             sections[i] = section
         sdp_text = ''.join(sections)
         if "opus/" in sdp_text.lower():
@@ -1836,6 +1856,50 @@ class RTCApp:
                      f"display '{display_id}' is held: it will paint nothing of this stream.")
         return True
 
+    async def _settle_ten_bit(self, client_peer_id: str, display_id: str, encoder: str,
+                              fullcolor: bool, tenbit_codecs: Optional[List[str]]) -> bool:
+        """Whether the offer to a peer may describe 10 bits.
+
+        The peer's hello named the formats it decodes at 10 bits, a codec name for
+        4:2:0 and the name with `444` after it for 4:4:4. When the format the
+        display emits is not among them, 10-bit goes off for the display through
+        `on_ten_bit_declined` before the offer is built, as full color does
+        (`_settle_fullcolor`); a peer that named none is taken at its word.
+
+        Args:
+            client_peer_id: The joining peer.
+            display_id: The display it joins.
+            encoder: The display's encoder.
+            fullcolor: Whether the display emits 4:4:4.
+            tenbit_codecs: The formats the peer decodes at 10 bits, or None.
+
+        Returns:
+            Whether the display emits 10 bits.
+        """
+        codec = TEN_BIT_CODECS.get(encoder)
+        if codec is None:
+            return False
+        try:
+            use_cpu = bool(self.get_use_cpu_for_display(display_id))
+        except Exception:
+            use_cpu = bool(app_settings.use_cpu[0])
+        if app_settings.encoder_ten_bit(encoder, use_cpu, fullcolor) is False:
+            return False
+        if tenbit_codecs is None or codec + ("444" if fullcolor else "") in tenbit_codecs:
+            return True
+        moved = False
+        if self.on_ten_bit_declined is not None:
+            try:
+                moved = bool(await self.on_ten_bit_declined(display_id))
+            except Exception:
+                logger.warning("on_ten_bit_declined failed", exc_info=True)
+        if moved:
+            logger.info(f"Peer {client_peer_id} decodes no 10-bit {codec}: display '{display_id}' streams 8-bit.")
+            return False
+        logger.error(f"Peer {client_peer_id} decodes no 10-bit {codec} and the 10-bit of "
+                     f"display '{display_id}' is held: it will paint nothing of this stream.")
+        return True
+
     async def _settle_video_codec(self, client_peer_id: str, peer_obj: Dict[str, Any]) -> None:
         """Take the video codec a peer's answer settled on.
 
@@ -1888,7 +1952,10 @@ class RTCApp:
         # Full color was settled for the codec offered; the one taken may carry a 4:4:4 this
         # peer decodes no better, so it is settled again before the display moves.
         if display_fullcolor:
-            await self._settle_fullcolor(client_peer_id, display_id, taken, fullcolor)
+            display_fullcolor = await self._settle_fullcolor(client_peer_id, display_id, taken, fullcolor)
+        if bool(self.get_ten_bit_for_display(display_id)):
+            await self._settle_ten_bit(client_peer_id, display_id, taken, display_fullcolor,
+                                       peer_obj.get("tenbit_codecs"))
         moved = False
         if self.on_video_codec_declined is not None:
             try:
@@ -2334,6 +2401,7 @@ class RTCApp:
         display_id: str = "primary",
         client_slot: Optional[int] = None,
         fullcolor_codecs: Optional[List[str]] = None,
+        tenbit_codecs: Optional[List[str]] = None,
     ) -> None:
         """Create a peer connection and send its offer over signaling.
 
@@ -2473,6 +2541,13 @@ class RTCApp:
             if display_fullcolor and fullcolor_codecs is not None:
                 display_fullcolor = await self._settle_fullcolor(client_peer_id, display_id, display_encoder, fullcolor_codecs)
             try:
+                display_ten_bit = bool(self.get_ten_bit_for_display(display_id))
+            except Exception:
+                display_ten_bit = bool(app_settings.video_10bit[0])
+            if display_ten_bit:
+                display_ten_bit = await self._settle_ten_bit(
+                    client_peer_id, display_id, display_encoder, display_fullcolor, tenbit_codecs)
+            try:
                 display_use_cpu = bool(self.get_use_cpu_for_display(display_id))
             except Exception:
                 display_use_cpu = bool(app_settings.use_cpu[0])
@@ -2485,7 +2560,7 @@ class RTCApp:
             offer = peer_connection.localDescription
 
             sdp = offer.sdp
-            sdp = self.munge_sdp(sdp, display_encoder, display_fullcolor, display_use_cpu)
+            sdp = self.munge_sdp(sdp, display_encoder, display_fullcolor, display_use_cpu, display_ten_bit)
             await self.on_sdp('offer', sdp, client_peer_id)
         except BaseException:
             input_consumer.cancel()
@@ -2517,6 +2592,7 @@ class RTCApp:
             "video_sender": rtp_video_sender,
             "video_mime": preferred_codec,
             "fullcolor_codecs": fullcolor_codecs,
+            "tenbit_codecs": tenbit_codecs,
             "video_paused": video_paused,
             "audio_sender": rtp_audio_sender,
             "audio_paused": audio_paused,
@@ -2923,18 +2999,20 @@ class RTCApp:
                 logger.debug(f"Error closing orphaned viewer '{pid}': {e}")
 
     async def start_rtc_connection(self, client_peer_id: str, client_type: str, client_token: Optional[str] = None, display_id: str = "primary", client_slot: Optional[int] = None,
-                                   fullcolor_codecs: Optional[List[str]] = None) -> None:
+                                   fullcolor_codecs: Optional[List[str]] = None,
+                                   tenbit_codecs: Optional[List[str]] = None) -> None:
         """Start a peer connection, cleaning up the half-built state on failure.
 
         A signaling socket that dies mid-handshake (refresh/eviction race) is
         routine churn, not a server fault, and is logged without a traceback.
-        `fullcolor_codecs` is what the peer's hello said it decodes at 4:4:4;
-        `None` is a client that did not say, taken at its word.
+        `fullcolor_codecs` is what the peer's hello said it decodes at 4:4:4 and
+        `tenbit_codecs` at 10 bits; `None` is a client that did not say, taken at
+        its word.
         """
         try:
             logger.debug("Starting RTC pipeline", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._start_rtc_pipeline(client_peer_id, client_type, client_token, display_id, client_slot,
-                                           fullcolor_codecs=fullcolor_codecs)
+                                           fullcolor_codecs=fullcolor_codecs, tenbit_codecs=tenbit_codecs)
         except (aiohttp.ClientConnectionResetError, ConnectionResetError) as e:
             logger.info(f"Peer went away during RTC setup: {e}", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
             await self._cleanup_failed_start(client_peer_id, client_type, display_id)

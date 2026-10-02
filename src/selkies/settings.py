@@ -688,6 +688,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Encode with 4:4:4 chroma rather than 4:2:0 where the codec and encoder carry it (H.264 and H.265 on NVENC, VA-API, x264, and x265; VP9 profile 1 on VA-API and libvpx); other codecs and encoders stay 4:2:0. The server knows which of its encoders carry it on this host, so a client whose decoder has no 4:4:4 profile turns it off for itself only where the stream would carry it, whether it or this default asked for it, and streams 4:2:0 on the same codec; where it is locked on, such a client steps over WebSockets to the next allowed encoder whose 4:4:4 it decodes or that has none, and to JPEG last, and reports the stream over WebRTC. A WebRTC client names the 4:4:4 it decodes in its hello, so its first offer already fits it.",
     },
     {
+        "name": "video_10bit",
+        "type": "bool",
+        "default": False,
+        "help": "Encode 10 bits per sample rather than 8 where the codec has a 10-bit profile an encoder of this host codes: H.264 on x264, and H.265 (Main 10, Main 4:4:4 10), VP9 (profiles 2 and 3), and AV1 on VA-API, x265, libvpx, and SVT-AV1, and H.265 and AV1 on NVENC. A GPU that does not encode the format hands the session to the software encoder, as it does a 4:4:4 it lacks, which the stream statistics show (H.264 on NVENC, which codes it at 8 bits); OpenH264, kvazaar, VP8, and JPEG stay 8-bit. A software encoder pays for it in CPU, converting every frame to 10-bit samples and coding at high bit depth, and the source is an 8-bit desktop, so it is recommended only together with 4:4:4 full color, where the added precision shows. The server knows which of its encoders carry it, and a client offers it only where its own decoder shows a 10-bit picture of that codec, turning it off for itself where it does not, whether it or this default asked for it; where it is locked on, such a client steps over WebSockets to the next allowed encoder it decodes, and reports the stream over WebRTC. A WebRTC client names the 10-bit formats it decodes in its hello, so its first offer already fits it.",
+    },
+    {
         "name": "video_streaming_mode",
         "type": "bool",
         "default": True,
@@ -703,7 +709,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "use_paint_over_quality",
         "type": "bool",
         "default": True,
-        "help": "Clean up a still screen at the paint-over quality, under CBR and CRF alike and whether or not video_streaming_mode (Turbo) sends every frame: once the picture stops changing, or keeps changing only in small places, a video encoder refreshes what changed at the paint-over CRF, and after a large change sends a key frame at it once the screen holds still. Under CBR, NVENC and x264 instead keep sending frames within the bitrate until their rate control reaches that quality, with no key frame (NVENC refreshes the screen a band a frame where the bitrate is too low for it to get there), and other encoders clean up only where the rate control has not already refined the picture further, a key frame within a second of the bitrate; JPEG re-sends still stripes at the paint-over JPEG quality.",
+        "help": "Clean up a still screen at the paint-over quality, under CBR and CRF alike and whether or not video_streaming_mode (Turbo) sends every frame: once the picture stops changing, or keeps changing only in small places, a video encoder refreshes what changed at the paint-over CRF, and after a large change sends a key frame at it once the screen holds still. Under CBR the frames instead keep coming after the screen stops, each coded by the rate control, until the picture is clean, and then stop until it moves again, so a blinking cursor on a clean screen costs only its own frames: NVENC and x264 until their rate control reaches that quality (NVENC refreshes the screen a band a frame where the bitrate is too low for it to get there), VA-API until the encoded picture stops improving, x265 and VP9 until theirs codes at it, for half a minute at most; VP8 and SVT-AV1 hold a refresh at it, a key frame within a second of the bitrate; JPEG re-sends still stripes at the paint-over JPEG quality.",
     },
     {
         "name": "paint_over_jpeg_quality",
@@ -724,7 +730,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "range",
         "default": "1-30",
         "meta": {"default_value": 5},
-        "help": 'Frames a video encoder keeps sending after a cleanup or a key frame on a still screen, so rate control settles (under CBR, NVENC and x264 keep sending until their rate control has refined the screen instead): allowed range, initial value, or both ("5,1-30"); "5-5" locks.',
+        "help": 'Frames a video encoder keeps sending after a cleanup or a key frame on a still screen, so rate control settles (under CBR every encoder but VP8 and SVT-AV1 keeps sending until the screen is clean instead): allowed range, initial value, or both ("5,1-30"); "5-5" locks.',
     },
     {
         "name": "second_screen",
@@ -1309,8 +1315,20 @@ def software_fullcolor() -> Optional[List[str]]:
     return None if table is None else [str(codec) for codec in table]
 
 
+def software_formats() -> Optional[Dict[str, List[str]]]:
+    """The formats each software encoder of the installed pixelflux build codes its
+    codec in, as `chroma-depth` names (`pixelflux.SOFTWARE_FORMATS`); None where
+    there is no pixelflux to ask."""
+    try:
+        import pixelflux
+    except ImportError:
+        return None
+    return {str(k): [str(f) for f in v] for k, v in dict(pixelflux.SOFTWARE_FORMATS).items()}
+
+
 _HARDWARE_ENCODERS: Dict[int, Optional[Dict[str, str]]] = {}
 _HARDWARE_FULLCOLOR: Dict[int, Optional[List[str]]] = {}
+_HARDWARE_FORMATS: Dict[int, Optional[Dict[str, List[str]]]] = {}
 
 
 def hardware_encoders(encode_node_index: int, auto_gpu: str = "") -> Optional[Dict[str, str]]:
@@ -1330,6 +1348,7 @@ def hardware_encoders(encode_node_index: int, auto_gpu: str = "") -> Optional[Di
     if node not in _HARDWARE_ENCODERS:
         served: Optional[Dict[str, str]] = None
         fullcolor: Optional[List[str]] = None
+        formats: Optional[Dict[str, List[str]]] = None
         try:
             import pixelflux
             probe = getattr(pixelflux, "hardware_encoders", None)
@@ -1338,12 +1357,15 @@ def hardware_encoders(encode_node_index: int, auto_gpu: str = "") -> Optional[Di
             probe = getattr(pixelflux, "hardware_fullcolor", None)
             if probe is not None:
                 fullcolor = [str(codec) for codec in probe(node, auto_gpu)]
+            formats = {str(k): [str(f) for f in v]
+                       for k, v in dict(pixelflux.hardware_formats(node, auto_gpu)).items()}
         except ImportError:
             served = None
         except Exception as e:
             logger.warning("Hardware encoder probe of render node %d failed: %s", node, e)
         _HARDWARE_ENCODERS[node] = served
         _HARDWARE_FULLCOLOR[node] = fullcolor
+        _HARDWARE_FORMATS[node] = formats
     return _HARDWARE_ENCODERS[node]
 
 
@@ -1352,6 +1374,15 @@ def hardware_fullcolor(encode_node_index: int, auto_gpu: str = "") -> Optional[L
     read with `hardware_encoders`; None where nothing can be known."""
     hardware_encoders(encode_node_index, auto_gpu)
     return _HARDWARE_FULLCOLOR.get(int(encode_node_index))
+
+
+def hardware_formats(encode_node_index: int, auto_gpu: str = "") -> Optional[Dict[str, List[str]]]:
+    """The formats the GPU behind a render node encodes each codec in, as
+    `chroma-depth` names (`pixelflux.hardware_formats`: `"420-8"`, `"444-8"`,
+    `"420-10"`, `"444-10"`), read with `hardware_encoders`; None where nothing
+    can be known."""
+    hardware_encoders(encode_node_index, auto_gpu)
+    return _HARDWARE_FORMATS.get(int(encode_node_index))
 
 
 def software_video_path(encoder: str, use_cpu: bool) -> bool:
@@ -1424,6 +1455,7 @@ class AppSettings:
     enable_collab: tuple[bool, bool]
     master_token: str
     video_fullcolor: tuple[bool, bool]
+    video_10bit: tuple[bool, bool]
     subfolder: str
     video_bitrate: tuple[float, float]
     file_transfer_limit_mbps: float
@@ -1749,9 +1781,11 @@ class AppSettings:
     def encoder_backends(self) -> Optional[Dict[str, Dict[str, Any]]]:
         """The backends that serve each video codec on this host, by codec
         name: `hardware` (the backend pixelflux named, or None) from the startup probe,
-        `software` (the pixelflux build's library or None), and `fullcolor`, whether
+        `software` (the pixelflux build's library or None), `fullcolor`, whether
         each of those sides takes a `video_fullcolor` session as 4:4:4 (None where the
-        side is absent or the build does not say). None before
+        side is absent or the build does not say), and `ten_bit`, whether each side
+        takes a `video_10bit` session at 10 bits, by chroma (`"420"`, `"444"`; None
+        where the side is absent or unknown). None before
         `resolve_encoder_backends` ran or where the hardware side is unknown,
         so no consumer hides a choice on a guess."""
         hardware = getattr(self, "_hardware_encoders", None)
@@ -1764,6 +1798,16 @@ class AppSettings:
         def carries(codec: str, backend: Optional[str], table: Optional[List[str]]) -> Optional[bool]:
             return None if backend is None or table is None else codec in table
 
+        hw_formats = getattr(self, "_hardware_formats", None)
+        sw_formats = software_formats()
+
+        def ten_bit(codec: str, backend: Optional[str],
+                    formats: Optional[Dict[str, List[str]]]) -> Optional[Dict[str, bool]]:
+            if backend is None or formats is None:
+                return None
+            listed = formats.get(codec, [])
+            return {chroma: f"{chroma}-10" in listed for chroma in ("420", "444")}
+
         return {
             codec: {
                 "hardware": hardware.get(codec),
@@ -1771,6 +1815,10 @@ class AppSettings:
                 "fullcolor": {
                     "hardware": carries(codec, hardware.get(codec), hw_fullcolor),
                     "software": carries(codec, software.get(codec), sw_fullcolor),
+                },
+                "ten_bit": {
+                    "hardware": ten_bit(codec, hardware.get(codec), hw_formats),
+                    "software": ten_bit(codec, software.get(codec), sw_formats),
                 },
             }
             for codec in CODEC_LABELS
@@ -1780,13 +1828,54 @@ class AppSettings:
     def encoder_fullcolor(self, encoder: str, use_cpu: bool = False) -> Optional[bool]:
         """Whether a `video_fullcolor` session on this encoder streams 4:4:4 from this host:
         by the encode node's engine where the codec has one and software is not forced or
-        striped, else by the build's software encoder. None where that side is unknown."""
+        striped, else by the build's software encoder. A VA-API engine refuses a 4:4:4 it
+        lacks rather than streaming 4:2:0, so that session is the software encoder's too
+        (H.264 on every Intel and AMD device). None where the side that answers is unknown."""
         backends = self.encoder_backends()
         served = (backends or {}).get(codec_for_encoder(canonical_encoder(encoder)))
         if not served:
             return None
-        side = "software" if use_cpu or encoder in CPU_ONLY_ENCODERS or not served["hardware"] else "hardware"
-        return served["fullcolor"][side]
+        carried = served["fullcolor"]
+        if use_cpu or encoder in CPU_ONLY_ENCODERS or not served["hardware"]:
+            return carried["software"]
+        if carried["hardware"] is False and served["hardware"] == "vaapi" and carried["software"]:
+            return True
+        return carried["hardware"]
+
+    def encoder_ten_bit(self, encoder: str, use_cpu: bool = False, fullcolor: bool = False) -> Optional[bool]:
+        """Whether a `video_10bit` session on this encoder streams 10 bits from this host.
+
+        A session runs on the encode node's engine where the codec has one and software
+        is not forced or striped, and pixelflux hands it to the build's software encoder
+        where the engine lacks the 4:4:4 a full-color session asks for, or the 10 bits
+        this one does while the software encoder codes them. Each side answers at the
+        chroma it would run: its 4:4:4 where full color is on and it carries that, else
+        4:2:0.
+
+        Args:
+            encoder: The encoder wire value.
+            use_cpu: Whether software encoding is forced.
+            fullcolor: Whether the session asks for 4:4:4.
+
+        Returns:
+            Whether the stream is 10-bit; None where the side that would answer is unknown.
+        """
+        backends = self.encoder_backends()
+        served = (backends or {}).get(codec_for_encoder(canonical_encoder(encoder)))
+        if not served:
+            return None
+
+        def carried(side: str) -> Optional[bool]:
+            table = served["ten_bit"][side]
+            if table is None:
+                return None
+            return table["444" if fullcolor and served["fullcolor"][side] else "420"]
+
+        if use_cpu or encoder in CPU_ONLY_ENCODERS or not served["hardware"]:
+            return carried("software")
+        if fullcolor and served["fullcolor"]["hardware"] is False and served["fullcolor"]["software"]:
+            return carried("software")
+        return carried("hardware") or carried("software") or carried("hardware")
 
     def encoder_served(self, encoder: str) -> bool:
         """Whether a session on this encoder comes up on the codec it names
@@ -1821,6 +1910,7 @@ class AppSettings:
         self._hardware_encoders = ({} if node is None
                                    else hardware_encoders(node, str(self.auto_gpu or "")))
         self._hardware_fullcolor = [] if node is None else hardware_fullcolor(node, str(self.auto_gpu or ""))
+        self._hardware_formats = {} if node is None else hardware_formats(node, str(self.auto_gpu or ""))
         if self._hardware_encoders is None:
             return
         enc_definition = next(

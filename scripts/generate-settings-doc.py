@@ -44,7 +44,7 @@ The settings are grouped by what they govern, the ones a deployment reaches for 
 # one is placed on purpose rather than appended to the end of the page.
 SECTIONS = [
     ("Stream", "The video encoder and its rate control. The dashboard chooses among what the server allows.", [
-        "encoder", "video_fullcolor", "framerate", "video_bitrate", "video_crf", "rate_control_mode",
+        "encoder", "video_fullcolor", "video_10bit", "framerate", "video_bitrate", "video_crf", "rate_control_mode",
         "enable_rate_control", "congestion_control", "keyframe_interval", "video_min_qp", "video_max_qp",
         "jpeg_quality", "video_streaming_mode", "use_paint_over_quality", "paint_over_jpeg_quality",
         "video_paintover_crf", "video_paintover_burst_frames", "use_cpu", "gpu_id", "encode_dri",

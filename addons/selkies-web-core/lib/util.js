@@ -69,8 +69,8 @@ export class Queue {
     }
 }
 
-import { H264_ANNEXB_SAMPLE, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS, codecOfEncoder, codecCarriesFullColor } from "./wire-codecs.js";
-export { codecOfEncoder, codecCarriesFullColor };
+import { H264_ANNEXB_SAMPLE, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS, TEN_BIT_SAMPLES, codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, codecStringFor } from "./wire-codecs.js";
+export { codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit };
 
 /**
  * Human-readable names for the wire values surfaced in UIs (transport modes,
@@ -312,6 +312,75 @@ const fullColorAnswers = {};
  * @returns {boolean|undefined}
  */
 export const fullColorDecoded = (codec) => fullColorAnswers[codec];
+
+/** The decodes `canDecodeTenBit` has asked for, by format. */
+const tenBitProbes = {};
+/** The answers `canDecodeTenBit` has settled, by format. */
+const tenBitAnswers = {};
+
+/**
+ * The name a 10-bit format goes by in `TEN_BIT_SAMPLES`, in `tenBitDecoded`, and
+ * in a WebRTC hello: the codec name for 4:2:0, with `444` after it for 4:4:4.
+ * @param {string} codec The codec name.
+ * @param {boolean} [fullcolor] Whether the format is 4:4:4.
+ * @returns {string}
+ */
+export const tenBitFormat = (codec, fullcolor = false) => `${codec}${fullcolor ? "444" : ""}`;
+
+/**
+ * Whether this engine's `VideoDecoder` shows a picture of `codec` at 10 bits.
+ *
+ * The decoder is handed a real 10-bit key frame (`TEN_BIT_SAMPLES`) and has to
+ * give a frame back, configured as a stream's decoder is, from the key frame's
+ * own codec string: engines accept 10-bit configurations they then fail to
+ * decode (Firefox and VP9 profile 2), and whether a profile decodes turns on
+ * the client's hardware where the engine has no software decoder for the codec
+ * (H.265 everywhere), so nothing short of a decode answers it.
+ * @param {string} codec The codec name.
+ * @param {boolean} [fullcolor] Whether to ask for the codec's 4:4:4 at 10 bits.
+ * @returns {Promise<boolean>} False for a format without a sample, where there
+ *     is no `VideoDecoder`, and where no frame comes back within
+ *     `DECODER_PROBE_TIMEOUT_MS`.
+ */
+export function canDecodeTenBit(codec, fullcolor = false) {
+    const format = tenBitFormat(codec, fullcolor);
+    const sample = TEN_BIT_SAMPLES[format];
+    if (!sample || typeof VideoDecoder === "undefined") return Promise.resolve(false);
+    if (!tenBitProbes[format]) {
+        tenBitProbes[format] = (async () => {
+            const data = Uint8Array.from(atob(sample), (c) => c.charCodeAt(0));
+            let outputs = 0;
+            let decoder = null;
+            try {
+                decoder = new VideoDecoder({ output: (frame) => { outputs++; frame.close(); }, error: () => {} });
+                decoder.configure({
+                    codec: codecStringFor(codec, data, 320, 240, 30, fullcolor, true),
+                    codedWidth: 320, codedHeight: 240, optimizeForLatency: true,
+                });
+                decoder.decode(new EncodedVideoChunk({ type: "key", timestamp: 0, data }));
+                await Promise.race([
+                    decoder.flush(),
+                    new Promise((resolve) => setTimeout(resolve, DECODER_PROBE_TIMEOUT_MS)),
+                ]);
+            } catch (err) {
+                // Refused: the count says so.
+            }
+            try { if (decoder && decoder.state !== "closed") decoder.close(); } catch (err) { /* closed by its error */ }
+            tenBitAnswers[format] = outputs > 0;
+            return outputs > 0;
+        })();
+    }
+    return tenBitProbes[format];
+}
+
+/**
+ * What `canDecodeTenBit` answered, for a decision that cannot wait on the
+ * decode: `undefined` while it is still out or was never asked.
+ * @param {string} codec The codec name.
+ * @param {boolean} [fullcolor] Whether the format is 4:4:4.
+ * @returns {boolean|undefined}
+ */
+export const tenBitDecoded = (codec, fullcolor = false) => tenBitAnswers[tenBitFormat(codec, fullcolor)];
 
 /**
  * Directory this document is served from, without a trailing slash (`''` at

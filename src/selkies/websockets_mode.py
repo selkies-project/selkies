@@ -175,7 +175,7 @@ STALLED_CLIENT_TIMEOUT_SECONDS = 4.0
 # with it -- the comparison is guarded, so a stale name reads as "rebuild" and
 # says nothing, which is how `output_mode` outlived the field for a release.
 STRUCTURAL_CAPTURE_SETTINGS = (
-    "codec", "use_cpu", "video_fullframe", "video_fullcolor", "video_cbr_mode",
+    "codec", "use_cpu", "video_fullframe", "video_fullcolor", "video_bit_depth", "video_cbr_mode",
 )
 # How long a gate stays shut with the client's acks standing still before it
 # reopens on an IDR to probe the client: a gated client is sent nothing, so one
@@ -1370,6 +1370,8 @@ class DataStreamingServer(BaseStreamingService):
         self.video_crf = self._initial_video_crf
         self._initial_video_fullcolor = get_initial_value('video_fullcolor')
         self.video_fullcolor = self._initial_video_fullcolor
+        self._initial_video_10bit = get_initial_value('video_10bit')
+        self.video_10bit = self._initial_video_10bit
         self._initial_video_streaming_mode = get_initial_value('video_streaming_mode')
         self.video_streaming_mode = self._initial_video_streaming_mode
         self.capture_cursor = False
@@ -3547,6 +3549,7 @@ class DataStreamingServer(BaseStreamingService):
         parsed["video_crf"] = get_int("video_crf")
         parsed["encoder"] = get_str("encoder")
         parsed["video_fullcolor"] = get_bool("video_fullcolor")
+        parsed["video_10bit"] = get_bool("video_10bit")
         parsed["video_streaming_mode"] = get_bool("video_streaming_mode")
         parsed["manual_resolution"] = get_bool(
             "manual_resolution"
@@ -3745,7 +3748,7 @@ class DataStreamingServer(BaseStreamingService):
                         client_scale_changed = True
                 # Only keys the payload carries: sanitizing an absent (None) key
                 # would reset the stored choice to the server default on every partial update.
-                for key in ("encoder", "framerate", "video_crf", "video_fullcolor",
+                for key in ("encoder", "framerate", "video_crf", "video_fullcolor", "video_10bit",
                             "video_streaming_mode", "jpeg_quality", "paint_over_jpeg_quality",
                             "use_paint_over_quality", "video_paintover_crf",
                             "video_paintover_burst_frames", "video_bitrate"):
@@ -3782,6 +3785,7 @@ class DataStreamingServer(BaseStreamingService):
                         'video_crf': ('video_crf', '_initial_video_crf'),
                         'video_bitrate': ('video_bitrate', '_initial_video_bitrate'),
                         'video_fullcolor': ('video_fullcolor', '_initial_video_fullcolor'),
+                        'video_10bit': ('video_10bit', '_initial_video_10bit'),
                         'video_streaming_mode': ('video_streaming_mode', '_initial_video_streaming_mode'),
                         'jpeg_quality': ('jpeg_quality', '_initial_jpeg_quality'),
                         'paint_over_jpeg_quality': ('paint_over_jpeg_quality', '_initial_paint_over_jpeg_quality'),
@@ -3870,7 +3874,7 @@ class DataStreamingServer(BaseStreamingService):
                 dimensional_change = resolution_actually_changed or position_actually_changed
 
                 video_params_list = [
-                    'encoder', 'framerate', 'video_crf', 'video_fullcolor', 'video_streaming_mode',
+                    'encoder', 'framerate', 'video_crf', 'video_fullcolor', 'video_10bit', 'video_streaming_mode',
                     'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'video_paintover_crf',
                     'video_paintover_burst_frames', 'use_paint_over_quality', 'rate_control_mode', 'video_bitrate'
                 ]
@@ -3895,7 +3899,7 @@ class DataStreamingServer(BaseStreamingService):
                                 await self._start_pcmflux_pipeline()
                 needs_fallback_reconfigure = False
                 if not (is_initial_settings or dimensional_change) and video_params_changed:
-                    restart_video_params = ['encoder', 'use_cpu', 'video_fullcolor', 'rate_control_mode']
+                    restart_video_params = ['encoder', 'use_cpu', 'video_fullcolor', 'video_10bit', 'rate_control_mode']
                     if IS_WAYLAND:
                         # A capture scale change reconfigures the output, which the
                         # live-tunables path cannot apply.
@@ -4562,6 +4566,7 @@ class DataStreamingServer(BaseStreamingService):
                                     'framerate': self.app.framerate,
                                     'video_crf': self._initial_video_crf,
                                     'video_fullcolor': self._initial_video_fullcolor,
+                                    'video_10bit': self._initial_video_10bit,
                                     'video_streaming_mode': self._initial_video_streaming_mode,
                                     'jpeg_quality': self._initial_jpeg_quality,
                                     'paint_over_jpeg_quality': self._initial_paint_over_jpeg_quality,
@@ -6576,6 +6581,7 @@ class DataStreamingServer(BaseStreamingService):
             paintover_crf=display_state.get('video_paintover_crf', self._initial_video_paintover_crf),
             paintover_burst=display_state.get('video_paintover_burst_frames', self._initial_video_paintover_burst_frames),
             fullcolor=display_state.get('video_fullcolor', self._initial_video_fullcolor),
+            ten_bit=display_state.get('video_10bit', self._initial_video_10bit),
             streaming=display_state.get('video_streaming_mode', self._initial_video_streaming_mode),
             use_paint_over_quality=display_state.get('use_paint_over_quality', self._initial_use_paint_over_quality),
             capture_cursor=self.capture_cursor,

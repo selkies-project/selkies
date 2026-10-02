@@ -130,10 +130,10 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
-import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers, rememberCcStart, recalledCcStart, forgetCcStart } from './lib/util.js';
+import { storageKeyForServerKey, resolveSpec, tenBitStream, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
+import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, canDecodeTenBit, tenBitDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers, rememberCcStart, recalledCcStart, forgetCcStart } from './lib/util.js';
 import {
-  wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecStringFor,
+  wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, codecStringFor,
   avcDescription, annexbToAvcc, sameBytes, decoderColorSpace, PROBE_CODEC_STRINGS, PROBE_FULLCOLOR_STRINGS,
 } from './lib/wire-codecs.js';
 // The same module by source, for the video worker's own copy of it.
@@ -398,7 +398,7 @@ const EXPLICIT_ONLY_SETTINGS = ['use_paint_over_quality'];
 const postedExplicitOnly = new Set();
 
 const PER_DISPLAY_SETTINGS = [
-    'framerate', 'video_crf', 'video_fullcolor',
+    'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
     'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
     'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
     'manual_resolution', 'manual_width', 'manual_height',
@@ -1093,6 +1093,7 @@ setInterval(() => {
 }, 1000);
 let video_crf = 25;
 let video_fullcolor = false;
+let video_10bit = false;
 let video_streaming_mode = false;
 let jpeg_quality = 60;
 let paint_over_jpeg_quality = 90;
@@ -1471,7 +1472,7 @@ function storeEncoderPick(pick) {
  * ends its hold (`releaseCrashSafeSettings`).
  */
 const CRASH_SAFE_SETTINGS = {
-  video_fullcolor: 'false', framerate: '60', video_crf: '25',
+  video_fullcolor: 'false', video_10bit: 'false', framerate: '60', video_crf: '25',
   manual_resolution: 'false', manual_width: null, manual_height: null,
 };
 /** Stores the crash ladder's safe values for this tab, keeping the picks they replace. */
@@ -1655,6 +1656,7 @@ function sanitizeAndStoreSettings(serverSettings) {
 framerate = getFloatParam('framerate', framerate);
 video_crf = getIntParam('video_crf', video_crf);
 video_fullcolor = getBoolParam('video_fullcolor', video_fullcolor);
+video_10bit = getBoolParam('video_10bit', video_10bit);
 video_streaming_mode = getBoolParam('video_streaming_mode', video_streaming_mode);
 jpeg_quality = getIntParam('jpeg_quality', jpeg_quality);
 paint_over_jpeg_quality = getIntParam('paint_over_jpeg_quality', paint_over_jpeg_quality);
@@ -3285,6 +3287,60 @@ async function declineUndecodableFullColor(reason) {
     return true;
 }
 
+/**
+ * Settles whether 10-bit is on the table for this engine, before the first
+ * SETTINGS payload is built, as `settleFullColorSupport` does for full color:
+ * an engine that shows no 10-bit picture of the codec has the setting turned
+ * off in storage rather than asked for. The decode is only waited on where
+ * 10-bit is on.
+ */
+async function settleTenBitSupport() {
+    const codec = codecOfEncoder(currentEncoderMode);
+    if (!codecCarriesTenBit(codec) || !getBoolParam('video_10bit', false)) return;
+    // The server has said nothing yet, so both chroma formats the stream may take are asked.
+    if (await canDecodeTenBit(codec, false)
+        && (!video_fullcolor || !codecCarriesFullColor(codec) || await canDecodeTenBit(codec, true))) return;
+    console.warn(`[Selkies] 10-bit is off: this browser shows no 10-bit ${codec} picture.`);
+    video_10bit = false;
+    setBoolParam('video_10bit', false);
+}
+
+/** Whether the server holds 10-bit: a locked `video_10bit`. */
+let tenBitLocked = false;
+
+/**
+ * The 10-bit stream `encoder` would run on this server with the settings in
+ * effect (`tenBitStream`), or `null` where it would stream 8 bits or the server
+ * has not said.
+ * @param {string} [encoder] The encoder; the current one by default.
+ * @returns {?{fullcolor: boolean, software: boolean}}
+ */
+function serverTenBit(encoder = currentEncoderMode) {
+    return tenBitStream(encoder, encoderBackends, use_cpu, video_fullcolor);
+}
+
+/**
+ * Turns a 10-bit the server announced, or the stream carries, off again where
+ * this engine shows no 10-bit picture of the codec, so the stream comes back at
+ * 8 bits on the same codec. A locked setting cannot be turned off and is left
+ * to the refusal ladder.
+ * @param {string} reason Logged with the settings update.
+ * @returns {Promise<boolean>} Whether 10-bit was turned off.
+ */
+async function declineUndecodableTenBit(reason) {
+    if (!video_10bit || tenBitLocked || isSharedMode) return false;
+    const codec = codecOfEncoder(currentEncoderMode);
+    const stream = serverTenBit();
+    // A stream this server runs at 8 bits whatever is asked gives the setting nothing to decline.
+    if (!codecCarriesTenBit(codec) || !stream || await canDecodeTenBit(codec, stream.fullcolor)) return false;
+    if (!video_10bit) return false;
+    console.warn(`[Selkies] 10-bit is off: this browser shows no 10-bit ${codec} picture.`);
+    video_10bit = false;
+    setBoolParam('video_10bit', false);
+    sendFullSettingsUpdateToServer(reason);
+    return true;
+}
+
 /** Whether a refused codec string names a 4:4:4 profile. */
 const isFullColorProfile = (label) => /^(avc1\.F4|hev1\.4\.|vp09\.01)/i.test(label);
 
@@ -3300,20 +3356,23 @@ let codecRefusalHeld = null;
 let encoderLocked = false;
 /** The encoders the server allows, in its order, when it restricts them. */
 let encoderAllowed = null;
-/** The backend of each codec on the server, `{codec: {hardware, software, fullcolor}}`, once it has probed. */
+/** The backend of each codec on the server, `{codec: {hardware, software, fullcolor, ten_bit}}`, once it has probed. */
 let encoderBackends = null;
 
 /**
  * Whether a full-color session on `codec` streams 4:4:4 from this server: the `fullcolor` of
- * its backend on the side in effect, the engine's unless `use_cpu` or it has none; `null`
- * while the server has not said.
+ * its backend on the side in effect, the engine's unless `use_cpu` or it has none, and the
+ * software encoder's where a VA-API engine lacks the 4:4:4, which it refuses rather than
+ * streaming 4:2:0; `null` while the server has not said.
  * @param {string} codec The codec name.
  * @returns {boolean|null}
  */
 function serverFullColor(codec) {
     const entry = encoderBackends && encoderBackends[codec];
     if (!entry || !entry.fullcolor) return null;
-    const answer = entry.fullcolor[(use_cpu || !entry.hardware) ? 'software' : 'hardware'];
+    const software = use_cpu || !entry.hardware
+        || (entry.hardware === 'vaapi' && entry.fullcolor.hardware === false && entry.fullcolor.software === true);
+    const answer = entry.fullcolor[software ? 'software' : 'hardware'];
     return typeof answer === 'boolean' ? answer : null;
 }
 /** The codecs this engine refused in this session. */
@@ -3360,6 +3419,10 @@ function nextRung(refused, leaving = currentEncoderMode) {
         if (refusedCodecs.has(codec) || !canDecodeEncoder(enc)) continue;
         if (fullColorLocked && video_fullcolor && codecCarriesFullColor(codec) && serverFullColor(codec) !== false
             && fullColorDecoded(codec) === false) continue;
+        if (tenBitLocked && video_10bit && codecCarriesTenBit(codec)) {
+            const stream = serverTenBit(enc);
+            if (stream && tenBitDecoded(codec, stream.fullcolor) === false) continue;
+        }
         return enc;
     }
     return null;
@@ -3387,6 +3450,24 @@ const fallbackEncoder = (pick) => nextRung(codecOfEncoder(pick), pick) || 'jpeg'
  * @param {string} codec The refused stream's codec name.
  */
 function answerRefusedCodec(label, codec) {
+    if (codecRefusalUnanswerable || codecRefusalPending) return;
+    // A refusal under 10-bit is answered by turning 10-bit off first, which keeps
+    // the codec and its chroma, where this engine shows no 10-bit picture of it.
+    if (video_10bit && !tenBitLocked && !isSharedMode && codecCarriesTenBit(codec)) {
+        declineUndecodableTenBit(`no decoder for ${label}`).then((declined) => {
+            if (!declined) answerRefusedFormat(label, codec);
+        });
+        return;
+    }
+    answerRefusedFormat(label, codec);
+}
+
+/**
+ * `answerRefusedCodec` once 10-bit is not the answer.
+ * @param {string} label The refused codec string or encoder.
+ * @param {string} codec The refused stream's codec name.
+ */
+function answerRefusedFormat(label, codec) {
     if (codecRefusalUnanswerable || codecRefusalPending) return;
     // A refused 4:4:4 profile is answered by turning full color off, which
     // keeps the codec, unless the server holds it: then the ladder answers.
@@ -3557,6 +3638,7 @@ function getCurrentSettingsPayload() {
         ['manual_resolution', () => getBoolParam('manual_resolution', false)],
         ['audio_bitrate', () => getIntParam('audio_bitrate', 320000)],
         ['video_fullcolor', () => getBoolParam('video_fullcolor', false)],
+        ['video_10bit', () => getBoolParam('video_10bit', false)],
         ['video_streaming_mode', () => getBoolParam('video_streaming_mode', false)],
         ['jpeg_quality', () => getIntParam('jpeg_quality', 60)],
         ['paint_over_jpeg_quality', () => getIntParam('paint_over_jpeg_quality', 90)],
@@ -5774,6 +5856,11 @@ function handleSettingsMessage(settings, fromServer) {
     settingsChanged = true;
     clearAllVncStripeDecoders();
   }
+  if (settings.video_10bit !== undefined) {
+    video_10bit = !!settings.video_10bit;
+    storeBool('video_10bit', video_10bit);
+    settingsChanged = true;
+  }
   if (settings.video_streaming_mode !== undefined) {
     video_streaming_mode = !!settings.video_streaming_mode;
     storeBool('video_streaming_mode', video_streaming_mode);
@@ -5937,6 +6024,7 @@ function sendStatsMessage() {
   };
   stats.encoderName = currentEncoderMode;
   stats.video_fullcolor = video_fullcolor;
+  stats.video_10bit = video_10bit;
   stats.video_streaming_mode = video_streaming_mode;
   window.parent.postMessage({
     type: 'stats',
@@ -7546,6 +7634,7 @@ class WorkerWebSocket {
     reconnectUnopened = 0;
     initialSettingsSent = false;
     await settleFullColorSupport();
+    await settleTenBitSupport();
     if (await h264FramingReady === 'avcc') console.info('[Selkies] H.264 decodes here with an avcC description; frames are reframed for it.');
     // The first answer is the baseline; a later one that differs is a new build.
     entryPageChanged().then((changed) => { if (changed) location.reload(); });
@@ -7565,14 +7654,14 @@ class WorkerWebSocket {
 
       const knownSettings = [
         'video_crf', 'encoder', 'manual_resolution',
-        'audio_bitrate', 'video_fullcolor', 'video_streaming_mode',
+        'audio_bitrate', 'video_fullcolor', 'video_10bit', 'video_streaming_mode',
         'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'video_paintover_crf',
         'video_paintover_burst_frames', 'use_paint_over_quality', 'scaling_dpi',
         'enable_binary_clipboard', 'rate_control_mode', 'video_bitrate',
         'force_aligned_resolution'
       ];
       const booleanSettingKeys = [
-        'manual_resolution', 'video_fullcolor', 'video_streaming_mode',
+        'manual_resolution', 'video_fullcolor', 'video_10bit', 'video_streaming_mode',
         'use_cpu', 'use_paint_over_quality', 'enable_binary_clipboard',
         'force_aligned_resolution'
       ];
@@ -8341,6 +8430,12 @@ class WorkerWebSocket {
               const fcEntry = obj.settings && obj.settings.video_fullcolor;
               fullColorLocked = !!(fcEntry && fcEntry.locked);
               if (video_fullcolor) declineUndecodableFullColor('full color the server announced is not decoded here');
+              if (typeof window['video_10bit'] === 'boolean') {
+                  video_10bit = window['video_10bit'];
+              }
+              const tbEntry = obj.settings && obj.settings.video_10bit;
+              tenBitLocked = !!(tbEntry && tbEntry.locked);
+              if (video_10bit) declineUndecodableTenBit('10-bit the server announced is not decoded here');
               if (typeof window['video_streaming_mode'] === 'boolean') {
                   video_streaming_mode = window['video_streaming_mode'];
               }

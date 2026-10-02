@@ -93,8 +93,8 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
-import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers, rememberCcStart, forgetCcStart } from './lib/util.js';
-import { codecOfEncoder, codecCarriesFullColor } from './lib/wire-codecs.js';
+import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canDecodeTenBit, tenBitFormat, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers, rememberCcStart, forgetCcStart } from './lib/util.js';
+import { codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 import { StreamStats, DecodeCapability, webrtcDecoder, FIRST_SAMPLE_MS } from './lib/stream-stats.js';
@@ -638,7 +638,7 @@ export default function webrtc() {
 		}
 	}
 	const PER_DISPLAY_SETTINGS = [
-		'framerate', 'video_crf', 'video_fullcolor',
+		'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
 		'video_streaming_mode', 'use_cpu',
 		'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
 		'manual_resolution', 'manual_width', 'manual_height',
@@ -1201,6 +1201,86 @@ export default function webrtc() {
 	}
 
 	/**
+	 * Whether this engine's RTP receiver lists `codec` at an SDP `profile-id`.
+	 * @param {string} codec A codec name.
+	 * @param {number} profile The profile id.
+	 * @returns {boolean}
+	 */
+	function receiverTakesProfile(codec, profile) {
+		const mime = new RegExp(`^video/${codec}$`, 'i');
+		const fmtp = new RegExp(`(^|;)profile-id=${profile}(;|$)`);
+		try {
+			return RTCRtpReceiver.getCapabilities('video').codecs.some((c) =>
+				mime.test(c.mimeType) && fmtp.test(c.sdpFmtpLine || ''));
+		} catch (e) {
+			return false;
+		}
+	}
+
+	/**
+	 * Whether this engine decodes the codec at 10 bits over WebRTC: the
+	 * receiver's capabilities where the profile is one RTP negotiates (VP9
+	 * profile 2, or 3 at 4:4:4, H.265 Main 10, and H.264 High 10), the decode of
+	 * a 10-bit key frame for AV1, whose main profile carries both depths, and
+	 * for H.264 and H.265 4:4:4, which full color is answered the same way for.
+	 * @param {string} codec A codec name.
+	 * @param {boolean} fullcolor Whether the stream is 4:4:4.
+	 * @returns {Promise<boolean>}
+	 */
+	async function tenBitDecodable(codec, fullcolor) {
+		if (codec === 'vp9') return receiverTakesProfile('vp9', fullcolor ? 3 : 2);
+		if (codec === 'h265' && !fullcolor) return receiverTakesProfile('h265', 2);
+		if (codec === 'h264' && !fullcolor) {
+			try {
+				return RTCRtpReceiver.getCapabilities('video').codecs.some((c) =>
+					/^video\/h264$/i.test(c.mimeType) && /profile-level-id=6e/i.test(c.sdpFmtpLine || ''));
+			} catch (e) {
+				return false;
+			}
+		}
+		return await canDecodeTenBit(codec, fullcolor);
+	}
+
+	/** Whether the stream on `codec` is 4:4:4 as far as this page asked for it. */
+	const streamsFullColor = (codec) => !!window.video_fullcolor && codecCarriesFullColor(codec);
+
+	/**
+	 * Turns 10-bit off in storage where this engine cannot decode the codec at
+	 * 10 bits over RTP, before the first SETTINGS payload, as
+	 * `settleFullColorSupport` does for full color.
+	 */
+	async function settleTenBitSupport() {
+		const codec = codecOfEncoder(encoder);
+		if (!codecCarriesTenBit(codec) || !getBoolParam('video_10bit', false)) return;
+		if (await tenBitDecodable(codec, getBoolParam('video_fullcolor', false) && codecCarriesFullColor(codec))) return;
+		console.warn(`[Selkies] 10-bit is off: this browser decodes ${codec} at 8 bits only over WebRTC.`);
+		setBoolParam('video_10bit', false);
+	}
+
+	/** Whether the server holds 10-bit: a locked `video_10bit`. */
+	let tenBitLocked = false;
+
+	/**
+	 * Turns a 10-bit the server announced off again where this engine cannot
+	 * decode it over WebRTC, so the stream comes back at 8 bits on the same
+	 * codec. A locked setting cannot be turned off and is reported once.
+	 */
+	async function declineUndecodableTenBit() {
+		if (!window.video_10bit || isSharedMode) return;
+		const codec = codecOfEncoder(encoder);
+		if (!codecCarriesTenBit(codec) || await tenBitDecodable(codec, streamsFullColor(codec))) return;
+		if (!window.video_10bit) return;
+		if (tenBitLocked) {
+			console.error(`This session streams 10-bit ${codec}, which this browser cannot decode over WebRTC.`);
+			return;
+		}
+		console.warn(`[Selkies] 10-bit is off: this browser decodes ${codec} at 8 bits only over WebRTC.`);
+		window.video_10bit = false;
+		setBoolParam('video_10bit', false);
+		handleSettingsMessage({ video_10bit: false }, false);
+	}
+
+	/**
 	 * Sends the persisted settings as the session's initial SETTINGS payload.
 	 *
 	 * Every display page sends its own: the server applies a payload to the
@@ -1267,12 +1347,12 @@ export default function webrtc() {
 			'encoder', 'manual_resolution',
 			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
 			'rate_control_mode', 'video_crf', 'use_cpu', 'force_aligned_resolution',
-			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality',
+			'video_fullcolor', 'video_10bit', 'video_streaming_mode', 'use_paint_over_quality',
 			'video_paintover_crf', 'video_paintover_burst_frames'
 		];
 		const booleanSettingKeys = [
 			'manual_resolution', 'enable_binary_clipboard', 'use_cpu',
-			'video_fullcolor', 'video_streaming_mode', 'use_paint_over_quality',
+			'video_fullcolor', 'video_10bit', 'video_streaming_mode', 'use_paint_over_quality',
 			'force_aligned_resolution'
 		];
 		const integerSettingKeys = [
@@ -2200,6 +2280,7 @@ export default function webrtc() {
 		}
 		const passthrough = {};
 		if (settings.video_fullcolor !== undefined) passthrough.video_fullcolor = !!settings.video_fullcolor;
+		if (settings.video_10bit !== undefined) passthrough.video_10bit = !!settings.video_10bit;
 		if (settings.video_streaming_mode !== undefined) passthrough.video_streaming_mode = !!settings.video_streaming_mode;
 		if (settings.use_paint_over_quality !== undefined) passthrough.use_paint_over_quality = !!settings.use_paint_over_quality;
 		if (settings.video_paintover_crf !== undefined) passthrough.video_paintover_crf = parseInt(settings.video_paintover_crf, 10);
@@ -2973,6 +3054,17 @@ export default function webrtc() {
 				}
 				return codecs;
 			};
+			// And the 10 bits it decodes, by format.
+			signaling.tenBitCapabilities = async () => {
+				const formats = [];
+				for (const codec of ['h264', 'h265', 'vp9', 'av1']) {
+					for (const fullcolor of [false, true]) {
+						if (fullcolor && !codecCarriesFullColor(codec)) continue;
+						if (await tenBitDecodable(codec, fullcolor)) formats.push(tenBitFormat(codec, fullcolor));
+					}
+				}
+				return formats;
+			};
 			/**
 			 * After repeated connect failures the signaling endpoint is probed with
 			 * a plain GET before the page reloads. No answer (`serverAnswers`) is a
@@ -3220,7 +3312,7 @@ export default function webrtc() {
 				}
 
 				loadLastSessionSettings();
-				settleFullColorSupport().then(sendClientPersistedSettings);
+				settleFullColorSupport().then(settleTenBitSupport).then(sendClientPersistedSettings);
 
 				// One loop per channel: a reopened channel restarts it.
 				if (metricsLoopId !== null) clearInterval(metricsLoopId);
@@ -3544,6 +3636,9 @@ export default function webrtc() {
 				const fcEntry = obj.settings && obj.settings.video_fullcolor;
 				fullColorLocked = !!(fcEntry && fcEntry.locked);
 				if (fcEntry) declineUndecodableFullColor();
+				const tbEntry = obj.settings && obj.settings.video_10bit;
+				tenBitLocked = !!(tbEntry && tbEntry.locked);
+				if (tbEntry) declineUndecodableTenBit();
 				const wce = obj.settings && obj.settings.webcam_encoder;
 				if (wce && WEBCAM_ENCODER_PREFERENCES.includes(wce.value)) {
 					const stored = getStringParam('webcam_encoder', wce.value);

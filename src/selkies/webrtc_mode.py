@@ -364,6 +364,7 @@ class WebRTCService(BaseStreamingService):
             audio_device_name=self.args.audio_device_name,
             crf=int(self.args.video_crf),
             video_fullcolor=bool(self.args.video_fullcolor),
+            video_10bit=bool(self.args.video_10bit),
             use_cpu=bool(self.args.use_cpu),
             video_streaming_mode=bool(self.args.video_streaming_mode),
             use_paint_over_quality=bool(self.args.use_paint_over_quality),
@@ -480,6 +481,7 @@ class WebRTCService(BaseStreamingService):
         self, session_peer_id: str, client_type: str, client_token: Optional[str] = None,
         display_id: str = "primary", display_position: str = "right",
         fullcolor_codecs: Optional[List[str]] = None,
+        tenbit_codecs: Optional[List[str]] = None,
     ) -> None:
         """Start an RTC connection for a joining peer.
 
@@ -528,7 +530,7 @@ class WebRTCService(BaseStreamingService):
                 self._seed_display_settings(entry)
             await self.rtc_app.start_rtc_connection(
                 session_peer_id, client_type, client_token, display_id, client_slot,
-                fullcolor_codecs=fullcolor_codecs)
+                fullcolor_codecs=fullcolor_codecs, tenbit_codecs=tenbit_codecs)
             if client_type == "controller":
                 await self._seed_start_rate(session_peer_id, display_id,
                                             getattr(peer, "cc_start_kbps", None) if peer else None)
@@ -684,6 +686,8 @@ class WebRTCService(BaseStreamingService):
         self.rtc_app.on_video_codec_declined = self._video_codec_declined
         self.rtc_app.on_fullcolor_declined = self._fullcolor_declined
         self.rtc_app.get_fullcolor_for_display = self._fullcolor_for_display
+        self.rtc_app.on_ten_bit_declined = self._ten_bit_declined
+        self.rtc_app.get_ten_bit_for_display = self._ten_bit_for_display
         self.rtc_app.get_use_cpu_for_display = self._use_cpu_for_display
         self.rtc_app.on_video_consumer_active = self.handle_video_consumer_active
         self.rtc_app.on_audio_consumer_active = self.handle_audio_consumer_active
@@ -2099,6 +2103,7 @@ class WebRTCService(BaseStreamingService):
                     height=s["h"],
                     crf=int(setting("video_crf")),
                     video_fullcolor=bool(setting("video_fullcolor")),
+                    video_10bit=bool(setting("video_10bit")),
                     use_cpu=bool(setting("use_cpu")),
                     video_streaming_mode=bool(setting("video_streaming_mode")),
                     use_paint_over_quality=bool(setting("use_paint_over_quality")),
@@ -2497,6 +2502,7 @@ class WebRTCService(BaseStreamingService):
         "use_cpu": lambda p, v: p.set_use_cpu(bool(v)),
         "encoder": lambda p, v: p.set_encoder(str(v)),
         "video_fullcolor": lambda p, v: p.set_video_fullcolor(bool(v)),
+        "video_10bit": lambda p, v: p.set_video_10bit(bool(v)),
         "video_streaming_mode": lambda p, v: p.set_video_streaming_mode(bool(v)),
         "use_paint_over_quality": lambda p, v: p.set_use_paint_over_quality(bool(v)),
         "video_paintover_crf": lambda p, v: p.set_video_paintover_crf(int(v)),
@@ -2610,21 +2616,42 @@ class WebRTCService(BaseStreamingService):
     async def _fullcolor_declined(self, display_id: str) -> bool:
         """A joining WebRTC peer decodes none of the 4:4:4 the display's codec
         carries: full color goes off for the display, so the offer describes
-        4:2:0 from its first frame, and every client hears of it; a full color
-        the operator holds stays, which leaves that peer without a picture."""
-        if not self._fullcolor_for_display(display_id):
+        4:2:0 from its first frame (`_format_declined`)."""
+        return await self._format_declined(display_id, "video_fullcolor", "4:4:4", "full color")
+
+    async def _ten_bit_declined(self, display_id: str) -> bool:
+        """A joining WebRTC peer decodes no 10 bits of the display's codec: 10-bit
+        goes off for the display, so the offer describes 8 bits from its first
+        frame (`_format_declined`)."""
+        return await self._format_declined(display_id, "video_10bit", "10-bit", "10-bit")
+
+    async def _format_declined(self, display_id: str, setting: str, fmt: str, label: str) -> bool:
+        """Turn a format setting off for a display whose joining peer cannot decode it,
+        and tell every client; a setting the operator holds stays, which leaves that
+        peer without a picture.
+
+        Args:
+            display_id: The display the peer joins.
+            setting: The bool setting that asks for the format.
+            fmt: The format, as the log names it.
+            label: The setting, as the log names it.
+
+        Returns:
+            Whether the display no longer emits the format.
+        """
+        if not bool(self._display_setting(display_id, setting)):
             return True
-        limit = getattr(self.settings, "video_fullcolor", None)
+        limit = getattr(self.settings, setting, None)
         if isinstance(limit, (tuple, list)) and len(limit) > 1 and limit[1]:
             return False
-        logger.warning("A WebRTC peer of display %r decodes no 4:4:4 of its codec; full color is off.",
-                       display_id)
-        await self._apply_display_setting(display_id, "video_fullcolor", False)
+        logger.warning("A WebRTC peer of display %r decodes no %s of its codec; %s is off.",
+                       display_id, fmt, label)
+        await self._apply_display_setting(display_id, setting, False)
         if display_id == "primary":
             # The settings payload advertises the primary's value: an operator override
-            # left in it would come back from the client and flip the stream to 4:4:4.
-            self.settings.video_fullcolor = (False, False)
-            self.settings._overridden["video_fullcolor"] = False
+            # left in it would come back from the client and turn the format on again.
+            setattr(self.settings, setting, (False, False))
+            self.settings._overridden[setting] = False
         if self.rtc_app:
             self.rtc_app.send_media_data_over_channel(
                 "server_settings", self._server_settings_payload())
@@ -2632,6 +2659,9 @@ class WebRTCService(BaseStreamingService):
 
     def _fullcolor_for_display(self, display_id: str) -> bool:
         return bool(self._display_setting(display_id, "video_fullcolor"))
+
+    def _ten_bit_for_display(self, display_id: str) -> bool:
+        return bool(self._display_setting(display_id, "video_10bit"))
 
     def _use_cpu_for_display(self, display_id: str) -> bool:
         return bool(self._display_setting(display_id, "use_cpu"))
@@ -2668,6 +2698,7 @@ class WebRTCService(BaseStreamingService):
             "force_aligned_resolution",
             "encoder",
             "video_fullcolor",
+            "video_10bit",
             "video_streaming_mode",
             "use_paint_over_quality",
             "video_paintover_crf",

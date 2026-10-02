@@ -36,13 +36,14 @@
  */
 
 import { Card, CardContent } from "@/components/ui/card";
-import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, isMacDesktop } from "../../../../selkies-web-core/lib/util.js";
+import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, canDecodeTenBit, tenBitFormat, codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, isMacDesktop } from "../../../../selkies-web-core/lib/util.js";
 import { switchStreamMode } from "../../../../selkies-web-core/lib/mode-switch.js";
 import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, framerateStopIndex, stopIndex, stopsWithin, withDisplayStop } from "../../../../selkies-web-core/lib/slider-stops.js";
 import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from "../../../../selkies-web-core/lib/display-refresh.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
-    USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
+    USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
+    tenBitStream,
     RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
@@ -483,6 +484,21 @@ export function Settings() {
     }, [encoder, videoStreamingMode]);
     const [useCpu, setUseCpu] = useConditionalSetting(
         USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    const [video10Bit, setVideo10Bit] = useConditionalSetting(
+        VIDEO_10BIT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    /** 10-bit is offered only where this engine shows a 10-bit picture of the stream's format. */
+    const [tenBitAnswer, setTenBitAnswer] = useState({ format: "", ok: false });
+    const tenBitOffered = tenBitStream(encoder, conditionalCtx.encoderBackends, useCpu, videoFullColor);
+    const tenBitFullColor = !!tenBitOffered && tenBitOffered.fullcolor;
+    const tenBitAsked = tenBitFormat(fullColorCodec, tenBitFullColor);
+    useEffect(() => {
+        let live = true;
+        canDecodeTenBit(fullColorCodec, tenBitFullColor).then((ok: boolean) => {
+            if (live) setTenBitAnswer({ format: tenBitFormat(fullColorCodec, tenBitFullColor), ok });
+        });
+        return () => { live = false; };
+    }, [fullColorCodec, tenBitFullColor]);
+    const tenBitDecodable = tenBitAnswer.ok && tenBitAnswer.format === tenBitAsked;
 
     // Anti-aliasing stays client-only (no server truth), so it keeps its own state.
     const [antiAliasing, setAntiAliasing] = useState(() => {
@@ -837,6 +853,10 @@ export function Settings() {
         writeConditional(VIDEO_FULLCOLOR_SPEC, !videoFullColor, setVideoFullColor, { persist: true });
     };
 
+    const handle10BitToggle = () => {
+        writeConditional(VIDEO_10BIT_SPEC, !video10Bit, setVideo10Bit, { persist: true });
+    };
+
     const handleH264StreamingModeToggle = () => {
         writeConditional(VIDEO_STREAMING_MODE_SPEC, !videoStreamingMode, setVideoStreamingMode, { persist: true });
     };
@@ -1009,6 +1029,8 @@ export function Settings() {
     const activeEncoder = encoder;
     const isH264 = VIDEO_ENCODERS.includes(activeEncoder);
     const showFullColor = isH264 && codecCarriesFullColor(codecOfEncoder(activeEncoder));
+    const show10Bit = isH264 && codecCarriesTenBit(codecOfEncoder(activeEncoder))
+        && !!tenBitOffered;
     const showJpegOptions = !isWebrtc && activeEncoder === 'jpeg';
     const showRateControl = rateControlEnabled && isH264;
     /**
@@ -1450,6 +1472,19 @@ export function Settings() {
                                         checked={videoFullColor}
                                         onCheckedChange={handleH264FullColorToggle}
                                         disabled={!serverSettings || serverSettings.video_fullcolor?.locked}
+                                    />
+                                </div>
+                                )}
+
+                                {show10Bit && (renderableSettings.video10Bit ?? true) && tenBitDecodable && (
+                                <div className="flex items-center justify-between">
+                                    <div className="space-y-0.5">
+                                        <label className="text-sm font-medium">{t('sections.video.tenBitLabel')}</label>
+                                    </div>
+                                    <Switch
+                                        checked={video10Bit}
+                                        onCheckedChange={handle10BitToggle}
+                                        disabled={!serverSettings || serverSettings.video_10bit?.locked}
                                     />
                                 </div>
                                 )}

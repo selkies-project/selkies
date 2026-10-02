@@ -113,7 +113,7 @@ All messages sent to the client must be JavaScript objects with a `type` propert
         *   `audio_bitrate` (Number): Audio bitrate in bps (e.g., 320000).
         *   `scaling_dpi` (Number): Custom DPI scaling for the remote desktop.
         *   `enable_binary_clipboard` (Boolean): Enables image (binary) copy/pasting. The matching `clipboard_in_enabled` / `clipboard_out_enabled` flags toggle paste-into-session and copy-from-session.
-        *   *Advanced Toggles:* `use_cpu`, `video_fullcolor`, `video_streaming_mode`, `jpeg_quality`, `use_paint_over_quality`.
+        *   *Advanced Toggles:* `use_cpu`, `video_fullcolor`, `video_10bit`, `video_streaming_mode`, `jpeg_quality`, `use_paint_over_quality`.
 *   **`clipboardUpdateFromUI`**
     *   **Payload:** `{ type: 'clipboardUpdateFromUI', text: <string> }`
     *   **Description:** Sends text from the local UI to the remote server's clipboard. *(Ignored in shared mode).*

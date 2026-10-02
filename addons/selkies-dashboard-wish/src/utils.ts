@@ -40,7 +40,7 @@ export { getRoutePrefix, getStorageAppName };
  * write the primary's key.
  */
 const PER_DISPLAY_SETTINGS = [
-  'framerate', 'video_crf', 'video_fullcolor',
+  'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
   'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
   'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
   'manual_resolution', 'manual_width', 'manual_height',
@@ -191,6 +191,7 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.usePaintOverQuality = isSettingRenderable(s.use_paint_over_quality);
   newRenderable.videoStreamingMode = isSettingRenderable(s.video_streaming_mode);
   newRenderable.videoFullColor = isSettingRenderable(s.video_fullcolor);
+  newRenderable.video10Bit = isSettingRenderable(s.video_10bit);
   newRenderable.useCpu = isSettingRenderable(s.use_cpu);
   newRenderable.uiScaling = isSettingRenderable(s.scaling_dpi);
   newRenderable.binaryClipboard = isSettingRenderable(s.enable_binary_clipboard)

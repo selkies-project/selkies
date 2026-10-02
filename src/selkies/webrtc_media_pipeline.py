@@ -203,6 +203,7 @@ class MediaPipelinePixel(MediaPipeline):
         crf: int = 23,
         rc_mode: RateControlMode = RateControlMode.CBR,
         video_fullcolor: bool = False,
+        video_10bit: bool = False,
         use_cpu: bool = False,
         video_streaming_mode: bool = True,
         use_paint_over_quality: bool = True,
@@ -221,6 +222,7 @@ class MediaPipelinePixel(MediaPipeline):
         self.rc_mode = rc_mode
         self.video_crf = crf
         self.video_fullcolor = video_fullcolor
+        self.video_10bit = video_10bit
         self.use_cpu = use_cpu
         self.video_streaming_mode = video_streaming_mode
         self.use_paint_over_quality = use_paint_over_quality
@@ -381,6 +383,16 @@ class MediaPipelinePixel(MediaPipeline):
         if not self._is_screen_capturing or self.capture_module is None:
             return
         logger.info(f"video_fullcolor -> {fullcolor}; restarting screen capture")
+        await self.restart_screen_capture()
+
+    async def set_video_10bit(self, ten_bit: bool) -> None:
+        """Toggle 10-bit samples. Structural (pixel format), so restart capture (WS parity)."""
+        if self.video_10bit == ten_bit:
+            return
+        self.video_10bit = ten_bit
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
+        logger.info(f"video_10bit -> {ten_bit}; restarting screen capture")
         await self.restart_screen_capture()
 
     async def set_encoder(self, encoder: str) -> None:
@@ -549,6 +561,7 @@ class MediaPipelinePixel(MediaPipeline):
             paintover_crf=self.video_paintover_crf,
             paintover_burst=self.video_paintover_burst_frames,
             fullcolor=self.video_fullcolor,
+            ten_bit=self.video_10bit,
             streaming=self.video_streaming_mode,
             use_paint_over_quality=self.use_paint_over_quality,
             capture_cursor=self.capture_cursor,

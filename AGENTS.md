@@ -210,7 +210,14 @@ Each is documented in full where named; read that before changing the subsystem.
   and `nextRung` in the core): the full-frame codecs the host encodes in hardware, most efficient first, then those it
   encodes in software by their encoders' measured time per frame, then striped H.264, and JPEG last. Over WebSockets the client walks it
   through the encoders it decodes; over WebRTC the offer lists it behind the display's codec
-  (`RTCApp.prefer_codec`) and the display follows the codec the answer took.
+  (`RTCApp.prefer_codec`) and the display follows the codec the answer took. 10 bits (`video_10bit`) follow the
+  same rule with one difference: the client is asked by decoding a 10-bit key frame of the format, never by
+  its decoder's word, since engines accept 10-bit configurations they then fail to decode
+  (`util.canDecodeTenBit`); the server says which formats its encode node and its software encoders carry
+  (`encoder_backends`' `ten_bit`, from `pixelflux.hardware_formats` and `SOFTWARE_FORMATS`), a format the
+  engine lacks running on the software encoder as a 4:4:4 it lacks does (`AppSettings.encoder_ten_bit`,
+  `conditional-settings.tenBitStream`), a WebRTC hello names the formats decoded (`tenbit_codecs`), and
+  `RTCApp._settle_ten_bit` settles it before the offer.
 - A picture a client could not decode is repaired by taking it out of the encoder's references, not by a key
   frame: the client names the frame it lost, the server asks that display's capture to forget it, and the
   stream keeps predicting past it while the other clients see nothing. Over WebSockets the client's decode

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""The 4:4:4 capability a client's hello carries through SESSION_START.
+"""The 4:4:4 and 10-bit capabilities a client's hello carries through SESSION_START.
 
-The signaling relay appends `fullcolor=<codec,...>` after the optional client token; the
-server's signaling client reads it into `fullcolor_codecs`, keeps the token apart from it,
-and leaves the field `None` for a client that said nothing, in every line length the
-protocol allows.
+The signaling relay appends `fullcolor=<codec,...>` and `tenbit=<format,...>` after the
+optional client token; the server's signaling client reads them into `fullcolor_codecs`
+and `tenbit_codecs`, keeps the token apart from both, and leaves a field `None` for a
+client that said nothing of it, in every line length the protocol allows.
 """
 import asyncio
 import os
@@ -21,10 +21,10 @@ def started(line: str) -> dict:
     seen = {}
 
     async def on_session_start(peer_id, client_type, client_token, display_id, display_position,
-                               fullcolor_codecs=None):
+                               fullcolor_codecs=None, tenbit_codecs=None):
         seen.update(peer_id=peer_id, client_type=client_type, client_token=client_token,
                     display_id=display_id, display_position=display_position,
-                    fullcolor_codecs=fullcolor_codecs)
+                    fullcolor_codecs=fullcolor_codecs, tenbit_codecs=tenbit_codecs)
 
     client.on_session_start = on_session_start
     asyncio.run(client._process_message(line))
@@ -44,6 +44,17 @@ def test_capability_without_a_token() -> None:
     assert seen["fullcolor_codecs"] == []
 
 
+def test_ten_bit_beside_full_color() -> None:
+    seen = started("SESSION_START p1 controller primary right tok fullcolor=h264 tenbit=av1,vp9,vp9444")
+    assert seen["client_token"] == "tok"
+    assert seen["fullcolor_codecs"] == ["h264"]
+    assert seen["tenbit_codecs"] == ["av1", "vp9", "vp9444"]
+    seen = started("SESSION_START p1 controller primary right tenbit=")
+    assert seen["client_token"] is None
+    assert seen["fullcolor_codecs"] is None and seen["tenbit_codecs"] == []
+    assert started("SESSION_START p1 viewer primary right tok")["tenbit_codecs"] is None
+
+
 def test_silence_is_none() -> None:
     assert started("SESSION_START p1 viewer primary right tok")["fullcolor_codecs"] is None
     assert started("SESSION_START p1 viewer primary right")["fullcolor_codecs"] is None
@@ -54,5 +65,6 @@ def test_silence_is_none() -> None:
 if __name__ == "__main__":
     test_capability_beside_the_token()
     test_capability_without_a_token()
+    test_ten_bit_beside_full_color()
     test_silence_is_none()
     print("ok")

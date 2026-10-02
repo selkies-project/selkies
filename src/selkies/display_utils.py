@@ -2569,6 +2569,7 @@ def apply_common_capture_settings(
     paintover_crf: int,
     paintover_burst: int,
     fullcolor: bool,
+    ten_bit: bool,
     streaming: bool,
     use_paint_over_quality: bool,
     capture_cursor: bool,
@@ -2615,6 +2616,7 @@ def apply_common_capture_settings(
     cs.video_paintover_crf = paintover_crf
     cs.video_paintover_burst_frames = paintover_burst
     cs.video_fullcolor = fullcolor
+    cs.video_bit_depth = 10 if ten_bit else 8
     cs.video_streaming_mode = streaming
     cs.video_fullframe = encoder != "h264enc-striped"
     cs.video_cbr_mode = cbr

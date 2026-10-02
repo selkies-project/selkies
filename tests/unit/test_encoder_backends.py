@@ -148,6 +148,38 @@ got = probe(
     " s.settings.encoder_fullcolor('jpeg'))")
 check("the engine's 4:4:4 answers for a hardware codec, the build's for a forced or striped one",
       got == "True False True True True None", got)
+got = probe(
+    "import selkies.settings as m; m.software_fullcolor = lambda: ['h264', 'h265']; m.software_formats = lambda: {};"
+    " m.software_encoders = lambda: {'h264': 'x264', 'h265': 'x265', 'av1': 'svt-av1'};"
+    " s.settings._hardware_encoders = {'h264': 'vaapi', 'h265': 'vaapi', 'av1': 'vaapi'}; s.settings._hardware_fullcolor = ['h265'];"
+    " a = s.settings.encoder_fullcolor('h264enc'), s.settings.encoder_fullcolor('h265enc'), s.settings.encoder_fullcolor('av1enc');"
+    " s.settings._hardware_encoders = {'h264': 'nvenc'}; s.settings._hardware_fullcolor = [];"
+    " print(*a, s.settings.encoder_fullcolor('h264enc'))")
+check("a 4:4:4 a VA-API engine lacks is the software encoder's, where that codes it",
+      got == "True True False False", got)
+
+# 10 bits are the engine's where it carries them at the chroma the session runs, and the
+# software encoder's where the engine does not and the build's encoder codes them, as a 4:4:4
+# the engine lacks is.
+got = probe(
+    "import selkies.settings as m;"
+    " m.software_formats = lambda: {'h265': ['420-8', '420-10', '444-8', '444-10'], 'av1': ['420-8', '420-10'], 'h264': ['420-8', '420-10', '444-8', '444-10'], 'vp8': ['420-8']};"
+    " m.software_fullcolor = lambda: ['h264', 'h265'];"
+    " m.software_encoders = lambda: {'h264': 'x264', 'h265': 'x265', 'av1': 'svt-av1', 'vp8': 'libvpx'};"
+    " s.settings._hardware_encoders = {'h265': 'vaapi', 'av1': 'vaapi', 'h264': 'vaapi', 'vp8': 'vaapi'};"
+    " s.settings._hardware_fullcolor = ['h265'];"
+    " s.settings._hardware_formats = {'h265': ['420-8', '420-10', '444-8'], 'av1': ['420-8'], 'h264': ['420-8'], 'vp8': ['420-8']};"
+    " t = s.settings.encoder_backends();"
+    " e = s.settings.encoder_ten_bit;"
+    " print(t['h265']['ten_bit'], e('h265enc'), e('h265enc', fullcolor=True), e('av1enc'), e('h264enc'),"
+    " e('h264enc', fullcolor=True), e('h264enc-striped'), e('vp8enc'), e('av1enc', use_cpu=True), e('jpeg'))")
+check("the engine's 10 bits answer by chroma, and the software encoder's where the engine has none",
+      got == "{'hardware': {'420': True, '444': False}, 'software': {'420': True, '444': True}} "
+             "True True True True True True False True None", got)
+got = probe(
+    "s.settings.resolve_encoder_backends(); t = s.settings.encoder_backends();"
+    " print(all(v['ten_bit']['hardware'] is None for v in t.values()))", SELKIES_GPU_ID="-1")
+check("gpu_id -1: no hardware side carries 10 bits", got == "True", got)
 
 print(f"[encoder-backends] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

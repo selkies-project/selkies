@@ -85,6 +85,15 @@ export class WebRTCSignaling {
          */
         this.capabilities = null;
 
+        /**
+         * Answers, before the hello, which formats this engine decodes at 10
+         * bits, a codec name for 4:2:0 and the name with `444` after it for
+         * 4:4:4, so the server offers 8 bits to a client without them; unset,
+         * the hello says nothing.
+         * @type {?function(): Promise<string[]>}
+         */
+        this.tenBitCapabilities = null;
+
         /** Local peer id, set by the WebRTC client before `connect`. @type {number} */
         this.peer_id = 1;
 
@@ -234,6 +243,9 @@ export class WebRTCSignaling {
         }
         if (this.capabilities) {
             try { meta.fullcolor_codecs = await this.capabilities(); } catch (e) { /* the server takes silence as decodable */ }
+        }
+        if (this.tenBitCapabilities) {
+            try { meta.tenbit_codecs = await this.tenBitCapabilities(); } catch (e) { /* the server takes silence as decodable */ }
         }
         if (!this._ws_conn || this._ws_conn.readyState !== WebSocket.OPEN) return;
         this._ws_conn.send(`HELLO ${this.peer_type} ${JSON.stringify(meta)}`);

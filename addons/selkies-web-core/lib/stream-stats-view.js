@@ -83,7 +83,8 @@ function encoderRow(info) {
   return {
     key: 'encoder',
     status: info.hardware ? 'good' : fell ? 'warn' : 'neutral',
-    value: joined([info.encoder, `${codecName(info.codec)}${video ? (info.fullcolor ? ' 4:4:4' : ' 4:2:0') : ''}`,
+    value: joined([info.encoder, `${codecName(info.codec)}${video ? (info.fullcolor ? ' 4:4:4' : ' 4:2:0') : ''}${
+      video && info.bit_depth === 10 ? ' 10-bit' : ''}`,
       info.striped && 'Striped']),
     detail: info.hardware ? joined([info.gpu, nodeName(info.encode_node), info.driver])
       : info.gpu_present === false ? 'No GPU exposed to the server' : '',

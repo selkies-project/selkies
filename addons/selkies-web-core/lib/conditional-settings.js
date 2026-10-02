@@ -66,6 +66,40 @@ export function softwareChoiceAvailable(encoder, encoderBackends) {
 }
 
 /**
+ * The 10-bit stream an encoder would run on this server, or `null` where it
+ * would stream 8 bits. A session runs on the encode node's engine where the
+ * codec has one and software is not forced, and the server hands it to its
+ * software encoder where the engine lacks the 4:4:4 a full-color session asks
+ * for, or the 10 bits this one does while the software encoder codes them.
+ * Each side answers at the chroma it would run: its 4:4:4 where full color is
+ * on and it carries that, else 4:2:0. `null` without a backend table, so the
+ * switch is not offered on a guess.
+ * @param {string} encoder Encoder wire value.
+ * @param {Object<string, {hardware: (string|null), software: (string|null),
+ *     fullcolor: Object<string, ?boolean>, ten_bit: Object<string, ?Object<string, boolean>>}>|undefined|null} encoderBackends
+ *     The server's `encoder_backends` payload entry, keyed by codec name.
+ * @param {boolean} useCpu Whether software encoding is forced.
+ * @param {boolean} fullColor Whether full color is on.
+ * @returns {?{fullcolor: boolean, software: boolean}} The stream's chroma, and
+ *     whether the software encoder codes it.
+ */
+export function tenBitStream(encoder, encoderBackends, useCpu, fullColor) {
+    if (encoder === "jpeg" || !encoderBackends) return null;
+    const backends = encoderBackends[codecOfEncoder(encoder)];
+    if (!backends || !backends.ten_bit) return null;
+    const carries = (side) => {
+        const table = backends.ten_bit[side];
+        const fullcolor = !!(fullColor && backends.fullcolor && backends.fullcolor[side]);
+        return table && table[fullcolor ? "444" : "420"] ? { fullcolor, software: side === "software" } : null;
+    };
+    if (useCpu || encoder === "h264enc-striped" || !backends.hardware) return carries("software");
+    if (fullColor && backends.fullcolor && backends.fullcolor.hardware === false && backends.fullcolor.software) {
+        return carries("software");
+    }
+    return carries("hardware") || carries("software");
+}
+
+/**
  * Resolves one setting to its value in server terms through the module's
  * precedence ladder.
  * @param {object} input
@@ -175,6 +209,8 @@ export const USE_BROWSER_CURSORS_SPEC = boolSpec("use_browser_cursors", false,
     (value, _ctx, io) => io.postToCore({ type: "setUseBrowserCursors", value }));
 export const VIDEO_FULLCOLOR_SPEC = boolSpec("video_fullcolor", false,
     (value, _ctx, io) => io.postSetting({ video_fullcolor: value }));
+export const VIDEO_10BIT_SPEC = boolSpec("video_10bit", false,
+    (value, _ctx, io) => io.postSetting({ video_10bit: value }));
 export const VIDEO_STREAMING_MODE_SPEC = boolSpec("video_streaming_mode", false,
     (value, _ctx, io) => io.postSetting({ video_streaming_mode: value }));
 /**
@@ -218,7 +254,7 @@ export const MAC_CMD_AS_CTRL_SPEC = boolSpec("mac_cmd_as_ctrl", true,
     (value, _ctx, io) => io.postToCore({ type: "setMacCmdAsCtrl", value }));
 
 const SETTING_SPECS = [
-    HIDPI_SPEC, RATE_CONTROL_SPEC, USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC,
+    HIDPI_SPEC, RATE_CONTROL_SPEC, USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC,
     VIDEO_STREAMING_MODE_SPEC, USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC,
     FORCE_ALIGNED_RESOLUTION_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC,
 ];

@@ -56,7 +56,7 @@
  * @module
  */
 import { useState, useEffect, useCallback, useId, useMemo, useRef, useSyncExternalStore } from "react";
-import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, codecOfEncoder, codecCarriesFullColor, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
+import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, canDecodeTenBit, tenBitFormat, codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
 import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.js";
 import { fragmentWithSessionToken, shareablePageURL, urlFragmentKeyword } from "../../../selkies-web-core/lib/page-url.js";
@@ -65,8 +65,9 @@ import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from 
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords } from "../../../selkies-web-core/lib/touch-controls.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
-  USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_STREAMING_MODE_SPEC,
+  USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
+  tenBitStream,
   RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import PlayerGamepadButton from "./PlayerGamepadButton.jsx";
@@ -98,7 +99,7 @@ const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
  * write the primary's key.
  */
 const PER_DISPLAY_SETTINGS = [
-    'framerate', 'video_crf', 'video_fullcolor',
+    'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
     'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
     'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
     'manual_resolution', 'manual_width', 'manual_height', 'encoder',
@@ -1041,6 +1042,7 @@ function Sidebar() {
     newRenderable.usePaintOverQuality = isRenderable('use_paint_over_quality');
     newRenderable.videoStreamingMode = isRenderable('video_streaming_mode');
     newRenderable.videoFullColor = isRenderable('video_fullcolor');
+    newRenderable.video10Bit = isRenderable('video_10bit');
     newRenderable.use_cpu = isRenderable('use_cpu');
     newRenderable.uiScaling = isRenderable('scaling_dpi');
     newRenderable.binaryClipboard = isRenderable('enable_binary_clipboard')
@@ -1419,6 +1421,21 @@ function Sidebar() {
   }, [fullColorCodec]);
   const [use_cpu, setUseCpu] = useConditionalSetting(
     USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [video10Bit, setVideo10Bit] = useConditionalSetting(
+    VIDEO_10BIT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  /** 10-bit is offered only where this engine shows a 10-bit picture of the stream's format. */
+  const [tenBitAnswer, setTenBitAnswer] = useState({ format: "", ok: false });
+  const tenBitOffered = tenBitStream(encoder, conditionalCtx.encoderBackends, use_cpu, videoFullColor);
+  const tenBitFullColor = !!tenBitOffered && tenBitOffered.fullcolor;
+  const tenBitAsked = tenBitFormat(fullColorCodec, tenBitFullColor);
+  useEffect(() => {
+    let live = true;
+    canDecodeTenBit(fullColorCodec, tenBitFullColor).then((ok) => {
+      if (live) setTenBitAnswer({ format: tenBitFormat(fullColorCodec, tenBitFullColor), ok });
+    });
+    return () => { live = false; };
+  }, [fullColorCodec, tenBitFullColor]);
+  const tenBitDecodable = tenBitAnswer.ok && tenBitAnswer.format === tenBitAsked;
   const [videoStreamingMode, setVideoStreamingMode] = useConditionalSetting(
     VIDEO_STREAMING_MODE_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [forceAlignedResolution, setForceAlignedResolution] = useConditionalSetting(
@@ -2196,6 +2213,9 @@ function Sidebar() {
   const handleH264FullColorToggle = () => {
     writeConditional(VIDEO_FULLCOLOR_SPEC, !videoFullColor, setVideoFullColor, { persist: true });
   };
+  const handle10BitToggle = () => {
+    writeConditional(VIDEO_10BIT_SPEC, !video10Bit, setVideo10Bit, { persist: true });
+  };
   const handleUsePaintOverQualityToggle = () => {
     writeConditional(USE_PAINT_OVER_QUALITY_SPEC, !usePaintOverQuality, setUsePaintOverQuality, { persist: true });
   };
@@ -2874,6 +2894,8 @@ function Sidebar() {
   const showCRF = VIDEO_ENCODERS.includes(activeEncoder);
   const showH264Options = VIDEO_ENCODERS.includes(activeEncoder);
   const showFullColor = showH264Options && codecCarriesFullColor(codecOfEncoder(activeEncoder));
+  const show10Bit = showH264Options && codecCarriesTenBit(codecOfEncoder(activeEncoder))
+    && !!tenBitOffered;
   const showJpegOptions = encoder === 'jpeg';
   const showPaintOverQualityToggle = showH264Options || showJpegOptions;
   /**
@@ -3527,6 +3549,23 @@ function Sidebar() {
                       aria-pressed={videoFullColor}
                       disabled={!serverSettings || serverSettings.video_fullcolor?.locked}
                       title={t(videoFullColor ? "buttons.videoFullColorDisableTitle" : "buttons.videoFullColorEnableTitle")}
+                    >
+                      <span className="toggle-button-sidebar-knob"></span>
+                    </button>
+                  </div>
+                )}
+                {show10Bit && (renderableSettings.video10Bit ?? true) && tenBitDecodable && (
+                  <div className="dev-setting-item toggle-item">
+                    <label htmlFor="video10BitToggle">
+                      {t("sections.video.tenBitLabel", "10-bit Color")}
+                    </label>
+                    <button
+                      id="video10BitToggle"
+                      className={`toggle-button-sidebar ${video10Bit ? "active" : ""}`}
+                      onClick={handle10BitToggle}
+                      aria-pressed={video10Bit}
+                      disabled={!serverSettings || serverSettings.video_10bit?.locked}
+                      title={t(video10Bit ? "buttons.video10BitDisableTitle" : "buttons.video10BitEnableTitle")}
                     >
                       <span className="toggle-button-sidebar-knob"></span>
                     </button>
