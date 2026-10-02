@@ -1169,12 +1169,14 @@ export function Settings() {
                                     <div className="space-y-2">
                                         <label className="text-sm font-medium">{t('sections.screen.uiScalingLabel')}</label>
                                         <DropdownMenu>
-                                            <DropdownMenuTrigger asChild>
-                                                <Button variant="outline" className="w-full justify-between" disabled={dpiScalingDisabled}>
-                                                    {dpiScalingChoices.find(option => option.value === selectedDpi)?.label || "100%"}
-                                                    <ChevronUp className="h-4 w-4 rotate-180" />
-                                                </Button>
-                                            </DropdownMenuTrigger>
+                                            <DropdownMenuTrigger 
+                                                render={(props) => (
+                                                    <Button {...props} variant="outline" className="w-full justify-between" disabled={dpiScalingDisabled}>
+                                                        {dpiScalingChoices.find(option => option.value === selectedDpi)?.label || "100%"}
+                                                        <ChevronUp className="h-4 w-4 rotate-180" />
+                                                    </Button>
+                                                )}
+                                            />
                                             <DropdownMenuContent className="w-full">
                                                 {dpiScalingChoices.map((option) => (
                                                     <DropdownMenuItem
@@ -1197,12 +1199,14 @@ export function Settings() {
                                 <div className="space-y-2">
                                     <label className="text-sm font-medium">{tl('sections.screen.presetLabel')}</label>
                                     <DropdownMenu>
-                                        <DropdownMenuTrigger asChild>
-                                            <Button variant="outline" className="w-full justify-between">
-                                                {presetValue || t('sections.screen.resolutionPresetSelect')}
-                                                <ChevronUp className="h-4 w-4 rotate-180" />
-                                            </Button>
-                                        </DropdownMenuTrigger>
+                                        <DropdownMenuTrigger 
+                                            render={(props) => (
+                                                <Button {...props} variant="outline" className="w-full justify-between">
+                                                    {presetValue || t('sections.screen.resolutionPresetSelect')}
+                                                    <ChevronUp className="h-4 w-4 rotate-180" />
+                                                </Button>
+                                            )}
+                                        />
                                         <DropdownMenuContent className="w-full">
                                             {commonResolutionValues.slice(1).map((res) => (
                                                 <DropdownMenuItem
@@ -1300,12 +1304,14 @@ export function Settings() {
                             <div className="space-y-2">
                                 <label className="text-sm font-medium">{t('streamingModeTitle')}</label>
                                 <DropdownMenu>
-                                    <DropdownMenuTrigger asChild>
-                                        <Button variant="outline" className="w-full justify-between">
-                                            {displayLabel(streamMode)}
-                                            <ChevronUp className="h-4 w-4 rotate-180" />
-                                        </Button>
-                                    </DropdownMenuTrigger>
+                                    <DropdownMenuTrigger 
+                                        render={(props) => (
+                                            <Button {...props} variant="outline" className="w-full justify-between">
+                                                {displayLabel(streamMode)}
+                                                <ChevronUp className="h-4 w-4 rotate-180" />
+                                            </Button>
+                                        )}
+                                    />
                                     <DropdownMenuContent className="w-full">
                                         {STREAMING_MODES.map(mode => (
                                             <DropdownMenuItem
@@ -1324,12 +1330,14 @@ export function Settings() {
                             <div className="space-y-2">
                                 <label className="text-sm font-medium">{tl('sections.video.encoderLabel')}</label>
                                 <DropdownMenu>
-                                    <DropdownMenuTrigger asChild>
-                                        <Button variant="outline" className="w-full justify-between">
-                                            {displayLabel(activeEncoder)}
-                                            <ChevronUp className="h-4 w-4 rotate-180" />
-                                        </Button>
-                                    </DropdownMenuTrigger>
+                                    <DropdownMenuTrigger 
+                                        render={(props) => (
+                                            <Button {...props} variant="outline" className="w-full justify-between">
+                                                {displayLabel(activeEncoder)}
+                                                <ChevronUp className="h-4 w-4 rotate-180" />
+                                            </Button>
+                                        )}
+                                    />
                                     <DropdownMenuContent className="w-full">
                                         {dynamicEncoderOptions.map(enc => (
                                             <DropdownMenuItem
@@ -1354,13 +1362,15 @@ export function Settings() {
                             <div className="space-y-2">
                                 <label className="text-sm font-medium">{tl('sections.video.webcamEncoderLabel')}</label>
                                 <DropdownMenu>
-                                    <DropdownMenuTrigger asChild>
-                                        <Button variant="outline" className="w-full justify-between"
-                                            disabled={!!serverSettings?.webcam_encoder?.locked}>
-                                            {displayLabel(webcamEncoder)}
-                                            <ChevronUp className="h-4 w-4 rotate-180" />
-                                        </Button>
-                                    </DropdownMenuTrigger>
+                                    <DropdownMenuTrigger 
+                                        render={(props) => (
+                                            <Button {...props} variant="outline" className="w-full justify-between"
+                                                disabled={!!serverSettings?.webcam_encoder?.locked}>
+                                                {displayLabel(webcamEncoder)}
+                                                <ChevronUp className="h-4 w-4 rotate-180" />
+                                            </Button>
+                                        )}
+                                    />
                                     <DropdownMenuContent className="w-full">
                                         {webcamEncoderOptions.map(pref => (
                                             <DropdownMenuItem
@@ -1387,7 +1397,7 @@ export function Settings() {
                                         max={framerateOptions.stops.length - 1}
                                         step={1}
                                         value={[framerateIndex]}
-                                        onValueChange={(value) => handleFramerateChange(value[0])}
+                                        onValueChange={(value) => handleFramerateChange(Array.isArray(value) ? value[0] : value)}
                                         className="flex-1"
                                     />
                                 </div>
@@ -1401,12 +1411,14 @@ export function Settings() {
                                 <div className="space-y-2">
                                     <label className="text-sm font-medium">{t('sections.video.rateControlLabel')}</label>
                                     <DropdownMenu>
-                                        <DropdownMenuTrigger asChild>
-                                            <Button variant="outline" className="w-full justify-between">
-                                                {displayLabel(rateControlMode)}
-                                                <ChevronUp className="h-4 w-4 rotate-180" />
-                                            </Button>
-                                        </DropdownMenuTrigger>
+                                        <DropdownMenuTrigger 
+                                            render={(props) => (
+                                                <Button {...props} variant="outline" className="w-full justify-between">
+                                                    {displayLabel(rateControlMode)}
+                                                    <ChevronUp className="h-4 w-4 rotate-180" />
+                                                </Button>
+                                            )}
+                                        />
                                         <DropdownMenuContent className="w-full">
                                             {(serverSettings?.rate_control_mode?.allowed || rateControlOptions).map((mode: string) => (
                                                 <DropdownMenuItem key={mode} onClick={() => handleRateControlChange(mode)}>
@@ -1428,7 +1440,7 @@ export function Settings() {
                                             step={1}
                                             value={[bitrateIndex]}
                                             onValueChange={(value) => {
-                                                const selected = videoBitrateOptions[value[0]];
+                                                const selected = videoBitrateOptions[Array.isArray(value) ? value[0] : value];
                                                 if (selected !== undefined) handleVideoBitRateChange(selected);
                                             }}
                                             disabled={!serverSettings || serverSettings.video_bitrate?.min === serverSettings.video_bitrate?.max}
@@ -1448,7 +1460,7 @@ export function Settings() {
                                             step={1}
                                             value={[videoCRFIndex]}
                                             onValueChange={(value) => {
-                                                const newCRF = videoCRFChoices[value[0]];
+                                                const newCRF = videoCRFChoices[Array.isArray(value) ? value[0] : value];
                                                 if (newCRF !== undefined) handleVideoCRFChange(newCRF);
                                             }}
                                             disabled={!serverSettings || serverSettings.video_crf?.min === serverSettings.video_crf?.max}
@@ -1515,7 +1527,7 @@ export function Settings() {
                                         max={serverSettings?.jpeg_quality?.max || 100}
                                         step={1}
                                         value={[jpegQuality]}
-                                        onValueChange={(value) => handleJpegQualityChange(value[0])}
+                                        onValueChange={(value) => handleJpegQualityChange(Array.isArray(value) ? value[0] : value)}
                                         disabled={!serverSettings || serverSettings.jpeg_quality?.min === serverSettings.jpeg_quality?.max}
                                         className="flex-1"
                                     />
@@ -1549,7 +1561,7 @@ export function Settings() {
                                             step={1}
                                             value={[stopIndex(videoPaintoverCRFChoices, videoPaintoverCRF)]}
                                             onValueChange={(value) => {
-                                                const newCRF = videoPaintoverCRFChoices[value[0]];
+                                                const newCRF = videoPaintoverCRFChoices[Array.isArray(value) ? value[0] : value];
                                                 if (newCRF !== undefined) handleH264PaintoverCRFChange(newCRF);
                                             }}
                                             disabled={!serverSettings || serverSettings.video_paintover_crf?.min === serverSettings.video_paintover_crf?.max}
@@ -1567,7 +1579,7 @@ export function Settings() {
                                             max={serverSettings?.video_paintover_burst_frames?.max || 30}
                                             step={1}
                                             value={[videoPaintoverBurstFrames]}
-                                            onValueChange={(value) => handleH264PaintoverBurstChange(value[0])}
+                                            onValueChange={(value) => handleH264PaintoverBurstChange(Array.isArray(value) ? value[0] : value)}
                                             disabled={!serverSettings || serverSettings.video_paintover_burst_frames?.min === serverSettings.video_paintover_burst_frames?.max}
                                             className="flex-1"
                                         />
@@ -1586,7 +1598,7 @@ export function Settings() {
                                         max={serverSettings?.paint_over_jpeg_quality?.max || 100}
                                         step={1}
                                         value={[paintOverJpegQuality]}
-                                        onValueChange={(value) => handlePaintOverJpegQualityChange(value[0])}
+                                        onValueChange={(value) => handlePaintOverJpegQualityChange(Array.isArray(value) ? value[0] : value)}
                                         disabled={!serverSettings || serverSettings.paint_over_jpeg_quality?.min === serverSettings.paint_over_jpeg_quality?.max}
                                         className="flex-1"
                                     />
@@ -1623,7 +1635,7 @@ export function Settings() {
                                     step={1}
                                     value={[Math.max(0, audioBitrateChoices.indexOf(audioBitRate))]}
                                     onValueChange={(value) => {
-                                        const index = value[0];
+                                        const index = Array.isArray(value) ? value[0] : value;
                                         const selectedBitrate = audioBitrateChoices[index];
                                         if (selectedBitrate !== undefined) {
                                             setAudioBitRate(selectedBitrate);
@@ -1644,14 +1656,16 @@ export function Settings() {
                         <div className="space-y-2">
                             <label className="text-sm font-medium">{tl('sections.audio.inputLabel')}</label>
                             <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
-                                    <Button variant="outline" className="w-full justify-between" disabled={isLoadingAudioDevices || !!audioDeviceError}>
-                                        <span className="truncate">
-                                            {audioInputDevices.find(d => d.deviceId === selectedInputDeviceId)?.label || t('audio.defaultDevice')}
-                                        </span>
-                                        <ChevronUp className="h-4 w-4 rotate-180 flex-shrink-0" />
-                                    </Button>
-                                </DropdownMenuTrigger>
+                                <DropdownMenuTrigger 
+                                    render={(props) => (
+                                        <Button {...props} variant="outline" className="w-full justify-between" disabled={isLoadingAudioDevices || !!audioDeviceError}>
+                                            <span className="truncate">
+                                                {audioInputDevices.find(d => d.deviceId === selectedInputDeviceId)?.label || t('audio.defaultDevice')}
+                                            </span>
+                                            <ChevronUp className="h-4 w-4 rotate-180 flex-shrink-0" />
+                                        </Button>
+                                    )}
+                                />
                                 <DropdownMenuContent className="w-[280px] max-w-[90vw]">
                                     {audioInputDevices.map(device => (
                                         <DropdownMenuItem
@@ -1675,14 +1689,16 @@ export function Settings() {
                             <div className="space-y-2">
                                 <label className="text-sm font-medium">{tl('sections.audio.outputLabel')}</label>
                                 <DropdownMenu>
-                                    <DropdownMenuTrigger asChild>
-                                        <Button variant="outline" className="w-full justify-between" disabled={isLoadingAudioDevices || !!audioDeviceError}>
-                                            <span className="truncate">
-                                                {audioOutputDevices.find(d => d.deviceId === selectedOutputDeviceId)?.label || t('audio.defaultDevice')}
-                                            </span>
-                                            <ChevronUp className="h-4 w-4 rotate-180 flex-shrink-0" />
-                                        </Button>
-                                    </DropdownMenuTrigger>
+                                    <DropdownMenuTrigger 
+                                        render={(props) => (
+                                            <Button {...props} variant="outline" className="w-full justify-between" disabled={isLoadingAudioDevices || !!audioDeviceError}>
+                                                <span className="truncate">
+                                                    {audioOutputDevices.find(d => d.deviceId === selectedOutputDeviceId)?.label || t('audio.defaultDevice')}
+                                                </span>
+                                                <ChevronUp className="h-4 w-4 rotate-180 flex-shrink-0" />
+                                            </Button>
+                                        )}
+                                    />
                                     <DropdownMenuContent className="w-[280px] max-w-[90vw]">
                                         {audioOutputDevices.map(device => (
                                             <DropdownMenuItem
