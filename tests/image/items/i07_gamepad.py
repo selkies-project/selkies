@@ -68,8 +68,26 @@ def drive_touch(page: Any, cdp: Any, moves: bool) -> tuple:
     """Tap every button of the touch gamepad, tap each stick (its click) and, where
     touches can move, push it into its four diagonals; `(controls tapped, sticks)`."""
     rects = page.evaluate("""() => [...document.querySelectorAll(
-        '#universal-touch-gamepad-controls-overlay .touch-button, #universal-touch-gamepad-controls-overlay .touch-analog-trigger')]
+        '#universal-touch-gamepad-controls-overlay .touch-button')]
         .map(e => { const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; })""")
+    # An analog trigger reads how far the finger is along it: swept end to end, so its value passes full.
+    triggers = page.evaluate("""() => [...document.querySelectorAll(
+        '#universal-touch-gamepad-controls-overlay .touch-analog-trigger')]
+        .map(e => { const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + 2, r.y + r.height - 2]; })""")
+    for x, top, bottom in triggers:
+        if cdp is None:
+            page.touchscreen.tap(x, (top + bottom) / 2)
+            continue
+        touch(page, cdp, "touchstart", x, top)
+        for f in (0.25, 0.5, 0.75, 1.0):
+            time.sleep(0.06)
+            touch(page, cdp, "touchmove", x, top + (bottom - top) * f)
+        time.sleep(0.15)
+        for f in (0.75, 0.5, 0.25, 0.0):
+            time.sleep(0.06)
+            touch(page, cdp, "touchmove", x, top + (bottom - top) * f)
+        touch(page, cdp, "touchend", x, top)
+        time.sleep(0.2)
     sticks = page.evaluate("""() => [...document.querySelectorAll(
         '#universal-touch-gamepad-controls-overlay .touch-joystick-base')]
         .map(e => { const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2, r.width / 2]; })""")
@@ -92,7 +110,7 @@ def drive_touch(page: Any, cdp: Any, moves: bool) -> tuple:
             time.sleep(0.3)
             touch(page, cdp, "touchend", x + dx * r, y + dy * r)
             time.sleep(0.2)
-    return len(rects), len(sticks)
+    return len(rects) + len(triggers), len(sticks)
 
 
 def run(cell: Any) -> None:

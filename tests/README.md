@@ -147,7 +147,7 @@ python3 tests/image/run.py --items 1,4 --engines chromium --backends x11 \
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `E2E_IMAGES` | none; the suite skips | `label=ref` pairs, comma-separated; positional arguments win. A tag is fine: the digest that ran is recorded. |
-| `E2E_IMAGE_WHERE` | `kube` | `kube`: a pod in `E2E_IMAGE_NAMESPACE`, reached at its own address from inside the cluster, else through `kubectl port-forward` (`E2E_IMAGE_KUBECTL` replaces the `kubectl` command). `docker` or `ssh:HOST`: a container here or on that host (`E2E_IMAGE_DOCKER_GPUS` is passed to `--gpus`). `url:https://HOST:PORT`: a session already running, with `E2E_IMAGE_EXEC` the prefix that runs `bash -c` inside it and `E2E_IMAGE_LOGS` the command printing its log. |
+| `E2E_IMAGE_WHERE` | `kube` | `kube`: a pod in `E2E_IMAGE_NAMESPACE`, reached at its own address from inside the cluster (a node the runner cannot route to is left out and the pod tried elsewhere), or through `kubectl port-forward` with `E2E_IMAGE_REACH=forward` for a runner outside it, where WebRTC needs `SELKIES_TURN_*` in `E2E_IMAGE_ENV` (`E2E_IMAGE_KUBECTL` replaces the `kubectl` command). `docker` or `ssh:HOST`: a container here or on that host (`E2E_IMAGE_DOCKER_GPUS` is passed to `--gpus`). `url:https://HOST:PORT`: a session already running, with `E2E_IMAGE_EXEC` the prefix that runs `bash -c` inside it and `E2E_IMAGE_LOGS` the command printing its log. |
 | `E2E_IMAGE_GPU` | `none` | `nvidia` (a GPU with NVENC, AV1-capable preferred), `nvidia-av1` (Ada or newer only), or `amd` (`amd.com/gpu`). The NVIDIA classes pick nodes by `nvidia.com/gpu.product`; `E2E_IMAGE_GPU_PRODUCTS` (comma-separated) replaces the list for a cluster that names its GPUs differently. |
 | `E2E_IMAGE_PRIORITY_CLASS` | none | The pods' `priorityClassName`. A preempted pod is brought up again before the next cell. |
 | `E2E_IMAGE_TRANSPORTS`, `E2E_IMAGE_BACKENDS`, `E2E_IMAGE_ENGINES`, `E2E_IMAGE_ITEMS` | all | `websockets,webrtc`; `x11,wayland`; `chromium,firefox,webkit`; `1-10`. |
@@ -156,7 +156,8 @@ python3 tests/image/run.py --items 1,4 --engines chromium --backends x11 \
 | `E2E_IMAGE_KEEP` | unset | `1` leaves each target running after its run. |
 
 Targets are started with `SELKIES_ENABLE_BASIC_AUTH=false` and `CAP_SYS_PTRACE`
-(the apps panel's runner needs it). The client browsers run headed on
+(the apps panel's runner needs it), each from a fresh pod or container: one of
+the same name, a killed run's, is removed first. The client browsers run headed on
 `E2E_DISPLAY`, so focus, the X clipboard, and pointer lock are real there:
 Chrome's focus emulation is off on every page and the Firefox profile drops the
 clipboard testing pref. Inside the session the tier serves a small tester site

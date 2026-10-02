@@ -22,7 +22,8 @@ def geometry(cell: Any) -> dict:
     """The session's monitors as xrandr reports them: name -> (w, h, x, y)."""
     out = cell.target.out("xrandr --listactivemonitors 2>/dev/null")
     mons = {}
-    for m in re.finditer(r"\d+: \+?\*?(\S+) (\d+)/\d+x(\d+)/\d+\+(\d+)\+(\d+)", out):
+    # XWayland under KWin reports no physical size (-1).
+    for m in re.finditer(r"\d+: \+?\*?(\S+) (\d+)/-?\d+x(\d+)/-?\d+\+(\d+)\+(\d+)", out):
         mons[m.group(1)] = tuple(int(m.group(i)) for i in range(2, 6))
     return mons
 

@@ -120,9 +120,16 @@ def run(cell: Any) -> None:
     try:
         reveal(page, 'button:has-text("Download Files")')
         page.locator('button:has-text("Download Files")').first.click(timeout=5000)
+        # The modal's own frame, as the user sees it: listed once its links render.
+        frame_el = page.locator(".files-modal iframe").first
         deadline = time.time() + 45
         while time.time() < deadline and listing is None:
-            listing = next((fr for fr in page.frames if "/api/files/" in fr.url), None)
+            try:
+                fr = frame_el.element_handle(timeout=2000).content_frame()
+                if fr is not None and fr.locator(f'a:has-text("{down}")').count():
+                    listing = fr
+            except Exception:
+                pass
             time.sleep(0.5)
         R.check("Download Files opens the session's file listing", listing is not None,
                 page.evaluate("""() => [...document.querySelectorAll('iframe')].map(f =>

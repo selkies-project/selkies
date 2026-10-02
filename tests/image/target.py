@@ -13,6 +13,8 @@ checks act on the desktop and read what the server and the session saw.
                       the session (`docker exec -i NAME`, `kubectl exec -i POD --`)
     E2E_IMAGE_LOGS    url targets: the command printing the server's log, given --tail=N
                       (`kubectl logs POD`, `docker logs NAME`)
+    E2E_IMAGE_REACH   kube targets: `forward` reaches the pod through kubectl port-forward
+                      (a runner outside the cluster) rather than at its own address
     E2E_IMAGE_KUBECTL the kubectl command (default `kubectl`), for a runner whose
                       HOME is not the one holding the kubeconfig and its tokens
 """
@@ -110,7 +112,8 @@ class Target:
 
 
 class KubePod(Target):
-    """The image as a pod; the browser reaches its IP when this host is in the cluster, else a port-forward."""
+    """The image as a pod, which the browser reaches at its IP from inside the cluster (or through a
+    port-forward, see `reach`)."""
 
     def __init__(self, image: str, name: str, env: Dict[str, str], namespace: Optional[str] = None,
                  labels: Optional[Dict[str, str]] = None, gpu: str = "none", affinity: Any = None,
@@ -164,7 +167,7 @@ class KubePod(Target):
         p = run(self.kc + ["get", "pod", self.name, "-o", "json"], 30)
         return json.loads(p.stdout) if p.returncode == 0 else {}
 
-    def up(self, timeout: float = 1800, tries: int = 3) -> None:
+    def up(self, timeout: float = 1800, tries: int = 6) -> None:
         """Create the pod and wait for its server; a node this host cannot exec
         into or reach is left out of the next try."""
         self.avoid: List[str] = []
@@ -185,7 +188,11 @@ class KubePod(Target):
             raise RuntimeError(f"kubectl apply: {p.stderr.decode(errors='replace')[-300:]}")
         deadline = time.time() + timeout
         while time.time() < deadline:
-            st = self.status().get("status", {})
+            pod = self.status()
+            if not pod:
+                # Preempted or evicted before it ran: the caller tries again.
+                return False
+            st = pod.get("status", {})
             if st.get("phase") == "Running" and st.get("podIP"):
                 cs = (st.get("containerStatuses") or [{}])[0]
                 self.digest = cs.get("imageID", "").rsplit("@", 1)[-1]
@@ -193,22 +200,25 @@ class KubePod(Target):
                 if self.sh("true", timeout=45).returncode != 0:
                     return False
                 self.url = self.reach(st["podIP"])
-                return self.wait_ready(max(60, min(900, deadline - time.time())))
+                return bool(self.url) and self.wait_ready(max(60, min(900, deadline - time.time())))
             if st.get("phase") in ("Failed", "Succeeded"):
                 return False
             time.sleep(5)
         return False
 
     def reach(self, ip: str) -> str:
-        """The pod's own address when this host can route to it (a refusal is
-        the server still starting), else a local port-forward."""
-        try:
-            socket.create_connection((ip, 8080), timeout=5).close()
+        """The pod's own address (a refusal is the server still starting); "" when
+        the cluster routes nowhere from here to that node, which the caller then
+        leaves out. With E2E_IMAGE_REACH=forward, a local port-forward instead,
+        for a runner outside the cluster (WebRTC then needs a TURN server)."""
+        if os.environ.get("E2E_IMAGE_REACH") != "forward":
+            try:
+                socket.create_connection((ip, 8080), timeout=5).close()
+            except ConnectionRefusedError:
+                pass
+            except OSError:
+                return ""
             return f"https://{ip}:8080"
-        except ConnectionRefusedError:
-            return f"https://{ip}:8080"
-        except OSError:
-            pass
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
@@ -243,6 +253,7 @@ class DockerContainer(Target):
         return run(["docker", *args], timeout)
 
     def up(self, timeout: float = 1800) -> None:
+        self.docker("rm", "-f", self.name)
         args = ["run", "-d", "--name", self.name, "--shm-size", "2g", "--cap-add", "SYS_PTRACE",
                 "-p", f"{self.port}:8080"]
         if self.gpus:
