@@ -136,7 +136,7 @@ def switch(target: Any, transport: str, timeout: float = 60) -> bool:
 
 
 def run_cell(mods: list, target: Any, label: str, transport: str, backend: str, engine: str,
-             facts: dict, outdir: str, rows: list) -> None:
+             facts: dict, outdir: str, rows: list, save: Any = lambda: None) -> None:
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pw:
         try:
@@ -171,7 +171,8 @@ def run_cell(mods: list, target: Any, label: str, transport: str, backend: str, 
                     finally:
                         for page in list(ctx.pages):
                             try:
-                                page.close()
+                                with H.answers_within(30, "the page"):
+                                    page.close()
                             except Exception:
                                 pass
                 cell.res.summary()
@@ -181,6 +182,8 @@ def run_cell(mods: list, target: Any, label: str, transport: str, backend: str, 
                              "failed": [f"{n}: {d}" for n, _, d in cell.res.failed()],
                              "skipped": [f"{n}: {r}" for n, r in cell.res.skipped],
                              "secs": round(time.time() - started)})
+                # Kept item by item: a browser that takes its driver down loses nothing already checked.
+                save()
         finally:
             L.C.close_browser(closer)
 
@@ -226,6 +229,10 @@ def main() -> int:
     prefix = os.environ.get("E2E_IMAGE_NAME", "selkies-imagetest")
     rows: list = []
     images_seen: dict = {}
+
+    def save() -> None:
+        with open(os.path.join(outdir, "results.json"), "w") as f:
+            json.dump({"argv": sys.argv[1:], "images": images_seen, "rows": rows}, f, indent=1)
     for label, ref in images.items():
         for backend in args.backends.split(","):
             env = {"TZ": "UTC", "SELKIES_ENABLE_BASIC_AUTH": "false", "SELKIES_WAYLAND": BACKEND_ENV[backend],
@@ -263,9 +270,7 @@ def main() -> int:
                                      "skip": 0, "failed": [f"no switch to {transport}"]})
                         continue
                     for engine in args.engines.split(","):
-                        run_cell(mods, target, label, transport, backend, engine, facts, outdir, rows)
-                        with open(os.path.join(outdir, "results.json"), "w") as f:
-                            json.dump({"images": images_seen, "rows": rows}, f, indent=1)
+                        run_cell(mods, target, label, transport, backend, engine, facts, outdir, rows, save)
                 with open(os.path.join(outdir, f"{label}-{backend}-server.log"), "w") as f:
                     f.write(target.selkies_log(20000))
             finally:
@@ -274,8 +279,7 @@ def main() -> int:
     text = table(rows, numbers)
     with open(os.path.join(outdir, "table.md"), "w") as f:
         f.write(text + "\n")
-    with open(os.path.join(outdir, "results.json"), "w") as f:
-        json.dump({"images": images_seen, "rows": rows}, f, indent=1)
+    save()
     print("\n" + text + f"\n\nresults: {outdir}", flush=True)
     failed = sum(r["fail"] for r in rows)
     print(f"\n=== IMAGE TIER: {'FAIL' if failed else 'PASS'} ({failed} failed checks) ===", flush=True)

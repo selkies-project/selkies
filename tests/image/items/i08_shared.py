@@ -111,7 +111,9 @@ def run(cell: Any) -> None:
         player.close()
     stop_session_browser(cell.target, "chrome", "pad")
 
-    # Long-term quality on a still, detailed screen, as the viewer sees it.
+    # Long-term quality on a still, detailed screen, as the viewer sees it, with
+    # no other page decoding beside it (headless WebKit wedges on two).
+    owner.close()
     cell.go("/texture.html")
     shared = cell.open("#shared")
     time.sleep(8)

@@ -36,11 +36,17 @@ def union(report: Any) -> tuple:
 
 
 def drive_virtual(page: Any) -> None:
+    # A browser exposes a pad to pages only once it has seen input from it, so a
+    # first press wakes the session's tester before the counted ones.
+    page.evaluate("window.__padPress(0, 1)")
+    time.sleep(0.3)
+    page.evaluate("window.__padPress(0, 0)")
+    time.sleep(1.5)
     for i in range(17):
         page.evaluate(f"window.__padPress({i}, 1)")
-        time.sleep(0.15)
+        time.sleep(0.3)
         page.evaluate(f"window.__padPress({i}, 0)")
-        time.sleep(0.1)
+        time.sleep(0.15)
     for stick in (0, 1):
         for x, y in DIAGONALS:
             page.evaluate(f"window.__padAxis({2 * stick}, {0.95 * x}); window.__padAxis({2 * stick + 1}, {0.95 * y})")
@@ -67,12 +73,13 @@ def drive_touch(page: Any, cdp: Any, moves: bool) -> tuple:
     sticks = page.evaluate("""() => [...document.querySelectorAll(
         '#universal-touch-gamepad-controls-overlay .touch-joystick-base')]
         .map(e => { const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2, r.width / 2]; })""")
-    for x, y in rects + [(x, y) for x, y, _ in sticks]:
+    # Buttons held as a finger does; a stick's click is a tap under its 250 ms threshold.
+    for (x, y), hold in [(r, 0.25) for r in rects] + [((x, y), 0.1) for x, y, _ in sticks]:
         if cdp is None:
             page.touchscreen.tap(x, y)
         else:
             touch(page, cdp, "touchstart", x, y)
-            time.sleep(0.12)
+            time.sleep(hold)
             touch(page, cdp, "touchend", x, y)
         time.sleep(0.2)
     for x, y, r in sticks if moves else ():

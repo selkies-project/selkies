@@ -238,7 +238,9 @@ class Cell:
              ctx: Any = None) -> Any:
         """A new page of the session in the cell's browser (or `ctx`), with the
         `init` scripts installed before the client starts; its stream up when `wait`."""
-        page = (ctx or self.ctx).new_page()
+        # A browser whose renderer died can leave a new page waiting forever.
+        with H.answers_within(60, "the browser"):
+            page = (ctx or self.ctx).new_page()
         page.add_init_script(TAP_JS)
         for script in init:
             page.add_init_script(script)

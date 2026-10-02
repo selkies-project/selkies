@@ -10,7 +10,7 @@ log has to say it brought each device up.
 import time
 from typing import Any
 
-from image_lib import open_sidebar, session_browser, stop_session_browser
+from image_lib import H, open_sidebar, session_browser, stop_session_browser
 
 ITEM = 2
 TITLE = "microphone and webcam"
@@ -28,9 +28,13 @@ def action(page: Any, title: str) -> bool:
 
 
 def camera_plays(cell: Any) -> bool:
-    """Whether the client's own fake camera gives a picture, in a page of its own
-    (headless WebKit's mock source takes its web process down when played)."""
-    page = cell.ctx.new_page()
+    """Whether the client's own fake camera gives a picture, in a page of its own.
+    Headless WebKit's mock source takes its web process down when played, and a
+    page opened after that can wait forever, so WebKit is not asked."""
+    if cell.engine == "webkit":
+        return False
+    with H.answers_within(60, "the browser"):
+        page = cell.ctx.new_page()
     try:
         page.goto(cell.target.url + "/api/status", timeout=30000)
         return bool(page.evaluate("""async () => {
