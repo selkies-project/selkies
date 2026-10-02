@@ -906,15 +906,16 @@ const safeSetItem = (key, value) => {
  * accept a config and then fail at decode(), which isConfigSupported cannot
  * predict, so the first hard decoder error retries the same encoder on
  * software before the fallback ladder reloads the page and degrades the
- * stream. The choice is stored against the user agent: a client whose
- * hardware path is broken starts on software, while a browser update (usually
- * a new decoder stack) re-probes hardware.
+ * stream. The choice holds for its tab alone, in the tab's sessionStorage,
+ * as the fallback encoder does: the tab's reloads start on software, while
+ * any other tab or later visit re-probes hardware at the cost of one failed
+ * decode, so an error whose cause has since cleared (a GPU process restart, a
+ * stream the server has since fixed) never outlives the tab that met it.
  */
 const SOFTWARE_DECODE_KEY = `${storageAppName}_prefer_software_decode`;
 let preferSoftwareDecode = false;
 try {
-  preferSoftwareDecode =
-    window.localStorage.getItem(SOFTWARE_DECODE_KEY) === navigator.userAgent;
+  preferSoftwareDecode = window.sessionStorage.getItem(SOFTWARE_DECODE_KEY) !== null;
 } catch (e) {
   console.warn('Selkies: could not read the software-decode preference:', e);
 }
@@ -946,7 +947,7 @@ const noteSessionRange = (info) => {
   }
 };
 /**
- * Persists or clears the software-decode preference.
+ * Stores or clears the software-decode preference of this tab.
  * @param {boolean} enabled
  */
 const rememberSoftwareDecode = (enabled) => {
@@ -954,14 +955,11 @@ const rememberSoftwareDecode = (enabled) => {
     try { videoWorker.postMessage({ type: 'wireHints', software: enabled }); } catch (e) { /* respawns fresh */ }
   }
   preferSoftwareDecode = enabled;
-  if (enabled) {
-    safeSetItem(SOFTWARE_DECODE_KEY, navigator.userAgent);
-    return;
-  }
   try {
-    window.localStorage.removeItem(SOFTWARE_DECODE_KEY);
+    if (enabled) window.sessionStorage.setItem(SOFTWARE_DECODE_KEY, '1');
+    else window.sessionStorage.removeItem(SOFTWARE_DECODE_KEY);
   } catch (e) {
-    console.warn('Selkies: could not clear the software-decode preference:', e);
+    console.warn('Selkies: could not store the software-decode preference:', e);
   }
 };
 /**
