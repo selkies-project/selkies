@@ -1,0 +1,426 @@
+xvfb: share GPU semaphores with a client reading what glamor renders
+
+A client that reads a pixmap this server blits the screen into through
+another API on the same GPU, such as an encoder's CUDA context, learns of the
+blit's completion on the CPU otherwise (a one-pixel GetImage) and only then
+queues its own work. Under a GPU-bound client each of the two jobs then waits
+a draw of that client for its turn, which halves the capture's rate. A sync
+file does not help on NVIDIA, whose GL waits for one on the CPU; a semaphore
+both sides share does.
+
+- SELKIES-SEMAPHORE 1.0: QueryVersion, ImportSemaphore(semaphore, drawable)
+  with one fd, an OPAQUE_FD semaphore (a Vulkan one, as CUDA imports it),
+  SignalSemaphore, which signals once the rendering requested before it has
+  completed on the GPU, and FreeSemaphore. A semaphore is binary: each signal
+  is for one wait on the client's side.
+- glamor imports the semaphore with GL_EXT_semaphore_fd and signals it with
+  glSignalSemaphoreEXT and a flush.
+- Xvfb offers the extension where every screen came up with glamor and its
+  context has GL_EXT_semaphore_fd.
+
+diff --git a/glamor/glamor_egl.c b/glamor/glamor_egl.c
+index 082e794..576342c 100644
+--- a/glamor/glamor_egl.c
++++ b/glamor/glamor_egl.c
+@@ -1783,6 +1783,65 @@ glamor_egl_flush_fenced(ScreenPtr screen)
+     return fd;
+ }
+ 
++/*
++ * GPU semaphores a client shares with glamor's context (GL_EXT_semaphore_fd).
++ * Work the client queues on another API of the same GPU can wait on one for
++ * the rendering glamor queued before its signal, with no CPU round trip in
++ * between: a sync file (glamor_egl_flush_fenced) does not do that on every
++ * driver, NVIDIA's waiting for it on the CPU.
++ */
++Bool
++glamor_egl_semaphore_capable(ScreenPtr screen)
++{
++    glamor_screen_private *glamor_priv = glamor_get_screen_private(screen);
++
++    if (!glamor_priv)
++        return FALSE;
++    glamor_make_current(glamor_priv);
++    return epoxy_has_gl_extension("GL_EXT_semaphore_fd");
++}
++
++GLuint
++glamor_egl_import_semaphore(ScreenPtr screen, int fd)
++{
++    GLuint semaphore = 0;
++
++    if (!glamor_egl_semaphore_capable(screen)) {
++        close(fd);
++        return 0;
++    }
++    while (glGetError() != GL_NO_ERROR)
++        ;
++    glGenSemaphoresEXT(1, &semaphore);
++    /* A successful import owns the fd; a failed one leaves it to us. */
++    glImportSemaphoreFdEXT(semaphore, GL_HANDLE_TYPE_OPAQUE_FD_EXT, fd);
++    if (glGetError() != GL_NO_ERROR) {
++        glDeleteSemaphoresEXT(1, &semaphore);
++        close(fd);
++        return 0;
++    }
++    return semaphore;
++}
++
++void
++glamor_egl_signal_semaphore(ScreenPtr screen, GLuint semaphore)
++{
++    glamor_make_current(glamor_get_screen_private(screen));
++    glSignalSemaphoreEXT(semaphore, 0, NULL, 0, NULL, NULL);
++    glFlush();
++}
++
++void
++glamor_egl_free_semaphore(ScreenPtr screen, GLuint semaphore)
++{
++    glamor_screen_private *glamor_priv = glamor_get_screen_private(screen);
++
++    if (!glamor_priv)
++        return;
++    glamor_make_current(glamor_priv);
++    glDeleteSemaphoresEXT(1, &semaphore);
++}
++
+ static dri3_screen_info_rec glamor_dri3_info = {
+     .version = 2,
+ 
+diff --git a/glamor/glamor_egl.h b/glamor/glamor_egl.h
+index dcc5cb9..e2ab6b2 100644
+--- a/glamor/glamor_egl.h
++++ b/glamor/glamor_egl.h
+@@ -91,6 +91,24 @@ Bool glamor_egl_syncobj_capable(ScreenPtr screen);
+  */
+ int glamor_egl_flush_fenced(ScreenPtr screen);
+ 
++/**
++ * Whether the screen shares GPU semaphores with clients (GL_EXT_semaphore_fd).
++ */
++Bool glamor_egl_semaphore_capable(ScreenPtr screen);
++
++/**
++ * Import an OPAQUE_FD semaphore, taking the fd; 0 if the screen cannot.
++ */
++GLuint glamor_egl_import_semaphore(ScreenPtr screen, int fd);
++
++/**
++ * Signal the semaphore once the rendering queued before this call completes,
++ * and flush it to the GPU.
++ */
++void glamor_egl_signal_semaphore(ScreenPtr screen, GLuint semaphore);
++
++void glamor_egl_free_semaphore(ScreenPtr screen, GLuint semaphore);
++
+ /*
+  * Create an EGLDisplay from a native display type. This is a little quirky
+  * for a few reasons.
+diff --git a/hw/vfb/InitOutput.c b/hw/vfb/InitOutput.c
+index 779be96..78381c5 100644
+--- a/hw/vfb/InitOutput.c
++++ b/hw/vfb/InitOutput.c
+@@ -82,6 +82,7 @@ from The Open Group.
+ #include "glamor.h"
+ #include "glamor_egl.h"
+ #include "glamor_priv.h"
++#include "vfbsemaphore.h"
+ #ifdef DRI3
+ #include "Xext/present/present_priv.h"
+ #endif
+@@ -146,6 +147,8 @@ typedef struct {
+ #ifdef GLAMOR
+     int dri_fd;
+     Bool gpuScreen;
++    /* glamor came up on the screen */
++    Bool glamor;
+     CreateScreenResourcesProcPtr createScreenResources;
+ #endif
+ } vfbScreenInfo, *vfbScreenInfoPtr;
+@@ -961,6 +964,7 @@ vfbGlamorInit(ScreenPtr pScreen)
+         close(pvfb->dri_fd);
+         return FALSE;
+     }
++    pvfb->glamor = TRUE;
+ 
+     /* Software renderers keep the memory framebuffer: a readback from
+      * llvmpipe is a memcpy, and the GPU path would only add overhead. */
+@@ -1502,4 +1506,18 @@ InitOutput(int argc, char **argv)
+         }
+     }
+ 
++#ifdef GLAMOR
++    /* The screens are up, and SELKIES-SEMAPHORE asks each one's glamor. */
++    {
++        static const ExtensionModule vfbExtensions[] = {
++            { vfbSemaphoreExtensionInit, SELKIES_SEMAPHORE_NAME, NULL },
++        };
++        Bool glamor = TRUE;
++
++        for (i = 0; i < vfbNumScreens; i++)
++            glamor = glamor && vfbScreens[i].glamor;
++        if (glamor)
++            LoadExtensionList(vfbExtensions, ARRAY_SIZE(vfbExtensions), TRUE);
++    }
++#endif
+ }                               /* end InitOutput */
+diff --git a/hw/vfb/meson.build b/hw/vfb/meson.build
+index 65f6ccc..0b85c1b 100644
+--- a/hw/vfb/meson.build
++++ b/hw/vfb/meson.build
+@@ -9,6 +9,7 @@ srcs = [
+ vfb_glamor = []
+ if build_glamor
+     vfb_glamor += glamor
++    srcs += 'vfbsemaphore.c'
+ endif
+ 
+ xvfb_server = executable(
+diff --git a/hw/vfb/vfbsemaphore.c b/hw/vfb/vfbsemaphore.c
+new file mode 100644
+index 0000000..ea14397
+--- /dev/null
++++ b/hw/vfb/vfbsemaphore.c
+@@ -0,0 +1,226 @@
++/*
++ * SELKIES-SEMAPHORE: GPU semaphores a client shares with the screen's renderer.
++ *
++ * A client that reads what this server renders through another API on the
++ * same GPU, such as an encoder's CUDA context reading a pixmap the server
++ * blits the screen into, learns of the rendering's completion on the CPU
++ * otherwise (a one-pixel GetImage) and only then queues its own work. Under a
++ * GPU-bound client each of the two waits for a scheduling gap of its own.
++ * With a semaphore glamor signals after the rendering, the client queues its
++ * work at once behind a GPU-side wait, and both run in the same gap.
++ *
++ * Requests, after the major opcode QueryExtension gives:
++ *   0 QueryVersion(client major, client minor) -> major, minor
++ *   1 ImportSemaphore(semaphore, drawable) with one fd: an OPAQUE_FD
++ *     semaphore (Vulkan's, as CUDA imports it) the drawable's screen takes
++ *   2 SignalSemaphore(semaphore): signaled once the rendering requested
++ *     before it has completed on the GPU
++ *   3 FreeSemaphore(semaphore)
++ *
++ * A semaphore is binary: each signal is for one wait on the client's side.
++ * The extension is offered only where every screen's glamor context has
++ * GL_EXT_semaphore_fd.
++ */
++
++#include <dix-config.h>
++
++#include <unistd.h>
++
++#include <X11/X.h>
++#include <X11/Xproto.h>
++
++#include "dix/dix_priv.h"
++#include "dix/request_priv.h"
++#include "dix/screenint_priv.h"
++#include "dixstruct_priv.h"
++#include "extnsionst.h"
++#include "pixmapstr.h"
++#include "resource.h"
++#include "scrnintstr.h"
++
++#include "glamor_egl.h"
++
++#include "vfbsemaphore.h"
++
++#define SEMAPHORE_MAJOR 1
++#define SEMAPHORE_MINOR 0
++
++typedef struct {
++    CARD8 reqType;
++    CARD8 semaphoreReqType;
++    CARD16 length;
++    CARD32 majorVersion;
++    CARD32 minorVersion;
++} xSemaphoreQueryVersionReq;
++
++typedef struct {
++    BYTE type;
++    CARD8 pad1;
++    CARD16 sequenceNumber;
++    CARD32 length;
++    CARD32 majorVersion;
++    CARD32 minorVersion;
++    CARD32 pad2;
++    CARD32 pad3;
++    CARD32 pad4;
++    CARD32 pad5;
++} xSemaphoreQueryVersionReply;
++
++typedef struct {
++    CARD8 reqType;
++    CARD8 semaphoreReqType;
++    CARD16 length;
++    CARD32 semaphore;
++    CARD32 drawable;
++} xSemaphoreImportReq;
++
++typedef struct {
++    CARD8 reqType;
++    CARD8 semaphoreReqType;
++    CARD16 length;
++    CARD32 semaphore;
++} xSemaphoreReq;
++
++typedef struct {
++    ScreenPtr screen;
++    GLuint gl;
++} SemaphoreRec;
++
++static RESTYPE semaphore_type;
++
++static int
++semaphore_free(void *value, XID id)
++{
++    SemaphoreRec *semaphore = value;
++
++    glamor_egl_free_semaphore(semaphore->screen, semaphore->gl);
++    free(semaphore);
++    return Success;
++}
++
++static int
++proc_semaphore_query_version(ClientPtr client)
++{
++    X_REQUEST_HEAD_STRUCT(xSemaphoreQueryVersionReq);
++    X_REQUEST_FIELD_CARD32(majorVersion);
++    X_REQUEST_FIELD_CARD32(minorVersion);
++
++    xSemaphoreQueryVersionReply reply = {
++        .majorVersion = SEMAPHORE_MAJOR,
++        .minorVersion = SEMAPHORE_MINOR,
++    };
++
++    X_REPLY_FIELD_CARD32(majorVersion);
++    X_REPLY_FIELD_CARD32(minorVersion);
++    return X_SEND_REPLY_SIMPLE(client, reply);
++}
++
++static int
++proc_semaphore_import(ClientPtr client)
++{
++    X_REQUEST_HEAD_STRUCT(xSemaphoreImportReq);
++    X_REQUEST_FIELD_CARD32(semaphore);
++    X_REQUEST_FIELD_CARD32(drawable);
++
++    SemaphoreRec *semaphore;
++    DrawablePtr drawable;
++    int status, fd;
++
++    SetReqFds(client, 1);
++    LEGAL_NEW_RESOURCE(stuff->semaphore, client);
++    status = dixLookupDrawable(&drawable, stuff->drawable, client, M_ANY, DixGetAttrAccess);
++    if (status != Success)
++        return status;
++    fd = ReadFdFromClient(client);
++    if (fd < 0)
++        return BadValue;
++    semaphore = calloc(1, sizeof(*semaphore));
++    if (!semaphore) {
++        close(fd);
++        return BadAlloc;
++    }
++    semaphore->screen = drawable->pScreen;
++    semaphore->gl = glamor_egl_import_semaphore(drawable->pScreen, fd);
++    if (!semaphore->gl) {
++        free(semaphore);
++        return BadMatch;
++    }
++    if (!AddResource(stuff->semaphore, semaphore_type, semaphore))
++        return BadAlloc;
++    return Success;
++}
++
++static int
++proc_semaphore_signal(ClientPtr client)
++{
++    X_REQUEST_HEAD_STRUCT(xSemaphoreReq);
++    X_REQUEST_FIELD_CARD32(semaphore);
++
++    SemaphoreRec *semaphore;
++    int status = dixLookupResourceByType((void **) &semaphore, stuff->semaphore,
++                                         semaphore_type, client, DixWriteAccess);
++
++    if (status != Success)
++        return status;
++    glamor_egl_signal_semaphore(semaphore->screen, semaphore->gl);
++    return Success;
++}
++
++static int
++proc_semaphore_free(ClientPtr client)
++{
++    X_REQUEST_HEAD_STRUCT(xSemaphoreReq);
++    X_REQUEST_FIELD_CARD32(semaphore);
++
++    SemaphoreRec *semaphore;
++    int status = dixLookupResourceByType((void **) &semaphore, stuff->semaphore,
++                                         semaphore_type, client, DixDestroyAccess);
++
++    if (status != Success)
++        return status;
++    FreeResource(stuff->semaphore, RT_NONE);
++    return Success;
++}
++
++static int
++proc_semaphore_dispatch(ClientPtr client)
++{
++    REQUEST(xReq);
++
++    /* The semaphore travels as an fd. */
++    if (!client->local)
++        return BadMatch;
++    switch (stuff->data) {
++    case 0:
++        return proc_semaphore_query_version(client);
++    case 1:
++        return proc_semaphore_import(client);
++    case 2:
++        return proc_semaphore_signal(client);
++    case 3:
++        return proc_semaphore_free(client);
++    default:
++        return BadRequest;
++    }
++}
++
++void
++vfbSemaphoreExtensionInit(void)
++{
++    Bool capable = screenInfo.numScreens > 0;
++
++    DIX_FOR_EACH_SCREEN({
++        if (!glamor_egl_semaphore_capable(walkScreen))
++            capable = FALSE;
++    });
++    if (!capable)
++        return;
++    semaphore_type = CreateNewResourceType(semaphore_free, "SelkiesSemaphore");
++    if (!semaphore_type)
++        return;
++    if (!AddExtension(SELKIES_SEMAPHORE_NAME, 0, 0, proc_semaphore_dispatch, proc_semaphore_dispatch,
++                      NULL, StandardMinorOpcode))
++        return;
++    LogMessage(X_INFO, "vfb: GPU semaphores shared with clients (%s %d.%d)\n",
++               SELKIES_SEMAPHORE_NAME, SEMAPHORE_MAJOR, SEMAPHORE_MINOR);
++}
+diff --git a/hw/vfb/vfbsemaphore.h b/hw/vfb/vfbsemaphore.h
+new file mode 100644
+index 0000000..d106f93
+--- /dev/null
++++ b/hw/vfb/vfbsemaphore.h
+@@ -0,0 +1,9 @@
++#ifndef VFB_SEMAPHORE_H
++#define VFB_SEMAPHORE_H
++
++#define SELKIES_SEMAPHORE_NAME "SELKIES-SEMAPHORE"
++
++/* Offers SELKIES-SEMAPHORE where every screen's glamor shares GPU semaphores. */
++void vfbSemaphoreExtensionInit(void);
++
++#endif
