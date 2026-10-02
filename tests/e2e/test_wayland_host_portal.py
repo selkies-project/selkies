@@ -225,8 +225,13 @@ def run(mode: str) -> "H.Results":
                 res.check("a touchpad's stroke reaches the KDE client unstepped, as far as the page scrolled",
                           any(v != int(v) for v in values) and abs(sum(values) - sum(stroke)) < 0.5,
                           f"{values} against {sum(stroke)}")
-                res.check("and stops once the stroke pauses",
-                          any(l["kind"] == "ptr_axis_stop" for l in seen[last_axis + 1:]), seen[-3:])
+                if "portal offers no EIS socket" in H.server_log():
+                    # Without EIS the stroke goes through NotifyPointerAxis, whose finish KDE's
+                    # backend drops (5.27 through master): the client is never told it stopped.
+                    res.skip("and stops once the stroke pauses", "KDE's portal takes no finish without EIS")
+                else:
+                    res.check("and stops once the stroke pauses",
+                              any(l["kind"] == "ptr_axis_stop" for l in seen[last_axis + 1:]), seen[-3:])
                 res.check("the portal cursor sprite is delivered when the client draws the cursor",
                           C.wait_log("portal cursor sprites arrive", 10), H.server_log(tail=4))
                 real_errors, bad404 = C.benign_console(console_errors, not_found)
