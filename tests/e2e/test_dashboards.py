@@ -1501,7 +1501,9 @@ def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
                     "framesent", lambda f: frames.append(f) if isinstance(f, str) else None))
 
                 def pushed(page=page, frames=frames):
-                    sent = frames + page.evaluate("window.__settingsSent || []")
+                    # One record or the other: Playwright's own Firefox reports the frames the
+                    # page records as well, and counting both doubles every push.
+                    sent = frames or page.evaluate("window.__settingsSent || []")
                     return [json.loads(m[len("SETTINGS,"):]).get("use_paint_over_quality") for m in sent
                             if m.startswith("SETTINGS,") and "use_paint_over_quality" in m]
 
