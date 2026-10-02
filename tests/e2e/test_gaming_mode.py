@@ -445,9 +445,10 @@ def firefox(res: "H.Results", p: Any, desk: Desk, wayland: bool, capture: str) -
         res.skip("firefox", "no installed Firefox (E2E_FIREFOX or firefox on PATH)")
         return
     # Playwright takes a bare argument as a page to open, so the window keeps its
-    # default size; the first-run notices would open over the page.
+    # default size; the first-run notices would open over the page. A release
+    # Firefox speaks WebDriver BiDi, not Juggler, wherever it was found.
     browser = p.firefox.launch(**C.installed_firefox({
-        "headless": False, "executable_path": binary,
+        "headless": False, "executable_path": binary, "channel": "moz-firefox",
         "firefox_user_prefs": {"media.autoplay.default": 0, "full-screen-api.warning.timeout": 0,
                                "datareporting.policy.dataSubmissionPolicyBypassNotification": True,
                                "termsofuse.bypassNotification": True},
