@@ -1,35 +1,82 @@
-/*
- * This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at https://mozilla.org/MPL/2.0/.
- */
+"use client"
 
-import * as React from "react"
-import { Progress as ProgressPrimitive } from "radix-ui"
-
-import { cn } from "@/lib/utils"
+import { Progress as ProgressPrimitive } from "@base-ui/react/progress"
+import { cn } from "cn"
 
 function Progress({
   className,
+  children,
   value,
   ...props
-}: React.ComponentProps<typeof ProgressPrimitive.Root>) {
+}: ProgressPrimitive.Root.Props) {
   return (
     <ProgressPrimitive.Root
+      value={value}
       data-slot="progress"
-      className={cn(
-        "bg-primary/20 relative h-2 w-full overflow-hidden rounded-full",
-        className
-      )}
+      className={cn("flex flex-wrap gap-3", className)}
       {...props}
     >
-      <ProgressPrimitive.Indicator
-        data-slot="progress-indicator"
-        className="bg-primary h-full w-full flex-1 transition-all"
-        style={{ transform: `translateX(-${100 - (value || 0)}%)` }}
-      />
+      {children}
+      <ProgressTrack>
+        <ProgressIndicator />
+      </ProgressTrack>
     </ProgressPrimitive.Root>
   )
 }
 
-export { Progress }
+function ProgressTrack({ className, ...props }: ProgressPrimitive.Track.Props) {
+  return (
+    <ProgressPrimitive.Track
+      className={cn(
+        "relative flex h-1 w-full items-center overflow-x-hidden rounded-md bg-muted",
+        className
+      )}
+      data-slot="progress-track"
+      {...props}
+    />
+  )
+}
+
+function ProgressIndicator({
+  className,
+  ...props
+}: ProgressPrimitive.Indicator.Props) {
+  return (
+    <ProgressPrimitive.Indicator
+      data-slot="progress-indicator"
+      className={cn("h-full bg-primary transition-all", className)}
+      {...props}
+    />
+  )
+}
+
+function ProgressLabel({ className, ...props }: ProgressPrimitive.Label.Props) {
+  return (
+    <ProgressPrimitive.Label
+      className={cn("text-xs/relaxed font-medium", className)}
+      data-slot="progress-label"
+      {...props}
+    />
+  )
+}
+
+function ProgressValue({ className, ...props }: ProgressPrimitive.Value.Props) {
+  return (
+    <ProgressPrimitive.Value
+      className={cn(
+        "ml-auto text-xs/relaxed text-muted-foreground tabular-nums",
+        className
+      )}
+      data-slot="progress-value"
+      {...props}
+    />
+  )
+}
+
+export {
+  Progress,
+  ProgressTrack,
+  ProgressIndicator,
+  ProgressLabel,
+  ProgressValue,
+}

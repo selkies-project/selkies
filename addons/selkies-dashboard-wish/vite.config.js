@@ -4,52 +4,63 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import path from "path"
-import tailwindcss from "@tailwindcss/vite"
-import react from "@vitejs/plugin-react"
-import { defineConfig, loadEnv } from "vite"
-import { ViteMinifyPlugin } from "vite-plugin-minify"
+import path from 'path'
+import { defineConfig, loadEnv } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+import { ViteMinifyPlugin } from 'vite-plugin-minify'
 
-// https://vite.dev/config/
+// Restarts the dev server when a file Vite does not track as a module changes.
+function restartOnChange(globs) {
+  const patterns = globs.map((glob) => new RegExp(
+    '(^|/)' + glob.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+                  .replace(/\*\*/g, ' ')
+                  .replace(/\*/g, '[^/]*')
+                  .replace(/ /g, '.*') + '$'));
+  return {
+    name: 'selkies-restart-on-change',
+    apply: 'serve',
+    configureServer(server) {
+      server.watcher.add(globs);
+      const onChange = (file) => {
+        const path = file.split(/[\\/]/).join('/');
+        if (patterns.some((pattern) => pattern.test(path))) server.restart();
+      };
+      server.watcher.on('add', onChange);
+      server.watcher.on('change', onChange);
+    },
+  };
+}
+
 export default ({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   const inject = env.SELKIES_INJECT === '1' || env.SELKIES_INJECT === 'true';
   const downloadsPath = env.SELKIES_UPLOAD_DIR || '~/Desktop';
 
   return defineConfig({
-    // Relative asset URLs so the dist works when served under a subfolder prefix.
     base: '',
-    plugins: [react(), tailwindcss(), ViteMinifyPlugin()],
-    resolve: {
-      alias: {
-        "@": path.resolve(import.meta.dirname, "./src"),
-      },
-    },
     server: {
-      // Dev-server exposure is opt-in: bind loopback unless SELKIES_VITE_HOST is set
-      // (parity with selkies-dashboard / selkies-web-core).
+      // Dev-server exposure is opt-in: bind loopback unless SELKIES_VITE_HOST is set.
       host: process.env.SELKIES_VITE_HOST || '127.0.0.1',
       allowedHosts: process.env.SELKIES_VITE_HOST ? true : undefined,
       // main.jsx imports the touch-gamepad addon from its sibling package.
-      fs: { allow: ['.', '../universal-touch-gamepad', '../selkies-dashboard'] },
+      fs: { allow: ['.', '../universal-touch-gamepad'] },
     },
     build: {
-      target: 'chrome94',
-      chunkSizeWarningLimit: 1000,
-      rollupOptions: {
-        output: {
-          manualChunks: (id) => {
-            if (id.includes('node_modules')) {
-              if (id.includes('@radix-ui') || id.includes('radix-ui')) {
-                return 'radix-ui';
-              }
-              if (id.includes('react') || id.includes('framer-motion') || id.includes('lucide-react')) {
-                return 'vendor';
-              }
-            }
-          }
-        }
-      }
+      target: 'chrome94'
+    },
+    plugins: [
+      react({
+        exclude: 'src/selkies-core.js'
+      }),
+      tailwindcss(),
+      ViteMinifyPlugin(),
+      restartOnChange(['index.html', 'src/**']),
+    ],
+    resolve: {
+      alias: {
+        '@': path.resolve(import.meta.dirname, './src'),
+      },
     },
     define: {
       // if inject=false -> undefined, so runtime falls back to localStorage/default

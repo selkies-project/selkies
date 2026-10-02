@@ -691,15 +691,18 @@ export function TopMenu({
           <div className="flex items-center px-2 py-2">
             <Menubar className="h-6 border-0 bg-transparent p-0">
               <MenubarMenu>
-                <MenubarTrigger asChild>
-                  <Button
-                    variant="secondary"
-                    size="icon"
-                    className="h-6 w-6"
-                  >
-                    <Gamepad2 className="h-4 w-4" />
-                  </Button>
-                </MenubarTrigger>
+                <MenubarTrigger 
+                  render={(props) => (
+                    <Button
+                      {...props}
+                      variant="secondary"
+                      size="icon"
+                      className="h-6 w-6"
+                    >
+                      <Gamepad2 className="h-4 w-4" />
+                    </Button>
+                  )}
+                />
                 <MenubarContent align="start" className="min-w-[260px] max-w-[300px]">
                   <MenubarLabel>{t('topMenu.gaming')}</MenubarLabel>
                   {(renderableSettings.gamingMode ?? true) && (
@@ -773,15 +776,18 @@ export function TopMenu({
         <div className="flex items-center px-2 py-2">
           <Menubar className="h-6 border-0 bg-transparent p-0">
             <MenubarMenu>
-              <MenubarTrigger asChild>
-                <Button
-                  variant="secondary"
-                  size="icon"
-                  className="h-6 w-6"
-                >
-                  <LayoutPanelLeft className="h-4 w-4" />
-                </Button>
-              </MenubarTrigger>
+              <MenubarTrigger 
+                render={(props) => (
+                  <Button
+                    {...props}
+                    variant="secondary"
+                    size="icon"
+                    className="h-6 w-6"
+                  >
+                    <LayoutPanelLeft className="h-4 w-4" />
+                  </Button>
+                )}
+              />
               <MenubarContent align="start" className="min-w-[200px]">
 
                 {!isSecondaryDisplay && (renderableSettings.coreButtons ?? true) && (
@@ -1018,107 +1024,125 @@ export function TopMenu({
           <div className="flex items-center space-x-1">
             {(renderableSettings.apps ?? true) && !isSecondaryDisplay && (
               <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="secondary"
-                    size="icon"
-                    className="h-6 w-6"
-                    onClick={() => handlePanelToggle('apps')}
-                  >
-                    <LayoutGrid className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
+                <TooltipTrigger 
+                  render={(props) => (
+                    <Button
+                      {...props}
+                      variant="secondary"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => handlePanelToggle('apps')}
+                    >
+                      <LayoutGrid className="h-4 w-4" />
+                    </Button>
+                  )}
+                />
                 <TooltipContent>{t('sections.apps.title')}</TooltipContent>
               </Tooltip>
             )}
 
             <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant={activePanel === 'settings' ? "default" : "secondary"}
-                  size="icon"
-                  className="h-6 w-6"
-                  onClick={() => handlePanelToggle('settings')}
-                >
-                  <Settings2 className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
+              <TooltipTrigger 
+                render={(props) => (
+                  <Button
+                    {...props}
+                    variant={activePanel === 'settings' ? "default" : "secondary"}
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={() => handlePanelToggle('settings')}
+                  >
+                    <Settings2 className="h-4 w-4" />
+                  </Button>
+                )}
+              />
               <TooltipContent>{t('topMenu.settings')}</TooltipContent>
             </Tooltip>
 
             {(renderableSettings.stats ?? true) && !isSecondaryDisplay && (
               <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant={showSystemMonitoring ? "default" : "secondary"}
-                    size="icon"
-                    className="h-6 w-6"
-                    onClick={() => handlePanelToggle('monitoring')}
-                  >
-                    <Gauge className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
+                <TooltipTrigger 
+                  render={(props) => (
+                    <Button
+                      {...props}
+                      variant={showSystemMonitoring ? "default" : "secondary"}
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => handlePanelToggle('monitoring')}
+                    >
+                      <Gauge className="h-4 w-4" />
+                    </Button>
+                  )}
+                />
                 <TooltipContent>{t('topMenu.systemMonitoring')}</TooltipContent>
               </Tooltip>
             )}
 
             {(renderableSettings.fullscreen ?? true) && (
               <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="secondary"
-                    size="icon"
-                    className="h-6 w-6"
-                    onClick={() => {
-                      if (document.fullscreenElement) {
-                        document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
-                      } else {
-                        // Plain fullscreen: the core locks neither the pointer nor
-                        // the keyboard, so the bar stays usable.
-                        window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
-                      }
-                    }}
-                  >
-                    <Maximize className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
+                <TooltipTrigger 
+                  render={(props) => (
+                    <Button
+                      {...props}
+                      variant="secondary"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => {
+                        if (document.fullscreenElement) {
+                          document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
+                        } else {
+                          // Plain fullscreen: the core locks neither the pointer nor
+                          // the keyboard, so the bar stays usable.
+                          window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
+                        }
+                      }}
+                    >
+                      <Maximize className="h-4 w-4" />
+                    </Button>
+                  )}
+                />
                 <TooltipContent>{t('topMenu.toggleFullscreen')}</TooltipContent>
               </Tooltip>
             )}
 
             {(renderableSettings.gamingMode ?? true) && (
               <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="secondary"
-                    size="icon"
-                    className="h-6 w-6"
-                    onClick={() => {
-                      if (document.fullscreenElement) {
-                        document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
-                      } else {
-                        window.postMessage({ type: 'requestGamingMode' }, window.location.origin);
-                      }
-                    }}
-                  >
-                    <Crosshair className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
+                <TooltipTrigger 
+                  render={(props) => (
+                    <Button
+                      {...props}
+                      variant="secondary"
+                      size="icon"
+                      className="h-6 w-6"
+                      onClick={() => {
+                        if (document.fullscreenElement) {
+                          document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
+                        } else {
+                          window.postMessage({ type: 'requestGamingMode' }, window.location.origin);
+                        }
+                      }}
+                    >
+                      <Crosshair className="h-4 w-4" />
+                    </Button>
+                  )}
+                />
                 <TooltipContent>{t('gamingModeTitle')}</TooltipContent>
               </Tooltip>
             )}
 
             <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="secondary"
-                  size="icon"
-                  className="h-6 w-6 cursor-grab active:cursor-grabbing select-none"
-                  onMouseDown={handleMouseDown}
-                >
-                  <Hand className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
+              <TooltipTrigger 
+                render={(props) => (
+                  <Button
+                    {...props}
+                    variant="secondary"
+                    size="icon"
+                    className="h-6 w-6 cursor-grab active:cursor-grabbing select-none"
+                    onMouseDown={handleMouseDown}
+                  >
+                    <Hand className="h-4 w-4" />
+                  </Button>
+                )}
+              />
               <TooltipContent>{t('topMenu.dragHandle')}</TooltipContent>
             </Tooltip>
           </div>
