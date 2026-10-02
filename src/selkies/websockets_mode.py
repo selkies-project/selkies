@@ -128,9 +128,9 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
-from .stream_server import (SESSION_TOKEN_PROTOCOL, BaseStreamingService, CongestionSteer, RateHold, TransferPacer,
-                            UplinkGauge, _observe_rtt_floor, _uplink_session_state, handshake_session_token, note_pong,
-                            start_kbps, uplink_rtt_ms, socket_gauge)
+from .stream_server import (SESSION_TOKEN_PROTOCOL, BaseStreamingService, ConnectionVerdict, CongestionSteer, RateHold,
+                            TransferPacer, UplinkGauge, _observe_rtt_floor, _uplink_session_state,
+                            handshake_session_token, note_pong, start_kbps, uplink_rtt_ms, socket_gauge)
 from .metrics import Metrics
 
 # How much stream may stand queued past the path's own round trip before the
@@ -844,11 +844,14 @@ class _VideoRelay:
         live_rows: Stripe rows whose IDR was accepted into the current backlog;
             only their delta chunks are chain-continuous for this client.
         stopped: Set by `stop`; the drain task exits after its in-flight send.
+        verdict: This client's connection verdict over the chunks offered to
+            it, those dropped or held back by the gate counting as missed; a
+            change goes to its page as `CONNECTION poor` or `CONNECTION ok`.
     """
 
     __slots__ = ('server', 'display_id', 'ws', 'budget', 'backlog',
                  'backlog_bytes', 'live_rows', 'stopped', '_wake', '_task',
-                 '_next_sync_req')
+                 '_next_sync_req', 'verdict')
 
     def __init__(self, server: "DataStreamingServer", display_id: str,
                  ws: web.WebSocketResponse, budget: int) -> None:
@@ -863,10 +866,19 @@ class _VideoRelay:
         self._wake = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
         self._next_sync_req = 0.0
+        self.verdict = ConnectionVerdict()
 
     def start(self) -> None:
         self._task = asyncio.create_task(
             self._run(), name=f"VideoRelay:{self.display_id}")
+
+    def _judge(self, missed: int) -> None:
+        """Count one chunk offered or held back and `missed` chunks that will not
+        reach this client, telling its page when its connection verdict changes."""
+        poor = self.verdict.note(1, missed, time.monotonic())
+        if poor is not None:
+            _spawn_background_task(_broadcast_to_clients(
+                self.server.clients, f"CONNECTION {'poor' if poor else 'ok'}", watched=True, only=id(self.ws)))
 
     def stop(self) -> None:
         """Graceful: an in-flight send completes — canceling mid-frame would
@@ -876,10 +888,15 @@ class _VideoRelay:
         self.backlog_bytes = 0
         self._wake.set()
 
-    def flush_for_gate(self) -> None:
+    def flush_for_gate(self, counted: bool = True) -> None:
         """ACK backpressure engaged: drop the undrained backlog and gate every
         row, so the client resumes only at the IDR that
-        _set_backpressure_enabled requests when the gate lifts."""
+        _set_backpressure_enabled requests when the gate lifts. The chunk held
+        back and the backlog count against the connection unless `counted` is
+        False (a stalled client: a page that stopped acking, such as a hidden
+        tab, is no judge of its link)."""
+        if counted:
+            self._judge(1 + len(self.backlog))
         if self.backlog or self.live_rows:
             self.backlog.clear()
             self.backlog_bytes = 0
@@ -916,8 +933,10 @@ class _VideoRelay:
         is_video = size >= 12 and data[0] == 0x04
         is_idr = is_video and (data[1] & 0x0F) == 0x01
         dropped = False
+        flushed = 0
         if (not is_idr and self.backlog
                 and self.backlog_bytes + size > self.budget):
+            flushed = len(self.backlog)
             self.backlog.clear()
             self.backlog_bytes = 0
             self.live_rows.clear()
@@ -934,6 +953,7 @@ class _VideoRelay:
             self.backlog.append(item)
             self.backlog_bytes += size
             self._wake.set()
+        self._judge(flushed + (not deliver))
         return dropped and self._want_sync()
 
     async def _run(self) -> None:
@@ -6333,7 +6353,7 @@ class DataStreamingServer(BaseStreamingService):
                                 targets.discard(pc_ws)
                                 relay = group.get(pc_ws)
                                 if relay is not None:
-                                    relay.flush_for_gate()
+                                    relay.flush_for_gate(ps.get('stall_gated_at') is None)
                         else:
                             ci = self.display_clients.get(display_id)
                             ws = ci.get('ws') if ci else None
@@ -6344,7 +6364,7 @@ class DataStreamingServer(BaseStreamingService):
                                 targets = set()
                                 relay = group.get(ws) if ws is not None else None
                                 if relay is not None:
-                                    relay.flush_for_gate()
+                                    relay.flush_for_gate(ci.get('stall_gated_at') is None)
                         # A socket gone for good (disconnect, pause, demotion to
                         # secondary) takes its relay with it; gated sockets stay in keep.
                         if len(group) > len(keep):

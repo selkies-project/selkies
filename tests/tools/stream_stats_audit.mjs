@@ -413,4 +413,20 @@ countingWatch.stop();
 await spacing();
 check('stopping drops a sample still waiting out the spacing', sampled.length === 0, String(sampled.length));
 
+const verdicts = new StreamStats({ transport: 'websockets', send: () => {}, isViewer: () => false });
+await settle();
+announced = 0;
+check('a connection starts out good', window.stream_client.connection === 'ok', window.stream_client.connection);
+verdicts.setConnection(true);
+await settle();
+check("the server's poor verdict is kept and announced with the stats shut",
+  window.stream_client.connection === 'poor' && announced === 1 && !window.stream_stats.open, String(announced));
+verdicts.setConnection(true);
+await settle();
+check('and a verdict that did not change is not announced again', announced === 1, String(announced));
+verdicts.disconnected();
+await settle();
+check('a lost connection takes its verdict with it', window.stream_client.connection === 'ok' && announced === 2,
+  `${window.stream_client.connection} ${announced}`);
+
 process.exit(failed ? 1 : 0);

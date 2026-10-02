@@ -90,6 +90,10 @@ export const SERVER_FRESH_MS = 3000;
  *     one that was taken rather than the one preferred.
  * @property {string} decode_path JPEG only: what turns a stripe into a picture,
  *     and where it runs.
+ * @property {'ok'|'poor'} connection The server's verdict on this page's
+ *     connection: poor while too many of its display's frames are lost on the
+ *     way or held back for its link (`ConnectionVerdict` on the server). The
+ *     server says so only when it changes, so it is kept with the stats shut.
  */
 
 /**
@@ -254,7 +258,7 @@ export class StreamStats {
     this._announcing = false;
     /** @type {StreamClient} */
     this._client = { transport, decoder: 'unknown', decoder_evidence: '', hardware_expected: false,
-      decoder_reason: '', codec: '', resolution: '', path: '', sink: '', decode_path: '' };
+      decoder_reason: '', codec: '', resolution: '', path: '', sink: '', decode_path: '', connection: 'ok' };
     window.stream_info = null;
     window.stream_client = this._client;
     window.stream_stats = { open: false, latest: null, history: [] };
@@ -304,9 +308,15 @@ export class StreamStats {
     }
   }
 
-  /** The connection went away, and the subscription with it. */
+  /** The connection went away, and the subscription and its verdict with it. */
   disconnected() {
     this._subscribed = false;
+    this.setConnection(false);
+  }
+
+  /** @param {boolean} poor The server's connection verdict for this page. */
+  setConnection(poor) {
+    this.setClient({ connection: poor ? 'poor' : 'ok' });
   }
 
   /** @param {StreamInfo|null} info The server's `stream_info`. */

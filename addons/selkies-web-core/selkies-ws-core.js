@@ -8137,6 +8137,10 @@ class WorkerWebSocket {
         rememberCcStart(displayId, parseFloat(event.data.substring(8)));
         return;
       }
+      if (event.data.startsWith('CONNECTION ')) {
+        streamStats.setConnection(event.data.substring(11) === 'poor');
+        return;
+      }
       if (event.data.startsWith('DISPLAY_OWNER ')) {
         // The owner beside which this page controlled the display is gone:
         // its settings, the window size among them, lay the display out now.

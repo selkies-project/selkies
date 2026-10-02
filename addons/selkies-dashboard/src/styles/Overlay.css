@@ -897,6 +897,27 @@
     user-select: none;
 }
 .stream-strip-marks { display: flex; gap: 2px; }
+
+/* The poor-connection mark: clear of the strip, the notifications and the
+   keyboard button, and of the pointer. */
+.connection-indicator {
+    --stat-warn: #fab219;
+    position: fixed;
+    bottom: 20px;
+    left: 20px;
+    z-index: 900;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 12px;
+    pointer-events: none;
+    user-select: none;
+}
+.connection-indicator .stream-status-icon { margin-top: 0; }
 .stream-strip-figure { display: flex; flex-direction: column; line-height: 1.15; }
 .stream-strip-figure b { font-size: 13px; white-space: nowrap; }
 .stream-strip-figure small { font-size: 10px; opacity: 0.75; white-space: nowrap; }

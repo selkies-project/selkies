@@ -310,6 +310,7 @@ const en = {
         webrtcFailedSwitch: "Its media path fails from this network. WebSockets streams over the same connection as this page.",
         webrtcFailedNoSwitch: "Its media path fails from this network. A TURN server or the WebSockets mode would carry the stream; ask the administrator.",
         switchToWebsockets: "Switch to WebSockets",
+        poorConnection: "Poor connection",
     },
     alerts: {
         invalidResolution: "Please enter valid positive integers for Width and Height.",
@@ -618,6 +619,7 @@ const es = {
         webrtcFailedSwitch: "Su ruta de medios falla desde esta red. WebSockets transmite por la misma conexión que esta página.",
         webrtcFailedNoSwitch: "Su ruta de medios falla desde esta red. Un servidor TURN o el modo WebSockets llevaría la transmisión; consulte al administrador.",
         switchToWebsockets: "Cambiar a WebSockets",
+        poorConnection: "Conexión deficiente",
     },
     alerts: {
         invalidResolution: "Por favor, introduzca números enteros positivos válidos para Ancho y Alto.",
@@ -926,6 +928,7 @@ const zh_cn = {
         webrtcFailedSwitch: "从此网络到服务器的媒体路径失败。WebSockets 通过与本页面相同的连接传输画面。",
         webrtcFailedNoSwitch: "从此网络到服务器的媒体路径失败。TURN 服务器或 WebSockets 模式可以传输画面，请联系管理员。",
         switchToWebsockets: "切换到 WebSockets",
+        poorConnection: "网络连接不佳",
     },
     alerts: {
         invalidResolution: "请输入有效的正整数作为宽度和高度。",
@@ -1234,6 +1237,7 @@ const hi = {
         webrtcFailedSwitch: "इस नेटवर्क से इसका मीडिया पथ विफल हो रहा है। WebSockets इसी पेज वाले कनेक्शन पर स्ट्रीम करता है।",
         webrtcFailedNoSwitch: "इस नेटवर्क से इसका मीडिया पथ विफल हो रहा है। TURN सर्वर या WebSockets मोड स्ट्रीम ले जा सकता है; व्यवस्थापक से संपर्क करें।",
         switchToWebsockets: "WebSockets पर स्विच करें",
+        poorConnection: "कमज़ोर कनेक्शन",
     },
     alerts: {
         invalidResolution: "कृपया चौड़ाई और ऊंचाई के लिए मान्य धनात्मक पूर्णांक दर्ज करें।",
@@ -1542,6 +1546,7 @@ const pt = {
         webrtcFailedSwitch: "O caminho de mídia falha a partir desta rede. O WebSockets transmite pela mesma conexão desta página.",
         webrtcFailedNoSwitch: "O caminho de mídia falha a partir desta rede. Um servidor TURN ou o modo WebSockets levaria a transmissão; fale com o administrador.",
         switchToWebsockets: "Mudar para WebSockets",
+        poorConnection: "Conexão fraca",
     },
     alerts: {
         invalidResolution: "Por favor, insira inteiros positivos válidos para Largura e Altura.",
@@ -1850,6 +1855,7 @@ const fr = {
         webrtcFailedSwitch: "Son chemin média échoue depuis ce réseau. WebSockets diffuse par la même connexion que cette page.",
         webrtcFailedNoSwitch: "Son chemin média échoue depuis ce réseau. Un serveur TURN ou le mode WebSockets acheminerait le flux ; contactez l'administrateur.",
         switchToWebsockets: "Passer à WebSockets",
+        poorConnection: "Connexion médiocre",
     },
     alerts: {
         invalidResolution: "Veuillez entrer des entiers positifs valides pour la Largeur et la Hauteur.",
@@ -2159,6 +2165,7 @@ const ru = {
         webrtcFailedSwitch: "Медиаканал к серверу из этой сети не работает. WebSockets передаёт поток через то же соединение, что и эта страница.",
         webrtcFailedNoSwitch: "Медиаканал к серверу из этой сети не работает. Поток может передать TURN-сервер или режим WebSockets; обратитесь к администратору.",
         switchToWebsockets: "Переключиться на WebSockets",
+        poorConnection: "Плохое соединение",
     },
     alerts: {
         invalidResolution: "Пожалуйста, введите действительные положительные целые числа для Ширины и Высоты.",
@@ -2467,6 +2474,7 @@ const de = {
         webrtcFailedSwitch: "Der Medienpfad schlägt aus diesem Netzwerk fehl. WebSockets überträgt über dieselbe Verbindung wie diese Seite.",
         webrtcFailedNoSwitch: "Der Medienpfad schlägt aus diesem Netzwerk fehl. Ein TURN-Server oder der WebSockets-Modus würde den Stream übertragen; wenden Sie sich an den Administrator.",
         switchToWebsockets: "Zu WebSockets wechseln",
+        poorConnection: "Schlechte Verbindung",
     },
     alerts: {
         invalidResolution: "Bitte geben Sie gültige positive ganze Zahlen für Breite und Höhe ein.",
@@ -2775,6 +2783,7 @@ const tr = {
         webrtcFailedSwitch: "Medya yolu bu ağdan başarısız oluyor. WebSockets, bu sayfayla aynı bağlantı üzerinden yayın yapar.",
         webrtcFailedNoSwitch: "Medya yolu bu ağdan başarısız oluyor. Bir TURN sunucusu veya WebSockets modu yayını taşıyabilir; yöneticiye başvurun.",
         switchToWebsockets: "WebSockets'e geç",
+        poorConnection: "Zayıf bağlantı",
     },
     alerts: {
         invalidResolution: "Lütfen Genişlik ve Yükseklik için geçerli pozitif tam sayılar girin.",
@@ -3083,6 +3092,7 @@ const it = {
         webrtcFailedSwitch: "Il percorso multimediale non funziona da questa rete. WebSockets trasmette sulla stessa connessione di questa pagina.",
         webrtcFailedNoSwitch: "Il percorso multimediale non funziona da questa rete. Un server TURN o la modalità WebSockets porterebbe il flusso; contatta l'amministratore.",
         switchToWebsockets: "Passa a WebSockets",
+        poorConnection: "Connessione scarsa",
     },
     alerts: {
         invalidResolution: "Inserisci numeri interi positivi validi per Larghezza e Altezza.",
@@ -3391,6 +3401,7 @@ const nl = {
         webrtcFailedSwitch: "Het mediapad mislukt vanaf dit netwerk. WebSockets streamt over dezelfde verbinding als deze pagina.",
         webrtcFailedNoSwitch: "Het mediapad mislukt vanaf dit netwerk. Een TURN-server of de WebSockets-modus zou de stream dragen; neem contact op met de beheerder.",
         switchToWebsockets: "Overschakelen naar WebSockets",
+        poorConnection: "Slechte verbinding",
     },
     alerts: {
         invalidResolution: "Voer geldige positieve gehele getallen in voor Breedte en Hoogte.",
@@ -3699,6 +3710,7 @@ const ar = {
         webrtcFailedSwitch: "يفشل مسار الوسائط من هذه الشبكة. يبث WebSockets عبر نفس اتصال هذه الصفحة.",
         webrtcFailedNoSwitch: "يفشل مسار الوسائط من هذه الشبكة. يمكن لخادم TURN أو وضع WebSockets نقل البث؛ تواصل مع المسؤول.",
         switchToWebsockets: "التبديل إلى WebSockets",
+        poorConnection: "اتصال ضعيف",
     },
     alerts: {
         invalidResolution: "الرجاء إدخال أعداد صحيحة موجبة صالحة للعرض والارتفاع.",
@@ -4007,6 +4019,7 @@ const ko = {
         webrtcFailedSwitch: "이 네트워크에서 미디어 경로가 실패합니다. WebSockets는 이 페이지와 같은 연결로 스트리밍합니다.",
         webrtcFailedNoSwitch: "이 네트워크에서 미디어 경로가 실패합니다. TURN 서버나 WebSockets 모드로 스트리밍할 수 있으니 관리자에게 문의하세요.",
         switchToWebsockets: "WebSockets로 전환",
+        poorConnection: "연결 상태 나쁨",
     },
     alerts: {
         invalidResolution: "너비와 높이에 유효한 양의 정수를 입력하십시오.",
@@ -4315,6 +4328,7 @@ const ja = {
         webrtcFailedSwitch: "このネットワークからはメディア経路が失敗します。WebSockets はこのページと同じ接続でストリーミングします。",
         webrtcFailedNoSwitch: "このネットワークからはメディア経路が失敗します。TURN サーバーまたは WebSockets モードで配信できます。管理者にお問い合わせください。",
         switchToWebsockets: "WebSockets に切り替える",
+        poorConnection: "接続が不安定です",
     },
     alerts: {
         invalidResolution: "幅と高さに有効な正の整数を入力してください。",
@@ -4623,6 +4637,7 @@ const vi = {
         webrtcFailedSwitch: "Đường truyền phương tiện bị lỗi từ mạng này. WebSockets truyền qua cùng kết nối với trang này.",
         webrtcFailedNoSwitch: "Đường truyền phương tiện bị lỗi từ mạng này. Máy chủ TURN hoặc chế độ WebSockets có thể truyền luồng; hãy liên hệ quản trị viên.",
         switchToWebsockets: "Chuyển sang WebSockets",
+        poorConnection: "Kết nối kém",
     },
     alerts: {
         invalidResolution: "Vui lòng nhập số nguyên dương hợp lệ cho Chiều rộng và Chiều cao.",
@@ -4931,6 +4946,7 @@ const th = {
         webrtcFailedSwitch: "เส้นทางสื่อล้มเหลวจากเครือข่ายนี้ WebSockets สตรีมผ่านการเชื่อมต่อเดียวกับหน้านี้",
         webrtcFailedNoSwitch: "เส้นทางสื่อล้มเหลวจากเครือข่ายนี้ เซิร์ฟเวอร์ TURN หรือโหมด WebSockets สามารถส่งสตรีมได้ โปรดติดต่อผู้ดูแลระบบ",
         switchToWebsockets: "สลับไปใช้ WebSockets",
+        poorConnection: "การเชื่อมต่อไม่ดี",
     },
     alerts: {
         invalidResolution: "โปรดป้อนจำนวนเต็มบวกที่ถูกต้องสำหรับความกว้างและความสูง",
@@ -5239,6 +5255,7 @@ const fil = {
         webrtcFailedSwitch: "Pumapalya ang daanan ng media mula sa network na ito. Nag-i-stream ang WebSockets sa parehong koneksyon ng pahinang ito.",
         webrtcFailedNoSwitch: "Pumapalya ang daanan ng media mula sa network na ito. Maaaring dalhin ng isang TURN server o ng WebSockets mode ang stream; makipag-ugnayan sa administrator.",
         switchToWebsockets: "Lumipat sa WebSockets",
+        poorConnection: "Mahinang koneksyon",
     },
     alerts: {
         invalidResolution: "Mangyaring maglagay ng mga wastong positibong integer para sa Lapad at Taas.",
@@ -5547,6 +5564,7 @@ const da = {
         webrtcFailedSwitch: "Mediestien fejler fra dette netværk. WebSockets streamer over den samme forbindelse som denne side.",
         webrtcFailedNoSwitch: "Mediestien fejler fra dette netværk. En TURN-server eller WebSockets-tilstanden ville bære streamen; kontakt administratoren.",
         switchToWebsockets: "Skift til WebSockets",
+        poorConnection: "Dårlig forbindelse",
     },
     alerts: {
         invalidResolution: "Indtast venligst gyldige positive heltal for Bredde og Højde.",
@@ -5855,6 +5873,7 @@ const zh_tw = {
         webrtcFailedSwitch: "從此網路到伺服器的媒體路徑失敗。WebSockets 透過與本頁面相同的連線傳輸畫面。",
         webrtcFailedNoSwitch: "從此網路到伺服器的媒體路徑失敗。TURN 伺服器或 WebSockets 模式可以傳輸畫面，請聯絡管理員。",
         switchToWebsockets: "切換至 WebSockets",
+        poorConnection: "網路連線不佳",
     },
     alerts: {
         invalidResolution: "請輸入有效的正整數作為寬度和高度。",

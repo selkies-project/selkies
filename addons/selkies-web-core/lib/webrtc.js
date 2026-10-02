@@ -103,7 +103,8 @@ export function takeMultiopus(offer, answer) {
  * `onclipboardcontent`, `oncursorchange`, `onsystemaction`, `onstreaminfo`,
  * `onstreamstats`, `onlatencymeasurement`, `onserversettings`,
  * `ondisplayconfig`, and `onccrate` receive the payload of the data channel
- * message of the same kind.
+ * message of the same kind, and `onconnection` the server's verdict on this
+ * page's connection, true while it is poor.
  */
 export class WebRTCClient {
 	/**
@@ -194,6 +195,9 @@ export class WebRTCClient {
 
 		/** @type {?function(Object): void} */
 		this.onstreamstats = null;
+
+		/** @type {?function(boolean): void} */
+		this.onconnection = null;
 
 		this.signaling.onsdp = this._onSDP.bind(this);
 		this.signaling.onice = this._onSignalingICE.bind(this);
@@ -739,6 +743,10 @@ export class WebRTCClient {
 		} else if (msg.type === 'stream_stats') {
 			if (this.onstreamstats !== null) {
 				this.onstreamstats(msg.data);
+			}
+		} else if (msg.type === 'connection') {
+			if (this.onconnection !== null) {
+				this.onconnection(!!(msg.data && msg.data.poor));
 			}
 		} else if (typeof msg.type === 'string' && msg.type.startsWith('clipboard-msg')) {
 			if (typeof this.onclipboardcontent === 'function') {
