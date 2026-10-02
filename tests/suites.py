@@ -142,6 +142,7 @@ SUITES: list = [
     {"path": "unit/test_media_relay_pull.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rtp_history.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_reference_invalidation.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_still_request.py", "tier": "unit", "timeout": 60},
     {"path": "unit/test_decode_gate.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_decode_pace.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ws_decode_pace.py", "tier": "unit", "timeout": 120},

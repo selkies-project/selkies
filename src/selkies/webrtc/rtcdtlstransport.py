@@ -1032,6 +1032,11 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
                 self._twcc_missing.pop(old, None)
         return seq
 
+    def _twcc_acked(self, seq: int) -> bool:
+        """Whether transport-cc feedback reported the packet sent under `seq`, sent
+        within TWCC_HISTORY_S, received."""
+        return seq not in self._twcc_history
+
     def _twcc_unmark_missing(self, seq: int) -> None:
         """Retract a provisional loss only while its control interval is open.
 

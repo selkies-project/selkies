@@ -95,6 +95,13 @@ RRTR_REPORTERS_MAX = 50
 # nothing, so a peer silent this long is gone (asleep, off the network), where ICE
 # consent would keep the stream going to it for half a minute.
 PEER_SILENCE_S = 10.0
+# A libwebrtc receiver with no frame to decode for three times the offer's rtx-time
+# (375 ms), and a packet in the last five seconds, asks for a key frame, and again
+# each 375 ms: a still screen sends nothing, so each still was answered with a key
+# frame and the cleanup after it, which ends in another still. A request this long
+# past the round trip after an acknowledged frame, with nothing lost since, is that
+# wait; one this soon after the last is a failed decode, which asks each rtx-time.
+STILL_REQUEST_S = 0.25
 
 # Media packets per FlexFEC group at most; a group also closes with its frame.
 FEC_GROUP_PACKETS = 10
@@ -228,6 +235,14 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # capture frame id took, which a frame predicting from it is measured against.
         self.__frame_number = 0
         self.__frame_numbers: dict[int, int] = {}
+        # The transport-wide sequence number ending the newest frame handed over, and
+        # of the newest on the wire with when it left; when the peer last asked for a
+        # key frame; and when it lost a frame past repair, until a frame coded after
+        # that is on the wire (`_still_request`).
+        self._frame_handed: Optional[int] = None
+        self._frame_left: Optional[tuple[int, float]] = None
+        self._key_asked_at = 0.0
+        self._lost_at: Optional[float] = None
         self.__rtcp_exited = asyncio.Event()
         self.__rtcp_started = asyncio.Event()
         self.__rtcp_task: Optional[asyncio.Future[None]] = None
@@ -479,6 +494,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 self.__rtp_history.repaired(seq, time.time() + self.transport._send_delay())
                 if lost and self.__rtp_history.newly_lost(frame, time.time()):
                     self.emit("lost_frame", frame)
+                    self._lost_at = time.monotonic()
             if gone:
                 # Gone from the history: only a key frame brings the peer back.
                 self._emit_pli_event()
@@ -489,13 +505,11 @@ class RTCRtpSender(AsyncIOEventEmitter):
             self.__rrtrs[packet.ssrc] = ((packet.rrtr >> 16) & 0xFFFFFFFF, time.monotonic_ns())
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_TWCC:
             self.transport._twcc_process_feedback(packet.fci)
-        elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_PLI:
-            self._send_keyframe()
-            self._emit_pli_event()
-        elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_FIR:
-            # Full Intra Request (RFC 5104): same recovery as PLI — force a keyframe.
-            self._send_keyframe()
-            self._emit_pli_event()
+        elif isinstance(packet, RtcpPsfbPacket) and packet.fmt in (RTCP_PSFB_PLI, RTCP_PSFB_FIR):
+            # A Full Intra Request (RFC 5104) asks what a PLI does: a key frame.
+            if not self._still_request():
+                self._send_keyframe()
+                self._emit_pli_event()
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_APP:
             try:
                 bitrate, ssrcs = unpack_remb_fci(packet.fci)
@@ -507,6 +521,31 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         self.__encoder.target_bitrate = bitrate
             except ValueError:
                 pass
+
+    def _still_request(self) -> bool:
+        """Whether a key-frame request is a receiver's wait on a still screen
+        (STILL_REQUEST_S), which a key frame would only restart: the newest frame is
+        on the wire and acknowledged, it left STILL_REQUEST_S and the round trip ago,
+        no frame lost past repair awaits one predicting past it, and the request
+        before came STILL_REQUEST_S or more earlier."""
+        now = time.monotonic()
+        before, self._key_asked_at = self._key_asked_at, now
+        left = self._frame_left
+        return (left is not None and left[0] == self._frame_handed and self._lost_at is None
+                and now - left[1] >= STILL_REQUEST_S + (self.__rtt or 0.0)
+                and now - before >= STILL_REQUEST_S
+                and self.transport._twcc_acked(left[0]))
+
+    def _frame_on_wire(self, seq: int, keyframe: bool, timing: Optional[tuple],
+                       captured: int, size: int) -> None:
+        """A frame's last packet left for the wire. One whose encode began after the
+        peer last lost a frame predicts past it, as a key frame predicts from nothing."""
+        self._frame_left = (seq, time.monotonic())
+        encoded = timing[1] / 1e9 if timing and len(timing) > 1 and timing[1] > 0 else 0.0
+        if self._lost_at is not None and (keyframe or encoded > self._lost_at):
+            self._lost_at = None
+        if self.on_frame_sent is not None:
+            self.on_frame_sent(captured, size)
 
     def _emit_pli_event(self):
         """
@@ -675,6 +714,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 # is disabled, in which case we just continue the loop.
                 enc_frame = await self._next_encoded_frame()
                 if enc_frame is None:
+                    # A frame this peer is not sent leaves its picture behind the screen.
+                    self._frame_left = None
                     continue
                 codec = self.__send_codec
                 frame_time = time.time()
@@ -705,6 +746,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         logger.info("RTCRtpSender(%s) frame %s predicts from %s, which this peer "
                                     "was not sent; asking for a key frame",
                                     self.__kind, *enc_frame.dependency)
+                        self._frame_left = None
                         self._emit_pli_event()
                         continue
 
@@ -805,16 +847,16 @@ class RTCRtpSender(AsyncIOEventEmitter):
                                 protected.append((fec_first_seq, len(fec_group)))
                             fec_group = []
 
-                sink = self.on_frame_sent
-                if sink is not None:
-                    last = next((seq for _, seq, media, _ in reversed(outgoing)
-                                 if media is not None and seq is not None), None)
-                    if last is not None:
-                        captured = enc_frame.timing[0] if enc_frame.timing else 0
-                        self.transport.frame_end(last, sink, captured,
-                                                 sum(len(p_) for p_ in enc_frame.payloads))
-                        if self.on_frame_queued is not None:
-                            self.on_frame_queued()
+                last = next((seq for _, seq, media, _ in reversed(outgoing)
+                             if media is not None and seq is not None), None)
+                if last is not None and self.__kind == "video":
+                    self._frame_handed = last
+                    captured = enc_frame.timing[0] if enc_frame.timing else 0
+                    self.transport.frame_end(last, self._frame_on_wire, last, enc_frame.keyframe,
+                                             enc_frame.timing, captured,
+                                             sum(len(p_) for p_ in enc_frame.payloads))
+                    if self.on_frame_queued is not None:
+                        self.on_frame_queued()
                 for packet_bytes, twcc_seq, media_seq, size in outgoing:
                     if media_seq is not None:
                         self.__last_sequence = media_seq

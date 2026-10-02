@@ -153,6 +153,7 @@ def layouts(res: H.Results) -> None:
 async def run_sender(fec_enabled: bool) -> tuple:
     """One frame of two packets through the real sender."""
     transport = SimpleNamespace(state="connected", _twcc_next=lambda size: 321,
+                                frame_end=lambda twcc_seq, sink, *args: sink(*args),
                                 _send_rtp=AsyncMock(return_value=True))
     sender = RTCRtpSender("video", transport)
     sender._ssrc = 0x1234

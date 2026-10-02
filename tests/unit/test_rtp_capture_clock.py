@@ -134,6 +134,9 @@ class FakeTransport:
     def note_video_keyframe(self, size: int, natural: bool = True) -> None:
         pass
 
+    def frame_end(self, twcc_seq: int, sink, *args) -> None:
+        sink(*args)
+
     async def _send_rtp(self, data: bytes, rtc_class=None, twcc_seq=None) -> bool:
         if rtp.is_rtcp(data):
             self.rtcp.append((time.monotonic_ns(), data))

@@ -53,6 +53,9 @@ class Transport:
     def note_video_keyframe(self, size: int, natural: bool = True) -> None:
         pass
 
+    def frame_end(self, twcc_seq: int, sink, *args) -> None:
+        sink(*args)
+
     async def _send_rtp(self, data: bytes, rtc_class=None, twcc_seq=None) -> bool:
         if not (len(data) > 1 and 192 <= data[1] <= 223):
             self.rtp.append(time.monotonic())
