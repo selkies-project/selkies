@@ -45,6 +45,9 @@ def open_client(pw: Any, engine: str, mode: str) -> tuple:
         browser = C.launch_browser(pw, engine)
         ctx = browser.new_context(viewport=viewport, device_scale_factor=1, has_touch=True)
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+    if mode == "webrtc":
+        # So a <video> that never plays can be told from a stream that never came.
+        ctx.add_init_script(C.PC_TAP_JS)
     page = ctx.new_page()
     page.goto(H.BASE_URL + "/", wait_until="load")
     if engine == "firefox":
