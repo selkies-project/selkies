@@ -273,7 +273,6 @@ export default function webrtc() {
 	/** Whether the clipboard follows every change on its own, or only when asked. */
 	let clipboard_seamless = true;
 	let windowResolution = [];
-	let encoderLabel = "";
 	let encoder = "";
 	let rateControlMode = "cbr";
 	let gamepad = {
@@ -301,7 +300,6 @@ export default function webrtc() {
 	};
 
 	var videoElement = null;
-	var audioElement = null;
 	/**
 	 * Set on a fatal server verdict (close 4000/4001): blocks every recovery
 	 * reload, the peer connection's and the resume watchdog's, so a superseded
@@ -358,7 +356,6 @@ export default function webrtc() {
 	let enableWebrtcStatics = false;
 
 	var videoConnected = "";
-	var audioConnected = "";
 	var statWatchEnabled = false;
 	var webrtc = null;
 	/** The cumulative counters of the last stats tick, null until one ran with the stats open. */
@@ -3814,7 +3811,6 @@ export default function webrtc() {
 			status = 'connecting';
 			clipboardStatus = 'disabled';
 			windowResolution = [];
-			encoderLabel = "";
 			encoder = ""
 			gamepad = {
 					gamepadState: 'disconnected',
@@ -3853,7 +3849,6 @@ export default function webrtc() {
 			pipelinesToggledByUser.clear();
 			startPolicyApplied = false;
 			videoConnected = "";
-			audioConnected = "";
 			statWatchEnabled = false;
 			streamStats.disconnected();
 			statsBaseline = null;

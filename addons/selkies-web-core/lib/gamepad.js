@@ -416,7 +416,7 @@ export class GamepadManager {
      */
     reannounce() {
         if (this.active === null) return;
-        let gp = null;
+        let gp;
         try {
             gp = navigator.getGamepads()[this.active];
         } catch (e) {
@@ -505,7 +505,7 @@ export class GamepadManager {
         if (off && !this._rumbling) return;
         this._rumbling = !off;
         durationMs = Math.min(RUMBLE_MAX_MS, Math.max(0, durationMs || 0));
-        let pads = [];
+        let pads;
         try {
             pads = Array.from(navigator.getGamepads());
         } catch (e) {

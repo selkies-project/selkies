@@ -204,7 +204,7 @@ export const parseAv1CodecFromObus = (bytes) => {
       const profile = r.u(3);
       r.skip(1);
       const reduced = r.u(1);
-      let level = 0;
+      let level;
       let tier = 0;
       if (reduced) {
         level = r.u(5);
@@ -236,7 +236,7 @@ export const parseAv1CodecFromObus = (bytes) => {
       const widthBits = r.u(4) + 1;
       const heightBits = r.u(4) + 1;
       r.skip(widthBits + heightBits);
-      let orderHint = 0;
+      let orderHint;
       if (!reduced) {
         if (r.u(1)) r.skip(4 + 3);
         r.skip(3 + 4);

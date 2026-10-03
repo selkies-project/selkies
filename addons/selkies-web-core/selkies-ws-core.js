@@ -105,9 +105,6 @@
  */
 
 import {
-  GamepadManager
-} from './lib/gamepad.js';
-import {
   Input
 } from './lib/input.js';
 import {
@@ -1106,7 +1103,6 @@ let use_paint_over_quality = true;
 let audio_bitrate = 320000;
 let videoBitrate = 8000;
 let force_aligned_resolution = false;
-let showStart = true;
 let status = 'connecting';
 let loadingText = '';
 const gamepad = {
@@ -1734,7 +1730,6 @@ const enterFullscreen = (gaming) => {
 
 /** Hides the start overlay and keeps the screen awake once the user starts the stream. */
 const playStream = () => {
-  showStart = false;
   if (playButtonElement) playButtonElement.classList.add('hidden');
   if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
   requestWakeLock();
@@ -3702,29 +3697,6 @@ function getCurrentSettingsPayload() {
 }
 
 /**
- * Labels a pipeline toggle button with its name and ON/OFF state.
- * @param {HTMLElement|null} buttonElement
- * @param {boolean} isActive
- */
-function updateToggleButtonAppearance(buttonElement, isActive) {
-  if (!buttonElement) return;
-  let label = 'Unknown';
-  if (buttonElement.id === 'videoToggleBtn') label = 'Video';
-  else if (buttonElement.id === 'audioToggleBtn') label = 'Audio';
-  else if (buttonElement.id === 'micToggleBtn') label = 'Microphone';
-  else if (buttonElement.id === 'gamepadToggleBtn') label = 'Gamepad';
-  if (isActive) {
-    buttonElement.textContent = `${label}: ON`;
-    buttonElement.classList.remove('inactive');
-    buttonElement.classList.add('active');
-  } else {
-    buttonElement.textContent = `${label}: OFF`;
-    buttonElement.classList.remove('active');
-    buttonElement.classList.add('inactive');
-  }
-}
-
-/**
  * Sends `r,WxH,displayId` with the aligned, DPR-scaled, and 4080-capped stream
  * resolution; blocked in shared mode, where the viewer follows the controller.
  * @param {number} width CSS pixels, or the exact size in manual mode.
@@ -4811,7 +4783,7 @@ const initializeInput = () => {
   applyGamepadRumble();
 
   if (overlayInput) {
-    const handlePointerDown = (e) => {
+    const handlePointerDown = () => {
       requestWakeLock();
     };
     overlayInput.removeEventListener('pointerdown', handlePointerDown);
@@ -5475,7 +5447,6 @@ function receiveMessage(event) {
       console.log(`Received pipeline control message: pipeline=${message.pipeline}, enabled=${message.enabled}`);
       const pipeline = message.pipeline;
       const desiredState = message.enabled;
-      let stateChangedFromControl = false;
       let wsMessage = '';
 
       if (pipeline === 'video') {
@@ -5486,7 +5457,6 @@ function receiveMessage(event) {
         pipelinesToggledByUser.add('video');
         if (isVideoPipelineActive !== desiredState) {
           isVideoPipelineActive = desiredState;
-          stateChangedFromControl = true;
           wsMessage = desiredState ? 'START_VIDEO' : 'STOP_VIDEO';
 
           if (!desiredState) {
@@ -5523,7 +5493,6 @@ function receiveMessage(event) {
         pipelinesToggledByUser.add('audio');
         if (isAudioPipelineActive !== desiredState) {
           isAudioPipelineActive = desiredState;
-          stateChangedFromControl = true;
           wsMessage = desiredState ? 'START_AUDIO' : 'STOP_AUDIO';
           if (audioDecoderWorker) {
             audioDecoderWorker.postMessage({
@@ -10119,7 +10088,6 @@ function cleanup() {
   preferredOutputDeviceId = null;
   status = 'connecting';
   loadingText = '';
-  showStart = true;
   streamStarted = false;
   inputInitialized = false;
   if (statusDisplayElement) statusDisplayElement.textContent = 'Connecting...';

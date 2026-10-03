@@ -861,7 +861,7 @@ export class WebcamCapture {
       let source = null;
       let combined = false;
       if (this._encodeWorker) {
-        source = await this._tryCombinedWorker(track, generation);
+        source = await this._tryCombinedWorker(track);
         combined = !!source;
         if (this._generation !== generation) {
           if (source) source.close();
@@ -898,10 +898,9 @@ export class WebcamCapture {
    * refusal (DataCloneError on Chromium) leaves the original for the
    * page-read fallback.
    * @param {MediaStreamTrack} track
-   * @param {number} generation
    * @returns {Promise<?{close: function(): void}>}
    */
-  _tryCombinedWorker(track, generation) {
+  _tryCombinedWorker(track) {
     const worker = this._encodeWorker;
     if (!worker) return Promise.resolve(null);
     let clone;
@@ -1420,7 +1419,7 @@ export class WebcamCapture {
       }
     }
     if (typeof VideoEncoder === "undefined" || this._candidateIndex >= this._encoderCandidates.length) {
-      this._encodeJpeg(frame, now);
+      this._encodeJpeg(frame);
       return;
     }
     const w = frame.displayWidth || frame.codedWidth;
@@ -1541,7 +1540,7 @@ export class WebcamCapture {
         latencyMode: "realtime",
         ...cand.extra,
       };
-      let support = null;
+      let support;
       try {
         support = await VideoEncoder.isConfigSupported(config);
       } catch (error) {
@@ -1658,9 +1657,8 @@ export class WebcamCapture {
    * a time. A JPEG leaves upright with no transform on the wire: drawImage
    * bakes in the engine's, a derived one is applied as a canvas transform.
    * @param {VideoFrame|HTMLVideoElement} frame
-   * @param {number} now `performance.now()` at receipt.
    */
-  _encodeJpeg(frame, now) {
+  _encodeJpeg(frame) {
     if (this._jpegBusy) {
       closeFrame(frame);
       return;

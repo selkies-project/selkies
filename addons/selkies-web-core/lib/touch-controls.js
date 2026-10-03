@@ -162,7 +162,7 @@ export function chordEvents(chord, held = {}) {
  * @returns {string[]}
  */
 export function readUserChords(storage, storageKey) {
-    let list = [];
+    let list;
     try {
         list = JSON.parse(storage.getItem(storageKey) || '[]');
     } catch (e) {

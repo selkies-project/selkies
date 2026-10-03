@@ -1355,7 +1355,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
      * @param {Promise<string>} textPromise The pending server text.
      */
     async function copyViaExecCommand(textPromise) {
-        let text = '';
+        let text;
         try { text = await textPromise; } catch (_) { return; }
         if (typeof text !== 'string') return;
         if (!text) return;

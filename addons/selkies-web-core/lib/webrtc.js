@@ -53,7 +53,6 @@
  * @module
  */
 
-import { Input } from "./input";
 
 /**
  * Answers the server's surround stream with the codec it is offered as.
@@ -215,7 +214,7 @@ export class WebRTCClient {
 		/** Order-preserving chain of pending order-sensitive receives. @type {Promise<void>} */
 		this._recvQueue = Promise.resolve();
 
-		/** @type {Input} */
+		/** @type {import('./input.js').Input} */
 		this.input = null;
 
 		/** @type {Array} */

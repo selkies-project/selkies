@@ -5181,7 +5181,7 @@ export class Input {
             this.gamepadManager.reannounce();
             return;
         }
-        let pads = [];
+        let pads;
         try {
             pads = navigator.getGamepads ? Array.from(navigator.getGamepads()) : [];
         } catch (e) {
