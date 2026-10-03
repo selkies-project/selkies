@@ -12,7 +12,11 @@ a round trip to arrive, and the sender then names the frame lost, once however
 often the peer NACKs its packets again, and the engine routes that to the
 encoder of the peer's own display. The websockets relay is left as it was: it
 drops seconds of backlog at a time, which no reference window reaches back
-over, so it still skips ahead to a keyframe. Driven with stand-ins; no peer.
+over, so it still skips ahead to a keyframe. The capture pipeline names what
+each frame of a session tracking its references predicts from, whatever size a
+resize in flight has left the pipeline at: a frame judged by that size went out
+undescribed and cost a second keyframe at the start of a session. Driven with
+stand-ins; no peer.
 """
 import asyncio
 import os
@@ -33,6 +37,7 @@ from selkies.webrtc.rtp import (
     RtpPacket, dependency_descriptor,
 )
 from selkies.webrtc_engine import RTCApp
+from selkies.webrtc_media_pipeline import MediaPipelinePixel
 from selkies.websockets_mode import _VideoRelay
 
 res = H.Results("reference-invalidation")
@@ -261,6 +266,34 @@ RTCApp.on_lost_frame(app, "peer-2", 77)
 RTCApp.on_lost_frame(app, "unknown-peer", 78)
 res.check("a peer's lost frame reaches its own display's encoder, an unknown peer's the primary",
           routed == [("display2", 77), ("primary", 78)], routed)
+
+# --- the pipeline names what each frame predicts from -----------------------------
+class Frame(bytes):
+    """A pixelflux StripeFrame stand-in: the wire header, a slice, and the stamps."""
+
+
+def captured(fid: int, reference: int, height: int) -> Frame:
+    f = Frame(bytes([0x04, 0x01 if reference == -1 else 0x00]) + fid.to_bytes(2, "big") + bytes(8)
+              + b"\x00\x00\x00\x01\x65")
+    f.capture_ns = f.encode_start_ns = f.encode_end_ns = 1
+    f.frame_id, f.reference_frame_id, f.stripe_y_start, f.stripe_height = fid, reference, 0, height
+    return f
+
+
+async def pipeline_names() -> None:
+    """The pipeline holds an asyncio.Lock, which Python 3.9 builds only in a loop."""
+    delivered = []
+    pipeline = MediaPipelinePixel(async_event_loop=SimpleNamespace(call_soon_threadsafe=lambda fn, *a: fn(*a)),
+                                  encoder="h264enc", height=720)
+    pipeline.produce_data = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None: \
+        delivered.append(dependency)
+    for fid, reference, height in ((0, -1, 4096), (1, 0, 720), (2, 1, 1080), (3, -2, 720)):
+        pipeline._screen_capture_callback(captured(fid, reference, height))
+    res.check("a tracked frame names what it predicts from whatever size a resize left the pipeline at, "
+              "an untracked one nothing", delivered == [(0, None), (1, 0), (2, 1), None], delivered)
+
+
+asyncio.run(pipeline_names())
 
 # --- the websockets relay is unchanged by any of this ----------------------------
 def chunk(frame_id: int, key: bool = False, size: int = 100) -> dict:

@@ -574,8 +574,11 @@ class MediaPipelinePixel(MediaPipeline):
 
         The frame owns its native buffer and goes downstream as a zero-copy
         memoryview sliced past the header, with the keyframe flag read off
-        the header's picture-type byte and, for a full frame whose encoder
-        tracks its references, the frame's id and the id it predicts from;
+        the header's picture-type byte and, for a frame whose encoder tracks
+        its references, the frame's id and the id it predicts from: only
+        whole-frame sessions track them, and a frame is judged by that rather
+        than by the pipeline's size, which a resize changes while frames of
+        the old size and the new are still arriving;
         `produce_data` wraps it in an EncodedPacket and keeps a reference so
         the frame stays alive. pts (90 kHz) is the frame's capture instant, as
         pixelflux stamped it on CLOCK_MONOTONIC, from the pipeline-scoped
@@ -613,7 +616,7 @@ class MediaPipelinePixel(MediaPipeline):
                 timing = (captured, frame.encode_start_ns, frame.encode_end_ns)
                 reference = frame.reference_frame_id
                 dependency = None
-                if reference != -2 and frame.stripe_y_start == 0 and frame.stripe_height == self.height:
+                if reference != -2:
                     dependency = (frame.frame_id & 0xFFFF, None if reference == -1 else reference)
                 self.async_event_loop.call_soon_threadsafe(
                     functools.partial(self.produce_data, data_bytes, pts, "video", keyframe,
