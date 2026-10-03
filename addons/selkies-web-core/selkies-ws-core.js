@@ -491,6 +491,15 @@ const METRICS_INTERVAL_MS = 500;
  * under a target the worklet deepens to.
  */
 const AUDIO_RELAY_CEILING_MS = 80;
+/**
+ * The URL an AudioWorklet loads `code` from. A data: URL: WebKit's worklet
+ * thread asks the main thread for a Blob URL's origin and waits, while its
+ * GStreamer ports start the audio destination with the main thread waiting on
+ * the worklet thread, which deadlocks the page.
+ * @param {string} code The module's source.
+ * @returns {string}
+ */
+const workletModuleURL = (code) => `data:text/javascript;charset=utf-8,${encodeURIComponent(code)}`;
 const BACKPRESSURE_INTERVAL_MS = 50;
 /**
  * How often an unchanged frame id is re-acked. The server reads a frame left
@@ -7341,12 +7350,7 @@ class WorkerWebSocket {
         }
         registerProcessor('audio-frame-processor', AudioFrameProcessor);
       `;
-      const audioWorkletBlob = new Blob([audioWorkletProcessorCode], {
-        type: 'text/javascript'
-      });
-      const audioWorkletURL = URL.createObjectURL(audioWorkletBlob);
-      await audioContext.audioWorklet.addModule(audioWorkletURL);
-      URL.revokeObjectURL(audioWorkletURL);
+      await audioContext.audioWorklet.addModule(workletModuleURL(audioWorkletProcessorCode));
       const workletChannels = getAudioChannelCount();
       if (workletChannels > 2) {
         try {
@@ -9875,15 +9879,7 @@ async function startMicrophoneCapture(askedByServer = false) {
     }
     if (micAudioContext.state === 'suspended') await micAudioContext.resume();
     if (typeof micWorkletProcessorCode === 'undefined' || !micWorkletProcessorCode) throw new Error("micWorkletProcessorCode undefined");
-    const micWorkletBlob = new Blob([micWorkletProcessorCode], {
-      type: 'application/javascript'
-    });
-    const micWorkletURL = URL.createObjectURL(micWorkletBlob);
-    try {
-      await micAudioContext.audioWorklet.addModule(micWorkletURL);
-    } finally {
-      URL.revokeObjectURL(micWorkletURL);
-    }
+    await micAudioContext.audioWorklet.addModule(workletModuleURL(micWorkletProcessorCode));
     micWorkletNode = new AudioWorkletNode(micAudioContext, 'mic-worklet-processor');
     const micEncodeWorkerURL = URL.createObjectURL(new Blob([micEncodeWorkerCode], { type: 'application/javascript' }));
     micEncodeWorker = new Worker(micEncodeWorkerURL);

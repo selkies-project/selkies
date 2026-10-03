@@ -102,8 +102,8 @@ PC_TAP_JS = """
 """
 
 # WebCodecs audio taken from the page and from every script it starts from a
-# blob (its workers and worklets), the way an engine without the API presents,
-# so the audio workers fall back on libopus in WASM.
+# blob (its workers), the way an engine without the API presents, so the audio
+# workers fall back on libopus in WASM.
 NO_WEBCODECS_AUDIO_JS = """
 (() => {
   const strip = "for (const n of ['AudioDecoder', 'AudioEncoder', 'AudioData', 'EncodedAudioChunk']) {" +
