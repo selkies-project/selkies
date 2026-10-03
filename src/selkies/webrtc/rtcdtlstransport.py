@@ -93,6 +93,19 @@ TWCC_HISTORY_S = 2.0
 # How far back the least one-way delay is the path's own: short enough that
 # the drift between the two ends' clocks stays a few milliseconds inside it.
 TWCC_DELAY_FLOOR_S = 30.0
+# How fast the path's own delay is let rise by the clock alone: the two ends'
+# clocks drift apart by tens of microseconds a second, a few hundred where one
+# is being slewed, and a queue stands tens of milliseconds past it at once.
+TWCC_DRIFT_S_PER_S = 0.00025
+# What tells a longer path from a queue once one-way delay has stood past the
+# path's own: intervals in a row that lost nothing and sent under this share
+# of what the path delivered while the delay stood, with the least delay of
+# each within the band of the others. A queue the stream filled empties by a
+# tenth of a second every second at such a rate; delay that holds is the path's.
+TWCC_PATH_INTERVALS = 3
+TWCC_PATH_SENT = 0.9
+TWCC_PATH_BAND_MS = 5.0
+TWCC_PATH_LOSS = 0.02
 # How far past the path's own delay one-way delay stands before congestion
 # control reads a queue on it.
 TWCC_QUEUE_MS = 25.0
@@ -499,6 +512,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_window = self._twcc_window_zero()
         self._twcc_reference: Optional[int] = None
         self._twcc_delay_floor: deque = deque()
+        self._twcc_delay_base: Optional[tuple] = None
+        self._twcc_stand: Optional[dict] = None
         # Receive side of transport-wide congestion control: a sender that
         # negotiates transport-cc runs its bandwidth estimation on this
         # feedback alone and starves at its floor bitrate without it.
@@ -1248,8 +1263,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         constant-size and reset on drain. Per-report pacer rates keep their
         separate idle-exclusion semantics.
 
-        The interval's least one-way delay over the least of the last
-        `TWCC_DELAY_FLOOR_S` is the queue that stood through all of it: a key
+        The interval's least one-way delay over the path's own
+        (`_twcc_path_delay`) is the queue that stood through all of it: a key
         frame's burst delays the packets behind it for a moment, while a queue
         the rate has outgrown delays every one of them. A queue still building
         shows before it stands a whole interval as the least delay of the
@@ -1282,13 +1297,17 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_window_id += 1
         queue_ms = rising_ms = depth_ms = None
         now = time.monotonic()
+        first = window["first_arrival"]
+        span_s = (window["last_arrival_us"] - first[0]) / 1e6 if first is not None else 0.0
+        goodput_bps = (int((window["bytes_acked"] - window["first_bytes"]) * 8 / span_s)
+                       if span_s > 0 else 0)
+        sent_bps = (int(window["bytes_sent"] * 8 / (now - window["opened"]))
+                    if now > window["opened"] else 0)
         if window["delay_min"] is not None:
-            floor = self._twcc_delay_floor
-            floor.append((now, window["delay_min"]))
-            while floor[0][0] < now - TWCC_DELAY_FLOOR_S:
-                floor.popleft()
-            least = min(d for _, d in floor)
             mins = window["feedback_mins"]
+            least = self._twcc_path_delay(
+                now, window["delay_min"], window["lost"] / packets, sent_bps, goodput_bps,
+                len(mins) >= TWCC_STAND_FEEDBACKS)
             if len(mins) >= TWCC_STAND_FEEDBACKS:
                 queue_ms = (window["delay_min"] - least) * 1000.0
                 depth_ms = (window["delay_last"] - least) * 1000.0
@@ -1296,21 +1315,73 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
                 newest_ms = (min(mins[len(mins) // 2:]) - least) * 1000.0
                 if newest_ms > TWCC_QUEUE_MS:
                     rising_ms = newest_ms
-        first = window["first_arrival"]
-        span_s = (window["last_arrival_us"] - first[0]) / 1e6 if first is not None else 0.0
         return {
             "received": window["received"],
             "lost": window["lost"],
             "loss_fraction": window["lost"] / packets,
             "bytes_acked": window["bytes_acked"],
-            "goodput_bps": (int((window["bytes_acked"] - window["first_bytes"]) * 8 / span_s)
-                            if span_s > 0 else 0),
+            "goodput_bps": goodput_bps,
             "queue_ms": queue_ms,
             "queue_rising_ms": rising_ms,
             "queue_depth_ms": depth_ms,
-            "sent_bps": (int(window["bytes_sent"] * 8 / (now - window["opened"]))
-                         if now > window["opened"] else 0),
+            "sent_bps": sent_bps,
         }
+
+    def _twcc_path_delay(self, now: float, delay: float, loss: float,
+                         sent_bps: int, goodput_bps: int, measured: bool) -> float:
+        """The path's own one-way delay, in seconds on the feedback's clock,
+        after an interval whose least delay was `delay`.
+
+        It is the least delay seen, let rise only as fast as the two ends'
+        clocks drift apart (`TWCC_DRIFT_S_PER_S`): the least of the last
+        `TWCC_DELAY_FLOOR_S` alone takes a queue that stands that long for the
+        path, and reads nothing of it from then on, while the loss it overflows
+        into goes on. Delay standing `TWCC_QUEUE_MS` past it is then a queue or
+        a longer path, and what the stream does tells them apart: over
+        `TWCC_PATH_INTERVALS` intervals in a row that lost nothing and sent
+        under `TWCC_PATH_SENT` of the most the path delivered while the delay
+        stood, a queue the stream filled drains by a tenth of a second each,
+        so delay that held within `TWCC_PATH_BAND_MS` through them is the
+        path's and becomes its own from there. A rate cut answering the first
+        reading provides those intervals, so a route change costs the few
+        cuts until they have passed. Where nothing cuts the rate, or the
+        delay jitters past the band, delay that has stood with nothing lost for
+        `TWCC_DELAY_FLOOR_S` gives way to the least of that time, as before. An interval of too few feedback packets to
+        read a queue from (`measured` unset) can only lower it.
+        """
+        floor = self._twcc_delay_floor
+        floor.append((now, delay))
+        while floor[0][0] < now - TWCC_DELAY_FLOOR_S:
+            floor.popleft()
+        if self._twcc_delay_base is None:
+            base = delay
+        else:
+            at, base = self._twcc_delay_base
+            base = min(delay, base + TWCC_DRIFT_S_PER_S * max(now - at, 0.0))
+        band = TWCC_PATH_BAND_MS / 1000.0
+        if (delay - base) * 1000.0 <= TWCC_QUEUE_MS:
+            self._twcc_stand = None
+        elif measured:
+            stand = self._twcc_stand
+            if stand is None:
+                stand = self._twcc_stand = {"delivered": 0, "quiet": [], "lossless": now}
+            stand["delivered"] = max(stand["delivered"], goodput_bps)
+            lossless = loss <= TWCC_PATH_LOSS
+            if lossless and sent_bps <= stand["delivered"] * TWCC_PATH_SENT:
+                stand["quiet"].append(delay)
+            else:
+                stand["quiet"].clear()
+            if not lossless:
+                stand["lossless"] = now
+            quiet = stand["quiet"][-TWCC_PATH_INTERVALS:]
+            if len(quiet) == TWCC_PATH_INTERVALS and max(quiet) - min(quiet) <= band:
+                base = min(quiet)
+                self._twcc_stand = None
+            elif now - stand["lossless"] >= TWCC_DELAY_FLOOR_S:
+                base = min(d for _, d in floor)
+                self._twcc_stand = None
+        self._twcc_delay_base = (now, base)
+        return base
 
     def _set_role(self, role: str) -> None:
         self._role = role

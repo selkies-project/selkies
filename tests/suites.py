@@ -134,6 +134,7 @@ SUITES: list = [
     {"path": "unit/test_webrtc_pacer_burst.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webrtc_frame_end.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webrtc_gop_reset.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_twcc_standing_queue.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_twcc_window.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_twcc_accounting.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_twcc_interval_delivery.py", "tier": "unit", "timeout": 120},
