@@ -18,6 +18,15 @@ TITLE = "encoders, CRF/CBR, paint-over, Turbo, 4:4:4, CPU"
 CODEC = {"h264enc": "h264", "h264enc-striped": "h264", "h265enc": "h265", "vp8enc": "vp8",
          "vp9enc": "vp9", "av1enc": "av1", "jpeg": "jpeg"}
 
+# Playwright's WebKit, a GStreamer port, hands WebRTC VP8 to libwebrtc's decoder
+# where GStreamer's best is vp8dec, and stamps those frames with their render
+# time: zero under the stream's zero playout delay, and on no clock the codecs
+# GStreamer decodes share. Its player drops each one as late and holds the frame
+# before, so only the stream is checked there. Safari stamps them with the
+# capture time.
+PICTURE_UNCHECKED = {("webkit", "webrtc", "vp8enc"):
+                     "WebKit's GStreamer player drops the VP8 frames libwebrtc decodes as late"}
+
 # The longest a cleanup runs ("half a minute at most"), with a margin, and
 # the low rate it is judged at (the sliders' floor, where a still screen needs it most).
 SETTLE = 40
@@ -136,9 +145,16 @@ def run(cell: Any) -> None:
         for rc in ("cbr", "crf") if enc != "jpeg" else ("quality",):
             picked = rc == "quality" or TD.pick_rate_control(page, "classic", rc)
             d = described(page, {"codec": CODEC.get(enc, enc)})
+            name = f"{enc} {rc.upper() if rc != 'quality' else ''}"
+            used = f"({d.get('encoder')}{', hardware' if d.get('hardware') else ''})"
+            why = PICTURE_UNCHECKED.get((cell.engine, cell.transport, enc))
+            if why:
+                R.check(f"{name}: streams {CODEC[enc]} {used}", picked and d.get("codec") == CODEC[enc],
+                        f"codec {d.get('codec')} ({d.get('encoder_reason') or 'no reason'})")
+                R.skip(f"{name}: decodes the picture", why)
+                continue
             s = cell.wait_pattern(page, 25)
-            R.check(f"{enc} {rc.upper() if rc != 'quality' else ''}: decodes the picture ({d.get('encoder')}"
-                    f"{', hardware' if d.get('hardware') else ''})",
+            R.check(f"{name}: decodes the picture {used}",
                     picked and pattern_matches(s) and d.get("codec") == CODEC.get(enc, enc),
                     f"sample {s and s['points']} codec {d.get('codec')} ({d.get('encoder_reason') or 'no reason'})")
     page.select_option("#encoderSelect", "h264enc", timeout=5000)

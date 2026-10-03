@@ -185,7 +185,9 @@ detail, the screenshots, and each target's server log.
 What WebKit cannot stand in for: Playwright's WebKit is WebKitGTK on Linux, not
 Safari. Its media stack is GStreamer rather than VideoToolbox, so what decodes
 and how fast says nothing about Safari's hardware decoders; it sends Safari's
-user agent but is not Safari's WebRTC, autoplay, or audio-unlock policy. Here it
+user agent but is not Safari's WebRTC, autoplay, or audio-unlock policy, and
+WebRTC VP8, which it decodes in libwebrtc and its player then drops as late, is
+checked on the stream alone. Here it
 also runs headless (headed WebKitGTK's web process dies on an Xvfb display), so
 it has no real focus, no clipboard of its own (Safari's paste confirmation is
 not modeled at all), no fullscreen or pointer lock, no touch moves (an iPad's or
