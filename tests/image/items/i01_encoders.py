@@ -151,13 +151,17 @@ def run(cell: Any) -> None:
     rate = slider(page, "videoBitrateSlider")
     toggle(page, "#videoStreamingModeToggle", False)
     low = slider_to(page, "videoBitrateSlider", LOW_RATE)
+    # Each arm starts from a settled rate and a texture of its own, not from a
+    # picture the other arm refined.
+    cell.go("/texture.html?motion=1&seed=3")
+    time.sleep(3)
     errors: dict = {}
-    for paint in (True, False):
+    for paint, seed in ((True, 1), (False, 2)):
         t = TD.switch_on(page.locator("#videoStreamingModeToggle").first)
         p = toggle(page, "#usePaintOverQualityToggle", paint)
-        cell.go("/texture.html?motion=1")
+        cell.go(f"/texture.html?motion=1&seed={seed}")
         time.sleep(3)
-        cell.go("/texture.html")
+        cell.go(f"/texture.html?seed={seed}")
         stopped = time.time()
         after, quiet = 0, 0
         while time.time() - stopped < SETTLE and quiet < 2:
@@ -165,7 +169,7 @@ def run(cell: Any) -> None:
             after += n
             quiet = quiet + 1 if n <= 1 else 0
         settled = round(time.time() - stopped - quiet, 1) if quiet >= 2 else None
-        errors[paint] = cell.texture_error(page)
+        errors[paint] = cell.texture_error(page, seed)
         cell.shot(page, f"paint-over-{'on' if paint else 'off'}")
         how = f"{after} frames after the stop, quiet after {settled} s; error {errors[paint]} levels"
         if paint:
