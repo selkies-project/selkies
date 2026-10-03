@@ -163,14 +163,9 @@ installSessionCookie();
  */
 let detectedKeyboardLayout = null;
 let initialSettingsSent = false;
-detectKeyboardLayout().then((layout) => {
+const keyboardLayoutProbe = detectKeyboardLayout().then((layout) => {
     detectedKeyboardLayout = layout;
-    try {
-        if (layout && initialSettingsSent && !isSharedMode && typeof websocket !== 'undefined' && websocket &&
-            websocket.readyState === WebSocket.OPEN) {
-            websocket.send(`SETTINGS,${JSON.stringify({ keyboardLayout: layout })}`);
-        }
-    } catch (e) { /* pre-connect */ }
+    return layout;
 });
 
 /** Timestamp of the newest Opus frame handed to the decoder; `null` before RED starts. */
@@ -3565,6 +3560,13 @@ function sendFullSettingsUpdateToServer(reason) {
         console.warn(`[websockets] Cannot send full settings update. Reason: ${reason}. WebSocket not open.`);
     }
 }
+
+// The late keyboard layout hint; the session state it checks lives in this closure.
+keyboardLayoutProbe.then((layout) => {
+    if (layout && initialSettingsSent && !isSharedMode && websocket && websocket.readyState === WebSocket.OPEN) {
+        websocket.send(`SETTINGS,${JSON.stringify({ keyboardLayout: layout })}`);
+    }
+});
 
 /**
  * This page's remote pixels per CSS pixel, reported so a neighboring display
