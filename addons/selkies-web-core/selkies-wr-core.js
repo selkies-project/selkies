@@ -881,11 +881,14 @@ export default function webrtc() {
 	}
 
 	/**
-	 * Verifies that frames follow a START_VIDEO. The resume is one message on
-	 * a data channel that can close at that very moment, and a lost one is
-	 * answered with nothing: the peer would stay subscribed to a feed nobody
-	 * encodes. The element's playback clock is the signal WebRTC has, so the
-	 * check is whether it advanced past the mark taken here.
+	 * Verifies that frames follow a START_VIDEO or a connect. The resume is one
+	 * message on a data channel that can close at that very moment, and a lost
+	 * one is answered with nothing: the peer would stay subscribed to a feed
+	 * nobody encodes. A player can also miss a session's only key frame (WebKit's
+	 * GStreamer player sometimes never prerolls on it), and a still screen sends
+	 * no other: the resend's IDR is one. The element's playback clock is the
+	 * signal WebRTC has, so the check is whether it advanced past the mark taken
+	 * here with a picture to show: WebKit's player runs its clock with none.
 	 */
 	function armResumeWatchdog() {
 		if (resumeWatchdogTimer !== null) clearTimeout(resumeWatchdogTimer);
@@ -899,21 +902,27 @@ export default function webrtc() {
 	 * unless a fatal verdict or a mode switch forbids it. A tab
 	 * hidden again stands the watchdog down, the visibility path owning that
 	 * state, and so does a stream the server declined, which no resend brings
-	 * back. Each attempt also replays the element, since one the browser
-	 * paused while the tab was away plays nothing however much RTP arrives.
+	 * back, a play button waiting on the user's gesture, or video the page has
+	 * off (its `video_on_start` setting, or the user's toggle). Each attempt
+	 * also replays the element, since one the browser paused while the tab was
+	 * away plays nothing however much RTP arrives.
 	 * @param {number} mark Playback time when the watchdog was armed.
 	 */
 	function checkResumed(mark) {
 		resumeWatchdogTimer = null;
-		if (document.hidden || !webrtc || videoDeclined) { resumeWatchdogAttempts = 0; return; }
-		if (videoElement && videoElement.currentTime > mark) {
+		if (document.hidden || !webrtc || videoDeclined || showStart || !isVideoPipelineActive) {
+			resumeWatchdogAttempts = 0;
+			return;
+		}
+		if (videoElement && videoElement.currentTime > mark
+				&& videoElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
 			resumeWatchdogAttempts = 0;
 			return;
 		}
 		if (videoElement && videoElement.paused) videoElement.play().catch(() => {});
 		resumeWatchdogAttempts++;
 		if (resumeWatchdogAttempts <= RESUME_WATCHDOG_MAX_ATTEMPTS) {
-			console.warn(`No video after resuming; resend attempt ${resumeWatchdogAttempts}/${RESUME_WATCHDOG_MAX_ATTEMPTS}.`);
+			console.warn(`No video after connecting or resuming; resend attempt ${resumeWatchdogAttempts}/${RESUME_WATCHDOG_MAX_ATTEMPTS}.`);
 			try { webrtc.sendDataChannelMessage('START_VIDEO'); } catch (_) {}
 			armResumeWatchdog();
 			return;
@@ -921,7 +930,7 @@ export default function webrtc() {
 		resumeWatchdogAttempts = 0;
 		if (fatalConnectionHalt) return;
 		if (typeof window !== 'undefined' && window.__selkiesModeSwitching) return;
-		console.warn('[webrtc] no video after resuming; reconnecting in place.');
+		console.warn('[webrtc] no video after connecting or resuming; reconnecting in place.');
 		webrtc.signaling.reconnect();
 	}
 
@@ -3259,6 +3268,7 @@ export default function webrtc() {
 					}
 					requestWakeLock();
 					applyOutputDevice();
+					armResumeWatchdog();
 				} else if (state === "failed" || state === "disconnected") {
 					if (input) input.stopRumble();
 					if (state === "failed" && !fatalConnectionHalt && signaling.state === 'connected'
