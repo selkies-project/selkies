@@ -319,12 +319,14 @@ def command_page(p: Any, chromium: Any, engine: str, mode: str) -> tuple:
 
 
 def check_command_chords(res: "H.Results", label: str, page: Any, held: Held,
-                         repeats: bool) -> None:
+                         repeats: bool, tapped: bool) -> None:
     """Command chords with the macOS keyups missing, then a long plain hold.
 
     Args:
         repeats: Whether the server repeats a held key itself (X11), which
             the long hold then has to show.
+        tapped: Whether the page sends a key pressed under Command as a tap,
+            as it does in Blink and WebKit, which lose its keyup on macOS.
     """
     kb = page.keyboard
     kb.down("Meta")
@@ -352,8 +354,9 @@ def check_command_chords(res: "H.Results", label: str, page: Any, held: Held,
 
     spotlight(res, f"{label}: a space rolled into Cmd+Space goes at the next key", page, held,
               XK_SPACE, rolled, lambda: kb.press("Escape"))
-    spotlight(res, f"{label}: a Cmd+Return's Return goes at a click", page, held,
-              XK_RETURN, chorded, lambda: page.mouse.click(640, 360))
+    spotlight(res, f"{label}: a Cmd+Return's Return " + ("is a tap, and its Control goes at a click" if tapped
+                                                         else "goes at a click"),
+              page, held, XK_RETURN, chorded, lambda: page.mouse.click(640, 360), tapped)
     kb.down("Meta")
     kb.press("Backspace")
     kb.press("Backspace")
@@ -369,18 +372,25 @@ def check_command_chords(res: "H.Results", label: str, page: Any, held: Held,
 
 
 def spotlight(res: "H.Results", name: str, page: Any, held: Held, keysym: int,
-              before: Any, after: Any) -> None:
-    """`before` leaves `keysym` down under Command, Spotlight takes Command's
-    keyup, and `after` is the first the page hears of Command being up."""
+              before: Any, after: Any, tapped: bool = False) -> None:
+    """`before` leaves `keysym` down under Command (or, `tapped`, sends it as a
+    tap there), Spotlight takes Command's keyup, and `after` is the first the
+    page hears of Command being up."""
     before()
     page.evaluate("window.__loseCommandUp = true")
     page.keyboard.up("Meta")
     time.sleep(0.3)
-    held.presses()
+    pressed = held.presses()
     stuck = keysym in held.down
     after()
     time.sleep(0.3)
     held.presses()
+    if tapped:
+        res.check(f"{name} once Spotlight took Command's keyup",
+                  keysym in pressed and not stuck and not held.down & {keysym, XK_CONTROL_L},
+                  f"pressed {keysym in pressed}, held before {stuck}, "
+                  f"after {sorted(hex(k) for k in held.down)}")
+        return
     res.check(f"{name} once Spotlight took Command's keyup", stuck and keysym not in held.down,
               f"held before {stuck}, after {keysym in held.down}")
 
@@ -462,7 +472,8 @@ def run_x11(mode: str, res: "H.Results") -> None:
                         time.sleep(0.5)
                         obs.drain(0.1)
                         held = Held(lambda: [(down, ks) for down, _kc, _g, ks in obs.drain(0.05)])
-                        check_command_chords(res, f"x11 {engine}", page, held, repeats=True)
+                        check_command_chords(res, f"x11 {engine}", page, held, repeats=True,
+                                             tapped=engine != "firefox")
                         closer.close()
                 finally:
                     browser.close()
@@ -506,7 +517,8 @@ def run_wayland(mode: str, res: "H.Results") -> None:
                     time.sleep(0.5)
                     keys.since(0)
                     held = Held(lambda: [(down, ks) for down, _key, ks in keys.since(0)])
-                    check_command_chords(res, f"wayland {engine}", page, held, repeats=False)
+                    check_command_chords(res, f"wayland {engine}", page, held, repeats=False,
+                                         tapped=engine != "firefox")
                     closer.close()
             finally:
                 browser.close()

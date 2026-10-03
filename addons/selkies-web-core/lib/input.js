@@ -1197,6 +1197,7 @@ const browser = {
         return !!window.chrome && (!!window.chrome.webstore || !!window.chrome.runtime);
     },
     isSafari: function() { return /Safari/.test(navigator.userAgent) && !/Chrome/.test(navigator.userAgent); },
+    isFirefox: function() { return /Firefox\//.test(navigator.userAgent); },
 };
 
 /** Codes of the modifiers no layout picks a character with, so a chord holding
@@ -2306,6 +2307,11 @@ export class Input {
             }, 100);
             return;
         }
+        // Blink and WebKit on macOS never deliver the keyup of a key let go
+        // while Command is down, so such a key goes out as a tap, and each of
+        // its autorepeats as another; Gecko delivers it and keeps the hold.
+        const tap = browser.isMac() && !browser.isFirefox() && event.metaKey && _isPhysicalKey(event) &&
+            keysym !== null && !MODIFIER_STATE_BY_CODE[code];
         // Meta is exempt while the macOS Cmd-to-Ctrl swap carries the chord.
         if (keysym !== null && !MODIFIER_STATE_BY_CODE[code] &&
             (event.ctrlKey || event.altKey || event.metaKey) &&
@@ -2320,11 +2326,13 @@ export class Input {
                 this._noteMomentaryChordMods(missingMods);
                 for (const m of missingMods) this.send("kd," + m);
                 this._sendKeyEvent(keysym, code, true);
+                if (tap) this._sendKeyEvent(keysym, code, false);
                 for (const m of missingMods.reverse()) this.send("ku," + m);
                 return;
             }
         }
         this._sendKeyEvent(keysym, code, true);
+        if (tap) this._sendKeyEvent(keysym, code, false);
     }
 
     /** Keyup handler: releases the keysym the key went down with, with the macOS Command and Windows Shift cleanups. */

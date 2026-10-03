@@ -203,51 +203,66 @@ const ACTIONS = [
       steps: [['down', 'AltLeft'], ['down', 'ArrowLeft']],
       wire: `kd,LEVEL3 kd,${XK.Alt_L} kd,${XK.Left} ku,${XK.Alt_L}` },
     { name: 'Cmd+Option+Z is a shortcut on the physical key',
-      engines: ['blink-mac', 'gecko-mac'],
+      engines: ['gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'AltLeft'], ['down', 'KeyZ', 'Ω']],
       wire: `kd,${XK.Alt_L} kd,LEVEL3 kd,${XK.Super_L} kd,122 ku,${XK.Super_L}` },
+    { name: 'and a tap where Command loses the keyup',
+      engines: ['blink-mac'],
+      steps: [['down', 'MetaLeft'], ['down', 'AltLeft'], ['down', 'KeyZ', 'Ω']],
+      wire: `kd,${XK.Alt_L} kd,LEVEL3 kd,${XK.Super_L} kd,122 ku,122 ku,${XK.Super_L}` },
     { name: 'Ctrl+Option+X is a shortcut on the physical key',
       engines: ['blink-mac', 'gecko-mac'],
       steps: [['down', 'ControlLeft'], ['down', 'AltLeft'], ['down', 'KeyX', '≈']],
       wire: `kd,${XK.Control_L} kd,LEVEL3 kd,${XK.Alt_L} kd,120 ku,${XK.Alt_L}` },
     { name: 'Cmd+C reaches the server as its Ctrl chord',
-      engines: ['blink-mac', 'gecko-mac'],
+      engines: ['gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'KeyC', 'c']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,99` },
+    { name: 'and as a tap of it where Command loses the keyup',
+      engines: ['blink-mac'],
+      steps: [['down', 'MetaLeft'], ['down', 'KeyC', 'c']],
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,99 ku,99` },
     // -- macOS Command: under Blink and WebKit a key let go while it is down is
-    // -- lost, and Spotlight can take Command's own keyup as it opens.
+    // -- lost, so a key pressed under it goes out as a tap, and Spotlight can
+    // -- take Command's own keyup as it opens.
     { name: 'Cmd+A then Cmd+C keeps the Control Command stands for',
       engines: ['blink-mac', 'webkit-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'KeyA', 'a'], ['lost', 'KeyA'],
               ['down', 'KeyC', 'c'], ['lost', 'KeyC'], ['up', 'MetaLeft']],
-      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,97 kd,99 ku,97 ku,99 ku,${XK.Control_L}` },
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,97 ku,97 kd,99 ku,99 ku,${XK.Control_L}` },
     { name: 'Cmd+A then Cmd+C keeps it where the keyups arrive',
       engines: ['gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'KeyA', 'a'], ['up', 'KeyA', 'a'],
               ['down', 'KeyC', 'c'], ['up', 'KeyC', 'c'], ['up', 'MetaLeft']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,97 ku,97 kd,99 ku,99 ku,${XK.Control_L}` },
     { name: 'a held Cmd+Backspace keeps its Control through the autorepeat',
-      engines: ['blink-mac', 'gecko-mac', 'webkit-mac'],
+      engines: ['gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'Backspace'],
               ['down', 'Backspace', undefined, { repeat: true }]],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.BackSpace}` },
+    { name: 'and taps once per autorepeat where Command loses the keyup',
+      engines: ['blink-mac', 'webkit-mac'],
+      steps: [['down', 'MetaLeft'], ['down', 'Backspace'],
+              ['down', 'Backspace', undefined, { repeat: true }]],
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.BackSpace} ku,${XK.BackSpace} `
+          + `kd,${XK.BackSpace} ku,${XK.BackSpace}` },
     { name: 'a space rolled into Cmd+Space lets go at the next key once Spotlight took Command',
       engines: ['blink-mac', 'webkit-mac'],
       steps: [['down', 'Space', ' '], ['down', 'MetaLeft'], ['lost', 'Space'], ['lost', 'MetaLeft'],
               ['down', 'Escape']],
       wire: `kd,32 kd,${XK.Alt_L} ku,${XK.Alt_L} ku,32 kd,${XK.Escape}` },
-    { name: 'so does the Return of a Cmd+Return before it',
+    { name: 'so does the Control of a Cmd+Return before it, whose Return was a tap',
       engines: ['blink-mac', 'webkit-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'Enter'], ['lost', 'Enter'], ['lost', 'MetaLeft'],
               ['down', 'Escape']],
-      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.Return} ku,${XK.Control_L} `
-          + `ku,${XK.Return} kd,${XK.Escape}` },
-    { name: 'and the next Command press lets go of them as well',
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.Return} ku,${XK.Return} `
+          + `ku,${XK.Control_L} kd,${XK.Escape}` },
+    { name: 'and the next Command press lets go of it as well',
       engines: ['blink-mac', 'webkit-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'Enter'], ['lost', 'Enter'], ['lost', 'MetaLeft'],
               ['down', 'MetaLeft']],
-      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.Return} ku,${XK.Control_L} `
-          + `ku,${XK.Return} kd,${XK.Alt_L}` },
+      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.Return} ku,${XK.Return} `
+          + `ku,${XK.Control_L} kd,${XK.Alt_L}` },
     { name: 'Cmd+C with Command held from before the page had the keyboard is still the Ctrl chord',
       engines: ['gecko-mac'],
       steps: [['down', 'KeyC', 'c', { meta: true }], ['up', 'KeyC', 'c', { meta: true }], ['up', 'MetaLeft']],
@@ -405,15 +420,15 @@ check('a soft modifier survives a physical key pressed under it',
 const cmdChord = [['down', 'MetaLeft'], ['down', 'KeyC', 'c']];
 const asCtrl = wire('blink-mac', cmdChord);
 check('Cmd+C reaches the server as its Ctrl chord while the setting is on',
-      asCtrl === `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,99`, asCtrl);
+      asCtrl === `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,99 ku,99`, asCtrl);
 Input.macCmdAsCtrl = false;
 try {
     const asSuper = wire('blink-mac', cmdChord);
     check('Cmd+C reaches it as Super with the setting off',
-          asSuper === `kd,${XK.Super_L} kd,99`, asSuper);
+          asSuper === `kd,${XK.Super_L} kd,99 ku,99`, asSuper);
     const cmdReturn = wire('blink-mac', [['down', 'MetaLeft'], ['down', 'Enter']]);
     check('Cmd+Return keeps Super too, which is what a Super-modifier session binds',
-          cmdReturn === `kd,${XK.Super_L} kd,65293`, cmdReturn);
+          cmdReturn === `kd,${XK.Super_L} kd,65293 ku,65293`, cmdReturn);
 } finally {
     Input.macCmdAsCtrl = true;
 }
