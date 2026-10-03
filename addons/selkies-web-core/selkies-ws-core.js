@@ -1587,7 +1587,7 @@ function sanitizeAndStoreSettings(serverSettings) {
   };
 
   for (const key in serverSettings) {
-    if (!serverSettings.hasOwnProperty(key)) continue;
+    if (!Object.prototype.hasOwnProperty.call(serverSettings, key)) continue;
     const setting = serverSettings[key];
     const storeKey = storageKeyForServerKey(key);
     const finalKey = storageKeyFor(storeKey);
@@ -4122,7 +4122,7 @@ const initializeUI = () => {
           }
       });
       console.log(`Initialized UI in Shared Mode: Canvas buffer target ${manual_width}x${manual_height} (logical), will scale to fit viewport.`);
-  } else if (manual_resolution && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
+  } else if (window.manual_resolution && manual_width != null && manual_height != null && manual_width > 0 && manual_height > 0) {
     applyManualCanvasStyle(manual_width, manual_height, scaleLocallyManual);
     disableAutoResize();
     console.log(`Initialized UI in Manual Resolution Mode: ${manual_width}x${manual_height} (logical), ScaleLocally: ${scaleLocallyManual}`);
@@ -4188,7 +4188,7 @@ const initializeUI = () => {
 function clearAllVncStripeDecoders() {
   console.log("Clearing all VNC stripe decoders.");
   for (const yPos in vncStripeDecoders) {
-    if (vncStripeDecoders.hasOwnProperty(yPos)) {
+    if (Object.prototype.hasOwnProperty.call(vncStripeDecoders, yPos)) {
       const decoderInfo = vncStripeDecoders[yPos];
       if (decoderInfo.decoder && decoderInfo.decoder.state !== "closed") {
         try {
@@ -5179,7 +5179,7 @@ function receiveMessage(event) {
         window.webrtcInput.setSynth(message.value);
       }
       break;
-    case 'showVirtualKeyboard':
+    case 'showVirtualKeyboard': {
       if (isSharedMode) {
         console.log("Shared mode: showVirtualKeyboard message ignored.");
         break;
@@ -5206,6 +5206,7 @@ function receiveMessage(event) {
         console.error("Could not find #keyboard-input-assist element to focus.");
       }
       break;
+    }
     case 'setUseCssScaling':
       if (typeof message.value === 'boolean') {
         const changed = useCssScaling !== message.value;
@@ -5304,7 +5305,7 @@ function receiveMessage(event) {
         console.warn("Invalid value received for setMacCmdAsCtrl:", message.value);
       }
       break;
-    case 'setManualResolution':
+    case 'setManualResolution': {
       if (isSharedMode) {
         console.log("Shared mode: setManualResolution message ignored.");
         break;
@@ -5343,6 +5344,7 @@ function receiveMessage(event) {
         canvasContext.clearRect(0, 0, canvas.width, canvas.height);
       }
       break;
+    }
     case 'resetResolutionToWindow':
       if (isSharedMode) {
         console.log("Shared mode: resetResolutionToWindow message ignored.");
@@ -5420,7 +5422,7 @@ function receiveMessage(event) {
       });
       break;
     }
-    case 'pipelineStatusUpdate':
+    case 'pipelineStatusUpdate': {
       console.log('Received pipelineStatusUpdate message:', message);
       let stateChangedFromStatus = false;
       if (message.video !== undefined && isVideoPipelineActive !== message.video) {
@@ -5443,7 +5445,8 @@ function receiveMessage(event) {
         postSidebarButtonUpdate();
       }
       break;
-    case 'pipelineControl':
+    }
+    case 'pipelineControl': {
       console.log(`Received pipeline control message: pipeline=${message.pipeline}, enabled=${message.enabled}`);
       const pipeline = message.pipeline;
       const desiredState = message.enabled;
@@ -5549,7 +5552,8 @@ function receiveMessage(event) {
         }
       }
       break;
-    case 'audioDeviceSelected':
+    }
+    case 'audioDeviceSelected': {
       console.log('Received audioDeviceSelected message:', message);
       if (isSharedMode && message.context === 'input') {
           console.log("Shared mode: Audio input device selection ignored.");
@@ -5579,7 +5583,8 @@ function receiveMessage(event) {
         console.warn(`Unknown context in audioDeviceSelected message: ${context}`);
       }
       break;
-    case 'gamepadControl':
+    }
+    case 'gamepadControl': {
       console.log(`Received gamepad control message: enabled=${message.enabled}`);
       const newGamepadState = message.enabled;
       pipelinesToggledByUser.add('gamepad');
@@ -5590,6 +5595,7 @@ function receiveMessage(event) {
         applyGamepadPolling();
       }
       break;
+    }
     case 'requestFullscreen':
       enterFullscreen(false);
       break;
@@ -7672,7 +7678,7 @@ class WorkerWebSocket {
       }
 
       if (settingsToSend.encoder !== undefined && encoderIsFallback()) settingsToSend.encoderFallback = true;
-      if (manual_resolution && manual_width != null && manual_height != null) {
+      if (window.manual_resolution && manual_width != null && manual_height != null) {
         settingsToSend['manual_resolution'] = true;
         settingsToSend['manual_width'] = alignResolution(manual_width);
         settingsToSend['manual_height'] = alignResolution(manual_height);

@@ -1069,7 +1069,7 @@ export class WebRTCClient {
 					connectionDetails.video.packetsReceived = videoRTP.packetsReceived;
 					connectionDetails.video.packetsLost = videoRTP.packetsLost;
 
-					var codec = reports.codecs[videoRTP.codecId];
+					const codec = reports.codecs[videoRTP.codecId];
 					if (codec !== undefined) {
 						connectionDetails.video.codecName = codec.mimeType.split("/")[1].toUpperCase();
 					}
@@ -1085,7 +1085,7 @@ export class WebRTCClient {
 					if (audioRTP.totalSamplesReceived !== undefined) connectionDetails.audio.totalSamplesReceived = audioRTP.totalSamplesReceived;
 					if (audioRTP.packetsDiscarded !== undefined) connectionDetails.audio.packetsDiscarded = audioRTP.packetsDiscarded;
 
-					var codec = reports.codecs[audioRTP.codecId];
+					const codec = reports.codecs[audioRTP.codecId];
 					if (codec !== undefined) {
 						connectionDetails.audio.codecName = codec.mimeType.split("/")[1].toUpperCase();
 					}

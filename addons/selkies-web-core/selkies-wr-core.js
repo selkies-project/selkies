@@ -1078,7 +1078,7 @@ export default function webrtc() {
 		const changes = {};
 
 		for (const key in serverSettings) {
-			if (!serverSettings.hasOwnProperty(key)) continue;
+			if (!Object.prototype.hasOwnProperty.call(serverSettings, key)) continue;
 			const setting = serverSettings[key];
 			const storeKey = storageKeyForServerKey(key);
 			const finalKey = storageKeyFor(storeKey);
@@ -1935,7 +1935,7 @@ export default function webrtc() {
 				handleResizeUI();
 				pushScalingDpi();
 				break;
-			case "setManualResolution":
+			case "setManualResolution": {
 				if (isSharedMode) { break; }
 				if (window.enable_resize === false && storageDisplayId !== 'display2') {
 					console.log("setManualResolution ignored: the server keeps this display's size (enable_resize=false).");
@@ -1965,6 +1965,7 @@ export default function webrtc() {
 				pushScalingDpi();
 				applyManualStyle(manualWidth, manualHeight, scaleLocal);
 				break;
+			}
 			case "setUseCssScaling":
 				if (isSharedMode) { break; }
 				if (typeof message.value === 'boolean') {
@@ -2064,14 +2065,14 @@ export default function webrtc() {
 					}
 					pipelinesToggledByUser.add('webcam');
 					webcamDemandRefused = false;
-					if (!!message.enabled) {
+					if (message.enabled) {
 						startWebcamCapture();
 					} else {
 						stopWebcamCapture();
 					}
 				}
 				break;
-			case 'gamepadControl':
+			case 'gamepadControl': {
 				console.log(`Received gamepad control message: enabled=${message.enabled}`);
 				const newGamepadState = message.enabled;
 				pipelinesToggledByUser.add('gamepad');
@@ -2082,6 +2083,7 @@ export default function webrtc() {
 					toggleGamepadConnection()
 				}
 				break;
+			}
 			case 'clipboardUpdateFromUI':
 				console.log('Received clipboardUpdateFromUI message.');
 				if (isSharedMode) {

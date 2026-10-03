@@ -1928,9 +1928,9 @@ export class Input {
     _sendKeyEvent(keysym, code, down) {
         if (keysym === null) return;
         let finalKeysymToSend = keysym;
-        if (NumpadTranslations_NumLockOn.hasOwnProperty(keysym)) {
+        if (Object.prototype.hasOwnProperty.call(NumpadTranslations_NumLockOn, keysym)) {
             finalKeysymToSend = NumpadTranslations_NumLockOn[keysym];
-        } else if (NumpadTranslations_NumLockOff.hasOwnProperty(keysym)) {
+        } else if (Object.prototype.hasOwnProperty.call(NumpadTranslations_NumLockOff, keysym)) {
             finalKeysymToSend = NumpadTranslations_NumLockOff[keysym];
         }
         if (down) {
@@ -4796,7 +4796,7 @@ export class Input {
      * @returns {string} Base64 of the Latin-1-safe name.
      */
     _encodeGamepadId(id) {
-        const safeId = String(id || 'Gamepad').replace(/[^\x00-\xFF]/g, '?');
+        const safeId = String(id || 'Gamepad').replace(/[\u0100-\uffff]/g, '?');
         try {
             return btoa(safeId);
         } catch (e) {
