@@ -20,10 +20,6 @@
  *   limitations under the License.
  */
 
-/*global GamepadManager, Input*/
-
-/*eslint no-unused-vars: ["error", { "vars": "local" }]*/
-
 /**
  * Peer-connection side of the WebRTC transport.
  *

@@ -90,7 +90,7 @@ you ruled out, and what you would do next. The same applies to a failure you can
 it is fixed or precisely described, and never let a test that fails for an unknown reason pass unremarked.
 
 Nothing is pushed before `pre-commit run --all-files` passes on the exact tree being pushed: CI's Lint job runs the
-same hooks (`ruff-check`, `codespell`, `settings-doc`, `file-index`, and `web-lint` for the dashboards) and fails the
+same hooks (`ruff-check`, `codespell`, `settings-doc`, `file-index`, and `web-lint` for the web client) and fails the
 run on what they find. Before a suite failure is called a regression, run it against the unchanged tree as well: the
 suites' servers come from the editable install, so a worktree needs `SELKIES_TEST_PYTHON` pointed at a wrapper that
 sets `PYTHONPATH` to its `src`. Check the sandbox's own health the same way. The sound server must answer

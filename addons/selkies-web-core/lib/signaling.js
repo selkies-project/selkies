@@ -20,8 +20,6 @@
  *   limitations under the License.
  */
 
-/*eslint no-unused-vars: ["error", { "vars": "local" }]*/
-
 /**
  * Signaling client for the WebRTC transport.
  *

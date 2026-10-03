@@ -27,13 +27,13 @@ repos:
   - repo: local
     hooks:
       - id: web-lint
-        name: eslint and tsc (dashboards)
+        name: eslint and tsc (web client)
         # The flat configs are per package and their rules read across files, so
         # each package is linted whole rather than by staged path
         entry: scripts/ci/lint-web.sh
         language: script
         pass_filenames: false
-        files: ^addons/selkies-dashboard(-wish)?/.*\.(js|jsx|ts|tsx|json)$
+        files: ^addons/(selkies-dashboard(-wish)?/.*\.(js|jsx|ts|tsx|json)|(selkies-web-core|universal-touch-gamepad)/.*\.(js|mjs)|eslint\.config\.mjs)$
 
       - id: settings-doc
         name: settings reference (docs/settings.md)

@@ -46,7 +46,6 @@ const STANDARD_LAYOUT = {
     }
 };
 
-/*eslint no-unused-vars: ["error", { "vars": "local" }]*/
 /** Poll interval in milliseconds: Chromium samples pads every 4 ms. */
 export const GP_TIMEOUT = 4;
 const MAX_GAMEPADS = 4;
