@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Cursor stream scaling fixture</title>
+<style>
+body { margin: 0; }
+#box { position: relative; width: 100vw; height: 100vh; }
+#stream, #videoCanvas, #overlay { position: absolute; width: 100%; height: 100%; }
+#stream { object-fit: contain; }
+</style>
+<div id="box"><div id="overlay" tabindex="0"></div></div>
+<script type="module">
+import { Input } from '../../addons/selkies-web-core/lib/input.js';
+
+// A decoded video (canvas MediaStream) or a WebSocket canvas, with the same
+// Input as a session. No server, desktop, or authenticated URL is needed.
+const canvasMode = new URLSearchParams(location.search).has('canvas');
+const box = document.getElementById('box');
+const overlay = document.getElementById('overlay');
+const sink = document.createElement(canvasMode ? 'canvas' : 'video');
+sink.id = canvasMode ? 'videoCanvas' : 'stream';
+sink.width = 3840; sink.height = 2160;
+if (!canvasMode) { sink.muted = true; sink.autoplay = true; }
+box.prepend(sink);
+window.manual_resolution = canvasMode;
+window.manualResolution = !canvasMode;
+window.sent = [];
+window.observers = new Set();
+for (const name of ['ResizeObserver', 'MutationObserver']) {
+    const Observer = window[name];
+    window[name] = class extends Observer {
+        observe(...args) { window.observers.add(this); return super.observe(...args); }
+        disconnect() { window.observers.delete(this); return super.disconnect(); }
+    };
+}
+window.makeInput = () => {
+    const input = new Input(overlay, msg => window.sent.push(msg));
+    input.setStreamDensity(devicePixelRatio);
+    input.attach();
+    window.input = input;
+};
+window.makeInput();
+
+window.decode = async (width, height) => {
+    if (canvasMode) { sink.width = width; sink.height = height; return; }
+    if (sink.srcObject) sink.srcObject.getTracks().forEach(track => track.stop());
+    const source = document.createElement('canvas');
+    source.width = width; source.height = height;
+    source.getContext('2d').fillRect(0, 0, width, height);
+    sink.srcObject = source.captureStream(1);
+    await sink.play();
+};
+window.cursor = async (browser, size = 48) => {
+    window.input.use_browser_cursors = browser;
+    const image = document.createElement('canvas');
+    image.width = image.height = size;
+    image.getContext('2d').fillRect(0, 0, size, size);
+    await window.input.updateServerCursor({ handle: 1, hotx: 12, hoty: 6,
+        curdata: image.toDataURL().split(',')[1] });
+};
+window.geometry = (width, height) => {
+    sink.style.width = `${width}px`; sink.style.height = `${height}px`;
+    sink.style.left = `${(innerWidth - width) / 2}px`; sink.style.top = '0px';
+};
+window.readCursor = () => {
+    const i = window.input;
+    return { css: overlay.style.cursor, width: parseFloat(i.cursorDiv.style.width),
+        height: parseFloat(i.cursorDiv.style.height), hotspot: i.cursorHotspot,
+        transform: i.cursorDiv.style.transform, density: i._cursorDensity() };
+};
+window.ready = true;
+</script>
