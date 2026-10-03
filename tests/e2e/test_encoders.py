@@ -19,7 +19,8 @@ The picture is two known colors the test paints on the server: X11 windows on
 the test display, or the Wayland observer surface filled with one and carrying
 the other, sampled from the decoded frame in the page. Over WebSockets the page
 runs in Chromium; over WebRTC each block runs in Chromium, Firefox and WebKit,
-whose own RTP receivers decode and paint the stream.
+whose own RTP receivers decode and paint the stream, and the <video> must keep
+presenting frames while the screen changes.
 
     python3 tests/e2e/test_encoders.py ws-x11|wr-x11|ws-wl|wr-wl
 """
@@ -114,6 +115,30 @@ SAMPLE_JS = """
 }
 """
 
+# Frames the <video> presents, counted from the first call through
+# requestVideoFrameCallback, which every engine has (a playback-quality count
+# of a live stream is not kept everywhere).
+PRESENTED_JS = """() => {
+  const v = document.querySelector('video');
+  if (!v || !v.requestVideoFrameCallback) return null;
+  if (v.__presented === undefined) {
+    v.__presented = 0;
+    const tick = () => { v.__presented++; v.requestVideoFrameCallback(tick); };
+    v.requestVideoFrameCallback(tick);
+  }
+  return v.__presented;
+}"""
+# The changing screen they are counted on for LIVE_SECS, LIVE_MIN_FRAMES at
+# least: on X11 a small window clear of the sampled points flips between two
+# grays every LIVE_FLIP_S; the Wayland surface blinks as often to a second fill
+# within the picture's tolerance.
+LIVE_SECS = 2.0
+LIVE_FLIP_S = 0.05
+LIVE_MIN_FRAMES = 10
+FLICKER = (1000, 400, 120, 80)
+FLICKER_GRAYS = (0x404040, 0xC0C0C0)
+PAINT2_ARGB = "ff2c7cd8"
+
 
 def near(rgb: Optional[list], want: tuple, tolerance: int = TOLERANCE) -> bool:
     return rgb is not None and all(abs(a - b) <= tolerance for a, b in zip(rgb, want))
@@ -138,18 +163,56 @@ class Picture:
     black frame, the Wayland observer surface covers the frame in the first
     color and carries the saturated block."""
 
-    def __init__(self, wayland: bool) -> None:
+    def __init__(self, wayland: bool, live: bool = False) -> None:
         self.wayland = wayland
+        self.live = live
         self.handle = None
 
     def paint(self) -> None:
         if self.wayland:
             os.environ["WLOBS_FILL"] = PAINT_ARGB
             os.environ["WLOBS_BLOCK"] = ",".join(map(str, BLOCK2)) + "," + SATURATED_ARGB
-            self.handle = H.WlObs(WL_SOCKET)
+            blink = {"WLOBS_FILL2": PAINT2_ARGB, "WLOBS_BLINK_MS": str(int(LIVE_FLIP_S * 1000))}
+            self.handle = H.WlObs(WL_SOCKET, **(blink if self.live else {}))
             self.handle.ready(20)
         else:
             self.handle = paint_x11()
+
+    def presenting(self, page: Any) -> dict:
+        """The frames the page presents while the screen changes for LIVE_SECS
+        (a `live` picture on Wayland blinks on its own)."""
+        start = page.evaluate(PRESENTED_JS)
+        flips = 0
+        if self.wayland:
+            time.sleep(LIVE_SECS)
+            flips = round(LIVE_SECS / LIVE_FLIP_S)
+        else:
+            from selkies.Xlib import X
+            d = self.handle
+            scr = d.screen()
+            win = scr.root.create_window(*FLICKER, 0, scr.root_depth, window_class=X.InputOutput,
+                                         background_pixel=FLICKER_GRAYS[0], override_redirect=True)
+            win.map()
+            d.sync()
+            end = time.time() + LIVE_SECS
+            while time.time() < end:
+                flips += 1
+                win.change_attributes(background_pixel=FLICKER_GRAYS[flips % 2])
+                win.clear_area()
+                d.sync()
+                time.sleep(LIVE_FLIP_S)
+            win.destroy()
+            d.sync()
+        frames = page.evaluate(PRESENTED_JS)
+        return {"frames": None if frames is None else frames - (start or 0), "secs": LIVE_SECS, "flips": flips}
+
+    def keeps_presenting(self, res: "H.Results", tag: str, page: Any, waived: str = "") -> None:
+        name = f"{tag}: frames keep presenting on a changing screen"
+        if waived:
+            res.skip(name, waived)
+            return
+        live = self.presenting(page)
+        res.check(name, (live["frames"] or 0) >= LIVE_MIN_FRAMES, live)
 
     def clear(self) -> None:
         if self.handle is None:
@@ -299,7 +362,7 @@ def cpu_encoder(line: str) -> bool:
 def block_striped(mode: str, wayland: bool, res: "H.Results", engine: str = "chromium") -> None:
     tag = "striped" if engine == "chromium" else "striped " + engine
     H.server_start(mode=mode, wayland=wayland, extra_env={"SELKIES_ENCODER": "h264enc-striped"})
-    picture = Picture(wayland)
+    picture = Picture(wayland, live=mode == "webrtc")
     try:
         picture.paint()
         with sync_playwright() as p:
@@ -336,6 +399,8 @@ def block_striped(mode: str, wayland: bool, res: "H.Results", engine: str = "chr
                               and C.wait_log("using 'h264enc'", timeout=5), "")
                 sample = picture.wait(page)
                 res.check(f"{tag}: the painted picture decodes", picture.matches(sample), sample)
+                if mode == "webrtc":
+                    picture.keeps_presenting(res, tag, page)
             finally:
                 owner.close()
     finally:
@@ -347,7 +412,7 @@ def block_cpu(mode: str, wayland: bool, res: "H.Results", engine: str = "chromiu
     tag = "cpu" if engine == "chromium" else "cpu " + engine
     H.server_start(mode=mode, wayland=wayland,
                    extra_env={"SELKIES_ENCODER": "h264enc", "SELKIES_USE_CPU": "true"})
-    picture = Picture(wayland)
+    picture = Picture(wayland, live=mode == "webrtc")
     try:
         picture.paint()
         with sync_playwright() as p:
@@ -363,6 +428,8 @@ def block_cpu(mode: str, wayland: bool, res: "H.Results", engine: str = "chromiu
                               video and is_fullframe(seen, video["h"]), seen)
                 sample = picture.wait(page)
                 res.check(f"{tag}: the painted picture decodes", picture.matches(sample), sample)
+                if mode == "webrtc":
+                    picture.keeps_presenting(res, tag, page)
             finally:
                 owner.close()
     finally:

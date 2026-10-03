@@ -16,7 +16,8 @@ a codec it takes is negotiated and streamed, one it declines is answered with
 H.264 and the display moves to ``h264enc``, logged by the server.
 
 The picture is a known color the test paints on the server, sampled from the
-decoded frame in the page, exactly as ``test_encoders.py`` does.
+decoded frame in the page, exactly as ``test_encoders.py`` does; over WebRTC
+the <video> must then keep presenting frames while the screen changes.
 
     python3 tests/e2e/test_codecs.py ws-x11|ws-wl|wr-x11 [chromium|firefox|webkit|all]
 
@@ -102,10 +103,16 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
     # before 157 decodes WebRTC AV1 through libwebrtc's dav1d, whose frames it
     # paints as BT.601 whatever they declare.
     matrix = not (engine == "webkit" and encoder == "vp8enc" and mode == "websockets")
+    # WebKit's GStreamer ports hand WebRTC VP8 to libwebrtc's decoder where
+    # GStreamer's best is vp8dec and stamp its frames with their render time,
+    # zero under the stream's zero playout delay: the player presents the first
+    # few and drops the rest as late. Safari stamps them with the capture time.
+    held = ("WebKit's GStreamer player drops the VP8 frames libwebrtc decodes as late"
+            if engine == "webkit" and encoder == "vp8enc" else "")
     # The codec under test is the default; the ladder's rungs stay allowed.
     H.server_start(mode=mode, wayland=wayland,
                    extra_env={"SELKIES_ENCODER": f"{encoder},h264enc,jpeg"})
-    picture = TENC.Picture(wayland)
+    picture = TENC.Picture(wayland, live=mode == "webrtc")
     try:
         picture.paint()
         with sync_playwright() as p:
@@ -135,6 +142,7 @@ def block_codec(mode: str, wayland: bool, engine: str, encoder: str, mode_name: 
                                   "Mode: H264" in line, TENC.encoder_field(line))
                     sample = picture.wait(page, matrix=matrix)
                     res.check(f"{tag}: the painted picture decodes", picture.matches(sample, matrix), sample)
+                    picture.keeps_presenting(res, tag, page, waived=held if taken else "")
                     print(f"      {tag}: rtp={'yes' if taken else 'no'} {TENC.encoder_field(line)}")
                     return
                 supported = page.evaluate(PROBE_JS, probe)
