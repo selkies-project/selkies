@@ -46,15 +46,14 @@ export function UploadNotifications() {
                 // printer mark at the end, so a short name leaves no hollow box.
                 toast(
                     <div className="flex w-full items-center gap-2">
-                        <Button 
+                        <Button
                             variant="outline" 
                             size="sm" 
-                            render={(props) => (
-                                <a {...props} href={url} target="_blank" onClick={() => toast.dismiss(url)}>
-                                    {t('sections.printing.openButton')}
-                                </a>
-                            )}
-                        />
+                            nativeButton={false}
+                            render={<a href={url} target="_blank" onClick={() => toast.dismiss(url)} />}
+                        >
+                            {t('sections.printing.openButton')}
+                        </Button>
                         <span className="min-w-0 flex-1 truncate" title={message.name}>{message.name}</span>
                         <Printer className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                     </div>,

@@ -278,19 +278,18 @@ export function SystemMonitoring() {
 
 	const toggle = (
 		<Tooltip>
-			<TooltipTrigger 
-				render={(props) => (
+			<TooltipTrigger
+				render={
 					<Button
-						{...props}
 						variant="ghost"
 						size="sm"
 						className="h-7 w-7 p-0 min-w-0 pointer-events-auto"
 						onClick={() => setIsDetailedView((detailed) => !detailed)}
-					>
-						{isDetailedView ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-					</Button>
-				)}
-			/>
+					/>
+				}
+			>
+				{isDetailedView ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+			</TooltipTrigger>
 			<TooltipContent side="bottom">
 				<p>{isDetailedView ? t('stats.compactView') : t('stats.detailedView')}</p>
 			</TooltipContent>
@@ -350,14 +349,16 @@ export function SystemMonitoring() {
 					<h3 className="text-sm font-semibold text-card-foreground pointer-events-none">{t('stats.monitorTitle')}</h3>
 					<div className="flex items-center gap-1">
 						<Tooltip>
-							<TooltipTrigger 
-								render={(props) => (
-									<Button {...props} variant="ghost" size="sm" className="h-7 w-7 p-0 min-w-0 pointer-events-auto"
-										onClick={copy} aria-label={t('sections.stats.copyLabel')}>
-										{copied ? <Check className="h-3 w-3 text-[var(--stat-good)]" /> : <Copy className="h-3 w-3" />}
-									</Button>
-								)}
-							/>
+							<TooltipTrigger
+								render={
+									<Button
+										variant="ghost" size="sm" className="h-7 w-7 p-0 min-w-0 pointer-events-auto"
+																			onClick={copy} aria-label={t('sections.stats.copyLabel')}
+									/>
+								}
+							>
+								{copied ? <Check className="h-3 w-3 text-[var(--stat-good)]" /> : <Copy className="h-3 w-3" />}
+							</TooltipTrigger>
 							<TooltipContent side="bottom">
 								<p>{t('sections.stats.copyLabel')}</p>
 							</TooltipContent>

@@ -133,13 +133,11 @@ export const Sharing = ({ show }: SharingProps) => {
 				<div className="flex items-center justify-between mb-1">
 					<CardTitle className="text-xs font-bold">{t('sharing.shareLinksTitle')}</CardTitle>
 					<Tooltip>
-						<TooltipTrigger 
-							render={(props) => (
-								<span {...props} className="inline-block cursor-help">
-									<Info className="h-4 w-4 text-muted-foreground" />
-								</span>
-							)}
-						/>
+						<TooltipTrigger
+							render={<span className="inline-block cursor-help" />}
+						>
+							<Info className="h-4 w-4 text-muted-foreground" />
+						</TooltipTrigger>
 						<TooltipContent className="text-sm bg-primary text-primary-foreground">
 							{t('sharing.tooltipLine1')}<br />
 							{t('sharing.tooltipLine2')}

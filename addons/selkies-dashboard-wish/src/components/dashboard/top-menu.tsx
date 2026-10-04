@@ -33,6 +33,7 @@ import {
   MenubarTrigger,
   MenubarSeparator,
   MenubarLabel,
+  MenubarGroup,
   MenubarSub,
   MenubarSubContent,
   MenubarSubTrigger,
@@ -375,13 +376,13 @@ export function TopMenu({
         const isOutsideMainMenu = dragRef.current && !dragRef.current.contains(target);
         const isOutsidePanel = panelRef.current && !panelRef.current.contains(target);
 
-        // Radix portals render outside the panel element.
-        const isOnDropdownPortal = (target as Element).closest('[data-radix-popper-content-wrapper]') !== null;
-        const isOnDropdownTrigger = (target as Element).closest('[data-radix-dropdown-menu-trigger]') !== null;
-        const isOnSelectTrigger = (target as Element).closest('[data-radix-select-trigger]') !== null;
-        const isOnSelectContent = (target as Element).closest('[data-radix-select-content]') !== null;
+        // Base UI portals render outside the panel element, and its menu
+        // triggers, unlike Radix's, let the mousedown through.
+        const isOnPortal = (target as Element).closest('[data-base-ui-portal]') !== null;
+        const isOnMenuTrigger = (target as Element).closest(
+          '[data-slot="dropdown-menu-trigger"], [data-slot="menubar-trigger"]') !== null;
 
-        if (isOutsideMainMenu && isOutsidePanel && !isOnDropdownPortal && !isOnDropdownTrigger && !isOnSelectTrigger && !isOnSelectContent) {
+        if (isOutsideMainMenu && isOutsidePanel && !isOnPortal && !isOnMenuTrigger) {
           setActivePanel(null);
         }
       }
@@ -689,76 +690,77 @@ export function TopMenu({
           }}
         >
           <div className="flex items-center px-2 py-2">
-            <Menubar className="h-6 border-0 bg-transparent p-0">
+            <Menubar modal={false} className="h-6 border-0 bg-transparent p-0">
               <MenubarMenu>
-                <MenubarTrigger 
-                  render={(props) => (
+                <MenubarTrigger
+                  render={
                     <Button
-                      {...props}
                       variant="secondary"
                       size="icon"
                       className="h-6 w-6"
-                    >
-                      <Gamepad2 className="h-4 w-4" />
-                    </Button>
-                  )}
-                />
+                    />
+                  }
+                >
+                  <Gamepad2 className="h-4 w-4" />
+                </MenubarTrigger>
                 <MenubarContent align="start" className="min-w-[260px] max-w-[300px]">
-                  <MenubarLabel>{t('topMenu.gaming')}</MenubarLabel>
-                  {(renderableSettings.gamingMode ?? true) && (
-                    <MenubarItem
-                      className="items-start"
-                      onClick={() => {
-                        if (document.fullscreenElement) {
-                          document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
-                        } else {
-                          window.postMessage({ type: 'requestGamingMode' }, window.location.origin);
-                        }
-                      }}
-                    >
-                      <Crosshair className="h-4 w-4 mr-2 mt-0.5" />
-                      <span className="flex-1 min-w-0">
-                        <span className="block">{t('gamingModeTitle')}</span>
-                        <span className="block text-xs text-muted-foreground whitespace-normal">
-                          {t('gamingModeHint')}
+                  <MenubarGroup>
+                    <MenubarLabel>{t('topMenu.gaming')}</MenubarLabel>
+                    {(renderableSettings.gamingMode ?? true) && (
+                      <MenubarItem
+                        className="items-start"
+                        onClick={() => {
+                          if (document.fullscreenElement) {
+                            document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
+                          } else {
+                            window.postMessage({ type: 'requestGamingMode' }, window.location.origin);
+                          }
+                        }}
+                      >
+                        <Crosshair className="h-4 w-4 mr-2 mt-0.5" />
+                        <span className="flex-1 min-w-0">
+                          <span className="block">{t('gamingModeTitle')}</span>
+                          <span className="block text-xs text-muted-foreground whitespace-normal">
+                            {t('gamingModeHint')}
+                          </span>
                         </span>
-                      </span>
-                    </MenubarItem>
-                  )}
-                  {!isSecondaryDisplay && (renderableSettings.gamepadToggle ?? true) && (
-                    <MenubarItem
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        onGamepadToggle();
-                      }}
-                    >
-                      <Gamepad2 className="h-4 w-4 mr-2" />
-                      <span className="flex-1">{t('topMenu.gamepadInput')}</span>
-                      <span className="text-xs text-muted-foreground ml-auto">
-                        {isGamepadEnabled ? t('common.on') : t('common.off')}
-                      </span>
-                    </MenubarItem>
-                  )}
-                  {!isSecondaryDisplay && isGamepadEnabled && (renderableSettings.gamepads ?? true) && (
-                    <MenubarItem
-                      data-testid="gamepad-rumble-toggle"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        toggleGamepadRumble();
-                      }}
-                    >
-                      <Vibrate className="h-4 w-4 mr-2" />
-                      <span className="flex-1">{t('topMenu.rumble')}</span>
-                      <span className="text-xs text-muted-foreground ml-auto">
-                        {gamepadRumble ? t('common.on') : t('common.off')}
-                      </span>
-                    </MenubarItem>
-                  )}
-                  {!isSecondaryDisplay && isGamepadEnabled && (renderableSettings.gamepads ?? true) && (
-                    <Gamepad isTouchGamepadActive={isTouchGamepadActive} />
-                  )}
+                      </MenubarItem>
+                    )}
+                    {!isSecondaryDisplay && (renderableSettings.gamepadToggle ?? true) && (
+                      <MenubarItem
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          onGamepadToggle();
+                        }}
+                      >
+                        <Gamepad2 className="h-4 w-4 mr-2" />
+                        <span className="flex-1">{t('topMenu.gamepadInput')}</span>
+                        <span className="text-xs text-muted-foreground ml-auto">
+                          {isGamepadEnabled ? t('common.on') : t('common.off')}
+                        </span>
+                      </MenubarItem>
+                    )}
+                    {!isSecondaryDisplay && isGamepadEnabled && (renderableSettings.gamepads ?? true) && (
+                      <MenubarItem
+                        data-testid="gamepad-rumble-toggle"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          toggleGamepadRumble();
+                        }}
+                      >
+                        <Vibrate className="h-4 w-4 mr-2" />
+                        <span className="flex-1">{t('topMenu.rumble')}</span>
+                        <span className="text-xs text-muted-foreground ml-auto">
+                          {gamepadRumble ? t('common.on') : t('common.off')}
+                        </span>
+                      </MenubarItem>
+                    )}
+                    {!isSecondaryDisplay && isGamepadEnabled && (renderableSettings.gamepads ?? true) && (
+                      <Gamepad isTouchGamepadActive={isTouchGamepadActive} />
+                    )}
+                  </MenubarGroup>
                 </MenubarContent>
               </MenubarMenu>
             </Menubar>
@@ -774,204 +776,209 @@ export function TopMenu({
         }}
       >
         <div className="flex items-center px-2 py-2">
-          <Menubar className="h-6 border-0 bg-transparent p-0">
+          <Menubar modal={false} className="h-6 border-0 bg-transparent p-0">
             <MenubarMenu>
-              <MenubarTrigger 
-                render={(props) => (
+              <MenubarTrigger
+                render={
                   <Button
-                    {...props}
                     variant="secondary"
                     size="icon"
                     className="h-6 w-6"
-                  >
-                    <LayoutPanelLeft className="h-4 w-4" />
-                  </Button>
-                )}
-              />
+                  />
+                }
+              >
+                <LayoutPanelLeft className="h-4 w-4" />
+              </MenubarTrigger>
               <MenubarContent align="start" className="min-w-[200px]">
 
                 {!isSecondaryDisplay && (renderableSettings.coreButtons ?? true) && (
                   <>
-                    <MenubarLabel>{t('topMenu.streamControls')}</MenubarLabel>
+                    <MenubarGroup>
+                      <MenubarLabel>{t('topMenu.streamControls')}</MenubarLabel>
 
-                    {(renderableSettings.videoToggle ?? true) && (
-                      <MenubarItem
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          onVideoToggle();
-                        }}
-                      >
-                        <Monitor className="h-4 w-4 mr-2" />
-                        <span className="flex-1">{t('topMenu.videoStream')}</span>
-                        <span className="text-xs text-muted-foreground ml-auto">
-                          {isVideoActive ? t('common.on') : t('common.off')}
-                        </span>
-                      </MenubarItem>
-                    )}
+                      {(renderableSettings.videoToggle ?? true) && (
+                        <MenubarItem
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onVideoToggle();
+                          }}
+                        >
+                          <Monitor className="h-4 w-4 mr-2" />
+                          <span className="flex-1">{t('topMenu.videoStream')}</span>
+                          <span className="text-xs text-muted-foreground ml-auto">
+                            {isVideoActive ? t('common.on') : t('common.off')}
+                          </span>
+                        </MenubarItem>
+                      )}
 
-                    {(renderableSettings.audioToggle ?? true) && (
-                      <MenubarItem
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          onAudioToggle();
-                        }}
-                      >
-                        <Volume2 className="h-4 w-4 mr-2" />
-                        <span className="flex-1">{t('topMenu.audioStream')}</span>
-                        <span className="text-xs text-muted-foreground ml-auto">
-                          {isAudioActive ? t('common.on') : t('common.off')}
-                        </span>
-                      </MenubarItem>
-                    )}
+                      {(renderableSettings.audioToggle ?? true) && (
+                        <MenubarItem
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onAudioToggle();
+                          }}
+                        >
+                          <Volume2 className="h-4 w-4 mr-2" />
+                          <span className="flex-1">{t('topMenu.audioStream')}</span>
+                          <span className="text-xs text-muted-foreground ml-auto">
+                            {isAudioActive ? t('common.on') : t('common.off')}
+                          </span>
+                        </MenubarItem>
+                      )}
 
-                    {(renderableSettings.microphoneToggle ?? true) && (
-                      <MenubarItem
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          onMicrophoneToggle();
-                        }}
-                      >
-                        <Mic className="h-4 w-4 mr-2" />
-                        <span className="flex-1">{t('topMenu.microphone')}</span>
-                        <span className="text-xs text-muted-foreground ml-auto">
-                          {isMicrophoneActive ? t('common.on') : t('common.off')}
-                        </span>
-                      </MenubarItem>
-                    )}
+                      {(renderableSettings.microphoneToggle ?? true) && (
+                        <MenubarItem
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onMicrophoneToggle();
+                          }}
+                        >
+                          <Mic className="h-4 w-4 mr-2" />
+                          <span className="flex-1">{t('topMenu.microphone')}</span>
+                          <span className="text-xs text-muted-foreground ml-auto">
+                            {isMicrophoneActive ? t('common.on') : t('common.off')}
+                          </span>
+                        </MenubarItem>
+                      )}
 
-                    {(renderableSettings.webcamToggle ?? true) && (
-                      <MenubarItem
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          onWebcamToggle();
-                        }}
-                      >
-                        <Webcam className="h-4 w-4 mr-2" />
-                        <span className="flex-1">{t('topMenu.webcam')}</span>
-                        <span className="text-xs text-muted-foreground ml-auto">
-                          {isWebcamActive ? t('common.on') : t('common.off')}
-                        </span>
-                      </MenubarItem>
-                    )}
+                      {(renderableSettings.webcamToggle ?? true) && (
+                        <MenubarItem
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onWebcamToggle();
+                          }}
+                        >
+                          <Webcam className="h-4 w-4 mr-2" />
+                          <span className="flex-1">{t('topMenu.webcam')}</span>
+                          <span className="text-xs text-muted-foreground ml-auto">
+                            {isWebcamActive ? t('common.on') : t('common.off')}
+                          </span>
+                        </MenubarItem>
+                      )}
 
-                    {(renderableSettings.gamepadToggle ?? true) && (
-                      <MenubarItem
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          onGamepadToggle();
-                        }}
-                      >
-                        <Gamepad2 className="h-4 w-4 mr-2" />
-                        <span className="flex-1">{t('topMenu.gamepadInput')}</span>
-                        <span className="text-xs text-muted-foreground ml-auto">
-                          {isGamepadEnabled ? t('common.enabled') : t('common.disabled')}
-                        </span>
-                      </MenubarItem>
-                    )}
+                      {(renderableSettings.gamepadToggle ?? true) && (
+                        <MenubarItem
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onGamepadToggle();
+                          }}
+                        >
+                          <Gamepad2 className="h-4 w-4 mr-2" />
+                          <span className="flex-1">{t('topMenu.gamepadInput')}</span>
+                          <span className="text-xs text-muted-foreground ml-auto">
+                            {isGamepadEnabled ? t('common.enabled') : t('common.disabled')}
+                          </span>
+                        </MenubarItem>
+                      )}
+                    </MenubarGroup>
 
                     <MenubarSeparator />
                   </>
                 )}
 
-                <MenubarLabel>{t('topMenu.toolsPanels')}</MenubarLabel>
+                <MenubarGroup>
+                  <MenubarLabel>{t('topMenu.toolsPanels')}</MenubarLabel>
 
-                {(renderableSettings.clipboard ?? true) && !isSecondaryDisplay && (
+                  {(renderableSettings.clipboard ?? true) && !isSecondaryDisplay && (
+                    <MenubarSub>
+                      <MenubarSubTrigger>
+                        <ClipboardIcon className="h-4 w-4 mr-2" />
+                        {t('sections.clipboard.title')}
+                      </MenubarSubTrigger>
+                      <MenubarSubContent>
+                        <Clipboard />
+                      </MenubarSubContent>
+                    </MenubarSub>
+                  )}
+
+                  {(renderableSettings.files ?? true) && !isSecondaryDisplay && (
+                    <MenubarSub>
+                      <MenubarSubTrigger>
+                        <FileText className="h-4 w-4 mr-2" />
+                        {t('sections.files.title')}
+                      </MenubarSubTrigger>
+                      <MenubarSubContent>
+                        <Files onOpenDownloads={() => setShowFilesModal(true)} />
+                      </MenubarSubContent>
+                    </MenubarSub>
+                  )}
+
+                  {printJobCount > 0 && !isSecondaryDisplay && (
+                    <MenubarSub>
+                      <MenubarSubTrigger>
+                        <Printer className="h-4 w-4 mr-2" />
+                        {t('sections.printing.title')}
+                      </MenubarSubTrigger>
+                      <MenubarSubContent>
+                        <Printing />
+                      </MenubarSubContent>
+                    </MenubarSub>
+                  )}
+
+                  {(renderableSettings.sharing ?? true) && !isSecondaryDisplay && (
+                    <MenubarSub>
+                      <MenubarSubTrigger>
+                        <Share2 className="h-4 w-4 mr-2" />
+                        {t('sections.sharing.title')}
+                      </MenubarSubTrigger>
+                      <MenubarSubContent>
+                        <Sharing show={true} />
+                      </MenubarSubContent>
+                    </MenubarSub>
+                  )}
+
+                  {(renderableSettings.shortcuts ?? true) && (
                   <MenubarSub>
                     <MenubarSubTrigger>
-                      <ClipboardIcon className="h-4 w-4 mr-2" />
-                      {t('sections.clipboard.title')}
+                      <Keyboard className="h-4 w-4 mr-2" />
+                      {t('sections.shortcuts.title')}
                     </MenubarSubTrigger>
                     <MenubarSubContent>
-                      <Clipboard />
+                      <ShortcutsMenu />
                     </MenubarSubContent>
                   </MenubarSub>
-                )}
-
-                {(renderableSettings.files ?? true) && !isSecondaryDisplay && (
-                  <MenubarSub>
-                    <MenubarSubTrigger>
-                      <FileText className="h-4 w-4 mr-2" />
-                      {t('sections.files.title')}
-                    </MenubarSubTrigger>
-                    <MenubarSubContent>
-                      <Files onOpenDownloads={() => setShowFilesModal(true)} />
-                    </MenubarSubContent>
-                  </MenubarSub>
-                )}
-
-                {printJobCount > 0 && !isSecondaryDisplay && (
-                  <MenubarSub>
-                    <MenubarSubTrigger>
-                      <Printer className="h-4 w-4 mr-2" />
-                      {t('sections.printing.title')}
-                    </MenubarSubTrigger>
-                    <MenubarSubContent>
-                      <Printing />
-                    </MenubarSubContent>
-                  </MenubarSub>
-                )}
-
-                {(renderableSettings.sharing ?? true) && !isSecondaryDisplay && (
-                  <MenubarSub>
-                    <MenubarSubTrigger>
-                      <Share2 className="h-4 w-4 mr-2" />
-                      {t('sections.sharing.title')}
-                    </MenubarSubTrigger>
-                    <MenubarSubContent>
-                      <Sharing show={true} />
-                    </MenubarSubContent>
-                  </MenubarSub>
-                )}
-
-                {(renderableSettings.shortcuts ?? true) && (
-                <MenubarSub>
-                  <MenubarSubTrigger>
-                    <Keyboard className="h-4 w-4 mr-2" />
-                    {t('sections.shortcuts.title')}
-                  </MenubarSubTrigger>
-                  <MenubarSubContent>
-                    <ShortcutsMenu />
-                  </MenubarSubContent>
-                </MenubarSub>
-                )}
+                  )}
+                </MenubarGroup>
 
                 <MenubarSeparator />
 
                 {(isMobile || hasDetectedTouch) && (
                   <>
-                    <MenubarLabel>{t('topMenu.touchControls')}</MenubarLabel>
+                    <MenubarGroup>
+                      <MenubarLabel>{t('topMenu.touchControls')}</MenubarLabel>
 
-                    {!isSecondaryDisplay && (
-                      <MenubarItem onClick={onToggleTouchGamepad}>
-                        <Gamepad2 className="h-4 w-4 mr-2" />
-                        <span className="flex-1">{t('topMenu.touchGamepad')}</span>
-                        <span className="text-xs text-muted-foreground ml-auto">
-                          {isTouchGamepadActive ? t('common.on') : t('common.off')}
-                        </span>
-                      </MenubarItem>
-                    )}
+                      {!isSecondaryDisplay && (
+                        <MenubarItem onClick={onToggleTouchGamepad}>
+                          <Gamepad2 className="h-4 w-4 mr-2" />
+                          <span className="flex-1">{t('topMenu.touchGamepad')}</span>
+                          <span className="text-xs text-muted-foreground ml-auto">
+                            {isTouchGamepadActive ? t('common.on') : t('common.off')}
+                          </span>
+                        </MenubarItem>
+                      )}
 
-                    {(renderableSettings.trackpad ?? true) && (
-                      <MenubarItem onClick={handleToggleTrackpadMode}>
-                        <Touchpad className="h-4 w-4 mr-2" />
-                        <span className="flex-1">{t('trackpadModeTitle')}</span>
-                        <span className="text-xs text-muted-foreground ml-auto">
-                          {isTrackpadModeActive ? t('common.on') : t('common.off')}
-                        </span>
-                      </MenubarItem>
-                    )}
+                      {(renderableSettings.trackpad ?? true) && (
+                        <MenubarItem onClick={handleToggleTrackpadMode}>
+                          <Touchpad className="h-4 w-4 mr-2" />
+                          <span className="flex-1">{t('trackpadModeTitle')}</span>
+                          <span className="text-xs text-muted-foreground ml-auto">
+                            {isTrackpadModeActive ? t('common.on') : t('common.off')}
+                          </span>
+                        </MenubarItem>
+                      )}
 
-                    {(renderableSettings.keyboardButton ?? true) && (
-                      <MenubarItem onClick={handleShowVirtualKeyboard}>
-                        <Keyboard className="h-4 w-4 mr-2" />
-                        <span className="flex-1">{t('topMenu.virtualKeyboard')}</span>
-                      </MenubarItem>
-                    )}
+                      {(renderableSettings.keyboardButton ?? true) && (
+                        <MenubarItem onClick={handleShowVirtualKeyboard}>
+                          <Keyboard className="h-4 w-4 mr-2" />
+                          <span className="flex-1">{t('topMenu.virtualKeyboard')}</span>
+                        </MenubarItem>
+                      )}
+                    </MenubarGroup>
 
                     <MenubarSeparator />
                   </>
@@ -1024,65 +1031,61 @@ export function TopMenu({
           <div className="flex items-center space-x-1">
             {(renderableSettings.apps ?? true) && !isSecondaryDisplay && (
               <Tooltip>
-                <TooltipTrigger 
-                  render={(props) => (
+                <TooltipTrigger
+                  render={
                     <Button
-                      {...props}
                       variant="secondary"
                       size="icon"
                       className="h-6 w-6"
                       onClick={() => handlePanelToggle('apps')}
-                    >
-                      <LayoutGrid className="h-4 w-4" />
-                    </Button>
-                  )}
-                />
+                    />
+                  }
+                >
+                  <LayoutGrid className="h-4 w-4" />
+                </TooltipTrigger>
                 <TooltipContent>{t('sections.apps.title')}</TooltipContent>
               </Tooltip>
             )}
 
             <Tooltip>
-              <TooltipTrigger 
-                render={(props) => (
+              <TooltipTrigger
+                render={
                   <Button
-                    {...props}
                     variant={activePanel === 'settings' ? "default" : "secondary"}
                     size="icon"
                     className="h-6 w-6"
                     onClick={() => handlePanelToggle('settings')}
-                  >
-                    <Settings2 className="h-4 w-4" />
-                  </Button>
-                )}
-              />
+                  />
+                }
+              >
+                <Settings2 className="h-4 w-4" />
+              </TooltipTrigger>
               <TooltipContent>{t('topMenu.settings')}</TooltipContent>
             </Tooltip>
 
             {(renderableSettings.stats ?? true) && !isSecondaryDisplay && (
               <Tooltip>
-                <TooltipTrigger 
-                  render={(props) => (
+                <TooltipTrigger
+                  render={
                     <Button
-                      {...props}
                       variant={showSystemMonitoring ? "default" : "secondary"}
                       size="icon"
                       className="h-6 w-6"
                       onClick={() => handlePanelToggle('monitoring')}
-                    >
-                      <Gauge className="h-4 w-4" />
-                    </Button>
-                  )}
-                />
+                    />
+                  }
+                >
+                  <Gauge className="h-4 w-4" />
+                </TooltipTrigger>
                 <TooltipContent>{t('topMenu.systemMonitoring')}</TooltipContent>
               </Tooltip>
             )}
 
             {(renderableSettings.fullscreen ?? true) && (
               <Tooltip>
-                <TooltipTrigger 
-                  render={(props) => (
+                <TooltipTrigger
+                  render={
                     <Button
-                      {...props}
                       variant="secondary"
                       size="icon"
                       className="h-6 w-6"
@@ -1095,21 +1098,20 @@ export function TopMenu({
                           window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
                         }
                       }}
-                    >
-                      <Maximize className="h-4 w-4" />
-                    </Button>
-                  )}
-                />
+                    />
+                  }
+                >
+                  <Maximize className="h-4 w-4" />
+                </TooltipTrigger>
                 <TooltipContent>{t('topMenu.toggleFullscreen')}</TooltipContent>
               </Tooltip>
             )}
 
             {(renderableSettings.gamingMode ?? true) && (
               <Tooltip>
-                <TooltipTrigger 
-                  render={(props) => (
+                <TooltipTrigger
+                  render={
                     <Button
-                      {...props}
                       variant="secondary"
                       size="icon"
                       className="h-6 w-6"
@@ -1120,29 +1122,28 @@ export function TopMenu({
                           window.postMessage({ type: 'requestGamingMode' }, window.location.origin);
                         }
                       }}
-                    >
-                      <Crosshair className="h-4 w-4" />
-                    </Button>
-                  )}
-                />
+                    />
+                  }
+                >
+                  <Crosshair className="h-4 w-4" />
+                </TooltipTrigger>
                 <TooltipContent>{t('gamingModeTitle')}</TooltipContent>
               </Tooltip>
             )}
 
             <Tooltip>
-              <TooltipTrigger 
-                render={(props) => (
+              <TooltipTrigger
+                render={
                   <Button
-                    {...props}
                     variant="secondary"
                     size="icon"
                     className="h-6 w-6 cursor-grab active:cursor-grabbing select-none"
                     onMouseDown={handleMouseDown}
-                  >
-                    <Hand className="h-4 w-4" />
-                  </Button>
-                )}
-              />
+                  />
+                }
+              >
+                <Hand className="h-4 w-4" />
+              </TooltipTrigger>
               <TooltipContent>{t('topMenu.dragHandle')}</TooltipContent>
             </Tooltip>
           </div>
