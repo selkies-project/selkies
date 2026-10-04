@@ -1180,11 +1180,12 @@ export function TopMenu({
               position: 'fixed',
               left: systemMonitoringPosition.x,
               top: systemMonitoringPosition.y,
-              // Held to the window below its top and scrolled within, the panel
-              // stays whole wherever the drag clamp puts it.
+              // Held to the window below its top, with a margin under it, and
+              // scrolled within, the panel stays whole wherever the drag clamp
+              // puts it.
               display: 'flex',
               flexDirection: 'column',
-              maxHeight: `calc(100dvh - ${systemMonitoringPosition.y}px)`,
+              maxHeight: `calc(100dvh - ${systemMonitoringPosition.y}px - 1rem)`,
               zIndex: 30,
               cursor: isSystemMonitoringDragging ? 'grabbing' : 'grab'
             }}
