@@ -226,6 +226,22 @@
     border-bottom: 1px solid var(--sidebar-border);
 }
 
+.netcore-brand {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    min-width: 0;
+    text-decoration: none;
+}
+
+.netcore-brand img {
+    display: block;
+    height: 36px;
+    width: auto;
+    max-width: 100%;
+}
+
 /* Container for header control buttons like theme toggle and fullscreen. */
 .header-controls {
     display: flex;
