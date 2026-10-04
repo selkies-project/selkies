@@ -83,7 +83,8 @@ SECTIONS = [
         "enable_sharing", "enable_shared", "enable_collab", "enable_player2", "enable_player3", "enable_player4",
     ]),
     ("Client interface", "What the shipped web interface shows; the feature behind a hidden control keeps working.", [
-        "ui_title", "ui_show_logo", "ui_show_sidebar", "ui_show_core_buttons", "ui_sidebar_show_video_settings",
+        "ui_title", "ui_show_logo", "ui_show_sidebar", "ui_show_connection_indicator", "ui_show_core_buttons",
+        "ui_sidebar_show_video_settings",
         "ui_sidebar_show_screen_settings", "ui_sidebar_show_audio_settings", "ui_sidebar_show_stats",
         "ui_sidebar_show_shortcuts", "ui_sidebar_show_clipboard", "ui_sidebar_show_files", "ui_sidebar_show_apps",
         "ui_sidebar_show_sharing", "ui_sidebar_show_gamepads", "ui_sidebar_show_webcam",

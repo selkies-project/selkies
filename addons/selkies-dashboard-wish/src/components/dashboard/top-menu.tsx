@@ -177,6 +177,23 @@ export function TopMenu({
     Meta: false,
   });
   const [isKeyPaletteOpen, setIsKeyPaletteOpen] = React.useState(false);
+  // How far the soft keys reach up from the bottom, published as --soft-keys-top
+  // for the poor-connection mark to sit above them.
+  const softKeysObserver = React.useRef<ResizeObserver | null>(null);
+  const softKeysRef = React.useCallback((bar: HTMLDivElement | null) => {
+    const root = document.documentElement;
+    softKeysObserver.current?.disconnect();
+    softKeysObserver.current = null;
+    if (!bar) {
+      root.style.removeProperty('--soft-keys-top');
+      return;
+    }
+    const place = () => root.style.setProperty(
+      '--soft-keys-top', `${parseFloat(getComputedStyle(bar).bottom) + bar.offsetHeight}px`);
+    softKeysObserver.current = new ResizeObserver(place);
+    softKeysObserver.current.observe(bar);
+    place();
+  }, []);
   const [userChords, setUserChords] = React.useState<string[]>(() =>
     readUserChords(localStorage, getPrefixedKey(USER_CHORDS_KEY)));
   const [chordDraft, setChordDraft] = React.useState("");
@@ -1199,6 +1216,8 @@ export function TopMenu({
       {(isMobile || hasDetectedTouch) &&
         ((renderableSettings.softButtons ?? true) || (renderableSettings.trackpad ?? true)) && (
         <motion.div
+          ref={softKeysRef}
+          data-soft-keys
           className="fixed bottom-4 left-4 z-40 flex flex-col gap-2 p-2 rounded-lg border bg-card shadow-lg"
           style={{ maxWidth: 'calc(100vw - 2rem)', maxHeight: 'calc(100dvh - 2rem)' }}
           initial={{ opacity: 0, y: 20 }}

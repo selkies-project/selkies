@@ -2923,8 +2923,12 @@ function Sidebar() {
   const videoCRFOptions = stopsWithin(CRF_STOPS, serverSettings?.video_crf?.min ?? 5, serverSettings?.video_crf?.max ?? 50);
   const videoPaintoverCRFOptions = stopsWithin(CRF_STOPS, serverSettings?.video_paintover_crf?.min ?? 5, serverSettings?.video_paintover_crf?.max ?? 50);
   const formatBitrate = (v) => `${v / 1000} Mbps`;
+  // The poor-connection mark is about the stream, not the sidebar, so it stays
+  // when the sidebar is hidden; it has its own setting.
+  const connectionMark = serverSettings?.ui_show_connection_indicator?.value === false
+    ? null : <ConnectionIndicator t={t} />;
   if (serverSettings && serverSettings.ui_show_sidebar?.value === false) {
-    return null;
+    return connectionMark;
   }
   const sidebarClasses = `sidebar ${isOpen ? "is-open" : ""} theme-${theme}`;
   const showCoreButtons = !isSecondaryDisplay && (renderableSettings.coreButtons ?? true);
@@ -4747,7 +4751,7 @@ function Sidebar() {
         </button>
       )}
       {statsStrip && !isViewerRole && (renderableSettings.stats ?? true) && <StreamStrip t={t} />}
-      <ConnectionIndicator t={t} />
+      {connectionMark}
     </>
   );
 }

@@ -435,6 +435,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Show the main sidebar UI.",
     },
     {
+        "name": "ui_show_connection_indicator",
+        "type": "bool",
+        "default": True,
+        "help": "Show the mark over the stream while the server finds the client's connection poor, with or without the sidebar.",
+    },
+    {
         "name": "ui_sidebar_show_video_settings",
         "type": "bool",
         "default": True,

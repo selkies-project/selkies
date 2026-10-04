@@ -13,7 +13,11 @@ suite crosses a userspace relay narrower than the stream, which the pacer meets
 by abandoning frames, and that client is told its connection is poor over its
 data channel; with the relay unshaped it is told nothing.
 
-Usage: python3 tests/e2e/test_connection_indicator.py [classic|wish|engines|webrtc|all]
+The mark has its own setting, ui_show_connection_indicator: it hides the mark,
+and hiding the sidebar does not. On a touch page the mark sits clear of the
+soft keys.
+
+Usage: python3 tests/e2e/test_connection_indicator.py [classic|wish|engines|webrtc|settings|all]
 (`engines` runs the default dashboard in Firefox and WebKit, whose session
 socket can run in a worker.)
 """
@@ -162,6 +166,63 @@ def webrtc_block() -> "H.Results":
     return res
 
 
+# A poor verdict as the core records one, for the dashboards to show.
+FORCE_POOR = """() => { window.stream_client = window.stream_client || {};
+  window.stream_client.connection = 'poor';
+  window.dispatchEvent(new Event('selkies-stream-stats')); }"""
+# Whether the mark and the soft keys overlap, or null without either.
+OVERLAP = """() => { const m = document.querySelector('[role=status]'), k = document.querySelector('[data-soft-keys]');
+  if (!m || !k) return null; const a = m.getBoundingClientRect(), b = k.getBoundingClientRect();
+  return a.right > b.left && a.left < b.right && a.bottom > b.top && a.top < b.bottom; }"""
+
+
+def settings_block(dashboard: str, dist: str) -> "H.Results":
+    from playwright.sync_api import sync_playwright
+
+    res = H.Results(f"connection-settings-{dashboard}")
+    cases = [("the setting hides the mark", {"SELKIES_UI_SHOW_CONNECTION_INDICATOR": "false"}, False),
+             ("hiding the sidebar leaves the mark", {"SELKIES_UI_SHOW_SIDEBAR": "false"}, True)]
+    for label, env, shown in cases:
+        H.server_start(mode="websockets", wayland=False, web_root=dist, extra_env=env)
+        try:
+            with sync_playwright() as p:
+                browser = C.chromium_launch(p)
+                ctx = browser.new_context(viewport={"width": WIDTH, "height": HEIGHT})
+                ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+                page = ctx.new_page()
+                page.goto(H.BASE_URL, wait_until="load")
+                C.wait_ws_video(page, timeout=45)
+                page.evaluate(FORCE_POOR)
+                time.sleep(1.0)
+                res.check(label, mark_shown(page) == shown, mark_shown(page))
+                C.close_browser(browser)
+        finally:
+            H.server_stop()
+    if dashboard == "wish":
+        H.server_start(mode="websockets", wayland=False, web_root=dist)
+        try:
+            with sync_playwright() as p:
+                browser = C.chromium_launch(p)
+                for name, viewport in (("landscape", {"width": 844, "height": 390}),
+                                       ("portrait", {"width": 390, "height": 844})):
+                    ctx = browser.new_context(viewport=viewport, has_touch=True, is_mobile=True)
+                    ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+                    page = ctx.new_page()
+                    page.goto(H.BASE_URL, wait_until="load")
+                    C.wait_ws_video(page, timeout=45)
+                    page.evaluate(FORCE_POOR)
+                    time.sleep(1.0)
+                    overlap = page.evaluate(OVERLAP)
+                    res.check(f"a touch phone ({name}) shows the mark clear of the soft keys",
+                              mark_shown(page) and overlap is False, overlap)
+                    ctx.close()
+                C.close_browser(browser)
+        finally:
+            H.server_stop()
+    res.summary()
+    return res
+
+
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
@@ -174,6 +235,9 @@ def main() -> None:
             blocks.append(ws_block("classic", H.CLASSIC_DIST, engine))
     if which in ("all", "webrtc"):
         blocks.append(webrtc_block())
+    if which in ("all", "settings"):
+        blocks.append(settings_block("classic", H.CLASSIC_DIST))
+        blocks.append(settings_block("wish", H.WISH_DIST))
     failed = sum(len(b.failed()) for b in blocks)
     total = sum(len(b.items) for b in blocks)
     print(f"\n=== CONNECTION: {total - failed}/{total} passed ===")

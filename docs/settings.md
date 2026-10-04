@@ -190,6 +190,7 @@ What the shipped web interface shows; the feature behind a hidden control keeps 
 | `--ui-title`<br>`SELKIES_UI_TITLE` | `Selkies`<br>str | Title in top left corner of sidebar. |
 | `--ui-show-logo`<br>`SELKIES_UI_SHOW_LOGO` | `true`<br>bool | Show the Selkies logo in the sidebar. |
 | `--ui-show-sidebar`<br>`SELKIES_UI_SHOW_SIDEBAR` | `true`<br>bool | Show the main sidebar UI. |
+| `--ui-show-connection-indicator`<br>`SELKIES_UI_SHOW_CONNECTION_INDICATOR` | `true`<br>bool | Show the mark over the stream while the server finds the client's connection poor, with or without the sidebar. |
 | `--ui-show-core-buttons`<br>`SELKIES_UI_SHOW_CORE_BUTTONS` | `true`<br>bool | Show the core components buttons display, audio, microphone, webcam, and gamepad. |
 | `--ui-sidebar-show-video-settings`<br>`SELKIES_UI_SIDEBAR_SHOW_VIDEO_SETTINGS` | `true`<br>bool | Show the video settings section in the sidebar. |
 | `--ui-sidebar-show-screen-settings`<br>`SELKIES_UI_SIDEBAR_SHOW_SCREEN_SETTINGS` | `true`<br>bool | Show the screen settings section in the sidebar. |
