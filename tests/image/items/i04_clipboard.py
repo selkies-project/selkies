@@ -119,12 +119,16 @@ class PageSession:
         return bool(self.cell.report("clip", 30, where=lambda r: r.get("ready")))
 
     def copy(self, page: Any, kind: str) -> None:
+        # The click focuses the session's page first, as a user's would before a key:
+        # a key right behind it can reach the session before its window has focus.
         page.mouse.click(1100, 650)
+        time.sleep(0.5)
         page.keyboard.press("t" if kind == "text" else "i")
 
     def read(self, page: Any, kind: str) -> tuple:
         before = len((self.cell.report("clip", 2) or {}).get("pasted", []))
         page.mouse.click(1100, 650)
+        time.sleep(0.5)
         page.keyboard.press("Control+v")
         rep = self.cell.report("clip", 20, where=lambda r: len(r.get("pasted", [])) > before)
         last = (rep or {}).get("pasted", [{}])[-1] if rep else {}
