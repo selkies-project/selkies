@@ -1489,7 +1489,8 @@ class RTCApp:
     def consume_data(self, buf: Any, pts: Optional[int], kind: str,
                      keyframe: bool = True, display_id: str = "primary",
                      timing: Optional[tuple] = None,
-                     dependency: Optional[tuple] = None) -> None:
+                     dependency: Optional[tuple] = None,
+                     codec: Optional[str] = None) -> None:
         """Feed one encoded frame from the capture side into a display's bridge.
 
         Synchronous: scheduled via `loop.call_soon_threadsafe` from the capture
@@ -1510,6 +1511,8 @@ class RTCApp:
             dependency: The frame's id and the id of the frame it predicts
                 from, where the encoder tracks them, for the dependency
                 descriptor and the bridge's drops.
+            codec: The MIME type of the codec that coded a video frame, which
+                a sender switched to another drops it for.
         """
         graph = self.displays.get(display_id or "primary")
         if graph is None:
@@ -1518,7 +1521,8 @@ class RTCApp:
             if buf:
                 try:
                     RTP_VIDEO_CLOCK_RATE = 90000
-                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE), keyframe, timing, dependency)
+                    packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE), keyframe, timing, dependency,
+                                           codec)
                     bridge = graph.get("video_bridge")
                     if bridge is not None:
                         bridge.set_data(packet, keyframe)

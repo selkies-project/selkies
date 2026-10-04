@@ -611,6 +611,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # accumulating in memory.
         if not self._enabled or self.__send_codec is None or self._peer_gone():
             return None
+        # A frame the capture coded before a codec switch is not this codec's to pack.
+        codec = getattr(data, "codec", None)
+        if codec is not None and codec.lower() != self.__send_codec.mimeType.lower():
+            return None
 
         if self.__encoder is None:
             self.__encoder = get_encoder(self.__send_codec)
@@ -619,7 +623,14 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # only packs them into RTP payloads. Keyframes are requested out of band
         # (the capture side produces the IDR), so no encode runs here.
         self.__force_keyframe_used = False
-        payloads, timestamp, keyframe = self.__encoder.pack(data)
+        try:
+            payloads, timestamp, keyframe = self.__encoder.pack(data)
+        except ValueError as e:
+            # A frame its packer cannot read is dropped, not the sender with it.
+            logger.warning("RTCRtpSender(%s) dropped a frame it cannot pack: %s", self.__kind, e)
+            if self.__kind == "video":
+                self._emit_pli_event()
+            return None
 
         # If the packer did not return any payloads, return `None`.
         if not payloads:

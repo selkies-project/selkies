@@ -86,6 +86,9 @@ logger = logging.getLogger("webrtc")
 # the stripe geometry, and the id of the frame it predicts from.
 STRIPE_HEADER_LEN = 12
 
+# The RTP MIME type of each codec id a video header carries.
+WIRE_VIDEO_MIMES = {1: "video/H264", 2: "video/VP8", 3: "video/VP9", 4: "video/AV1", 5: "video/H265"}
+
 
 async def _discard_stream_info(display_id: str, info: Dict[str, Any]) -> None:
     """The `on_stream_info` of a pipeline nobody listens to."""
@@ -239,7 +242,7 @@ class MediaPipelinePixel(MediaPipeline):
         # A requested IDR not yet captured: a request landing meanwhile is
         # satisfied by it; one landing after it was captured is not.
         self.idr_pending = False
-        self.produce_data: Callable[..., None] = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None: logger.warning(
+        self.produce_data: Callable[..., None] = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None: logger.warning(
             "unhandled produce_data"
         )
         self.on_pipeline_started: Callable[[], None] = lambda: None
@@ -573,8 +576,8 @@ class MediaPipelinePixel(MediaPipeline):
         """Deliver one encoded video frame; runs on the pixelflux capture thread.
 
         The frame owns its native buffer and goes downstream as a zero-copy
-        memoryview sliced past the header, with the keyframe flag read off
-        the header's picture-type byte and, for a frame whose encoder tracks
+        memoryview sliced past the header, with its keyframe flag and codec
+        read off the header's type byte and, for a frame whose encoder tracks
         its references, the frame's id and the id it predicts from: only
         whole-frame sessions track them, and a frame is judged by that rather
         than by the pipeline's size, which a resize changes while frames of
@@ -618,9 +621,10 @@ class MediaPipelinePixel(MediaPipeline):
                 dependency = None
                 if reference != -2:
                     dependency = (frame.frame_id & 0xFFFF, None if reference == -1 else reference)
+                codec = WIRE_VIDEO_MIMES.get(view[1] >> 4) if view[0] == 0x04 else None
                 self.async_event_loop.call_soon_threadsafe(
                     functools.partial(self.produce_data, data_bytes, pts, "video", keyframe,
-                                      timing=timing, dependency=dependency)
+                                      timing=timing, dependency=dependency, codec=codec)
                 )
 
         except Exception as e:
