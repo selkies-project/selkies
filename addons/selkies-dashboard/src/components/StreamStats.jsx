@@ -187,7 +187,7 @@ export default function StreamStats({ t, active, framerate }) {
   if (!snapshot) return null;
   const { info, client, latest } = snapshot;
   const rows = streamRows(info, client, latest, words);
-  const tiles = streamTiles(latest, client ? client.transport : "websockets");
+  const tiles = streamTiles(latest, client ? client.transport : "websockets", snapshot.history);
   const meters = streamMeters(latest);
   const meterLabels = {
     cpu: t("sections.stats.cpuLabel"),

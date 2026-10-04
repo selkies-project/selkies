@@ -319,7 +319,7 @@ export function SystemMonitoring() {
 		);
 	}
 
-	const tiles = streamTiles(latest, client ? client.transport : 'websockets');
+	const tiles = streamTiles(latest, client ? client.transport : 'websockets', history);
 	const meters = streamMeters(latest);
 	const meterLabels: Record<string, string> = {
 		cpu: t('sections.stats.cpuLabel'),

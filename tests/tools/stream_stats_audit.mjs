@@ -291,6 +291,28 @@ check('and shown with one, the utilizations grouped above the memories',
 check('and the bars are the utilizations, so they do not alternate with the figures',
   streamMeters({ ...latest, gpu_percent: 5, gpu_mem_used: 1, gpu_mem_total: 2 })
     .map((meter) => meter.bar).join() === 'true,true,false,false');
+const light = streamMeters({ ...latest, cpu_percent: 0.4, gpu_percent: 4, gpu_mem_used: 1, gpu_mem_total: 2 });
+check('a light load under ten percent shows its tenths, so it does not read as idle',
+  light[0].text === '0.4%' && light[1].text === '4.0%', light.map((m) => m.text).join());
+check('and a heavier one rounds to the percent', streamMeters({ ...latest, cpu_percent: 12.6 })[0].text === '13%');
+
+// Times through a still spell: frames came and went, as on a desktop between movements.
+const second = (t, extra) => ({ t, server: true, encoded_fps: 0, fps: 0, ...extra });
+const moved = [second(1000, { encoded_fps: 60, fps: 60, encode_ms: 1.6, pipeline_ms: 1.8, pipeline_min_ms: 1.7,
+  pipeline_max_ms: 2.4, decode_ms: 3.1 })];
+const tileOf = (tiles, key) => tiles.find((tile) => tile.key === key);
+const held = streamTiles(second(4000), 'websockets', [...moved, second(4000)]);
+check('a time a second without frames did not measure reads the last one, within the hold',
+  tileOf(held, 'encode_ms').value === '1.6 ms' && tileOf(held, 'pipeline_ms').detail === '1.7\u20132.4'
+  && tileOf(held, 'decode_ms').value === '3.1 ms', JSON.stringify(tileOf(held, 'encode_ms')));
+const still = streamTiles(second(7000), 'websockets', [...moved, second(7000)]);
+check('past the hold a still stream reads idle, not a dash', tileOf(still, 'encode_ms').value === 'idle'
+  && tileOf(still, 'decode_ms').value === 'idle', tileOf(still, 'encode_ms').value);
+const unsent = streamTiles({ t: 7000, server: false, fps: 30 }, 'websockets', [...moved]);
+check('and a time nobody measured while frames move stays a dash', tileOf(unsent, 'encode_ms').value === '\u2013',
+  tileOf(unsent, 'encode_ms').value);
+check('counts are not held: a figure the second lacks reads as a dash',
+  tileOf(streamTiles(second(4000), 'websockets', [...moved, second(4000)]), 'lost_frames').value === '\u2013');
 
 const long = Array.from({ length: 500 }, (_, i) => ({ fps: i === 250 ? 144 : 60 }));
 const series = seriesOf(long, 'fps');

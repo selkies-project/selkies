@@ -202,16 +202,42 @@ const RANGES = { pipeline_ms: ['pipeline_min_ms', 'pipeline_max_ms'], send_ms: [
 export const OVERSHOOT = 1.1;
 
 /**
+ * How long a time measured in an earlier second stands in for seconds that
+ * measured none, in ms: a still screen encodes nothing, so motion that comes and
+ * goes would otherwise blink its times out between frames.
+ */
+export const HOLD_MS = 5000;
+
+/**
  * What a figure reads: its value with the unit, and for a time the server
  * measured its range, as `least–most`, and whether it warns: the video rate
  * when it runs past `OVERSHOOT` of its CBR target, which it is shown against.
+ * A time with nothing measured this second reads the last one measured within
+ * `HOLD_MS` (`history`), else `idle` where the stream moved no frame, else a
+ * dash.
  * @param {StreamSample|null} latest
  * @param {string} key
+ * @param {StreamSample[]|null} [history]
  * @returns {{value: string, detail: string, warn: boolean}}
  */
-function figure(latest, key) {
+function figure(latest, key, history = null) {
   const [, unit] = TILES[key];
-  const of = (k) => (latest && typeof latest[k] === 'number' ? latest[k] : null);
+  const at = (sample, k) => (sample && typeof sample[k] === 'number' ? sample[k] : null);
+  let shown = latest;
+  if (at(latest, key) === null && unit === 'ms' && latest && history) {
+    shown = null;
+    for (let i = history.length - 1; i >= 0 && latest.t - history[i].t <= HOLD_MS; i--) {
+      if (at(history[i], key) !== null) {
+        shown = history[i];
+        break;
+      }
+    }
+    if (shown === null) {
+      const idle = latest.encoded_fps === 0 || latest.fps === 0;
+      return { value: idle ? 'idle' : '\u2013', detail: '', warn: false };
+    }
+  }
+  const of = (k) => at(shown, k);
   const value = of(key);
   if (value === null) return { value: '\u2013', detail: '', warn: false };
   const range = RANGES[key] && RANGES[key].map(of);
@@ -229,15 +255,16 @@ function figure(latest, key) {
  * server measured one, and the video rate the last ten seconds' against the
  * CBR target with its fullest quarter second beside it; everything else counts
  * from the opening: the data received, the packet loss, and each drop and
- * repair. A figure with nothing measured this second, an encode time on an
- * idle screen, reads as a dash rather than leaving.
+ * repair. A figure with nothing measured this second keeps its place: a time
+ * reads its last measurement for a while (`figure`), and the rest a dash.
  * @param {StreamSample|null} latest
  * @param {'websockets'|'webrtc'} transport
+ * @param {StreamSample[]|null} [history] What the time figures fall back on.
  * @returns {Array<{key: string, label: string, value: string, detail: string, warn: boolean}>}
  */
-export function streamTiles(latest, transport) {
+export function streamTiles(latest, transport, history = null) {
   return (TRANSPORT_TILES[transport] || TRANSPORT_TILES.websockets).map((key) => (
-    { key, label: TILES[key][0], ...figure(latest, key) }));
+    { key, label: TILES[key][0], ...figure(latest, key, history) }));
 }
 
 /**
@@ -275,7 +302,9 @@ const gib = (bytes) => `${(bytes / 1073741824).toFixed(1)} GiB`;
 export function streamMeters(latest) {
   if (!latest || typeof latest.cpu_percent !== 'number') return [];
   const share = (used, total) => (total > 0 ? Math.min(100, (100 * used) / total) : 0);
-  const used = (key, percent) => ({ key, percent, text: `${Math.round(percent)}%`, detail: '', bar: true });
+  // Under ten percent a tenth shows, so a light session does not read as idle.
+  const used = (key, percent) => (
+    { key, percent, text: `${percent < 10 ? percent.toFixed(1) : Math.round(percent)}%`, detail: '', bar: true });
   const amounts = (key, gotten, total) => ({
     key,
     percent: share(gotten, total),
