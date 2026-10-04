@@ -352,8 +352,11 @@ export function SystemMonitoring() {
 							<TooltipTrigger
 								render={
 									<Button
-										variant="ghost" size="sm" className="h-7 w-7 p-0 min-w-0 pointer-events-auto"
-																			onClick={copy} aria-label={t('sections.stats.copyLabel')}
+										variant="ghost"
+										size="sm"
+										className="h-7 w-7 p-0 min-w-0 pointer-events-auto"
+										onClick={copy}
+										aria-label={t('sections.stats.copyLabel')}
 									/>
 								}
 							>
