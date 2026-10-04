@@ -2164,10 +2164,17 @@ a.cite-link:active {
     border-color: var(--accent-border);
 }
 
+/* Rows that wrap at each key's own width: six fixed columns of a 280px sidebar are narrower than a
+   bold "Home" or "PgUp" in wider fonts (Windows' Korean UI), and the last column spilled past the edge. */
 .key-palette-grid {
-    display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    display: flex;
+    flex-wrap: wrap;
     gap: 6px;
+}
+
+.key-palette-grid .mobile-key-button {
+    flex: 1 0 auto;
+    min-width: 2.75em;
 }
 
 .key-palette-chords {
