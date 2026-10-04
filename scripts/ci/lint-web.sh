@@ -3,8 +3,9 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# ESLint over the dashboards, the web core and the touch gamepad, plus the Wish
-# dashboard's TypeScript check. Run from the repository root; requires npm.
+# ESLint over the dashboards, the web core, the touch gamepad and the scripts
+# outside them, plus the Wish dashboard's TypeScript check. Run from the
+# repository root; requires npm.
 #
 # The CI lint gate and the pre-commit hook both call this, so the two cannot
 # drift apart.
@@ -29,6 +30,12 @@ done
 echo "eslint: addons/selkies-web-core addons/universal-touch-gamepad"
 (cd addons && selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
     selkies-web-core universal-touch-gamepad)
+
+# The Node audits, the site's scripts and the image tier's tester pages:
+# eslint.config.mjs at the root, with the same ESLint.
+echo "eslint: tests/tools website/scripts tests/image/site"
+addons/selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
+    'tests/tools/**/*.mjs' 'website/scripts/**/*.mjs' 'tests/image/site/**/*.js'
 
 # The Wish dashboard is the only typed package. Its own build runs tsc as well,
 # but that is downstream of this gate.

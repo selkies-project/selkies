@@ -83,7 +83,7 @@ const ENGINES = {
         // The dashboards' on-screen modifiers: a constructed KeyboardEvent
         // naming the modifier it wants held, with no platform behind it.
         platform: 'MacIntel', ua: 'Mozilla/5.0 (Macintosh) Chrome/151', chrome: true,
-        trusted: false, flags: (down) => ({ altGraph: false }),
+        trusted: false, flags: () => ({ altGraph: false }),
     },
 };
 
