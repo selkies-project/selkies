@@ -15,6 +15,7 @@ that too.
 import asyncio
 import logging
 import os
+import re
 import shutil
 import signal
 import stat
@@ -124,6 +125,26 @@ class SpoolWatcher(FileSystemEventHandler):
         self.loop.create_task(self.on_document(name, size))
 
 
+def default_paper(ppd: str, requested: str) -> Tuple[str, Optional[str]]:
+    """`ppd` with its default paper set to `requested`, and the size it now
+    defaults to, or None where `requested` names no size the PPD offers.
+
+    `requested` is a paper name as libpaper's `PAPERSIZE` gives it (`letter`,
+    `a4`), matched against the PPD's sizes ignoring case. Only that explicit
+    choice moves the default: a host's /etc/papersize and locale are left
+    unread, because a container image sets both as an accident of its build
+    (an `en_US` locale, the paper its distribution's packaging chose) rather
+    than for the person printing, so following them would change the page
+    for users nobody asked about.
+    """
+    size = next((s for s in re.findall(r"^\*PageSize (\w+)/", ppd, re.M)
+                 if s.lower() == requested.strip().lower()), None)
+    if size:
+        ppd = re.sub(r"^(\*Default(?:PageSize|PageRegion|ImageableArea|PaperDimension):) \S+",
+                     rf"\1 {size}", ppd, flags=re.M)
+    return ppd, size
+
+
 def _die_with_parent() -> None:
     """Asks the kernel to end the scheduler when the server is gone, however
     it went: one killed outright would otherwise leave the scheduler holding
@@ -150,6 +171,7 @@ class PrintQueue:
             os.path.join(tempfile.gettempdir(), f"selkies-cups-{os.getuid()}")
         self.socket = os.path.join(self.root, "cups.sock")
         self.spool = spool
+        self.paper = "A4"
         self.process: Optional[asyncio.subprocess.Process] = None
 
     #: Where the scheduler is looked for, beyond PATH: the sbin directories a
@@ -197,8 +219,13 @@ class PrintQueue:
         with open(backend, "wb") as out:
             out.write((package / "backend").read_bytes())
         os.chmod(backend, 0o755)
-        with open(os.path.join(self.root, "ppd", "Selkies.ppd"), "wb") as out:
-            out.write((package / "selkies.ppd").read_bytes())
+        requested = os.environ.get("PAPERSIZE", "")
+        ppd, size = default_paper((package / "selkies.ppd").read_text("latin-1"), requested)
+        if requested and not size:
+            logger.warning("PAPERSIZE=%s names no size the Selkies queue offers; it stays on A4", requested)
+        self.paper = size or "A4"
+        with open(os.path.join(self.root, "ppd", "Selkies.ppd"), "w", encoding="latin-1") as out:
+            out.write(ppd)
         confs = {
             "cups-files.conf": f"""ServerRoot {self.root}
 ServerBin {os.path.join(self.root, "bin")}
@@ -280,7 +307,7 @@ ErrorPolicy retry-job
                            os.path.join(self.root, "error.log"))
             await self.stop()
             return False
-        logger.info("Print queue Selkies listening on %s, spooling to %s", self.socket, self.spool)
+        logger.info("Print queue Selkies listening on %s, spooling to %s, on %s paper", self.socket, self.spool, self.paper)
         return True
 
     async def stop(self) -> None:

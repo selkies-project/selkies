@@ -10,6 +10,7 @@ primary controller pages alone.
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -63,6 +64,21 @@ def spool_path_cases(root: str) -> None:
     finally:
         if saved is not None:
             os.environ["XDG_STATE_HOME"] = saved
+
+
+def paper_cases() -> None:
+    ppd = (printing.files("selkies") / "cups" / "selkies.ppd").read_text("latin-1")
+
+    def defaults(text: str) -> list:
+        return re.findall(r"^\*Default(?:PageSize|PageRegion|ImageableArea|PaperDimension): (\S+)", text, re.M)
+
+    check("the shipped queue defaults to A4", defaults(ppd) == ["A4"] * 4, defaults(ppd))
+    for requested in ("b5", "letterish"):
+        check(f"PAPERSIZE={requested!r} leaves the PPD as shipped",
+              printing.default_paper(ppd, requested) == (ppd, None))
+    text, size = printing.default_paper(ppd, "LETTER")
+    check("a size the queue offers, named in any case, becomes every default",
+          size == "Letter" and defaults(text) == ["Letter"] * 4, defaults(text))
 
 
 def pending_cases(spool: str) -> None:
@@ -303,6 +319,7 @@ async def main() -> None:
     os.makedirs(elsewhere)
     try:
         name_cases()
+        paper_cases()
         spool_path_cases(os.path.join(root, "state"))
         scheduler_cases(os.path.join(root, "arch"))
         pending_cases(spool)

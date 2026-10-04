@@ -5,7 +5,8 @@
 runtime directory, declares the Selkies queue from the shipped PPD, and the
 shipped backend writes each job into the print spool: a PDF whatever the
 application sent, named after the job's title, never on top of an earlier
-document, and never seen half-written. Needs cupsd with the cups-filters
+document, and never seen half-written. Its paper is A4 unless the server's
+PAPERSIZE names another size the queue offers. Needs cupsd with the cups-filters
 chain and the lp and lpstat clients; skips without them.
 """
 import asyncio
@@ -62,6 +63,15 @@ def pages(path: str) -> int:
         return 0
 
 
+def media(path: str) -> str:
+    """The first page's size in the PDF at `path`, as `width x height`."""
+    try:
+        box = re.search(rb"/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)", open(path, "rb").read())
+    except OSError:
+        return "missing"
+    return "x".join(str(round(float(box.group(i)) - float(box.group(i - 2)))) for i in (3, 4)) if box else "none"
+
+
 async def main() -> None:
     path = os.environ.get("PATH", "") + ":/usr/sbin"
     if printing.PrintQueue.programs() is None or not all(shutil.which(t, path=path) for t in ("lp", "lpstat")):
@@ -110,6 +120,8 @@ async def main() -> None:
         res.check("the document is a whole one-page PDF",
                   os.path.isfile(landed) and open(landed, "rb").read(4) == b"%PDF" and pages(landed) == 1,
                   os.path.getsize(landed) if os.path.isfile(landed) else "missing")
+        res.check("without PAPERSIZE a job with no size of its own is printed on A4",
+                  media(landed) == "595x842", media(landed))
 
         run("lp", "-d", "Selkies", "-t", "Report.pdf", pdf)
         run("lp", "-d", "Selkies", "-t", "Report", pdf)
@@ -131,8 +143,14 @@ async def main() -> None:
         pid = queue.process.pid
         await queue.stop()
         res.check("the scheduler stops with the queue", queue.process is None and not os.path.exists(f"/proc/{pid}"))
+        os.environ["PAPERSIZE"] = "letter"
         res.check("a second start replaces the state under the same root",
                   await queue.start() and "running" in run("lpstat", "-r").stdout)
+        del os.environ["PAPERSIZE"]
+        run("lp", "-d", "Selkies", "-t", "Letter", text)
+        spooled(6)
+        res.check("with PAPERSIZE=letter the same job is printed on Letter",
+                  media(os.path.join(spool, "Letter.pdf")) == "612x792", media(os.path.join(spool, "Letter.pdf")))
         # A server killed outright leaves its scheduler running the program;
         # the next start replaces it rather than tripping over it.
         stale = queue.process
