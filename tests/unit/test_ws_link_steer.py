@@ -13,13 +13,15 @@ a gate shut on a moment's delay or frames held back a moment and delivered
 together do not either, while a queue behind an encoder running over its target
 still does; a window with nothing acked moves nothing, nor does a queue under a
 still screen's trickle unless the gate held some of it, a page taking the
-display over is measured against its own path, and whatever else applies a
-bitrate applies the steered one.
+display over is measured against its own path, whatever else applies a
+bitrate applies the steered one, and the capture's tracked settings carry it, so
+the target the stats report is the rate the encoder runs at.
 """
 import os
 import random
 import sys
 from collections import deque
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 from selkies.websockets_mode import DataStreamingServer, _forget_path, _note_round_trip  # noqa: E402
@@ -218,6 +220,15 @@ module.rates.clear()
 t = run(2.0, 0.0, 5)
 run(60.0, t, 1)
 check("where the old path's floor stayed, that round trip read as one", module.rates != [], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+state["link_kbps"] = 1000
+server.capture_instances["display2"]["settings"] = SimpleNamespace(video_cbr_mode=True, video_bitrate_kbps=1000)
+run(20.0, 0.0, 20)
+check("a display steered up from the rate it started at reports the rate it runs at as its target",
+      module.rates[-1:] == [4000] and server._cbr_target_kbps("display2") == 4000,
+      (module.rates[-1:], server._cbr_target_kbps("display2")))
 
 print(f"\n{passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)
