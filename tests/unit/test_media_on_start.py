@@ -8,12 +8,15 @@ and webcam off. `pipeline_starts_on` resolves them for a page and exempts
 shared viewers and second display pages. Server side, the WebRTC service
 registers a peer with its senders paused by that rule, starts only the
 captures a peer receives, and pauses or resumes the shared audio capture as
-peers toggle it, and the pipeline starts its two captures one by one. Driven
-with fakes and loopback peer connections: no pixelflux, pcmflux, or browser.
+peers toggle it, and the pipeline starts its two captures one by one. A first
+capture of the primary waits for its controller's page to send its size, so
+it does not open on the display's old one. Driven with fakes and loopback peer
+connections: no pixelflux, pcmflux, or browser.
 """
 import asyncio
 import os
 import sys
+import time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
@@ -103,6 +106,7 @@ class FakePipeline:
 
     def __init__(self, running: bool = False, video: bool = False, audio: bool = False) -> None:
         self.running, self.video, self.audio = running, video, audio
+        self.width, self.height = 1920, 1080
         self.calls: list = []
 
     async def start_media_pipeline(self, video: bool = True, audio: bool = True) -> None:
@@ -117,6 +121,9 @@ class FakePipeline:
 
     def is_media_pipeline_running(self) -> bool:
         return self.running
+
+    def is_screen_capturing(self) -> bool:
+        return self.running and self.video
 
     async def dynamic_idr_frame(self) -> None:
         self.calls.append(("idr",))
@@ -362,9 +369,80 @@ def cores_block(res: H.Results) -> None:
         res.check(f"{label}: no audio_start_muted left", "audio_start_muted" not in text)
 
 
+async def size_block(res: H.Results) -> None:
+    def started(svc: webrtc_mode.WebRTCService) -> bool:
+        return any(call[0] == "start" for call in svc.media_pipeline.calls)
+
+    def sized_service(peers: dict) -> webrtc_mode.WebRTCService:
+        svc = make_service(peers)
+        svc.settings.manual_resolution = (False, False)
+        return svc
+
+    def controller() -> dict:
+        return dict(peer(), client_type=ClientType.CONTROLLER)
+
+    async def resized(res_: str) -> None:
+        pass
+
+    svc = sized_service({"c1": controller()})
+    start = asyncio.ensure_future(svc.start_display_media("primary"))
+    await asyncio.sleep(0.1)
+    res.check("size: a controller's first capture waits for its page's size", not started(svc),
+              svc.media_pipeline.calls)
+    svc._resize_primary_display = resized
+    await svc.on_resize_handler("1280x720")
+    await asyncio.wait_for(start, 1)
+    res.check("size: its resize starts the capture", started(svc), svc.media_pipeline.calls)
+
+    svc = sized_service({"c1": controller()})
+    start = asyncio.ensure_future(svc.start_display_media("primary"))
+    await asyncio.sleep(0.1)
+    await svc.handle_update_settings({}, "primary")
+    await asyncio.wait_for(start, 1)
+    res.check("size: so do the settings of a page that keeps the server's size", started(svc),
+              svc.media_pipeline.calls)
+
+    wait = webrtc_mode.PRIMARY_SIZE_WAIT_S
+    webrtc_mode.PRIMARY_SIZE_WAIT_S = 0.3
+    try:
+        svc = sized_service({"c1": controller()})
+        began = time.monotonic()
+        await svc.start_display_media("primary")
+        waited = time.monotonic() - began
+        res.check("size: a page that sends neither is started once the wait ends",
+                  started(svc) and 0.25 <= waited < 1.0, round(waited, 2))
+    finally:
+        webrtc_mode.PRIMARY_SIZE_WAIT_S = wait
+
+    def viewers(svc: webrtc_mode.WebRTCService) -> None:
+        svc.rtc_app.peer_connections = {"v1": dict(peer(), client_type=ClientType.VIEWER)}
+
+    def unresizable(svc: webrtc_mode.WebRTCService) -> None:
+        svc.args.enable_resize = False
+
+    def locked(svc: webrtc_mode.WebRTCService) -> None:
+        svc.settings.manual_resolution = (True, True)
+        svc._manual_dims = (1024, 768)
+
+    def warm(svc: webrtc_mode.WebRTCService) -> None:
+        svc.media_pipeline.running = svc.media_pipeline.video = True
+
+    for what, prepare in (("viewers alone", viewers), ("a display the page cannot resize", unresizable),
+                          ("a server-locked resolution", locked), ("a running capture", warm)):
+        svc = sized_service({"c1": controller()})
+        prepare(svc)
+        try:
+            await asyncio.wait_for(svc.start_display_media("primary"), 0.2)
+            at_once = True
+        except asyncio.TimeoutError:
+            at_once = False
+        res.check(f"size: with {what} the capture starts at once", at_once and started(svc), svc.media_pipeline.calls)
+
+
 async def main_async(res: H.Results) -> None:
     await pipeline_block(res)
     await service_block(res)
+    await size_block(res)
     await rtc_block(res)
 
 

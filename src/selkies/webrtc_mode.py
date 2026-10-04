@@ -150,6 +150,10 @@ def _install_webrtc_teardown_noise_filters(loop: asyncio.AbstractEventLoop) -> N
 CURSOR_SIZE: Optional[int] = settings.cursor_size if settings.cursor_size > 0 else None
 # The input backend must match the capture backend (CaptureSettings.use_wayland).
 IS_WAYLAND: bool = bool(settings.wayland[0])
+# Seconds a first capture of the primary waits for its page's size: the resize
+# the page sends once its data channel opens, or its settings from a page that
+# keeps the server's size. Started first, it streams the old size's picture.
+PRIMARY_SIZE_WAIT_S = 2.0
 
 def get_server_settings() -> Dict[str, Any]:
     """The server-settings payload every client is greeted with."""
@@ -257,6 +261,8 @@ class WebRTCService(BaseStreamingService):
         self._wayland_ctl_module: Optional[Any] = None
         self._host_output_capacity: Optional[int] = None
         self._last_resize_request: Optional[Tuple[int, int]] = None
+        # Set once the primary's controller sent its size or its settings.
+        self._primary_sized = asyncio.Event()
         self._wm_swap = MultiMonitorWindowManager()
         self._congestion_steer: Dict[str, CongestionSteer] = {}
         self._rate_holds: Dict[str, RateHold] = {}
@@ -528,6 +534,8 @@ class WebRTCService(BaseStreamingService):
                 entry = self.display_clients.setdefault(display_id, {"width": 0, "height": 0})
                 entry["position"] = display_position
                 self._seed_display_settings(entry)
+            if display_id == "primary" and client_type == "controller":
+                self._primary_sized.clear()
             await self.rtc_app.start_rtc_connection(
                 session_peer_id, client_type, client_token, display_id, client_slot,
                 fullcolor_codecs=fullcolor_codecs, tenbit_codecs=tenbit_codecs)
@@ -964,9 +972,12 @@ class WebRTCService(BaseStreamingService):
                     return
                 entry["width"], entry["height"] = w, h
             await self.reconfigure_displays()
+            if display_id == "primary":
+                self._primary_sized.set()
             return
         self._primary_dims = None
         await self._resize_primary_display(res)
+        self._primary_sized.set()
 
     def _server_locked_dims(self) -> Optional[Tuple[int, int]]:
         """The geometry an admin-configured manual-resolution lock pins the desktop
@@ -1048,18 +1059,7 @@ class WebRTCService(BaseStreamingService):
                 if self.media_pipeline.is_screen_capturing():
                     await self._size_wayland_screen(target_w, target_h, grow_only=True)
                     await self.media_pipeline.restart_screen_capture()
-                    await self._push_wayland_realized_geometry("primary", self.media_pipeline)
-                    await self._size_wayland_screen(
-                        self.media_pipeline.width, self.media_pipeline.height)
-                    # A nested session's screen is its own compositor's, not the
-                    # capture's: sizing only the capture leaves its applications
-                    # laid out for the size the last DPI change realized.
-                    if self.input_handler is not None:
-                        await self.input_handler.realize_wayland_dpi(
-                            getattr(self, "_last_applied_dpi", None)
-                            or getattr(settings, "scaling_dpi", 96) or 96,
-                            "primary",
-                            (self.media_pipeline.width, self.media_pipeline.height))
+                    await self._settle_wayland_primary()
                 self.media_pipeline.last_resize_success = True
                 self._last_resize_request = (target_w, target_h)
                 logger.info(
@@ -1204,9 +1204,11 @@ class WebRTCService(BaseStreamingService):
         await control.aclose()
 
     async def start_display_media(self, display_id: str) -> None:
-        """A display's consumer connected: the primary starts its pipeline right
-        away; a secondary waits for its dimensions (the client's first resize
-        message), which trigger the layout pass that creates its pipeline.
+        """A display's consumer connected: the primary starts its pipeline once
+        its controller's page has sent its size, at most `PRIMARY_SIZE_WAIT_S`
+        later (`_await_primary_size`); a secondary waits for its dimensions
+        (the client's first resize message), which trigger the layout pass that
+        creates its pipeline.
 
         A consumer reclaiming the primary cancels a pending grace stop, and
         `start_media_pipeline` is idempotent, so a controller tab reload that
@@ -1227,6 +1229,12 @@ class WebRTCService(BaseStreamingService):
         """
         if display_id == "primary" and self.media_pipeline:
             self._cancel_primary_stop_grace()
+            resized = await self._await_primary_size()
+            if resized and IS_WAYLAND:
+                # The page's size reached a capture yet to start, which sizes
+                # the view alone: the screen has to hold it first.
+                await self._size_wayland_screen(
+                    self.media_pipeline.width, self.media_pipeline.height, grow_only=True)
             consumers = self._display_consumers("primary")
             video_wanted = any(not p.get("video_paused", False) for p in consumers) or not consumers
             audio_wanted = any(not p.get("audio_paused", False) for p in consumers) or not consumers
@@ -1244,10 +1252,37 @@ class WebRTCService(BaseStreamingService):
                       if IS_WAYLAND else None)
             if caveat:
                 logger.warning(f"Primary Wayland capture started with a caveat: {caveat}")
+            if resized and IS_WAYLAND and self.media_pipeline.is_screen_capturing():
+                await self._settle_wayland_primary()
             if await self._refresh_second_screen_capacity() and self.rtc_app:
                 self.rtc_app.send_media_data_over_channel(
                     "server_settings", self._server_settings_payload()
                 )
+
+    async def _await_primary_size(self) -> bool:
+        """Hold a first capture of the primary until its controller's page has
+        sent its size (`on_resize_handler`) or its settings, which a page that
+        keeps the server's size sends instead, for `PRIMARY_SIZE_WAIT_S` at
+        most. A capture started first opens on the display's old size, and
+        that picture is the page's first key frame, shown until the resized
+        one arrives: seconds at a low rate. A running capture, a display the
+        page cannot resize, and viewers alone start at once.
+
+        Returns:
+            Whether the page's size changed the pipeline's while it waited.
+        """
+        if (not any(p.get("client_type") == ClientType.CONTROLLER
+                    for p in self._display_consumers("primary"))
+                or self.media_pipeline.is_screen_capturing() or not self.args.enable_resize
+                or self._server_locked_dims() is not None):
+            return False
+        size = (self.media_pipeline.width, self.media_pipeline.height)
+        try:
+            await asyncio.wait_for(self._primary_sized.wait(), PRIMARY_SIZE_WAIT_S)
+        except asyncio.TimeoutError:
+            logger.info(f"No size from the primary's page within {PRIMARY_SIZE_WAIT_S} s; "
+                        "starting its capture at the display's size.")
+        return (self.media_pipeline.width, self.media_pipeline.height) != size
 
     async def stop_display_media(self, display_id: str) -> None:
         """Release a display's pipeline: the primary's stop is deferred by a
@@ -1327,6 +1362,21 @@ class WebRTCService(BaseStreamingService):
         if self._wayland_ctl_module is None:
             self._wayland_ctl_module = PixelfluxScreenCapture()
         return self._wayland_ctl_module
+
+    async def _settle_wayland_primary(self) -> None:
+        """After the primary's capture started at a new size: push what the
+        compositor realized to the pages, fit the screen to it, and size a
+        nested session's screen too, which is its own compositor's, not the
+        capture's: sizing only the capture leaves its applications laid out
+        for the size the last DPI change realized."""
+        await self._push_wayland_realized_geometry("primary", self.media_pipeline)
+        await self._size_wayland_screen(self.media_pipeline.width, self.media_pipeline.height)
+        if self.input_handler is not None:
+            await self.input_handler.realize_wayland_dpi(
+                getattr(self, "_last_applied_dpi", None)
+                or getattr(settings, "scaling_dpi", 96) or 96,
+                "primary",
+                (self.media_pipeline.width, self.media_pipeline.height))
 
     async def _size_wayland_screen(self, width: int, height: int,
                                    grow_only: bool = False) -> None:
@@ -2788,6 +2838,8 @@ class WebRTCService(BaseStreamingService):
             logger.debug(
                 f"Updated setting '{key}' for display '{display_id}' from {current_value} to {sanitized_value}"
             )
+        if display_id == "primary":
+            self._primary_sized.set()
 
     def mon_rtc_config(
         self, stun_servers: List[str], turn_servers: List[str], rtc_config: Any
