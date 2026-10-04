@@ -297,7 +297,7 @@ SUITES: list = [
     {"path": "e2e/test_dashboards.py", "tier": "e2e", "timeout": 1200,
      "selectors": ["classic", "wish", "gates", "hidpi", "hidpi-webrtc", "raw-motion",
                    "raw-motion-webrtc", "rate-control", "rate-control-webrtc", "paint-over", "dpi-resolution",
-                   "second-screen"]},
+                   "second-screen", "layout"]},
     {"path": "e2e/test_mixed_dpi.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_reference_invalidation.py", "tier": "e2e", "timeout": 600},

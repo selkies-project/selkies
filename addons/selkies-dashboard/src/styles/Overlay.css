@@ -460,13 +460,19 @@
     background-color: var(--item-bg-hover);
 }
 
+/* A long title (German runs to one word of 23 letters) wraps rather than
+   pushing the caret past the section's edge. */
 .sidebar-section-header h3 {
     margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    hyphens: auto;
 }
 
 /* Toggle icon (caret) for collapsible sections. */
 .section-toggle-icon {
     display: flex;
+    flex-shrink: 0;
     align-items: center;
     color: var(--text-muted);
     margin-left: 10px;

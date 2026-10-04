@@ -20,6 +20,17 @@ def wait_canvas(page, timeout: float = 15):
     return C.wait_ws_video(page, timeout)
 
 
+def wait_chunk(page, timeout: float = 15) -> bool:
+    """Wait for the first video chunk, by which the dashboard has the server's settings. Unlike
+    `wait_canvas` it takes a canvas of any size: a phone's is under 640 pixels."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if page.evaluate("window.videoChunksReceived > 0"):
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def classic_open_video(page) -> bool:
     """Open the classic dashboard's Video section.
 
@@ -1581,6 +1592,83 @@ def page_socket_block(dashboard: str, dist: str, engine: str) -> "H.Results":
     return res
 
 
+# The languages the dashboards ship, by the locale a browser would ask for.
+LOCALES = ["en-US", "es-ES", "zh-CN", "hi-IN", "pt-BR", "fr-FR", "ru-RU", "de-DE", "tr-TR", "it-IT",
+           "nl-NL", "ar-SA", "ko-KR", "ja-JP", "vi-VN", "th-TH", "fil-PH", "da-DK", "zh-TW"]
+# What of the open sidebar reaches past its right edge, or is cut off inside a box.
+SPILL = """() => {
+  const bar = document.querySelector('.sidebar.is-open');
+  if (!bar) return null;
+  const edge = bar.getBoundingClientRect().right;
+  const out = bar.scrollWidth > bar.clientWidth + 1 ? ['sidebar scrolls sideways'] : [];
+  for (const el of bar.querySelectorAll('*')) {
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const clipped = getComputedStyle(el).overflowX !== 'visible' && el.scrollWidth > el.clientWidth + 1;
+    if (r.right > edge + 1 || clipped) out.push(`${el.className || el.tagName} ${(el.innerText || '').trim().slice(0, 30)}`);
+  }
+  return out.slice(0, 5);
+}"""
+PHONE = {"width": 320, "height": 568}
+
+
+def layout_block() -> "H.Results":
+    """The classic sidebar, every section open and on a touch screen the key
+    palette too, keeps its contents inside it in every language the dashboards
+    ship, on a desktop window and a 320-pixel phone; the wish dashboard's top
+    bar and soft keys fit that phone."""
+    res = H.Results("dash-layout")
+    H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST)
+    try:
+        with sync_playwright() as p:
+            browser = C.chromium_launch(p)
+            for form, viewport, touch in (("desktop", {"width": 1280, "height": 900}, False), ("phone", PHONE, True)):
+                spilled = {}
+                for locale in LOCALES:
+                    ctx = browser.new_context(viewport=viewport, locale=locale, has_touch=touch, is_mobile=touch)
+                    ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+                    page = ctx.new_page()
+                    page.goto(H.BASE_URL, wait_until="load")
+                    wait_chunk(page, 40)
+                    if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
+                        page.locator('.toggle-handle').first.click(force=True)
+                        time.sleep(0.8)
+                    heads = page.locator('.sidebar-section-header')
+                    for i in range(heads.count()):
+                        if heads.nth(i).get_attribute("aria-expanded") != "true":
+                            heads.nth(i).click(force=True)
+                    palette = page.locator('.key-palette-toggle').first
+                    if palette.count() and palette.is_visible():
+                        palette.click(force=True)
+                    time.sleep(0.6)
+                    found = page.evaluate(SPILL)
+                    if found is None or found:
+                        spilled[locale] = found
+                    ctx.close()
+                res.check(f"classic: the sidebar holds its contents in every language ({form})", not spilled, spilled)
+            browser.close()
+    finally:
+        H.server_stop()
+    H.server_start(mode="websockets", wayland=False, web_root=H.WISH_DIST)
+    try:
+        with sync_playwright() as p:
+            browser = C.chromium_launch(p)
+            ctx = browser.new_context(viewport=PHONE, has_touch=True, is_mobile=True)
+            ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+            page = ctx.new_page()
+            page.goto(H.BASE_URL, wait_until="load")
+            wait_chunk(page, 40)
+            time.sleep(1.0)
+            reach = page.evaluate("""() => Math.max(...[...document.querySelectorAll('#dashboard-root button')]
+              .filter((b) => b.offsetParent).map((b) => b.getBoundingClientRect().right))""")
+            res.check("wish: the top bar and the soft keys fit a 320-pixel phone", reach <= PHONE["width"], reach)
+            browser.close()
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
 def main() -> None:
     """Run the dashboard blocks named on argv (default: all)."""
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -1626,6 +1714,8 @@ def main() -> None:
             blocks.append(transport_advice_block("wish", H.WISH_DIST, dual))
         for engine in ("firefox", "webkit"):
             blocks.append(transport_advice_block("classic", H.CLASSIC_DIST, True, engine))
+    if which in ("all", "layout"):
+        blocks.append(layout_block())
     if which in ("all", "second-screen"):
         blocks.append(second_screen_block("classic", H.CLASSIC_DIST))
         blocks.append(second_screen_block("wish", H.WISH_DIST))
