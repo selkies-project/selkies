@@ -1611,6 +1611,9 @@ SPILL = """() => {
   return out.slice(0, 5);
 }"""
 PHONE = {"width": 320, "height": 568}
+# The sidebar in DejaVu Sans, the default sans of CI's Ubuntu runners and wider than most desktop
+# fonts, so a host whose own font is narrower sees what a wider one spills.
+WIDE_FONT = ".sidebar, .sidebar * { font-family: 'DejaVu Sans', sans-serif !important; }"
 
 
 def layout_block() -> "H.Results":
@@ -1635,6 +1638,7 @@ def layout_block() -> "H.Results":
                     page = ctx.new_page()
                     page.goto(H.BASE_URL, wait_until="load")
                     wait_chunk(page, 40)
+                    page.add_style_tag(content=WIDE_FONT)
                     if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
                         page.locator('.toggle-handle').first.click(force=True)
                         time.sleep(0.8)
