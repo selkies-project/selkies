@@ -1362,11 +1362,15 @@ class _XTestKeyboard:
     # its previous symbol -- NoSymbol on a spare, which drops the key outright.
     # A Chrome whose main thread is starved of its core needs ~25 ms.
     _BIND_SETTLE_S = 0.025
-    # Spares taken first and recycled before any other, as on Wayland: Chromium
-    # reads an X keycode as the evdev key it numbers, whatever key the server's
-    # own keycodes put there, and runs the arrows, Delete, Copy or Undo it names
-    # as commands, numbers an Xorg on xfree86 keycodes leaves unbound.
+    # Spares taken first, as on Wayland. Chromium reads an X keycode as the evdev
+    # key it numbers, whatever key the server's own keycodes put there, and runs
+    # the arrows, Delete, Copy or Undo it names as commands. On evdev keycodes a
+    # spare is a key the layout leaves out, so the whole pool serves; on others
+    # (an Xorg on xfree86 keycodes leaves those numbers unbound) the text spares
+    # are recycled before any other is taken.
     _TEXT_SPARES = _WaylandKeymapOwner._TEXT_SPARES
+    # XK_Left at evdev's keycode for it, which tells the server's keycodes apart.
+    _EVDEV_LEFT = (0xFF51, 113)
     # A group lock outlives the last key that needed it by this long: one switch
     # per run of keystrokes, and the desktop's layout indicator stays put.
     _GROUP_LINGER_S = 0.5
@@ -1403,7 +1407,9 @@ class _XTestKeyboard:
         never spare: pressing one would toggle its modifier under the typed
         char. The full range is scanned (not a fixed cap): more slots make
         recycling — the only case where a slow app can mistranslate a rebound
-        keycode — rare. The text spares (`_TEXT_SPARES`) lead the pool.
+        keycode — rare. The text spares (`_TEXT_SPARES`) lead the pool, and on
+        keycodes other than evdev's they are all a bind recycles before it takes
+        another (`_text_codes`).
         """
         info = self._d.display.info
         lo, hi = info.min_keycode, info.max_keycode
@@ -1428,7 +1434,8 @@ class _XTestKeyboard:
                     spares.append(kc)
         self._spare_set = frozenset(spares)
         text = [kc for kc in self._TEXT_SPARES if kc in self._spare_set]
-        self._text_codes = len(text)
+        keysym, evdev_kc = self._EVDEV_LEFT
+        self._text_codes = 0 if self._d.keysym_to_keycode(keysym) == evdev_kc else len(text)
         return text + [kc for kc in spares if kc not in text]
 
     def _free_spares(self) -> list:
@@ -1489,7 +1496,7 @@ class _XTestKeyboard:
 
     def text_room(self) -> int:
         """How many text spares are not physically down: how many keysyms a run
-        can bind on them at once; 0 where the pool has none."""
+        can bind on them at once; 0 where binds are not kept to them."""
         if self._spare_keycodes is None:
             self._spare_keycodes = self._find_spare_keycodes()
         held = set(self._pressed_kc.values())
@@ -5900,9 +5907,10 @@ class WebRTCInput:
         on every letter. With neutralize, conflicting held Shift/AltGr are
         lifted around the whole run (one keymap query, not one per char).
         Unmapped chars are bound in one batch (O(1) MappingNotify broadcasts
-        instead of one per char), and nothing is typed on failure. A text with
-        more of them than the text spares hold goes out in runs that fit them,
-        each bound behind the keys before it.
+        instead of one per char), and nothing is typed on failure. Where binds
+        are kept to the text spares (`text_room`), a text with more of them
+        than those hold goes out in runs that fit them, each bound behind the
+        keys before it.
 
         Returns:
             True on full success; False (having typed nothing) if the shim is

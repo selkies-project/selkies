@@ -6,9 +6,11 @@ keycode as the evdev key it numbers and runs the arrows, Delete, Copy or Undo
 it names as commands, so a character bound there never lands. An Xorg on
 xfree86 keycodes leaves many of those numbers unbound (101, 114, 118-123,
 129-146), and "한국어 입력" composed on the client landed as "한어" on the GLX
-desktop. The shim takes the text spares (F13-F24, IntlRo, IntlYen) first, for
-a single bind and a composition's batch alike, recycles them before it takes
-any other keycode, and types a longer text in runs that fit them.
+desktop. The shim takes the text spares (F13-F24, IntlRo, IntlYen) first. Off
+evdev keycodes it recycles them before it takes any other keycode, for a
+single bind and a composition's batch alike, and types a longer text in runs
+that fit them; on evdev keycodes, where a spare is a key the layout leaves
+out, the whole pool serves.
 """
 import asyncio
 import os
@@ -73,12 +75,14 @@ def keyboard(bound: dict) -> "ih._XTestKeyboard":
 # 101, 114, 118-131 and 133-146 left unbound beside the text spares.
 XFREE86 = {kc: [0x61 + (kc % 26)] for kc in range(8, 101)}
 XFREE86.update({97: [0xFF50], 111: [0xFF61], 113: [0xFFEA], 116: [0xFFEC], 115: [0xFFEB], 108: [0xFE03],
-                102: [0xFF53], 103: [0xFF57], 104: [0xFF54], 105: [0xFF56], 106: [0xFF63], 107: [0xFFFF]})
+                100: [0xFF51], 102: [0xFF53], 103: [0xFF57], 104: [0xFF54], 105: [0xFF56], 106: [0xFF63],
+                107: [0xFFFF]})
 XFREE86_SPACE = 65
 XFREE86[XFREE86_SPACE] = [0x20]
-# An evdev keymap binds F13-F24 and the JIS keys, and leaves a few others free.
+# An evdev keymap, Left at 113, binds most of F13-F24 and the JIS keys, and leaves a few others free.
 EVDEV = {kc: [0x61 + (kc % 26)] for kc in range(8, 248)}
-for kc in (93, 157):
+EVDEV[113] = [0xFF51]
+for kc in (93, 132, 157, 202):
     EVDEV.pop(kc)
 
 
@@ -88,7 +92,12 @@ def pool_order() -> None:
     check("the text spares lead an xfree86 keymap's pool", pool[:13] == [*range(191, 203), 132], pool[:16])
     kb = keyboard(EVDEV)
     pool = kb._find_spare_keycodes()
-    check("with the text spares bound, the free keycodes make the pool", pool == [93, 157, *range(248, 256)], pool)
+    check("an evdev keymap's free text spares lead its pool too", pool == [202, 132, 93, 157, *range(248, 256)],
+          pool)
+    placed = [kb._overlay_keycode(ks) for ks in HANGUL]
+    check("and on evdev keycodes the whole pool serves before a bind is recycled", placed == [202, 132, 93, 157, 248],
+          placed)
+    check("with no run kept to the text spares", kb.text_room() == 0, kb.text_room())
 
 
 def binds() -> None:
