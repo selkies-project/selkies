@@ -111,7 +111,7 @@ def open_settings(page: Any) -> bool:
     trig.click(force=True, timeout=3000)
     deadline = time.time() + 6
     while time.time() < deadline:
-        if page.locator('[role="slider"]').count() > 0:
+        if page.locator('[data-slot="slider-thumb"]').count() > 0:
             return True
         time.sleep(0.3)
     return False
@@ -220,7 +220,7 @@ def wish_block(cell: str) -> "H.Results":
 
             res.check("settings panel opens", open_settings(page))
             mark = len(H.server_log())
-            slider = page.locator('[role="slider"]').first
+            slider = page.locator('[data-slot="slider-thumb"]').first
             slider.click(force=True, timeout=3000)
             time.sleep(0.2)
             for _ in range(2):

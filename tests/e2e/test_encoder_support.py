@@ -66,7 +66,7 @@ def wish_menu(page: Any) -> Optional[list]:
     deadline = time.time() + 10
     while time.time() < deadline:
         items = page.evaluate(
-            "() => Array.from(document.querySelectorAll('[role=\"menu\"][data-state=\"open\"] [role=\"menuitem\"]'))"
+            "() => Array.from(document.querySelectorAll('[role=\"menu\"][data-open] [role=\"menuitem\"]'))"
             ".map((i) => [i.textContent, i.getAttribute('aria-disabled') === 'true' || i.hasAttribute('data-disabled')])")
         if items:
             return items
@@ -96,7 +96,7 @@ def menu_block(dashboard: str, mode: str) -> "H.Results":
                       H264 in by_label and not by_label[H264][1] and UNSUPPORTED not in by_label[H264][0], by_label.get(H264))
             if dashboard == "wish":
                 layers = page.evaluate(
-                    "() => { const m = document.querySelector('[role=\"menu\"][data-state=\"open\"]');"
+                    "() => { const m = document.querySelector('[role=\"menu\"][data-open]');"
                     " const z = (e) => parseInt(getComputedStyle(e).zIndex, 10);"
                     " return m ? [z(m.parentElement), z(document.getElementById('dashboard-root'))] : null; }")
                 res.check("the open menu stacks above the dashboard root that hosts the panel",

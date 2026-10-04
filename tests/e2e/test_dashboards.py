@@ -752,20 +752,20 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
             except Exception as e:
                 print("classic slider err:", e)
         else:
-            # Radix sliders are driven by click-to-focus plus arrow keys.
+            # The sliders are driven by click-to-focus plus arrow keys.
             try:
                 opened = False
                 trig = page.locator('button:has(svg.lucide-settings-2)').first
                 if trig.count():
                     trig.click(force=True, timeout=3000)
                     time.sleep(1.2)
-                    opened = page.locator('[role="slider"]').count() > 0
+                    opened = page.locator('[data-slot="slider-thumb"]').count() > 0
                 if not opened:
                     page.get_by_role("button", name=lambda n: "settings" in (n or "").lower()).first.click(force=True, timeout=2500)
                     time.sleep(1.2)
-                    opened = page.locator('[role="slider"]').count() > 0
+                    opened = page.locator('[data-slot="slider-thumb"]').count() > 0
                 if opened:
-                    track = page.locator('[role="slider"]').first
+                    track = page.locator('[data-slot="slider-thumb"]').first
                     track.click(force=True, timeout=2000)
                     time.sleep(0.2)
                     for _ in range(2):
@@ -1311,7 +1311,7 @@ def click_raw_pointer_motion(page, dashboard: str) -> bool:
         if not open_wish_settings_tab(page, "Resolution"):
             return False
         toggle = page.locator(
-            'div:has(> div > label:has-text("Raw pointer motion")) > button[role="switch"]')
+            'div:has(> div > label:has-text("Raw pointer motion")) > [role="switch"]')
     if not toggle.count():
         return False
     toggle.first.scroll_into_view_if_needed()
@@ -1456,7 +1456,7 @@ def paint_over_switches(page, dashboard: str):
         open_wish_settings_tab(page, "Video")
 
     def row(label: str):
-        return page.locator(f"div.justify-between:has(> div > label:text-is('{label}')) button[role='switch']").first
+        return page.locator(f"div.justify-between:has(> div > label:text-is('{label}')) [role='switch']").first
     return row("Turbo"), row("Use Paint-Overs")
 
 
