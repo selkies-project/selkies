@@ -23,7 +23,7 @@ sys.argv = ["selkies"]
 
 from aiohttp import web  # noqa: E402
 from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
-from selkies import audit, printing  # noqa: E402
+from selkies import audit, printing, settings  # noqa: E402
 from selkies.webrtc_engine import ClientType, RTCApp  # noqa: E402
 from selkies.websockets_mode import DataStreamingServer, client_permissions  # noqa: E402
 from selkies.stream_server import CentralizedStreamServer  # noqa: E402
@@ -45,6 +45,24 @@ def name_cases() -> None:
     check("case of the suffix does not matter", printing.document_name("scan.PDF") == "scan.PDF")
     for bad in ("../x.pdf", "sub/x.pdf", ".hidden.pdf", ".3.part", "notes.txt", "x\x00.pdf", ""):
         check(f"{bad!r} is not a document", printing.document_name(bad) is None)
+
+
+def spool_path_cases(root: str) -> None:
+    default = next(d["default"] for d in settings.SETTING_DEFINITIONS if d["name"] == "print_spool_path")
+    saved = os.environ.get("XDG_STATE_HOME")
+    try:
+        os.environ["XDG_STATE_HOME"] = root
+        check("the default spool is under XDG_STATE_HOME",
+              printing.spool_path(default) == os.path.join(root, "selkies", "print"), printing.spool_path(default))
+        del os.environ["XDG_STATE_HOME"]
+        check("and under ~/.local/state without it",
+              printing.spool_path(default) == os.path.expanduser("~/.local/state/selkies/print"),
+              printing.spool_path(default))
+        check("a configured spool is taken as given, ~ expanded",
+              printing.spool_path("~/prints") == os.path.expanduser("~/prints"))
+    finally:
+        if saved is not None:
+            os.environ["XDG_STATE_HOME"] = saved
 
 
 def pending_cases(spool: str) -> None:
@@ -285,6 +303,7 @@ async def main() -> None:
     os.makedirs(elsewhere)
     try:
         name_cases()
+        spool_path_cases(os.path.join(root, "state"))
         scheduler_cases(os.path.join(root, "arch"))
         pending_cases(spool)
         await watcher_cases(spool, elsewhere)

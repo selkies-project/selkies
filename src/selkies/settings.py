@@ -211,8 +211,8 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "print_spool_path",
         "type": "str",
-        "default": "~/.local/state/selkies/print",
-        "help": "Directory the session's print queue writes finished jobs into as PDFs, watched for documents to hand to the browser and created at startup when missing; a document is removed once a page has taken it.",
+        "default": "",
+        "help": "Directory the session's print queue writes finished jobs into as PDFs, watched for documents to hand to the browser and created at startup when missing; a document is removed once a page has taken it. Empty (default) uses selkies/print under $XDG_STATE_HOME, or under ~/.local/state when that is unset.",
     },
     {
         "name": "file_transfer_limit_mbps",

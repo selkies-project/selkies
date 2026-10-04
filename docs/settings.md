@@ -152,7 +152,7 @@ What leaves and enters the session besides the stream.
 | `--file-manager-path`<br>`SELKIES_FILE_MANAGER_PATH`<br>`FILE_MANAGER_PATH` | `~/Desktop`<br>str | Directory for client file transfers on both transports: uploads land here and the file-browser/download API serves it (created at startup if missing). |
 | `--file-transfer-limit-mbps`<br>`SELKIES_FILE_TRANSFER_LIMIT_MBPS` | `0.0`<br>float, from 0.0 | Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. The congestion-control pacing protects the video stream without it, in both directions and end to end through a reverse proxy; the cap is for holding transfers to a fixed share regardless. |
 | `--printing-enabled`<br>`SELKIES_PRINTING_ENABLED` | `true`<br>bool | Hand the documents printed in the session to the browser: a job printed to the session's Selkies queue lands in the print spool as a PDF, and the page opens it in the browser's print dialog. Off refuses the documents and shows no printer section. |
-| `--print-spool-path`<br>`SELKIES_PRINT_SPOOL_PATH` | `~/.local/state/selkies/print`<br>str | Directory the session's print queue writes finished jobs into as PDFs, watched for documents to hand to the browser and created at startup when missing; a document is removed once a page has taken it. |
+| `--print-spool-path`<br>`SELKIES_PRINT_SPOOL_PATH` | (empty)<br>str | Directory the session's print queue writes finished jobs into as PDFs, watched for documents to hand to the browser and created at startup when missing; a document is removed once a page has taken it. Empty (default) uses selkies/print under $XDG_STATE_HOME, or under ~/.local/state when that is unset. |
 
 ## Webcam
 

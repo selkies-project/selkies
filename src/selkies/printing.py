@@ -33,6 +33,13 @@ logger = logging.getLogger("printing")
 SETTLE_SECONDS = 0.5
 
 
+def spool_path(configured: str) -> str:
+    """The print spool: `configured` when set, else selkies/print under the
+    XDG state directory, as the server's other state is."""
+    state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.expanduser(configured) if configured else os.path.join(state, "selkies", "print")
+
+
 def document_name(name: str) -> Optional[str]:
     """`name` when it names a document in the spool, else None: a path, a
     hidden or partial file, or anything that is not a PDF is refused."""

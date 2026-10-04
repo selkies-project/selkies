@@ -1544,7 +1544,7 @@ class CentralizedStreamServer:
             os.path.expanduser(self.settings.file_manager_path)
         ).resolve()
         self.print_spool = pathlib.Path(
-            os.path.expanduser(self.settings.print_spool_path)
+            printing.spool_path(self.settings.print_spool_path)
         ).resolve()
         self.print_watcher: Optional[printing.SpoolWatcher] = None
         self.print_queue: Optional[printing.PrintQueue] = None
