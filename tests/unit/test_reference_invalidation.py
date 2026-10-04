@@ -285,7 +285,7 @@ async def pipeline_names() -> None:
     delivered = []
     pipeline = MediaPipelinePixel(async_event_loop=SimpleNamespace(call_soon_threadsafe=lambda fn, *a: fn(*a)),
                                   encoder="h264enc", height=720)
-    pipeline.produce_data = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None: \
+    pipeline.produce_data = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None: \
         delivered.append(dependency)
     for fid, reference, height in ((0, -1, 4096), (1, 0, 720), (2, 1, 1080), (3, -2, 720)):
         pipeline._screen_capture_callback(captured(fid, reference, height))

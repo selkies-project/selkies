@@ -1229,11 +1229,15 @@ export default function webrtc() {
 	 * profile 2, or 3 at 4:4:4, H.265 Main 10, and H.264 High 10), the decode of
 	 * a 10-bit key frame for AV1, whose main profile carries both depths, and
 	 * for H.264 and H.265 4:4:4, which full color is answered the same way for.
+	 * Chromium decodes WebRTC AV1 in libwebrtc's dav1d wrapper, which drops every
+	 * picture deeper than 8 bits ("unhandled bit depth") whatever WebCodecs
+	 * decodes, so a stream opening at 10 bits never showed a frame there.
 	 * @param {string} codec A codec name.
 	 * @param {boolean} fullcolor Whether the stream is 4:4:4.
 	 * @returns {Promise<boolean>}
 	 */
 	async function tenBitDecodable(codec, fullcolor) {
+		if (codec === 'av1' && isChromium) return false;
 		if (codec === 'vp9') return receiverTakesProfile('vp9', fullcolor ? 3 : 2);
 		if (codec === 'h265' && !fullcolor) return receiverTakesProfile('h265', 2);
 		if (codec === 'h264' && !fullcolor) {
@@ -1600,6 +1604,18 @@ export default function webrtc() {
 	}
 
 	/**
+	 * The stream resolution `sendResolutionToServer` asks for `width` x `height`,
+	 * with the density it multiplied them by.
+	 * @param {number} width
+	 * @param {number} height
+	 * @returns {number[]} The width, the height, and the density.
+	 */
+	function streamResolution(width, height) {
+		const dpr = window.manualResolution ? 1 : streamDensity();
+		return [Math.min(alignResolution(width * dpr), 4080), Math.min(alignResolution(height * dpr), 4080), dpr];
+	}
+
+	/**
 	 * Requests a stream resolution with the `r,WxH` message.
 	 *
 	 * A manual resolution is the exact framebuffer and is not multiplied by the
@@ -1615,24 +1631,15 @@ export default function webrtc() {
 			console.log("Skipping sending resolution in shared mode.");
 			return;
 		}
-		let realWidth, realHeight, dpr;
-		if (window.manualResolution) {
-			dpr = 1;
-			realWidth = alignResolution(width);
-			realHeight = alignResolution(height);
-		} else {
-			dpr = streamDensity();
+		const [realWidth, realHeight, dpr] = streamResolution(width, height);
+		if (!window.manualResolution) {
 			appliedStreamDensity = dpr;
-			realWidth = alignResolution(width * dpr);
 			// A request at a density the last SETTINGS did not report: the layout
 			// carries the reported scale to the other pages, so it is sent again.
 			if (reportedStreamDensity > 0 && Math.abs(dpr - reportedStreamDensity) > 1e-6) {
 				setTimeout(() => sendClientPersistedSettings(), 0);
 			}
-			realHeight = alignResolution(height * dpr);
 		}
-		if (realWidth > 4080) realWidth = 4080;
-		if (realHeight > 4080) realHeight = 4080;
 		const resString = `${realWidth}x${realHeight}`;
 		lastRequestedStreamRes = [realWidth, realHeight];
 		console.log(`Sending resolution to server: ${resString}, Pixel Ratio Used: ${dpr}, useCssScaling: ${useCssScaling}`);
@@ -3061,6 +3068,13 @@ export default function webrtc() {
 					if (await fullColorDecodable(codec)) codecs.push(codec);
 				}
 				return codecs;
+			};
+			// And the size its first resize will ask for, which a primary's capture starts at
+			// (`loadLastSessionSettings`); none where that resize is not sent.
+			signaling.pageSize = () => {
+				if (isSharedMode || window.manualResolution || storageDisplayId === 'display2' || !input) return null;
+				const [width, height] = streamResolution(...input.getWindowResolution());
+				return [width, height];
 			};
 			// And the 10 bits it decodes, by format.
 			signaling.tenBitCapabilities = async () => {

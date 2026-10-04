@@ -110,7 +110,11 @@ SAMPLE_JS = """
   const oc = document.createElement('canvas'); oc.width = w; oc.height = h;
   const ctx = oc.getContext('2d'); ctx.drawImage(src, 0, 0, w, h);
   const d = ctx.getImageData(0, 0, w, h).data;
-  const px = (x, y) => { const i = (y * w + x) * 4; return [d[i], d[i + 1], d[i + 2]]; };
+  // A point past a picture still smaller than the page (a start or a resize) reads as no sample.
+  const px = (x, y) => {
+    if (x >= w || y >= h) return null;
+    const i = (y * w + x) * 4; return [d[i], d[i + 1], d[i + 2]];
+  };
   return {kind, w, h, inside: px(ix, iy), outside: px(ox, oy), saturated: px(sx, sy)};
 }
 """

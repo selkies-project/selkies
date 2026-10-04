@@ -1362,6 +1362,15 @@ class _XTestKeyboard:
     # its previous symbol -- NoSymbol on a spare, which drops the key outright.
     # A Chrome whose main thread is starved of its core needs ~25 ms.
     _BIND_SETTLE_S = 0.025
+    # Spares taken first, as on Wayland. Chromium reads an X keycode as the evdev
+    # key it numbers, whatever key the server's own keycodes put there, and runs
+    # the arrows, Delete, Copy or Undo it names as commands. On evdev keycodes a
+    # spare is a key the layout leaves out, so the whole pool serves; on others
+    # (an Xorg on xfree86 keycodes leaves those numbers unbound) the text spares
+    # are recycled before any other is taken.
+    _TEXT_SPARES = _WaylandKeymapOwner._TEXT_SPARES
+    # XK_Left at evdev's keycode for it, which tells the server's keycodes apart.
+    _EVDEV_LEFT = (0xFF51, 113)
     # A group lock outlives the last key that needed it by this long: one switch
     # per run of keystrokes, and the desktop's layout indicator stays put.
     _GROUP_LINGER_S = 0.5
@@ -1379,6 +1388,7 @@ class _XTestKeyboard:
         self._synth_mods = {}
         self._spare_keycodes = None
         self._spare_set = frozenset()
+        self._text_codes = 0
         self._overlay = {}
         self._overlay_value_kc = {}
         self._settle_until = 0.0
@@ -1397,7 +1407,9 @@ class _XTestKeyboard:
         never spare: pressing one would toggle its modifier under the typed
         char. The full range is scanned (not a fixed cap): more slots make
         recycling — the only case where a slow app can mistranslate a rebound
-        keycode — rare.
+        keycode — rare. The text spares (`_TEXT_SPARES`) lead the pool, and on
+        keycodes other than evdev's they are all a bind recycles before it takes
+        another (`_text_codes`).
         """
         info = self._d.display.info
         lo, hi = info.min_keycode, info.max_keycode
@@ -1421,7 +1433,10 @@ class _XTestKeyboard:
                     # An overlay bind, this handler's or a previous one's.
                     spares.append(kc)
         self._spare_set = frozenset(spares)
-        return spares
+        text = [kc for kc in self._TEXT_SPARES if kc in self._spare_set]
+        keysym, evdev_kc = self._EVDEV_LEFT
+        self._text_codes = 0 if self._d.keysym_to_keycode(keysym) == evdev_kc else len(text)
+        return text + [kc for kc in spares if kc not in text]
 
     def _free_spares(self) -> list:
         """Spare keycodes not currently bound, in pool order."""
@@ -1467,29 +1482,51 @@ class _XTestKeyboard:
         except Exception:
             pass
 
-    def _recycle_index(self) -> int:
+    def _recycle_index(self, keep: Iterable[int] = ()) -> int:
         """Index into _overlay_order of the oldest binding whose keycode is
         not physically down: rebound while held, a keycode's eventual release
-        would be read under the new symbol and leave the old one stuck."""
+        would be read under the new symbol and leave the old one stuck. The
+        bindings of `keep`, keysyms about to be typed, are passed over too."""
         held = set(self._pressed_kc.values())
+        held.update(self._overlay[k] for k in keep if k in self._overlay)
         for i, ks in enumerate(self._overlay_order):
             if self._overlay[ks] not in held:
                 return i
         return 0
 
-    def _alloc_overlay_keycode(self, keysym: int) -> int:
+    def text_room(self) -> int:
+        """How many text spares are not physically down: how many keysyms a run
+        can bind on them at once; 0 where binds are not kept to them."""
+        if self._spare_keycodes is None:
+            self._spare_keycodes = self._find_spare_keycodes()
+        held = set(self._pressed_kc.values())
+        return sum(kc not in held for kc in self._spare_keycodes[:self._text_codes])
+
+    def _alloc_overlay_keycode(self, keysym: int, keep: Iterable[int] = ()) -> int:
         """Reserve a spare keycode for keysym and record the binding.
 
-        Recycles the oldest binding when the pool is full. The mapping request
-        itself is the caller's (single vs batched).
+        A free text spare comes first. Once every text spare is bound, the
+        oldest bind on one that is not down, nor one of `keep`, is recycled
+        before any other keycode is taken; then a free spare, then the oldest
+        binding anywhere. The mapping request itself is the caller's (single
+        vs batched).
         """
         free = self._free_spares()
-        if free:
+        text = self._spare_keycodes[:self._text_codes]
+        held = set(self._pressed_kc.values())
+        held.update(self._overlay[k] for k in keep if k in self._overlay)
+        victim = None
+        if not (free and (free[0] in text or not text)):
+            victim = next((ks for ks in self._overlay_order
+                           if self._overlay[ks] in text and self._overlay[ks] not in held), None)
+            if victim is None and not free:
+                victim = self._overlay_order[self._recycle_index(keep)]
+        if victim is None:
             kc = free[0]
         else:
-            oldest = self._overlay_order.pop(self._recycle_index())
-            kc = self._overlay.pop(oldest)
-            self._overlay_value_kc.pop(overlay_bind_keysym(oldest), None)
+            self._overlay_order.remove(victim)
+            kc = self._overlay.pop(victim)
+            self._overlay_value_kc.pop(overlay_bind_keysym(victim), None)
         self._overlay[keysym] = kc
         self._overlay_value_kc[overlay_bind_keysym(keysym)] = kc
         self._overlay_order.append(keysym)
@@ -1526,8 +1563,9 @@ class _XTestKeyboard:
 
         One ChangeKeyboardMapping per contiguous spare-keycode run, one sync —
         so a CJK composition commit broadcasts O(1) MappingNotify events
-        instead of one per new char; the longest free runs are taken first to
-        keep that count down.
+        instead of one per new char. The keycodes come as a single bind takes
+        them (`_alloc_overlay_keycode`), the text spares first, and never one a
+        keysym of the batch is bound to.
 
         Returns:
             False (nothing bound) when more new keysyms than slots exist, since
@@ -1536,42 +1574,15 @@ class _XTestKeyboard:
             typing. True otherwise.
         """
         d = self._d
-        missing = []
-        for ks in dict.fromkeys(keysyms):
-            if ks not in self._overlay and not self._layout_keycode(ks):
-                missing.append(ks)
+        batch = list(dict.fromkeys(keysyms))
+        missing = [ks for ks in batch if ks not in self._overlay and not self._layout_keycode(ks)]
         if not missing:
             return True
         if self._spare_keycodes is None:
             self._spare_keycodes = self._find_spare_keycodes()
         if len(missing) > len(self._spare_keycodes):
             return False
-        free = self._free_spares()
-        runs = []
-        i = 0
-        while i < len(free):
-            j = i
-            while j + 1 < len(free) and free[j + 1] == free[j] + 1:
-                j += 1
-            runs.append(free[i:j + 1])
-            i = j + 1
-        runs.sort(key=len, reverse=True)
-        picked = []
-        for run in runs:
-            if len(picked) >= len(missing):
-                break
-            picked.extend(run[:len(missing) - len(picked)])
-        while len(picked) < len(missing):
-            oldest = self._overlay_order.pop(self._recycle_index())
-            picked.append(self._overlay.pop(oldest))
-            self._overlay_value_kc.pop(overlay_bind_keysym(oldest), None)
-        assigns = []
-        for ks, kc in zip(missing, picked):
-            self._overlay[ks] = kc
-            self._overlay_value_kc[overlay_bind_keysym(ks)] = kc
-            self._overlay_order.append(ks)
-            assigns.append((kc, ks))
-        assigns.sort()
+        assigns = sorted((self._alloc_overlay_keycode(ks, keep=batch), ks) for ks in missing)
         i = 0
         while i < len(assigns):
             j = i
@@ -5896,7 +5907,10 @@ class WebRTCInput:
         on every letter. With neutralize, conflicting held Shift/AltGr are
         lifted around the whole run (one keymap query, not one per char).
         Unmapped chars are bound in one batch (O(1) MappingNotify broadcasts
-        instead of one per char), and nothing is typed on failure.
+        instead of one per char), and nothing is typed on failure. Where binds
+        are kept to the text spares (`text_room`), a text with more of them
+        than those hold goes out in runs that fit them, each bound behind the
+        keys before it.
 
         Returns:
             True on full success; False (having typed nothing) if the shim is
@@ -5906,16 +5920,26 @@ class WebRTCInput:
         if not self.keyboard or not text:
             return False
         # Pre-resolve every char so a mid-string failure types no partial line.
-        keysyms = []
+        keysyms, overlaid = [], set()
         for ch in text:
             ks = character_to_layout_keysym(ch)
             if not self.keyboard.layout_carries(ks):
                 ks = universal_text_keysym(ch)
                 if ks is None:
                     continue
+                overlaid.add(ks)
             keysyms.append(ks)
         try:
-            if not self.keyboard.prebind(keysyms):
+            room = self.keyboard.text_room()
+            runs, missing = [[]], set()
+            for ks in keysyms:
+                if room and ks in overlaid and ks not in missing:
+                    if len(missing) >= room:
+                        runs.append([])
+                        missing = set()
+                    missing.add(ks)
+                runs[-1].append(ks)
+            if not self.keyboard.prebind(runs[0]):
                 return False
             settle = self.keyboard.settle_delay()
             if settle > 0:
@@ -5928,9 +5952,15 @@ class WebRTCInput:
             for m in lifted:
                 xtest.fake_input(self.keyboard._d, Xlib.X.KeyRelease, m)
             try:
-                for ks in keysyms:
-                    self.keyboard.press(ks)
-                    self.keyboard.release(ks)
+                for i, run in enumerate(runs):
+                    # A later run that cannot bind as a batch binds key by key.
+                    if i and self.keyboard.prebind(run):
+                        settle = self.keyboard.settle_delay()
+                        if settle > 0:
+                            await asyncio.sleep(settle)
+                    for ks in run:
+                        self.keyboard.press(ks)
+                        self.keyboard.release(ks)
             finally:
                 for m in reversed(lifted):
                     xtest.fake_input(self.keyboard._d, Xlib.X.KeyPress, m)

@@ -37,7 +37,7 @@ import os
 import shutil
 import subprocess
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 import psutil
 
@@ -297,10 +297,16 @@ def _drm_client_paths(root: Optional[str] = None) -> Dict[str, str]:
 def _drm_engine_busy(clients: Dict[str, str]) -> Dict[Tuple[str, str], float]:
     """Nanoseconds each device's engines have run, summed over its clients.
 
+    A client is a `drm-client-id` on a device, not a descriptor: every
+    duplicate of a descriptor, in the same process or one it was passed to,
+    reports the same client's totals, so each id is counted once. A descriptor
+    whose driver writes no id is a client of its own.
+
     Clients that have exited are dropped from `clients` as they are found, so
     the list never outgrows what is open.
     """
     busy: Dict[Tuple[str, str], float] = {}
+    counted: Set[Tuple[str, str]] = set()
     for path, device in list(clients.items()):
         try:
             with open(path, "r") as f:
@@ -310,8 +316,12 @@ def _drm_engine_busy(clients: Dict[str, str]) -> Dict[Tuple[str, str], float]:
             continue
         engines: Dict[str, float] = {}
         capacity: Dict[str, float] = {}
+        client = path
         for line in lines:
             key, _, value = line.partition(":")
+            if key == "drm-client-id":
+                client = value.strip()
+                continue
             if key.startswith("drm-engine-capacity-"):
                 name, into = key.removeprefix("drm-engine-capacity-"), capacity
             elif key.startswith("drm-engine-"):
@@ -322,6 +332,9 @@ def _drm_engine_busy(clients: Dict[str, str]) -> Dict[Tuple[str, str], float]:
                 into[name] = float(value.split()[0])
             except (IndexError, ValueError):
                 continue
+        if (device, client) in counted:
+            continue
+        counted.add((device, client))
         for engine, ns in engines.items():
             slot = (device, engine)
             busy[slot] = busy.get(slot, 0.0) + ns / max(1.0, capacity.get(engine, 1.0))

@@ -18,7 +18,8 @@ Wire protocol (text frames, space-separated): a peer opens with
 `display_position`, `fullcolor_codecs`: the codec names the client decodes at
 4:4:4, `tenbit_codecs`: the formats it decodes at 10 bits, a codec name for 4:2:0
 and the name with `444` after it for 4:4:4, `client_tab_id`, `cc_start_kbps`: the rate congestion control last held
-the page's display at) and is answered `HELLO`. `SESSION <peer-id|server>` pairs
+the page's display at, `page_size`: the `[width, height]` its first resize will ask for) and is answered `HELLO`.
+A server that does not know a key ignores it. `SESSION <peer-id|server>` pairs
 the caller with the callee: the caller gets `SESSION_OK <callee-id>`, the callee
 `SESSION_START <caller-id> <client_type> <display_id> <display_position>
 [<client_token>] [fullcolor=<codec,...>] [tenbit=<format,...>]`, and a disconnect sends the partner `SESSION_END <peer-id>
@@ -59,6 +60,18 @@ from .stream_server import note_pong
 
 logger = logging.getLogger("signaling")
 
+# The largest side a hello's `page_size` may name; the page caps its requests at 4080.
+MAX_PAGE_SIZE = 8192
+
+
+def hello_page_size(value: Any) -> Optional[Tuple[int, int]]:
+    """A hello's `page_size` as (width, height), or None for anything but two
+    whole numbers from 1 to `MAX_PAGE_SIZE`."""
+    if (isinstance(value, list) and len(value) == 2
+            and all(type(v) is int and 0 < v <= MAX_PAGE_SIZE for v in value)):
+        return value[0], value[1]
+    return None
+
 
 @dataclass
 class Peer:
@@ -87,6 +100,9 @@ class Peer:
             beside it; None for a page that names none.
         cc_start_kbps: The rate congestion control last held this page's
             display at, as the page kept it (`RateHold`); None for none.
+        page_size: The width and height the page's first resize will ask
+            for, which a primary's capture can start at; None for a page that
+            names none, as one before it did not.
     """
 
     uid: str
@@ -104,6 +120,7 @@ class Peer:
     tenbit_codecs: Optional[List[str]] = None
     tab_id: Optional[str] = None
     cc_start_kbps: Any = None
+    page_size: Optional[Tuple[int, int]] = None
 
 
 class WebRTCPeerManagement:
@@ -755,6 +772,7 @@ class WebRTCPeerManagement:
         display_position = "right"
         fullcolor_codecs = None
         tenbit_codecs = None
+        page_size = None
         dead_peer_notifications: List[Callable[[], Awaitable[Any]]] = []
 
         def evict_peer_locked(
@@ -799,6 +817,7 @@ class WebRTCPeerManagement:
                         codecs = json_metadata.get("tenbit_codecs")
                         if isinstance(codecs, list):
                             tenbit_codecs = [str(c) for c in codecs if isinstance(c, str) and c.isalnum()]
+                        page_size = hello_page_size(json_metadata.get("page_size"))
                     except json.JSONDecodeError as e:
                         await ws.close(code=1002, message=b"invalid protocol")
                         raise Exception("Invalid JSON metadata from {!r}".format(raddr)) from e
@@ -1019,6 +1038,7 @@ class WebRTCPeerManagement:
                     tenbit_codecs=tenbit_codecs,
                     tab_id=client_tab_id,
                     cc_start_kbps=cc_start_kbps,
+                    page_size=page_size,
                 )
                 result = (puid, peer_type, client_type, client_slot, client_strict_viewer)
         finally:

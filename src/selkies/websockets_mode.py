@@ -3230,6 +3230,7 @@ class DataStreamingServer(BaseStreamingService):
                 f"{delivered_bps / 1000:.0f} kbps delivered)")
             try:
                 module.update_video_bitrate(rate)
+                self._track_capture_settings(display_id, video_bitrate_kbps=rate)
             except Exception as e:
                 data_logger.warning(f"Congestion control could not retarget '{display_id}' ({e}).")
 

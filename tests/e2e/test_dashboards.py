@@ -1595,11 +1595,12 @@ def page_socket_block(dashboard: str, dist: str, engine: str) -> "H.Results":
 # The languages the dashboards ship, by the locale a browser would ask for.
 LOCALES = ["en-US", "es-ES", "zh-CN", "hi-IN", "pt-BR", "fr-FR", "ru-RU", "de-DE", "tr-TR", "it-IT",
            "nl-NL", "ar-SA", "ko-KR", "ja-JP", "vi-VN", "th-TH", "fil-PH", "da-DK", "zh-TW"]
-# What of the open sidebar reaches past its right edge, or is cut off inside a box.
+# What of the open sidebar reaches past its content's right edge, or is cut off inside a box: the
+# padding hid the key palette's last column, which a wider font then pushed out of the sidebar.
 SPILL = """() => {
   const bar = document.querySelector('.sidebar.is-open');
   if (!bar) return null;
-  const edge = bar.getBoundingClientRect().right;
+  const edge = bar.getBoundingClientRect().right - parseFloat(getComputedStyle(bar).paddingRight);
   const out = bar.scrollWidth > bar.clientWidth + 1 ? ['sidebar scrolls sideways'] : [];
   for (const el of bar.querySelectorAll('*')) {
     const r = el.getBoundingClientRect();
@@ -1610,26 +1611,34 @@ SPILL = """() => {
   return out.slice(0, 5);
 }"""
 PHONE = {"width": 320, "height": 568}
+# The sidebar in DejaVu Sans, the default sans of CI's Ubuntu runners and wider than most desktop
+# fonts, so a host whose own font is narrower sees what a wider one spills.
+WIDE_FONT = ".sidebar, .sidebar * { font-family: 'DejaVu Sans', sans-serif !important; }"
 
 
 def layout_block() -> "H.Results":
     """The classic sidebar, every section open and on a touch screen the key
     palette too, keeps its contents inside it in every language the dashboards
-    ship, on a desktop window and a 320-pixel phone; the wish dashboard's top
-    bar and soft keys fit that phone."""
+    ship, on a desktop window, a touch laptop's (the 280-pixel sidebar with the
+    palette open) and a 320-pixel phone; the wish dashboard's top bar and soft
+    keys fit that phone."""
     res = H.Results("dash-layout")
     H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST)
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
-            for form, viewport, touch in (("desktop", {"width": 1280, "height": 900}, False), ("phone", PHONE, True)):
+            for form, viewport, touch in (("desktop", {"width": 1280, "height": 900}, False),
+                                          ("touch laptop", {"width": 1280, "height": 900}, True),
+                                          ("phone", PHONE, True)):
                 spilled = {}
                 for locale in LOCALES:
-                    ctx = browser.new_context(viewport=viewport, locale=locale, has_touch=touch, is_mobile=touch)
+                    ctx = browser.new_context(viewport=viewport, locale=locale, has_touch=touch,
+                                              is_mobile=touch and viewport is PHONE)
                     ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
                     page = ctx.new_page()
                     page.goto(H.BASE_URL, wait_until="load")
                     wait_chunk(page, 40)
+                    page.add_style_tag(content=WIDE_FONT)
                     if not page.evaluate("!!document.querySelector('.sidebar.is-open')"):
                         page.locator('.toggle-handle').first.click(force=True)
                         time.sleep(0.8)

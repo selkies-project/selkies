@@ -536,6 +536,7 @@ class WebRTCService(BaseStreamingService):
                 self._seed_display_settings(entry)
             if display_id == "primary" and client_type == "controller":
                 self._primary_sized.clear()
+                await self._apply_hello_size(getattr(peer, "page_size", None) if peer else None)
             await self.rtc_app.start_rtc_connection(
                 session_peer_id, client_type, client_token, display_id, client_slot,
                 fullcolor_codecs=fullcolor_codecs, tenbit_codecs=tenbit_codecs)
@@ -1258,6 +1259,18 @@ class WebRTCService(BaseStreamingService):
                 self.rtc_app.send_media_data_over_channel(
                     "server_settings", self._server_settings_payload()
                 )
+
+    async def _apply_hello_size(self, size: Optional[Tuple[int, int]]) -> None:
+        """Resize the primary to the size its controller's hello named, which
+        the page's first resize will ask for again, so its capture starts at
+        once (`_await_primary_size`) rather than once the data channel opens,
+        25-50 ms later. Only on X11, alone, and before a capture runs: a
+        Wayland page's density depends on the display config it is sent later,
+        and a page whose hello names no size waits as before."""
+        if (size is None or IS_WAYLAND or self.display_clients or not self.media_pipeline
+                or self.media_pipeline.is_screen_capturing()):
+            return
+        await self.on_resize_handler(f"{size[0]}x{size[1]}")
 
     async def _await_primary_size(self) -> bool:
         """Hold a first capture of the primary until its controller's page has
@@ -2176,8 +2189,8 @@ class WebRTCService(BaseStreamingService):
                 # The native-cursor toggle is global across displays.
                 pipeline.capture_cursor = self.media_pipeline.capture_cursor
                 pipeline.produce_data = (
-                    lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, _did=did:
-                        self.rtc_app.consume_data(buf, pts, kind, keyframe, _did, timing, dependency)
+                    lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None, _did=did:
+                        self.rtc_app.consume_data(buf, pts, kind, keyframe, _did, timing, dependency, codec)
                 )
                 # pixelflux's cursor-callback slot is process-global (last registration
                 # wins), so every display must route cursors into the same sink.

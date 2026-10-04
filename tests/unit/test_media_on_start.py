@@ -402,6 +402,38 @@ async def size_block(res: H.Results) -> None:
     res.check("size: so do the settings of a page that keeps the server's size", started(svc),
               svc.media_pipeline.calls)
 
+    asked = []
+
+    async def recorded(res_: str) -> None:
+        asked.append(res_)
+
+    svc = sized_service({"c1": controller()})
+    svc._resize_primary_display = recorded
+    await svc._apply_hello_size((1280, 720))
+    try:
+        await asyncio.wait_for(svc.start_display_media("primary"), 0.2)
+        at_once = True
+    except asyncio.TimeoutError:
+        at_once = False
+    res.check("size: the size a page's hello names starts its capture at once, at that size",
+              at_once and started(svc) and asked == ["1280x720"], (asked, svc.media_pipeline.calls))
+
+    for what, size, wayland in (("a hello that names no size", None, False),
+                                ("a hello's size on Wayland", (1280, 720), True)):
+        svc = sized_service({"c1": controller()})
+        svc._resize_primary_display = recorded
+        asked.clear()
+        was, webrtc_mode.IS_WAYLAND = webrtc_mode.IS_WAYLAND, wayland
+        try:
+            await svc._apply_hello_size(size)
+        finally:
+            webrtc_mode.IS_WAYLAND = was
+        start = asyncio.ensure_future(svc.start_display_media("primary"))
+        await asyncio.sleep(0.1)
+        res.check(f"size: after {what} the capture still waits for the page", not started(svc) and not asked,
+                  (asked, svc.media_pipeline.calls))
+        start.cancel()
+
     wait = webrtc_mode.PRIMARY_SIZE_WAIT_S
     webrtc_mode.PRIMARY_SIZE_WAIT_S = 0.3
     try:
