@@ -1767,7 +1767,7 @@ export class Input {
         return Math.abs(x - window.screenX) < 1 && Math.abs(y - window.screenY) < 1;
     }
 
-    /** Paints the server cursor bitmap onto the cursor canvas at the current device pixel ratio and rebases the hotspot. */
+    /** Paints the server cursor at the displayed stream scale and rebases its hotspot into CSS pixels. */
     _drawAndScaleCursor() {
         if (!this._cursorImageBitmap) {
             return;
@@ -1825,8 +1825,8 @@ export class Input {
 
     /**
      * Applies the server cursor as a CSS cursor. The PNG is in remote device
-     * pixels but CSS cursors render one image pixel per CSS pixel, so above a
-     * device pixel ratio of 1 the density is declared through `image-set()`
+     * pixels but CSS cursors render one image pixel per CSS pixel, so the
+     * displayed stream density is declared through `image-set()`
      * and the hotspot rebased into CSS pixels, mirroring `_drawAndScaleCursor`;
      * a plain `url()` with the raw hotspot is the fallback where `image-set()`
      * is unsupported.
@@ -1861,8 +1861,10 @@ export class Input {
 
     /**
      * Applies a cursor update from the server; an empty or null-handle update
-     * hides the cursor. Trackpad mode always paints the canvas, at the pointer
-     * echo, since no local pointer shows where the remote one is.
+     * hides the cursor. A new PNG invalidates the cached canvas bitmap even
+     * while CSS renders it, so changing modes retains the current shape and
+     * size. Trackpad mode always paints the canvas, at the pointer echo,
+     * since no local pointer shows where the remote one is.
      * @param {{curdata?: string, handle: string|number, hotx?: string|number, hoty?: string|number}} cursorData
      *     Base64 PNG and hotspot as the server sends them.
      */
@@ -1881,6 +1883,7 @@ export class Input {
         this._rawHotspotX = parseInt(cursorData.hotx) || 0;
         this._rawHotspotY = parseInt(cursorData.hoty) || 0;
         this._cursorBase64Data = cursorData.curdata;
+        this._cursorImageBitmap = null;
         if (!this.inputAttached) {
             this.cursorDiv.style.display = 'none';
             this.element.style.cursor = 'auto';
@@ -1912,7 +1915,7 @@ export class Input {
             console.log(`Input: Updating useCssScaling from ${this.useCssScaling} to ${newUseCssScalingValue}`);
             this.useCssScaling = newUseCssScalingValue;
             this._windowMath();
-            this._drawAndScaleCursor();
+            this._refreshCursorScale();
         }
     }
 
@@ -3316,13 +3319,15 @@ export class Input {
      * box; a canvas reports its buffer.
      * @param {HTMLCanvasElement|null} canvas
      * @param {HTMLVideoElement|null} videoEle
+     * @param {boolean} measureCursor Measure even automatic resolution; wait for decoded video dimensions.
      * @returns {{boxLeft: number, boxTop: number, boxW: number, boxH: number, sinkW: number, sinkH: number}|null}
      */
-    _sinkBox(canvas, videoEle) {
-        const sink = ((window.manual_resolution || this.isSharedMode || window.streamResolutionDiverged) && canvas)
+    _sinkBox(canvas, videoEle, measureCursor = false) {
+        const sink = ((measureCursor || window.manual_resolution || this.isSharedMode || window.streamResolutionDiverged) && canvas)
             ? canvas
-            : ((window.manualResolution || window.streamResolutionDiverged) && videoEle) ? videoEle : null;
-        if (!sink) {
+            : ((measureCursor || window.manualResolution || window.streamResolutionDiverged) && videoEle) ? videoEle : null;
+        if (!sink || (measureCursor && sink.tagName === 'VIDEO' &&
+            !(sink.videoWidth > 0 && sink.videoHeight > 0))) {
             return null;
         }
         let rect = sink.getBoundingClientRect();
@@ -3686,21 +3691,69 @@ export class Input {
         if (window.manual_resolution || window.manualResolution || this.isSharedMode) {
             return 1;
         }
-        return this._cursorDensity();
+        return this._streamDensity || (this.useCssScaling ? 1 : (window.devicePixelRatio || 1));
     }
 
     /**
-     * Stream pixels per CSS pixel the page draws at: the density the core
-     * set (a secondary streams at the primary's), else the page's own, 1
-     * under CSS scaling. The cursor image arrives in stream pixels and is
-     * shown at that many per CSS pixel.
+     * Stream pixels per CSS pixel in the fitted content box. The requested
+     * density is only a fallback before a sink can be measured: a manual
+     * resolution, a capped stream, or a shared viewer can draw at a different
+     * scale. Cursor pixels and hotspots use that scale; input keeps its own
+     * mapping so this measurement never adds layout work to pointer motion.
      * @returns {number}
      */
     _cursorDensity() {
+        const box = this._sinkBox(document.getElementById('videoCanvas'),
+                                  document.getElementById('stream'), true);
+        if (box) return Math.max(box.sinkW / box.boxW, box.sinkH / box.boxH);
         if (this._streamDensity) {
             return this._streamDensity;
         }
         return this.useCssScaling ? 1 : (window.devicePixelRatio || 1);
+    }
+
+    /** Redraws a cached cursor only when its displayed scale changes. */
+    _refreshCursorScale() {
+        const density = this._cursorDensity();
+        if (density === this._lastCursorDensity) return;
+        this._lastCursorDensity = density;
+        if (!this.inputAttached) return;
+        if (this.use_browser_cursors && !this._trackpadMode) {
+            this._updateBrowserCursor();
+        } else {
+            this._drawAndScaleCursor();
+        }
+    }
+
+    /**
+     * Follows CSS geometry and decoded dimensions even with a stationary
+     * pointer. A canvas buffer can resize without changing its CSS box, and
+     * a video can receive its first frame after its box is already laid out.
+     * Both transports keep their canonical sinks for the input lifetime;
+     * WebSocket mirrors share the canonical canvas style and buffer size.
+     */
+    _watchCursorScale() {
+        if (typeof ResizeObserver !== 'undefined') {
+            this._cursorResizeObserver = new ResizeObserver(() => this._refreshCursorScale());
+            this._cursorResizeObserver.observe(this.element);
+        }
+        if (typeof MutationObserver !== 'undefined') {
+            this._cursorMutationObserver = new MutationObserver(() => this._refreshCursorScale());
+        }
+        this.listeners.push(addListener(window, 'resize', this._refreshCursorScale, this));
+        for (const id of ['stream', 'videoCanvas']) {
+            const sink = document.getElementById(id);
+            if (!sink) continue;
+            if (this._cursorResizeObserver) this._cursorResizeObserver.observe(sink);
+            if (this._cursorMutationObserver) {
+                this._cursorMutationObserver.observe(sink, {
+                    attributes: true, attributeFilter: ['width', 'height', 'style'],
+                });
+            }
+            this.listeners.push(addListener(sink, 'resize', this._refreshCursorScale, this));
+            this.listeners.push(addListener(sink, 'loadedmetadata', this._refreshCursorScale, this));
+        }
+        this._refreshCursorScale();
     }
 
     /**
@@ -3713,8 +3766,7 @@ export class Input {
         if (this._streamDensity === value) return;
         this._streamDensity = value;
         this._windowMath();
-        this._drawAndScaleCursor();
-        this._updateBrowserCursor();
+        this._refreshCursorScale();
     }
 
     /**
@@ -5071,6 +5123,7 @@ export class Input {
             try { Input._attachedInstance.detach(); } catch (e) { /* already torn down */ }
         }
         Input._attachedInstance = this;
+        this._watchCursorScale();
         this._focusCompositionHost();
         this.listeners.push(addListener(this.element, 'resize', this._windowMath, this));
         this.listeners.push(addListener(document, 'pointerlockchange', this._pointerLock, this));
@@ -5201,6 +5254,9 @@ export class Input {
         if (Input._attachedInstance === this) {
             Input._attachedInstance = null;
         }
+        if (this._cursorResizeObserver) this._cursorResizeObserver.disconnect();
+        if (this._cursorMutationObserver) this._cursorMutationObserver.disconnect();
+        this._lastCursorDensity = null;
         removeListeners(this.listeners);
         this.listeners = [];
         if (this.gamepadManager) {
