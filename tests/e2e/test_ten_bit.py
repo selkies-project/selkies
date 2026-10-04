@@ -9,7 +9,9 @@ decoding a 10-bit key frame before it asks the server for anything, and this
 suite holds it to the outcome rather than to its own answer: with the setting
 stored on before the page loads, the picture painted on the server has to decode
 in the page, at 10 bits where the client kept the setting and the host encodes
-them, at 8 bits on the same codec everywhere else.
+them, at 8 bits on the same codec everywhere else. Chromium's WebRTC AV1 is one
+such: libwebrtc's dav1d wrapper drops every picture deeper than 8 bits, where
+WebCodecs decodes them, and a stream that opened at 10 bits never showed one.
 
 The host's encoders decide how much a run covers: a codec the encode node
 carries no 10 bits for runs on the build's software encoder where that codes

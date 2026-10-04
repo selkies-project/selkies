@@ -1229,11 +1229,15 @@ export default function webrtc() {
 	 * profile 2, or 3 at 4:4:4, H.265 Main 10, and H.264 High 10), the decode of
 	 * a 10-bit key frame for AV1, whose main profile carries both depths, and
 	 * for H.264 and H.265 4:4:4, which full color is answered the same way for.
+	 * Chromium decodes WebRTC AV1 in libwebrtc's dav1d wrapper, which drops every
+	 * picture deeper than 8 bits ("unhandled bit depth") whatever WebCodecs
+	 * decodes, so a stream opening at 10 bits never showed a frame there.
 	 * @param {string} codec A codec name.
 	 * @param {boolean} fullcolor Whether the stream is 4:4:4.
 	 * @returns {Promise<boolean>}
 	 */
 	async function tenBitDecodable(codec, fullcolor) {
+		if (codec === 'av1' && isChromium) return false;
 		if (codec === 'vp9') return receiverTakesProfile('vp9', fullcolor ? 3 : 2);
 		if (codec === 'h265' && !fullcolor) return receiverTakesProfile('h265', 2);
 		if (codec === 'h264' && !fullcolor) {
