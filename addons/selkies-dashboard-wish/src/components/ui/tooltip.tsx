@@ -1,7 +1,14 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
 "use client"
 
 import { Tooltip as TooltipPrimitive } from "@base-ui/react/tooltip"
-import { cn } from "cn"
+
+import { cn } from "@/lib/utils"
 
 function TooltipProvider({
   delay = 0,
@@ -44,7 +51,7 @@ function TooltipContent({
         alignOffset={alignOffset}
         side={side}
         sideOffset={sideOffset}
-        className="isolate z-[9999]"
+        className="isolate z-50"
       >
         <TooltipPrimitive.Popup
           data-slot="tooltip-content"
