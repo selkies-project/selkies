@@ -4,7 +4,8 @@
 The signaling relay appends `fullcolor=<codec,...>` and `tenbit=<format,...>` after the
 optional client token; the server's signaling client reads them into `fullcolor_codecs`
 and `tenbit_codecs`, keeps the token apart from both, and leaves a field `None` for a
-client that said nothing of it, in every line length the protocol allows.
+client that said nothing of it, in every line length the protocol allows. The page
+size a hello names is two whole numbers or nothing.
 """
 import asyncio
 import os
@@ -62,9 +63,19 @@ def test_silence_is_none() -> None:
     assert legacy["fullcolor_codecs"] is None and legacy["display_id"] == "primary"
 
 
+def test_page_size() -> None:
+    from selkies.webrtc_signaling_server import hello_page_size
+    assert hello_page_size([1280, 720]) == (1280, 720)
+    for bad in (None, [1280], [1280, 720, 1], [0, 720], [1280, 9000], [1280.0, 720], ["1280", "720"],
+                [True, 720], "1280x720"):
+        assert hello_page_size(bad) is None, bad
+
+
 if __name__ == "__main__":
     test_capability_beside_the_token()
     test_capability_without_a_token()
     test_ten_bit_beside_full_color()
     test_silence_is_none()
+    test_page_size()
     print("ok")
+

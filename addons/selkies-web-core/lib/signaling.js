@@ -91,6 +91,13 @@ export class WebRTCSignaling {
          * @type {?function(): Promise<string[]>}
          */
         this.tenBitCapabilities = null;
+        /**
+         * Returns the [width, height] the page's first resize will ask for,
+         * which the server starts the primary's capture at, or null where the
+         * page sends none; unset, the hello says nothing.
+         * @type {?function(): ?number[]}
+         */
+        this.pageSize = null;
 
         /** Local peer id, set by the WebRTC client before `connect`. @type {number} */
         this.peer_id = 1;
@@ -244,6 +251,12 @@ export class WebRTCSignaling {
         }
         if (this.tenBitCapabilities) {
             try { meta.tenbit_codecs = await this.tenBitCapabilities(); } catch (e) { /* the server takes silence as decodable */ }
+        }
+        if (this.pageSize) {
+            try {
+                const size = this.pageSize();
+                if (size) meta.page_size = size;
+            } catch (e) { /* the server then waits for the first resize */ }
         }
         if (!this._ws_conn || this._ws_conn.readyState !== WebSocket.OPEN) return;
         this._ws_conn.send(`HELLO ${this.peer_type} ${JSON.stringify(meta)}`);

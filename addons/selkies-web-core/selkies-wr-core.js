@@ -1604,6 +1604,18 @@ export default function webrtc() {
 	}
 
 	/**
+	 * The stream resolution `sendResolutionToServer` asks for `width` x `height`,
+	 * with the density it multiplied them by.
+	 * @param {number} width
+	 * @param {number} height
+	 * @returns {number[]} The width, the height, and the density.
+	 */
+	function streamResolution(width, height) {
+		const dpr = window.manualResolution ? 1 : streamDensity();
+		return [Math.min(alignResolution(width * dpr), 4080), Math.min(alignResolution(height * dpr), 4080), dpr];
+	}
+
+	/**
 	 * Requests a stream resolution with the `r,WxH` message.
 	 *
 	 * A manual resolution is the exact framebuffer and is not multiplied by the
@@ -1619,24 +1631,15 @@ export default function webrtc() {
 			console.log("Skipping sending resolution in shared mode.");
 			return;
 		}
-		let realWidth, realHeight, dpr;
-		if (window.manualResolution) {
-			dpr = 1;
-			realWidth = alignResolution(width);
-			realHeight = alignResolution(height);
-		} else {
-			dpr = streamDensity();
+		const [realWidth, realHeight, dpr] = streamResolution(width, height);
+		if (!window.manualResolution) {
 			appliedStreamDensity = dpr;
-			realWidth = alignResolution(width * dpr);
 			// A request at a density the last SETTINGS did not report: the layout
 			// carries the reported scale to the other pages, so it is sent again.
 			if (reportedStreamDensity > 0 && Math.abs(dpr - reportedStreamDensity) > 1e-6) {
 				setTimeout(() => sendClientPersistedSettings(), 0);
 			}
-			realHeight = alignResolution(height * dpr);
 		}
-		if (realWidth > 4080) realWidth = 4080;
-		if (realHeight > 4080) realHeight = 4080;
 		const resString = `${realWidth}x${realHeight}`;
 		lastRequestedStreamRes = [realWidth, realHeight];
 		console.log(`Sending resolution to server: ${resString}, Pixel Ratio Used: ${dpr}, useCssScaling: ${useCssScaling}`);
@@ -3065,6 +3068,13 @@ export default function webrtc() {
 					if (await fullColorDecodable(codec)) codecs.push(codec);
 				}
 				return codecs;
+			};
+			// And the size its first resize will ask for, which a primary's capture starts at
+			// (`loadLastSessionSettings`); none where that resize is not sent.
+			signaling.pageSize = () => {
+				if (isSharedMode || window.manualResolution || storageDisplayId === 'display2' || !input) return null;
+				const [width, height] = streamResolution(...input.getWindowResolution());
+				return [width, height];
 			};
 			// And the 10 bits it decodes, by format.
 			signaling.tenBitCapabilities = async () => {
