@@ -92,18 +92,20 @@ export const annexbNals = (bytes) => {
 
 /**
  * A bit reader over an RBSP: `bytes` from `offset` with emulation prevention
- * bytes removed, `limit` bytes at most.
+ * bytes removed, `limit` bytes at most; `raw` reads them as they stand, for
+ * AV1, which has none.
  * @param {Uint8Array} bytes
  * @param {number} offset
  * @param {number} limit
+ * @param {boolean} [raw]
  * @returns {{u: (n: number) => number, skip: (n: number) => void}}
  */
-export const rbspReader = (bytes, offset, limit) => {
+export const rbspReader = (bytes, offset, limit, raw = false) => {
   const data = [];
   let zeros = 0;
   for (let i = offset; i < bytes.length && data.length < limit; i++) {
     const b = bytes[i];
-    if (zeros >= 2 && b === 3) { zeros = 0; continue; }
+    if (!raw && zeros >= 2 && b === 3) { zeros = 0; continue; }
     zeros = b === 0 ? zeros + 1 : 0;
     data.push(b);
   }
@@ -174,7 +176,8 @@ export const parseHevcCodecFromAnnexB = (bytes) => {
 /**
  * `av01.P.LLT.DD` from the sequence header of an AV1 temporal unit: the profile,
  * the first operating point's level and tier, and the bit depth its color
- * configuration declares.
+ * configuration declares. Every operating point is read past, and the header
+ * as it stands, since AV1 has no emulation prevention.
  * @param {Uint8Array} bytes
  * @returns {string|null} `null` when no sequence header is found.
  */
@@ -200,7 +203,7 @@ export const parseAv1CodecFromObus = (bytes) => {
       }
     }
     if (obuType === 1) {
-      const r = rbspReader(bytes, i, Math.min(size, 64));
+      const r = rbspReader(bytes, i, size, true);
       const profile = r.u(3);
       r.skip(1);
       const reduced = r.u(1);
@@ -226,12 +229,18 @@ export const parseAv1CodecFromObus = (bytes) => {
           }
         }
         const displayDelay = r.u(1);
-        r.skip(5);
-        r.skip(12);
-        level = r.u(5);
-        tier = level > 7 ? r.u(1) : 0;
-        if (decoderModel && r.u(1)) r.skip(bufferDelayBits * 2 + 1);
-        if (displayDelay && r.u(1)) r.skip(4);
+        const points = r.u(5) + 1;
+        for (let op = 0; op < points; op++) {
+          r.skip(12);
+          const opLevel = r.u(5);
+          const opTier = opLevel > 7 ? r.u(1) : 0;
+          if (op === 0) {
+            level = opLevel;
+            tier = opTier;
+          }
+          if (decoderModel && r.u(1)) r.skip(bufferDelayBits * 2 + 1);
+          if (displayDelay && r.u(1)) r.skip(4);
+        }
       }
       const widthBits = r.u(4) + 1;
       const heightBits = r.u(4) + 1;

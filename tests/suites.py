@@ -156,6 +156,7 @@ SUITES: list = [
     {"path": "unit/test_drm_gpu_stats.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_stream_stats.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_stream_stats_client.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_wire_codecs.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_connection_verdict.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_per_display_settings.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_client_setting_sanitizer.py", "tier": "unit", "timeout": 120},
