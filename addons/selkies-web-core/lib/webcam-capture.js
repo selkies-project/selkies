@@ -861,7 +861,7 @@ export class WebcamCapture {
       let source = null;
       let combined = false;
       if (this._encodeWorker) {
-        source = await this._tryCombinedWorker(track);
+        source = await this._tryCombinedWorker(track, generation);
         combined = !!source;
         if (this._generation !== generation) {
           if (source) source.close();
@@ -896,11 +896,13 @@ export class WebcamCapture {
    * read-and-encode; null when the engine cannot transfer tracks or the
    * worker lacks a MediaStreamTrackProcessor. A clone is transferred, so a
    * refusal (DataCloneError on Chromium) leaves the original for the
-   * page-read fallback.
+   * page-read fallback. A reply that comes after a later capture began leaves
+   * that capture's state alone, and its handle closes only its own worker.
    * @param {MediaStreamTrack} track
+   * @param {number} generation Capture generation the worker serves.
    * @returns {Promise<?{close: function(): void}>}
    */
-  _tryCombinedWorker(track) {
+  _tryCombinedWorker(track, generation) {
     const worker = this._encodeWorker;
     if (!worker) return Promise.resolve(null);
     let clone;
@@ -921,11 +923,13 @@ export class WebcamCapture {
       const onMessage = (e) => {
         const m = e.data;
         if (m.type === "track_reading") {
-          this._workerIsSource = true;
-          this._deriveOrientation = canDeriveOrientation();
-          this._watchOrientation();
-          this._logPath("capture+encode: camera read and encoded in a worker");
-          finish({ close: () => this._stopEncodeWorker() });
+          if (this._generation === generation) {
+            this._workerIsSource = true;
+            this._deriveOrientation = canDeriveOrientation();
+            this._watchOrientation();
+            this._logPath("capture+encode: camera read and encoded in a worker");
+          }
+          finish({ close: () => { if (this._encodeWorker === worker) this._stopEncodeWorker(); } });
         } else if (m.type === "track_unsupported") {
           // No worker MediaStreamTrackProcessor here, so a second worker would
           // fail the same way: _openSource skips straight to the page's.
