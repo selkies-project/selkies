@@ -21,7 +21,7 @@ screenshots under `$E2E_WORKDIR/image-tier/<run>/`.
                            nvidia-av1 (Ada or newer only), or amd; E2E_IMAGE_GPU_PRODUCTS
                            names the nvidia.com/gpu.product values to pick from instead
     E2E_IMAGE_PRIORITY_CLASS  the pods' priorityClassName
-    E2E_IMAGE_ENV          extra container environment, comma-separated KEY=VALUE
+    E2E_IMAGE_ENV          extra container environment, comma-separated KEY=VALUE (a value may hold commas)
     E2E_IMAGE_LABELS       extra pod labels, comma-separated key=value
     E2E_IMAGE_NAME         pod or container name prefix (default selkies-imagetest)
     E2E_IMAGE_KEEP         1 leaves each target up after its run
@@ -70,10 +70,16 @@ def gpu_affinity(gpu: str) -> Any:
 
 
 def pairs(text: str, sep: str = "=") -> Dict[str, str]:
-    out = {}
+    """Comma-separated KEY=VALUE pairs. A part without `sep` continues the value
+    before it, so a value may hold commas (`SELKIES_ENCODER=h264enc,vp8enc`)."""
+    out: Dict[str, str] = {}
+    key = None
     for part in filter(None, (p.strip() for p in (text or "").split(","))):
-        k, _, v = part.partition(sep)
-        out[k] = v
+        if sep not in part and key is not None:
+            out[key] += "," + part
+            continue
+        key, _, v = part.partition(sep)
+        out[key] = v
     return out
 
 
