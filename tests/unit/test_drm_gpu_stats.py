@@ -17,6 +17,7 @@ import os
 import shutil
 import sys
 import tempfile
+from typing import Optional
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, TESTS)
@@ -67,9 +68,11 @@ def card(name: str, driver: str, pci: str, **files: str) -> str:
     return device
 
 
-def client(pid: int, fd: int, node: str, **engines: float) -> None:
+def client(pid: int, fd: int, node: str, client_id: Optional[int] = None,
+           **engines: float) -> None:
     """One process holding that DRM node open, its engines at those totals in
-    nanoseconds. A capacity is given as `engine__capacity`."""
+    nanoseconds. A capacity is given as `engine__capacity`, and a descriptor
+    duplicated from another's as that one's `client_id`."""
     fds = os.path.join(ROOT, "proc", str(pid), "fd")
     info = os.path.join(ROOT, "proc", str(pid), "fdinfo")
     os.makedirs(fds, exist_ok=True)
@@ -77,7 +80,7 @@ def client(pid: int, fd: int, node: str, **engines: float) -> None:
     link = os.path.join(fds, str(fd))
     if not os.path.islink(link):
         os.symlink(f"/dev/dri/{node}", link)
-    lines = ["pos:\t0", "drm-driver:\tfabricated", f"drm-client-id:\t{pid}"]
+    lines = ["pos:\t0", "drm-driver:\tfabricated", f"drm-client-id:\t{pid if client_id is None else client_id}"]
     for name, value in engines.items():
         if name.endswith("__capacity"):
             lines.append(f"drm-engine-capacity-{name[:-10]}:\t{int(value)}")
@@ -134,6 +137,24 @@ try:
     client(4001, 3, "renderD128", **engines)
     res.check("two engines under one key share the window between them",
               RS._drm_client_load().get(mali) == 0.5)
+
+    # A client's descriptor duplicated, in its own process and into another,
+    # reports the same totals again: one client, counted once.
+    client(4001, 4, "renderD128", **engines)
+    client(4005, 9, "card0", client_id=4001, **engines)
+    RS._drm_clients_at = 0.0
+    RS._drm_client_load()
+    clock.now += 0.5
+    engines["panthor"] = 350 * MS
+    for pid, fd, node in ((4001, 3, "renderD128"), (4001, 4, "renderD128"), (4005, 9, "card0")):
+        client(pid, fd, node, client_id=4001, **engines)
+    res.check("a client held through several descriptors is counted once",
+              RS._drm_client_load().get(mali) == 0.2)
+    os.remove(os.path.join(ROOT, "proc", "4001", "fd", "4"))
+    os.remove(os.path.join(ROOT, "proc", "4001", "fdinfo", "4"))
+    shutil.rmtree(os.path.join(ROOT, "proc", "4005"))
+    RS._drm_clients_at = 0.0
+    RS._drm_client_load()
 
     # Two clients on one card add up, and no client can push it past full.
     client(4002, 7, "card0", panthor=0)
