@@ -4626,6 +4626,16 @@ const requestWakeLock = async () => {
   }
 };
 
+/** A press over the stream takes the screen wake lock. */
+const wakeOnPress = () => {
+  requestWakeLock();
+};
+
+/** The stream's overlay takes right clicks for the remote desktop, not a browser menu. */
+const noContextMenu = (event) => {
+  event.preventDefault();
+};
+
 /** Releases the screen wake lock if one is held. */
 const releaseWakeLock = async () => {
   if (wakeLockSentinel !== null) {
@@ -4783,14 +4793,9 @@ const initializeInput = () => {
   applyGamepadRumble();
 
   if (overlayInput) {
-    const handlePointerDown = () => {
-      requestWakeLock();
-    };
-    overlayInput.removeEventListener('pointerdown', handlePointerDown);
-    overlayInput.addEventListener('pointerdown', handlePointerDown);
-    overlayInput.addEventListener('contextmenu', e => {
-      e.preventDefault();
-    });
+    // Module functions, so another call adds no second listener.
+    overlayInput.addEventListener('pointerdown', wakeOnPress);
+    overlayInput.addEventListener('contextmenu', noContextMenu);
   }
 
   /**
