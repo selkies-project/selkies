@@ -151,9 +151,10 @@ python3 tests/image/run.py --items 1,4 --engines chromium --backends x11 \
 | `E2E_IMAGE_GPU` | `none` | `nvidia` (a GPU with NVENC, AV1-capable preferred), `nvidia-av1` (Ada or newer only), or `amd` (`amd.com/gpu`). The NVIDIA classes pick nodes by `nvidia.com/gpu.product`; `E2E_IMAGE_GPU_PRODUCTS` (comma-separated) replaces the list for a cluster that names its GPUs differently. |
 | `E2E_IMAGE_PRIORITY_CLASS` | none | The pods' `priorityClassName`. A preempted pod is brought up again before the next cell. |
 | `E2E_IMAGE_TRANSPORTS`, `E2E_IMAGE_BACKENDS`, `E2E_IMAGE_ENGINES`, `E2E_IMAGE_ITEMS` | all | `websockets,webrtc`; `x11,wayland`; `chromium,firefox,webkit`; `1-10`. |
-| `E2E_IMAGE_ENV`, `E2E_IMAGE_LABELS`, `E2E_IMAGE_NAME` | none, none, `selkies-imagetest` | Extra container environment and pod labels (`K=V,...`), and the pod or container name prefix. |
+| `E2E_IMAGE_ENV`, `E2E_IMAGE_LABELS`, `E2E_IMAGE_NAME` | none, none, `selkies-imagetest` | Extra container environment and pod labels (`K=V,...`; a value may hold commas, as in `SELKIES_ENCODER=h264enc,vp8enc`), and the pod or container name prefix. |
 | `E2E_IMAGE_DRIFT_SECONDS` | `120` | How long item 8 watches the shared view of a still screen for quality drift; tens of minutes for the long check. |
 | `E2E_IMAGE_KEEP` | unset | `1` leaves each target running after its run. |
+| `E2E_IMAGE_CONSOLE` | unset | `1` keeps each page's console in the run's folder, as `<cell>-console.log`. |
 
 Targets are started with `SELKIES_ENABLE_BASIC_AUTH=false` and `CAP_SYS_PTRACE`
 (the apps panel's runner needs it), each from a fresh pod or container: one of

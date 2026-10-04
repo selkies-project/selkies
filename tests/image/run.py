@@ -25,6 +25,7 @@ screenshots under `$E2E_WORKDIR/image-tier/<run>/`.
     E2E_IMAGE_LABELS       extra pod labels, comma-separated key=value
     E2E_IMAGE_NAME         pod or container name prefix (default selkies-imagetest)
     E2E_IMAGE_KEEP         1 leaves each target up after its run
+    E2E_IMAGE_CONSOLE      1 keeps each page's console in the run's folder
 """
 import argparse
 import importlib

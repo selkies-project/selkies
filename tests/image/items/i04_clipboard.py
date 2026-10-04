@@ -188,8 +188,9 @@ def run(cell: Any) -> None:
         page.mouse.click(900, 600)
         n = wait(lambda: page.evaluate("Math.max(0, ...window.__itWrites.filter(w => w.type.startsWith('text'))"
                                        ".map(w => w.size))"), lambda n: n >= len(text), 25)
+        got = page.evaluate("window.__it.clip.map(d => JSON.stringify(d).length)")
         R.check(f"{len(text) // 1024} KiB of text copied in the session is written to the local clipboard",
-                n >= len(text), f"largest text write {n}")
+                n >= len(text), f"largest text write {n}; clipboard updates to the dashboard {got}")
     session.copy(page, "image")
     if real:
         want = dims(image)

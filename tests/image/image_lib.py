@@ -244,6 +244,9 @@ class Cell:
         page.add_init_script(TAP_JS)
         for script in init:
             page.add_init_script(script)
+        if os.environ.get("E2E_IMAGE_CONSOLE"):
+            log = os.path.join(self.outdir, f"{self.id.replace('/', '-')}-console.log")
+            page.on("console", lambda m: open(log, "a").write(f"{time.strftime('%H:%M:%S')} {m.type}: {m.text}\n"))
         page.goto(self.target.url + "/" + url_hash, wait_until="load", timeout=60000)
         if self.engine == "chromium":
             cdp = (ctx or self.ctx).new_cdp_session(page)
