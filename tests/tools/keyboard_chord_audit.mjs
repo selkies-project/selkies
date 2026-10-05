@@ -424,4 +424,80 @@ const restored = wire('blink-mac', cmdChord);
 check('the setting back on restores the Ctrl chord',
       restored === asCtrl, restored);
 
+// macOS dead keys: Option+E then E types an e-acute. The steps are the events
+// Chrome 154 and Safari 26 were recorded delivering for it from a HID keyboard,
+// in their order: Blink's dead keydown comes before the composition it starts,
+// and WebKit commits the letter with no update before it and then reports the
+// keydown.
+const DEAD_KEY = {
+    'blink-mac': [
+        ['keydown', { key: 'Alt', code: 'AltLeft', alt: true }],
+        ['keydown', { key: 'Dead', code: 'KeyE', alt: true, keyCode: 229 }],
+        ['compositionstart', ''], ['compositionupdate', '´'],
+        ['keyup', { key: 'Dead', code: 'KeyE', alt: true, composing: true }],
+        ['keyup', { key: 'Alt', code: 'AltLeft', composing: true }],
+        ['keydown', { key: 'é', code: 'KeyE', keyCode: 229, composing: true }],
+        ['compositionupdate', 'é'], ['textInput', 'é'], ['compositionend', 'é'],
+        ['keyup', { key: 'e', code: 'KeyE' }],
+    ],
+    'webkit-mac': [
+        ['keydown', { key: 'Alt', code: 'AltLeft', alt: true }],
+        ['compositionstart', ''], ['compositionupdate', '´'],
+        ['keydown', { key: 'Dead', code: 'KeyE', alt: true, keyCode: 229, composing: true }],
+        ['keyup', { key: '´', code: 'KeyE', alt: true, composing: true }],
+        ['keyup', { key: 'Alt', code: 'AltLeft', composing: true }],
+        ['textInput', 'é'], ['compositionend', 'é'],
+        ['keydown', { key: 'é', code: 'KeyE', keyCode: 229 }],
+        ['keyup', { key: 'e', code: 'KeyE' }],
+    ],
+};
+
+/** Runs recorded key and composition events through the handlers and returns the wire. */
+async function compose(engineName, steps) {
+    setPlatform(ENGINES[engineName]);
+    const input = makeInput();
+    input.compositionString = '';
+    input._lastTextInputCommit = null;
+    input._pendingChord = null;
+    input._chordKeySent = false;
+    input._clearCompositionHostSoon = () => {};
+    const target = { classList: { contains: () => false }, parentElement: null };
+    for (const [type, arg] of steps) {
+        const base = { type, target, isTrusted: true, timeStamp: 0, preventDefault() {}, stopPropagation() {} };
+        if (type === 'keydown' || type === 'keyup') {
+            const event = { ...base, key: arg.key, code: arg.code, location: LOCATION[arg.code] || 0,
+                            keyCode: arg.keyCode || 0, isComposing: !!arg.composing, repeat: false,
+                            altKey: !!arg.alt, ctrlKey: false, metaKey: false, shiftKey: false,
+                            getModifierState: (name) => name === 'Alt' && !!arg.alt };
+            if (type === 'keydown') input._handleKeyDown(event); else input._handleKeyUp(event);
+        } else if (type === 'compositionstart') input._compositionStart({ ...base, data: arg });
+        else if (type === 'compositionupdate') input._compositionUpdate({ ...base, data: arg });
+        else if (type === 'compositionend') input._compositionEnd({ ...base, data: arg });
+        else input._handleTextInput({ ...base, data: arg });
+    }
+    // The chord a composition held back goes out on a timer once it ends.
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+    return input.sent;
+}
+
+/** What a wire of presses leaves typed, a BackSpace erasing the character before it. */
+function typed(sent) {
+    const text = [];
+    for (const msg of sent) {
+        const [verb, keysym] = msg.split(',');
+        if (verb !== 'kd') continue;
+        const k = Number(keysym);
+        if (k === XK.BackSpace) text.pop();
+        else if (k < 0x100) text.push(String.fromCodePoint(k));
+    }
+    return text.join('');
+}
+
+for (const [engineName, steps] of Object.entries(DEAD_KEY)) {
+    const sent = await compose(engineName, steps);
+    check(`${engineName}: Option+E then E leaves the e-acute typed`, typed(sent) === 'é',
+          `${JSON.stringify(typed(sent))} from ${sent.join(' ')}`);
+    check(`${engineName}: and its dead key is no Alt+E`, !sent.includes(`kd,${XK.Alt_L}`), sent.join(' '));
+}
+
 process.exit(failed === 0 ? 0 : 1);

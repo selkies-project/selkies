@@ -2179,8 +2179,10 @@ export class Input {
         }
         if (this.isComposing || event.isComposing || event.keyCode === 229) {
             const armedCtrl = this._altGrArmed;
+            // A dead key composes with the key after it: macOS Option+E is
+            // the acute accent's, never Alt+E.
             if ((event.ctrlKey || event.altKey || event.metaKey || armedCtrl) &&
-                !this._composesText(event)) {
+                event.key !== 'Dead' && !this._composesText(event)) {
                 const chordKeysym = KeyboardUtil.getKeysymFromCode(event.code);
                 if (chordKeysym) {
                     if (this.isComposing || event.isComposing) {
@@ -2609,11 +2611,15 @@ export class Input {
      * compositionend Blink chains after it only clears the preedit. Only an
      * IME commit reaches this: plain keydowns are stopped before the browser
      * action, and Blink can deliver a commit as textInput with an empty
-     * compositionend.
+     * compositionend. The preedit still on the server is erased first, the
+     * commit landing where it stood: WebKit commits a dead key's letter with
+     * no update before it, so erasing after would take the letter and leave
+     * the accent.
      */
     _handleTextInput(event) {
         if (!event.data) return;
         if (this._chordEchoPending()) return;
+        if (this.isComposing) this._updateCompositionText("");
         this._typeText(event.data);
         this._lastTextInputCommit = { data: event.data, at: performance.now() };
         this._clearCompositionHostSoon();
