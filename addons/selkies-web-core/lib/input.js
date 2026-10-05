@@ -51,7 +51,9 @@
  * plus pointer and keyboard lock. Touch is direct (tap, drag, long-press right
  * click, two-finger scroll and pinch) or a trackpad emulation. Wheel events are
  * classified as discrete wheel or trackpad and accumulated in fractional
- * notches so no distance is lost. A pinch, on the touchscreen or a touchpad,
+ * notches so no distance is lost; a macOS wheel, whose deltas the system
+ * accelerates past any notch size, is one notch a detent (`_isDetentWheel`).
+ * A pinch, on the touchscreen or a touchpad,
  * reaches the session as Ctrl+wheel. The server-drawn cursor is painted on a
  * page canvas or applied as a CSS cursor; in trackpad mode the canvas is drawn
  * where the server echoes the pointer, moved on by the deltas sent since
@@ -138,6 +140,9 @@ const TRACKPAD_SPEED_MAX = 4;
  * touchpad's (`_isDiscreteWheel`, `_isFingerScroll`).
  */
 const WHEEL_NOTCH_MIN_PX = 80;
+
+/** Pixels Blink and WebKit report for a line a macOS wheel turned (`_isDetentWheel`). */
+const MAC_WHEEL_LINE_PX = 40;
 
 /**
  * How long a touchpad's scroll may pause before it counts as ended (`sfe`), in
@@ -4515,6 +4520,35 @@ export class Input {
     }
 
     /**
+     * Whether a wheel event is one detent of a macOS mouse wheel. macOS
+     * reports a wheel's turn in lines, as 16.16 fixed point, scaled by how
+     * fast it spins: 0.1 of a line for a detent after a pause, up to ten for
+     * one in a spin, and no two alike. Blink and WebKit hand that to the page
+     * as pixels at 40 a line, so a detent is 4.0002 px or 380 and the deltas
+     * share no quantum for `_isDiscreteWheel` to find; what marks one is the
+     * fraction, a touchpad there scrolling in whole pixels at any page zoom.
+     * Gecko hands it over as whole lines, 1 to 10 a detent, and divides a
+     * touchpad's pixels by the page zoom, so a fraction there says nothing.
+     * Under Shift the system turns the wheel sideways and rounds it to whole
+     * lines, which Blink and WebKit report as a sideways multiple of
+     * `MAC_WHEEL_LINE_PX` with no fraction left; a touchpad's scroll is not
+     * turned, so only a sideways stroke of exactly that under Shift reads the
+     * same. Either way each event is one report of the wheel, taken as one
+     * notch whatever distance the system's acceleration gave it, a detent
+     * being a notch everywhere else.
+     * @param {WheelEvent} event
+     * @returns {boolean}
+     */
+    _isDetentWheel(event) {
+        if (!browser.isMacDesktop()) return false;
+        if (event.deltaMode !== 0) return event.deltaMode === 1;
+        if (browser.isFirefox()) return false;
+        if (!(Number.isInteger(event.deltaX) && Number.isInteger(event.deltaY))) return true;
+        return event.shiftKey && event.deltaY === 0 && event.deltaX !== 0 &&
+            event.deltaX % MAC_WHEEL_LINE_PX === 0;
+    }
+
+    /**
      * Forgets everything learned about the current scroll device: notch
      * quantums, classification samples, and fractional-notch carries. Called
      * after a wheel-idle gap, since the learned state only holds for the
@@ -4542,7 +4576,8 @@ export class Input {
      *
      * A wheel event reporting a Control no held key accounts for is a
      * touchpad pinch, which the engines deliver as Ctrl+wheel, and goes to
-     * `_pinchWheel` instead.
+     * `_pinchWheel` instead. A macOS wheel's detent bypasses the classifier
+     * too, as one notch (`_isDetentWheel`).
      */
     _mouseWheelWrapper(event) {
         // One idle second is longer than any intra-gesture gap (momentum
@@ -4554,6 +4589,12 @@ export class Input {
         this._lastWheelEventTs = nowTs;
         if (event.ctrlKey && !this._keysymHeld(KeyTable.XK_Control_L, KeyTable.XK_Control_R)) {
             this._pinchWheel(event);
+            event.preventDefault();
+            return;
+        }
+        if (this._isDetentWheel(event)) {
+            if (event.deltaY !== 0) this._triggerMouseWheel(event.deltaY < 0 ? 'up' : 'down', 1);
+            if (event.deltaX !== 0) this._triggerHorizontalMouseWheel(event.deltaX < 0 ? 'left' : 'right', 1);
             event.preventDefault();
             return;
         }

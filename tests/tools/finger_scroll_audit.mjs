@@ -8,7 +8,9 @@
 // session takes a finger's scroll (Wayland), a wheel classified as a touchpad
 // sends its travel in stream pixels and an end once it pauses; a wheel's
 // notches, line deltas, and a session that does not take one keep the notch
-// pulses.
+// pulses. A macOS wheel is told from a touchpad there by what each engine was
+// measured to report for one, since the system's acceleration leaves its
+// deltas no notch size.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -66,6 +68,17 @@ globalThis.window = {
     removeEventListener() {},
     location: { origin: 'http://localhost' },
 };
+/** Stands the page on a platform and engine; the wheel's reading depends on both. */
+function setPlatform(platform, userAgent) {
+    Object.defineProperty(globalThis, 'navigator', {
+        value: { platform, userAgent, maxTouchPoints: 0 }, configurable: true, writable: true });
+}
+const LINUX = ['Linux x86_64', 'Mozilla/5.0 (X11; Linux x86_64) Chrome/154'];
+const MAC_BLINK = ['MacIntel', 'Mozilla/5.0 (Macintosh) Chrome/154 Safari/537.36'];
+const MAC_WEBKIT = ['MacIntel', 'Mozilla/5.0 (Macintosh) Version/26.6 Safari/605.1.15'];
+const MAC_GECKO = ['MacIntel', 'Mozilla/5.0 (Macintosh; rv:157.0) Gecko/20100101 Firefox/157.0'];
+setPlatform(...LINUX);
+
 globalThis.document = {
     createElement: () => ({ style: {}, getContext: () => ({}) }),
     body: { appendChild() {} },
@@ -86,9 +99,9 @@ function makeInput(finger) {
 }
 
 /** One wheel event through the page's own handler, `ms` after the previous. */
-function wheel(input, deltaY, { deltaX = 0, deltaMode = 0, ms = 16 } = {}) {
+function wheel(input, deltaY, { deltaX = 0, deltaMode = 0, ms = 16, shiftKey = false } = {}) {
     advance(ms);
-    input._mouseWheelWrapper({ type: 'wheel', deltaY, deltaX, deltaMode, ctrlKey: false,
+    input._mouseWheelWrapper({ type: 'wheel', deltaY, deltaX, deltaMode, ctrlKey: false, shiftKey,
                                preventDefault() {} });
 }
 
@@ -177,6 +190,93 @@ const fingers = (sent) => sent.filter((m) => m.startsWith('sf,') || m === 'sfe')
     wheel(second.input, 8);
     second.input.detach_context();
     check('and so does detaching the page', second.sent.includes('sfe'), JSON.stringify(second.sent));
+}
+
+// macOS, as measured from a wheel's HID reports through the system's own
+// acceleration: a detent after a pause is 0.1 of a line, later ones whatever
+// the spin's speed made them.
+const MAC_SLOW = [4.000244140625, 4.000244140625, 4.000244140625];
+const MAC_SPIN = [4.000244140625, 21.70654296875, 67.843017578125, 132.9052734375, 211.6064453125, 361.2994384765625];
+/** Notches sent on the buttons of `mask`: each pulse raises its bit once, carrying its count. */
+const notches = (sent, mask) => sent.map((m) => m.split(','))
+    .filter((f) => f[0] === 'm2' && (Number(f[3]) & mask))
+    .reduce((sum, f) => sum + Number(f[4]), 0);
+const downs = (sent) => notches(sent, 8);
+const sideways = (sent) => notches(sent, 192);
+
+for (const [engine, platform] of [['Blink', MAC_BLINK], ['WebKit', MAC_WEBKIT]]) {
+    for (const finger of [true, false]) {
+        const session = finger ? 'a session taking finger scroll' : 'a session taking notches';
+        setPlatform(...platform);
+        {
+            const { input, sent } = makeInput(finger);
+            for (const d of MAC_SLOW) wheel(input, d, { ms: 400 });
+            advance(300);
+            check(`macOS ${engine}, ${session}: a wheel's slow detents are a notch each`,
+                  downs(sent) === MAC_SLOW.length && fingers(sent).length === 0, JSON.stringify(sent));
+        }
+        {
+            const { input, sent } = makeInput(finger);
+            for (const d of MAC_SPIN) wheel(input, d);
+            advance(300);
+            check(`macOS ${engine}, ${session}: a spin's accelerated detents are still a notch each`,
+                  downs(sent) === MAC_SPIN.length && fingers(sent).length === 0, JSON.stringify(sent));
+        }
+        {
+            const { input, sent } = makeInput(finger);
+            for (let i = 0; i < 3; i++) wheel(input, 0, { deltaX: 4.000244140625, ms: 300 });
+            check(`macOS ${engine}, ${session}: a sideways detent is a sideways notch`,
+                  sideways(sent) === 3 && fingers(sent).length === 0, JSON.stringify(sent));
+        }
+    }
+    {
+        // Under Shift the system turns the wheel sideways, in whole lines of 40 px.
+        const { input, sent } = makeInput(true);
+        const turned = [-40, -40, -120, -320];
+        for (const d of turned) wheel(input, 0, { deltaX: d, shiftKey: true, ms: 30 });
+        check(`macOS ${engine}: a wheel turned under Shift is a sideways notch a detent`,
+              sideways(sent) === turned.length && fingers(sent).length === 0, JSON.stringify(sent));
+    }
+    {
+        const { input, sent } = makeInput(true);
+        for (const d of [7, 40, 80]) wheel(input, d, { shiftKey: true });
+        check(`macOS ${engine}: a touchpad's stroke under Shift stays a finger's`,
+              fingers(sent).length === 3 && pulses(sent).length === 0, JSON.stringify(sent));
+    }
+    {
+        const { input, sent } = makeInput(true);
+        const stroke = [1, 3, 7, 11, 25, 13, 5];
+        for (const d of stroke) wheel(input, d);
+        check(`macOS ${engine}: a touchpad's whole pixels stay a finger's`,
+              fingers(sent).length === stroke.length && pulses(sent).length === 0, JSON.stringify(sent));
+    }
+}
+
+setPlatform(...MAC_GECKO);
+{
+    // Gecko reports the wheel in lines, the count being the system's acceleration.
+    const { input, sent } = makeInput(true);
+    const spin = [1, 1, 2, 6, 10, 10];
+    for (const d of spin) wheel(input, d, { deltaMode: 1 });
+    check('macOS Gecko: a wheel\'s accelerated line counts are a notch each',
+          downs(sent) === spin.length && fingers(sent).length === 0, JSON.stringify(sent));
+}
+{
+    // At a page zoom of 110% Gecko divides a touchpad's pixels by it.
+    const { input, sent } = makeInput(true);
+    const stroke = [0.9, 2.7, 6.3, 9.9, 22.5];
+    for (const d of stroke) wheel(input, d);
+    check('macOS Gecko: a zoomed page\'s fractional touchpad pixels stay a finger\'s',
+          fingers(sent).length === stroke.length && pulses(sent).length === 0, JSON.stringify(sent));
+}
+
+setPlatform(...LINUX);
+{
+    const { input, sent } = makeInput(true);
+    for (const d of MAC_SLOW) wheel(input, d, { ms: 400 });
+    check('off macOS a fractional pixel delta is still a touchpad\'s',
+          fingers(sent).filter((m) => m !== 'sfe').length === MAC_SLOW.length && pulses(sent).length === 0,
+          JSON.stringify(sent));
 }
 
 process.exit(failed ? 1 : 0);
