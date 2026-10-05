@@ -1594,6 +1594,8 @@ export class Input {
         this.listeners = [];
         this.listeners_context = [];
         this._queue = new Queue();
+        /** A press reported as the secondary button is the primary's, and so is its release (`_pressedButton`). */
+        this._primaryAsSecondary = false;
         /**
          * Whether wheel input is classified as a trackpad, which takes a fixed
          * 100px notch (`_wheelNotches`). Starts true until the detector has its
@@ -2774,6 +2776,26 @@ export class Input {
     }
 
     /**
+     * The button a press or release is of. Gecko on macOS reports a
+     * Control-click as the secondary button while `buttons` holds the primary
+     * alone, where Blink and WebKit report the primary; taken as reported, the
+     * press would add a secondary to the primary the motion before it stated
+     * and the release would leave that primary held. The press is read from
+     * `buttons` there and its release follows it, so every engine sends
+     * Control and the primary button.
+     * @param {MouseEvent} event
+     * @param {number} down 1 for a press, 0 for a release.
+     * @returns {number} The button, as `MouseEvent.button` counts.
+     */
+    _pressedButton(event, down) {
+        if (event.button !== 2) return event.button;
+        if (down) this._primaryAsSecondary = event.ctrlKey && (event.buttons & 0x3) === 0x1;
+        if (!this._primaryAsSecondary) return 2;
+        if (!down) this._primaryAsSecondary = false;
+        return 0;
+    }
+
+    /**
      * Mouse and pen handler: moves the page-drawn cursor (to the predicted
      * position where the engine offers one), maps the position through the
      * sink or the window math, keeps the button mask, and sends motion
@@ -2889,7 +2911,7 @@ export class Input {
         // suppresses the compatibility mousedown.
         if (event.type === 'mousedown' || event.type === 'mouseup' ||
             ((event.type === 'pointerdown' || event.type === 'pointerup') && event.button >= 0)) {
-            var mask = 1 << event.button;
+            var mask = 1 << this._pressedButton(event, down);
             if (down) {
                 this.buttonMask |= mask;
             } else {
