@@ -160,6 +160,8 @@ class KubePod(Target):
                     {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": self.avoid})
         if affinity:
             spec["affinity"] = affinity
+        if getattr(self, "groups", None):
+            spec["securityContext"] = {"supplementalGroups": self.groups}
         return {"apiVersion": "v1", "kind": "Pod",
                 "metadata": {"name": self.name, "labels": self.labels}, "spec": spec}
 
@@ -199,6 +201,15 @@ class KubePod(Target):
                 self.node = self.status().get("spec", {}).get("nodeName", "")
                 if self.sh("true", timeout=45).returncode != 0:
                     return False
+                if self.gpu != "none" and not getattr(self, "groups", None):
+                    # A render node the host keeps to a group the session user is not in, which Docker's
+                    # --group-add covers: the pod comes up again in that group, or every encoder is software.
+                    gids = self.out("stat -c %g /dev/dri/renderD* 2>/dev/null; echo :; id -G").split(":")
+                    missing = sorted(set(gids[0].split()) - set(gids[-1].split()))
+                    if missing:
+                        self.groups = [int(g) for g in missing]
+                        run(self.kc + ["delete", "pod", self.name, "--wait=true", "--timeout=120s"], 150)
+                        return self._up(max(60, deadline - time.time()))
                 self.url = self.reach(st["podIP"])
                 return bool(self.url) and self.wait_ready(max(60, min(900, deadline - time.time())))
             if st.get("phase") in ("Failed", "Succeeded"):
