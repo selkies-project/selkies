@@ -15,8 +15,9 @@
 // Reading those flags to tell a level shift from a shortcut therefore gives a
 // different answer per browser, which is the defect this matrix exists to catch.
 //
-// They disagree about macOS Command too: Blink and WebKit never deliver the keyup
-// of a key let go while Command is down, where Gecko does.
+// They disagree about macOS Command too: WebKit and Gecko never deliver the keyup
+// of a key let go while Command is down, where Blink does (Safari 26, Firefox 157
+// and Chrome 154, measured from a HID keyboard).
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -202,63 +203,50 @@ const ACTIONS = [
       engines: ['blink-mac', 'gecko-mac'],
       steps: [['down', 'AltLeft'], ['down', 'ArrowLeft']],
       wire: `kd,LEVEL3 kd,${XK.Alt_L} kd,${XK.Left} ku,${XK.Alt_L}` },
-    { name: 'Cmd+Option+Z is a shortcut on the physical key',
-      engines: ['gecko-mac'],
-      steps: [['down', 'MetaLeft'], ['down', 'AltLeft'], ['down', 'KeyZ', 'Ω']],
-      wire: `kd,${XK.Alt_L} kd,LEVEL3 kd,${XK.Super_L} kd,122 ku,${XK.Super_L}` },
-    { name: 'and a tap where Command loses the keyup',
-      engines: ['blink-mac'],
+    { name: 'Cmd+Option+Z is a shortcut on the physical key, and a tap since Command can lose the keyup',
+      engines: ['blink-mac', 'gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'AltLeft'], ['down', 'KeyZ', 'Ω']],
       wire: `kd,${XK.Alt_L} kd,LEVEL3 kd,${XK.Super_L} kd,122 ku,122 ku,${XK.Super_L}` },
     { name: 'Ctrl+Option+X is a shortcut on the physical key',
       engines: ['blink-mac', 'gecko-mac'],
       steps: [['down', 'ControlLeft'], ['down', 'AltLeft'], ['down', 'KeyX', '≈']],
       wire: `kd,${XK.Control_L} kd,LEVEL3 kd,${XK.Alt_L} kd,120 ku,${XK.Alt_L}` },
-    { name: 'Cmd+C reaches the server as its Ctrl chord',
-      engines: ['gecko-mac'],
-      steps: [['down', 'MetaLeft'], ['down', 'KeyC', 'c']],
-      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,99` },
-    { name: 'and as a tap of it where Command loses the keyup',
-      engines: ['blink-mac'],
+    { name: 'Cmd+C reaches the server as a tap of its Ctrl chord',
+      engines: ['blink-mac', 'gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'KeyC', 'c']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,99 ku,99` },
-    // -- macOS Command: under Blink and WebKit a key let go while it is down is
-    // -- lost, so a key pressed under it goes out as a tap, and Spotlight can
-    // -- take Command's own keyup as it opens.
+    // -- macOS Command: under WebKit and Gecko a key let go while it is down is
+    // -- lost, so a key pressed under it goes out as a tap on every engine, and
+    // -- Spotlight can take Command's own keyup as it opens.
     { name: 'Cmd+A then Cmd+C keeps the Control Command stands for',
-      engines: ['blink-mac', 'webkit-mac'],
+      engines: ['blink-mac', 'webkit-mac', 'gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'KeyA', 'a'], ['lost', 'KeyA'],
               ['down', 'KeyC', 'c'], ['lost', 'KeyC'], ['up', 'MetaLeft']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,97 ku,97 kd,99 ku,99 ku,${XK.Control_L}` },
     { name: 'Cmd+A then Cmd+C keeps it where the keyups arrive',
-      engines: ['gecko-mac'],
+      engines: ['blink-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'KeyA', 'a'], ['up', 'KeyA', 'a'],
               ['down', 'KeyC', 'c'], ['up', 'KeyC', 'c'], ['up', 'MetaLeft']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,97 ku,97 kd,99 ku,99 ku,${XK.Control_L}` },
-    { name: 'a held Cmd+Backspace keeps its Control through the autorepeat',
-      engines: ['gecko-mac'],
-      steps: [['down', 'MetaLeft'], ['down', 'Backspace'],
-              ['down', 'Backspace', undefined, { repeat: true }]],
-      wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.BackSpace}` },
-    { name: 'and taps once per autorepeat where Command loses the keyup',
-      engines: ['blink-mac', 'webkit-mac'],
+    { name: 'a held Cmd+Backspace keeps its Control and taps once per autorepeat',
+      engines: ['blink-mac', 'webkit-mac', 'gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'Backspace'],
               ['down', 'Backspace', undefined, { repeat: true }]],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.BackSpace} ku,${XK.BackSpace} `
           + `kd,${XK.BackSpace} ku,${XK.BackSpace}` },
     { name: 'a space rolled into Cmd+Space lets go at the next key once Spotlight took Command',
-      engines: ['blink-mac', 'webkit-mac'],
+      engines: ['blink-mac', 'webkit-mac', 'gecko-mac'],
       steps: [['down', 'Space', ' '], ['down', 'MetaLeft'], ['lost', 'Space'], ['lost', 'MetaLeft'],
               ['down', 'Escape']],
       wire: `kd,32 kd,${XK.Alt_L} ku,${XK.Alt_L} ku,32 kd,${XK.Escape}` },
     { name: 'so does the Control of a Cmd+Return before it, whose Return was a tap',
-      engines: ['blink-mac', 'webkit-mac'],
+      engines: ['blink-mac', 'webkit-mac', 'gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'Enter'], ['lost', 'Enter'], ['lost', 'MetaLeft'],
               ['down', 'Escape']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.Return} ku,${XK.Return} `
           + `ku,${XK.Control_L} kd,${XK.Escape}` },
     { name: 'and the next Command press lets go of it as well',
-      engines: ['blink-mac', 'webkit-mac'],
+      engines: ['blink-mac', 'webkit-mac', 'gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'Enter'], ['lost', 'Enter'], ['lost', 'MetaLeft'],
               ['down', 'MetaLeft']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.Return} ku,${XK.Return} `
@@ -268,11 +256,11 @@ const ACTIONS = [
       steps: [['down', 'KeyC', 'c', { meta: true }], ['up', 'KeyC', 'c', { meta: true }], ['up', 'MetaLeft']],
       wire: `kd,${XK.Control_L} kd,99 ku,99 ku,${XK.Control_L}` },
     { name: 'and with its keyup lost, Command\'s own keyup lets go of both',
-      engines: ['blink-mac', 'webkit-mac'],
+      engines: ['blink-mac', 'webkit-mac', 'gecko-mac'],
       steps: [['down', 'KeyC', 'c', { meta: true }], ['lost', 'KeyC'], ['up', 'MetaLeft']],
       wire: `kd,${XK.Control_L} kd,99 ku,99 ku,${XK.Control_L}` },
     { name: 'Cmd+Backspace pressed twice deletes twice',
-      engines: ['blink-mac', 'webkit-mac'],
+      engines: ['blink-mac', 'webkit-mac', 'gecko-mac'],
       steps: [['down', 'MetaLeft'], ['down', 'Backspace'], ['lost', 'Backspace'],
               ['down', 'Backspace'], ['lost', 'Backspace'], ['up', 'MetaLeft']],
       wire: `kd,${XK.Alt_L} ku,${XK.Alt_L} kd,${XK.Control_L} kd,${XK.BackSpace} ku,${XK.BackSpace} `

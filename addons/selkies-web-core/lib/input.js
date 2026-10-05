@@ -2317,10 +2317,10 @@ export class Input {
             }, 100);
             return;
         }
-        // Blink and WebKit on macOS never deliver the keyup of a key let go
+        // WebKit and Gecko on macOS never deliver the keyup of a key let go
         // while Command is down, so such a key goes out as a tap, and each of
-        // its autorepeats as another; Gecko delivers it and keeps the hold.
-        const tap = browser.isMac() && !browser.isFirefox() && event.metaKey && _isPhysicalKey(event) &&
+        // its autorepeats as another; Blink's keyup then finds nothing held.
+        const tap = browser.isMac() && event.metaKey && _isPhysicalKey(event) &&
             keysym !== null && !MODIFIER_STATE_BY_CODE[code];
         // Meta is exempt while the macOS Cmd-to-Ctrl swap carries the chord.
         if (keysym !== null && !MODIFIER_STATE_BY_CODE[code] &&
