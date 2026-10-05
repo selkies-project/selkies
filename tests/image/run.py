@@ -21,6 +21,8 @@ screenshots under `$E2E_WORKDIR/image-tier/<run>/`.
                            nvidia-av1 (Ada or newer only), or amd; E2E_IMAGE_GPU_PRODUCTS
                            names the nvidia.com/gpu.product values to pick from instead
     E2E_IMAGE_PRIORITY_CLASS  the pods' priorityClassName
+    E2E_IMAGE_CPU          each pod's CPU request in whole CPUs (default 4; the limit is twice it)
+    E2E_IMAGE_MEMORY       each pod's memory request and limit (default 8Gi)
     E2E_IMAGE_ENV          extra container environment, comma-separated KEY=VALUE (a value may hold commas)
     E2E_IMAGE_LABELS       extra pod labels, comma-separated key=value
     E2E_IMAGE_NAME         pod or container name prefix (default selkies-imagetest)
@@ -246,7 +248,8 @@ def main() -> int:
                    **pairs(os.environ.get("E2E_IMAGE_ENV", ""))}
             name = f"{prefix}-{label}-{backend}".lower().replace("_", "-")[:63]
             target = T.make(ref, name, env, labels=pairs(os.environ.get("E2E_IMAGE_LABELS", "")), gpu=gpu,
-                            affinity=gpu_affinity(gpu))
+                            affinity=gpu_affinity(gpu), cpu=os.environ.get("E2E_IMAGE_CPU", "4"),
+                            memory=os.environ.get("E2E_IMAGE_MEMORY", "8Gi"))
             print(f"=== {label} {backend}: bringing up {ref}", flush=True)
             try:
                 target.up()
