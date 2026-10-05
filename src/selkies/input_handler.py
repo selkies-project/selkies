@@ -83,6 +83,7 @@ import base64
 import io
 import re
 import json
+from html.parser import HTMLParser
 import aiofiles
 import msgpack
 from PIL import Image, ImageOps
@@ -1140,8 +1141,10 @@ class _X11ClipboardMonitor:
 
         Images come first where the caller takes them, since a copied picture
         offers markup of its own (an `img` tag pointing back at a page) that is
-        worth less than the picture; a text selection carries no image target,
-        so its markup wins over the plain text beneath it.
+        worth less than the picture, unless that markup carries text
+        (`clipboard_markup_has_text`): an office application's text selection
+        offers a picture of itself beside it. Markup wins over the plain text
+        beneath it.
         """
         reply = self._convert_and_wait(self._targets)
         if not reply or reply[1] != 32:
@@ -1157,7 +1160,12 @@ class _X11ClipboardMonitor:
             got = self._convert_and_wait(hint)
             if got is not None and got[1] == 8 and clipboard_secret_hint(got[0]):
                 return self._read_secret(offered)
-        if use_binary:
+        html = None
+        if self._html_atom in offered:
+            got = self._convert_and_wait(self._html_atom)
+            if got is not None and got[0]:
+                html = bytes(got[0])
+        if use_binary and not (html and clipboard_markup_has_text(html)):
             for atom, mime in self._image_targets:
                 if atom in offered:
                     got = self._convert_and_wait(atom)
@@ -1169,19 +1177,16 @@ class _X11ClipboardMonitor:
                     resolved = self._resolve_uri_list_image(bytes(got[0]))
                     if resolved is not None:
                         return resolved
-        if self._html_atom in offered:
-            got = self._convert_and_wait(self._html_atom)
-            if got is not None and got[0]:
-                html = bytes(got[0])
-                plain = b''
-                for atom, _name in self._text_targets:
-                    if atom in offered:
-                        beside = self._convert_and_wait(atom)
-                        if beside is not None and beside[0]:
-                            plain = bytes(beside[0])
-                            break
-                entries = [("text/html", html)] + ([("text/plain", plain)] if plain else [])
-                return clipboard_envelope(entries), CLIPBOARD_FLAVOURS_MIME
+        if html:
+            plain = b''
+            for atom, _name in self._text_targets:
+                if atom in offered:
+                    beside = self._convert_and_wait(atom)
+                    if beside is not None and beside[0]:
+                        plain = bytes(beside[0])
+                        break
+            entries = [("text/html", html)] + ([("text/plain", plain)] if plain else [])
+            return clipboard_envelope(entries), CLIPBOARD_FLAVOURS_MIME
         for atom, _name in self._text_targets:
             if atom in offered:
                 got = self._convert_and_wait(atom)
@@ -2112,6 +2117,56 @@ def clipboard_flavours(payload: bytes) -> List[Tuple[str, bytes]]:
     if not entries:
         raise ValueError(f"no usable clipboard flavour in {sorted(decoded)}")
     return entries
+
+
+class _MarkupText(HTMLParser):
+    """Whether markup carries text a reader would see; see `clipboard_markup_has_text`."""
+
+    # Elements whose content is never shown as text.
+    _UNSHOWN = frozenset(("head", "style", "script", "title", "noscript", "template"))
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.unshown = 0
+        self.found = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._UNSHOWN:
+            self.unshown += 1
+
+    def handle_endtag(self, tag):
+        if tag in self._UNSHOWN and self.unshown:
+            self.unshown -= 1
+
+    def handle_data(self, data):
+        if not self.unshown and data.strip():
+            self.found = True
+
+
+def clipboard_markup_has_text(html: bytes) -> bool:
+    """Whether a copy's markup carries text, which makes the copy text.
+
+    An office application copying formatted text offers a picture of the
+    selection beside its markup (Word's bitmap, LibreOffice's PNG and BMP),
+    so that a paint program can take it, while a copied picture offers markup
+    of its own that is only an `img` tag pointing back at its page. So the
+    markup decides which the copy is: one with text to show is text, and its
+    picture is left out; one with none is a picture.
+
+    Args:
+        html: The `text/html` flavour.
+
+    Returns:
+        True when any of it outside the document head, styles and scripts is
+        text other than whitespace.
+    """
+    parser = _MarkupText()
+    try:
+        parser.feed(bytes(html).decode("utf-8", errors="replace"))
+        parser.close()
+    except Exception:
+        return False
+    return parser.found
 
 
 # The target a password manager offers beside a secret it copies, valued
@@ -7579,7 +7634,11 @@ class WebRTCInput:
                 if data is None:
                     return None, None
                 return SecretText(bytes(data).decode('utf-8', errors='replace')), 'text/plain'
-            if use_binary:
+            html = None
+            if 'text/html' in available_types:
+                html = await loop.run_in_executor(None, read_fn, display, 'text/html')
+            # A copy whose markup carries text is text (`clipboard_markup_has_text`).
+            if use_binary and not (html and clipboard_markup_has_text(bytes(html))):
                 image_mimes = ['image/png', 'image/jpeg', 'image/bmp', 'image/webp',
                                'image/svg+xml', 'image/svg']
                 target_mime = next((m for m in image_mimes if m in available_types), None)
@@ -7588,17 +7647,15 @@ class WebRTCInput:
                         None, read_fn, display, target_mime)
                     if data:
                         return bytes(data), target_mime
-            if 'text/html' in available_types:
-                html = await loop.run_in_executor(None, read_fn, display, 'text/html')
-                if html:
-                    plain = b''
-                    beside = next((m for m in ('text/plain;charset=utf-8', 'text/plain',
-                                               'UTF8_STRING') if m in available_types), None)
-                    if beside:
-                        plain = bytes(await loop.run_in_executor(
-                            None, read_fn, display, beside) or b'')
-                    entries = [("text/html", bytes(html))] + ([("text/plain", plain)] if plain else [])
-                    return clipboard_envelope(entries), CLIPBOARD_FLAVOURS_MIME
+            if html:
+                plain = b''
+                beside = next((m for m in ('text/plain;charset=utf-8', 'text/plain',
+                                           'UTF8_STRING') if m in available_types), None)
+                if beside:
+                    plain = bytes(await loop.run_in_executor(
+                        None, read_fn, display, beside) or b'')
+                entries = [("text/html", bytes(html))] + ([("text/plain", plain)] if plain else [])
+                return clipboard_envelope(entries), CLIPBOARD_FLAVOURS_MIME
             source_mime = next((m for m in text_mimes if m in available_types), None)
             if source_mime:
                 data = await loop.run_in_executor(None, read_fn, display, source_mime)
@@ -7620,7 +7677,9 @@ class WebRTCInput:
         pictures are taken, markup with the text beneath it as one envelope,
         text as str, and the text alone as `SecretText` where the owner marked
         the copy secret; (None, None) for a picture where none is taken, and
-        for a cleared selection, which is delivered without flavours."""
+        for a cleared selection, which is delivered without flavours. A copy
+        whose markup carries text is text, a picture beside it notwithstanding
+        (`clipboard_markup_has_text`)."""
         hinted = any(mime in CLIPBOARD_SECRET_HINTS and clipboard_secret_hint(data)
                      for mime, data in entries)
         entries = [(mime, data) for mime, data in entries if mime not in CLIPBOARD_SECRET_HINTS]
@@ -7628,10 +7687,10 @@ class WebRTCInput:
                       if mime != 'text/html' and not mime.startswith('image/')), None)
         if hinted:
             return SecretText((plain or b'').decode('utf-8', errors='replace')), 'text/plain'
-        image = next(((data, mime) for mime, data in entries if mime.startswith('image/')), None)
-        if image is not None:
-            return image if use_binary else (None, None)
         html = next((data for mime, data in entries if mime == 'text/html'), None)
+        image = next(((data, mime) for mime, data in entries if mime.startswith('image/')), None)
+        if image is not None and not (html and clipboard_markup_has_text(html)):
+            return image if use_binary else (None, None)
         if html:
             return clipboard_envelope([("text/html", html)] + ([("text/plain", plain)] if plain else [])), \
                 CLIPBOARD_FLAVOURS_MIME
@@ -7703,7 +7762,18 @@ class WebRTCInput:
                 )
                 stdout_hint, _ = await self._communicate_or_kill(proc_hint, 1, "xclip password-manager hint")
                 secret = proc_hint.returncode == 0 and clipboard_secret_hint(stdout_hint)
-            if use_binary and not secret:
+            # A copy whose markup carries text is text (`clipboard_markup_has_text`);
+            # this rung sends its plain text.
+            text_copy = False
+            if use_binary and not secret and 'text/html' in targets and any(
+                    t.startswith('image/') for t in targets):
+                proc_html = await subprocess.create_subprocess_exec(
+                    "xclip", "-selection", "clipboard", "-o", "-t", "text/html",
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                stdout_html, _ = await self._communicate_or_kill(proc_html, 1, "xclip text/html")
+                text_copy = proc_html.returncode == 0 and clipboard_markup_has_text(stdout_html)
+            if use_binary and not secret and not text_copy:
                 for mime_type in ['image/png', 'image/jpeg', 'image/bmp', 'image/webp',
                                   'image/svg+xml', 'image/svg']:
                     if mime_type in targets:

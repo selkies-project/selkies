@@ -79,6 +79,20 @@ class FakeWaylandInput:
         pass
 
 
+class FlavouredWaylandInput(FakeWaylandInput):
+    """A selection serving each of several flavours as itself."""
+
+    def __init__(self, flavours: dict) -> None:
+        super().__init__()
+        self.flavours = flavours
+
+    def clipboard_types_app(self, display: str) -> list:
+        return list(self.flavours)
+
+    def clipboard_read_app(self, display: str, mime: str):
+        return self.flavours.get(mime)
+
+
 def make_handler() -> WebRTCInput:
     """A WebRTCInput with the outbound-clipboard state, every client-facing
     side recorded, and the app compositor reported as a nested session."""
@@ -186,6 +200,25 @@ async def main() -> None:
     except asyncio.TimeoutError:
         task.cancel()
     check("monitor loop stops", h._clipboard_monitor_active is False)
+
+    # An office application's formatted text offers a picture of itself beside
+    # its markup: where pictures are taken it reads as the text, while a copied
+    # picture, whose markup is an img tag, reads as the picture.
+    png = b"\x89PNG\r\n\x1a\nfake"
+    word = (b"<html><head><style>p{margin:0}</style></head><body><!--StartFragment-->"
+            b"<p><b>Quarterly</b> report</p><!--EndFragment--></body></html>")
+    h = make_handler()
+    h.wayland_input = FlavouredWaylandInput(
+        {"text/html": word, "text/plain": b"Quarterly report", "image/png": png})
+    data, mime = await h._app_clipboard_read(True)
+    check("data-control: formatted text with its picture reads as the text",
+          mime == ih.CLIPBOARD_FLAVOURS_MIME
+          and ih.clipboard_flavours(data) == [("text/html", word), ("text/plain", b"Quarterly report")],
+          str(mime))
+    h.wayland_input = FlavouredWaylandInput(
+        {"text/html": b'<img src="https://example.org/a.png">', "image/png": png})
+    check("data-control: a copied picture reads as the picture",
+          await h._app_clipboard_read(True) == (png, "image/png"))
 
 
 asyncio.run(main())

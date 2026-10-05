@@ -78,6 +78,35 @@ def x11_block(res: H.Results) -> None:
         H.stop_x_server(proc, display)
 
 
+def x11_office_block(res: H.Results) -> None:
+    """An office application's formatted text offers a picture of itself beside
+    its markup (Word's bitmap, LibreOffice's PNG and BMP): read where pictures
+    are taken, it is the text, while a copied picture stays the picture."""
+    word_html = (b"<html><head><style>p{margin:0}</style></head><body><!--StartFragment-->"
+                 b"<p><b>Quarterly</b> report</p><!--EndFragment--></body></html>")
+    bmp = b"BM" + bytes(64)
+    png = b"\x89PNG\r\n\x1a\n" + bytes(16)
+    proc, display = H.private_x_server()
+    try:
+        owner = _X11ClipboardMonitor(display)
+        reader = _X11ClipboardMonitor(display)
+        res.check("x11: an office copy is taken", owner.offer(
+            [("text/html", word_html), ("text/plain", b"Quarterly report"), ("image/bmp", bmp)]))
+        data, mime = reader.read(use_binary=True)
+        res.check("x11: formatted text with its picture reads as the text, pictures taken",
+                  mime == CLIPBOARD_FLAVOURS_MIME, mime)
+        res.check("x11: and carries its markup and plain text",
+                  mime == CLIPBOARD_FLAVOURS_MIME and clipboard_flavours(data)
+                  == [("text/html", word_html), ("text/plain", b"Quarterly report")], data)
+        res.check("x11: a picture copy is taken", owner.offer(
+            [("text/html", b'<img src="https://example.org/a.png">'), ("image/png", png)]))
+        data, mime = reader.read(use_binary=True)
+        res.check("x11: a copied picture, its markup an img tag, reads as the picture",
+                  (bytes(data or b""), mime) == (png, "image/png"), mime)
+    finally:
+        H.stop_x_server(proc, display)
+
+
 def wayland_block(res: H.Results) -> None:
     import pixelflux
     runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
@@ -104,6 +133,7 @@ def wayland_block(res: H.Results) -> None:
 def main() -> H.Results:
     res = H.Results("clip-flavours")
     x11_block(res)
+    x11_office_block(res)
     wayland_block(res)
     res.summary()
     return res

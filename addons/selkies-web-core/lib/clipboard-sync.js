@@ -152,15 +152,19 @@ export async function readLocalClipboard(binaryEnabled) {
     const item = items[0];
     const imageType = item.types.find((t) => t.startsWith('image/'));
     try {
-        if (imageType) {
+        // A copy whose markup carries text is text: an office application's
+        // text selection offers a picture of itself beside the markup (Word's
+        // bitmap), where a copied picture's markup is only an img tag.
+        const html = item.types.includes('text/html')
+            ? await (await item.getType('text/html')).text() : '';
+        if (imageType && !textOfMarkup(html).trim()) {
             const blob = await item.getType(imageType);
             return { kind: 'image', blob, mime: imageType };
         }
-        if (item.types.includes('text/html')) {
-            const html = await (await item.getType('text/html')).text();
+        if (html) {
             const text = item.types.includes('text/plain')
                 ? await (await item.getType('text/plain')).text() : '';
-            if (html) return { kind: 'flavours', html, text };
+            return { kind: 'flavours', html, text };
         }
         if (item.types.includes('text/plain')) {
             const blob = await item.getType('text/plain');

@@ -19,7 +19,8 @@ sys.path.insert(0, os.path.join(REPO, "src"))
 sys.argv = ["selkies"]
 
 from selkies.input_handler import (  # noqa: E402
-    CLIPBOARD_FLAVOURS_MIME, WebRTCInput, clipboard_envelope, clipboard_flavours)
+    CLIPBOARD_FLAVOURS_MIME, WebRTCInput, clipboard_envelope, clipboard_flavours,
+    clipboard_markup_has_text)
 from selkies.settings import SETTING_DEFINITIONS  # noqa: E402
 
 passed = failed = 0
@@ -124,8 +125,42 @@ def settings_cases() -> None:
               names.get(name))
 
 
+# An office application's formatted text, as Word writes its markup: styles in
+# the head, the selection between fragment comments; a picture of it rides beside.
+WORD_HTML = (b"<html><head><style>p.MsoNormal{margin:0}</style></head><body>"
+             b"<!--StartFragment--><p class=MsoNormal><b>Quarterly</b> report&nbsp;draft</p>"
+             b"<!--EndFragment--></body></html>")
+PICTURE_HTML = b'<meta charset="utf-8"><img src="https://example.org/logo.png" alt="Logo">'
+PNG = b"\x89PNG\r\n\x1a\nfake"
+
+
+def markup_cases() -> None:
+    check("formatted text's markup carries text", clipboard_markup_has_text(WORD_HTML))
+    check("a copied picture's markup carries none", not clipboard_markup_has_text(PICTURE_HTML))
+    check("nor does a picture copied out of a document, spaces around its img",
+          not clipboard_markup_has_text(b"<html><head><title>Doc</title></head><body><p>&nbsp;</p>"
+                                        b"<img src='file:///tmp/clip_image001.png'></body></html>"))
+    check("a fragment's text counts without a body", clipboard_markup_has_text(b"<b>bold</b> words"))
+    check("styles and scripts are not text",
+          not clipboard_markup_has_text(b"<style>b{}</style><script>x()</script><img src=a>"))
+    payload = WebRTCInput._native_clipboard_payload
+    entries = [("text/html", WORD_HTML), ("text/plain", b"Quarterly report draft"), ("image/png", PNG)]
+    data, mime = payload(entries, True)
+    check("the compositor's formatted text with its picture goes as the text",
+          mime == CLIPBOARD_FLAVOURS_MIME
+          and clipboard_flavours(data) == [("text/html", WORD_HTML), ("text/plain", b"Quarterly report draft")],
+          mime)
+    check("and so where pictures are not taken, rather than as nothing",
+          payload(entries, False)[1] == CLIPBOARD_FLAVOURS_MIME, payload(entries, False)[1])
+    picture = [("text/html", PICTURE_HTML), ("image/png", PNG)]
+    check("the compositor's copied picture goes as the picture",
+          payload(picture, True) == (PNG, "image/png"), payload(picture, True)[1])
+    check("and as nothing where pictures are not taken", payload(picture, False) == (None, None))
+
+
 def main() -> int:
     envelope_cases()
+    markup_cases()
     asyncio.run(dispatch_cases())
     settings_cases()
     print(f"\n{passed} passed, {failed} failed")
