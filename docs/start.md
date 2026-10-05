@@ -30,6 +30,8 @@ docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
     ghcr.io/selkies-project/selkies/desktop:main-ubuntu26.04
 ```
 
+On Kubernetes, `securityContext.supplementalGroups` does what `--group-add` does: list the render node's group ID on the host (`stat -c %g /dev/dri/renderD128` there).
+
 ### NVIDIA
 
 The [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit), v1.20.1 or higher, passes the driver, its Vulkan ICD, the DRM nodes, and the modeset node in, so the runtime flags are all it takes:
