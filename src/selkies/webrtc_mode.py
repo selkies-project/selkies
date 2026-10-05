@@ -263,6 +263,8 @@ class WebRTCService(BaseStreamingService):
         self._last_resize_request: Optional[Tuple[int, int]] = None
         # Set once the primary's controller sent its size or its settings.
         self._primary_sized = asyncio.Event()
+        # The primary's size before its controller's hello resized it, which the size wait reads a change against.
+        self._unsized_dims: Optional[Tuple[int, int]] = None
         self._wm_swap = MultiMonitorWindowManager()
         self._congestion_steer: Dict[str, CongestionSteer] = {}
         self._rate_holds: Dict[str, RateHold] = {}
@@ -1264,12 +1266,12 @@ class WebRTCService(BaseStreamingService):
         """Resize the primary to the size its controller's hello named, which
         the page's first resize will ask for again, so its capture starts at
         once (`_await_primary_size`) rather than once the data channel opens,
-        25-50 ms later. Only on X11, alone, and before a capture runs: a
-        Wayland page's density depends on the display config it is sent later,
-        and a page whose hello names no size waits as before."""
-        if (size is None or IS_WAYLAND or self.display_clients or not self.media_pipeline
+        25-50 ms later. Only alone and before a capture runs; a page whose
+        hello names no size waits as before."""
+        if (size is None or self.display_clients or not self.media_pipeline
                 or self.media_pipeline.is_screen_capturing()):
             return
+        self._unsized_dims = (self.media_pipeline.width, self.media_pipeline.height)
         await self.on_resize_handler(f"{size[0]}x{size[1]}")
 
     async def _await_primary_size(self) -> bool:
@@ -1282,14 +1284,16 @@ class WebRTCService(BaseStreamingService):
         page cannot resize, and viewers alone start at once.
 
         Returns:
-            Whether the page's size changed the pipeline's while it waited.
+            Whether the page's size, from its hello or while it waited, changed
+            the pipeline's.
         """
+        unsized, self._unsized_dims = self._unsized_dims, None
         if (not any(p.get("client_type") == ClientType.CONTROLLER
                     for p in self._display_consumers("primary"))
                 or self.media_pipeline.is_screen_capturing() or not self.args.enable_resize
                 or self._server_locked_dims() is not None):
             return False
-        size = (self.media_pipeline.width, self.media_pipeline.height)
+        size = unsized or (self.media_pipeline.width, self.media_pipeline.height)
         try:
             await asyncio.wait_for(self._primary_sized.wait(), PRIMARY_SIZE_WAIT_S)
         except asyncio.TimeoutError:

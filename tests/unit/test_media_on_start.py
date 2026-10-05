@@ -418,21 +418,51 @@ async def size_block(res: H.Results) -> None:
     res.check("size: the size a page's hello names starts its capture at once, at that size",
               at_once and started(svc) and asked == ["1280x720"], (asked, svc.media_pipeline.calls))
 
-    for what, size, wayland in (("a hello that names no size", None, False),
-                                ("a hello's size on Wayland", (1280, 720), True)):
-        svc = sized_service({"c1": controller()})
-        svc._resize_primary_display = recorded
-        asked.clear()
-        was, webrtc_mode.IS_WAYLAND = webrtc_mode.IS_WAYLAND, wayland
-        try:
-            await svc._apply_hello_size(size)
-        finally:
-            webrtc_mode.IS_WAYLAND = was
-        start = asyncio.ensure_future(svc.start_display_media("primary"))
-        await asyncio.sleep(0.1)
-        res.check(f"size: after {what} the capture still waits for the page", not started(svc) and not asked,
-                  (asked, svc.media_pipeline.calls))
-        start.cancel()
+    svc = sized_service({"c1": controller()})
+    svc._resize_primary_display = recorded
+    asked.clear()
+    await svc._apply_hello_size(None)
+    start = asyncio.ensure_future(svc.start_display_media("primary"))
+    await asyncio.sleep(0.1)
+    res.check("size: after a hello that names no size the capture still waits for the page",
+              not started(svc) and not asked, (asked, svc.media_pipeline.calls))
+    start.cancel()
+
+    # On Wayland the page's size reaches a capture yet to start, which sizes the view alone: the screen is
+    # grown to it before the start and fitted after, from the hello's size as from a resize.
+    svc = sized_service({"c1": controller()})
+    steps = []
+
+    async def realized(res_: str) -> None:
+        steps.append(("resize", res_))
+        svc.media_pipeline.width, svc.media_pipeline.height = (int(v) for v in res_.split("x"))
+
+    async def grown(width: int, height: int, grow_only: bool = False) -> None:
+        steps.append(("grow", width, height))
+
+    async def settled() -> None:
+        steps.append(("settle",))
+
+    async def live(*_args) -> bool:
+        return True
+
+    svc._resize_primary_display = realized
+    svc._size_wayland_screen = grown
+    svc._settle_wayland_primary = settled
+    svc._wayland_capture_live = live
+    svc._wayland_capture_last_error = lambda *_args: None
+    was, webrtc_mode.IS_WAYLAND = webrtc_mode.IS_WAYLAND, True
+    try:
+        await svc._apply_hello_size((1280, 720))
+        await asyncio.wait_for(svc.start_display_media("primary"), 0.5)
+        at_once = True
+    except asyncio.TimeoutError:
+        at_once = False
+    finally:
+        webrtc_mode.IS_WAYLAND = was
+    res.check("size: on Wayland the hello's size starts the capture at once, the screen grown to it first and "
+              "fitted after", at_once and started(svc)
+              and steps == [("resize", "1280x720"), ("grow", 1280, 720), ("settle",)], steps)
 
     wait = webrtc_mode.PRIMARY_SIZE_WAIT_S
     webrtc_mode.PRIMARY_SIZE_WAIT_S = 0.3
