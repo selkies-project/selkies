@@ -18,7 +18,7 @@ the dashboard scales it and is kept. Every block runs in Chromium, Firefox,
 and WebKit on both transports: Chromium driven through CDP touch, Firefox and
 WebKit through synthetic touches.
 
-    python3 tests/e2e/test_touch_controls.py x11|wl
+    python3 tests/e2e/test_touch_controls.py x11|wl [keyboard]
 """
 import os
 import sys
@@ -200,6 +200,58 @@ RECT_JS = """(sel) => {
           inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight,
           on_top: !!hit && (hit === el || el.contains(hit))};
 }"""
+
+
+def keyboard_button_block(res: "H.Results", dashboard: str, dist: str, engine: str) -> None:
+    """A tablet's attached keyboard keeps the system's on-screen one down, so
+    the button that pops it goes once a key only a keyboard has is pressed,
+    not on a letter, which an on-screen keyboard types too; each dashboard's
+    own keyboard control brings it back (the classic tile, Wish's menu button)."""
+    tag = f"{dashboard} {engine}"
+    H.server_start(mode="websockets", web_root=dist)
+    try:
+        with sync_playwright() as pw:
+            browser, page = open_client(pw, engine, "websockets")
+            try:
+                video = C.wait_ws_video(page, 40)
+                res.check(f"{tag}: video up", video is not None, video)
+                if not video:
+                    return
+                touch_once(page, engine)
+                button = page.locator(".virtual-keyboard-button" if dashboard == "classic"
+                                      else "[data-virtual-keyboard-button]")
+                shown = button.count() > 0 and button.first.is_visible()
+                if dashboard == "wish" and not shown:
+                    # The Wish dashboard offers it by `(pointer: coarse)`, which a
+                    # touch-emulating desktop engine may not report.
+                    print(f"[{tag}] no keyboard button offered on this engine's emulation", flush=True)
+                    return
+                res.check(f"{tag}: a touch client is offered the keyboard button", shown)
+                if not shown:
+                    return
+                page.keyboard.press("a")
+                time.sleep(0.4)
+                res.check(f"{tag}: a letter leaves it, as an on-screen keyboard's would",
+                          button.count() > 0 and button.first.is_visible())
+                page.keyboard.press("Escape")
+                time.sleep(0.4)
+                res.check(f"{tag}: a key only a keyboard has takes it away",
+                          button.count() == 0 or not button.first.is_visible())
+                if dashboard == "classic":
+                    open_sidebar(page)
+                    page.locator(".keyboard-toggle-button").first.click()
+                    time.sleep(0.4)
+                    close_sidebar(page)
+                else:
+                    page.locator("button:has(svg.lucide-keyboard):not([data-virtual-keyboard-button])"
+                                 ).first.click()
+                    time.sleep(0.4)
+                res.check(f"{tag}: the dashboard's own keyboard control brings it back",
+                          button.count() > 0 and button.first.is_visible())
+            finally:
+                C.close_browser(browser)
+    finally:
+        H.server_stop()
 
 
 def set_trackpad(page: Any, dashboard: str, on: bool) -> None:
@@ -397,13 +449,17 @@ def wayland_block(res: "H.Results", mode: str, engine: str = "chromium") -> None
 
 def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "x11"
+    only = sys.argv[2] if len(sys.argv) > 2 else ""
     res = H.Results(f"touch-controls-{which}")
     if which == "x11":
         for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
-            for mode in ("websockets", "webrtc"):
+            for mode in ("websockets", "webrtc") if only != "keyboard" else ():
                 for engine in ("chromium", "firefox", "webkit"):
                     palette_block(res, dashboard, dist, engine, mode)
                     speed_block(res, dashboard, dist, mode, engine)
+        for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+            for engine in ("chromium", "firefox", "webkit"):
+                keyboard_button_block(res, dashboard, dist, engine)
     elif which == "wl":
         for mode in ("websockets", "webrtc"):
             for engine in ("chromium", "firefox", "webkit"):

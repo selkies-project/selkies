@@ -9,7 +9,7 @@ import { GamepadVisualizer } from "@/components/dashboard/GamepadVisualizer";
 import { Button } from "@/components/ui/button";
 import { Keyboard } from "lucide-react";
 import { t } from "@/i18n";
-import { isMobileClient } from "@/utils";
+import { hardwareKeyboard, isMobileClient } from "@/utils";
 
 /**
  * The gamepad preview of the top menu's gamepad dropdown, one visualizer per
@@ -95,14 +95,24 @@ export function Gamepad({ isTouchGamepadActive }: GamepadProps) {
     );
 }
 
-/** The mobile button that asks the core to show the virtual keyboard; nothing elsewhere. */
+/** The page's attached-keyboard verdict, listening from load. */
+const keyboardWatch = hardwareKeyboard();
+
+/**
+ * The mobile button that asks the core to show the virtual keyboard; nothing elsewhere,
+ * nor while a keyboard is attached, which keeps the system's on-screen one down.
+ */
 export function VirtualKeyboardButton() {
-    if (!isMobileClient) return null;
+    const keyboardAttached = React.useSyncExternalStore(keyboardWatch.subscribe, keyboardWatch.attached);
+    if (!isMobileClient || keyboardAttached) return null;
     return (
         <Button
             variant="default"
             size="icon"
             className="fixed bottom-4 right-4 z-50"
+            aria-label={t("topMenu.virtualKeyboard")}
+            title={t("topMenu.virtualKeyboard")}
+            data-virtual-keyboard-button=""
             onClick={() => window.postMessage({ type: 'showVirtualKeyboard' }, window.location.origin)}
         >
             <Keyboard className="h-4 w-4" />

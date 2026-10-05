@@ -58,6 +58,7 @@
 import { useState, useEffect, useCallback, useId, useMemo, useRef, useSyncExternalStore } from "react";
 import { displayLabel, canPlayEncoder, decoderSupportReady, canDecodeFullColor, canDecodeTenBit, tenBitFormat, codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, getStorageAppName, isMobileClient, isMacDesktop } from "../../../selkies-web-core/lib/util.js";
 import { withSessionToken } from "../../../selkies-web-core/lib/session-token.js";
+import { hardwareKeyboard } from "../../../selkies-web-core/lib/hardware-keyboard.js";
 import { switchStreamMode } from "../../../selkies-web-core/lib/mode-switch.js";
 import { fragmentWithSessionToken, shareablePageURL, urlFragmentKeyword } from "../../../selkies-web-core/lib/page-url.js";
 import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, framerateStopIndex, stopIndex, stopsWithin, withDisplayStop } from "../../../selkies-web-core/lib/slider-stops.js";
@@ -268,6 +269,9 @@ const AppsIcon = () => (
 );
 /* Padded viewBox: the glyph inks its full box where its row neighbors ink
    about four fifths, and drawn as-is it reads as the larger tile. */
+/** The page's attached-keyboard verdict (lib/hardware-keyboard.js), listening from load. */
+const keyboardWatch = hardwareKeyboard();
+
 const KeyboardIcon = () => (
   <svg 
     xmlns="http://www.w3.org/2000/svg" 
@@ -983,6 +987,9 @@ function Sidebar() {
     return TRACKPAD_SPEEDS.includes(stored) ? stored : 1;
   });
   const [isKeyboardButtonVisible, setIsKeyboardButtonVisible] = useState(true);
+  // A tablet's attached keyboard keeps the system's on-screen one down, so the
+  // button that pops it goes while one is in use (lib/hardware-keyboard.js).
+  const keyboardAttached = useSyncExternalStore(keyboardWatch.subscribe, keyboardWatch.attached);
   const [isTouchGamepadActive, setIsTouchGamepadActive] = useState(false);
   const [isTouchGamepadSetup, setIsTouchGamepadSetup] = useState(false);
   const [availablePlacements, setAvailablePlacements] = useState(null);
@@ -1318,6 +1325,12 @@ function Sidebar() {
     writeUserChords(localStorage, getPrefixedKey(USER_CHORDS_KEY), next);
   };
   const toggleKeyboardButtonVisibility = () => {
+    // Asked for back while a keyboard was assumed: the user knows better.
+    if (keyboardAttached) {
+      keyboardWatch.reset();
+      setIsKeyboardButtonVisible(true);
+      return;
+    }
     setIsKeyboardButtonVisible(prev => !prev);
   };
 
@@ -3113,7 +3126,7 @@ function Sidebar() {
             )}
             {showKeyboardTile && (
               <button
-                className={`action-button keyboard-toggle-button ${isKeyboardButtonVisible ? "active" : ""}`}
+                className={`action-button keyboard-toggle-button ${isKeyboardButtonVisible && !keyboardAttached ? "active" : ""}`}
                 onClick={toggleKeyboardButtonVisibility}
                 title={t("keyboardButtonToggleTitle", "Keyboard Button")}
               >
@@ -4730,7 +4743,7 @@ function Sidebar() {
       {isViewerRole && (
         <PlayerGamepadButton touchOnly isActive={isTouchGamepadActive} onToggle={handleToggleTouchGamepad} />
       )}
-      {!isViewerRole && (isMobile || hasDetectedTouch) && isKeyboardButtonVisible && (renderableSettings.keyboardButton ?? true) && (
+      {!isViewerRole && (isMobile || hasDetectedTouch) && isKeyboardButtonVisible && !keyboardAttached && (renderableSettings.keyboardButton ?? true) && (
         <button
           className={`virtual-keyboard-button theme-${theme} allow-native-input`}
           onClick={onKeyboardButtonClick}

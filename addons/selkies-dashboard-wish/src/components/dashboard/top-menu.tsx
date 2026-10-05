@@ -71,7 +71,7 @@ import { Gamepad } from "@/components/dashboard/gamepad";
 import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
-import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, isMobileClient, isSecondaryDisplay } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, hardwareKeyboard, isMobileClient, isSecondaryDisplay } from "@/utils";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords } from "../../../../selkies-web-core/lib/touch-controls.js";
 import { fragmentWithSessionToken } from "../../../../selkies-web-core/lib/page-url.js";
@@ -555,6 +555,9 @@ export function TopMenu({
    */
   const handleShowVirtualKeyboard = React.useCallback(() => {
     console.log("Dashboard: Directly handling virtual keyboard pop.");
+    // Asked for the on-screen keyboard: an attached one is no longer assumed, and the
+    // floating button that pops it comes back (lib/hardware-keyboard.js).
+    hardwareKeyboard().reset();
     const kbdAssistInput = document.getElementById('keyboard-input-assist');
     const mainInteractionOverlay = document.getElementById('overlayInput');
     if (kbdAssistInput) {

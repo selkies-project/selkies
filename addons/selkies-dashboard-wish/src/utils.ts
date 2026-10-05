@@ -26,8 +26,10 @@
 
 import { getRoutePrefix, getStorageAppName, isMobileClient, isMacDesktop } from "../../selkies-web-core/lib/util.js";
 import { urlFragmentKeyword } from "../../selkies-web-core/lib/page-url.js";
+import { hardwareKeyboard } from "../../selkies-web-core/lib/hardware-keyboard.js";
 
 export { isMobileClient };
+export { hardwareKeyboard };
 
 export { getRoutePrefix, getStorageAppName };
 
