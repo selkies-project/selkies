@@ -319,14 +319,16 @@ def command_page(p: Any, chromium: Any, engine: str, mode: str) -> tuple:
 
 
 def check_command_chords(res: "H.Results", label: str, page: Any, held: Held,
-                         repeats: bool, tapped: bool) -> None:
+                         repeats: bool) -> None:
     """Command chords with the macOS keyups missing, then a long plain hold.
+
+    A key pressed under Command goes as a tap in every engine on macOS: Safari
+    and Firefox lose its keyup there, and the one Chrome delivers finds nothing
+    held.
 
     Args:
         repeats: Whether the server repeats a held key itself (X11), which
             the long hold then has to show.
-        tapped: Whether the page sends a key pressed under Command as a tap,
-            as it does in Blink and WebKit, which lose its keyup on macOS.
     """
     kb = page.keyboard
     kb.down("Meta")
@@ -354,9 +356,8 @@ def check_command_chords(res: "H.Results", label: str, page: Any, held: Held,
 
     spotlight(res, f"{label}: a space rolled into Cmd+Space goes at the next key", page, held,
               XK_SPACE, rolled, lambda: kb.press("Escape"))
-    spotlight(res, f"{label}: a Cmd+Return's Return " + ("is a tap, and its Control goes at a click" if tapped
-                                                         else "goes at a click"),
-              page, held, XK_RETURN, chorded, lambda: page.mouse.click(640, 360), tapped)
+    spotlight(res, f"{label}: a Cmd+Return's Return is a tap, and its Control goes at a click",
+              page, held, XK_RETURN, chorded, lambda: page.mouse.click(640, 360), tapped=True)
     kb.down("Meta")
     kb.press("Backspace")
     kb.press("Backspace")
@@ -472,8 +473,7 @@ def run_x11(mode: str, res: "H.Results") -> None:
                         time.sleep(0.5)
                         obs.drain(0.1)
                         held = Held(lambda: [(down, ks) for down, _kc, _g, ks in obs.drain(0.05)])
-                        check_command_chords(res, f"x11 {engine}", page, held, repeats=True,
-                                             tapped=engine != "firefox")
+                        check_command_chords(res, f"x11 {engine}", page, held, repeats=True)
                         closer.close()
                 finally:
                     browser.close()
@@ -517,8 +517,7 @@ def run_wayland(mode: str, res: "H.Results") -> None:
                     time.sleep(0.5)
                     keys.since(0)
                     held = Held(lambda: [(down, ks) for down, _key, ks in keys.since(0)])
-                    check_command_chords(res, f"wayland {engine}", page, held, repeats=False,
-                                         tapped=engine != "firefox")
+                    check_command_chords(res, f"wayland {engine}", page, held, repeats=False)
                     closer.close()
             finally:
                 browser.close()
