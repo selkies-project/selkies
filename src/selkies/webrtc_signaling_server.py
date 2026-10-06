@@ -721,9 +721,10 @@ class WebRTCPeerManagement:
         itself, so dead holders are reaped and a live one is closed. The
         identities are the display's sole client in non-sharing mode, a
         player slot in sharing mode (`-1` is the unassigned sentinel, exempt
-        from uniqueness), and a display's controller — each scoped per
-        display so display2 never supersedes the primary — unless the
-        takeover-storm breaker (`_eviction_storm`) rejects the claimant. A
+        from uniqueness) or, in secure mode, the page's token, since its slot
+        claim there is only its URL's, and a display's controller — each
+        scoped per display so display2 never supersedes the primary — unless
+        the takeover-storm breaker (`_eviction_storm`) rejects the claimant. A
         viewer first reaps a dead, unreaped controller and treats it as
         absent rather than pairing with a stale peer; a viewer of the primary
         display needs no controller, since the desktop exists regardless and
@@ -902,30 +903,47 @@ class WebRTCPeerManagement:
                                 "Invalid client slot provided {!r}".format(client_slot)
                             )
                         if client_slot != -1:
+                            # A page is the only one of its slot, as its hello names it. In
+                            # secure mode the token table says who a page is and which slots
+                            # it drives, while every page opened without `#playerN` names
+                            # slot 1, so a page is the only one of its token instead: the
+                            # pages of a collaboration room, each with its own, all stay.
+                            by_token = bool(app_settings.master_token)
+                            if by_token:
+                                key = ("token", display_id, client_token)
+                            else:
+                                key = ("slot", display_id, client_slot)
                             colliding = [
                                 (pid, peer)
                                 for pid, peer in self.peers.items()
-                                if getattr(peer, "client_slot", None) == client_slot
+                                if (getattr(peer, "client_token", None) == client_token if by_token
+                                    else getattr(peer, "client_slot", None) == client_slot)
                                 and getattr(peer, "display_id", "primary") == display_id
                                 and not self._beside(peer, client_type, client_tab_id)
                             ]
-                            if colliding and self._eviction_storm(("slot", display_id, client_slot)):
+                            if colliding and self._eviction_storm(key):
                                 await ws.close(
                                     code=4000,
-                                    message=b"Player slot takeover loop detected; another page holds this slot.",
+                                    message=(b"Session takeover loop detected; another page holds this session."
+                                             if by_token else
+                                             b"Player slot takeover loop detected; another page holds this slot."),
                                 )
+                                # The token is a credential: logs name the page by its address alone.
                                 raise Exception(
-                                    "Rejecting slot {!r} claim from {!r}: takeover storm".format(
-                                        client_slot, raddr
-                                    )
+                                    "Rejecting a page of the same token from {!r}: takeover storm".format(raddr)
+                                    if by_token else
+                                    "Rejecting slot {!r} claim from {!r}: takeover storm".format(client_slot, raddr)
                                 )
                             for pid, peer in colliding:
                                 evict_peer_locked(
                                     pid, peer,
-                                    b"Superseded by a new connection for this player slot.",
-                                    storm_key=("slot", display_id, client_slot),
+                                    b"Superseded by a new connection." if by_token
+                                    else b"Superseded by a new connection for this player slot.",
+                                    storm_key=key,
                                 )
                                 logger.info(
+                                    "Evicting peer {!r} of the same token for reconnect from {!r}".format(pid, raddr)
+                                    if by_token else
                                     "Evicting peer {!r} holding slot {!r} for reconnect from {!r}".format(
                                         pid, client_slot, raddr
                                     )

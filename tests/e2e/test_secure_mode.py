@@ -542,6 +542,22 @@ def run_webrtc() -> "H.Results":
                       and wait_file(os.path.join(FILES_DIR, "webrtc-upload.txt"), 5), ups[-2:])
         finally:
             browser.close()
+        # A collaboration room opens each participant's session this way: every
+        # page with its own token and none with #playerN, so each hello names slot 1.
+        mark = len(H.server_log())
+        pages = [launch(pw, f"?token={token}", "webrtc") for token in (CTRL_TOKEN, VIEW_TOKEN)]
+        try:
+            shown = [C.wait_wr_video(page, timeout=60) for _, page, _ in pages]
+            time.sleep(5)
+            later = H.server_log()[mark:]
+            res.check("a controller page and a viewer page, each with its own token, stream at once",
+                      all(shown), shown)
+            res.check("and neither supersedes the other",
+                      "Evicting" not in later and "takeover storm" not in later,
+                      [ln for ln in later.splitlines() if "Evicting" in ln or "storm" in ln][:3])
+        finally:
+            for browser, _, _ in pages:
+                browser.close()
     res.summary()
     return res
 
