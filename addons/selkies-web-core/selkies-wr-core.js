@@ -100,6 +100,7 @@ import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 import { StreamStats, DecodeCapability, webrtcDecoder, FIRST_SAMPLE_MS } from './lib/stream-stats.js';
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
+import { DISPLAY_SETTINGS, holdDisplaySettings, releaseHeldSettings, restoreHeldPicks } from './lib/held-settings.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -586,6 +587,8 @@ export default function webrtc() {
 	let collabInputGranted = false;
 
 	const storageAppName = getStorageAppName();
+	/** The last server_settings payload, posted again when the display's settings change under the dashboards. */
+	let lastServerSettings = null;
 	/** Writes a key, degrading a full or unavailable store to a warning. */
 	const safeSetItem = (key, value) => {
 		try {
@@ -649,6 +652,8 @@ export default function webrtc() {
 		}
 		return prefixedKey;
 	};
+	// A tab that holds nothing gets its picks back (lib/held-settings.js).
+	restoreHeldPicks(storageKeyFor, storageAppName);
 
 	const getIntParam = (key, default_value) => {
 		const prefixedKey = storageKeyFor(key);
@@ -2277,6 +2282,7 @@ export default function webrtc() {
 		const storeInt = fromServer ? () => {} : setIntParam;
 		const storeBool = fromServer ? () => {} : setBoolParam;
 		const storeString = fromServer ? () => {} : setStringParam;
+		if (!fromServer) releaseHeldSettings(storageKeyFor, Object.keys(settings));
 		if (settings.webcam_encoder !== undefined) {
 			const preference = String(settings.webcam_encoder);
 			if (WEBCAM_ENCODER_PREFERENCES.includes(preference) && preference !== webcamEncoderPreference) {
@@ -2304,9 +2310,6 @@ export default function webrtc() {
 		if (settings.use_cpu !== undefined) passthrough.use_cpu = !!settings.use_cpu;
 		if (settings.encoder !== undefined) passthrough.encoder = settings.encoder;
 	if (settings.displayPosition !== undefined) passthrough.displayPosition = settings.displayPosition;
-		if (Object.keys(passthrough).length > 0) {
-			webrtc.sendDataChannelMessage(`SETTINGS,${JSON.stringify(passthrough)}`);
-		}
 		if (settings.video_bitrate !== undefined) {
 			videoBitRate = parseInt(settings.video_bitrate, 10);
 			webrtc.sendDataChannelMessage(`vb,${videoBitRate}`);
@@ -2418,6 +2421,46 @@ export default function webrtc() {
 				const currentWindowRes = input.getWindowResolution();
 				sendResolutionToServer(currentWindowRes[0], currentWindowRes[1]);
 			}
+		}
+		// A pick also rides the SETTINGS, the live verbs' values with it, marked
+		// as the user's: a page beside the display's owner changes it by that.
+		if (!fromServer) {
+			const picked = Object.keys(settings).filter((key) => DISPLAY_SETTINGS.includes(key));
+			const live = { framerate: videoFramerate, video_bitrate: videoBitRate, audio_bitrate: audioBitRate,
+				video_crf: crf, rate_control_mode: rateControlMode };
+			for (const key of picked) {
+				if (passthrough[key] === undefined && live[key] !== undefined) passthrough[key] = live[key];
+			}
+			if (picked.length > 0) passthrough.picked = picked;
+		}
+		if (Object.keys(passthrough).length > 0) {
+			webrtc.sendDataChannelMessage(`SETTINGS,${JSON.stringify(passthrough)}`);
+		}
+	}
+
+	/**
+	 * Takes what this page's display streams with (`display_settings`), which
+	 * the server sends a page joining a display beside its owner, and the pages
+	 * of a display another one's pick changed: held for the tab, taken as what
+	 * this page asks for, and shown in the dashboards.
+	 * @param {Object<string, *>} values
+	 */
+	function followDisplaySettings(values) {
+		if (isSharedMode) return;
+		const changed = holdDisplaySettings(storageKeyFor, storageAppName, values,
+			`${new Date().toISOString()} the settings of a display it shares`);
+		if (Object.keys(changed).length === 0) return;
+		console.log('[display] Streaming with what the display does:', changed);
+		for (const [name, value] of Object.entries(changed)) window[name] = value;
+		if (changed.encoder !== undefined) encoder = changed.encoder;
+		if (changed.video_crf !== undefined) crf = parseInt(changed.video_crf, 10);
+		if (changed.video_bitrate !== undefined) videoBitRate = parseInt(changed.video_bitrate, 10);
+		if (changed.audio_bitrate !== undefined) audioBitRate = parseInt(changed.audio_bitrate, 10);
+		if (changed.rate_control_mode !== undefined) rateControlMode = changed.rate_control_mode;
+		const rate = parseFloat(changed.framerate);
+		if (Number.isFinite(rate)) videoFramerate = framerateAsked = rate;
+		if (lastServerSettings) {
+			window.postMessage({ type: 'serverSettings', payload: { ...lastServerSettings } }, window.location.origin);
 		}
 	}
 
@@ -3646,12 +3689,14 @@ export default function webrtc() {
 			 * dashboards show and the server already applies; the core's own
 			 * defaults would move the stream off both.
 			 */
+			webrtc.ondisplaysettings = (obj) => followDisplaySettings((obj && obj.settings) || {});
 			webrtc.onserversettings = (obj) => {
 				if (obj.settings === undefined || obj.settings === null) {
 					console.warn("Received invalid server settings paylod");
 					return;
 				}
 				console.log("Received server settings payload:", obj.settings);
+				lastServerSettings = obj.settings;
 				const changes = sanitizeAndStoreSettings(obj.settings);
 				if (Number.isFinite(window.video_crf)) crf = Math.round(window.video_crf);
 				if (Number.isFinite(window.video_bitrate)) videoBitRate = Math.round(window.video_bitrate);

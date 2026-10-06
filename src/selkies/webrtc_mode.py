@@ -69,8 +69,8 @@ from .webrtc_ice_config import get_rtc_configuration
 from .metrics import Metrics
 from . import resource_stats
 from . import stream_stats
-from .settings import (settings, AppSettings, SETTING_DEFINITIONS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX,
-                       build_client_settings_payload, sanitize_client_setting, socket_dir)
+from .settings import (settings, AppSettings, SETTING_DEFINITIONS, STREAM_SETTINGS, RateControlMode, SCALING_DPI_MIN,
+                       SCALING_DPI_MAX, build_client_settings_payload, sanitize_client_setting, socket_dir)
 from types import SimpleNamespace
 from .webrtc_ice_config import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
 from .stream_server import BaseStreamingService, CentralizedStreamServer, CongestionSteer, RateHold, start_kbps
@@ -829,6 +829,8 @@ class WebRTCService(BaseStreamingService):
                 settled = getattr(getattr(self.display_pipelines.get(did), "stream_watch", None), "info", None)
                 if settled:
                     self.rtc_app.send_stream_info(did, settled, channel)
+                if any(p is peer for p in self._peers_beside_owner(did)):
+                    self._tell_display_settings(did, [peer])
         else:
             self.rtc_app.send_media_data_over_channel(
                 "server_settings", server_settings_payload
@@ -1672,6 +1674,9 @@ class WebRTCService(BaseStreamingService):
 
     # What sizes or configures the display a peer streams: its owner's alone apply.
     OWNER_ONLY_PREFIXES = ("SETTINGS,", "r,", "s,")
+    # The live verbs of the stream settings. A page beside the owner sends its
+    # user's picks in a SETTINGS too, so these from it are its own changes.
+    STREAM_VERB_PREFIXES = ("_arg_fps,", "vb,", "ab,", "_crf,", "_rc,")
 
     def _display_tabs(self, display_id: str, but: Optional[str] = None) -> set:
         """The tabs of the peers streaming `display_id`, leaving out peer `but`."""
@@ -1680,19 +1685,100 @@ class WebRTCService(BaseStreamingService):
                 if tab and pid != but and ((peers.get(pid) or {}).get("display_id") or "primary") == display_id}
 
     def _on_peer_data_message(self, msg: Any, display_id: str = "primary", conn_id: Optional[str] = None) -> Any:
-        """Hand a peer's data-channel message to the input handler, holding back
-        what would size or configure the display from a controller beside its
-        owner: the latest of each kind is kept, and replayed once that
-        controller owns the display (`_succeed_display_owner`)."""
-        if isinstance(msg, str) and msg.startswith(self.OWNER_ONLY_PREFIXES):
-            tab = self._peer_tabs.get(conn_id)
-            owner = self._display_owner_tabs.get(display_id or "primary")
-            if tab and owner and tab != owner:
-                peer = self.rtc_app.peer_connections.get(conn_id) if self.rtc_app else None
-                if peer is not None:
-                    peer.setdefault("held_owner_messages", {})[msg.split(",", 1)[0]] = msg
-                return None
-        return self.input_handler.on_message(msg, display_id, conn_id=conn_id)
+        """Hand a peer's data-channel message to the input handler. From a
+        controller beside the display's owner, what would size the display is
+        held back, the latest of each kind replayed once that controller owns
+        the display (`_succeed_display_owner`); its SETTINGS changes the stream
+        by its user's picks alone (`_settings_beside_owner`), and its stream
+        verbs, its page's own changes, are dropped. The owner's changes to the
+        stream reach the pages beside it."""
+        if not isinstance(msg, str) or not msg.startswith(self.OWNER_ONLY_PREFIXES + self.STREAM_VERB_PREFIXES):
+            return self.input_handler.on_message(msg, display_id, conn_id=conn_id)
+        display_id = display_id or "primary"
+        tab = self._peer_tabs.get(conn_id)
+        owner = self._display_owner_tabs.get(display_id)
+        if tab and owner and tab != owner:
+            peer = self.rtc_app.peer_connections.get(conn_id) if self.rtc_app else None
+            if msg.startswith("SETTINGS,"):
+                return self._settings_beside_owner(msg, display_id, peer)
+            if peer is not None and msg.startswith(self.OWNER_ONLY_PREFIXES):
+                peer.setdefault("held_owner_messages", {})[msg.split(",", 1)[0]] = msg
+            return None
+        result = self.input_handler.on_message(msg, display_id, conn_id=conn_id)
+        if msg.startswith(("SETTINGS,",) + self.STREAM_VERB_PREFIXES) and self._peers_beside_owner(display_id):
+            return self._tell_beside_after(result, display_id)
+        return result
+
+    def _owner_peer(self, display_id: str) -> Optional[Dict[str, Any]]:
+        """The peer entry of the display's owner."""
+        owner = self._display_owner_tabs.get(display_id)
+        peers = self.rtc_app.peer_connections if self.rtc_app else {}
+        return next((p for pid, p in peers.items() if owner and self._peer_tabs.get(pid) == owner
+                     and (p.get("display_id") or "primary") == display_id), None)
+
+    def _peers_beside_owner(self, display_id: str) -> List[Dict[str, Any]]:
+        """The controller peers streaming `display_id` from another tab than its owner's."""
+        owner = self._display_owner_tabs.get(display_id)
+        peers = self.rtc_app.peer_connections if self.rtc_app else {}
+        return [p for pid, p in peers.items() if owner and self._peer_tabs.get(pid) not in (None, owner)
+                and p.get("client_type") == ClientType.CONTROLLER
+                and (p.get("display_id") or "primary") == display_id]
+
+    def _holds_full_control(self, peer: Optional[Dict[str, Any]]) -> bool:
+        """Whether a peer holds a display's full permissions: a controller that
+        may drive keyboard and mouse, not a viewer, which only watches, nor a
+        gamepad player."""
+        return (peer is not None and peer.get("client_type") == ClientType.CONTROLLER
+                and self.rtc_app is not None and self.rtc_app.peer_holds_input_authority(peer))
+
+    def _tell_display_settings(self, display_id: str, peers: List[Optional[Dict[str, Any]]]) -> None:
+        """Tell peers what `display_id` streams with (`display_settings`): a
+        page beside the display's owner holds it for its tab, as does the owner
+        once another page's pick changed it."""
+        values = {key: self._display_setting(display_id, key) for key in STREAM_SETTINGS}
+        data = {"displayId": display_id, "settings": {k: v for k, v in values.items() if v is not None}}
+        for peer in peers:
+            channel = (peer or {}).get("data_channel")
+            if channel is not None:
+                self.rtc_app.send_message_to_channel(channel, "display_settings", data)
+
+    async def _tell_beside_after(self, result: Any, display_id: str) -> Any:
+        """Run the owner's change, then tell the pages beside it."""
+        if asyncio.iscoroutine(result):
+            result = await result
+        self._tell_display_settings(display_id, self._peers_beside_owner(display_id))
+        return result
+
+    async def _settings_beside_owner(self, msg: str, display_id: str, peer: Optional[Dict[str, Any]]) -> None:
+        """A SETTINGS from a controller beside the display's owner. What its
+        user picked of the stream (`picked`) applies where both pages hold full
+        permissions, and the display's pages are told; the rest of it waits
+        until that controller owns the display, without the stream settings,
+        which stay as they are then, and the page is told what they are now."""
+        try:
+            settings_json = json.loads(msg.split(",", 1)[1])
+        except (IndexError, ValueError):
+            return
+        if not isinstance(settings_json, dict):
+            return
+        picked = settings_json.get("picked") if isinstance(settings_json.get("picked"), list) else []
+        picks = {key: settings_json[key] for key in picked
+                 if key in STREAM_SETTINGS and settings_json.get(key) is not None}
+        rest = {k: v for k, v in settings_json.items() if k not in STREAM_SETTINGS and k != "picked"}
+        if peer is not None and rest:
+            held = peer.setdefault("held_owner_messages", {})
+            try:
+                rest = dict(json.loads(held["SETTINGS"].split(",", 1)[1]), **rest) if "SETTINGS" in held else rest
+            except (IndexError, ValueError, TypeError):
+                pass
+            held["SETTINGS"] = "SETTINGS," + json.dumps(rest)
+        owner_peer = self._owner_peer(display_id)
+        if not (picks and self._holds_full_control(peer) and self._holds_full_control(owner_peer)):
+            self._tell_display_settings(display_id, [peer])
+            return
+        logger.info(f"Applying {', '.join(sorted(picks))} picked by the controller beside the owner of '{display_id}'.")
+        await self.handle_update_settings(picks, display_id)
+        self._tell_display_settings(display_id, [owner_peer, *self._peers_beside_owner(display_id)])
 
     async def _succeed_display_owner(self, display_id: str, tab: str) -> None:
         """Once the owner's tab has been gone through the reconnect grace, hand

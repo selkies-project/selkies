@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""The stream settings of a display that two controller pages share over WebSockets.
+"""The stream settings of a display that two controller pages share, on both transports.
 
 A page beside the display's owner changes the display by what its user picks, and only where
 both pages hold full permissions; what it changes on its own follows the owner, and it is told
-what that is. A page's later SETTINGS applies the stream settings it changed, not the ones it
-repeats. The server runs on the tables these read, with the apply and the send recorded.
+what that is. Over WebSockets a page's later SETTINGS applies the stream settings it changed,
+not the ones it repeats; over WebRTC its stream verbs are its page's own and are dropped, and
+what would size the display waits for it to own it, without the stream settings. The servers
+run on the tables these read, with the apply and the sends recorded.
 """
 import asyncio
 import os
@@ -144,8 +146,95 @@ async def run_display_checks() -> None:
           and parsed(server, picked="encoder")["picked"] == [])
 
 
+class Channel:
+    pass
+
+
+class RTCApp:
+    """The peers a WebRTC service routes between, with its sends recorded."""
+
+    def __init__(self, peers: dict) -> None:
+        self.peer_connections = peers
+        self.sent: list = []
+        self.denied: set = set()
+
+    def send_message_to_channel(self, channel, msg_type, data) -> None:
+        self.sent.append((channel, msg_type, data))
+
+    def peer_holds_input_authority(self, peer) -> bool:
+        return bool(peer) and peer.get("name") not in self.denied
+
+
+async def run_webrtc_checks() -> None:
+    import json
+    from selkies import webrtc_mode as rm
+    from selkies.webrtc_engine import ClientType
+
+    owner = {"name": "owner", "client_type": ClientType.CONTROLLER, "display_id": "primary", "data_channel": Channel()}
+    joiner = {"name": "joiner", "client_type": ClientType.CONTROLLER, "display_id": "primary",
+              "data_channel": Channel()}
+    service = object.__new__(rm.WebRTCService)
+    service.rtc_app = RTCApp({"o": owner, "j": joiner})
+    service._peer_tabs = {"o": "tab-a", "j": "tab-b"}
+    service._display_owner_tabs = {"primary": "tab-a"}
+    service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
+    service.display_clients = {}
+    handled, updated = [], []
+
+    class Handler:
+        def on_message(self, msg, display_id, conn_id=None):
+            handled.append((msg, conn_id))
+
+    async def update(settings, display_id="primary"):
+        updated.append(settings)
+    service.input_handler = Handler()
+    service.handle_update_settings = update
+
+    def told():
+        return [(ch, data["settings"].get("encoder")) for ch, kind, data in service.rtc_app.sent
+                if kind == "display_settings"]
+
+    await service._on_peer_data_message("SETTINGS," + json.dumps({"encoder": "h264enc", "video_crf": 18,
+                                        "scaling_dpi": 144, "picked": ["encoder"]}), "primary", "j")
+    check("webrtc: a pick beside the owner applies", updated == [{"encoder": "h264enc"}], updated)
+    check("webrtc: and the owner and the page are told", {ch for ch, _ in told()}
+          == {owner["data_channel"], joiner["data_channel"]}, told())
+    held = joiner.get("held_owner_messages", {}).get("SETTINGS", "")
+    check("webrtc: what would size the display waits for it to own it, without the stream settings",
+          '"scaling_dpi": 144' in held and "encoder" not in held and "video_crf" not in held, held)
+
+    updated.clear(), service.rtc_app.sent.clear()
+    await service._on_peer_data_message('SETTINGS,{"encoder": "av1enc"}', "primary", "j")
+    check("webrtc: what it changed on its own does not apply", updated == [], updated)
+    check("webrtc: it is told what the display streams with",
+          [ch for ch, _ in told()] == [joiner["data_channel"]], told())
+
+    for verb in ("_arg_fps,144", "vb,2000", "ab,64000", "_crf,40", "_rc,crf"):
+        check(f"webrtc: its {verb.split(',')[0]} verb is dropped",
+              service._on_peer_data_message(verb, "primary", "j") is None and not handled, handled)
+    service._on_peer_data_message("r,1024x640", "primary", "j")
+    check("webrtc: its resize is held", joiner["held_owner_messages"].get("r") == "r,1024x640" and not handled)
+
+    service.rtc_app.denied = {"joiner"}
+    updated.clear()
+    await service._on_peer_data_message('SETTINGS,{"encoder": "h264enc", "picked": ["encoder"]}', "primary", "j")
+    check("webrtc: nor a pick from a page whose keyboard and mouse another token holds", updated == [], updated)
+    service.rtc_app.denied = set()
+    joiner["client_type"] = ClientType.VIEWER
+    await service._on_peer_data_message('SETTINGS,{"encoder": "h264enc", "picked": ["encoder"]}', "primary", "j")
+    check("webrtc: nor a viewer's", updated == [], updated)
+    joiner["client_type"] = ClientType.CONTROLLER
+
+    service.rtc_app.sent.clear()
+    result = service._on_peer_data_message("_crf,30", "primary", "o")
+    if asyncio.iscoroutine(result):
+        await result
+    check("webrtc: the owner's verb applies", handled == [("_crf,30", "o")], handled)
+    check("webrtc: and the page beside it is told", [ch for ch, _ in told()] == [joiner["data_channel"]], told())
+
+
 def main() -> int:
-    for block in (run_pick_checks, run_repeat_checks, run_display_checks):
+    for block in (run_pick_checks, run_repeat_checks, run_display_checks, run_webrtc_checks):
         asyncio.run(block())
     print(f"\n{failures} failure(s)")
     return 1 if failures else 0

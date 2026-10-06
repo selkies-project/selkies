@@ -1224,6 +1224,14 @@ CODEC_LABELS = {"jpeg": "JPEG", "h264": "H.264", "h265": "H.265", "vp8": "VP8", 
 
 # Encoders with no hardware path: selecting one implies software encoding.
 CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
+# What a display streams with, as SETTINGS carries it: a controller beside the
+# display's owner changes these by its user's pick alone, while the display's
+# size and density, and anything its page changes on its own, follow the owner.
+STREAM_SETTINGS = (
+    "encoder", "framerate", "video_crf", "video_fullcolor", "video_10bit", "video_streaming_mode",
+    "jpeg_quality", "paint_over_jpeg_quality", "use_paint_over_quality", "video_paintover_crf",
+    "video_paintover_burst_frames", "video_bitrate", "rate_control_mode", "use_cpu", "audio_bitrate",
+)
 
 # The fallback ladder, one order on both transports: the full-frame codecs by the measured
 # time per frame of their software encoders (x264, SVT-AV1, libvpx VP8, x265, libvpx VP9),

@@ -6,12 +6,13 @@ the owner's own page takes its connection back without touching the other, and
 once the owner is gone for good the page beside it owns the display and sets
 its size.
 
-The ``settings`` block follows the display's stream settings between the two
-over WebSockets: the page beside the owner starts on what the owner streams
-with, whatever it has stored, a setting its user picks changes the display for
-both, and the owner's own later picks leave it be.
+The ``settings`` and ``settings-wr`` blocks follow the display's stream
+settings between the two, over WebSockets and over WebRTC: the page beside the
+owner starts on what the owner streams with, whatever it has stored, a setting
+its user picks changes the display for both, and the owner's own later picks
+leave it be.
 
-Usage: python3 tests/e2e/test_multi_controller.py [websockets|webrtc|settings|all]
+Usage: python3 tests/e2e/test_multi_controller.py [websockets|webrtc|settings|settings-wr|all]
 """
 import json
 import os
@@ -116,14 +117,15 @@ STATE_JS = """(() => {
 })()""" % STORAGE_PREFIX_JS
 
 
-def open_page(pw, seed: dict, storage: dict = None) -> tuple:
+def open_page(pw, seed: dict, storage: dict = None, mode: str = "websockets") -> tuple:
     """A controller page of its own browser context, with `seed` stored before its first load;
     `(browser, page, console lines)`."""
     browser = C.launch_browser(pw, "chromium")
     ctx = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
                               device_scale_factor=1)
+    ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
     ctx.add_init_script(NAV_JS)
-    ctx.add_init_script(C.PAGE_TAP_JS)
+    ctx.add_init_script(C.PAGE_TAP_JS + C.PC_TAP_JS)
     if seed:
         ctx.add_init_script(SEED_JS % (STORAGE_PREFIX_JS, json.dumps(seed)))
     page = ctx.new_page()
@@ -207,6 +209,75 @@ def run_settings(res: "H.Results") -> None:
         H.server_stop()
 
 
+def wr_codec(page) -> str:
+    """The codec the page's WebRTC video arrives in, as its inbound stats name it."""
+    state = C.wr_video_state(page)
+    if not isinstance(state, dict):
+        return ""
+    return next((i.get("codec") or "" for pc in state["pcs"] for i in pc["inbound"] if i.get("kind") == "video"), "")
+
+
+def wait_codec(page, name: str, timeout: float = 30) -> str:
+    """Poll the page's inbound video codec until it names `name`; the last one read."""
+    deadline = time.time() + timeout
+    codec = wr_codec(page)
+    while name not in codec and time.time() < deadline:
+        time.sleep(1)
+        codec = wr_codec(page)
+    return codec
+
+
+def run_settings_wr(res: "H.Results") -> None:
+    H.server_start(mode="webrtc")
+    try:
+        with sync_playwright() as pw:
+            owner_browser, owner, owner_lines = open_page(pw, {"encoder": "vp8enc", "video_crf": "30"},
+                                                          mode="webrtc")
+            res.check("settings-wr: the owner streams", video(owner, "webrtc"))
+            codec = wait_codec(owner, "VP8")
+            res.check("settings-wr: on the encoder it picked", "VP8" in codec, codec)
+            other_browser, other, other_lines = open_page(pw, {"encoder": "h264enc", "video_crf": "20"},
+                                                          mode="webrtc")
+            res.check("settings-wr: a page of another tab streams too", video(other, "webrtc"))
+            state = wait_state(other, lambda s: s["stored"] == "vp8enc" and s["crf"] == "30")
+            res.check("settings-wr: and starts on what the owner streams with, whatever it stored",
+                      state["stored"] == "vp8enc" and state["crf"] == "30", state)
+            time.sleep(5)
+            codec = wr_codec(owner)
+            res.check("settings-wr: while the display keeps the owner's encoder", "VP8" in codec, codec)
+
+            pick(other, {"encoder": "h264enc"})
+            codec = wait_codec(owner, "H264")
+            res.check("settings-wr: a pick on the page beside the owner changes the display", "H264" in codec, codec)
+            state = wait_state(owner, lambda s: s["stored"] == "h264enc")
+            res.check("settings-wr: and the owner follows it", state["stored"] == "h264enc", state)
+            res.check("settings-wr: both go on streaming", streaming(owner, "webrtc") and streaming(other, "webrtc"))
+
+            pick(owner, {"video_crf": 35})
+            state = wait_state(other, lambda s: s["crf"] == "35")
+            res.check("settings-wr: the owner's own later pick reaches the page beside it", state["crf"] == "35", state)
+            time.sleep(3)
+            codec = wr_codec(owner)
+            res.check("settings-wr: and leaves the encoder picked beside it be", "H264" in codec, codec)
+            for name, page in (("owner", owner), ("page beside it", other)):
+                state = page.evaluate(STATE_JS)
+                res.check(f"settings-wr: the {name} never reloaded", state["navs"] == 1, state["navs"])
+            storage = owner.context.storage_state()
+            other_browser.close()
+            owner_browser.close()
+        H.server_start(mode="webrtc")
+        with sync_playwright() as pw:
+            browser, page, _ = open_page(pw, {}, storage=storage, mode="webrtc")
+            res.check("settings-wr: a later visit of the owner's browser streams", video(page, "webrtc"))
+            state = page.evaluate(STATE_JS)
+            codec = wait_codec(page, "VP8")
+            res.check("settings-wr: on its own picks again", "VP8" in codec and state["stored"] == "vp8enc"
+                      and state["crf"] == "35", (codec, state))
+            browser.close()
+    finally:
+        H.server_stop()
+
+
 def main() -> int:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     res = H.Results(f"multi-controller-{which}")
@@ -215,6 +286,8 @@ def main() -> int:
             run(res, mode)
     if which in ("all", "settings"):
         run_settings(res)
+    if which in ("all", "settings-wr"):
+        run_settings_wr(res)
     return 0 if res.summary() else 1
 
 

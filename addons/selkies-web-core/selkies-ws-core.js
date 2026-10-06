@@ -128,6 +128,7 @@ import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, tenBitStream, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
+import { CRASH_SAFE_SETTINGS, holdKeys, holdDisplaySettings, releaseHeldSettings, restoreHeldPicks } from './lib/held-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, canDecodeTenBit, tenBitDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers, rememberCcStart, recalledCcStart, forgetCcStart } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, codecStringFor,
@@ -1481,8 +1482,9 @@ const setStringParam = (key, value) => {
  * `encoderFallback`, so the server keeps it to this display and seeds no later
  * page or session with it. The tab's mark says when and why (`fallbackStamp`).
  */
-const ENCODER_PICK_KEY = `${prefixedStorageKey('encoder')}_pick`;
-const FALLBACK_TAB_KEY = `${ENCODER_PICK_KEY}_tab`;
+const HOLD_KEYS = holdKeys(prefixedStorageKey, storageAppName);
+const ENCODER_PICK_KEY = HOLD_KEYS.encoderPick;
+const FALLBACK_TAB_KEY = HOLD_KEYS.fallbackTab;
 /** Whether the stored encoder is a fallback rather than the user's pick. */
 function encoderIsFallback() {
   try { return window.localStorage.getItem(ENCODER_PICK_KEY) !== null; } catch (e) { return false; }
@@ -1510,19 +1512,8 @@ function storeEncoderPick(pick) {
   } catch (e) { /* storage unavailable */ }
 }
 /**
- * The settings the crash ladder resets, with their safe values (null clears
- * the setting). They are held for the crashing tab the way the encoder
- * fallback is: each safe value is stored where the pick is, the pick kept
- * under `<key>_pick` (empty for none), and any other tab or later visit puts
- * the picks back. A setting the user picks again in that tab is theirs, which
- * ends its hold (`releaseCrashSafeSettings`).
- */
-const CRASH_SAFE_SETTINGS = {
-  video_fullcolor: 'false', video_10bit: 'false', framerate: '60', video_crf: '25',
-  manual_resolution: 'false', manual_width: null, manual_height: null,
-};
-/**
- * Stores the crash ladder's safe values for this tab, keeping the picks they replace.
+ * Stores the crash ladder's safe values (`CRASH_SAFE_SETTINGS`) for this tab,
+ * keeping the picks they replace, the way the encoder fallback is held.
  * @param {string} why The crash.
  */
 function holdCrashSafeSettings(why) {
@@ -1538,75 +1529,8 @@ function holdCrashSafeSettings(why) {
     window.sessionStorage.setItem(FALLBACK_TAB_KEY, fallbackStamp(why));
   } catch (e) { /* storage unavailable */ }
 }
-/**
- * What a display streams with, as `display_settings` carries it. A page that
- * shares a display holds these for its tab the way a fallback is held: a page
- * beside the display's owner from the moment it joins, and any of its pages
- * once another one's pick changed them. Each value is stored where the pick is,
- * the pick kept under `<key>_pick` (`ENCODER_PICK_KEY` for the encoder), so the
- * page shows and asks for what the display does and its reloads keep it; any
- * other tab or later visit puts the picks back. The tab is marked under
- * `DISPLAY_TAB_KEY`, which says when and why (`fallbackStamp`).
- */
-const DISPLAY_SETTINGS = ['encoder', 'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
-  'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_paint_over_quality',
-  'video_paintover_crf', 'video_paintover_burst_frames', 'video_bitrate', 'rate_control_mode', 'use_cpu',
-  'audio_bitrate'];
-const DISPLAY_TAB_KEY = `${storageAppName}_display_settings_tab`;
-/** Every setting but the encoder a tab can hold in place of a pick. */
-const HELD_SETTINGS = [...new Set([...Object.keys(CRASH_SAFE_SETTINGS),
-  ...DISPLAY_SETTINGS.filter((name) => name !== 'encoder')])];
-/**
- * Holds what this page's display streams with for its tab, keeping the picks
- * it replaces.
- * @param {Object<string, *>} values A `display_settings` payload.
- * @param {string} why
- * @returns {Object<string, *>} The values that differ from what the tab held.
- */
-function holdDisplaySettings(values, why) {
-  const changed = {};
-  try {
-    for (const name of DISPLAY_SETTINGS) {
-      if (values[name] === undefined || values[name] === null) continue;
-      const key = prefixedStorageKey(name);
-      const value = String(values[name]);
-      if (window.localStorage.getItem(key) === value) continue;
-      const pickKey = name === 'encoder' ? ENCODER_PICK_KEY : `${key}_pick`;
-      if (window.localStorage.getItem(pickKey) === null) safeSetItem(pickKey, window.localStorage.getItem(key) ?? '');
-      safeSetItem(key, value);
-      changed[name] = values[name];
-    }
-    if (Object.keys(changed).length > 0) window.sessionStorage.setItem(DISPLAY_TAB_KEY, fallbackStamp(why));
-  } catch (e) { /* storage unavailable */ }
-  return changed;
-}
-/** Ends the hold of each held setting in `names`: the user picked it. */
-function releaseHeldSettings(names) {
-  try {
-    for (const name of names) {
-      if (HELD_SETTINGS.includes(name)) window.localStorage.removeItem(`${prefixedStorageKey(name)}_pick`);
-    }
-  } catch (e) { /* storage unavailable */ }
-}
-try {
-  const holds = window.sessionStorage.getItem(FALLBACK_TAB_KEY) !== null
-    || window.sessionStorage.getItem(DISPLAY_TAB_KEY) !== null;
-  const pick = window.localStorage.getItem(ENCODER_PICK_KEY);
-  if (pick !== null && !holds) {
-    setStringParam('encoder', pick || null);
-    window.localStorage.removeItem(ENCODER_PICK_KEY);
-  }
-  if (!holds) {
-    for (const name of HELD_SETTINGS) {
-      const key = prefixedStorageKey(name);
-      const held = window.localStorage.getItem(`${key}_pick`);
-      if (held === null) continue;
-      if (held === '') window.localStorage.removeItem(key);
-      else safeSetItem(key, held);
-      window.localStorage.removeItem(`${key}_pick`);
-    }
-  }
-} catch (e) { /* storage unavailable */ }
+// A tab that holds nothing gets its picks back (lib/held-settings.js).
+restoreHeldPicks(prefixedStorageKey, storageAppName);
 // A load that inherits its tab's fallback says what it holds and why.
 try {
   const mark = window.sessionStorage.getItem(FALLBACK_TAB_KEY);
@@ -1618,7 +1542,7 @@ try {
   if (mark !== null && held) {
     console.warn(`[fallback] This tab streams ${held} ${readFallbackStamp(mark)}. A new tab or visit puts the picks back.`);
   }
-  const shared = window.sessionStorage.getItem(DISPLAY_TAB_KEY);
+  const shared = window.sessionStorage.getItem(HOLD_KEYS.displayTab);
   if (shared !== null) {
     console.warn(`[display] This tab streams with what its display does ${readFallbackStamp(shared)}. A new tab or visit puts the picks back.`);
   }
@@ -5451,7 +5375,7 @@ function receiveMessage(event) {
       manual_width = alignResolution(width);
       manual_height = alignResolution(height);
       console.log(`Rounded logical resolution to even numbers: ${manual_width}x${manual_height}`);
-      releaseHeldSettings(['manual_resolution', 'manual_width', 'manual_height']);
+      releaseHeldSettings(prefixedStorageKey, ['manual_resolution', 'manual_width', 'manual_height']);
       setIntParam('manual_width', manual_width);
       setIntParam('manual_height', manual_height);
       setBoolParam('manual_resolution', true);
@@ -5480,7 +5404,7 @@ function receiveMessage(event) {
       window.manual_resolution = false;
       manual_width = null;
       manual_height = null;
-      releaseHeldSettings(['manual_resolution', 'manual_width', 'manual_height']);
+      releaseHeldSettings(prefixedStorageKey, ['manual_resolution', 'manual_width', 'manual_height']);
       setIntParam('manual_width', null);
       setIntParam('manual_height', null);
       setBoolParam('manual_resolution', false);
@@ -5896,7 +5820,7 @@ function handleSettingsMessage(settings, fromServer, send = true) {
   const storeInt = fromServer ? () => {} : setIntParam;
   const storeBool = fromServer ? () => {} : setBoolParam;
   const storeString = fromServer ? () => {} : setStringParam;
-  if (!fromServer) releaseHeldSettings(Object.keys(settings));
+  if (!fromServer) releaseHeldSettings(prefixedStorageKey, Object.keys(settings));
   console.log('Applying settings:', settings);
   let settingsChanged = false;
   if (settings.framerate !== undefined) {
@@ -6109,7 +6033,8 @@ function handleSettingsMessage(settings, fromServer, send = true) {
  */
 function followDisplaySettings(values) {
   if (isSharedMode) return;
-  const changed = holdDisplaySettings(values, 'the settings of a display it shares');
+  const changed = holdDisplaySettings(prefixedStorageKey, storageAppName, values,
+    fallbackStamp('the settings of a display it shares'));
   if (Object.keys(changed).length === 0) return;
   console.log('[display] Streaming with what the display does:', changed);
   for (const [name, value] of Object.entries(changed)) window[name] = value;

@@ -41,11 +41,12 @@
  * unordered `pointer` channel, JSON messages downstream, routed by `type` to
  * the `on*` callbacks (`pipeline`,
  * `stream_info`, `stream_stats`, `cursor`, `system`, `ping`,
- * `latency_measurement`, `server_settings`, `display_config_update`, `cc_rate`,
- * and `clipboard-msg*`). Either side may gzip a message once the `_gz,1`
- * handshake has been exchanged; the multipart clipboard and
- * `server_settings` kinds keep their arrival order across asynchronous
- * inflation, the rest route as soon as they are readable.
+ * `latency_measurement`, `server_settings`, `display_settings`,
+ * `display_config_update`, `cc_rate`, and `clipboard-msg*`). Either side may
+ * gzip a message once the `_gz,1` handshake has been exchanged; the multipart
+ * clipboard, `server_settings` and `display_settings` kinds keep their arrival
+ * order across asynchronous inflation, the rest route as soon as they are
+ * readable.
  * @module
  */
 
@@ -97,7 +98,7 @@ export function takeMultiopus(offer, answer) {
  * fires when autoplay was refused and a user gesture is needed, and
  * `onclipboardcontent`, `oncursorchange`, `onsystemaction`, `onstreaminfo`,
  * `onstreamstats`, `onlatencymeasurement`, `onserversettings`,
- * `ondisplayconfig`, and `onccrate` receive the payload of the data channel
+ * `ondisplaysettings`, `ondisplayconfig`, and `onccrate` receive the payload of the data channel
  * message of the same kind, and `onconnection` the server's verdict on this
  * page's connection, true while it is poor.
  */
@@ -218,6 +219,9 @@ export class WebRTCClient {
 
 		/** @type {?function(Object): void} */
 		this.onserversettings = null;
+
+		/** @type {?function(Object): void} */
+		this.ondisplaysettings = null;
 
 		/** @type {?function(Object): void} */
 		this.ondisplayconfig = null;
@@ -688,16 +692,16 @@ export class WebRTCClient {
 
 	/**
 	 * Whether a message rides the ordered queue: multipart clipboard sequences
-	 * must reassemble in sequence, and `server_settings` snapshots are
-	 * last-wins, so a slow-inflating one must not be overtaken by a newer
-	 * plain one. Everything else (cursor, ping, stats, system actions) routes
+	 * must reassemble in sequence, and `server_settings` and
+	 * `display_settings` snapshots are last-wins, so a slow-inflating one must
+	 * not be overtaken by a newer plain one. Everything else (cursor, ping, stats, system actions) routes
 	 * on arrival so a long clipboard decode cannot delay it.
 	 * @param {Object} msg
 	 * @returns {boolean}
 	 */
 	_requiresOrderedDelivery(msg) {
 		return typeof msg.type === 'string' &&
-			(msg.type.startsWith('clipboard-msg') || msg.type === 'server_settings');
+			(msg.type.startsWith('clipboard-msg') || msg.type === 'server_settings' || msg.type === 'display_settings');
 	}
 
 	/**
@@ -778,6 +782,10 @@ export class WebRTCClient {
 		} else if (msg.type === 'server_settings') {
 			if (this.onserversettings !== null) {
 				this.onserversettings(msg.data);
+			}
+		} else if (msg.type === 'display_settings') {
+			if (this.ondisplaysettings !== null) {
+				this.ondisplaysettings(msg.data);
 			}
 		} else if (msg.type === 'display_config_update') {
 			if (this.ondisplayconfig !== null) {

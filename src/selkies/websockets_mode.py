@@ -113,7 +113,7 @@ from .input_handler import (
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
-from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, fps_label, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting, socket_dir
+from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, STREAM_SETTINGS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, fps_label, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting, socket_dir
 from .settings import settings as app_settings
 from . import sessions
 from . import audit
@@ -235,14 +235,6 @@ AUDIO_CHANNELS_DEFAULT = 2
 # numeric string; a fractional value must not abort module import.
 AUDIO_BITRATE_DEFAULT = int(float(settings.audio_bitrate))
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "h265enc", "vp8enc", "vp9enc", "av1enc"]
-# What a display streams with, as SETTINGS carries it: a controller beside the
-# display's owner changes these by its user's pick alone, while the display's
-# size and density, and anything its page changes on its own, follow the owner.
-STREAM_SETTINGS = (
-    "encoder", "framerate", "video_crf", "video_fullcolor", "video_10bit", "video_streaming_mode",
-    "jpeg_quality", "paint_over_jpeg_quality", "use_paint_over_quality", "video_paintover_crf",
-    "video_paintover_burst_frames", "video_bitrate", "rate_control_mode", "use_cpu", "audio_bitrate",
-)
 
 logger_selkies_gamepad = logging.getLogger("gamepad")
 logger_app = logging.getLogger("ws")
