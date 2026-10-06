@@ -10295,18 +10295,6 @@ function initiateFallback(error, context) {
         console.warn(`[initiateFallback] Ignoring decoder error (Context: ${context}) from the decoders the software switch replaced.`);
         return;
     }
-    // Software decode that has put out no frame proves nothing against the
-    // stream: the engine may have no software decoder for it at all (one can
-    // take the config and then fail to start). The decoder the engine picks
-    // gets the stream back, and the retry stays spent, so its next failure
-    // reaches the ladder.
-    if (preferSoftwareDecode && !window.isFallingBack && !(lastVideoOutputAt > softwareDecodeSince)) {
-        console.warn(`[initiateFallback] Software decode put out no frame (Context: ${context}); leaving the choice of decoder to the browser.`, error);
-        rememberSoftwareDecode(false);
-        softwareDecodeSwitchedAt = performance.now();
-        restartDecodersForAcceleration();
-        return;
-    }
     // An engine that takes the configuration and refuses the stream at decode
     // (WebKit does for AV1): a codec with a rung below it steps the ladder the
     // way a refused configuration does, rather than reloading into the crash
@@ -10321,6 +10309,18 @@ function initiateFallback(error, context) {
             clearAllVncStripeDecoders();
             return;
         }
+    }
+    // Software decode that has put out no frame proves nothing against the
+    // stream: the engine may have no software decoder for it at all (one can
+    // take the config and then fail to start). Short of the crash ladder, the
+    // decoder the engine picks gets the stream back, and the retry stays
+    // spent, so its next failure reaches the ladder.
+    if (preferSoftwareDecode && !window.isFallingBack && !(lastVideoOutputAt > softwareDecodeSince)) {
+        console.warn(`[initiateFallback] Software decode put out no frame (Context: ${context}); leaving the choice of decoder to the browser.`, error);
+        rememberSoftwareDecode(false);
+        softwareDecodeSwitchedAt = performance.now();
+        restartDecodersForAcceleration();
+        return;
     }
     console.error(`FATAL DECODER ERROR (Context: ${context}).`, error);
     if (window.isFallingBack) return;
