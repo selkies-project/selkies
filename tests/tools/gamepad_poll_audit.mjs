@@ -229,4 +229,79 @@ function makeManager() {
     manager.destroy();
 }
 
+// --- a token holding several slots drives one with each pad -------------------
+{
+    const press = (p, b, v) => { p.buttons[b] = { pressed: v > 0, touched: v > 0, value: v }; };
+    const named = (name, index) => {
+        const p = pad('standard', [0, 0, 0, 0]);
+        p.id = `${name} (STANDARD GAMEPAD Vendor: 045e Product: 0b13)`;
+        p.index = index;
+        return p;
+    };
+    const [a, b, c] = [named('Pad A', 0), named('Pad B', 1), named('Pad C', 2)];
+    const sent = [];
+    const manager = new GamepadManager(null,
+        (i, btn, v) => sent.push(['b', i, btn, v]),
+        (i, ax, v) => sent.push(['a', i, ax, v]),
+        null,
+        (gp, switched, position) => sent.push(['active', gp ? gp.id : null, switched, position]));
+    manager.setSlotCount(2);
+    pads = [a, b, null, null];
+    manager._poll();
+    check('two pads for two slots drive one each at once, in the browser\'s order',
+          JSON.stringify(sent) === JSON.stringify([['active', a.id, false, 0], ['active', b.id, false, 1]]),
+          JSON.stringify(sent));
+    sent.length = 0;
+    press(b, 0, 1);
+    manager._poll();
+    check('each pad\'s controls go out as its own, the second pad\'s on the second slot',
+          JSON.stringify(sent) === JSON.stringify([['b', 1, 0, 1]]) && manager.drivenPosition(1) === 1,
+          JSON.stringify(sent));
+    sent.length = 0;
+    pads = [a, b, c, null];
+    manager._poll();
+    check('a third pad, not taken up, takes no slot', sent.length === 0, JSON.stringify(sent));
+    press(c, 0, 1);
+    manager._poll();
+    check('taken up, it takes the slot of the pad taken up longest ago, as a switch',
+          JSON.stringify(sent[0]) === JSON.stringify(['active', c.id, true, 0]) && manager.drivenPosition(0) === -1,
+          JSON.stringify(sent));
+    sent.length = 0;
+    manager.padGone(1);
+    check('a pad going away gives its slot up', JSON.stringify(sent) === JSON.stringify([['active', null, true, 1]]),
+          JSON.stringify(sent));
+    sent.length = 0;
+    pads = [a, null, c, null];
+    manager._poll();
+    check('and with the pads fitting the slots again, the one without a slot takes the free one at once',
+          JSON.stringify(sent[0]) === JSON.stringify(['active', a.id, false, 1]), JSON.stringify(sent));
+    sent.length = 0;
+    manager.setSlotCount(1);
+    check('a token left one slot: the pad on the slot it lost gives it up',
+          JSON.stringify(sent) === JSON.stringify([['active', null, true, 1]]) && manager.drivers.length === 1,
+          JSON.stringify(sent));
+    manager.destroy();
+
+    const calls = [];
+    const shaker = (p, name) => {
+        p.vibrationActuator = {
+            playEffect: (type, e) => { calls.push([name, 'play', e.strongMagnitude]); return Promise.resolve('complete'); },
+            reset: () => { calls.push([name, 'reset']); return Promise.resolve('complete'); },
+        };
+        return p;
+    };
+    pads = [shaker(named('Pad A', 0), 'a'), shaker(named('Pad B', 1), 'b'), null, null];
+    const rumbler = new GamepadManager(null, () => {}, () => {}, null, () => {});
+    rumbler.rumble(0.5, 0.5, 300, 1);
+    rumbler.rumble(0.25, 0.25, 300, 0);
+    rumbler.rumble(0, 0, 0, 1);
+    check('a rumble for one slot plays on the pad driving it alone, and stops there alone',
+          JSON.stringify(calls) === JSON.stringify([['b', 'play', 0.5], ['a', 'play', 0.25], ['b', 'reset']]),
+          JSON.stringify(calls));
+    calls.length = 0;
+    rumbler.destroy();
+    check('tearing the manager down stops the rumble still playing', JSON.stringify(calls) === JSON.stringify([['a', 'reset']]),
+          JSON.stringify(calls));
+}
+
 process.exit(failed === 0 ? 0 : 1);

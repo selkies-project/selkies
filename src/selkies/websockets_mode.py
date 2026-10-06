@@ -6798,9 +6798,10 @@ class DataStreamingServer(BaseStreamingService):
 
         new_mk_owner = None
         for tkn, perms in new_token_data.items():
-            if perms.get("mk_control", False):
+            if "slot" in perms:
+                perms["slot"] = sessions.stored_slot(perms["slot"])
+            if perms.get("mk_control", False) and new_mk_owner is None:
                 new_mk_owner = tkn
-                break
         sessions.user_tokens = new_token_data
         sessions.active_mk_token = new_mk_owner
         logger.info(f"Updated user tokens. Now tracking {len(sessions.user_tokens)} tokens.")

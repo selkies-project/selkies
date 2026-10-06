@@ -10,12 +10,45 @@ authorizes input against them here, and a token update reaches live WebRTC
 peers through `webrtc_reconcile_hook`, which the WebRTC service registers.
 """
 import hmac
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from .settings import settings as app_settings
 
 user_tokens: dict[str, dict] = {}
 active_mk_token: Optional[str] = None
+
+# The kernel gamepads a session presents; a token's slots are one-based among them.
+GAMEPAD_SLOTS = 4
+
+
+def token_slots(value: Any) -> list[int]:
+    """The one-based gamepad slots a token entry's `slot` names, in its order.
+
+    An entry names one slot (1 to GAMEPAD_SLOTS, or its decimal string), a list
+    of them, or none (null, 0, or an empty list). The order is the page's: its
+    first pad drives the first slot, its second the next. A value that is no
+    such slot names none, and a slot named twice counts once.
+    """
+    slots: list[int] = []
+    for item in (value if isinstance(value, (list, tuple)) else [value]):
+        if isinstance(item, bool):
+            continue
+        try:
+            slot = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= slot <= GAMEPAD_SLOTS and slot not in slots:
+            slots.append(slot)
+    return slots
+
+
+def stored_slot(value: Any) -> Any:
+    """A token entry's `slot` as the table keeps and pages are told it: null
+    for none, the number for one, and the list for several (`token_slots`)."""
+    slots = token_slots(value)
+    if not slots:
+        return None
+    return slots[0] if len(slots) == 1 else slots
 
 
 def current_session_tokens() -> tuple[dict[str, dict], Optional[str]]:

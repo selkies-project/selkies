@@ -74,9 +74,12 @@ When secure mode is enabled (`SELKIES_MASTER_TOKEN` is set), the server exposes 
 *   `"role"`: (String, required) Can be one of the following:
     *   `"controller"`: Full access. Can send keyboard, mouse, and all other input events (unless overridden by `mk_control`).
     *   `"viewer"`: Restricted access. Primarily for viewing the stream. Can be granted specific input rights via the `slot` or `mk_control` properties.
-*   `"slot"`: (Integer or `null`, required) Assigns an input slot, primarily for gamepads.
+*   `"slot"`: (Integer, list of integers, or `null`, required) Assigns input slots, primarily for gamepads.
     *   `null`: No specific input slot.
     *   `1` - `4`: Grants the user control over the specific virtual gamepad slot (Player 1 through Player 4).
+    *   A list, such as `[3, 4]`: Grants several slots to one client, for several controllers in one browser. Its
+        pads take them in the browser's order: its first pad drives the first slot listed, its second the next. With
+        more pads than slots, the pad last used takes a slot.
 *   `"mk_control"`: (Boolean, optional) Exclusive override for Mouse & Keyboard input.
     *   If `true` on **any** active token in the set, only that specific client processes mouse and keyboard events.
     *   If `false` or omitted on **all** active tokens, mouse and keyboard access defaults to clients with the `"controller"` role.
@@ -92,7 +95,8 @@ curl -X POST http://localhost:8080/api/tokens \
 -H "Content-Type: application/json" \
 -d '{
   "token-1": {"role": "controller", "slot": null, "mk_control": false},
-  "token-2": {"role": "viewer", "slot": 1, "mk_control": true}
+  "token-2": {"role": "viewer", "slot": 1, "mk_control": true},
+  "token-3": {"role": "viewer", "slot": [3, 4], "mk_control": false}
 }'
 ```
 

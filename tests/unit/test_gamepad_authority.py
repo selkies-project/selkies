@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""A client drives the gamepad slot it holds and no other.
+"""A client drives the gamepad slots it holds and no other.
 
 The gamepad index is a field of the client's own message, so nothing about it
 is trustworthy until the connection is consulted. The rule is one shared
 policy (`gamepad_slot_denied`) applied by both transports: a viewer holding
 player slot N drives index N-1 alone, a `#shared` viewer holding no slot drives
 none, a master token's provisioned slot governs every role, and a legacy
-controller — which already holds keyboard and mouse — stays unrestricted. The
+controller — which already holds keyboard and mouse — stays unrestricted. A
+token may hold several slots, as a list, and the table keeps a lone one as the
+number it always was (`sessions.stored_slot`). The
 websockets handshake gives a legacy controller no slot while the signaling
 HELLO has it claim slot 1 as its registry identity, so the WebRTC gate is
 checked to govern the same client the same way on both transports.
@@ -70,6 +72,31 @@ def policy(res: H.Results) -> None:
     # hold for a spelling of the index the client chose rather than its digits.
     res.check("an index spelled oddly is compared by value",
               not gamepad_slot_denied("js,b, 01 ,0,1", "viewer", 2, False))
+    res.check("a token holding slots 3 and 4 drives indexes 2 and 3",
+              not any(gamepad_slot_denied(m.format(i), "controller", [3, 4], True)
+                      for m in (CONNECT, BUTTON, DISCONNECT) for i in (2, 3)))
+    res.check("and no other",
+              all(gamepad_slot_denied(BUTTON.format(i), "controller", [3, 4], True) for i in (0, 1)))
+
+
+def slots(res: H.Results) -> None:
+    """What a token entry's `slot` names, and how the table keeps it."""
+    res.check("a number names its slot, as does its decimal string",
+              sessions.token_slots(2) == [2] and sessions.token_slots("3") == [3])
+    res.check("a list names its slots in its order",
+              sessions.token_slots([4, 3]) == [4, 3])
+    res.check("null, 0 and an empty list name none",
+              sessions.token_slots(None) == [] and sessions.token_slots(0) == []
+              and sessions.token_slots([]) == [])
+    res.check("what is no slot names none, and a slot named twice counts once",
+              sessions.token_slots([5, True, "x", 2, 2]) == [2]
+              and sessions.token_slots({"slot": 1}) == [])
+    res.check("the table keeps a lone slot as the number it always was",
+              sessions.stored_slot(2) == 2 and sessions.stored_slot([2]) == 2
+              and sessions.stored_slot("2") == 2)
+    res.check("several as their list, and none as null",
+              sessions.stored_slot([3, 4]) == [3, 4] and sessions.stored_slot([]) is None
+              and sessions.stored_slot(0) is None)
 
 
 async def webrtc(res: H.Results) -> None:
@@ -106,6 +133,11 @@ async def webrtc(res: H.Results) -> None:
         res.check("WebRTC secure: a re-slotted token takes effect on the next message",
                   app._gamepad_denied(BUTTON.format(1), ClientType.VIEWER, "tok-p2", 1)
                   and not app._gamepad_denied(BUTTON.format(2), ClientType.VIEWER, "tok-p2", 1))
+        sessions.user_tokens["tok-p2"] = {"role": "controller", "slot": [3, 4]}
+        res.check("WebRTC secure: a token holding slots 3 and 4 drives indexes 2 and 3 alone",
+                  not app._gamepad_denied(BUTTON.format(2), ClientType.CONTROLLER, "tok-p2", 1)
+                  and not app._gamepad_denied(BUTTON.format(3), ClientType.CONTROLLER, "tok-p2", 1)
+                  and app._gamepad_denied(BUTTON.format(0), ClientType.CONTROLLER, "tok-p2", 1))
     finally:
         sessions.user_tokens, sessions.active_mk_token = tokens_before, mk_before
         app_settings.master_token = master_before
@@ -114,6 +146,7 @@ async def webrtc(res: H.Results) -> None:
 def run() -> H.Results:
     res = H.Results("gamepad-authority")
     policy(res)
+    slots(res)
     asyncio.run(webrtc(res))
     res.summary()
     return res

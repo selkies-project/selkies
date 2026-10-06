@@ -184,6 +184,19 @@ function trackpadGain(speed) {
     return 1 + (TRACKPAD_ACCEL_MAX - 1) * t * t * (3 - 2 * t);
 }
 
+/**
+ * The one-based gamepad slots a server verdict's `slot` names, in the order the
+ * client's pads take them: one number, a list of them (a token holding
+ * several), or none.
+ * @param {number|number[]|null|undefined} slot
+ * @returns {number[]|null}
+ */
+export function slotList(slot) {
+    const named = Array.isArray(slot) ? slot : (slot === null || slot === undefined ? [] : [slot]);
+    const slots = named.map(Number).filter((s) => Number.isInteger(s) && s >= 1);
+    return slots.length ? slots : null;
+}
+
 /** Finger travel, in CSS pixels, that one wheel notch of a two-finger scroll stands for. */
 const TOUCH_SCROLL_NOTCH_PX = 50;
 
@@ -1494,7 +1507,8 @@ export class Input {
      * @param {boolean} [isSharedMode=false] Viewer-only session: listeners are limited to suppressing touch defaults.
      * @param {number} [playerIndex=0] Gamepad slot used while the server has assigned no controller slot.
      * @param {boolean} [useCssScaling=false] Whether the stream is realized in CSS pixels, so no device pixel ratio applies.
-     * @param {number|null} [initialSlot=null] One-based controller slot assigned by the server.
+     * @param {number|number[]|null} [initialSlot=null] One-based controller slot assigned by the server,
+     *     or the list of them a token holding several names.
      */
     constructor(element, send, isSharedMode = false, playerIndex = 0,  useCssScaling = false, initialSlot = null) {
         this.element = element;
@@ -1515,7 +1529,8 @@ export class Input {
         this._pointerSeq = 0;
         this._isSidebarOpen = false;
         this.isSharedMode = isSharedMode;
-        this.controllerSlot = initialSlot;
+        /** The one-based slots the server assigned, in the order the pads take them, or null (`slotList`). */
+        this.controllerSlots = slotList(initialSlot);
         this.playerIndex = playerIndex;
         this.cursorDiv = document.createElement('canvas');
         this.cursorDiv.style.position = 'fixed';
@@ -1567,8 +1582,8 @@ export class Input {
         this._geometryTimer = null;
         this.buttonMask = 0;
         this.gamepadManager = null;
-        /** The server slot a `js,c` was last sent on, which a `js,d` releases (`_gamepadActive`). */
-        this._gamepadAnnounced = null;
+        /** Per slot position, the server slot a `js,c` was last sent on, which a `js,d` releases (`_gamepadActive`). */
+        this._gamepadAnnounced = {};
         /** Pads play the rumble the server relays (`setGamepadRumble`). */
         this.gamepadRumble = true;
         this.x = 0;
@@ -1700,16 +1715,20 @@ export class Input {
     }
 
     /**
-     * Assigns the one-based controller slot the server gave this client, and
-     * announces the pad that drives it there: a `js,c` sent before the slot
-     * was known was refused by the server's slot gate, which left the pad
-     * unassociated.
+     * Assigns the one-based controller slot the server gave this client, or
+     * the list of them, and announces the pads that drive them there: a `js,c`
+     * sent before the slot was known was refused by the server's slot gate,
+     * which left the pad unassociated.
+     * @param {number|number[]|null} newSlot
      */
     updateControllerSlot(newSlot) {
-        if (this.controllerSlot !== newSlot) {
-            console.log(`Input class: Controller slot updated to: ${newSlot}`);
-            this.controllerSlot = newSlot;
-            if (this.gamepadManager) this.gamepadManager.reannounce();
+        const slots = slotList(newSlot);
+        if (String(slots) === String(this.controllerSlots)) return;
+        console.log(`Input class: Controller slots updated to: ${slots}`);
+        this.controllerSlots = slots;
+        if (this.gamepadManager) {
+            this.gamepadManager.setSlotCount(slots ? slots.length : 1);
+            this.gamepadManager.reannounce();
         }
     }
     /** Tracks the dashboard's `sidebarVisibilityChanged` message so gamepad state is only mirrored while it is open. */
@@ -4989,47 +5008,61 @@ export class Input {
     }
 
     /**
-     * The zero-based server slot this client's pad drives: its controller
-     * slot, else its player index; null for a negative slot (a controller
-     * slot of 0), which every gamepad send refuses, so no phantom slot is
-     * created.
+     * The zero-based server slot the pad at `position` among this client's
+     * drives: its controller slot there, else (position 0, no slot assigned)
+     * its player index; null where it holds no such slot, which every gamepad
+     * send refuses, so no phantom slot is created.
+     * @param {number} [position=0]
      * @returns {number|null}
      */
-    _gamepadIndex() {
-        const index = (this.controllerSlot !== null) ? this.controllerSlot - 1 : this.playerIndex;
+    _gamepadIndex(position = 0) {
+        const slots = this.controllerSlots;
+        const index = slots ? slots[position] - 1 : (position === 0 ? this.playerIndex : null);
         return (Number.isInteger(index) && index >= 0) ? index : null;
     }
 
-    /** Creates the shared manager on the first pad; which pad drives the slot is its call (`_gamepadActive`). */
+    /**
+     * The zero-based server slot browser pad `gp_num` drives, or null.
+     * @param {number} gp_num
+     * @returns {number|null}
+     */
+    _gamepadIndexOf(gp_num) {
+        const position = this.gamepadManager ? this.gamepadManager.drivenPosition(gp_num) : 0;
+        return position < 0 ? null : this._gamepadIndex(position);
+    }
+
+    /** Creates the shared manager on the first pad; which pads drive the slots is its call (`_gamepadActive`). */
     _gamepadConnected(event) {
         if (this._gamepadIndex() === null) return;
         if (!this.gamepadManager) {
             this.gamepadManager = new GamepadManager(event.gamepad, this._gamepadButton.bind(this), this._gamepadAxis.bind(this),
                 this._gamepadHeartbeat.bind(this), this._gamepadActive.bind(this));
+            this.gamepadManager.setSlotCount(this.controllerSlots ? this.controllerSlots.length : 1);
             this.gamepadManager.setRumbleEnabled(this.gamepadRumble);
         }
         if (this.ongamepadconnected !== null) { this.ongamepadconnected(event.gamepad.id); }
     }
 
     /**
-     * Announces the pad that now drives the slot (`js,c`). The slot drops what
-     * it held (`js,d`) first when another pad drove it, when none drives it
-     * any more, or when the slot itself moved. The axis and button counts are
-     * advisory: the server presents a fixed Xbox pad, and Firefox's
-     * non-standard axis layout is normalized on the way.
+     * Announces the pad that now drives the slot at `position` (`js,c`). The
+     * slot drops what it held (`js,d`) first when another pad drove it, when
+     * none drives it any more, or when the slot itself moved. The axis and
+     * button counts are advisory: the server presents a fixed Xbox pad, and
+     * Firefox's non-standard axis layout is normalized on the way.
      * @param {Gamepad|null} gamepad
      * @param {boolean} switched
+     * @param {number} [position=0]
      */
-    _gamepadActive(gamepad, switched) {
-        const index = this._gamepadIndex();
-        const announced = this._gamepadAnnounced;
-        this._gamepadAnnounced = null;
-        if (announced !== null && (switched || !gamepad || announced !== index)) {
+    _gamepadActive(gamepad, switched, position = 0) {
+        const index = this._gamepadIndex(position);
+        const announced = this._gamepadAnnounced[position];
+        delete this._gamepadAnnounced[position];
+        if (announced !== undefined && (switched || !gamepad || announced !== index)) {
             this.send("js,d," + announced);
         }
         if (!gamepad || index === null) return;
         this.send("js,c," + index + "," + this._encodeGamepadId(gamepad.id) + "," + gamepad.axes.length + "," + gamepad.buttons.length);
-        this._gamepadAnnounced = index;
+        this._gamepadAnnounced[position] = index;
     }
 
     /** A pad gone: the slot is released only if that pad drove it. */
@@ -5040,7 +5073,7 @@ export class Input {
 
     /** Sends a button change (`js,b`) and mirrors it to the dashboard while the sidebar is open. */
     _gamepadButton(gp_num, btn_num, val) {
-        const server_gp_index = this._gamepadIndex();
+        const server_gp_index = this._gamepadIndexOf(gp_num);
         if (server_gp_index === null) return;
         this.send("js,b," + server_gp_index + "," + btn_num + "," + val);
         if (this._isSidebarOpen) {
@@ -5050,14 +5083,22 @@ export class Input {
 
     /**
      * Plays the rumble the server relays for a pad slot, on this client's
-     * pads when the slot is the one they drive (`GamepadManager.rumble`).
+     * pads when the slot is the one they drive (`GamepadManager.rumble`); a
+     * client holding several slots plays it on the pad driving that one.
      * @param {number} slot Zero-based server slot.
      * @param {number} strong Strong motor level, 0 to 1.
      * @param {number} weak Weak motor level, 0 to 1.
      * @param {number} durationMs How long to hold it.
      */
     rumble(slot, strong, weak, durationMs) {
-        if (slot !== this._gamepadIndex() || !this.gamepadManager) return;
+        if (!this.gamepadManager) return;
+        const slots = this.controllerSlots;
+        if (slots && slots.length > 1) {
+            const pad = this.gamepadManager.drivers[slots.indexOf(slot + 1)];
+            if (pad !== undefined && pad !== null) this.gamepadManager.rumble(strong, weak, durationMs, pad);
+            return;
+        }
+        if (slot !== this._gamepadIndex()) return;
         this.gamepadManager.rumble(strong, weak, durationMs);
     }
 
@@ -5076,16 +5117,19 @@ export class Input {
         if (this.gamepadManager) this.gamepadManager.stopRumble();
     }
 
-    /** Sends the held-pad heartbeat (`js,h`). */
+    /** Sends the held-pad heartbeat (`js,h`) on each slot a pad drives, the first outside a token that names several. */
     _gamepadHeartbeat() {
-        const server_gp_index = this._gamepadIndex();
-        if (server_gp_index === null) return;
-        this.send("js,h," + server_gp_index);
+        const positions = this.gamepadManager ? this.gamepadManager.drivers.length : 1;
+        for (let position = 0; position < positions; position++) {
+            if (position > 0 && this.gamepadManager.drivers[position] === null) continue;
+            const server_gp_index = this._gamepadIndex(position);
+            if (server_gp_index !== null) this.send("js,h," + server_gp_index);
+        }
     }
 
     /** Sends an axis change (`js,a`); Firefox's non-standard layout reports the triggers on axes 4 and 5, sent as buttons 6 and 7. */
     _gamepadAxis(gp_num, axis_num, val) {
-        const server_gp_index = this._gamepadIndex();
+        const server_gp_index = this._gamepadIndexOf(gp_num);
         if (server_gp_index === null) return;
         if (navigator.userAgent.toLowerCase().includes('firefox')) {
             if (axis_num === 4) {
@@ -5362,7 +5406,7 @@ export class Input {
     resyncGamepads() {
         if (this.gamepadManager) {
             // The association was the dead channel's, and the server released it.
-            this._gamepadAnnounced = null;
+            this._gamepadAnnounced = {};
             this.gamepadManager.reannounce();
             return;
         }
@@ -5395,7 +5439,7 @@ export class Input {
             this.gamepadManager.destroy();
             this.gamepadManager = null;
         }
-        this._gamepadAnnounced = null;
+        this._gamepadAnnounced = {};
         this._watchScreenGeometry(false);
         this.detach_context();
     }

@@ -5,7 +5,7 @@ kernel would receive. A `#player2` client repeats it on the sharing path, where
 the slot comes from the connection rather than the message. A client with two
 local pads, a flight stick whose pots jitter beside the pad in use, drives its
 one slot with the pad it takes up, with and without a token that binds it to a
-slot."""
+slot. A token holding slots 3 and 4 has the page's two pads drive one each."""
 import json
 import os
 import struct
@@ -63,8 +63,22 @@ TWO_PADS_INIT: str = """
   };
 })();
 """
+SLOTS_PADS_INIT: str = """
+(() => {
+  const blank = (n) => Array.from({length: n}, () => ({pressed: false, touched: false, value: 0}));
+  const named = (index, name) => ({index, id: name + " (STANDARD GAMEPAD Vendor: 045e Product: 0b13)",
+    mapping: "standard", connected: true, timestamp: 1, buttons: blank(17), axes: [0, 0, 0, 0]});
+  window.__pads = [named(0, "Pad A"), named(1, "Pad B")];
+  navigator.getGamepads = () => [window.__pads[0], window.__pads[1], null, null];
+  window.__padPress = (p, i, v) => {
+    window.__pads[p].buttons[i] = {pressed: v > 0, touched: v > 0, value: v};
+    window.__pads[p].timestamp = performance.now();
+  };
+})();
+"""
 MASTER = "e2e-gamepad-master"
 SLOT_TOKEN = "e2e-gamepad-slot1-Rk7"
+SLOTS_TOKEN = "e2e-gamepad-slots34-Qm2"
 # The stick's jitter, 0.06 to 0.09 of full scale on the kernel device's axis.
 JITTER = range(1500, 3500)
 
@@ -205,11 +219,11 @@ def run_player_slot(mode: str, results: "H.Results") -> None:
                   H.shim_created(SHIMLOG, ih.STANDARD_XPAD_CONFIG["name"]) == 1)
 
 
-def post_slot_token() -> int:
-    """Provision a controller token bound to player slot 1; returns the HTTP status."""
+def post_slot_token(token: str = SLOT_TOKEN, slot=1) -> int:
+    """Provision a controller token bound to player slot 1, or to `slot`; returns the HTTP status."""
     req = urllib.request.Request(
         H.BASE_URL + "/api/tokens", method="POST",
-        data=json.dumps({SLOT_TOKEN: {"role": "controller", "slot": 1}}).encode(),
+        data=json.dumps({token: {"role": "controller", "slot": slot}}).encode(),
         headers={"Authorization": f"Bearer {MASTER}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=10) as resp:
         return resp.status
@@ -271,10 +285,51 @@ def run_two_pads(mode: str, results: "H.Results", token: bool) -> None:
                   f"{sum(1 for (t, c, v) in events if t == ih.EV_ABS and abs(v) in JITTER)} jitter events")
 
 
+def run_slot_list(mode: str, results: "H.Results") -> None:
+    """A token holding slots 3 and 4: the page's pad 0 drives slot 3 and its pad 1 slot 4.
+
+    The token table takes a list where it took a number, and the verdict hands
+    the page that list; the page announces each of its pads on its own slot, in
+    the browser's order, and the gate lets both through.
+
+    Args:
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+        results: Results accumulator shared across both transports.
+    """
+    label = f"{mode} with slots 3 and 4"
+    shim_env, STREAM, SHIMLOG = H.uinput_shim_env(f"e2e-slots-{mode}")
+    H.server_start(mode=mode, extra_env=dict(shim_env, SELKIES_MASTER_TOKEN=MASTER))
+    try:
+        results.check(f"{label}: token provisioned", post_slot_token(SLOTS_TOKEN, [3, 4]) == 200)
+        with sync_playwright() as pw:
+            browser, page, errors = launch(pw, mode, fragment=f"#token={SLOTS_TOKEN}", init=SLOTS_PADS_INIT)
+            video = C.wait_wr_video(page) if mode == "webrtc" else C.wait_ws_video(page)
+            results.check(f"{label}: video flowing", bool(video), str(video))
+            time.sleep(1.0)
+            for action in ("__padPress(0, 0, 1)", "__padPress(0, 0, 0)", "__padPress(1, 1, 1)", "__padPress(1, 1, 0)"):
+                page.evaluate(f"window.{action}")
+                time.sleep(0.25)
+            browser.close()
+    finally:
+        server_log = H.server_log()
+        H.server_stop()
+
+    events = decode(STREAM)
+    associated = lambda name, slot: (f"'{name} (STANDARD GAMEPAD Vendor: 045e Product: 0b13)' (17b, 4a) is now associated"
+                                     f" with persistent virtual gamepad slot {slot}") in server_log
+    results.check(f"{label}: pad 0 drives slot 3 and pad 1 slot 4",
+                  associated("Pad A", 2) and associated("Pad B", 3))
+    results.check(f"{label}: no other slot was driven",
+                  not any(f"virtual gamepad slot {i}." in server_log for i in (0, 1)))
+    results.check(f"{label}: both pads' presses reached the kernel",
+                  (ih.EV_KEY, ih.BTN_A, 1) in events and (ih.EV_KEY, ih.BTN_B, 1) in events)
+
+
 results = H.Results("uinput")
 for mode in ("websockets", "webrtc"):
     run(mode, results)
     run_player_slot(mode, results)
     run_two_pads(mode, results, token=False)
     run_two_pads(mode, results, token=True)
+    run_slot_list(mode, results)
 sys.exit(0 if results.summary() else 1)

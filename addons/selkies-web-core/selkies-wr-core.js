@@ -3526,7 +3526,8 @@ export default function webrtc() {
 					const previousSlot = clientSlot;
 					clientRole = perms.role === CLIENT_CONTROLLER ? CLIENT_CONTROLLER : CLIENT_VIEWER;
 					clientSlot = (perms.slot === null || perms.slot === undefined) ? null : perms.slot;
-					playerInputTargetIndex = (clientSlot !== null && clientSlot > 0) ? clientSlot - 1 : undefined;
+					const firstSlot = Array.isArray(clientSlot) ? clientSlot[0] : clientSlot;
+					playerInputTargetIndex = (firstSlot !== null && firstSlot > 0) ? firstSlot - 1 : undefined;
 					console.log(`Server role verdict: role=${clientRole}, slot=${clientSlot}`);
 					if (input) {
 						input.updateControllerSlot(clientSlot);

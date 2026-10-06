@@ -11,10 +11,12 @@
  * gamepad announces its own changes (`touchgamepadinput`), and is read the
  * moment it does rather than on the next tick.
  *
- * A client drives one server slot, so of its local pads one drives it at a
- * time (`GamepadManager._choose`): a lone pad at once, and among several the
- * one last taken up, so a second device's resting or noisy controls (a flight
- * stick's pots, a throttle parked at an end) never write over the pad in use.
+ * A client drives the server slots it holds, one pad each
+ * (`GamepadManager._choose`): one slot outside a token that names several.
+ * Pads that all fit drive at once, in the browser's order; past that, a pad
+ * taken up takes a slot, so a further device's resting or noisy controls (a
+ * flight stick's pots, a throttle parked at an end) never write over a pad
+ * in use.
  *
  * Rumble goes the other way (`rumble`): the dual-rumble effect of the
  * Gamepad API's `vibrationActuator` (Chromium, WebKit), else Gecko's
@@ -94,10 +96,11 @@ export class GamepadManager {
      * @param {(() => void)=} onHeld Called about ten times a second while any
      *     control is away from rest, so the server can neutralize a held pad
      *     whose client died without a transport close.
-     * @param {((gamepad: Gamepad|null, switched: boolean) => void)=} onActive
-     *     Called with the pad that now drives the slot, or null when none
-     *     does; `switched` when it replaces another, whose held controls the
-     *     slot must drop, rather than announcing the same pad again.
+     * @param {((gamepad: Gamepad|null, switched: boolean, position: number) => void)=} onActive
+     *     Called with the pad that now drives the slot at `position` among
+     *     those the client holds, or null when none does; `switched` when it
+     *     replaces another, whose held controls the slot must drop, rather than
+     *     announcing the same pad again.
      */
     constructor(gamepad, onButton, onAxis, onHeld, onActive) {
         this.gamepad = gamepad;
@@ -105,10 +108,13 @@ export class GamepadManager {
         this.onAxis = onAxis;
         this.onHeld = onHeld || null;
         this.onActive = onActive || null;
-        /** The browser index of the pad that drives the slot, or null. */
-        this.active = null;
+        /** Per slot the client holds, in its order, the browser index of the pad driving it, or null. */
+        this.drivers = [null];
         /** Per pad, the controls that held it taken up at the last tick (`_takenUp`). */
         this._takenUpAt = {};
+        /** Per pad, the tick it was last taken up, so the driver idle longest gives way first. */
+        this._usedAt = {};
+        this._tick = 0;
         this._lastHeldBeat = 0;
         this.state = {};
         this._active = true;
@@ -119,7 +125,37 @@ export class GamepadManager {
         window.addEventListener('touchgamepadinput', this._onTouchInput);
         /** Pads play the rumble relayed to them (the dashboards' toggle). */
         this.rumbleEnabled = true;
-        this._rumbling = false;
+        /** Per target of `rumble` (a pad's index, or `all`), whether an effect plays. */
+        this._rumbling = {};
+    }
+
+    /** The pad driving the client's first slot, or null. */
+    get active() {
+        return this.drivers[0];
+    }
+
+    /**
+     * Holds `count` slots (a token's list, else one); a pad driving one beyond
+     * them gives it up.
+     * @param {number} count
+     */
+    setSlotCount(count) {
+        const n = Math.max(1, count | 0);
+        while (this.drivers.length > n) {
+            const position = this.drivers.length - 1;
+            if (this.drivers[position] !== null) this._setDriver(position, null, null);
+            this.drivers.pop();
+        }
+        while (this.drivers.length < n) this.drivers.push(null);
+    }
+
+    /**
+     * The position among the client's slots of the one pad `i` drives, or -1.
+     * @param {number} i
+     * @returns {number}
+     */
+    drivenPosition(i) {
+        return this.drivers.indexOf(i);
     }
 
     /** Resumes polling. */
@@ -224,7 +260,7 @@ export class GamepadManager {
                         }
                     }
                 }
-                if (i !== this.active) continue;
+                if (this.drivers.indexOf(i) < 0) continue;
 
                 if (gpState.buttons.length !== currentGp.buttons.length) {
                     gpState.buttons = new Array(currentGp.buttons.length).fill(0);
@@ -323,31 +359,55 @@ export class GamepadManager {
     }
 
     /**
-     * Picks the pad that drives the slot. A lone pad drives it; among several,
-     * the one whose control was taken up last (`_takenUp`) takes over, and
-     * until one is, none does. A pad that went away gives the slot up.
+     * Picks the pads that drive the slots. Pads that all fit drive at once, in
+     * the browser's order, so with slots 3 and 4 its pad 0 drives 3 and pad 1
+     * drives 4. Past that, a pad whose control is taken up (`_takenUp`) takes a
+     * free slot, else the one whose pad was taken up longest ago, and until
+     * one is, the slots keep their pads. A pad that went away gives its slot up.
      * @param {(Gamepad|null)[]} gamepads
      */
     _choose(gamepads) {
-        let count = 0;
-        let lone = null;
-        let takenUp = null;
+        this._tick++;
+        const connected = [];
+        const takenUp = [];
         for (let i = 0; i < MAX_GAMEPADS; i++) {
             const gp = gamepads[i];
             if (!gp) {
                 delete this._takenUpAt[i];
+                delete this._usedAt[i];
                 continue;
             }
-            count++;
-            lone = i;
+            connected.push(i);
             const now = this._takenUp(gp);
-            if ((now & ~(this._takenUpAt[i] || 0)) && takenUp === null && i !== this.active) takenUp = i;
+            if (now & ~(this._takenUpAt[i] || 0)) {
+                this._usedAt[i] = this._tick;
+                if (this.drivers.indexOf(i) < 0) takenUp.push(i);
+            }
             this._takenUpAt[i] = now;
         }
-        let next = (this.active !== null && gamepads[this.active]) ? this.active : null;
-        if (takenUp !== null) next = takenUp;
-        else if (next === null && count === 1) next = lone;
-        if (next !== this.active) this._setActive(next, next === null ? null : gamepads[next]);
+        for (let position = 0; position < this.drivers.length; position++) {
+            const i = this.drivers[position];
+            if (i !== null && !gamepads[i]) this._setDriver(position, null, null);
+        }
+        const claims = connected.length <= this.drivers.length
+            ? connected.filter((i) => this.drivers.indexOf(i) < 0) : takenUp;
+        const claimed = new Set();
+        for (const i of claims) {
+            let position = this.drivers.indexOf(null);
+            if (position < 0) {
+                let oldest = Infinity;
+                for (let p = 0; p < this.drivers.length; p++) {
+                    const used = this._usedAt[this.drivers[p]] || 0;
+                    if (!claimed.has(p) && used < oldest) {
+                        oldest = used;
+                        position = p;
+                    }
+                }
+            }
+            if (position < 0) break;
+            claimed.add(position);
+            this._setDriver(position, i, gamepads[i]);
+        }
     }
 
     /**
@@ -374,19 +434,21 @@ export class GamepadManager {
     }
 
     /**
-     * Hands the slot to pad `next` (null: to none). Neither pad's controls
-     * count as reported any more, so the next tick sends the new pad's whole
-     * state onto the slot the switch cleared.
+     * Hands the slot at `position` to pad `next` (null: to none). Neither
+     * pad's controls count as reported any more, so the next tick sends the
+     * new pad's whole state onto the slot the switch cleared.
+     * @param {number} position
      * @param {number|null} next
      * @param {Gamepad|null} gp The pad at `next`.
      */
-    _setActive(next, gp) {
-        const switched = this.active !== null;
-        for (const i of [this.active, next]) {
+    _setDriver(position, next, gp) {
+        const previous = this.drivers[position];
+        const switched = previous !== null;
+        for (const i of [previous, next]) {
             this._unreport(i);
         }
-        this.active = next;
-        if (this.onActive) this.onActive(gp, switched);
+        this.drivers[position] = next;
+        if (this.onActive) this.onActive(gp, switched, position);
     }
 
     /** Forgets what pad `i` reported, as if it had held nothing. */
@@ -399,31 +461,36 @@ export class GamepadManager {
     }
 
     /**
-     * A pad the browser reports gone: if it drove the slot, the slot is given
+     * A pad the browser reports gone: if it drove a slot, the slot is given
      * up at once, even while polling is paused.
      * @param {number} index
      */
     padGone(index) {
         delete this._takenUpAt[index];
+        delete this._usedAt[index];
         delete this.state[index];
-        if (this.active === index) this._setActive(null, null);
+        const position = this.drivers.indexOf(index);
+        if (position >= 0) this._setDriver(position, null, null);
     }
 
     /**
-     * Announces the pad that drives the slot again, and has its whole state
-     * sent anew: the slot changed, or a channel reopened.
+     * Announces each pad that drives a slot again, and has its whole state
+     * sent anew: the slots changed, or a channel reopened.
      */
     reannounce() {
-        if (this.active === null) return;
-        let gp;
+        let gamepads;
         try {
-            gp = navigator.getGamepads()[this.active];
+            gamepads = navigator.getGamepads();
         } catch (e) {
             return;
         }
-        if (!gp) return;
-        this._unreport(this.active);
-        if (this.onActive) this.onActive(gp, false);
+        for (let position = 0; position < this.drivers.length; position++) {
+            const i = this.drivers[position];
+            const gp = i === null ? null : gamepads[i];
+            if (!gp) continue;
+            this._unreport(i);
+            if (this.onActive) this.onActive(gp, false, position);
+        }
     }
 
     /**
@@ -490,19 +557,22 @@ export class GamepadManager {
     }
 
     /**
-     * Plays a rumble on every connected pad that can: both motors for
-     * `durationMs`, at most the Gamepad API's 5 s, a new call replacing the
-     * one before; 0 on both motors stops it. Gecko's pulse has one motor,
-     * which takes the stronger level. Nothing plays while rumble is off or
-     * polling is paused, and a stop with nothing playing is not sent.
+     * Plays a rumble on every connected pad that can, or on pad `index` alone:
+     * both motors for `durationMs`, at most the Gamepad API's 5 s, a new call
+     * replacing the one before; 0 on both motors stops it. Gecko's pulse has
+     * one motor, which takes the stronger level. Nothing plays while rumble is
+     * off or polling is paused, and a stop with nothing playing is not sent.
      * @param {number} strong Strong (low-frequency) motor, 0 to 1.
      * @param {number} weak Weak (high-frequency) motor, 0 to 1.
      * @param {number} durationMs
+     * @param {number|null} [index=null] The pad driving the slot the rumble is
+     *     for, where the client drives several; null for every pad.
      */
-    rumble(strong, weak, durationMs) {
+    rumble(strong, weak, durationMs, index = null) {
         const off = !(strong > 0 || weak > 0) || !this.rumbleEnabled || !this._active;
-        if (off && !this._rumbling) return;
-        this._rumbling = !off;
+        const target = index === null ? 'all' : index;
+        if (off && !this._rumbling[target]) return;
+        this._rumbling[target] = !off;
         durationMs = Math.min(RUMBLE_MAX_MS, Math.max(0, durationMs || 0));
         let pads;
         try {
@@ -512,6 +582,7 @@ export class GamepadManager {
         }
         for (const pad of pads) {
             if (!pad || !pad.connected) continue;
+            if (index !== null && pad.index !== index) continue;
             const actuator = pad.vibrationActuator;
             if (actuator && typeof actuator.playEffect === 'function') {
                 const done = (off && typeof actuator.reset === 'function')
@@ -533,7 +604,9 @@ export class GamepadManager {
 
     /** Stops a rumble playing on the pads, if one is. */
     stopRumble() {
-        this.rumble(0, 0, 0);
+        for (const target of Object.keys(this._rumbling)) {
+            this.rumble(0, 0, 0, target === 'all' ? null : Number(target));
+        }
     }
 
     /**

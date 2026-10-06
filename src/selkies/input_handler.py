@@ -98,6 +98,7 @@ from .display_utils import (
 )
 from .settings import RateControlMode
 from .settings import sanitize_client_setting, settings
+from .sessions import token_slots
 from . import audit
 try:
     from pixelflux import VirtualKeyboardUnavailable as PixelfluxVkUnavailable
@@ -178,20 +179,22 @@ VIEWER_COLLAB_EXTRA_PREFIXES = (
 VIEWER_SILENT_DROP_PREFIXES = ("kr", "cr", "_pointer_echo")
 
 
-def gamepad_slot_denied(msg: str, role: Optional[str], slot: Optional[int],
+def gamepad_slot_denied(msg: str, role: Optional[str], slot: Union[int, List[int], None],
                         is_secure: bool) -> bool:
     """Whether a `js,` message drives a gamepad slot its sender does not hold.
 
     The index is a field of the client's own message, so the connection decides
-    which one it may name: a slot holder drives index `slot - 1` alone, and a
-    viewer without one drives none. A legacy controller is left unrestricted,
-    since it already holds keyboard and mouse: pinning it to index 0 would buy
-    no guarantee while breaking a client presenting several local pads.
+    which ones it may name: a slot holder drives the index of each slot it
+    holds (`slot - 1`), and a viewer without one drives none. A legacy
+    controller is left unrestricted, since it already holds keyboard and mouse:
+    pinning it to index 0 would buy no guarantee while breaking a client
+    presenting several local pads.
 
     Args:
         msg: Raw client message; anything but `js,` is not this gate's business.
         role: The connection's role, "controller" or "viewer".
-        slot: One-based player slot the connection holds, None when it holds none.
+        slot: One-based player slot the connection holds, or a list of them
+            (`sessions.token_slots`), None when it holds none.
         is_secure: Whether a master token is set.
 
     Returns:
@@ -205,7 +208,7 @@ def gamepad_slot_denied(msg: str, role: Optional[str], slot: Optional[int],
         index = int(msg.split(",", 3)[2])
     except (IndexError, ValueError):
         return True
-    return int(slot) - 1 != index
+    return index + 1 not in token_slots(slot)
 
 
 class _WaylandKeymapOwner:
