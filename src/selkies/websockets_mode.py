@@ -235,6 +235,14 @@ AUDIO_CHANNELS_DEFAULT = 2
 # numeric string; a fractional value must not abort module import.
 AUDIO_BITRATE_DEFAULT = int(float(settings.audio_bitrate))
 PIXELFLUX_VIDEO_ENCODERS = ["jpeg", "h264enc", "h264enc-striped", "h265enc", "vp8enc", "vp9enc", "av1enc"]
+# What a display streams with, as SETTINGS carries it: a controller beside the
+# display's owner changes these by its user's pick alone, while the display's
+# size and density, and anything its page changes on its own, follow the owner.
+STREAM_SETTINGS = (
+    "encoder", "framerate", "video_crf", "video_fullcolor", "video_10bit", "video_streaming_mode",
+    "jpeg_quality", "paint_over_jpeg_quality", "use_paint_over_quality", "video_paintover_crf",
+    "video_paintover_burst_frames", "video_bitrate", "rate_control_mode", "use_cpu", "audio_bitrate",
+)
 
 logger_selkies_gamepad = logging.getLogger("gamepad")
 logger_app = logging.getLogger("ws")
@@ -1447,6 +1455,9 @@ class DataStreamingServer(BaseStreamingService):
         # the display's size and encoding, and the oldest owns it once the owner
         # is gone for good (`_promote_co_controller`).
         self.co_controllers: Dict[str, "OrderedDict[Any, Optional[str]]"] = {}
+        # Each controller page's last SETTINGS: a later one applies the stream
+        # settings it changed, not the ones it repeats (`_settings_changed_by`).
+        self._page_settings: Dict[Any, dict] = {}
         self.video_relay_groups = {}
         self.capture_instances = {}
         # A display's capture while its start is awaited: its module takes rate,
@@ -1663,6 +1674,70 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.info(f"The controller beside '{display_id}' owns it now.")
             return True
         return False
+
+    def _holds_full_control(self, websocket: Any) -> bool:
+        """Whether a page holds a display's full permissions: a controller that
+        may drive keyboard and mouse, not a viewer, which only watches, nor a
+        gamepad player."""
+        perms = client_permissions.get(websocket) if websocket is not None else None
+        return bool(perms) and perms.get("role") == "controller" and self._holds_input_authority(websocket)
+
+    def _display_settings(self, display_id: str) -> Dict[str, Any]:
+        """What a display streams with, keyed as SETTINGS carries it: the
+        `use_cpu` the display asks for rather than the one a CPU-only encoder
+        implies, and the session's audio bitrate."""
+        state = self.display_clients.get(display_id) or {}
+        values = {key: state.get(key) for key in STREAM_SETTINGS}
+        requested = state.get("use_cpu_requested")
+        values["use_cpu"] = bool(self._initial_use_cpu) if requested is None else bool(requested)
+        values["audio_bitrate"] = self.app.audio_bitrate
+        return {key: value for key, value in values.items() if value is not None}
+
+    async def _tell_display_settings(self, display_id: str, sockets: Any) -> None:
+        """Tell pages what `display_id` streams with (`display_settings`): a
+        page beside the display's owner holds it for its tab, as does the owner
+        once another page's pick changed it, so each shows and asks for what
+        the display does."""
+        sockets = {ws for ws in sockets if ws is not None and ws in self.clients}
+        if not sockets:
+            return
+        message = json.dumps({"type": "display_settings", "displayId": display_id,
+                              "settings": self._display_settings(display_id)})
+        for ws in await _broadcast_to_clients(sockets, message, watched=True):
+            self.clients.discard(ws)
+
+    def _settings_changed_by(self, websocket: Any, settings: dict) -> dict:
+        """A page's later SETTINGS without the stream settings it repeats from
+        its last one: a page beside its owner may have changed them since. An
+        encoder whose fallback mark changed counts as changed."""
+        last = self._page_settings.get(websocket) or {}
+        self._page_settings[websocket] = settings
+        changed = {key for key in STREAM_SETTINGS if settings.get(key) != last.get(key)}
+        if settings.get("encoderFallback") != last.get("encoderFallback"):
+            changed.add("encoder")
+        return {key: value for key, value in settings.items() if key not in STREAM_SETTINGS or key in changed}
+
+    async def _take_pick_beside_owner(self, websocket: Any, settings: dict, client_role: str) -> None:
+        """A later SETTINGS from a controller beside the primary's owner. What
+        its user picked of the stream (`picked`) applies to the display where
+        both pages hold full permissions, and the display's pages are told; the
+        rest, its own size and density and what its page changed on its own,
+        follows the owner, and the page is told what that is."""
+        picks = {key: settings[key] for key in (settings.get("picked") or ())
+                 if key in STREAM_SETTINGS and settings.get(key) is not None}
+        owner_ws = (self.display_clients.get('primary') or {}).get('ws')
+        if not (picks and self._holds_full_control(websocket) and self._holds_full_control(owner_ws)):
+            await self._tell_display_settings('primary', {websocket})
+            return
+        data_logger.info(f"Applying {', '.join(sorted(picks))} picked by the controller beside the owner of 'primary'.")
+        # Every other key as a payload that does not carry it: what the owner's
+        # page sends of the display's geometry stays as it was.
+        applied = dict.fromkeys(settings)
+        applied.update(picks, displayId='primary')
+        if "encoder" in picks:
+            applied["encoderFallback"] = settings.get("encoderFallback")
+        await self._apply_client_settings(websocket, applied, False, client_role)
+        await self._tell_display_settings('primary', {owner_ws, *self.co_controllers.get('primary', {})})
 
     async def _handle_resize(self, res_str: str, display_id: str = 'primary') -> None:
         """Route a client resize once the displays have been laid out.
@@ -3537,7 +3612,9 @@ class DataStreamingServer(BaseStreamingService):
         informational on X11; `encoderFallback` marks an `encoder` the page
         fell back to on its own rather than one its user picked; `tabId` names
         the browser tab the page runs in; `ccStartKbps` is the rate congestion
-        control last held the display at for this page (`RateHold`).
+        control last held the display at for this page (`RateHold`); `picked`
+        lists the keys its user just picked, which is what applies from a page
+        beside the display's owner (`_take_pick_beside_owner`).
 
         Raises:
             json.JSONDecodeError: When the payload is not valid JSON.
@@ -3609,6 +3686,8 @@ class DataStreamingServer(BaseStreamingService):
         parsed["tabId"] = (get_str("tabId") or "")[:64] or None
         parsed["keyboardLayout"] = get_str("keyboardLayout")
         parsed["encoderFallback"] = get_bool("encoderFallback")
+        picked = settings_data.get("picked")
+        parsed["picked"] = [k for k in picked if isinstance(k, str)][:64] if isinstance(picked, list) else []
         parsed["ccStartKbps"] = settings_data.get("ccStartKbps")
         data_logger.debug(f"Parsed client settings: {parsed}")
         return parsed
@@ -4497,7 +4576,8 @@ class DataStreamingServer(BaseStreamingService):
                             tab_id = parsed_settings.get("tabId")
                             if display_id == 'primary' and self._joins_beside_owner(websocket, tab_id):
                                 # Streamed as a viewer is, with its input taken as a
-                                # controller's; the owner keeps the display.
+                                # controller's; the owner keeps the display, and the page
+                                # starts on what it streams with.
                                 joiners = self.co_controllers.setdefault('primary', OrderedDict())
                                 if websocket not in joiners:
                                     joiners[websocket] = tab_id
@@ -4509,6 +4589,9 @@ class DataStreamingServer(BaseStreamingService):
                                     except (ConnectionResetError, OSError, RuntimeError):
                                         pass
                                     self._schedule_idr_for_display('primary')
+                                    await self._tell_display_settings('primary', {websocket})
+                                else:
+                                    await self._take_pick_beside_owner(websocket, parsed_settings, client_role)
                                 continue
                             if display_id in ['primary', 'display2']:
                                 existing_client_info = self.display_clients.get(display_id)
@@ -4655,12 +4738,18 @@ class DataStreamingServer(BaseStreamingService):
                                     pass
                                 self._schedule_idr_for_display(display_id)
  
+                            if initial_settings_processed:
+                                applied = self._settings_changed_by(websocket, parsed_settings)
+                            else:
+                                applied = parsed_settings
+                                self._page_settings[websocket] = parsed_settings
                             await self._apply_client_settings(
                                 websocket,
-                                parsed_settings,
+                                applied,
                                 not initial_settings_processed,
                                 client_role
                             )
+                            await self._tell_display_settings(display_id, set(self.co_controllers.get(display_id, ())))
                             if not initial_settings_processed:
                                 initial_settings_processed = True
                                 data_logger.info(self._settings_applied_summary(remote_address, display_id))
@@ -5093,6 +5182,7 @@ class DataStreamingServer(BaseStreamingService):
                     stale_relay.stop()
             for joiners in self.co_controllers.values():
                 joiners.pop(websocket, None)
+            self._page_settings.pop(websocket, None)
             if self.data_ws is websocket:
                 self.data_ws = None
             # A departing non-capable client may let the rest enable RED.

@@ -279,51 +279,10 @@ def firefox_persistent_context(pw: Any, viewport: Optional[dict] = None,
     return pw.firefox.launch_persistent_context(**installed_firefox(kwargs))
 
 
-def launch_chrome(pw: Any, url_hash: str = "", mode: Optional[str] = None,
-                  engine: str = "chromium") -> tuple:
-    """Launch an instrumented browser page on the test server.
-
-    The init script counts WebSocket binary frames because headless rAF
-    throttling makes the client's own fps counter read 0 even while the stream
-    flows, and records clipboard/display/role postMessages for the checks.
-
-    Args:
-        pw: The sync_playwright handle.
-        url_hash: Fragment appended to the base URL (e.g. `#display2`).
-        mode: Authoritative transport at load time; skips the
-            localStorage-default mode-flip probe/reload (the hook dashboards
-            use after /api/status).
-        engine: Browser engine to drive (chromium, firefox, or webkit).
-
-    Returns:
-        `(browser, page, console_errors, not_found)`; the two lists keep
-        filling as the page runs.
-    """
-    browser = launch_browser(pw, engine)
-    ctx = browser.new_context(
-        permissions=[],
-        viewport={"width": 1280, "height": 720},
-        device_scale_factor=1,
-    )
-    try:
-        perms = {"chromium": ["clipboard-read", "clipboard-write"],
-                 "firefox": ["clipboard-read"],
-                 "webkit": []}[engine]
-        if perms:
-            ctx.grant_permissions(perms, origin=H.BASE_URL)
-    except Exception:
-        pass
-    if mode:
-        ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
-    page = ctx.new_page()
-    console_errors = []
-    page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
-    page.on("pageerror", lambda e: console_errors.append(str(e)))
-    not_found = []
-    page.on("response", lambda r: not_found.append(r.url) if r.status == 404 else None)
-    page.add_init_script("""
-      // Instrument WebSocket binary frames: headless rAF throttling makes the
-      // client's fps counter read 0 even while the stream flows.
+# Counts the page's WebSocket binary frames (`window.__wsFrames`): headless rAF
+# throttling makes the client's own fps counter read 0 while the stream flows.
+# Also records clipboard, display and role postMessages for the checks.
+PAGE_TAP_JS = """
       window.__wsFrames = 0;
       (() => {
         const tap = (e) => {
@@ -366,7 +325,52 @@ def launch_chrome(pw: Any, url_hash: str = "", mode: Optional[str] = None,
         if (e.data.type === 'displayConfigUpdate' || e.data.type === 'DISPLAY_CONFIG_UPDATE') window.__displayCfg.push(e.data);
         if (e.data.type === 'clientRoleUpdate') window.__roleUpdates.push(e.data.role);
       });
-    """)
+"""
+
+
+def launch_chrome(pw: Any, url_hash: str = "", mode: Optional[str] = None,
+                  engine: str = "chromium") -> tuple:
+    """Launch an instrumented browser page on the test server.
+
+    The init script counts WebSocket binary frames because headless rAF
+    throttling makes the client's own fps counter read 0 even while the stream
+    flows, and records clipboard/display/role postMessages for the checks.
+
+    Args:
+        pw: The sync_playwright handle.
+        url_hash: Fragment appended to the base URL (e.g. `#display2`).
+        mode: Authoritative transport at load time; skips the
+            localStorage-default mode-flip probe/reload (the hook dashboards
+            use after /api/status).
+        engine: Browser engine to drive (chromium, firefox, or webkit).
+
+    Returns:
+        `(browser, page, console_errors, not_found)`; the two lists keep
+        filling as the page runs.
+    """
+    browser = launch_browser(pw, engine)
+    ctx = browser.new_context(
+        permissions=[],
+        viewport={"width": 1280, "height": 720},
+        device_scale_factor=1,
+    )
+    try:
+        perms = {"chromium": ["clipboard-read", "clipboard-write"],
+                 "firefox": ["clipboard-read"],
+                 "webkit": []}[engine]
+        if perms:
+            ctx.grant_permissions(perms, origin=H.BASE_URL)
+    except Exception:
+        pass
+    if mode:
+        ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+    page = ctx.new_page()
+    console_errors = []
+    page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
+    page.on("pageerror", lambda e: console_errors.append(str(e)))
+    not_found = []
+    page.on("response", lambda r: not_found.append(r.url) if r.status == 404 else None)
+    page.add_init_script(PAGE_TAP_JS)
     page.goto(H.BASE_URL + "/" + url_hash, wait_until="load")
     return browser, page, console_errors, not_found
 

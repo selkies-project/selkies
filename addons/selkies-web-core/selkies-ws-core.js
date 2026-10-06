@@ -354,6 +354,8 @@ let pipelinesToggledByUser = new Set();
  * The initial audio request waits for it, so a policy of audio off acts
  * before anything was requested rather than stopping a stream just started. */
 let serverSettingsReceived = false;
+/** The last server_settings payload, posted again when the display's settings change under the dashboards. */
+let lastServerSettings = null;
 /** Initialization wanted audio before the settings payload arrived; the
  * payload handler resolves it. */
 let pendingInitialAudioStart = false;
@@ -1536,22 +1538,66 @@ function holdCrashSafeSettings(why) {
     window.sessionStorage.setItem(FALLBACK_TAB_KEY, fallbackStamp(why));
   } catch (e) { /* storage unavailable */ }
 }
+/**
+ * What a display streams with, as `display_settings` carries it. A page that
+ * shares a display holds these for its tab the way a fallback is held: a page
+ * beside the display's owner from the moment it joins, and any of its pages
+ * once another one's pick changed them. Each value is stored where the pick is,
+ * the pick kept under `<key>_pick` (`ENCODER_PICK_KEY` for the encoder), so the
+ * page shows and asks for what the display does and its reloads keep it; any
+ * other tab or later visit puts the picks back. The tab is marked under
+ * `DISPLAY_TAB_KEY`, which says when and why (`fallbackStamp`).
+ */
+const DISPLAY_SETTINGS = ['encoder', 'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
+  'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_paint_over_quality',
+  'video_paintover_crf', 'video_paintover_burst_frames', 'video_bitrate', 'rate_control_mode', 'use_cpu',
+  'audio_bitrate'];
+const DISPLAY_TAB_KEY = `${storageAppName}_display_settings_tab`;
+/** Every setting but the encoder a tab can hold in place of a pick. */
+const HELD_SETTINGS = [...new Set([...Object.keys(CRASH_SAFE_SETTINGS),
+  ...DISPLAY_SETTINGS.filter((name) => name !== 'encoder')])];
+/**
+ * Holds what this page's display streams with for its tab, keeping the picks
+ * it replaces.
+ * @param {Object<string, *>} values A `display_settings` payload.
+ * @param {string} why
+ * @returns {Object<string, *>} The values that differ from what the tab held.
+ */
+function holdDisplaySettings(values, why) {
+  const changed = {};
+  try {
+    for (const name of DISPLAY_SETTINGS) {
+      if (values[name] === undefined || values[name] === null) continue;
+      const key = prefixedStorageKey(name);
+      const value = String(values[name]);
+      if (window.localStorage.getItem(key) === value) continue;
+      const pickKey = name === 'encoder' ? ENCODER_PICK_KEY : `${key}_pick`;
+      if (window.localStorage.getItem(pickKey) === null) safeSetItem(pickKey, window.localStorage.getItem(key) ?? '');
+      safeSetItem(key, value);
+      changed[name] = values[name];
+    }
+    if (Object.keys(changed).length > 0) window.sessionStorage.setItem(DISPLAY_TAB_KEY, fallbackStamp(why));
+  } catch (e) { /* storage unavailable */ }
+  return changed;
+}
 /** Ends the hold of each held setting in `names`: the user picked it. */
-function releaseCrashSafeSettings(names) {
+function releaseHeldSettings(names) {
   try {
     for (const name of names) {
-      if (name in CRASH_SAFE_SETTINGS) window.localStorage.removeItem(`${prefixedStorageKey(name)}_pick`);
+      if (HELD_SETTINGS.includes(name)) window.localStorage.removeItem(`${prefixedStorageKey(name)}_pick`);
     }
   } catch (e) { /* storage unavailable */ }
 }
 try {
+  const holds = window.sessionStorage.getItem(FALLBACK_TAB_KEY) !== null
+    || window.sessionStorage.getItem(DISPLAY_TAB_KEY) !== null;
   const pick = window.localStorage.getItem(ENCODER_PICK_KEY);
-  if (pick !== null && window.sessionStorage.getItem(FALLBACK_TAB_KEY) === null) {
+  if (pick !== null && !holds) {
     setStringParam('encoder', pick || null);
     window.localStorage.removeItem(ENCODER_PICK_KEY);
   }
-  if (window.sessionStorage.getItem(FALLBACK_TAB_KEY) === null) {
-    for (const name of Object.keys(CRASH_SAFE_SETTINGS)) {
+  if (!holds) {
+    for (const name of HELD_SETTINGS) {
       const key = prefixedStorageKey(name);
       const held = window.localStorage.getItem(`${key}_pick`);
       if (held === null) continue;
@@ -1567,11 +1613,14 @@ try {
   const pick = window.localStorage.getItem(ENCODER_PICK_KEY);
   const held = [
     pick !== null ? `the ${getStringParam('encoder', '')} encoder (in place of ${pick || "the server's"})` : '',
-    Object.keys(CRASH_SAFE_SETTINGS).some((name) => window.localStorage.getItem(`${prefixedStorageKey(name)}_pick`) !== null)
-      ? "on a decoder crash's safe settings" : '',
+    /decoder crash/.test(mark || '') ? "on a decoder crash's safe settings" : '',
   ].filter(Boolean).join(' ');
   if (mark !== null && held) {
     console.warn(`[fallback] This tab streams ${held} ${readFallbackStamp(mark)}. A new tab or visit puts the picks back.`);
+  }
+  const shared = window.sessionStorage.getItem(DISPLAY_TAB_KEY);
+  if (shared !== null) {
+    console.warn(`[display] This tab streams with what its display does ${readFallbackStamp(shared)}. A new tab or visit puts the picks back.`);
   }
   const software = window.sessionStorage.getItem(SOFTWARE_DECODE_KEY);
   if (software !== null) console.warn(`[fallback] This tab decodes video in software ${readFallbackStamp(software)}.`);
@@ -3610,11 +3659,15 @@ function settleServerEncoder(encoder, entry) {
  * first settings the server sees and start the stream on settings the session
  * is still settling, such as full color while the decoder probe is out.
  * @param {string} reason Logged with the send.
+ * @param {?string[]} [picked] The settings its user just picked, which a page
+ *     beside a display's owner changes the display by; what a page changes on
+ *     its own leaves it to the owner.
  */
-function sendFullSettingsUpdateToServer(reason) {
+function sendFullSettingsUpdateToServer(reason, picked = null) {
     if (isSharedMode || !initialSettingsSent) return;
     if (websocket && websocket.readyState === WebSocket.OPEN) {
         const settingsToSend = getCurrentSettingsPayload();
+        if (picked && picked.length > 0) settingsToSend.picked = picked;
         const settingsJson = JSON.stringify(settingsToSend);
         const message = `SETTINGS,${settingsJson}`;
         websocket.send(message);
@@ -5398,7 +5451,7 @@ function receiveMessage(event) {
       manual_width = alignResolution(width);
       manual_height = alignResolution(height);
       console.log(`Rounded logical resolution to even numbers: ${manual_width}x${manual_height}`);
-      releaseCrashSafeSettings(['manual_resolution', 'manual_width', 'manual_height']);
+      releaseHeldSettings(['manual_resolution', 'manual_width', 'manual_height']);
       setIntParam('manual_width', manual_width);
       setIntParam('manual_height', manual_height);
       setBoolParam('manual_resolution', true);
@@ -5427,7 +5480,7 @@ function receiveMessage(event) {
       window.manual_resolution = false;
       manual_width = null;
       manual_height = null;
-      releaseCrashSafeSettings(['manual_resolution', 'manual_width', 'manual_height']);
+      releaseHeldSettings(['manual_resolution', 'manual_width', 'manual_height']);
       setIntParam('manual_width', null);
       setIntParam('manual_height', null);
       setBoolParam('manual_resolution', false);
@@ -5839,11 +5892,11 @@ async function sendClipboardData(data, mimeType = 'text/plain', onSkip = null) {
  * @param {Object<string, *>} settings Keys named as the server knows them.
  * @param {boolean} [fromServer]
  */
-function handleSettingsMessage(settings, fromServer) {
+function handleSettingsMessage(settings, fromServer, send = true) {
   const storeInt = fromServer ? () => {} : setIntParam;
   const storeBool = fromServer ? () => {} : setBoolParam;
   const storeString = fromServer ? () => {} : setStringParam;
-  if (!fromServer) releaseCrashSafeSettings(Object.keys(settings));
+  if (!fromServer) releaseHeldSettings(Object.keys(settings));
   console.log('Applying settings:', settings);
   let settingsChanged = false;
   if (settings.framerate !== undefined) {
@@ -6042,9 +6095,27 @@ function handleSettingsMessage(settings, fromServer) {
     storeBool('force_aligned_resolution', force_aligned_resolution);
     settingsChanged = true;
   }
-  if (settingsChanged) {
-    sendFullSettingsUpdateToServer('handleSettingsMessage');
+  if (settingsChanged && send) {
+    sendFullSettingsUpdateToServer('handleSettingsMessage', fromServer ? null : Object.keys(settings));
   }
+}
+
+/**
+ * Takes what this page's display streams with (`display_settings`), which the
+ * server sends a page joining a display beside its owner, and the pages of a
+ * display another one's pick changed: held for the tab, applied as the
+ * server's word, and shown in the dashboards.
+ * @param {Object<string, *>} values
+ */
+function followDisplaySettings(values) {
+  if (isSharedMode) return;
+  const changed = holdDisplaySettings(values, 'the settings of a display it shares');
+  if (Object.keys(changed).length === 0) return;
+  console.log('[display] Streaming with what the display does:', changed);
+  for (const [name, value] of Object.entries(changed)) window[name] = value;
+  handleSettingsMessage(changed, true, false);
+  if (changed.encoder !== undefined) settleServerEncoder(changed.encoder, lastServerSettings && lastServerSettings.encoder);
+  if (lastServerSettings) window.postMessage({ type: 'serverSettings', payload: { ...lastServerSettings } }, window.location.origin);
 }
 
 /**
@@ -8448,7 +8519,11 @@ class WorkerWebSocket {
             noteSessionRange(obj.info);
           }
           else if (obj.type === 'stream_stats') streamStats.serverSample(obj.stats);
+          else if (obj.type === 'display_settings') {
+              followDisplaySettings(obj.settings || {});
+          }
           else if (obj.type === 'server_settings') {
+              lastServerSettings = obj.settings;
               if (displayId !== 'primary' && obj.settings.second_screen && obj.settings.second_screen.value === false) {
                   console.error("The server reports no second display is available. This client will not function.");
                   if (statusDisplayElement) {
