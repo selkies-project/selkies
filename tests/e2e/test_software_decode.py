@@ -14,7 +14,8 @@ at all is not refused but pinned to the striped-JPEG encoder at pre-flight, and
 the dashboard offers it nothing else.
 
 The ``nosoftware`` block is an engine with no software H.264 decoder, whose refusal of the
-preference must not read as a refusal of the codec.
+preference must not read as a refusal of the codec; the ``nostart`` block one that claims a
+software decoder and starts none, whose failure must not count as a crash.
 
 The ``newtab`` block follows the preference past its tab: it holds for the tab that met the
 failure, and a new tab of the same profile starts on hardware again.
@@ -24,7 +25,7 @@ clears gives a new tab its video back, and one that stays takes it to JPEG at it
 The ``held`` block follows the settings a crash resets the same way: the user's own come back
 in a new tab, and one picked again in the crashing tab stays picked.
 
-Usage: python3 tests/e2e/test_software_decode.py [retry|nosoftware|persisted|newtab|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|held|all]
+Usage: python3 tests/e2e/test_software_decode.py [retry|nosoftware|nostart|persisted|newtab|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|held|all]
 """
 import json
 import os
@@ -54,7 +55,8 @@ def shim_js(fail_mode: str, loads: int = 0, soft_h264: str = "yes") -> str:
     for. ``loads`` confines the failure to the tab's first that many loads, a fault that clears
     up; 0 keeps it for every load. ``soft_h264`` ``no`` is an engine with no software H.264
     decoder, as Chromium without FFmpeg's video decoders: it refuses the software preference
-    for H.264, in ``isConfigSupported`` and at ``configure``."""
+    for H.264, in ``isConfigSupported`` and at ``configure``; ``claims`` is one that takes the
+    preference in ``isConfigSupported`` and then starts no decoder for it."""
     return """
     (() => {
       const Real = window.VideoDecoder;
@@ -268,6 +270,41 @@ def block_nosoftware(r: "H.Results") -> None:
                 r.check("still decoding", after["decoded"] > state["decoded"],
                         (state["decoded"], after["decoded"]))
                 r.check("the console says why", any("has no software decoder for avc1" in line
+                                                     for line in page.console_lines))
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+
+
+def block_nostart(r: "H.Results") -> None:
+    """An engine that takes the software preference for H.264 and then starts no decoder for
+    it meets one hardware decode error: the software retry puts out no frame, and the decoder
+    the engine picks gets the stream back without a reload, where the crash ladder would
+    reload the page on its safe settings and count a crash toward JPEG."""
+    from playwright.sync_api import sync_playwright
+    H.server_start(mode="websockets")
+    try:
+        with sync_playwright() as pw:
+            browser, page = open_client(pw, fail_mode="once", soft_h264="claims")
+            try:
+                state = wait_for(page, lambda s: "prefer-software" in s["cfgs"] and s["cfgs"][-1] == "default"
+                                 and s["decoded"] > 0, timeout=40)
+                r.check("software was tried", "prefer-software" in state["cfgs"], state["cfgs"][:6])
+                r.check("then the engine's own decoder again", state["cfgs"][-1:] == ["default"],
+                        state["cfgs"][-3:])
+                r.check("frames decode after the error", state["decoded"] > 0, state["decoded"])
+                time.sleep(6)
+                after = read_state(page)
+                crashes = page.evaluate("localStorage.getItem(%s + '_crash_count')" % STORAGE_PREFIX_JS)
+                r.check("the stream stays H.264", after["codec"] == "h264", after["codec"])
+                r.check("no fallback encoder stored", after["encoder"] is None, after["encoder"])
+                r.check("no software preference stored", after["stored"] is None, after["stored"])
+                r.check("no crash counted", crashes is None, crashes)
+                r.check("page never reloaded", after["navs"] == 1, after["navs"])
+                r.check("still decoding", after["decoded"] > state["decoded"],
+                        (state["decoded"], after["decoded"]))
+                r.check("the console says why", any("Software decode put out no frame" in line
                                                      for line in page.console_lines))
             finally:
                 browser.close()
@@ -670,7 +707,8 @@ def block_silent(r: "H.Results") -> None:
         H.server_stop()
 
 
-BLOCKS = {"retry": block_retry, "nosoftware": block_nosoftware, "persisted": block_persisted, "newtab": block_newtab,
+BLOCKS = {"retry": block_retry, "nosoftware": block_nosoftware, "nostart": block_nostart,
+          "persisted": block_persisted, "newtab": block_newtab,
           "ladder": block_ladder, "healthy": block_healthy,
           "silent": block_silent,
           "striped": block_striped, "nowebcodecs": block_nowebcodecs,

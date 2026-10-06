@@ -931,6 +931,8 @@ try {
 let softwareDecodeAttempted = preferSoftwareDecode;
 let softwareDecodeSwitchedAt = Number.NEGATIVE_INFINITY;
 const SOFTWARE_DECODE_SETTLE_MS = 3000;
+/** When decoding turned to software: the retry's switch, or the load of a tab that prefers it. */
+let softwareDecodeSince = preferSoftwareDecode ? 0 : Number.NEGATIVE_INFINITY;
 /** Whether the session converted at full range, as its own `stream_info` says. */
 let sessionFullRange = false;
 /**
@@ -10239,7 +10241,7 @@ function initiateFallback(error, context) {
     if (!softwareDecodeAttempted && !window.isFallingBack &&
         currentEncoderMode !== 'jpeg') {
         softwareDecodeAttempted = true;
-        softwareDecodeSwitchedAt = performance.now();
+        softwareDecodeSwitchedAt = softwareDecodeSince = performance.now();
         console.warn(`[initiateFallback] Decoder error (Context: ${context}); retrying on software decode.`, error);
         rememberSoftwareDecode(true);
         restartDecodersForAcceleration();
@@ -10247,6 +10249,18 @@ function initiateFallback(error, context) {
     }
     if (performance.now() - softwareDecodeSwitchedAt < SOFTWARE_DECODE_SETTLE_MS) {
         console.warn(`[initiateFallback] Ignoring decoder error (Context: ${context}) from the decoders the software switch replaced.`);
+        return;
+    }
+    // Software decode that has put out no frame proves nothing against the
+    // stream: the engine may have no software decoder for it at all (one can
+    // take the config and then fail to start). The decoder the engine picks
+    // gets the stream back, and the retry stays spent, so its next failure
+    // reaches the ladder.
+    if (preferSoftwareDecode && !window.isFallingBack && !(lastVideoOutputAt > softwareDecodeSince)) {
+        console.warn(`[initiateFallback] Software decode put out no frame (Context: ${context}); leaving the choice of decoder to the browser.`, error);
+        rememberSoftwareDecode(false);
+        softwareDecodeSwitchedAt = performance.now();
+        restartDecodersForAcceleration();
         return;
     }
     // An engine that takes the configuration and refuses the stream at decode
