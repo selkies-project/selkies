@@ -27,6 +27,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 ADDON = os.path.join(ROOT, "addons", "v4l2-interposer")
 TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
 INTERPOSER = os.path.join(ADDON, "selkies_v4l2_interposer.so")
+
+
+def interposer_reads_pipewire() -> bool:
+    """Whether the interposer carries its PipeWire node reader, which its Makefile leaves out where
+    PipeWire's headers are missing: a node the camera publishes is then one it cannot read."""
+    with open(INTERPOSER, "rb") as so:
+        return b"libpipewire-0.3.so.0" in so.read()
 PROBE = os.path.join(TOOLS, "v4l2probe")
 
 # Limited-range BT.601 of the solid colors the feeder paints (JPEG is full range
@@ -224,6 +231,9 @@ def main() -> int:
                     # A daemon that accepts the connection and never answers reads as no node list.
                     nodes = "pw-cli did not answer in 20 s"
                 res.check("PipeWire node is published while the daemon is reachable", "selkies-webcam" in nodes, nodes[-200:])
+            if st.get("pipewire") and not interposer_reads_pipewire():
+                res.skip("PipeWire source reads", "the interposer was built without PipeWire's headers")
+            elif st.get("pipewire"):
                 # The same frames, taken from the node instead of the backend socket.
                 nowhere = os.path.join(sock_dir, "no-socket-here")
                 r = probe(nowhere, 15, samples=[(320, 240)], source="pipewire")
@@ -289,7 +299,7 @@ def main() -> int:
                       px is not None and px[0] == (640, 480) and (rgb_near(px[1], (255, 0, 0)) or rgb_near(px[1], (0, 0, 255))), str(px))
             st = cam.stats()
             res.check("MJPEG: passed through undecoded", st["passthrough"] > 0 and st["decoded"] == 0, str(st))
-            if st.get("pipewire"):
+            if st.get("pipewire") and interposer_reads_pipewire():
                 r = probe(os.path.join(sock_dir, "no-socket-here"), 5, source="pipewire", dump=dump)
                 res.check("MJPEG: the PipeWire source serves the video/mjpg node",
                           r.get("rc") == 0 and r.get("format") == "MJPG" and r.get("first_bytes", "").startswith("ffd8"), str(r)[:160])
