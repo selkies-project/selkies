@@ -309,6 +309,23 @@ def run_slot_list(mode: str, results: "H.Results") -> None:
             for action in ("__padPress(0, 0, 1)", "__padPress(0, 0, 0)", "__padPress(1, 1, 1)", "__padPress(1, 1, 0)"):
                 page.evaluate(f"window.{action}")
                 time.sleep(0.25)
+            # The table takes slot 3 back while pad 0 holds A on it. The page's
+            # own release of a slot no longer its is refused, so the server lets
+            # go, at once rather than when the slot's heartbeat lapses (2 s).
+            page.evaluate("window.__padPress(0, 0, 1)")
+            time.sleep(0.5)
+            held_at = len(decode(STREAM))
+            deadline = time.time() + 1.0
+            results.check(f"{label}: table re-slotted to 4 alone", post_slot_token(SLOTS_TOKEN, [4]) == 200)
+            released = lambda: (ih.EV_KEY, ih.BTN_A, 0) in decode(STREAM)[held_at:]
+            while time.time() < deadline and not released():
+                time.sleep(0.05)
+            results.check(f"{label}: taking slot 3 away releases what its pad held there within 1 s", released())
+            results.check(f"{label}: and lets the pad go from it",
+                          C.wait_log("'Pad A (STANDARD GAMEPAD Vendor: 045e Product: 0b13)' disassociated"
+                                     " from persistent virtual gamepad slot 2.", timeout=5))
+            page.evaluate("window.__padPress(0, 0, 0)")
+            time.sleep(0.25)
             browser.close()
     finally:
         server_log = H.server_log()

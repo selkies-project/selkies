@@ -7028,6 +7028,14 @@ async def reconcile_clients() -> None:
             
             elif old_slot != new_slot:
                 data_logger.info(f"Updating client {remote_address} for slot change: {old_slot} -> {new_slot}")
+                lost = [s for s in sessions.token_slots(old_slot) if s not in sessions.token_slots(new_slot)]
+                data_server = perms.get("data_server")
+                handler = getattr(data_server, "input_handler", None) if data_server else None
+                if lost and handler is not None and hasattr(handler, "release_gamepad_slots_for_conn"):
+                    try:
+                        await handler.release_gamepad_slots_for_conn(id(ws), lost)
+                    except Exception as e:
+                        data_logger.warning(f"Releasing slots {lost} of {remote_address} failed: {e}")
                 update_payload = json.dumps({"role": new_role, "slot": new_slot})
                 update_message = f"ROLE_UPDATE,{update_payload}"
                 try:

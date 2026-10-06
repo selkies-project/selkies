@@ -1854,7 +1854,9 @@ class WebRTCService(BaseStreamingService):
         the media stream and the client-side grant, which otherwise persist
         until the peer disconnects itself. A slot-only change keeps the peer
         but is pushed as a role_update (websockets ROLE_UPDATE parity): the
-        gamepad slot mapping lives client-side and would silently desync."""
+        gamepad slot mapping lives client-side and would silently desync. The
+        slots it lost are released here, since the gate refuses the page's own
+        release of a slot no longer its."""
         if self.rtc_app is None:
             return
         tokens, mk = current_session_tokens()
@@ -1878,7 +1880,14 @@ class WebRTCService(BaseStreamingService):
             self.rtc_app._send_collab_state(peer.get("data_channel"), ctype, token)
             new_slot = new_perms.get("slot")
             if new_slot != peer.get("client_slot"):
+                lost = [s for s in sessions.token_slots(peer.get("client_slot"))
+                        if s not in sessions.token_slots(new_slot)]
                 peer["client_slot"] = new_slot
+                if lost and self.input_handler is not None:
+                    try:
+                        await self.input_handler.release_gamepad_slots_for_conn(peer_id, lost)
+                    except Exception:
+                        logger.warning(f"Releasing slots {lost} of {peer_id} failed", exc_info=True)
                 channel = peer.get("data_channel")
                 if channel is not None and channel.readyState == "open":
                     try:

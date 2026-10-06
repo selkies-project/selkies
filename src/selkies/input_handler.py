@@ -5012,6 +5012,19 @@ class WebRTCInput:
             if info.get("conn_id") == conn_id:
                 await self.__gamepad_disconnect(idx)
 
+    async def release_gamepad_slots_for_conn(self, conn_id: Any, slots: Iterable[int]) -> None:
+        """Disassociate (and neutralize) the one-based `slots` this connection's
+        pads drive. A token table that takes a slot from a connection leaves its
+        page no way to: the `js,d` it sends for the slot is refused, as the slot
+        is no longer its, and anything it held would stay held until its
+        heartbeat lapsed."""
+        if conn_id is None:
+            return
+        for slot in slots:
+            info = self.client_gamepad_associations.get(slot - 1)
+            if info is not None and info.get("conn_id") == conn_id:
+                await self.__gamepad_disconnect(slot - 1)
+
     async def _set_pointer_echo(self, conn_id: Any, on: bool) -> None:
         """Start or stop echoing the pointer to a trackpad page, which draws it
         from the echo: `pointer,<display>,<x>,<y>,<scale>,<seq>`, the position in
