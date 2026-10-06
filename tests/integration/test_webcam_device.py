@@ -10,6 +10,7 @@ v4l2-ctl and statx users rely on; and the end-of-source ENODEV a reader gets.
 """
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -41,46 +42,82 @@ PROBE = os.path.join(TOOLS, "v4l2probe")
 RED = (81, 90, 240)
 BLUE = (41, 240, 110)
 BLACK = (16, 128, 128)
-# Limited-range BT.601 green as the encoders (fed limited-range I420) carry it.
-GREEN = (145, 54, 34)
+# Pure green as pixelflux's encoders carry it, limited range: BT.709 for H.264, which declares it,
+# and BT.601 for VP8, whose bitstream can name no other matrix. The camera hands the decoded
+# samples on as they are.
+GREEN = {"h264": (173, 42, 26), "vp8": (145, 54, 34)}
 
 
-def encode_stream(encoder: str, width: int, height: int, frames: int):
-    """Encode `frames` solid-green pictures with PyAV; `[(bytes, is_keyframe)]`, or
-    None when the encoder is not built in. H.264 comes out Annex-B (what the
-    WebRTC depacketizer and WebCodecs' annexb mode hand the camera)."""
-    try:
-        import av
-        ctx = av.codec.CodecContext.create(encoder, "w")
-    except Exception:
+def is_key_frame(codec: str, data: bytes) -> bool:
+    """Whether an encoded frame decodes on its own: an IDR slice in an H.264 access unit, or the
+    key-frame bit (0) of a VP8 frame tag."""
+    if codec == "vp8":
+        return bool(data) and not data[0] & 1
+    return any(m.end() < len(data) and data[m.end()] & 0x1F == 5 for m in re.finditer(rb"\x00\x00\x01", data))
+
+
+def encode_stream(codec: str, width: int, height: int, frames: int):
+    """Encode `frames` solid-green pictures with pixelflux's own software encoder (H.264 with x264,
+    or OpenH264 in a GPL-free build; VP8 with libvpx), from a private X server painted green;
+    `[(bytes, is_keyframe)]` from a key frame on, or None where pixelflux encodes no `codec` here.
+    A key frame every 15, and H.264 one Annex-B access unit a frame with its parameter sets on
+    each key frame, as the WebRTC depacketizer and WebCodecs' annexb mode hand the camera. The
+    root turns between two greens a level apart at the rate, so every tick codes a frame."""
+    if codec not in getattr(pixelflux, "SOFTWARE_ENCODERS", {}):
         return None
-    from fractions import Fraction
-    ctx.width, ctx.height = width, height
-    ctx.pix_fmt = "yuv420p"
-    ctx.time_base = Fraction(1, 30)
-    ctx.framerate = Fraction(30, 1)
-    ctx.bit_rate = 600000
-    ctx.gop_size = 15
-    opts = {"tune": "zerolatency", "preset": "veryfast", "x264-params": "annexb=1:repeat-headers=1"} if encoder == "libx264" else {"deadline": "realtime", "cpu-used": "8"}
-    ctx.options = opts
+    from selkies.Xlib import display as xdisplay
+    xproc, disp = H.private_x_server(width, height)
+    packets = []
+    enough = threading.Event()
+    stop = threading.Event()
+
+    def on_frame(frame):
+        data = bytes(memoryview(frame))
+        packets.append((data, is_key_frame(codec, data)))
+        if sum(1 for _, key in packets if key) >= 2 and len(packets) >= frames + 30:
+            enough.set()
+
+    def paint():
+        d = xdisplay.Display(disp)
+        root = d.screen().root
+        shade = 0
+        while not stop.wait(1 / 30):
+            root.change_attributes(background_pixel=(0x00FF00, 0x00FE00)[shade])
+            root.clear_area()
+            d.flush()
+            shade ^= 1
+        d.close()
+
+    cap = pixelflux.ScreenCapture()
+    saved = os.environ.get("DISPLAY")
+    os.environ["DISPLAY"] = disp
     try:
-        ctx.open()
-    except Exception:
+        cs = pixelflux.CaptureSettings()
+        cs.capture_width, cs.capture_height = width, height
+        cs.target_fps = 30.0
+        cs.codec = codec
+        cs.use_cpu = True
+        cs.video_fullframe = True
+        cs.omit_stripe_headers = True
+        cs.keyframe_interval_s = 0.5
+        cs.video_crf = 25
+        cs.use_paint_over_quality = False
+        painter = threading.Thread(target=paint, daemon=True)
+        painter.start()
+        cap.start_capture(on_frame, cs)
+        enough.wait(30)
+    finally:
+        stop.set()
+        cap.stop_capture()
+        if saved is None:
+            os.environ.pop("DISPLAY", None)
+        else:
+            os.environ["DISPLAY"] = saved
+        H.stop_x_server(xproc, disp)
+    first = next((i for i, (_, key) in enumerate(packets) if key), None)
+    if first is None or len(packets) - first < frames:
         return None
-    frame = av.VideoFrame(width, height, "yuv420p")
-    for plane, value in zip(frame.planes, GREEN):
-        buf = bytearray(plane.buffer_size)
-        for i in range(0, plane.buffer_size, plane.line_size):
-            buf[i:i + plane.width] = bytes([value]) * plane.width
-        plane.update(bytes(buf))
-    out = []
-    for i in range(frames):
-        frame.pts = i
-        for pkt in ctx.encode(frame):
-            out.append((bytes(pkt), bool(pkt.is_keyframe)))
-    for pkt in ctx.encode(None):
-        out.append((bytes(pkt), bool(pkt.is_keyframe)))
-    return out or None
+    return packets[first:first + frames]
 
 
 def build() -> None:
@@ -313,9 +350,9 @@ def main() -> int:
                       and (rgb_near(px[1], (250, 250, 250)) or rgb_near(px[1], (5, 5, 5))), str(px))
             res.check("MJPEG: re-encoded frames are decoded first", cam.stats()["decoded"] > 0, str(cam.stats()))
         cam.stop()
-        h264 = encode_stream("libx264", 320, 240, 45)
+        h264 = encode_stream("h264", 320, 240, 45)
         if h264 is None:
-            res.skip("MJPEG: H.264 uplink is re-encoded", "PyAV has no libx264 encoder")
+            res.skip("MJPEG: H.264 uplink is re-encoded", "pixelflux encodes no H.264 here")
         else:
             cam = start_camera(sock_dir, 320, 240, "MJPEG")
             stop_flag = threading.Event()
@@ -356,11 +393,11 @@ def main() -> int:
             res.check("pillarbox: side bars are black", near(s.get((20, 240)), BLACK) and near(s.get((620, 240)), BLACK), str(s))
         cam.stop()
 
-        for codec_name, enc_name, codec_id in (("h264", "libx264", pixelflux.VirtualCamera.CODEC_H264),
-                                               ("vp8", "libvpx", pixelflux.VirtualCamera.CODEC_VP8)):
-            packets = encode_stream(enc_name, 320, 240, 45)
+        for codec_name, codec_id in (("h264", pixelflux.VirtualCamera.CODEC_H264),
+                                     ("vp8", pixelflux.VirtualCamera.CODEC_VP8)):
+            packets = encode_stream(codec_name, 320, 240, 45)
             if packets is None:
-                res.skip(f"{codec_name}: decoded color", f"PyAV has no {enc_name} encoder")
+                res.skip(f"{codec_name}: decoded color", f"pixelflux encodes no {codec_name} here")
                 continue
             cam = start_camera(sock_dir, 320, 240)
             stop_flag = threading.Event()
@@ -381,7 +418,7 @@ def main() -> int:
             st = cam.stats()
             res.check(f"{codec_name}: 20 frames decoded and delivered", r.get("rc") == 0 and r.get("frames") == "20" and st["decoded"] >= 20,
                       f"frames={r.get('frames')} stats={st}")
-            res.check(f"{codec_name}: decoded color is the encoded green", near(r["samples"].get((160, 120)), GREEN, 10) and near(r["samples"].get((10, 10)), GREEN, 10),
+            res.check(f"{codec_name}: decoded color is the encoded green", near(r["samples"].get((160, 120)), GREEN[codec_name], 10) and near(r["samples"].get((10, 10)), GREEN[codec_name], 10),
                       str(r["samples"]))
             res.check(f"{codec_name}: no decode errors", st["errors"] == 0, str(st))
             cam.stop()
