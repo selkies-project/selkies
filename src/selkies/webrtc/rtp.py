@@ -1110,8 +1110,9 @@ class RtpPacket:
 
 class RtpHistory:
     """Packets sent on one stream, by sequence number, for retransmission, each with the
-    frame it carried, how many NACKs have named it, and when the last packet able to
-    restore it went out; and the frames the peer was reported to have lost.
+    frame it carried, how many NACKs have named it, when the last packet able to
+    restore it went out, and whether its GOP was abandoned; and the frames the peer was
+    reported to have lost.
 
     Bounded by RTP_HISTORY_S of sending and RTP_HISTORY_MAX_PACKETS; within
     those a sequence number cannot repeat, so a lookup is exact.
@@ -1129,11 +1130,23 @@ class RtpHistory:
 
     def add(self, packet: RtpPacket, now: float, frame: Optional[int] = None) -> None:
         """Record a sent packet and let go of those past the horizon."""
-        self._packets[packet.sequence_number] = [packet, frame, 0, now]
+        self._packets[packet.sequence_number] = [packet, frame, 0, now, False]
         order = self._order
         order.append((now, packet.sequence_number))
         while order and (now - order[0][0] > self._horizon or len(order) > self._capacity):
             self._packets.pop(order.popleft()[1], None)
+
+    def abandon(self) -> None:
+        """Abandon every packet held, with the GOP the pacer dropped: its key frame is their
+        repair. Each packet carries the mark, so none sent later is taken for one, however
+        far the numbering has run since."""
+        for entry in self._packets.values():
+            entry[4] = True
+
+    def abandoned(self, sequence_number: int) -> bool:
+        """Whether the packet was held when its GOP was abandoned."""
+        entry = self._packets.get(sequence_number)
+        return entry is not None and entry[4]
 
     def get(self, sequence_number: int) -> Optional[RtpPacket]:
         entry = self._packets.get(sequence_number)

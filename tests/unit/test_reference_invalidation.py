@@ -213,7 +213,7 @@ async def nacks() -> None:
         return True
 
     stand_in = SimpleNamespace(_RTCRtpSender__rtp_history=history, _retransmit=retransmit,
-                               _RTCRtpSender__abandoned=None, _RTCRtpSender__rtt=None,
+                               _RTCRtpSender__rtt=None,
                                transport=SimpleNamespace(_send_delay=lambda: 0.0),
                                _emit_pli_event=lambda: events.append("pli"),
                                emit=lambda name, *args: events.append((name,) + args))
