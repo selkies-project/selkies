@@ -52,7 +52,9 @@
  * click, two-finger scroll and pinch) or a trackpad emulation. Wheel events are
  * classified as discrete wheel or trackpad and accumulated in fractional
  * notches so no distance is lost; a macOS wheel, whose deltas the system
- * accelerates past any notch size, is one notch a detent (`_isDetentWheel`).
+ * accelerates past any notch size, is one notch a detent (`_isDetentWheel`),
+ * and a WebKitGTK wheel, whose notch shrinks with the view, goes by the
+ * notches it reports (`_webKitGtkWheelNotches`).
  * A pinch, on the touchscreen or a touchpad,
  * reaches the session as Ctrl+wheel. The server-drawn cursor is painted on a
  * page canvas or applied as a CSS cursor; in trackpad mode the canvas is drawn
@@ -143,6 +145,9 @@ const WHEEL_NOTCH_MIN_PX = 80;
 
 /** Pixels Blink and WebKit report for a line a macOS wheel turned (`_isDetentWheel`). */
 const MAC_WHEEL_LINE_PX = 40;
+
+/** The legacy `wheelDelta` of one wheel notch (`_webKitGtkWheelNotches`). */
+const LEGACY_WHEEL_DELTA_PER_NOTCH = 120;
 
 /**
  * How long a touchpad's scroll may pause before it counts as ended (`sfe`), in
@@ -4577,6 +4582,57 @@ export class Input {
     }
 
     /**
+     * A WebKitGTK wheel's notches, signed as the deltas are, or null for any
+     * other event. WebKitGTK reports a notch in pixels, the view's height (its
+     * width, sideways) to the 2/3 power: 54 px in a 400 px tall view, 71 in a
+     * 600 px one, 99 in a 1000 px one, so a short view's notch falls under
+     * `WHEEL_NOTCH_MIN_PX` and reads as a touchpad's. It gives each notch a
+     * legacy `wheelDelta` of 120, against the direction, so the pixels per
+     * 120 are that step, whole as WebKit truncates it, and a fraction of 120
+     * is a fraction of a notch. A touchpad's pixels per 120 are 2.5 (GTK 4
+     * scales its travel by that) or 40 (GTK 3), as a synthetic precise
+     * delta's are 40. Under Shift a notch turns sideways at the height's step.
+     * @param {WheelEvent} event
+     * @returns {{x: number, y: number}|null}
+     */
+    _webKitGtkWheelNotches(event) {
+        if (event.deltaMode !== 0 || !browser.isSafari() || !browser.isLinux()) return null;
+        const steps = [window.innerHeight, window.innerWidth].map((size) => Math.floor(Math.pow(size, 2 / 3)));
+        const axis = (delta, wheelDelta) => {
+            if (!delta && !wheelDelta) return 0;
+            if (!delta || !wheelDelta || Math.sign(delta) === Math.sign(wheelDelta)) return null;
+            const notches = Math.abs(wheelDelta) / LEGACY_WHEEL_DELTA_PER_NOTCH;
+            const perNotch = Math.abs(delta) / notches;
+            return steps.some((step) => step > 0 && Math.abs(perNotch - step) <= 1) ? Math.sign(delta) * notches : null;
+        };
+        const y = axis(event.deltaY, event.wheelDeltaY);
+        const x = axis(event.deltaX, event.wheelDeltaX);
+        if (x === null || y === null || (!x && !y)) return null;
+        return { x, y };
+    }
+
+    /**
+     * Adds notches a wheel reported as such, on both axes, to the fractional
+     * carries, and emits the whole ones.
+     * @param {number} y Signed vertical notches, positive down.
+     * @param {number} x Signed horizontal notches, positive right.
+     */
+    _addWheelNotches(y, x) {
+        if (y) {
+            const direction = (y < 0) ? 'up' : 'down';
+            if (direction !== this._wheelDirY) { this._wheelAccumY = 0; this._wheelDirY = direction; }
+            this._wheelAccumY += Math.abs(y);
+            this._emitWheelY();
+        }
+        if (x) {
+            const direction = (x < 0) ? 'left' : 'right';
+            if (direction !== this._wheelDirX) { this._wheelAccumX = 0; this._wheelDirX = direction; }
+            this._wheelAccumX += Math.abs(x);
+            this._emitWheelX();
+        }
+    }
+
+    /**
      * Forgets everything learned about the current scroll device: notch
      * quantums, classification samples, and fractional-notch carries. Called
      * after a wheel-idle gap, since the learned state only holds for the
@@ -4605,7 +4661,8 @@ export class Input {
      * A wheel event reporting a Control no held key accounts for is a
      * touchpad pinch, which the engines deliver as Ctrl+wheel, and goes to
      * `_pinchWheel` instead. A macOS wheel's detent bypasses the classifier
-     * too, as one notch (`_isDetentWheel`).
+     * too, as one notch (`_isDetentWheel`), and so do a WebKitGTK wheel's
+     * notches, as many as it reports (`_webKitGtkWheelNotches`).
      */
     _mouseWheelWrapper(event) {
         // One idle second is longer than any intra-gesture gap (momentum
@@ -4623,6 +4680,12 @@ export class Input {
         if (this._isDetentWheel(event)) {
             if (event.deltaY !== 0) this._triggerMouseWheel(event.deltaY < 0 ? 'up' : 'down', 1);
             if (event.deltaX !== 0) this._triggerHorizontalMouseWheel(event.deltaX < 0 ? 'left' : 'right', 1);
+            event.preventDefault();
+            return;
+        }
+        const notches = this._webKitGtkWheelNotches(event);
+        if (notches) {
+            this._addWheelNotches(notches.y, notches.x);
             event.preventDefault();
             return;
         }

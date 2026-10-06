@@ -10,7 +10,8 @@
 // notches, line deltas, and a session that does not take one keep the notch
 // pulses. A macOS wheel is told from a touchpad there by what each engine was
 // measured to report for one, since the system's acceleration leaves its
-// deltas no notch size.
+// deltas no notch size, and a WebKitGTK wheel by the notches it reports
+// beside its pixels, since its notch shrinks with the view.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -99,10 +100,11 @@ function makeInput(finger) {
 }
 
 /** One wheel event through the page's own handler, `ms` after the previous. */
-function wheel(input, deltaY, { deltaX = 0, deltaMode = 0, ms = 16, shiftKey = false } = {}) {
+function wheel(input, deltaY, { deltaX = 0, deltaMode = 0, ms = 16, shiftKey = false,
+                               wheelDeltaX = undefined, wheelDeltaY = undefined } = {}) {
     advance(ms);
     input._mouseWheelWrapper({ type: 'wheel', deltaY, deltaX, deltaMode, ctrlKey: false, shiftKey,
-                               preventDefault() {} });
+                               wheelDeltaX, wheelDeltaY, preventDefault() {} });
 }
 
 const pulses = (sent) => sent.filter((m) => m.startsWith('m,') || m.startsWith('m2,'));
@@ -277,6 +279,70 @@ setPlatform(...LINUX);
     check('off macOS a fractional pixel delta is still a touchpad\'s',
           fingers(sent).filter((m) => m !== 'sfe').length === MAC_SLOW.length && pulses(sent).length === 0,
           JSON.stringify(sent));
+}
+
+// WebKitGTK, as measured with XTEST wheel clicks into Playwright's WebKitGTK:
+// a notch is the view's size to the 2/3 power in whole pixels (54 in a 400 px
+// tall view, 71 in 600, 99 in 1000; sideways the width's, under Shift the
+// height's), with a legacy wheelDelta of 120 against it. Its synthetic precise
+// deltas are 40 px per 120, and its touchpads report 2.5 (GTK 4) or 40 (GTK 3).
+const LINUX_WEBKIT = ['Linux x86_64',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15'];
+function view(width, height) {
+    window.innerWidth = width;
+    window.innerHeight = height;
+}
+setPlatform(...LINUX_WEBKIT);
+for (const finger of [true, false]) {
+    const session = finger ? 'finger scroll' : 'no finger scroll';
+    view(800, 600);
+    {
+        const { input, sent } = makeInput(finger);
+        for (let i = 0; i < 3; i++) wheel(input, 71, { wheelDeltaY: -120, ms: 250 });
+        check(`WebKitGTK, ${session}: a 600 px view's 71 px notches are a notch each`,
+              downs(sent) === 3 && notches(sent, 16) === 0 && fingers(sent).length === 0, JSON.stringify(sent));
+    }
+    {
+        const { input, sent } = makeInput(finger);
+        for (let i = 0; i < 3; i++) wheel(input, 0, { deltaX: 86, wheelDeltaX: -120, wheelDeltaY: 0, ms: 250 });
+        check(`WebKitGTK, ${session}: a sideways notch at the width's step is a sideways notch`,
+              notches(sent, 128) === 3 && fingers(sent).length === 0, JSON.stringify(sent));
+    }
+    {
+        const { input, sent } = makeInput(finger);
+        for (let i = 0; i < 4; i++) wheel(input, 17.75, { wheelDeltaY: -30, ms: 40 });
+        check(`WebKitGTK, ${session}: four quarter notches of a high-resolution wheel are one`,
+              downs(sent) === 1 && fingers(sent).length === 0, JSON.stringify(sent));
+    }
+}
+view(640, 400);
+{
+    const { input, sent } = makeInput(true);
+    for (let i = 0; i < 2; i++) wheel(input, -54, { wheelDeltaY: 120, ms: 250 });
+    for (let i = 0; i < 2; i++) wheel(input, 0, { deltaX: 54, wheelDeltaX: -120, wheelDeltaY: 0, shiftKey: true, ms: 250 });
+    check('WebKitGTK: a 400 px view\'s notches up, and turned sideways under Shift, are notches',
+          notches(sent, 16) === 2 && notches(sent, 128) === 2 && fingers(sent).length === 0, JSON.stringify(sent));
+}
+view(800, 600);
+{
+    const { input, sent } = makeInput(true);
+    for (const g of [1.3, 2.1, 3.4, 2.2]) wheel(input, 2.5 * g, { wheelDeltaY: -120 * g });
+    check('WebKitGTK: a GTK 4 touchpad\'s stroke stays a finger\'s',
+          fingers(sent).filter((m) => m !== 'sfe').length === 4 && pulses(sent).length === 0, JSON.stringify(sent));
+}
+{
+    const { input, sent } = makeInput(true);
+    for (const t of [0.13, 0.2, 0.31]) wheel(input, 40 * t, { wheelDeltaY: -120 * t });
+    for (const px of [40, 120]) wheel(input, px, { wheelDeltaY: -3 * px });
+    check('WebKitGTK: a GTK 3 touchpad\'s and a synthetic precise stroke are no notches',
+          fingers(sent).filter((m) => m !== 'sfe').length === 5 && pulses(sent).length === 0, JSON.stringify(sent));
+}
+setPlatform(...LINUX);
+{
+    const { input, sent } = makeInput(true);
+    for (let i = 0; i < 3; i++) wheel(input, 71, { wheelDeltaY: -120, ms: 250 });
+    check('the same deltas from Chromium go by the classifier, as before',
+          fingers(sent).length > 0, JSON.stringify(sent));
 }
 
 process.exit(failed ? 1 : 0);
