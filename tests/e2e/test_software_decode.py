@@ -239,6 +239,13 @@ def block_retry(r: "H.Results") -> None:
                 r.check("page never reloaded", after["navs"] == 1, after["navs"])
                 r.check("still decoding", after["decoded"] > state["decoded"],
                         (state["decoded"], after["decoded"]))
+                page.console_lines.clear()
+                page.reload(wait_until="load")
+                wait_for(page, lambda s: s["navs"] == 2 and s["decoded"] > 0)
+                said = [line for line in page.console_lines if line.startswith("[fallback]")]
+                r.check("a reload of the tab says it decodes in software, and why",
+                        any("decodes video in software since" in line and "decoder error" in line
+                            for line in said), said)
             finally:
                 browser.close()
     finally:
@@ -549,10 +556,17 @@ def block_cleared(r: "H.Results") -> None:
                 ctx.add_init_script(NAV_JS)
                 ctx.add_init_script(shim_js("all", loads=3))
                 page = ctx.new_page()
+                said = []
+                page.on("console", lambda m: said.append(m.text) if m.text.startswith("[fallback]") else None)
                 page.goto(H.BASE_URL + "/?offscreen_worker=false", wait_until="load")
                 state = wait_for(page, lambda s: s["navs"] > 3 and s["codec"] == "jpeg", timeout=90)
                 r.check("the failing tab reaches JPEG at its fourth load", state["navs"] == 4
                         and state["codec"] == "jpeg", {"navs": state["navs"], "codec": state["codec"]})
+                r.check("which says it streams JPEG for the third crash", any(
+                    "streams the jpeg encoder (in place of" in line and "decoder crash 3" in line
+                    for line in said), said)
+                r.check("and counts the crashes", any("since its last healthy session: 3" in line
+                                                      for line in said), said)
                 time.sleep(6)
                 after = read_state(page)
                 r.check("and stays there", after["navs"] == 4 and after["codec"] == "jpeg",

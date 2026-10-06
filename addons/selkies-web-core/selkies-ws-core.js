@@ -912,8 +912,25 @@ const safeSetItem = (key, value) => {
  * any other tab or later visit re-probes hardware at the cost of one failed
  * decode, so an error whose cause has since cleared (a GPU process restart, a
  * stream the server has since fixed) never outlives the tab that met it.
+ * Its value says when and why (`fallbackStamp`).
  */
 const SOFTWARE_DECODE_KEY = `${storageAppName}_prefer_software_decode`;
+/**
+ * What a fallback held for its tab is stored as: when it was taken and why, for
+ * the tab's later loads to log, the console of the page that took it being gone.
+ * @param {string} why
+ * @returns {string}
+ */
+const fallbackStamp = (why) => `${new Date().toISOString()} ${why}`;
+/**
+ * A stored `fallbackStamp` as text; one stored before stamps were says only that.
+ * @param {string} stamp
+ * @returns {string}
+ */
+const readFallbackStamp = (stamp) => {
+  const match = /^(\S+) (.+)$/s.exec(stamp || '');
+  return match ? `since ${match[1]}: ${match[2]}` : 'since an earlier load';
+};
 let preferSoftwareDecode = false;
 try {
   preferSoftwareDecode = window.sessionStorage.getItem(SOFTWARE_DECODE_KEY) !== null;
@@ -952,14 +969,15 @@ const noteSessionRange = (info) => {
 /**
  * Stores or clears the software-decode preference of this tab.
  * @param {boolean} enabled
+ * @param {string} [why] What made it prefer software.
  */
-const rememberSoftwareDecode = (enabled) => {
+const rememberSoftwareDecode = (enabled, why = '') => {
   if (videoWorker) {
     try { videoWorker.postMessage({ type: 'wireHints', software: enabled }); } catch (e) { /* respawns fresh */ }
   }
   preferSoftwareDecode = enabled;
   try {
-    if (enabled) window.sessionStorage.setItem(SOFTWARE_DECODE_KEY, '1');
+    if (enabled) window.sessionStorage.setItem(SOFTWARE_DECODE_KEY, fallbackStamp(why));
     else window.sessionStorage.removeItem(SOFTWARE_DECODE_KEY);
   } catch (e) {
     console.warn('Selkies: could not store the software-decode preference:', e);
@@ -1459,7 +1477,7 @@ const setStringParam = (key, value) => {
  * pick back and decides afresh, so a fallback taken for a fault that has since
  * cleared never outlives the tab that took it. It is sent beside
  * `encoderFallback`, so the server keeps it to this display and seeds no later
- * page or session with it.
+ * page or session with it. The tab's mark says when and why (`fallbackStamp`).
  */
 const ENCODER_PICK_KEY = `${prefixedStorageKey('encoder')}_pick`;
 const FALLBACK_TAB_KEY = `${ENCODER_PICK_KEY}_tab`;
@@ -1467,13 +1485,17 @@ const FALLBACK_TAB_KEY = `${ENCODER_PICK_KEY}_tab`;
 function encoderIsFallback() {
   try { return window.localStorage.getItem(ENCODER_PICK_KEY) !== null; } catch (e) { return false; }
 }
-/** Stores `encoder` as this tab's fallback, keeping the pick it replaces. */
-function storeFallbackEncoder(encoder) {
+/**
+ * Stores `encoder` as this tab's fallback, keeping the pick it replaces.
+ * @param {string} encoder
+ * @param {string} why What made the page fall back.
+ */
+function storeFallbackEncoder(encoder, why) {
   try {
     if (window.localStorage.getItem(ENCODER_PICK_KEY) === null) {
       safeSetItem(ENCODER_PICK_KEY, getStringParam('encoder', ''));
     }
-    window.sessionStorage.setItem(FALLBACK_TAB_KEY, '1');
+    window.sessionStorage.setItem(FALLBACK_TAB_KEY, fallbackStamp(why));
   } catch (e) { /* storage unavailable */ }
   setStringParam('encoder', encoder);
 }
@@ -1497,8 +1519,11 @@ const CRASH_SAFE_SETTINGS = {
   video_fullcolor: 'false', video_10bit: 'false', framerate: '60', video_crf: '25',
   manual_resolution: 'false', manual_width: null, manual_height: null,
 };
-/** Stores the crash ladder's safe values for this tab, keeping the picks they replace. */
-function holdCrashSafeSettings() {
+/**
+ * Stores the crash ladder's safe values for this tab, keeping the picks they replace.
+ * @param {string} why The crash.
+ */
+function holdCrashSafeSettings(why) {
   try {
     for (const [name, value] of Object.entries(CRASH_SAFE_SETTINGS)) {
       const key = prefixedStorageKey(name);
@@ -1508,7 +1533,7 @@ function holdCrashSafeSettings() {
       if (value === null) window.localStorage.removeItem(key);
       else safeSetItem(key, value);
     }
-    window.sessionStorage.setItem(FALLBACK_TAB_KEY, '1');
+    window.sessionStorage.setItem(FALLBACK_TAB_KEY, fallbackStamp(why));
   } catch (e) { /* storage unavailable */ }
 }
 /** Ends the hold of each held setting in `names`: the user picked it. */
@@ -1534,6 +1559,25 @@ try {
       else safeSetItem(key, held);
       window.localStorage.removeItem(`${key}_pick`);
     }
+  }
+} catch (e) { /* storage unavailable */ }
+// A load that inherits its tab's fallback says what it holds and why.
+try {
+  const mark = window.sessionStorage.getItem(FALLBACK_TAB_KEY);
+  const pick = window.localStorage.getItem(ENCODER_PICK_KEY);
+  const held = [
+    pick !== null ? `the ${getStringParam('encoder', '')} encoder (in place of ${pick || "the server's"})` : '',
+    Object.keys(CRASH_SAFE_SETTINGS).some((name) => window.localStorage.getItem(`${prefixedStorageKey(name)}_pick`) !== null)
+      ? "on a decoder crash's safe settings" : '',
+  ].filter(Boolean).join(' ');
+  if (mark !== null && held) {
+    console.warn(`[fallback] This tab streams ${held} ${readFallbackStamp(mark)}. A new tab or visit puts the picks back.`);
+  }
+  const software = window.sessionStorage.getItem(SOFTWARE_DECODE_KEY);
+  if (software !== null) console.warn(`[fallback] This tab decodes video in software ${readFallbackStamp(software)}.`);
+  const crashes = Number(window.localStorage.getItem(CRASH_COUNT_KEY)) || 0;
+  if (crashes > 0) {
+    console.warn(`[fallback] Decoder crashes in this browser since its last healthy session: ${crashes}; from the third on, a crash takes the jpeg encoder.`);
   }
 } catch (e) { /* storage unavailable */ }
 /**
@@ -3515,7 +3559,7 @@ function stepRefusalLadder(label, codec) {
         codecRefusalPending = next;
         console.warn(`This browser has no decoder for ${label}; switching to the ${next} encoder.`);
         currentEncoderMode = next;
-        storeFallbackEncoder(next);
+        storeFallbackEncoder(next, `no decoder for ${label}`);
         // The worker takes the next stream from its first frame, whatever the
         // refused one did to it; the refused stream's stragglers it drops.
         workerDecodeFailed = false;
@@ -5836,7 +5880,7 @@ function handleSettingsMessage(settings, fromServer) {
       const fallback = fallbackEncoder(newEncoderSetting);
       console.warn(`This browser has no decoder for ${newEncoderSetting}; using the ${fallback} encoder.`);
       newEncoderSetting = fallback;
-      storeFallbackEncoder(fallback);
+      storeFallbackEncoder(fallback, `no decoder for ${settings.encoder}`);
     }
     if (currentEncoderMode !== newEncoderSetting) {
         currentEncoderMode = newEncoderSetting;
@@ -10243,7 +10287,7 @@ function initiateFallback(error, context) {
         softwareDecodeAttempted = true;
         softwareDecodeSwitchedAt = softwareDecodeSince = performance.now();
         console.warn(`[initiateFallback] Decoder error (Context: ${context}); retrying on software decode.`, error);
-        rememberSoftwareDecode(true);
+        rememberSoftwareDecode(true, `decoder error (${context}: ${(error && error.message) || error})`);
         restartDecodersForAcceleration();
         return;
     }
@@ -10297,20 +10341,23 @@ function initiateFallback(error, context) {
             statusDisplayElement.classList.remove('hidden');
         }
     } else {
-        console.log("Primary client fallback: Forcing client settings to safe defaults.");
         let crashCount = parseInt(window.localStorage.getItem(CRASH_COUNT_KEY) || '0');
         crashCount++;
         safeSetItem(CRASH_COUNT_KEY, crashCount.toString());
+        const why = `decoder crash ${crashCount} in this browser (${context}: ${(error && error.message) || error})`;
+        let encoder = null;
         if (crashCount >= 3) {
-            storeFallbackEncoder('jpeg');
+            encoder = 'jpeg';
         } else if (currentEncoderMode !== 'jpeg') {
-            storeFallbackEncoder('h264enc');
+            encoder = 'h264enc';
         } else {
             // Un-escalating from jpeg would loop the ladder on builds whose
             // WebCodecs claims H.264 support but fails at decode().
             safeSetItem(CRASH_COUNT_KEY, '0');
         }
-        holdCrashSafeSettings();
+        if (encoder) storeFallbackEncoder(encoder, why);
+        holdCrashSafeSettings(why);
+        console.log(`Primary client fallback, ${why}: this tab reloads on safe defaults${encoder ? ` and the ${encoder} encoder` : ''}.`);
         if (statusDisplayElement) {
             statusDisplayElement.textContent = 'A critical video error occurred. Resetting to default settings and reloading...';
             statusDisplayElement.classList.remove('hidden');
@@ -10352,7 +10399,7 @@ function runPreflightChecks() {
 /** Pins the jpeg encoder, the fallback ladder's last rung. */
 function pinJpegEncoder() {
     currentEncoderMode = 'jpeg';
-    storeFallbackEncoder('jpeg');
+    storeFallbackEncoder('jpeg', 'no WebCodecs VideoDecoder');
 }
 
 window.addEventListener('beforeunload', cleanup);
