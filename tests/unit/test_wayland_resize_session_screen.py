@@ -131,6 +131,21 @@ async def scenario(res: H.Results) -> None:
                   not srv.capture_screen and not srv.input_handler.sized,
                   f"{srv.capture_screen} {srv.input_handler.sized}")
 
+        # A connection that has joined no display (a viewer, or one ahead of its
+        # SETTINGS) sizes nothing and logs no error.
+        srv = make_server((1920, 928))
+        errors = []
+        catcher = type("Catch", (S.logging.Handler,), {"emit": lambda self, r: errors.append(r.getMessage())})(
+            S.logging.ERROR)
+        S.logger_app_resize.addHandler(catcher)
+        try:
+            await S.on_resize_handler("1920x936", FakeApp(), srv, None)
+        finally:
+            S.logger_app_resize.removeHandler(catcher)
+        res.check("a resize from a connection on no display sizes nothing and logs no error",
+                  not srv.capture_screen and not srv.input_handler.sized and not errors,
+                  f"{srv.capture_screen} {srv.input_handler.sized} {errors}")
+
         # Without an input handler the path still completes.
         srv = make_server((1920, 928))
         srv.input_handler = None

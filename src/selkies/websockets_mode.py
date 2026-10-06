@@ -6865,7 +6865,7 @@ async def on_resize_handler(
     res_str: str,
     current_app_instance: SelkiesStreamingApp,
     data_server_instance: Optional[DataStreamingServer] = None,
-    display_id: str = 'primary',
+    display_id: Optional[str] = 'primary',
 ) -> None:
     """Handle a client resize request for one display.
 
@@ -6887,8 +6887,14 @@ async def on_resize_handler(
             display state.
         data_server_instance: The owning server; without it only the gate
             checks run.
-        display_id: The display being resized.
+        display_id: The display being resized; None for a connection that has
+            joined none, whose resize goes nowhere.
     """
+    if display_id is None:
+        # A connection joins a display with its own SETTINGS, and a viewer never
+        # does; the server-wide gate in `_handle_resize` lets either through.
+        logger_app_resize.debug(f"Ignoring a resize to {res_str} from a connection on no display.")
+        return
     logger_app_resize.debug(f"Resize message for display '{display_id}': {res_str}")
     if (display_id == 'primary'
             and not getattr(current_app_instance, 'server_enable_resize', True)):
