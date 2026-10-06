@@ -36,7 +36,7 @@ XK = {"F5": 0xFFC2, "Tab": 0xFF09, "Alt_L": 0xFFE9, "Control_L": 0xFFE3, "Shift_
       "t": 0x74, "Delete": 0xFFFF}
 
 
-def open_client(pw: Any, engine: str, mode: str) -> tuple:
+def open_client(pw: Any, engine: str, mode: str, init_js: str = "") -> tuple:
     viewport = {"width": 1280, "height": 720}
     if engine == "firefox":
         ctx = C.firefox_persistent_context(pw, viewport=viewport, has_touch=True, prefs=FIREFOX_TOUCH_PREFS)
@@ -45,6 +45,8 @@ def open_client(pw: Any, engine: str, mode: str) -> tuple:
         browser = C.launch_browser(pw, engine)
         ctx = browser.new_context(viewport=viewport, device_scale_factor=1, has_touch=True)
     ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+    if init_js:
+        ctx.add_init_script(init_js)
     if mode == "webrtc":
         # So a <video> that never plays can be told from a stream that never came.
         ctx.add_init_script(C.PC_TAP_JS)
@@ -248,6 +250,72 @@ def keyboard_button_block(res: "H.Results", dashboard: str, dist: str, engine: s
                     time.sleep(0.4)
                 res.check(f"{tag}: the dashboard's own keyboard control brings it back",
                           button.count() > 0 and button.first.is_visible())
+            finally:
+                C.close_browser(browser)
+    finally:
+        H.server_stop()
+
+
+# A convertible's primary pointer, which Edge on a Surface turns fine when the
+# keyboard and its touchpad are attached and coarse when they are detached:
+# `__setPointerFine` flips it the same way, with the change events Edge sends.
+POINTER_POSTURE_JS = """
+(() => {
+  const real = window.matchMedia.bind(window);
+  let fine = true;
+  const lists = new Map();
+  for (const [query, test] of [['(pointer: fine)', () => fine], ['(pointer: coarse)', () => !fine]]) {
+    const listeners = new Set();
+    lists.set(query, {
+      media: query,
+      get matches() { return test(); },
+      onchange: null,
+      addEventListener(type, fn) { if (type === 'change') listeners.add(fn); },
+      removeEventListener(type, fn) { listeners.delete(fn); },
+      addListener(fn) { listeners.add(fn); },
+      removeListener(fn) { listeners.delete(fn); },
+      dispatchEvent() { return true; },
+      fire() { for (const fn of listeners) fn({ matches: test(), media: query }); },
+    });
+  }
+  window.matchMedia = (query) => lists.get(String(query).trim()) || real(query);
+  Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { get: () => 10, configurable: true });
+  window.__setPointerFine = (to) => { fine = to; for (const list of lists.values()) list.fire(); };
+})();
+"""
+
+
+def keyboard_posture_block(res: "H.Results", dashboard: str, dist: str, engine: str) -> None:
+    """A convertible says at once whether its keyboard is attached: the
+    primary pointer turns coarse when it is detached and fine when it is
+    attached. The keyboard button follows at once, with no key pressed and no
+    touch needed, and a touch does not bring it back while the keyboard is on."""
+    tag = f"{dashboard} {engine} posture"
+    H.server_start(mode="websockets", web_root=dist)
+    try:
+        with sync_playwright() as pw:
+            browser, page = open_client(pw, engine, "websockets", init_js=POINTER_POSTURE_JS)
+            try:
+                video = C.wait_ws_video(page, 40)
+                res.check(f"{tag}: video up", video is not None, video)
+                if not video:
+                    return
+                button = page.locator(".virtual-keyboard-button" if dashboard == "classic"
+                                      else "[data-virtual-keyboard-button]")
+
+                def shown() -> bool:
+                    time.sleep(0.4)
+                    return button.count() > 0 and button.first.is_visible()
+
+                res.check(f"{tag}: opened with the keyboard attached, no button", not shown())
+                page.evaluate("__setPointerFine(false)")
+                res.check(f"{tag}: detaching the keyboard brings the button at once", shown())
+                page.evaluate("__setPointerFine(true)")
+                res.check(f"{tag}: attaching it takes the button away at once", not shown())
+                touch_once(page, engine)
+                res.check(f"{tag}: a touch leaves it away while the keyboard is attached", not shown())
+                page.evaluate("__setPointerFine(false)")
+                res.check(f"{tag}: and detaching it again brings it back", shown())
             finally:
                 C.close_browser(browser)
     finally:
@@ -460,6 +528,7 @@ def main() -> None:
         for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
             for engine in ("chromium", "firefox", "webkit"):
                 keyboard_button_block(res, dashboard, dist, engine)
+                keyboard_posture_block(res, dashboard, dist, engine)
     elif which == "wl":
         for mode in ("websockets", "webrtc"):
             for engine in ("chromium", "firefox", "webkit"):

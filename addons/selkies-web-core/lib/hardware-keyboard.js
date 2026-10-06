@@ -5,7 +5,8 @@
  */
 
 /**
- * Whether a touch device has a keyboard attached, told from the keys it types.
+ * Whether a touch device has a keyboard attached, told from its pointer and the
+ * keys it types.
  *
  * The dashboards' on-screen keyboard button does nothing on a tablet with a
  * keyboard attached, since the system keeps its on-screen keyboard down then,
@@ -18,6 +19,14 @@
  * keys keep coming, and a touch after `HARDWARE_KEYBOARD_IDLE_MS` without one
  * takes it back, so a keyboard detached mid-session leaves the on-screen one
  * reachable again.
+ *
+ * A convertible says it at once where the engine follows its posture. Windows
+ * leaves its tablet posture when a Surface's keyboard is attached, and Edge
+ * turns the primary pointer from coarse to fine with the touchpad that comes
+ * with it, and back when the keyboard is detached (Edge 154 on a Surface Pro
+ * 8, within 0.1 s both ways). So on a touch screen a fine primary pointer, at
+ * load or on a change, says a keyboard is attached until the pointer turns
+ * coarse again, keys or no keys.
  * @module
  */
 
@@ -43,12 +52,14 @@ export function isKeyboardOnlyKeystroke(event) {
 }
 
 /**
- * A store of the verdict, fed keydowns and touches.
+ * A store of the verdict, fed keydowns, touches and the primary pointer.
  * @param {{now?: () => number, idleMs?: number}} [options]
  */
 export function createHardwareKeyboardWatch({ now = () => Date.now(), idleMs = HARDWARE_KEYBOARD_IDLE_MS } = {}) {
     let attached = false;
     let lastKeyAt = -Infinity;
+    // Whether the verdict rests on a fine primary pointer, which only its turning coarse ends.
+    let byPointer = false;
     const subscribers = new Set();
     const set = (value) => {
         if (value === attached) return;
@@ -65,11 +76,25 @@ export function createHardwareKeyboardWatch({ now = () => Date.now(), idleMs = H
             set(true);
         },
         onTouch() {
-            if (attached && now() - lastKeyAt >= idleMs) set(false);
+            if (attached && !byPointer && now() - lastKeyAt >= idleMs) set(false);
         },
-        /** Forgets the verdict until the next keyboard-only key, as when the user asks for the button back. */
+        /**
+         * The primary pointer of a touch screen turned fine, a keyboard attached
+         * with its touchpad, or coarse, the keyboard gone with the keys it typed.
+         * @param {boolean} fine
+         */
+        onPointer(fine) {
+            byPointer = fine;
+            lastKeyAt = -Infinity;
+            set(fine);
+        },
+        /**
+         * Forgets the verdict until the next keyboard-only key or pointer change,
+         * as when the user asks for the button back.
+         */
         reset() {
             lastKeyAt = -Infinity;
+            byPointer = false;
             set(false);
         },
         /**
@@ -87,7 +112,8 @@ let pageWatch = null;
 
 /**
  * The page's watch, listening from its first use: keydowns and touches on the
- * window in the capture phase, before the stream's own handlers take them.
+ * window in the capture phase, before the stream's own handlers take them, and
+ * on a touch screen the primary pointer.
  * @returns {ReturnType<typeof createHardwareKeyboardWatch>}
  */
 export function hardwareKeyboard() {
@@ -96,6 +122,11 @@ export function hardwareKeyboard() {
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
         window.addEventListener('keydown', (e) => pageWatch.onKeyDown(e), { capture: true, passive: true });
         window.addEventListener('touchstart', () => pageWatch.onTouch(), { capture: true, passive: true });
+        const fine = typeof window.matchMedia === 'function' ? window.matchMedia('(pointer: fine)') : null;
+        if (fine && typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) {
+            if (fine.matches) pageWatch.onPointer(true);
+            fine.addEventListener('change', (e) => pageWatch.onPointer(e.matches));
+        }
     }
     return pageWatch;
 }

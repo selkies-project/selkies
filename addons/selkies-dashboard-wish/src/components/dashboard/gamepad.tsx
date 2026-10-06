@@ -9,7 +9,7 @@ import { GamepadVisualizer } from "@/components/dashboard/GamepadVisualizer";
 import { Button } from "@/components/ui/button";
 import { Keyboard } from "lucide-react";
 import { t } from "@/i18n";
-import { hardwareKeyboard, isMobileClient } from "@/utils";
+import { hardwareKeyboard } from "@/utils";
 
 /**
  * The gamepad preview of the top menu's gamepad dropdown, one visualizer per
@@ -98,13 +98,25 @@ export function Gamepad({ isTouchGamepadActive }: GamepadProps) {
 /** The page's attached-keyboard verdict, listening from load. */
 const keyboardWatch = hardwareKeyboard();
 
+/** The primary pointer, which a convertible turns coarse when its keyboard is detached. */
+const coarsePointer = typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia("(pointer: coarse)")
+    : null;
+const subscribeCoarsePointer = (onChange: () => void) => {
+    coarsePointer?.addEventListener("change", onChange);
+    return () => coarsePointer?.removeEventListener("change", onChange);
+};
+const isCoarsePointer = () => coarsePointer?.matches ?? false;
+
 /**
- * The mobile button that asks the core to show the virtual keyboard; nothing elsewhere,
- * nor while a keyboard is attached, which keeps the system's on-screen one down.
+ * The button that asks the core to show the virtual keyboard, while the primary pointer is
+ * coarse (a phone, a tablet, a convertible in its tablet posture) and no keyboard is
+ * attached, which keeps the system's on-screen one down.
  */
 export function VirtualKeyboardButton() {
     const keyboardAttached = React.useSyncExternalStore(keyboardWatch.subscribe, keyboardWatch.attached);
-    if (!isMobileClient || keyboardAttached) return null;
+    const coarse = React.useSyncExternalStore(subscribeCoarsePointer, isCoarsePointer);
+    if (!coarse || keyboardAttached) return null;
     return (
         <Button
             variant="default"

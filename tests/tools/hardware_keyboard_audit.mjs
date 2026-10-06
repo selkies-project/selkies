@@ -9,7 +9,9 @@
 // an engine may report from an on-screen keyboard with a physical code, and
 // an on-screen keyboard's own keys (keyCode 229, no code) do not. A touch
 // after the idle period without such a key takes the verdict back, so a
-// keyboard detached mid-session leaves the button reachable again.
+// keyboard detached mid-session leaves the button reachable again. On a touch
+// screen the primary pointer decides at once: fine with a convertible's
+// keyboard and touchpad attached, coarse once they are detached.
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
@@ -74,6 +76,59 @@ check('but not a key the page dispatched itself',
     check('each such key keeps the verdict fresh', watch.attached() === true);
     watch.reset();
     check('asking for the button back resets it', watch.attached() === false);
+}
+
+{
+    let t = 0;
+    const watch = createHardwareKeyboardWatch({ now: () => t });
+    const seen = [];
+    watch.subscribe((v) => seen.push(v));
+    watch.onPointer(true);
+    check('a primary pointer turning fine hides it at once, as a keyboard attached with its touchpad',
+          watch.attached() === true && seen.join() === 'true');
+    t += HARDWARE_KEYBOARD_IDLE_MS * 10;
+    watch.onTouch();
+    check('no touch brings it back while the pointer stays fine', watch.attached() === true);
+    watch.onKeyDown(key('Escape', { key: 'Escape' }));
+    watch.onPointer(false);
+    check('the pointer turning coarse brings it back at once, keys typed before or not',
+          watch.attached() === false && seen.join() === 'true,false');
+    watch.onPointer(true);
+    watch.reset();
+    t += HARDWARE_KEYBOARD_IDLE_MS * 10;
+    watch.onTouch();
+    check('asking for the button back outweighs a fine pointer', watch.attached() === false);
+}
+
+/** The page's watch, imported afresh on a window whose primary pointer starts `fine`. */
+async function pageWatchOn(fine, maxTouchPoints, tag) {
+    const listeners = new Set();
+    const pointer = { matches: fine, addEventListener: (type, fn) => type === 'change' && listeners.add(fn) };
+    globalThis.window = {
+        addEventListener() {},
+        matchMedia: (query) => (query === '(pointer: fine)' ? pointer : { matches: false, addEventListener() {} }),
+    };
+    Object.defineProperty(globalThis, 'navigator', { value: { maxTouchPoints }, configurable: true, writable: true });
+    const mod = await import(`../../addons/selkies-web-core/lib/hardware-keyboard.js?${tag}`);
+    const turn = (to) => {
+        pointer.matches = to;
+        for (const fn of listeners) fn({ matches: to });
+    };
+    return { watch: mod.hardwareKeyboard(), turn };
+}
+{
+    const { watch, turn } = await pageWatchOn(true, 10, 'surface');
+    check('a touch screen opened with a fine pointer counts as one with a keyboard', watch.attached() === true);
+    turn(false);
+    check('the page follows its pointer turning coarse', watch.attached() === false);
+    turn(true);
+    check('and fine again', watch.attached() === true);
+}
+{
+    const { watch, turn } = await pageWatchOn(true, 0, 'desktop');
+    turn(false);
+    turn(true);
+    check('a screen without touch is told only by its keys', watch.attached() === false);
 }
 
 console.log(`[hw-keyboard] ${failed === 0 ? 'all checks passed' : failed + ' failed'}`);

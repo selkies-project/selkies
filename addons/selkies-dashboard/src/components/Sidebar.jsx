@@ -1218,6 +1218,18 @@ function Sidebar() {
   }, []);
 
   useEffect(() => {
+    // A convertible whose keyboard is detached turns its primary pointer
+    // coarse and takes touch from then on, so it gets the touch controls at once.
+    const coarse = window.matchMedia?.('(pointer: coarse)');
+    if (!coarse) return undefined;
+    const onChange = (e) => {
+      if (e.matches) setHasDetectedTouch(true);
+    };
+    coarse.addEventListener('change', onChange);
+    return () => coarse.removeEventListener('change', onChange);
+  }, []);
+
+  useEffect(() => {
     const setRealViewportHeight = () => {
       const vh = window.innerHeight * 0.01;
       document.documentElement.style.setProperty('--vh', `${vh}px`);
