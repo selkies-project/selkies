@@ -82,14 +82,14 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.target.runner }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Download the wheel
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ inputs.artifact_name || 'selkies-wheel' }}
           path: dist/
@@ -101,7 +101,7 @@ jobs:
       # saying so still gets its wheels, and a missing artifact leaves the
       # release path below to answer for it.
       - name: Fetch the capture-stack wheels
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
         with:
           pattern: "*-wheels-${{ matrix.target.arch }}-manylinux"
@@ -143,7 +143,7 @@ jobs:
           /tmp/selkies-venv/bin/python -c "import importlib.resources as r; c = r.files('selkies.selkies_web'); assert (c / 'index.html').is_file(), 'web client missing from wheel'; print('bundled web client OK')"
       - name: Set up the oldest supported Python
         id: oldest-python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.9"
           update-environment: false

@@ -62,8 +62,8 @@ jobs:
         # package claims support for checks it against the kernel headers
         python-version: ["3.9", "3.15"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
           # The newest interpreter is taken from its release candidates until
@@ -71,7 +71,7 @@ jobs:
           allow-prereleases: true
       # The dashboard translation audit is JavaScript, and reports itself
       # skipped rather than passing when it cannot run
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Build the test tools
@@ -118,7 +118,7 @@ jobs:
       matrix:
         shard: [1, 2, 3]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free disk space
         uses: endersonmenezes/free-disk-space@2a22f8c59cae9cddae7194b33e6b92d023b2b4b8 # v4
         with:
@@ -129,7 +129,7 @@ jobs:
           remove_packages: azure-cli google-cloud-cli microsoft-edge-stable postgresql* temurin-* mysql* mongodb*
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -137,7 +137,7 @@ jobs:
             addons/selkies-web-core/package.json
             addons/selkies-dashboard/package.json
             addons/selkies-dashboard-wish/package.json
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -171,7 +171,7 @@ jobs:
           echo "labwc=${LABWC_VERSION}" >> "$GITHUB_OUTPUT"
       - name: Cache the patched labwc
         id: labwc-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.local/labwc
           key: labwc-${{ steps.labwc.outputs.wlroots }}-${{ steps.labwc.outputs.labwc }}-${{ hashFiles('addons/base/patches/labwc-*.patch', 'addons/base/build-labwc.sh') }}
@@ -215,7 +215,7 @@ jobs:
           echo "sha256=${XLIBRE_SHA256}" >> "$GITHUB_OUTPUT"
       - name: Cache the patched Xvfb
         id: xvfb-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.local/xvfb
           key: xvfb-${{ steps.xvfb.outputs.tag }}-${{ hashFiles('addons/base/patches/xvfb-*.patch', 'addons/base/build-xvfb.sh') }}
@@ -239,14 +239,14 @@ jobs:
       # packages, and AppImages ship, which come from main HEAD rather than any
       # released version. Whichever job resolved them left them here.
       - name: Download the pixelflux wheels (main HEAD)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
           path: main-wheels/
           merge-multiple: true
       - name: Download the pcmflux wheels (main HEAD)
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
@@ -342,7 +342,7 @@ jobs:
           mkdir -p suite-logs
           cp -r /tmp/selkies-tests/*.log suite-logs/ 2>/dev/null || true
           cp -r /tmp/selkies-tests/suite-logs/. suite-logs/ 2>/dev/null || true
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: suite-logs-${{ matrix.shard }}

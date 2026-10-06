@@ -30,7 +30,7 @@ jobs:
     name: Build wheel (with bundled web client)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free disk space
         # The tool cache is kept: setup-python and setup-node resolve from it
         uses: endersonmenezes/free-disk-space@2a22f8c59cae9cddae7194b33e6b92d023b2b4b8 # v4
@@ -43,7 +43,7 @@ jobs:
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -52,7 +52,7 @@ jobs:
             addons/selkies-dashboard/package-lock.json
             addons/selkies-dashboard-wish/package-lock.json
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -65,7 +65,7 @@ jobs:
           python3 -m pip install --upgrade build
           sed -i "s|^version =.*|version = \"${PACKAGE_VERSION}\"|" pyproject.toml
           python3 -m build && ls -la dist/
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ inputs.artifact_name || 'selkies-wheel' }}
           path: dist/*

@@ -118,7 +118,7 @@ jobs:
               image: archlinux:base-devel
               script: infra/packaging/arch.sh
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free disk space
         # The tool cache is kept: setup-python and setup-node resolve from it
         uses: endersonmenezes/free-disk-space@2a22f8c59cae9cddae7194b33e6b92d023b2b4b8 # v4
@@ -131,7 +131,7 @@ jobs:
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
       - name: Download the wheel
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
           path: dist/
@@ -140,7 +140,7 @@ jobs:
       # tolerated (standalone dispatch) and mkvenv.sh leaves them to the index
       - name: Download the pixelflux wheels
         if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
@@ -148,7 +148,7 @@ jobs:
           merge-multiple: true
       - name: Download the pcmflux wheels
         if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
@@ -206,7 +206,7 @@ jobs:
             -e INSTALL -e SELKIES_PACKAGE_VERIFY=1 \
             -v "${GITHUB_WORKSPACE}/scripts/ci/verify-package.sh:/verify.sh:ro" \
             "${IMAGE}" sh /verify.sh
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.kind.name }}-${{ matrix.arch.name }}
           path: out/*
@@ -230,7 +230,7 @@ jobs:
           - name: aarch64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free disk space
         # The tool cache is kept: setup-python and setup-node resolve from it
         uses: endersonmenezes/free-disk-space@2a22f8c59cae9cddae7194b33e6b92d023b2b4b8 # v4
@@ -245,7 +245,7 @@ jobs:
       # The same wheels the packages above carry, required for the same reason
       - name: Download the pixelflux wheels
         if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
@@ -253,7 +253,7 @@ jobs:
           merge-multiple: true
       - name: Download the pcmflux wheels
         if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
@@ -288,7 +288,7 @@ jobs:
           docker run --rm -v "${GITHUB_WORKSPACE}/out:/out:ro" \
             -v "${GITHUB_WORKSPACE}/scripts/ci/verify-appimage.sh:/verify.sh:ro" \
             almalinux:8 sh -c 'dnf install -y -q mesa-libgbm > /dev/null && sh /verify.sh /out/*.AppImage'
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: appimage-${{ matrix.arch.name }}
           path: out/*
