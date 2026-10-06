@@ -16,14 +16,34 @@
 //
 // Prints one PASS/FAIL line per check and exits non-zero if any failed.
 
+/** The text `html` shows, read in one pass, so nothing a removal joins up is read as markup. */
+function shownText(html) {
+    let shown = '';
+    let at = 0;
+    while (at < html.length) {
+        const open = html.indexOf('<', at);
+        if (open < 0) {
+            shown += html.slice(at);
+            break;
+        }
+        shown += html.slice(at, open);
+        const comment = html.startsWith('<!--', open);
+        const end = comment ? html.indexOf('-->', open + 4) : html.indexOf('>', open);
+        if (end < 0) break;
+        at = end + (comment ? 3 : 1);
+        const hidden = !comment && /^<(head|style|script|title)\b/i.exec(html.slice(open, at));
+        if (hidden) {
+            const closing = html.toLowerCase().indexOf(`</${hidden[1].toLowerCase()}`, at);
+            const closed = closing < 0 ? -1 : html.indexOf('>', closing);
+            at = closed < 0 ? html.length : closed + 1;
+        }
+    }
+    return shown.replaceAll('&nbsp;', '\u00a0');
+}
+
 globalThis.DOMParser = class {
     parseFromString(html) {
-        const shown = html
-            .replace(/<!--[\s\S]*?-->/g, '')
-            .replace(/<(head|style|script|title)\b[\s\S]*?<\/\1>/gi, '')
-            .replace(/<[^>]*>/g, '')
-            .replace(/&nbsp;/g, '\u00a0');
-        return { body: { textContent: shown } };
+        return { body: { textContent: shownText(html) } };
     }
 };
 
