@@ -13,6 +13,9 @@ The ``nowebcodecs`` block is the rung below the ladder: an engine with no WebCod
 at all is not refused but pinned to the striped-JPEG encoder at pre-flight, and
 the dashboard offers it nothing else.
 
+The ``nosoftware`` block is an engine with no software H.264 decoder, whose refusal of the
+preference must not read as a refusal of the codec.
+
 The ``newtab`` block follows the preference past its tab: it holds for the tab that met the
 failure, and a new tab of the same profile starts on hardware again.
 
@@ -21,7 +24,7 @@ clears gives a new tab its video back, and one that stays takes it to JPEG at it
 The ``held`` block follows the settings a crash resets the same way: the user's own come back
 in a new tab, and one picked again in the crashing tab stays picked.
 
-Usage: python3 tests/e2e/test_software_decode.py [retry|persisted|newtab|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|held|all]
+Usage: python3 tests/e2e/test_software_decode.py [retry|nosoftware|persisted|newtab|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|held|all]
 """
 import json
 import os
@@ -43,17 +46,27 @@ STORAGE_KEY_JS = (
 ENCODER_KEY_JS = STORAGE_KEY_JS.replace("_prefer_software_decode", "_encoder")
 
 
-def shim_js(fail_mode: str, loads: int = 0) -> str:
+def shim_js(fail_mode: str, loads: int = 0, soft_h264: str = "yes") -> str:
     """Make every VideoDecoder in the page fail on a chosen path and record the acceleration
-    each decoder was configured with. ``hardware``/``all`` raise an asynchronous decode error;
-    ``silent`` accepts the chunk on the hardware path but never outputs and never errors, the
-    case the no-output watchdog exists for. ``loads`` confines the failure to the tab's first
-    that many loads, a fault that clears up; 0 keeps it for every load."""
+    each decoder was configured with. ``hardware``/``all`` raise an asynchronous decode error,
+    ``once`` only at the first hardware decode of a load; ``silent`` accepts the chunk on the
+    hardware path but never outputs and never errors, the case the no-output watchdog exists
+    for. ``loads`` confines the failure to the tab's first that many loads, a fault that clears
+    up; 0 keeps it for every load. ``soft_h264`` ``no`` is an engine with no software H.264
+    decoder, as Chromium without FFmpeg's video decoders: it refuses the software preference
+    for H.264, in ``isConfigSupported`` and at ``configure``."""
     return """
     (() => {
       const Real = window.VideoDecoder;
       if (!Real) return;
       const MODE = %d && Number(sessionStorage.getItem('__navs') || 0) > %d ? 'none' : '%s';
+      const SOFT_H264 = '%s';
+      const softH264 = (cfg) => !!cfg && cfg.hardwareAcceleration === 'prefer-software'
+        && /^avc1/.test(cfg.codec || '');
+      const realSupported = Real.isConfigSupported.bind(Real);
+      Real.isConfigSupported = (cfg) => SOFT_H264 === 'no' && softH264(cfg)
+        ? Promise.resolve({ supported: false, config: cfg }) : realSupported(cfg);
+      let failedOnce = false;
       const errorFor = new WeakMap(), softFor = new WeakMap();
       const record = (accel) => {
         const seen = JSON.parse(sessionStorage.getItem('__cfgs') || '[]');
@@ -66,11 +79,19 @@ def shim_js(fail_mode: str, loads: int = 0) -> str:
         const accel = (cfg && cfg.hardwareAcceleration) || 'default';
         softFor.set(this, accel === 'prefer-software');
         record(accel);
+        if (SOFT_H264 !== 'yes' && softH264(cfg)) {
+          // What Chromium reports when no decoder will start for the config.
+          const cb = errorFor.get(this);
+          if (cb) setTimeout(() => cb(new DOMException('Unsupported configuration.', 'OperationError')), 0);
+          return;
+        }
         return origConfigure.call(this, cfg);
       };
       proto.decode = function (chunk) {
         const soft = softFor.get(this) === true;
-        if (MODE === 'all' || (MODE === 'hardware' && !soft)) {
+        const once = MODE === 'once' && !soft && !failedOnce;
+        if (once) failedOnce = true;
+        if (MODE === 'all' || (MODE === 'hardware' && !soft) || once) {
           const cb = errorFor.get(this);
           if (cb) setTimeout(() => cb(new DOMException('injected decode failure',
                                                        'EncodingError')), 0);
@@ -94,7 +115,7 @@ def shim_js(fail_mode: str, loads: int = 0) -> str:
         },
       });
     })();
-    """ % (loads, loads, fail_mode)
+    """ % (loads, loads, fail_mode, soft_h264)
 
 
 # Every WebCodecs global removed, the way an engine without the API presents.
@@ -128,20 +149,23 @@ ENCODER_JS = """
 
 
 def open_client(pw, fail_mode: str = "none", seed_preference: bool = False,
-                encoder: Optional[str] = None, query: str = "", engine: str = "chromium"):
+                encoder: Optional[str] = None, query: str = "", engine: str = "chromium",
+                soft_h264: str = "yes"):
     """Launch a browser with the decode-failure shim installed.
 
     Args:
         pw: Active Playwright instance.
-        fail_mode: ``none``, ``hardware``, ``all``, or ``silent`` decode failure injection.
+        fail_mode: ``none``, ``hardware``, ``all``, ``once``, or ``silent`` decode failure injection.
         seed_preference: Pre-store the software-decode preference key.
         encoder: Optional encoder to pin in localStorage before load.
         query: Optional query string appended to the stream URL.
         engine: ``chromium``, ``firefox``, or ``webkit``. The shim needs WebCodecs, so on an
             engine without it (Playwright WebKit) it no-ops and the client takes its jpeg path.
+        soft_h264: Whether the engine has a software H.264 decoder (``shim_js``).
 
     Returns:
-        Tuple of (browser, page) with the stream page loaded.
+        Tuple of (browser, page) with the stream page loaded; ``page.console_lines`` collects
+        its console across reloads.
     """
     browser = C.chromium_launch(pw) if engine == "chromium" else C.launch_browser(pw, engine)
     ctx = browser.new_context(viewport={"width": 1280, "height": 720},
@@ -151,8 +175,10 @@ def open_client(pw, fail_mode: str = "none", seed_preference: bool = False,
         ctx.add_init_script(SEED_JS)
     if encoder:
         ctx.add_init_script(ENCODER_JS % encoder)
-    ctx.add_init_script(shim_js(fail_mode))
+    ctx.add_init_script(shim_js(fail_mode, soft_h264=soft_h264))
     page = ctx.new_page()
+    page.console_lines = []
+    page.on("console", lambda m: page.console_lines.append(m.text))
     page.goto(H.BASE_URL + "/" + (f"?{query}" if query else ""), wait_until="load")
     return browser, page
 
@@ -211,6 +237,38 @@ def block_retry(r: "H.Results") -> None:
                 r.check("page never reloaded", after["navs"] == 1, after["navs"])
                 r.check("still decoding", after["decoded"] > state["decoded"],
                         (state["decoded"], after["decoded"]))
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+
+
+def block_nosoftware(r: "H.Results") -> None:
+    """An engine with no software H.264 decoder meets one hardware decode error: the
+    software retry it cannot take leaves the choice of decoder to the engine, which decodes
+    on, where reading the refused preference as a refused codec would step the stream down
+    the ladder for the rest of the tab's life."""
+    from playwright.sync_api import sync_playwright
+    H.server_start(mode="websockets")
+    try:
+        with sync_playwright() as pw:
+            browser, page = open_client(pw, fail_mode="once", soft_h264="no")
+            try:
+                state = wait_for(page, lambda s: len(s["cfgs"]) > 1 and s["decoded"] > 0, timeout=40)
+                r.check("the failed decoder was rebuilt", len(state["cfgs"]) > 1, state["cfgs"][:6])
+                r.check("without the software preference the engine refuses",
+                        "prefer-software" not in state["cfgs"], state["cfgs"][:6])
+                r.check("frames decode after the error", state["decoded"] > 0, state["decoded"])
+                time.sleep(6)
+                after = read_state(page)
+                r.check("the stream stays H.264", after["codec"] == "h264", after["codec"])
+                r.check("no fallback encoder stored", after["encoder"] is None, after["encoder"])
+                r.check("no software preference stored", after["stored"] is None, after["stored"])
+                r.check("page never reloaded", after["navs"] == 1, after["navs"])
+                r.check("still decoding", after["decoded"] > state["decoded"],
+                        (state["decoded"], after["decoded"]))
+                r.check("the console says why", any("has no software decoder for avc1" in line
+                                                     for line in page.console_lines))
             finally:
                 browser.close()
     finally:
@@ -612,7 +670,7 @@ def block_silent(r: "H.Results") -> None:
         H.server_stop()
 
 
-BLOCKS = {"retry": block_retry, "persisted": block_persisted, "newtab": block_newtab,
+BLOCKS = {"retry": block_retry, "nosoftware": block_nosoftware, "persisted": block_persisted, "newtab": block_newtab,
           "ladder": block_ladder, "healthy": block_healthy,
           "silent": block_silent,
           "striped": block_striped, "nowebcodecs": block_nowebcodecs,

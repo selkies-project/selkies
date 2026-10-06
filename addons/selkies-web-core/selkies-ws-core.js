@@ -972,6 +972,28 @@ const rememberSoftwareDecode = (enabled) => {
  */
 const decoderConfigFor = (config) =>
   preferSoftwareDecode ? { ...config, hardwareAcceleration: 'prefer-software' } : config;
+/**
+ * The config a page decoder takes: `config` where the engine supports it, and
+ * where only its software preference is refused, the same without it. An
+ * engine with no software decoder for the codec (Chromium without FFmpeg's
+ * video decoders, as on 32-bit ARM Android) refuses the preference, not the
+ * stream, so the preference is dropped rather than the codec. Null where the
+ * engine refuses the stream.
+ * @param {VideoDecoderConfig} config A config from `decoderConfigFor`.
+ * @returns {Promise<?VideoDecoderConfig>}
+ */
+async function supportedDecoderConfig(config) {
+  if ((await VideoDecoder.isConfigSupported(config)).supported) return config;
+  if (config.hardwareAcceleration !== 'prefer-software') return null;
+  const plain = { ...config };
+  delete plain.hardwareAcceleration;
+  if (!(await VideoDecoder.isConfigSupported(plain)).supported) return null;
+  if (preferSoftwareDecode) {
+    console.warn(`[decode] This browser has no software decoder for ${config.codec}; leaving the choice of decoder to it.`);
+    rememberSoftwareDecode(false);
+  }
+  return plain;
+}
 
 /**
  * Storage key of the decoder crash count the fallback ladder escalates on.
@@ -8041,10 +8063,10 @@ class WorkerWebSocket {
                 decoderInfo = vncStripeDecoders[vncStripeYStart];
 
                 if (!firstConfigAskedAt) firstConfigAskedAt = performance.now();
-                VideoDecoder.isConfigSupported(decoderConfig)
-                    .then(support => {
-                        if (support.supported) {
-                            return newStripeDecoder.configure(decoderConfig);
+                supportedDecoderConfig(decoderConfig)
+                    .then(config => {
+                        if (config) {
+                            return newStripeDecoder.configure(config);
                         } else {
                             // The catch below closes the decoder while the map entry still points at it.
                             answerRefusedCodec(dynamicCodec, wireCodecName(video_frame_type_byte));
