@@ -289,8 +289,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # Told each described frame on the wire to the peer and each it holds, as `(frame id,
         # key frame)`, and each key frame sent it; the described frames sent and not yet held,
         # oldest first, as (frame id, frame predicted from, key frame, when sent,
-        # [(transport-wide, media sequence number)]); the newest frames held; and the
-        # transport-wide sequence number each retransmitted packet last went out under.
+        # [(transport-wide, media sequence number)]); the newest frames held; whether a frame
+        # sent since the key frame was never held (`_confirm`); and the transport-wide
+        # sequence number each retransmitted packet last went out under.
         self.on_frame_out: Optional[Callable[[int, bool], None]] = None
         self.on_frame_held: Optional[Callable[[int, bool], None]] = None
         self.on_key_sent: Optional[Callable[[], None]] = None
@@ -300,6 +301,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self._stall_last = 0.0
         self._key_sent_at: Optional[float] = None
         self.__held: deque[int] = deque(maxlen=64)
+        self._unheld_gap = False
         self.__rtx_twcc: dict[int, int] = {}
         self.__loop = asyncio.get_running_loop()
         self.__mid: Optional[str] = None
@@ -649,10 +651,11 @@ class RTCRtpSender(AsyncIOEventEmitter):
         the frames it was sent, so `_forward` holds back whatever predicts from
         them, NACKs for the dropped packets go unanswered, and the run is
         answered as a run left out is. False where this sender cannot, which
-        leaves the pacer its key frame, and for the display's owner: the cut
-        leaves a gap in its sequence numbers that no retransmission fills, which
-        its receiver closes on a key frame (a burst of loss on a software
-        encoder's stream otherwise took one to two seconds to close).
+        leaves the pacer its key frame, and for the display's owner and a peer
+        without the descriptor: the cut leaves a gap in its sequence numbers
+        that no retransmission fills, which its receiver closes on a key frame
+        (a burst of loss on a software encoder's stream otherwise took one to
+        two seconds to close).
         """
         if (first_tag is None or not self.__in_flight or self.selective is None
                 or not self.selective()
@@ -677,16 +680,21 @@ class RTCRtpSender(AsyncIOEventEmitter):
     def _confirm(self) -> None:
         """Tell `on_frame_held` of each frame sent the peer now holds: every packet of it
         reported received, or the retransmission of one, and the frame it predicts from
-        held. A frame not held within HELD_S never will be."""
+        held. A frame not held within HELD_S never will be. A peer without the dependency
+        descriptor decodes nothing past a frame it lacks until a key frame, so it holds a
+        frame only once it holds every frame sent before it."""
         acked = getattr(self.transport, "twcc_arrived", self.transport._twcc_acked)
         now = time.monotonic()
         rtx = self.__rtx_twcc
+        in_order = not self.__rtp_header_extensions_map.has_dependency_descriptor()
         kept = []
         for entry in self.__unheld:
             frame_id, reference, keyframe, sent_at, packets = entry
             if now - sent_at > HELD_S:
+                self._unheld_gap = self._unheld_gap or in_order
                 continue
-            if (all(acked(twcc) or (media in rtx and acked(rtx[media])) for twcc, media in packets)
+            if (not (in_order and (kept or self._unheld_gap))
+                    and all(acked(twcc) or (media in rtx and acked(rtx[media])) for twcc, media in packets)
                     and (keyframe or reference in self.__held)):
                 self.__held.append(frame_id)
                 if self.on_frame_held is not None:
@@ -706,9 +714,12 @@ class RTCRtpSender(AsyncIOEventEmitter):
         predicting from one it holds comes next. A request while that run is open, or while the
         key frame it was sent is on its way, is answered by them. False where it cannot, which
         asks for a key frame: past RESYNC_ANCHORED_S of such requests one after another (a
-        decoder that only takes a key frame), or where it holds nothing and no key frame is due."""
+        decoder that only takes a key frame), where it holds nothing and no key frame is due,
+        and for a peer without the dependency descriptor, which decodes nothing past the
+        packets it lacks until a key frame."""
         now = time.monotonic()
-        if self.selective is None or not self.selective() or not self._anchored:
+        if (self.selective is None or not self.selective() or not self._anchored
+                or not self.__rtp_header_extensions_map.has_dependency_descriptor()):
             return False
         if self._stall_since is None or now - self._stall_last > RESYNC_ANCHORED_S:
             self._stall_since = now
@@ -796,6 +807,14 @@ class RTCRtpSender(AsyncIOEventEmitter):
         """Whether the stream is H.264, whose frame_num wraps (FRAME_NUM_WRAP)."""
         codec = self.__send_codec
         return codec is not None and codec.mimeType.lower() == "video/h264"
+
+    def _numbers_frames(self) -> bool:
+        """Whether frames naming their reference are numbered for this peer and left out
+        where it has no room: one reading the dependency descriptor, or an H.264 one
+        without it (Firefox answers so), which finds a frame's reference by sequence
+        number, unbroken by a frame left out before it is packed; its frames carry no
+        descriptor."""
+        return self.__rtp_header_extensions_map.has_dependency_descriptor() or self._numbered()
 
     def _open_run(self, frame_id: int) -> None:
         self._resync_since = time.monotonic()
@@ -1042,7 +1061,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
 
                 timestamp = uint32_add(timestamp_origin, enc_frame.timestamp)
                 described = None
-                if enc_frame.dependency is not None and self.__rtp_header_extensions_map.has_dependency_descriptor():
+                descriptor = self.__rtp_header_extensions_map.has_dependency_descriptor()
+                if enc_frame.dependency is not None and self._numbers_frames():
                     if not self._forward(*enc_frame.dependency, enc_frame.keyframe, enc_frame.anchor):
                         self._frame_left = None
                         if self.on_frame_left_out is not None:
@@ -1111,14 +1131,14 @@ class RTCRtpSender(AsyncIOEventEmitter):
                         arrival_ms = min(0xFFFF, max(0, int((time.time() - frame_time) * 1000)))
                         packet.extensions.video_timing = video_timing_legs(
                             enc_frame.timing, time.monotonic_ns(), arrival_ms)
-                    if described is not None:
+                    if described is not None and descriptor:
                         packet.extensions.dependency_descriptor = dependency_descriptor(
                             i == 0, bool(packet.marker), described[0], described[1], enc_frame.keyframe)
                     if i == 0 and abs_capture_time is not None:
                         packet.extensions.abs_capture_time = abs_capture_time
                     self.__log_debug("> %s", packet)
                     self.__rtp_history.add(
-                        packet, frame_time, enc_frame.dependency[0] if described is not None else None)
+                        packet, frame_time, enc_frame.dependency[0] if described is not None and descriptor else None)
                     packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
                     outgoing.append((packet_bytes, packet.extensions.transport_sequence_number,
                                      packet.sequence_number, len(payload)))
@@ -1166,6 +1186,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                             self._key_sent_at = time.monotonic()
                             self.__unheld.clear()
                             self.__held.clear()
+                            self._unheld_gap = False
                             if self.on_key_sent is not None:
                                 self.on_key_sent()
                         self.__unheld.append((

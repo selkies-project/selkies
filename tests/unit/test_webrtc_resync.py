@@ -107,7 +107,7 @@ def sender_with(dd: bool = True, selective: bool = False, taken: bool = True, mi
         _RTCRtpSender__in_flight=deque(maxlen=64), _RTCRtpSender__frame_numbers={},
         _RTCRtpSender__unheld=deque(maxlen=256), _RTCRtpSender__held=deque(maxlen=64),
         _RTCRtpSender__rtx_twcc={}, on_frame_held=None, on_frame_out=None, acked=acked, _anchored=False,
-        _stall_since=None, _stall_last=0.0, _key_sent_at=None,
+        _stall_since=None, _stall_last=0.0, _key_sent_at=None, _unheld_gap=False,
         _RTCRtpSender__frame_number=0, _RTCRtpSender__rtp_history=history,
         _RTCRtpSender__rtp_header_extensions_map=SimpleNamespace(has_dependency_descriptor=lambda: dd),
         _RTCRtpSender__kind="video", _resync_since=None, _resync_first=None, _resync_run=0,
@@ -120,7 +120,7 @@ def sender_with(dd: bool = True, selective: bool = False, taken: bool = True, mi
         _emit_pli_event=lambda: events.append("pli"))
     for name in ("_describe", "_pacer_resync", "_undecodable", "_frame_on_wire", "_forward",
                  "_open_run", "_close_run", "_repair", "_video_backlog", "_numbered", "_far", "_confirm",
-                 "_resync_held", "_anchor_room"):
+                 "_resync_held", "_anchor_room", "_numbers_frames"):
         setattr(s, name, getattr(RTCRtpSender, name).__get__(s))
     return s, events, history, backlog
 
@@ -356,5 +356,40 @@ clock.t += HELD_S + 0.01
 s.acked.add(120)
 s._confirm()
 res.check(f"a frame not held within {HELD_S:.0f} s never is", held[-1] == (3, False) and not unheld, held)
+
+# A peer without the dependency descriptor (Firefox answers so) finds an H.264 frame's
+# reference by sequence number: its frames are numbered and left out alike; VP8's and VP9's
+# name pictures, and are not.
+res.check("an H.264 peer without the descriptor has its frames numbered and left out",
+          sender_with(dd=False)[0]._numbers_frames() and sender_with(mime="video/VP8")[0]._numbers_frames()
+          and not sender_with(dd=False, mime="video/VP8")[0]._numbers_frames())
+s, events, _, backlog = sender_with(dd=False, selective=True)
+send(s, 1, None, 10, key=True)
+send(s, 2, 1, 20)
+backlog[:2] = [RESYNC_ROOM_FRAMES, 0.0]
+out = [send(s, n, n - 1, 10 * n) for n in range(3, 3 + RESYNC_REACH_FRAMES)]
+res.check("it is left the frames it has no room for, and the encoder told at the reach",
+          out == [None] * RESYNC_REACH_FRAMES and events == [("resync", 3, True)], (out, events))
+res.check("the frame predicting past the run goes out", send(s, 30, 2, 300) == (2, 1))
+s._anchored = True
+s._RTCRtpSender__held.extend([1, 2])
+res.check("a loss past repair is left a key frame: its receiver decodes nothing past the hole",
+          s._resync_held() is False)
+s, events, _, _ = sender_with(dd=False)
+held = []
+s.on_frame_held = lambda frame_id, key: held.append(frame_id)
+unheld = s._RTCRtpSender__unheld
+unheld.append((1, None, True, clock.t, [(100, 1)]))
+unheld.append((2, 1, False, clock.t, [(101, 2)]))
+unheld.append((3, 1, False, clock.t, [(102, 3)]))
+s.acked.update({100, 102})
+s._confirm()
+res.check("it holds a frame only once it holds every frame sent before it", held == [1], held)
+unheld.append((4, 1, False, clock.t + HELD_S, [(103, 4)]))
+clock.t += HELD_S + 0.01
+s.acked.add(103)
+s._confirm()
+res.check("and none past one it never held, until a key frame",
+          held == [1] and [e[0] for e in unheld] == [4] and s._unheld_gap, (held, list(unheld)))
 
 sys.exit(0 if res.summary() else 1)
