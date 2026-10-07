@@ -72,6 +72,17 @@ def sources() -> list:
     return [line.split("\t")[1] for line in out.splitlines() if "\t" in line]
 
 
+def unload_left_mic() -> None:
+    """Unload a virtual microphone an earlier suite's server left loaded (a server killed at
+    its teardown unloads nothing), so the one checked here is the one its first mic data
+    provisions."""
+    out = subprocess.run(["pactl", "list", "short", "modules"], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        fields = line.split("\t")
+        if len(fields) > 2 and fields[1] == "module-virtual-source" and VIRTUAL_MIC in fields[2]:
+            subprocess.run(["pactl", "unload-module", fields[0]], capture_output=True)
+
+
 def virtual_mic_source(timeout: float = 25) -> Optional[str]:
     """The virtual microphone source once the server has provisioned it."""
     deadline = time.time() + timeout
@@ -199,6 +210,7 @@ def transport_block(mode: str, wasm: bool = False, fixed_rate: bool = False, eng
                     f"{'' if engine == 'chromium' else '-' + engine}")
     wav = os.path.join(tempfile.mkdtemp(prefix="selkies-mic-"), "tone.wav")
     tone_wav(wav)
+    unload_left_mic()
     H.server_start(mode=mode, wayland=False)
     try:
         with sync_playwright() as p:
@@ -247,6 +259,7 @@ def locked_block() -> "H.Results":
     wav = os.path.join(tempfile.mkdtemp(prefix="selkies-mic-"), "tone.wav")
     tone_wav(wav)
     for mode in ("websockets", "webrtc"):
+        unload_left_mic()
         H.server_start(mode=mode, wayland=False, extra_env={"SELKIES_MICROPHONE_ENABLED": "false|locked"})
         try:
             with sync_playwright() as p:
