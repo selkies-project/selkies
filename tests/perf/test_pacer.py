@@ -296,6 +296,11 @@ async def run_client(ws_url: str, measure_s: float, warmup_s: float,
                 await ws.send_str("SESSION server")
             elif data.startswith(("SESSION_OK", "SESSION_END", "ERROR")):
                 LOG.info("signaling: %s", data)
+                # The server's own peer can register after the rig's HELLO; the
+                # page asks again a second later, and so does the rig.
+                if data == "ERROR peer server not found":
+                    await asyncio.sleep(1.0)
+                    await ws.send_str("SESSION server")
             elif data.startswith("SESSION"):
                 pass
             else:
