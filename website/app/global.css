@@ -56,7 +56,7 @@
 #nd-page td,
 #nd-page th {
   vertical-align: top;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 #nd-page td:first-child code {
