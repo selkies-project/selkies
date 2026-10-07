@@ -153,6 +153,71 @@ clipboard.text = 'what the user copied before';
           sent.length === 1, JSON.stringify(sent));
 }
 
+// A push that never left (no connection yet, the socket reconnecting after the
+// tab came back) is no send: the content is still news to the session, sent at
+// the next read and read again once the next connection's settings arrive. A
+// push the server's policy declined is not chased.
+/** A sender whose transport declines with `codes`, one per call, then sends. */
+function declining(codes) {
+    const sent = [];
+    const clipboardSync = createClipboardSync({ sendRequest: () => {} });
+    const s = createLocalClipboardSender({
+        isChromium: true,
+        isSharedMode: () => false,
+        canSync: () => true,
+        canRead: () => true,
+        binaryEnabled: () => false,
+        clipboardSync,
+        sendClipboardData: async (data, mime, onSkip) => {
+            const code = codes.shift();
+            if (code) { if (onSkip) onSkip('declined', code); return; }
+            sent.push({ data, mime });
+            clipboardSync.markSynced(data, mime);
+        },
+    });
+    return { sender: s, sent };
+}
+globalThis.document = { hasFocus: () => true };
+navigator.permissions = { query: async () => ({ state: 'granted' }) };
+const settle = () => new Promise((r) => setTimeout(r, 0));
+{
+    const { sender: s, sent } = declining(['clipboardSkipNotConnected']);
+    await s.readAndSend();
+    await s.readAndSend();
+    check('a read whose push found no connection sends at the next read',
+          sent.length === 1 && sent[0].data === clipboard.text, JSON.stringify(sent));
+}
+{
+    const { sender: s, sent } = declining([undefined, 'clipboardSkipNotConnected']);
+    await s.maybeInitial();
+    await settle();
+    clipboard.text = 'copied while the tab was away';
+    await s.readAndSend();
+    await s.maybeInitial();
+    await settle();
+    check('the next connection reads again what a dropped push missed',
+          sent.length === 2 && sent[1].data === 'copied while the tab was away', JSON.stringify(sent));
+    await s.maybeInitial();
+    await settle();
+    check('and only once', sent.length === 2, JSON.stringify(sent));
+    clipboard.text = 'what the user copied before';
+}
+{
+    const { sender: s, sent } = declining(['clipboardSkipSendFailed']);
+    await s.readAndSend();
+    await s.readAndSend();
+    check('a push the connection dropped mid-send sends at the next read',
+          sent.length === 1, JSON.stringify(sent));
+}
+{
+    const { sender: s, sent } = declining(['clipboardSkipInDisabled']);
+    await s.readAndSend();
+    await s.maybeInitial();
+    await settle();
+    await s.readAndSend();
+    check('a push the policy declined is not chased', sent.length === 0, JSON.stringify(sent));
+}
+
 Date.now = realNow;
 console.log(`[clip-precedence] ${failed === 0 ? 'all checks passed' : failed + ' failed'}`);
 process.exit(failed === 0 ? 0 : 1);

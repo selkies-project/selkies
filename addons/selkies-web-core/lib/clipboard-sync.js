@@ -328,7 +328,8 @@ const INCOMING_STALL_MS = 30000;
  *     pushes any content to the server.
  * @property {(data: string|ArrayBuffer|Blob, mime?: string, onSkip?: Function) => Promise<void>} sendExplicit
  *     Pushes content the user named, outranking a concurrent `readAndSend`.
- * @property {() => Promise<void>} maybeInitial The connect-time one-shot send.
+ * @property {() => Promise<void>} maybeInitial The connect-time send: once a page,
+ *     and again at a connection after a read whose push found none.
  * @property {() => (Promise<void>|null)} getSendInFlight The send the
  *     paste-ordering hold awaits, or `null`.
  */
@@ -375,6 +376,9 @@ export function createLocalClipboardSender({
 }) {
     let sendInFlight = null;
     let initialAttempted = false;
+    // A read whose push found no connection, or lost it mid-send, is made again
+    // when the next connection's settings arrive (`maybeInitial`).
+    let readAgainOnConnect = false;
     let explicitRunning = 0;
     let explicitSettledAt = -Infinity;
 
@@ -443,9 +447,17 @@ export function createLocalClipboardSender({
                     payload = packClipboardFlavours(res);
                     mime = CLIPBOARD_FLAVOURS_MIME;
                 }
-                const changed = clipboardSync.noteLocal(await clipboardSync.localSig(payload, mime));
+                const localSig = await clipboardSync.localSig(payload, mime);
+                const changed = clipboardSync.noteLocal(localSig);
                 if (!changed || explicitHasPrecedence()) return;
-                await sendClipboardData(payload, mime);
+                let skipped = null;
+                await sendClipboardData(payload, mime, (reason, code) => { skipped = code || reason; });
+                if (skipped === 'clipboardSkipNotConnected' || skipped === 'clipboardSkipSendFailed') {
+                    clipboardSync.forgetLocal(localSig);
+                    readAgainOnConnect = true;
+                    return;
+                }
+                if (skipped) return;
                 console.log(`Sent the local clipboard (${mime}) to the session`);
             } catch (err) {
                 if (err.name !== 'NotFoundError' && err.name !== 'DataError' && err.name !== 'NotAllowedError'
@@ -477,8 +489,9 @@ export function createLocalClipboardSender({
     }
 
     async function maybeInitial() {
-        if (initialAttempted) return;
+        if (initialAttempted && !readAgainOnConnect) return;
         initialAttempted = true;
+        readAgainOnConnect = false;
         if (!isChromium || isSharedMode() || !document.hasFocus()) return;
         if (!navigator.permissions || !navigator.permissions.query) return;
         try {
@@ -1097,6 +1110,8 @@ export function clipboardPreviewMessage(text, secret = false) {
  *     made whatever the local clipboard holds older than the session's.
  * @property {() => void} forget Forgets the synced value and what the local
  *     clipboard held, once this page emptied the local clipboard.
+ * @property {(s: string) => void} forgetLocal Forgets that the local
+ *     clipboard held `s`, where its push never left, so the next read sends it.
  * @property {(text?: string, blob?: Blob, mime?: string, bytes?: Uint8Array) => void} resolveServer
  *     Caches fresh server data and settles pending requests.
  * @property {() => Promise<void>} captureLocalImageSig Records the browser's
@@ -1250,6 +1265,16 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
     }
 
     /**
+     * A push of the local clipboard that never left (no connection, or it
+     * dropped mid-send) leaves the content still news to the session: the
+     * next read finds it a change again. A newer reading, or a push the user
+     * asked for since, stands.
+     */
+    function forgetLocal(s) {
+        if (lastLocalSig === s) lastLocalSig = null;
+    }
+
+    /**
      * Caches fresh server data and settles pending requests through the
      * one-behind guard. `bytes`, when the receive path has them, make the
      * stored signature content-hashed so it matches what `shouldSend`
@@ -1392,6 +1417,7 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
         noteLocal,
         noteExplicit,
         forget,
+        forgetLocal,
         resolveServer,
         captureLocalImageSig,
         request,
