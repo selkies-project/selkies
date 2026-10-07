@@ -34,6 +34,11 @@
 #     than thinning arbitrary packet tails; a timeout resurrects video if no
 #     keyframe arrives, so an unbound keyframe callback or a stuck encoder
 #     cannot kill the class permanently (natural IDR cadence can be minutes).
+#     Where the video sender can resync its peer without one (`resync`: the
+#     encoder names each frame's reference and the peer reads the dependency
+#     descriptor), the drop is handed to it instead: it holds back the frames
+#     the purge left undecodable and has the encoder predict past them, and
+#     video flows on, the shared stream carrying no keyframe for one peer.
 #   * Rate control is AIMD on wire evidence: an internal overflow only proves
 #     injection > drain, and with UDP sends the drain is the pace setting, not
 #     the wire — once one brake drops the pace below the encoder rate, every
@@ -183,6 +188,7 @@ class RtpPacer:
         request_keyframe: Optional[Callable[[], None]] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         on_dropped: Optional[Callable[[int], None]] = None,
+        resync: Optional[Callable[[Optional[int]], bool]] = None,
     ) -> None:
         self._encoder_bps = max(int(encoder_bps), 100_000)
         self._goodput_bps: Optional[int] = None
@@ -194,6 +200,9 @@ class RtpPacer:
         # Told the tag of every video packet dropped, refused, or purged, so the
         # transport's loss accounting can leave them out.
         self._on_dropped = on_dropped
+        # Offered a GOP reset's oldest dropped tag; True when the video sender
+        # resyncs its peer itself, so no keyframe is asked for (module notes).
+        self._resync = resync
         self._loop = loop or asyncio.get_running_loop()
         # Tag of a frame's last packet -> what to call, and with what, once it is
         # on the wire (`frame_end`); a dropped one is forgotten with its packet.
@@ -236,9 +245,10 @@ class RtpPacer:
         self._keyreq_answered = True
         self._enabled_at = self._last
         self._gop_dead_at = 0.0
+        self._purged_first: Optional[int] = None
         self._oversize_warned = False
         self.stats = {
-            "video_dropped": 0, "keyreqs": 0, "gop_resets": 0,
+            "video_dropped": 0, "keyreqs": 0, "gop_resets": 0, "resyncs": 0,
             "idr_resurrects": 0, "timeout_resurrects": 0, "stale_resets": 0,
             "paced_bytes": 0, "queue_max_bytes": 0, "fastpath_bytes": 0,
         }
@@ -551,7 +561,7 @@ class RtpPacer:
                     deadline = idr_time
             now = time.monotonic()
             if now - self._video_ts[0] > deadline:
-                self._stale_reset(deadline)
+                self._stale_reset(deadline, tag)
                 self.stats["video_dropped"] += 1
                 self._drop(tag)
                 return False
@@ -572,7 +582,7 @@ class RtpPacer:
         # Video queue budget: a packet the budget cannot hold abandons the GOP,
         # queue and all. The cap is video-only: audio/DC never push an IDR out.
         if cls == CLASS_VIDEO and self._video_bytes + n > self._video_cap_bytes():
-            self._reset_gop()
+            self._reset_gop(tag=tag)
             self.stats["video_dropped"] += 1
             self._drop(tag)
             return False
@@ -594,9 +604,9 @@ class RtpPacer:
         self._kick()
         return True
 
-    def _stale_reset(self, deadline_s: float) -> None:
+    def _stale_reset(self, deadline_s: float, tag: Optional[int] = None) -> None:
         """Latency-first GOP reset for queued video that outlived its usefulness."""
-        self._reset_gop("video backlog stale (>%.0fms)" % (deadline_s * 1000))
+        self._reset_gop("video backlog stale (>%.0fms)" % (deadline_s * 1000), tag)
         self.stats["stale_resets"] += 1
 
     def frame_end(self, tag: int, sink: Callable[..., None], *args: Any) -> None:
@@ -622,12 +632,14 @@ class RtpPacer:
 
     def _purge_video(self) -> int:
         """Drop the whole video queue, keeping the byte counters and the
-        enqueue-time and tag mirrors in lockstep with it; the packets dropped."""
+        enqueue-time and tag mirrors in lockstep with it; the packets dropped.
+        The oldest tag dropped is kept in `_purged_first`."""
         dq = self._queues[CLASS_VIDEO]
         n = len(dq)
         if dq:
             self.stats["video_dropped"] += n
             dq.clear()
+        self._purged_first = next((t for t in self._video_tags if t is not None), None)
         for tag in self._video_tags:
             self._drop(tag)
         self._video_tags.clear()
@@ -636,11 +648,21 @@ class RtpPacer:
         self._video_bytes = 0
         return n
 
-    def _reset_gop(self, reason: str = "video queue overflow") -> None:
+    def _reset_gop(self, reason: str = "video queue overflow", tag: Optional[int] = None) -> None:
         """Abandon the GOP: purge the queued video, which nothing behind the
         requested keyframe can use, refuse video until that keyframe, and
-        brake if wire evidence sizes one."""
+        brake if wire evidence sizes one. Where the video sender resyncs its
+        peer itself (`_resync`), told the oldest packet lost (the queue's, else
+        `tag`, the packet at hand), the purge and the brake are all: video
+        flows on and no keyframe is asked for."""
         purged = self._purge_video()
+        first = self._purged_first if self._purged_first is not None else tag
+        if not self._gop_dead and self._resync is not None and self._resync(first):
+            self._on_overflow()
+            self.stats["resyncs"] += 1
+            logger.info("pacer: %s => %d queued packets purged; the sender resyncs its peer",
+                        reason, purged)
+            return
         if not self._gop_dead:
             self._gop_dead = True
             self._gop_dead_at = time.monotonic()
@@ -714,8 +736,9 @@ class RtpPacer:
                                            exc_info=True)
                             # The receiver's reference chain dies with the
                             # purged packets: mark video dead so nothing that
-                            # depends on them is sent, and ask for a keyframe.
-                            self._reset_gop("send failed")
+                            # depends on them is sent, and ask for a keyframe,
+                            # unless the sender resyncs its peer itself.
+                            self._reset_gop("send failed", tag)
                             self._queues = {c: deque() for c in _QUEUED_CLASSES}
                             self._make_class_table()
                             self._bytes_queued = self._video_bytes = 0

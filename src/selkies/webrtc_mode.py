@@ -2980,7 +2980,8 @@ class WebRTCService(BaseStreamingService):
             logger.debug("updating STUN/TURN servers in RTC app")
             self.rtc_app.update_rtc_config(stun_servers, turn_servers)
 
-    def _ensure_pacer(self, pc: Any, peer: Dict[str, Any], display_id: str) -> Optional[Any]:
+    def _ensure_pacer(self, pc: Any, peer: Dict[str, Any], display_id: str,
+                      peer_id: Optional[str] = None) -> Optional[Any]:
         """Ensure the per-transport packet pacer is enabled/configured (called
         from the congestion loop; idempotent and cheap).
 
@@ -2997,7 +2998,10 @@ class WebRTCService(BaseStreamingService):
         shared RTCDtlsTransport — serves as the fallback. The IDR floor is
         bootstrapped from the session-start keyframe: on a late attach, waiting
         for the next natural IDR would start it at 0 and reset on the first
-        real burst.
+        real burst. The keyframe a GOP reset asks for, where the video sender
+        cannot resync its peer itself, is limited for `peer_id` as the peer's
+        own requests are (`RTCApp.peer_recovery_taken`): a page that does not
+        own its display gets the shared encoder's at most once a second.
 
         Returns:
             The DTLS transport (so callers can snapshot its pacer), or None
@@ -3020,13 +3024,15 @@ class WebRTCService(BaseStreamingService):
                 if getattr(tr, "kind", None) == "video":
                     vsender = tr.sender
                     break
-            transport.enable_pacer(
-                encoder_bps=enc_bps,
+            def pacer_keyframe(did_: str = display_id, pid_: Optional[str] = peer_id) -> None:
                 # Must hit the encoder pipeline: video rides the pre-encoded pack()
                 # path, where the sender's __force_keyframe flag is silently ignored.
-                request_keyframe=lambda did_=display_id: asyncio.ensure_future(
-                    self.request_idr_for_display(did_, unless_pending=True)),
-            )
+                rtc_app = self.rtc_app
+                if pid_ is not None and rtc_app is not None and not rtc_app.peer_recovery_taken(pid_, "keyframe"):
+                    return
+                asyncio.ensure_future(self.request_idr_for_display(did_, unless_pending=True))
+
+            transport.enable_pacer(encoder_bps=enc_bps, request_keyframe=pacer_keyframe)
             kf_bytes = getattr(vsender, "_keyframe_bytes", None)
             if kf_bytes:
                 transport.note_video_keyframe(
@@ -3098,7 +3104,7 @@ class WebRTCService(BaseStreamingService):
                 did = peer.get("display_id", "primary") or "primary"
                 if pacer_on:
                     try:
-                        dtls = self._ensure_pacer(pc, peer, did)
+                        dtls = self._ensure_pacer(pc, peer, did, peer_id)
                         if self.metrics is not None and dtls is not None:
                             self.metrics.set_pacer_snapshot(did, dtls.pacer_snapshot())
                     except Exception:

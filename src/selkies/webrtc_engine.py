@@ -104,7 +104,7 @@ from .webrtc.codecs.base import EncodedPacket
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 from .webrtc.contrib.relay import MediaRelay
 from enum import Enum
-from .display_utils import LOST_FRAME_MEMORY
+from .display_utils import FRAME_NUM_WRAP, LOST_FRAME_MEMORY
 from .webrtc_media_pipeline import MediaPipeline
 from .input_handler import (
     BULK_DRAIN_TIMEOUT_S,
@@ -212,10 +212,6 @@ LOST_CHAIN_FRAMES = 3
 # How far past its display's steered rate a video bridge lets frames run, in
 # seconds of that rate, before it drops delta frames (`PipelineBridge.set_budget`).
 BUDGET_WINDOW_S = 0.25
-# The shortest H.264 frame_num range, which every longer one is a multiple of:
-# the frames a multiple of it past a keyframe are where a stream's frame_num can
-# wrap to 0.
-FRAME_NUM_WRAP = 16
 
 
 async def drain_data_channel(channel: RTCDataChannel,
@@ -2402,6 +2398,18 @@ class RTCApp:
         peer_obj = self.peer_connections.get(client_peer_id) or {}
         self.invalidate_reference(peer_obj.get("display_id") or "primary", frame_id)
 
+    def on_resync_frame(self, client_peer_id: str, frame_id: int, reach: bool) -> bool:
+        """A peer's sender left `frame_id` and the frames after it out (its link has
+        no room for them, or its pacer cut them): its display's encoder predicts past
+        them. The sender paces these itself; a run past the encoder's `reach`, which
+        may cost the shared stream a key frame, is taken as the peer's key-frame
+        requests are (`peer_recovery_taken`). False when refused."""
+        if not reach and not self.peer_recovery_taken(client_peer_id, "keyframe"):
+            return False
+        peer_obj = self.peer_connections.get(client_peer_id) or {}
+        self.invalidate_reference(peer_obj.get("display_id") or "primary", frame_id)
+        return True
+
     def _note_connection(self, client_peer_id: str, frames: int, missed: int) -> None:
         """Fold frames into a peer's connection verdict (`ConnectionVerdict`), with
         those its display's bridge held back for the link's steered rate since the
@@ -2532,9 +2540,13 @@ class RTCApp:
             self._note_connection(cid, 0, 1)
 
         # A frame counts as missed from the pacer's hand until its last packet leaves,
-        # and again once the peer lost it past repair.
+        # and again once the peer lost it past repair; one left out is missed outright.
         rtp_video_sender.on_frame_sent = frame_sent
         rtp_video_sender.on_frame_queued = lambda cid=client_peer_id: self._note_connection(cid, 1, 1)
+        rtp_video_sender.on_frame_left_out = lambda cid=client_peer_id: self._note_connection(cid, 1, 1)
+        rtp_video_sender.selective = lambda cid=client_peer_id: not self.peer_owns_display(cid)
+        rtp_video_sender.on_resync = (
+            lambda frame_id, reach, cid=client_peer_id: self.on_resync_frame(cid, frame_id, reach))
         rtp_video_sender.on("pli", lambda cid=client_peer_id, ct=client_type: self.on_pli(cid, ct))
         rtp_video_sender.on("lost_frame", frame_lost)
         rtp_audio_sender = None

@@ -67,6 +67,8 @@ from . import stream_stats
 from .audio_control import AudioControl, ensure_capture_sink, opus_capture_settings
 from .display_utils import (
     FIRST_FRAME_WAIT_S,
+    FRAME_NUM_WRAP,
+    LOST_FRAME_MEMORY,
     applied_dpi,
     apply_common_capture_settings,
     no_first_frame,
@@ -130,7 +132,8 @@ from .webcam import (
 )
 from .stream_server import (SESSION_TOKEN_PROTOCOL, BaseStreamingService, ConnectionVerdict, CongestionSteer, RateHold,
                             TransferPacer, UplinkGauge, _observe_rtt_floor, _uplink_session_state,
-                            handshake_session_token, note_pong, start_kbps, uplink_rtt_ms, socket_gauge)
+                            handshake_session_token, note_pong, ping_behind, start_kbps, uplink_rtt_ms,
+                            socket_gauge)
 from .metrics import Metrics
 
 # How much stream may stand queued past the path's own round trip before the
@@ -201,6 +204,35 @@ VIDEO_RELAY_BUDGET_MIN_BYTES = 4 * 1024 * 1024
 # concurrent requests into one flag, so this only bounds the IDR bitrate a
 # hopeless client can add to the shared stream (~1 IDR/s).
 VIDEO_RELAY_SYNC_FLOOR_SECONDS = 1.0
+# How long a relay holds back a client's frames that predict from frames it
+# dropped, waiting for the encoder to predict past them, before it asks for a
+# key frame instead: the page's own decode gate waits as long (LOST_RECOVERY_MS
+# in lib/decode-gate.js).
+VIDEO_RELAY_LOST_RECOVERY_SECONDS = 1.0
+# A page that does not own its display is sent a delta frame only while fewer
+# than this many of its frames are still on their way out of this host, and
+# while the oldest ping the relay wrote behind its frames (every
+# VIDEO_RELAY_PING_SECONDS) has gone unanswered no longer than the path's round
+# trip and VIDEO_RELAY_LAG_SECONDS; past either its link carries less than the
+# stream, and the frame is left out. The pings read the queue end to end: a
+# proxy or a bloated hop ahead of the page holds one no local count sees.
+VIDEO_RELAY_ROOM_FRAMES = 3
+VIDEO_RELAY_LAG_SECONDS = 0.1
+VIDEO_RELAY_PING_SECONDS = 0.05
+# Frames a run left out of a page may span before the encoder is told without
+# waiting for the page's room: the encoder predicts from the last eight
+# (REFERENCE_FRAMES in pixelflux), and the report lands a frame or two late.
+VIDEO_RELAY_REACH_FRAMES = 5
+# A page with this many frames on their way out of this host, or a ping this
+# far past the round trip, is too far behind to be sent the frame answering a
+# run at the reach: it waits for room, and a key frame.
+VIDEO_RELAY_FAR_FRAMES = 12
+VIDEO_RELAY_FAR_SECONDS = 1.0
+# How many frames ahead of a possible frame_num wrap (FRAME_NUM_WRAP) an open
+# run is reported, so the frame answering it comes no later than the wrap. Only
+# H.264 numbers its frames so; its id in the wire header's codec nibble.
+VIDEO_RELAY_WRAP_LEAD = 2
+WIRE_H264 = 1
 # What a real-time frame may find queued in front of it: a bulk (clipboard)
 # chunk is only admitted below this. Left to fill the socket buffer instead, a
 # transfer stalls playback for as long as that buffer takes to drain.
@@ -818,12 +850,30 @@ class _VideoRelay:
     shared pipeline or its socket transport (whose freed burst peaks the
     allocator retains, ratcheting RSS): past its byte budget (~
     VIDEO_RELAY_BUDGET_SECONDS of stream at the configured bitrate) it drops
-    its backlog and skips ahead to the next keyframe, the standard
-    broadcast-video contract. Keyframes are exempt from the budget (part of
-    one is useless), so the true bound is budget plus one keyframe burst.
-    That budget is the only bound on a slow client: a send waits for as long
-    as its socket keeps draining, and only a socket that stops draining costs
+    its backlog. Keyframes are exempt from the budget (part of one is
+    useless), so the true bound is budget plus one keyframe burst. That
+    budget is the only bound on a slow client: a send waits for as long as
+    its socket keeps draining, and only a socket that stops draining costs
     the client its connection (`_send_live`).
+
+    Where the encoder names the frame each one predicts from (a whole-frame
+    session; the wire header's last field), a page that does not own its
+    display is served as a selective forwarding unit serves a receiver on a
+    narrow link: one stream for every page, each sent what its link carries.
+    A delta frame finding VIDEO_RELAY_ROOM_FRAMES of the page's frames still
+    on their way out of this host (`_frames_ahead`), or its queue
+    VIDEO_RELAY_LAG_SECONDS past the path's round trip (`_lag`), is left out,
+    which opens a run; the frames predicting from it are held back, and once the page
+    has room the encoder is told the run's first frame is lost to it
+    (`_relay_lost`, the client's own LOST_FRAME). Its next frame predicts
+    from the last frame the page was sent and goes out, so the page keeps a
+    frame rate its link carries and lags by a few frames, and the shared
+    stream carries no key frame for it. A run past VIDEO_RELAY_REACH_FRAMES
+    is reported without waiting for room, while the encoder still holds the
+    frame to predict from. Only a run the encoder has not predicted past in
+    VIDEO_RELAY_LOST_RECOVERY_SECONDS falls back to the keyframe gate below;
+    elsewhere a drop skips ahead to the next keyframe, the standard
+    broadcast-video contract.
 
     Video reference-chain safety is tracked per stripe ROW (wire-header y_start, bytes
     4:6): one capture frame can mix IDR and delta stripes (a lone stripe
@@ -847,11 +897,27 @@ class _VideoRelay:
         verdict: This client's connection verdict over the chunks offered to
             it, those dropped or held back by the gate counting as missed; a
             change goes to its page as `CONNECTION poor` or `CONNECTION ok`.
+        lost: Ids of the frames left out for this client in the current run,
+            and of those held back for predicting from one.
+        lost_run: How many frames the run holds.
+        lost_since: When the current run began, 0 for none.
+        lost_first: The run's first frame, the one the encoder is told of.
+        lost_told: Whether the encoder took that report (`_relay_lost`).
+        since_key: Delta frames offered since the last key frame, and
+            `numbered`, whether the stream is H.264, whose frame_num wraps.
+        written: Video bytes handed to the socket, and `marks`, that count
+            at the end of each frame whose last byte may not have left yet.
+        gauged: Whether the relay pings behind its frames (a page that does
+            not own its display); `pinged` is when it last pinged, and
+            `pongs` and `rtt_floor` the pong count and the round trip's floor
+            it last read.
     """
 
     __slots__ = ('server', 'display_id', 'ws', 'budget', 'backlog',
                  'backlog_bytes', 'live_rows', 'stopped', '_wake', '_task',
-                 '_next_sync_req', 'verdict')
+                 '_next_sync_req', 'verdict', 'lost', 'lost_run', 'lost_since',
+                 'lost_first', 'lost_told', 'since_key', 'numbered', 'written',
+                 'marks', 'gauged', 'pinged', 'pongs', 'rtt_floor')
 
     def __init__(self, server: "DataStreamingServer", display_id: str,
                  ws: web.WebSocketResponse, budget: int) -> None:
@@ -867,6 +933,19 @@ class _VideoRelay:
         self._task: Optional[asyncio.Task] = None
         self._next_sync_req = 0.0
         self.verdict = ConnectionVerdict()
+        self.lost: deque = deque(maxlen=LOST_FRAME_MEMORY)
+        self.lost_run = 0
+        self.lost_since = 0.0
+        self.lost_first: Optional[int] = None
+        self.lost_told = False
+        self.since_key = 0
+        self.numbered = False
+        self.written = 0
+        self.marks: deque = deque(maxlen=LOST_FRAME_MEMORY)
+        self.gauged = False
+        self.pinged = 0.0
+        self.pongs = 0
+        self.rtt_floor: Optional[float] = None
 
     def start(self) -> None:
         self._task = asyncio.create_task(
@@ -915,6 +994,102 @@ class _VideoRelay:
             return True
         return False
 
+    def _lose(self, frame_id: int) -> None:
+        """Count a frame lost to this client, starting a run where none is open."""
+        self.lost.append(frame_id)
+        self.lost_run += 1
+        if self.lost_first is None:
+            self.lost_first = frame_id
+            self.lost_since = time.monotonic()
+            self.lost_told = False
+
+    def _end_lost(self) -> None:
+        """The run is over: the encoder predicted past it, or a key frame came."""
+        self.lost.clear()
+        self.lost_run = 0
+        self.lost_first = None
+        self.lost_since = 0.0
+        self.lost_told = False
+
+    def _frames_ahead(self) -> int:
+        """This client's frames still on their way out of this host: those queued
+        here, and those handed to its socket whose last byte it has not sent
+        (`_ws_write_backlog`; a frame with fewer bytes behind it than are
+        unsent is still in there)."""
+        marks = self.marks
+        if marks:
+            unsent = _ws_write_backlog(self.ws)
+            if unsent is None:
+                marks.clear()
+            while marks and self.written - marks[0] >= unsent:
+                marks.popleft()
+        return len(self.backlog) + len(marks)
+
+    def _lag(self) -> float:
+        """How long the oldest ping written behind this client's frames
+        (`ping_behind`) has gone unanswered past the path's round trip: the
+        queue ahead of it on the path. A ping older than the newest answered
+        one was lost, since the socket keeps them in order. 0 where none is
+        outstanding or no pong came yet."""
+        state = _uplink_session_state(self.ws)
+        now = time.monotonic()
+        if state["seq"] != self.pongs and state["rtt_us"] is not None:
+            self.pongs = state["seq"]
+            self.rtt_floor = _observe_rtt_floor(state, state["rtt_us"], now) / 1e6
+        if self.rtt_floor is None:
+            return 0.0
+        answered = state.get("answered", 0.0)
+        oldest = next((sent for sent in state["pending"].values() if sent > answered), None)
+        return 0.0 if oldest is None else max(0.0, now - oldest - self.rtt_floor)
+
+    def _room(self) -> bool:
+        """Whether this client has room for a frame (VIDEO_RELAY_ROOM_FRAMES)."""
+        return (self._frames_ahead() < VIDEO_RELAY_ROOM_FRAMES
+                and self._lag() < VIDEO_RELAY_LAG_SECONDS)
+
+    def _far(self) -> bool:
+        """Whether this client is too far behind to be answered without room
+        (VIDEO_RELAY_FAR_FRAMES)."""
+        return (self._frames_ahead() >= VIDEO_RELAY_FAR_FRAMES
+                or self._lag() >= VIDEO_RELAY_FAR_SECONDS)
+
+    def _forward(self, frame_id: int, reference: int) -> Optional[bool]:
+        """Whether a delta frame naming the frame it predicts from goes to this
+        client; None where only a key frame brings the client back. The first
+        frame predicting past an open run, which decodes on the client, ends it."""
+        if self.lost_first is not None:
+            if reference not in self.lost:
+                self._end_lost()
+                return True
+            self._lose(frame_id)
+            return self._repair()
+        if self.server._owns_display(self.ws, self.display_id):
+            return True
+        self.gauged = True
+        if (not self.numbered or self.since_key % FRAME_NUM_WRAP) and not self._room():
+            self._lose(frame_id)
+            return self._repair()
+        return True
+
+    def _repair(self) -> Optional[bool]:
+        """A frame of the open run was held back: tell the encoder of the run's
+        first frame once the client has room for the frame predicting past it,
+        or sooner where waiting would cost a key frame: at
+        VIDEO_RELAY_REACH_FRAMES, while the encoder still holds the frame to
+        predict from, and in H.264 VIDEO_RELAY_WRAP_LEAD frames ahead of a
+        frame_num wrap (FRAME_NUM_WRAP), which is never left out. False while
+        the run waits; None once it has waited VIDEO_RELAY_LOST_RECOVERY_SECONDS."""
+        if time.monotonic() - self.lost_since > VIDEO_RELAY_LOST_RECOVERY_SECONDS:
+            return None
+        if not self.lost_told:
+            due = (self.lost_run >= VIDEO_RELAY_REACH_FRAMES
+                   or (self.numbered and -self.since_key % FRAME_NUM_WRAP <= VIDEO_RELAY_WRAP_LEAD))
+            if self._room() or (due and not self._far()):
+                self.lost_told = self.server._relay_lost(
+                    self.ws, self.display_id, self.lost_first,
+                    self.lost_run <= VIDEO_RELAY_REACH_FRAMES)
+        return False
+
     def offer(self, item: dict) -> bool:
         """Accept, drop, or gate one encoded chunk.
 
@@ -940,15 +1115,31 @@ class _VideoRelay:
             self.backlog.clear()
             self.backlog_bytes = 0
             self.live_rows.clear()
+            self._end_lost()
             dropped = True
         deliver = True
         if is_video:
             row = (data[4] << 8) | data[5]
+            frame_id = (data[2] << 8) | data[3]
+            reference = (data[10] << 8) | data[11]
             if is_idr:
+                self.since_key = 0
+                self.numbered = (data[1] >> 4) == WIRE_H264
                 self.live_rows.add(row)
+                self._end_lost()
             elif row not in self.live_rows:
                 deliver = False
                 dropped = True
+            elif reference != frame_id:
+                # A whole-frame session names the frame each delta predicts from;
+                # a stripe, or a session that cannot say, names its own id.
+                self.since_key += 1
+                forward = self._forward(frame_id, reference)
+                deliver = bool(forward)
+                if forward is None:
+                    self.live_rows.clear()
+                    self._end_lost()
+                    dropped = True
         if deliver:
             self.backlog.append(item)
             self.backlog_bytes += size
@@ -969,6 +1160,8 @@ class _VideoRelay:
                 item = self.backlog.popleft()
                 data = item['data']
                 self.backlog_bytes -= len(data)
+                self.written += len(data)
+                self.marks.append(self.written)
                 # Stamped before the await, and only for the display's
                 # registered client: that is what the ACK RTT math measures, and
                 # the hand to the socket is where its stats read a frame as sent.
@@ -980,6 +1173,9 @@ class _VideoRelay:
                         watch.note_send(getattr(item.get('owner'), 'capture_ns', 0), len(data))
                 try:
                     await _send_live(self.ws, data, f"Video relay for '{self.display_id}'")
+                    if self.gauged and time.monotonic() - self.pinged >= VIDEO_RELAY_PING_SECONDS:
+                        self.pinged = time.monotonic()
+                        await ping_behind(self.ws)
                 except (ConnectionResetError, OSError, RuntimeError):
                     self.server.clients.discard(self.ws)
                     return
@@ -2793,6 +2989,18 @@ class DataStreamingServer(BaseStreamingService):
                 module.request_idr_frame()
             except Exception:
                 pass
+
+    def _relay_lost(self, websocket: Any, display_id: str, frame_id: int, reach: bool) -> bool:
+        """Tell the encoder a client's relay left `frame_id` and the frames after it out
+        (`_VideoRelay`), as the client's own LOST_FRAME would: the encoder predicts past
+        them and the client resumes without a key frame. The relay paces these itself; a
+        run past its `reach`, which may cost the shared stream a key frame, is taken as a
+        key-frame request is (`_repair_taken`). False when refused; the relay asks again
+        on its next held frame."""
+        if not reach and not self._repair_taken(websocket, display_id, "keyframe"):
+            return False
+        self._schedule_invalidation(display_id, frame_id)
+        return True
 
     def _schedule_invalidation(self, display_id: str, frame_id: int) -> None:
         """Tell the display's encoder a client lost `frame_id`, so the frames after it stop
@@ -6529,7 +6737,9 @@ class DataStreamingServer(BaseStreamingService):
                                     self._video_relay_budget(display_id, relay_budget))
                                 group[ws] = relay
                                 relay.start()
-                            if relay.offer(item):
+                            # A page that does not own the display asks for the shared key
+                            # frame at most once a second, as its own requests do.
+                            if relay.offer(item) and self._repair_taken(ws, display_id, "keyframe"):
                                 need_sync = True
                         if need_sync:
                             self._schedule_idr_for_display(display_id)

@@ -241,6 +241,19 @@ def note_pong(ws: Any, data: Any) -> None:
     state["answered"] = max(state.get("answered", 0.0), sent)
 
 
+async def ping_behind(ws: Any) -> None:
+    """Ping `ws` behind everything written to it so far: its pong says all of that
+    reached the peer (`note_pong` keeps when the newest answered ping went out)."""
+    state = _uplink_session_state(ws)
+    payload = state["next_ping"].to_bytes(8, "big")
+    state["next_ping"] += 1
+    pending = state["pending"]
+    pending[payload] = time.monotonic()
+    while len(pending) > UplinkGauge._PENDING_MAX:
+        pending.pop(next(iter(pending)))
+    await ws.ping(payload)
+
+
 def _observe_rtt_floor(state: Dict[str, Any], rtt_us: int, now: float) -> int:
     """Fold one RTT sample into a session's floor history and return the
     current floor.
@@ -573,15 +586,8 @@ class UplinkGauge:
         if now - self._last_ping >= self.PING_INTERVAL:
             self._last_ping = now
             for conn in list(self._conns):
-                ws, state, _last = conn
-                payload = state["next_ping"].to_bytes(8, "big")
-                state["next_ping"] += 1
-                pending = state["pending"]
-                pending[payload] = now
-                while len(pending) > self._PENDING_MAX:
-                    pending.pop(next(iter(pending)))
                 try:
-                    await ws.ping(payload)
+                    await ping_behind(conn[0])
                 except Exception:
                     self._conns.remove(conn)
         verdict: Optional[bool] = None

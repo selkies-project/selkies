@@ -1279,6 +1279,12 @@ FIRST_FRAME_WAIT_S = 5.0
 #: older one; the ids are 16-bit, so one is named again after 65536 frames.
 LOST_FRAME_MEMORY = 64
 
+#: The shortest H.264 frame_num range, which every longer one is a multiple of:
+#: the frames a multiple of it past a keyframe are where a stream's frame_num can
+#: wrap to 0. A decoder that misses that frame cannot be predicted past the gap,
+#: so the encoder answers a loss covering it with a keyframe.
+FRAME_NUM_WRAP = 16
+
 
 def no_first_frame(display_id: str, encoder: str) -> str:
     """The one line a capture that never delivered a frame earns."""

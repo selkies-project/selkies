@@ -19,6 +19,7 @@ import asyncio
 import os
 import sys
 import time
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -35,7 +36,7 @@ import helpers as H  # noqa: E402
 def sender(asks: list, sent: list) -> SimpleNamespace:
     """A sender whose newest frame, transport-wide number 40, left 0.4 s ago and was
     acknowledged, with no request before."""
-    s = SimpleNamespace(_RTCRtpSender__rtt=0.02, _frame_handed=40,
+    s = SimpleNamespace(_RTCRtpSender__rtt=0.02, _frame_handed=40, _RTCRtpSender__in_flight=deque(),
                         _frame_left=(40, time.monotonic() - 0.4), _key_asked_at=0.0, _lost_at=None,
                         transport=SimpleNamespace(_twcc_acked=lambda seq: seq != 41),
                         _send_keyframe=lambda: None, _emit_pli_event=lambda: asks.append("key"),

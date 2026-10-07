@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""A lossy, delayed, rate-limited link recovers cleanly from every GOP the
-pacer abandons: nothing of the abandoned GOP is delivered after the keyframe
-that replaced it.
+"""A lossy, delayed, rate-limited link recovers cleanly from every cut the
+pacer makes: nothing of an abandoned GOP is delivered after the keyframe that
+replaced it, and a cut the sender resyncs its peer across instead (the encoder
+predicting past the frames it dropped) needs none.
 
 A real server in WebRTC mode streams a scene repainted every frame to a
 headless client on the same vendored stack, with every ICE candidate on both
@@ -10,7 +11,7 @@ from a seeded stream, over each link in LINKS. The client's NACKs cross the
 relay, so the server's retransmissions are real. Read at the client, per
 video packet: its arrival, its sequence number, whether it repairs an earlier
 one, and whether it opens a keyframe. Read from the server log: the GOP
-resets, what each purged, and the pace at the end. The measures are the
+resets and resyncs, what each purged, and the pace at the end. The measures are the
 keyframes the client saw, the repairs of a hole's packets that arrived behind
 the keyframe closing the hole, how long a hole took to reach that keyframe,
 and the longest gap between frames, against the resets that caused them.
@@ -91,16 +92,18 @@ def analyze(packets: list, rtx_map: dict) -> dict:
 
 
 def server_counts(log_text: str) -> dict:
-    resets = [line for line in log_text.splitlines() if "GOP reset" in line]
+    lines = log_text.splitlines()
+    resets = [line for line in lines if "GOP reset" in line]
+    resyncs = [line for line in lines if "the sender resyncs its peer" in line]
     purged = 0
-    for line in resets:
+    for line in resets + resyncs:
         try:
-            purged += int(line.split("=> GOP reset, ")[1].split(" ")[0])
+            purged += int(line.split("=> ")[1].replace("GOP reset, ", "").split(" ")[0])
         except (IndexError, ValueError):
             pass
-    closed = [line for line in log_text.splitlines() if "pacer closed:" in line]
+    closed = [line for line in lines if "pacer closed:" in line]
     pace = int(closed[-1].split("'pace_bps': ")[1].split(",")[0]) if closed else None
-    return {"resets": len(resets), "purged": purged, "pace_bps": pace,
+    return {"resets": len(resets), "resyncs": len(resyncs), "purged": purged, "pace_bps": pace,
             "timeout_resurrects": log_text.count("resurrecting video optimistically")}
 
 
@@ -179,8 +182,8 @@ def main() -> int:
                       seen["frames"] > (15 if link == "bursts" else 5) * MEASURE_S and seen["keyframes"] >= 1, seen)
             res.check(f"{link}: the link lost packets and the client had them repaired",
                       seen["lost_down"] > 0 and seen["repairs"] > 0, seen)
-            res.check(f"{link}: the pacer abandoned at least one GOP",
-                      seen["resets"] >= 1, seen)
+            res.check(f"{link}: the pacer cut its queue at least once, abandoning the GOP or resyncing the peer",
+                      seen["resets"] + seen["resyncs"] >= 1, seen)
             res.check(f"{link}: no hole's packet was repaired behind the keyframe that closed the hole",
                       seen["stale_repairs"] == 0, seen)
             res.check(f"{link}: no media from before a keyframe arrived behind it",

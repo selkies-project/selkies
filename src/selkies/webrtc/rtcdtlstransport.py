@@ -513,6 +513,12 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_reference: Optional[int] = None
         self._twcc_delay_floor: deque = deque()
         self._twcc_delay_base: Optional[tuple] = None
+        # The one-way delay of the newest arrival the newest feedback reported, and the
+        # least any reported, on the feedback's clock as `_twcc_delay_base` is; and when
+        # a feedback last reported a packet the wire lost.
+        self._twcc_delay_newest: Optional[float] = None
+        self._twcc_delay_least: Optional[float] = None
+        self._twcc_lost_at = 0.0
         self._twcc_stand: Optional[dict] = None
         # Receive side of transport-wide congestion control: a sender that
         # negotiates transport-cc runs its bandwidth estimation on this
@@ -892,6 +898,13 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
     def pacer_enabled(self) -> bool:
         return self._pacer is not None
 
+    def set_video_resync(self, resync: Optional[Callable[[Optional[int]], bool]]) -> None:
+        """The video sender's hook for a pacer GOP reset (`RtpPacer._resync`), kept for a
+        pacer enabled later."""
+        self._video_resync = resync
+        if self._pacer is not None:
+            self._pacer._resync = resync
+
     def enable_pacer(
         self,
         encoder_bps: int,
@@ -910,6 +923,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
                 send_now_data=_send_now_data,
                 request_keyframe=request_keyframe,
                 on_dropped=self._twcc_dropped,
+                resync=getattr(self, "_video_resync", None),
             )
         elif request_keyframe is not None:
             self._pacer._request_keyframe = request_keyframe
@@ -935,6 +949,20 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
     def _send_delay(self) -> float:
         """Seconds until a packet handed over now is on the wire."""
         return self._pacer.drain_s() if self._pacer is not None else 0.0
+
+    def video_backlog(self) -> tuple[int, float, float]:
+        """The frames whose last packet waits in the pacer; how long a packet handed
+        over now waits to reach the peer: what the pacer holds takes to leave, and the
+        queue the newest transport-cc feedback found standing on the path, its newest
+        arrival's delay over the path's own (`_twcc_path_delay`; the least delay
+        reported until the first control interval dates that); and the seconds since
+        a feedback last reported a packet the wire lost."""
+        frames, wait = (0, 0.0) if self._pacer is None else (
+            len(self._pacer.frame_ends), self._pacer.drain_s())
+        base = self._twcc_delay_base[1] if self._twcc_delay_base is not None else self._twcc_delay_least
+        if self._twcc_delay_newest is not None and base is not None:
+            wait += max(0.0, self._twcc_delay_newest - base)
+        return frames, wait, time.monotonic() - self._twcc_lost_at
 
     def pacer_snapshot(self) -> Optional[dict]:
         return self._pacer.snapshot() if self._pacer is not None else None
@@ -976,6 +1004,10 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         ends[twcc_seq] = (sink, args)
         if len(ends) > FRAME_ENDS_MAX:
             del ends[next(iter(ends))]
+
+    def forget_frame_end(self, twcc_seq: int) -> None:
+        """Forget the frame whose last packet, `twcc_seq`, will not be sent."""
+        (self._pacer.frame_ends if self._pacer is not None else self._frame_ends).pop(twcc_seq, None)
 
     async def _twcc_received(self, seq: int, arrival_ms: float, media_ssrc: int,
                              rtcp_ssrc: Optional[int]) -> None:
@@ -1209,6 +1241,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             "recv_span_s": span_s,
             "goodput_bps": goodput,
         }
+        if lost:
+            self._twcc_lost_at = time.monotonic()
         window = self._twcc_window
         window["received"] += received
         window["lost"] += lost
@@ -1217,6 +1251,9 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             if window["delay_min"] is None or delay_min < window["delay_min"]:
                 window["delay_min"] = delay_min
             window["delay_last"] = delay_last
+            self._twcc_delay_newest = delay_last
+            if self._twcc_delay_least is None or delay_min < self._twcc_delay_least:
+                self._twcc_delay_least = delay_min
             window["feedback_mins"].append(delay_min)
         if self._pacer is not None:
             # A brake sizes itself from a rate the wire limited. A window the wire
