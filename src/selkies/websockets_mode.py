@@ -42,6 +42,7 @@ import asyncio
 import inspect
 import base64
 import contextlib
+import functools
 import gzip
 import json
 import logging
@@ -67,8 +68,10 @@ from . import stream_stats
 from .audio_control import AudioControl, ensure_capture_sink, opus_capture_settings
 from .display_utils import (
     FIRST_FRAME_WAIT_S,
+    FRAME_ANCHOR,
     FRAME_NUM_WRAP,
     LOST_FRAME_MEMORY,
+    CommonFrames,
     applied_dpi,
     apply_common_capture_settings,
     no_first_frame,
@@ -228,6 +231,18 @@ VIDEO_RELAY_REACH_FRAMES = 5
 # run at the reach: it waits for room, and a key frame.
 VIDEO_RELAY_FAR_FRAMES = 12
 VIDEO_RELAY_FAR_SECONDS = 1.0
+# How long a run may wait for the page's room where the encoder pins an anchor
+# every page holds (a FRAME_ANCHOR frame came since the key frame): it predicts
+# past a run of any depth on the report, so the page is answered then rather
+# than every page being sent a key frame at VIDEO_RELAY_LOST_RECOVERY_SECONDS.
+VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS = 4.0
+# An anchor goes to a page without room only while its queue stands under this
+# past the round trip (`_lag`): on a link too narrow for the anchors alone they
+# would never let it drain.
+VIDEO_RELAY_ANCHOR_SECONDS = 0.25
+# How many of the frames a relay sent it remembers, as far back as a frame may
+# predict from (an encoder's pinned anchor); a frame id recurs every 65536.
+VIDEO_RELAY_SENT_MEMORY = 4096
 # How many frames ahead of a possible frame_num wrap (FRAME_NUM_WRAP) an open
 # run is reported, so the frame answering it comes no later than the wrap. Only
 # H.264 numbers its frames so; its id in the wire header's codec nibble.
@@ -875,6 +890,16 @@ class _VideoRelay:
     elsewhere a drop skips ahead to the next keyframe, the standard
     broadcast-video contract.
 
+    Each frame a relay writes is one its page holds (`CommonFrames`, joined at
+    a key frame and left at the gate below), and the display's encoder is told
+    of each frame every page holds. An encoder that keeps long-term references
+    then pins the newest such anchor, so a run of any depth is predicted past
+    on its report, and flags an anchor predicting from such a frame
+    (FRAME_ANCHOR), which every page decodes: it goes to a page without room as
+    a key frame does, unless the page is too far behind for one, and ends the
+    page's run. Whether a page can decode a frame is read off the frames it was
+    sent (VIDEO_RELAY_SENT_MEMORY), since a pinned anchor is older than any run.
+
     Video reference-chain safety is tracked per stripe ROW (wire-header y_start, bytes
     4:6): one capture frame can mix IDR and delta stripes (a lone stripe
     encoder re-init IDRs only its own row), so after any drop a row's delta
@@ -897,8 +922,10 @@ class _VideoRelay:
         verdict: This client's connection verdict over the chunks offered to
             it, those dropped or held back by the gate counting as missed; a
             change goes to its page as `CONNECTION poor` or `CONNECTION ok`.
-        lost: Ids of the frames left out for this client in the current run,
-            and of those held back for predicting from one.
+        sent: Ids of the frames sent this client since its key frame, the newest
+            VIDEO_RELAY_SENT_MEMORY; a frame predicting from another is held back.
+        anchored: Whether a FRAME_ANCHOR frame came since the key frame, so a
+            run waits VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS for room.
         lost_run: How many frames the run holds.
         lost_since: When the current run began, 0 for none.
         lost_first: The run's first frame, the one the encoder is told of.
@@ -915,9 +942,9 @@ class _VideoRelay:
 
     __slots__ = ('server', 'display_id', 'ws', 'budget', 'backlog',
                  'backlog_bytes', 'live_rows', 'stopped', '_wake', '_task',
-                 '_next_sync_req', 'verdict', 'lost', 'lost_run', 'lost_since',
+                 '_next_sync_req', 'verdict', 'sent', 'lost_run', 'lost_since',
                  'lost_first', 'lost_told', 'since_key', 'numbered', 'written',
-                 'marks', 'gauged', 'pinged', 'pongs', 'rtt_floor')
+                 'marks', 'gauged', 'pinged', 'pongs', 'rtt_floor', 'anchored')
 
     def __init__(self, server: "DataStreamingServer", display_id: str,
                  ws: web.WebSocketResponse, budget: int) -> None:
@@ -933,7 +960,7 @@ class _VideoRelay:
         self._task: Optional[asyncio.Task] = None
         self._next_sync_req = 0.0
         self.verdict = ConnectionVerdict()
-        self.lost: deque = deque(maxlen=LOST_FRAME_MEMORY)
+        self.sent: Dict[int, None] = {}
         self.lost_run = 0
         self.lost_since = 0.0
         self.lost_first: Optional[int] = None
@@ -946,6 +973,7 @@ class _VideoRelay:
         self.pinged = 0.0
         self.pongs = 0
         self.rtt_floor: Optional[float] = None
+        self.anchored = False
 
     def start(self) -> None:
         self._task = asyncio.create_task(
@@ -965,6 +993,7 @@ class _VideoRelay:
         self.stopped = True
         self.backlog.clear()
         self.backlog_bytes = 0
+        self._leave_common()
         self._wake.set()
 
     def flush_for_gate(self, counted: bool = True) -> None:
@@ -980,6 +1009,7 @@ class _VideoRelay:
             self.backlog.clear()
             self.backlog_bytes = 0
             self.live_rows.clear()
+            self._leave_common()
 
     def hold_sync(self) -> None:
         """A key frame for every row is already asked for (the gate's lift): the
@@ -994,9 +1024,14 @@ class _VideoRelay:
             return True
         return False
 
+    def _leave_common(self) -> None:
+        """This client holds no frame the others do until its next key frame."""
+        common = self.server.common_frames.get(self.display_id)
+        if common is not None:
+            common.leave(self)
+
     def _lose(self, frame_id: int) -> None:
         """Count a frame lost to this client, starting a run where none is open."""
-        self.lost.append(frame_id)
         self.lost_run += 1
         if self.lost_first is None:
             self.lost_first = frame_id
@@ -1005,7 +1040,6 @@ class _VideoRelay:
 
     def _end_lost(self) -> None:
         """The run is over: the encoder predicted past it, or a key frame came."""
-        self.lost.clear()
         self.lost_run = 0
         self.lost_first = None
         self.lost_since = 0.0
@@ -1047,26 +1081,43 @@ class _VideoRelay:
         return (self._frames_ahead() < VIDEO_RELAY_ROOM_FRAMES
                 and self._lag() < VIDEO_RELAY_LAG_SECONDS)
 
+    def _anchor_room(self) -> bool:
+        """Whether this client is sent an anchor without room: not far behind, and its
+        queue under VIDEO_RELAY_ANCHOR_SECONDS past the round trip."""
+        return not self._far() and self._lag() < VIDEO_RELAY_ANCHOR_SECONDS
+
     def _far(self) -> bool:
         """Whether this client is too far behind to be answered without room
         (VIDEO_RELAY_FAR_FRAMES)."""
         return (self._frames_ahead() >= VIDEO_RELAY_FAR_FRAMES
                 or self._lag() >= VIDEO_RELAY_FAR_SECONDS)
 
-    def _forward(self, frame_id: int, reference: int) -> Optional[bool]:
+    def _forward(self, frame_id: int, reference: int, anchor: bool = False) -> Optional[bool]:
         """Whether a delta frame naming the frame it predicts from goes to this
         client; None where only a key frame brings the client back. The first
-        frame predicting past an open run, which decodes on the client, ends it."""
+        frame predicting past an open run, which decodes on the client, ends it,
+        and an `anchor` goes without room unless the client is too far behind."""
+        # In H.264 a frame where frame_num may wrap is never left out, nor the one after a key
+        # frame, which an encoder keeping two long-term references marks into the second.
+        kept = self.numbered and (self.since_key == 1 or not self.since_key % FRAME_NUM_WRAP)
+        if reference not in self.sent:
+            self._lose(frame_id)
+            return self._repair()
         if self.lost_first is not None:
-            if reference not in self.lost:
+            if not anchor or kept or self._anchor_room():
                 self._end_lost()
                 return True
+            # An anchor left out predicts past the run: the encoder is told of it.
+            self.lost_first = frame_id
+            self.lost_told = False
             self._lose(frame_id)
             return self._repair()
         if self.server._owns_display(self.ws, self.display_id):
             return True
         self.gauged = True
-        if (not self.numbered or self.since_key % FRAME_NUM_WRAP) and not self._room():
+        if anchor and self._anchor_room():
+            return True
+        if not kept and not self._room():
             self._lose(frame_id)
             return self._repair()
         return True
@@ -1078,8 +1129,10 @@ class _VideoRelay:
         VIDEO_RELAY_REACH_FRAMES, while the encoder still holds the frame to
         predict from, and in H.264 VIDEO_RELAY_WRAP_LEAD frames ahead of a
         frame_num wrap (FRAME_NUM_WRAP), which is never left out. False while
-        the run waits; None once it has waited VIDEO_RELAY_LOST_RECOVERY_SECONDS."""
-        if time.monotonic() - self.lost_since > VIDEO_RELAY_LOST_RECOVERY_SECONDS:
+        the run waits; None once it has waited VIDEO_RELAY_LOST_RECOVERY_SECONDS,
+        or VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS where anchors run."""
+        limit = VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS if self.anchored else VIDEO_RELAY_LOST_RECOVERY_SECONDS
+        if time.monotonic() - self.lost_since > limit:
             return None
         if not self.lost_told:
             due = (self.lost_run >= VIDEO_RELAY_REACH_FRAMES
@@ -1116,6 +1169,7 @@ class _VideoRelay:
             self.backlog_bytes = 0
             self.live_rows.clear()
             self._end_lost()
+            self._leave_common()
             dropped = True
         deliver = True
         if is_video:
@@ -1125,8 +1179,11 @@ class _VideoRelay:
             if is_idr:
                 self.since_key = 0
                 self.numbered = (data[1] >> 4) == WIRE_H264
+                self.anchored = False
                 self.live_rows.add(row)
                 self._end_lost()
+                self.sent.clear()
+                self.server.common_frames_for(self.display_id).join(self)
             elif row not in self.live_rows:
                 deliver = False
                 dropped = True
@@ -1134,18 +1191,35 @@ class _VideoRelay:
                 # A whole-frame session names the frame each delta predicts from;
                 # a stripe, or a session that cannot say, names its own id.
                 self.since_key += 1
-                forward = self._forward(frame_id, reference)
+                anchor = bool(data[1] & FRAME_ANCHOR)
+                self.anchored = self.anchored or anchor
+                forward = self._forward(frame_id, reference, anchor)
                 deliver = bool(forward)
                 if forward is None:
                     self.live_rows.clear()
                     self._end_lost()
+                    self._leave_common()
                     dropped = True
         if deliver:
+            if is_video:
+                self.sent[frame_id] = None
+                if len(self.sent) > VIDEO_RELAY_SENT_MEMORY:
+                    del self.sent[next(iter(self.sent))]
             self.backlog.append(item)
             self.backlog_bytes += size
             self._wake.set()
         self._judge(flushed + (not deliver))
         return dropped and self._want_sync()
+
+    def _hold(self, data: Any) -> None:
+        """This client holds a video frame its relay wrote: a key frame, or a delta
+        frame naming the one it predicts from, which this relay sends only where
+        the client holds that one (`CommonFrames`)."""
+        frame_id = (data[2] << 8) | data[3]
+        key = (data[1] & 0x0F) == 0x01
+        if (((data[4] << 8) | data[5]) in self.live_rows
+                and (key or ((data[10] << 8) | data[11]) != frame_id)):
+            self.server.common_frames_for(self.display_id).hold(self, frame_id, key)
 
     async def _run(self) -> None:
         """Drain the backlog onto the socket until stopped or the socket dies."""
@@ -1173,6 +1247,8 @@ class _VideoRelay:
                         watch.note_send(getattr(item.get('owner'), 'capture_ns', 0), len(data))
                 try:
                     await _send_live(self.ws, data, f"Video relay for '{self.display_id}'")
+                    if len(data) >= 12 and data[0] == 0x04 and not self.stopped:
+                        self._hold(data)
                     if self.gauged and time.monotonic() - self.pinged >= VIDEO_RELAY_PING_SECONDS:
                         self.pinged = time.monotonic()
                         await ping_behind(self.ws)
@@ -1501,6 +1577,8 @@ class DataStreamingServer(BaseStreamingService):
         video_relay_groups: Display id to `{ws: _VideoRelay}`; the dict's
             presence marks the capture as delivering, and relays are created
             lazily by the fan-out.
+        common_frames: Display id to the frames every one of its relays'
+            clients holds (`CommonFrames`), told to its encoder.
         video_paused_clients: Sockets that sent STOP_VIDEO (hidden tab) —
             any shared client, not viewers alone — excluded from the primary
             video fan-out until their next START_VIDEO while capture, control,
@@ -1654,6 +1732,7 @@ class DataStreamingServer(BaseStreamingService):
         # settings it changed, not the ones it repeats (`_settings_changed_by`).
         self._page_settings: Dict[Any, dict] = {}
         self.video_relay_groups = {}
+        self.common_frames: Dict[str, CommonFrames] = {}
         self.capture_instances = {}
         # A display's capture while its start is awaited: its module takes rate,
         # tunable and key-frame requests meanwhile, and the settings registered
@@ -2976,6 +3055,7 @@ class DataStreamingServer(BaseStreamingService):
         if group:
             for relay in list(group.values()):
                 relay.stop()
+        self.common_frames.pop(display_id, None)
 
     def _schedule_idr_for_display(self, display_id: str) -> None:
         """Ask the encoder for a fresh keyframe on this display.
@@ -3001,6 +3081,24 @@ class DataStreamingServer(BaseStreamingService):
             return False
         self._schedule_invalidation(display_id, frame_id)
         return True
+
+    def common_frames_for(self, display_id: str) -> CommonFrames:
+        """The frames every client of the display holds (`CommonFrames`)."""
+        common = self.common_frames.get(display_id)
+        if common is None:
+            common = self.common_frames[display_id] = CommonFrames(
+                functools.partial(self._acknowledge_frame, display_id))
+        return common
+
+    def _acknowledge_frame(self, display_id: str, frame_id: int) -> None:
+        """Tell the display's encoder every client holds `frame_id`; a pixelflux
+        that cannot take it is not told."""
+        acknowledge = getattr(self._opcode_display_module(display_id), "acknowledge_reference", None)
+        if acknowledge is not None:
+            try:
+                acknowledge(frame_id & 0xFFFF)
+            except Exception:
+                pass
 
     def _schedule_invalidation(self, display_id: str, frame_id: int) -> None:
         """Tell the display's encoder a client lost `frame_id`, so the frames after it stop

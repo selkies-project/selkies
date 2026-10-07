@@ -119,7 +119,8 @@ class Socket:
 
 
 def video_frame(fid: int, size: int, key: bool) -> dict:
-    head = bytes([0x04, 0x01 if key else 0x00, fid >> 8, fid & 0xFF, 0, 0, 0, 0, 0, 0, 0, 0])
+    ref = fid if key else fid - 1
+    head = bytes([0x04, 0x01 if key else 0x00, fid >> 8, fid & 0xFF, 0, 0, 0, 0, 0, 0, ref >> 8, ref & 0xFF])
     data = head + bytes(size - len(head))
     return {"data": memoryview(data), "owner": data, "frame_id": fid}
 
@@ -129,6 +130,9 @@ def relay_server(ws: Socket) -> DataStreamingServer:
     server.clients = {ws}
     server.display_clients = {"primary": {"ws": ws, "sent_timestamps": OrderedDict(), "sent_bytes": 0}}
     server.video_relay_groups = {"primary": {}}
+    server.common_frames = {}
+    server.capture_instances = {}
+    server._starting_captures = {}
     server._stream_watches = {}
     return server
 

@@ -104,7 +104,7 @@ from .webrtc.codecs.base import EncodedPacket
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 from .webrtc.contrib.relay import MediaRelay
 from enum import Enum
-from .display_utils import FRAME_NUM_WRAP, LOST_FRAME_MEMORY
+from .display_utils import FRAME_NUM_WRAP, LOST_FRAME_MEMORY, CommonFrames
 from .webrtc_media_pipeline import MediaPipeline
 from .input_handler import (
     BULK_DRAIN_TIMEOUT_S,
@@ -349,7 +349,9 @@ class PipelineBridge:
     a frame FRAME_NUM_WRAP frames or a multiple of it past a keyframe dropped:
     an H.264 decoder that misses the frame whose frame_num wraps to 0 cannot
     be predicted past the gap, so the encoder answers such a drop with a
-    keyframe.
+    keyframe. Queued, such an H.264 frame, and the one after a keyframe, which
+    an encoder keeping two long-term references marks into the second, is not
+    let go for a newer frame either: the newer one is, as behind a keyframe.
     """
     def __init__(self, maxsize: int = 1,
                  request_keyframe: Optional[Callable[[], None]] = None,
@@ -467,7 +469,9 @@ class PipelineBridge:
             if reference in self._lost:
                 self._hold(frame_id, getattr(data, "timing", None))
                 return
-            if self._since_key % FRAME_NUM_WRAP and self._budget_full():
+            kept = (str(getattr(data, "codec", "") or "").lower() == "video/h264"
+                    and (self._since_key == 1 or not self._since_key % FRAME_NUM_WRAP))
+            if self._since_key % FRAME_NUM_WRAP and not kept and self._budget_full():
                 self.over_budget += 1
                 self._drop(data)
                 return
@@ -481,7 +485,7 @@ class PipelineBridge:
                     return
             queue.put_nowait(data)
             self._charge(data)
-            self._queued_keyframe = False
+            self._queued_keyframe = kept
             self._held = 0
             if self._lost and self._told_at is not None:
                 encoded = _encode_start(getattr(data, "timing", None))
@@ -640,6 +644,9 @@ class RTCApp:
         invalidate_reference: Tells a display's encoder a peer lost a frame,
             or its video bridge dropped one (`dropped`), so the frames after
             it stop predicting from it.
+        acknowledge_reference: Tells a display's encoder every peer holds a
+            frame, or where not `held` was sent it (`CommonFrames`, per display
+            and level in `common_frames`).
         on_video_consumer_active: Per-peer video pause (tab-hide STOP_VIDEO /
             START_VIDEO), display-scoped; left None the verbs fall through to
             the input dispatcher, which ignores them.
@@ -699,6 +706,8 @@ class RTCApp:
 
         self.request_idr_frame = lambda display_id='primary': logger.warning('unhandled request_idr_frame')
         self.invalidate_reference = lambda display_id, frame_id, dropped=False: logger.warning('unhandled invalidate_reference')
+        self.acknowledge_reference: Callable[..., None] = lambda display_id, frame_id, held=True: None
+        self.common_frames: Dict[Tuple[str, bool], CommonFrames] = {}
         # Whether a peer is its display's owner (a predicate on the peer id): a peer that is
         # not, a viewer or a controller beside the owner, has its keyframe requests and lost
         # frames taken at most once a second each, since they cost the owner's stream.
@@ -1491,7 +1500,7 @@ class RTCApp:
                      keyframe: bool = True, display_id: str = "primary",
                      timing: Optional[tuple] = None,
                      dependency: Optional[tuple] = None,
-                     codec: Optional[str] = None) -> None:
+                     codec: Optional[str] = None, anchor: bool = False) -> None:
         """Feed one encoded frame from the capture side into a display's bridge.
 
         Synchronous: scheduled via `loop.call_soon_threadsafe` from the capture
@@ -1514,6 +1523,8 @@ class RTCApp:
                 descriptor and the bridge's drops.
             codec: The MIME type of the codec that coded a video frame, which
                 a sender switched to another drops it for.
+            anchor: Whether a video delta frame is an anchor every peer can
+                decode (FRAME_ANCHOR).
         """
         graph = self.displays.get(display_id or "primary")
         if graph is None:
@@ -1523,7 +1534,7 @@ class RTCApp:
                 try:
                     RTP_VIDEO_CLOCK_RATE = 90000
                     packet = EncodedPacket(buf, pts, Fraction(1, RTP_VIDEO_CLOCK_RATE), keyframe, timing, dependency,
-                                           codec)
+                                           codec, anchor)
                     bridge = graph.get("video_bridge")
                     if bridge is not None:
                         bridge.set_data(packet, keyframe)
@@ -2398,6 +2409,15 @@ class RTCApp:
         peer_obj = self.peer_connections.get(client_peer_id) or {}
         self.invalidate_reference(peer_obj.get("display_id") or "primary", frame_id)
 
+    def common_frames_for(self, display_id: str, held: bool = True) -> CommonFrames:
+        """The frames every peer of the display holds, or where not `held` was sent
+        (`CommonFrames`)."""
+        common = self.common_frames.get((display_id, held))
+        if common is None:
+            common = self.common_frames[(display_id, held)] = CommonFrames(
+                lambda frame_id, did=display_id, h=held: self.acknowledge_reference(did, frame_id, h))
+        return common
+
     def on_resync_frame(self, client_peer_id: str, frame_id: int, reach: bool) -> bool:
         """A peer's sender left `frame_id` and the frames after it out (its link has
         no room for them, or its pacer cut them): its display's encoder predicts past
@@ -2547,6 +2567,17 @@ class RTCApp:
         rtp_video_sender.selective = lambda cid=client_peer_id: not self.peer_owns_display(cid)
         rtp_video_sender.on_resync = (
             lambda frame_id, reach, cid=client_peer_id: self.on_resync_frame(cid, frame_id, reach))
+        rtp_video_sender.on_frame_out = (
+            lambda frame_id, key, s=rtp_video_sender, did=display_id:
+                self.common_frames_for(did, False).hold(s, frame_id, key))
+        rtp_video_sender.on_frame_held = (
+            lambda frame_id, key, s=rtp_video_sender, did=display_id: self.common_frames_for(did).hold(s, frame_id, key))
+
+        def key_sent(s=rtp_video_sender, did=display_id) -> None:
+            for held in (False, True):
+                self.common_frames_for(did, held).join(s)
+
+        rtp_video_sender.on_key_sent = key_sent
         rtp_video_sender.on("pli", lambda cid=client_peer_id, ct=client_type: self.on_pli(cid, ct))
         rtp_video_sender.on("lost_frame", frame_lost)
         rtp_audio_sender = None
@@ -2963,6 +2994,10 @@ class RTCApp:
                        duration_s=round(time.time() - peer_obj["connected_at"], 3))
         for kind in ("keyframe", "lost"):
             self._peer_recovery_times.pop((client_peer_id, kind), None)
+        for held in (False, True):
+            common = self.common_frames.get((peer_obj.get("display_id") or "primary", held))
+            if common is not None and peer_obj.get("video_sender") is not None:
+                common.leave(peer_obj["video_sender"])
         await self._cancel_channel_consumers(peer_obj)
         await self._stop_mic_playback_state(peer_obj.get("mic_state"))
         self._close_webcam_state(peer_obj.get("webcam_state"))

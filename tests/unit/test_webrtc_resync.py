@@ -10,7 +10,9 @@ and the peer decodes the first frame predicting past the run. A pacer GOP reset 
 its cut to the sender the same way: the pacer brakes, asks for no key frame, and video
 goes on flowing. A sender that cannot (no descriptor, nothing it described in flight)
 leaves the pacer its key frame, as does a run the encoder never predicts past within
-RESYNC_S. Driven with stand-ins; no peer.
+RESYNC_S. An anchor the encoder flags goes to a peer without room and ends its run,
+and a frame is held once transport-cc reported each of its packets, or a retransmission
+of one, and the frame it predicts from is held. Driven with stand-ins; no peer.
 """
 import asyncio
 import os
@@ -21,9 +23,9 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 from selkies.webrtc import rtcrtpsender as sender_mod  # noqa: E402
 from selkies.webrtc.pacer import CLASS_VIDEO, RtpPacer  # noqa: E402
-from selkies.webrtc.rtcrtpsender import (FRAME_NUM_WRAP, RESYNC_FAR_FRAMES, RESYNC_LAG_S,  # noqa: E402
-                                         RESYNC_LOSS_S, RESYNC_REACH_FRAMES, RESYNC_ROOM_FRAMES, RESYNC_S,
-                                         RTCRtpSender)
+from selkies.webrtc.rtcrtpsender import (FRAME_NUM_WRAP, HELD_S, RESYNC_FAR_FRAMES,  # noqa: E402
+                                         RESYNC_LAG_S, RESYNC_LOSS_S, RESYNC_REACH_FRAMES,
+                                         RESYNC_ROOM_FRAMES, RESYNC_S, RTCRtpSender)
 from selkies.webrtc.rtp import RtpHistory, RtpPacket  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -100,8 +102,12 @@ def sender_with(dd: bool = True, selective: bool = False, taken: bool = True, mi
         events.append(("resync", frame_id, reach))
         return True
 
+    acked: set = set()
     s = SimpleNamespace(
         _RTCRtpSender__in_flight=deque(maxlen=64), _RTCRtpSender__frame_numbers={},
+        _RTCRtpSender__unheld=deque(maxlen=256), _RTCRtpSender__held=deque(maxlen=64),
+        _RTCRtpSender__rtx_twcc={}, on_frame_held=None, on_frame_out=None, acked=acked, _anchored=False,
+        _stall_since=None, _stall_last=0.0, _key_sent_at=None,
         _RTCRtpSender__frame_number=0, _RTCRtpSender__rtp_history=history,
         _RTCRtpSender__rtp_header_extensions_map=SimpleNamespace(has_dependency_descriptor=lambda: dd),
         _RTCRtpSender__kind="video", _resync_since=None, _resync_first=None, _resync_run=0,
@@ -109,18 +115,19 @@ def sender_with(dd: bool = True, selective: bool = False, taken: bool = True, mi
         _RTCRtpSender__send_codec=SimpleNamespace(mimeType=mime),
         on_frame_sent=None, on_resync=on_resync, taken=taken,
         selective=(lambda: selective),
-        transport=SimpleNamespace(video_backlog=lambda: tuple(backlog)),
+        transport=SimpleNamespace(video_backlog=lambda: tuple(backlog), _twcc_acked=acked.__contains__),
         emit=lambda name, *args: events.append((name,) + args),
         _emit_pli_event=lambda: events.append("pli"))
     for name in ("_describe", "_pacer_resync", "_undecodable", "_frame_on_wire", "_forward",
-                 "_open_run", "_close_run", "_repair", "_video_backlog", "_numbered"):
+                 "_open_run", "_close_run", "_repair", "_video_backlog", "_numbered", "_far", "_confirm",
+                 "_resync_held", "_anchor_room"):
         setattr(s, name, getattr(RTCRtpSender, name).__get__(s))
     return s, events, history, backlog
 
 
-def send(s, frame_id: int, reference, tag: int, key: bool = False):
+def send(s, frame_id: int, reference, tag: int, key: bool = False, anchor: bool = False):
     """What the RTP loop does with a frame: leave it out, describe it and hand it over."""
-    if not s._forward(frame_id, reference, key):
+    if not s._forward(frame_id, reference, key, anchor):
         s._frame_left = None
         return None
     described = s._describe(frame_id, reference, key)
@@ -238,7 +245,8 @@ res.check("once it has room, a run past the reach waits while its key-frame requ
           events == [], events)
 s.taken = True
 send(s, n + 1, n, 0)
-res.check("and is reported on the next held frame once taken", events == [("resync", 2, False)], events)
+res.check("and is reported on the next held frame once taken, the frame after the key frame sent",
+          events == [("resync", 3, False)], events)
 
 # A path dropping what overflows its buffer shows no deeper queue than the buffer holds: loss
 # while a queue stands is far behind too, and loss on an empty path is not.
@@ -252,5 +260,101 @@ s, events, _, backlog = sender_with(selective=True)
 send(s, 1, None, 10, key=True)
 backlog[:] = [0, 0.0, RESYNC_LOSS_S / 2]
 res.check("while loss on a path with no queue standing takes no room away", send(s, 2, 1, 20) is not None)
+
+# Anchors: a frame the encoder flags as predicting from one every peer holds.
+s, events, _, backlog = sender_with(selective=True)
+send(s, 1, None, 10, key=True)
+send(s, 2, 1, 20)
+backlog[:2] = [RESYNC_ROOM_FRAMES, 0.0]
+res.check("an anchor goes to a peer without room", send(s, 3, 2, 30, anchor=True) is not None
+          and s._resync_since is None, s._resync_since)
+out = [send(s, n, n - 1, 10 * n) for n in range(4, 4 + RESYNC_REACH_FRAMES - 1)]
+res.check("a peer without room is left the frames after it",
+          out == [None] * len(out) and s._resync_first == 4 and events == [], (s._resync_first, events))
+res.check("the next anchor ends the run", send(s, 20, 3, 200, anchor=True) is not None
+          and s._resync_since is None, s._resync_since)
+send(s, 21, 20, 210)
+backlog[:2] = [RESYNC_FAR_FRAMES, 0.0]
+res.check("a peer too far behind is not sent one, and its run is told from it",
+          send(s, 30, 3, 300, anchor=True) is None and s._resync_first == 30, s._resync_first)
+backlog[:2] = [0, 0.0]
+send(s, 31, 30, 310)
+res.check("once it has room", events == [("resync", 30, True)], events)
+out = []
+s._frame_on_wire(0, False, None, 0, 0)
+s.on_frame_out = lambda frame_id, key: out.append((frame_id, key))
+s._frame_on_wire(0, False, None, 0, 0, 20)
+res.check("a frame whose last packet leaves is told as sent", out == [(20, False)], out)
+s._RTCRtpSender__frame_numbers.clear()
+for n in range(100, 100 + 70):
+    s._describe(n, None if n == 100 else n - 1, n == 100)
+res.check("a frame is numbered for longer than the 64 recent ones, as a pinned anchor is",
+          s._describe(200, 100, False) is not None)
+
+# The frame after an H.264 key frame goes out without room, and an anchored run waits
+# RESYNC_ANCHORED_S rather than RESYNC_S for one.
+s, events, _, backlog = sender_with(selective=True)
+send(s, 1, None, 10, key=True)
+backlog[:2] = [RESYNC_FAR_FRAMES, 0.0]
+res.check("the frame after a key frame goes out though the peer is far behind",
+          send(s, 2, 1, 20) is not None and s._resync_since is None, s._resync_since)
+backlog[:2] = [RESYNC_ROOM_FRAMES, 0.0]
+send(s, 3, 2, 30, anchor=True)
+send(s, 4, 3, 40)
+backlog[:2] = [RESYNC_FAR_FRAMES, 0.0]
+send(s, 5, 4, 50)
+clock.t += RESYNC_S + 0.5
+send(s, 6, 5, 60)
+res.check("an anchored run is not answered with a key frame after RESYNC_S", "pli" not in events, events)
+clock.t += sender_mod.RESYNC_ANCHORED_S
+send(s, 7, 6, 70)
+res.check("but is past RESYNC_ANCHORED_S", "pli" in events, events)
+
+# A peer that lost frames past repair is resynced from the newest frame it holds, once per
+# RESYNC_ANCHORED_S, where anchors run and it does not own its display.
+s, events, _, backlog = sender_with(selective=True)
+for n in range(1, 6):
+    send(s, n, None if n == 1 else n - 1, 10 * n, key=n == 1, anchor=n == 3)
+res.check("a peer holding no frame, with no key frame on its way, is left one", s._resync_held() is False)
+s._stall_since = None
+s._RTCRtpSender__held.extend([1, 2, 3])
+res.check("one holding frame 3 is resynced from it", s._resync_held() is True
+          and events == [("resync", 4, True)] and 4 not in s._RTCRtpSender__frame_numbers, events)
+res.check("the frames after it are held back", send(s, 6, 5, 60) is None)
+res.check("a request while that run is open is answered by it", s._resync_held() is True
+          and events == [("resync", 4, True)], events)
+clock.t += sender_mod.RESYNC_ANCHORED_S / 2
+s._resync_held()
+clock.t += sender_mod.RESYNC_ANCHORED_S / 2 + 0.1
+res.check("a stall of requests past RESYNC_ANCHORED_S is left a key frame", s._resync_held() is False)
+o, _, _, _ = sender_with()
+send(o, 1, None, 10, key=True)
+send(o, 2, 1, 20, anchor=True)
+o._RTCRtpSender__held.extend([1])
+res.check("and the display's owner always is", o._resync_held() is False)
+
+# Held: transport-cc reported every packet of the frame, and its reference is held.
+s, events, _, _ = sender_with()
+held = []
+s.on_frame_held = lambda frame_id, key: held.append((frame_id, key))
+unheld = s._RTCRtpSender__unheld
+unheld.append((1, None, True, clock.t, [(100, 1), (101, 2)]))
+unheld.append((2, 1, False, clock.t, [(102, 3)]))
+unheld.append((3, 2, False, clock.t, [(103, 4), (104, 5)]))
+s.acked.update({100, 101, 103, 104})
+s._confirm()
+res.check("a frame whose packets were all reported received is held", held == [(1, True)], held)
+res.check("one predicting from a frame not yet held waits for it", [e[0] for e in unheld] == [2, 3],
+          list(unheld))
+s._RTCRtpSender__rtx_twcc[3] = 110
+s.acked.add(110)
+s._confirm()
+res.check("a retransmission received holds the packet it repairs, and the frame after it",
+          held == [(1, True), (2, False), (3, False)] and not unheld, held)
+unheld.append((4, 3, False, clock.t, [(120, 6)]))
+clock.t += HELD_S + 0.01
+s.acked.add(120)
+s._confirm()
+res.check(f"a frame not held within {HELD_S:.0f} s never is", held[-1] == (3, False) and not unheld, held)
 
 sys.exit(0 if res.summary() else 1)

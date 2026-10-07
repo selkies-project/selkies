@@ -652,6 +652,7 @@ class WebRTCService(BaseStreamingService):
 
         self.rtc_app.request_idr_frame = self.request_idr_for_display
         self.rtc_app.invalidate_reference = self.invalidate_reference_for_display
+        self.rtc_app.acknowledge_reference = self.acknowledge_reference_for_display
         self.rtc_app.peer_owns_display = self._peer_owns_display
         self._invalidation_log: Dict[tuple, tuple] = {}
         self.rtc_app.start_display_media = self.start_display_media
@@ -1150,6 +1151,16 @@ class WebRTCService(BaseStreamingService):
             return
         self._last_idr_request_times[display_id] = now
         await pipeline.dynamic_idr_frame()
+
+    def acknowledge_reference_for_display(self, display_id: str, frame_id: int, held: bool = True) -> None:
+        """Tell the display's encoder every peer holds `frame_id`, or where not `held`
+        was sent it (`CommonFrames`)."""
+        pipeline = self.display_pipelines.get(display_id or "primary")
+        if pipeline is not None:
+            try:
+                pipeline.acknowledge_reference(frame_id, held)
+            except Exception:
+                pass
 
     def invalidate_reference_for_display(self, display_id: str, frame_id: int,
                                          dropped: bool = False) -> None:
@@ -2303,8 +2314,9 @@ class WebRTCService(BaseStreamingService):
                 # The native-cursor toggle is global across displays.
                 pipeline.capture_cursor = self.media_pipeline.capture_cursor
                 pipeline.produce_data = (
-                    lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None, _did=did:
-                        self.rtc_app.consume_data(buf, pts, kind, keyframe, _did, timing, dependency, codec)
+                    lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None, anchor=False,
+                    _did=did: self.rtc_app.consume_data(buf, pts, kind, keyframe, _did, timing, dependency, codec,
+                                                         anchor)
                 )
                 # pixelflux's cursor-callback slot is process-global (last registration
                 # wins), so every display must route cursors into the same sink.

@@ -357,8 +357,40 @@ async def budget(res: H.Results) -> None:
               delivered == 120 and plain.over_budget == 0, (delivered, plain.over_budget))
 
 
+async def kept(res: H.Results) -> None:
+    """In H.264 a queued frame a consumer never leaves out, the one after a keyframe or where
+    frame_num may wrap, is not let go for a newer frame: the newer one is."""
+    clock = Clock()
+    forgotten = []
+    bridge = PipelineBridge(request_keyframe=lambda: None, clock=clock, invalidate_reference=forgotten.append)
+    frame = lambda fid, ref, codec="video/H264": SimpleNamespace(
+        name=f"F{fid}", dependency=(fid, ref), codec=codec)
+    bridge.set_data(frame(0, None), keyframe=True)
+    await drain(bridge)
+    bridge.set_data(frame(1, 0), keyframe=False)
+    bridge.set_data(frame(2, 1), keyframe=False)
+    res.check("the frame after a keyframe stays queued, the newer one let go",
+              [f.name for f in await drain(bridge)] == ["F1"] and forgotten == [2], forgotten)
+    for n in range(3, FRAME_NUM_WRAP):
+        bridge.set_data(frame(n, n - 2 if n == 3 else n - 1), keyframe=False)
+        await drain(bridge)
+    bridge.set_data(frame(FRAME_NUM_WRAP, FRAME_NUM_WRAP - 1), keyframe=False)
+    bridge.set_data(frame(FRAME_NUM_WRAP + 1, FRAME_NUM_WRAP), keyframe=False)
+    res.check("so does the frame where frame_num may wrap",
+              [f.name for f in await drain(bridge)] == [f"F{FRAME_NUM_WRAP}"]
+              and forgotten == [2, FRAME_NUM_WRAP + 1], forgotten)
+    vp8 = PipelineBridge(request_keyframe=lambda: None, clock=clock, invalidate_reference=forgotten.append)
+    vp8.set_data(frame(0, None, "video/VP8"), keyframe=True)
+    await drain(vp8)
+    vp8.set_data(frame(1, 0, "video/VP8"), keyframe=False)
+    vp8.set_data(frame(2, 0, "video/VP8"), keyframe=False)
+    res.check("a codec without frame_num keeps the newest frame",
+              [f.name for f in await drain(vp8)] == ["F2"] and forgotten[-1] == 1, forgotten)
+
+
 def main() -> int:
     res = H.Results("video-bridge-gate")
+    asyncio.run(kept(res))
     asyncio.run(scenario(res))
     asyncio.run(references(res))
     asyncio.run(unheard(res))

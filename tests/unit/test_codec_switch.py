@@ -141,8 +141,8 @@ def capture_tags() -> None:
     got = []
     pipeline = MediaPipelinePixel(async_event_loop=type("Loop", (), {"call_soon_threadsafe": lambda self, fn: fn()})(),
                                   encoder="h264enc", height=720)
-    pipeline.produce_data = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None: \
-        got.append(codec)
+    pipeline.produce_data = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None, \
+        anchor=False: got.append(codec)
     for codec_id in range(6):
         pipeline._screen_capture_callback(captured(0x04, (codec_id << 4) | 0x01))
     pipeline._screen_capture_callback(captured(0x03, 0x00))

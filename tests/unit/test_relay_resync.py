@@ -8,6 +8,10 @@ held back, the encoder is told the run's first frame is lost once the page has r
 first frame predicting past it. The owner's relay is never thinned this way, a stripe
 stream still skips ahead to the next key frame past the byte budget, and so does a run the
 encoder never predicts past within a second.
+
+The encoder is told of each frame every page's relay wrote (`CommonFrames`), and an anchor
+it flags as predicting from such a frame goes to a page without room and ends its run. A
+frame predicting from one the page was not sent, however long ago, is held back.
 """
 import os
 import sys
@@ -55,16 +59,18 @@ class Page:
 
 
 def chunk(frame_id: int, reference: int, key: bool = False, size: int = 400, row: int = 0,
-          codec: int = wm.WIRE_H264) -> dict:
+          codec: int = wm.WIRE_H264, anchor: bool = False) -> dict:
     """A 0x04 chunk with the wire header the relay reads."""
-    head = bytes([0x04, (codec << 4) | (0x01 if key else 0x00), frame_id >> 8, frame_id & 0xFF, row >> 8, row & 0xFF,
+    kind = (0x01 if key else 0x00) | (wm.FRAME_ANCHOR if anchor else 0)
+    head = bytes([0x04, (codec << 4) | kind, frame_id >> 8, frame_id & 0xFF, row >> 8, row & 0xFF,
                   0x07, 0x80, 0x04, 0x38, reference >> 8, reference & 0xFF])
     data = head + bytes(size)
     return {'data': memoryview(data), 'owner': data, 'frame_id': frame_id}
 
 
-def relay(owner: bool = False, taken: bool = True, budget: int = 100_000):
-    """A relay whose server records the lost reports as (frame, within reach)."""
+def relay(owner: bool = False, taken: bool = True, budget: int = 100_000, server=None):
+    """A relay whose server records the lost reports as (frame, within reach), and the
+    frames every relay's page holds as `server.acked`; `server` shares another's."""
     reports = []
     sock = Socket()
 
@@ -74,9 +80,15 @@ def relay(owner: bool = False, taken: bool = True, budget: int = 100_000):
         reports.append((frame_id, reach))
         return True
 
-    server = SimpleNamespace(taken=taken, owner=owner, clients=set(), _relay_lost=relay_lost)
-    server._owns_display = lambda ws, display_id: server.owner
+    if server is None:
+        server = SimpleNamespace(taken=taken, owner=owner, clients=set(), _relay_lost=relay_lost,
+                                 acked=[], common_frames={})
+        server.common_frames_for = lambda display_id: server.common_frames.setdefault(
+            display_id, wm.CommonFrames(server.acked.append))
+        server._owns_display = lambda ws, display_id: server.owner is ws
     ws = Page(sock)
+    if owner:
+        server.owner = ws
     r = wm._VideoRelay(server, "primary", ws, budget)
     r.verdict = SimpleNamespace(note=lambda *a: None)
     return r, server, reports, sock
@@ -91,6 +103,7 @@ def hand(r, sock, count: int = 1) -> None:
         r.written += n
         r.marks.append(r.written)
         sock.unsent += n
+        r._hold(item['data'])
 
 
 def full(r, sock) -> None:
@@ -158,7 +171,8 @@ def main() -> int:
     for n in range(1, 1 + FAR):
         r.offer(chunk(n, n, key=True))
     hand(r, sock, len(r.backlog))
-    first = 1 + FAR
+    r.offer(chunk(1 + FAR, FAR))  # the frame after an H.264 key frame goes out
+    first = 2 + FAR
     for n in range(first, first + REACH + 2):
         r.offer(chunk(n, n - 1))
     check("a page far behind is not answered at the reach", reports == [], reports)
@@ -171,7 +185,8 @@ def main() -> int:
 
     # A frame_num can wrap only a multiple of FRAME_NUM_WRAP frames past a key frame, and the
     # encoder answers a run covering that frame with a key frame: a run open just ahead of it
-    # is reported at once, and the frame itself is never left out.
+    # is reported at once, and the frame itself is never left out, nor the frame after a key
+    # frame, which an encoder keeping two long-term references marks into the second.
     r, server, reports, sock = relay()
     r.offer(chunk(1, 1, key=True))
     for n in range(2, WRAP - 1):
@@ -209,16 +224,17 @@ def main() -> int:
     state = wm._uplink_session_state(r.ws)
     state.update(seq=1, rtt_us=20_000, answered=clock.t - 1.0)
     r.offer(chunk(1, 1, key=True))
-    hand(r, sock)
+    r.offer(chunk(2, 1))
+    hand(r, sock, 2)
     sock.unsent = 0
     state["pending"][b"behind"] = clock.t - 0.3
-    r.offer(chunk(2, 1))
+    r.offer(chunk(3, 2))
     check(f"a ping unanswered {wm.VIDEO_RELAY_LAG_SECONDS * 1000:.0f} ms past the round trip leaves the page "
-          "no room", r.lost_first == 2, r.lost_first)
+          "no room", r.lost_first == 3, r.lost_first)
     del state["pending"][b"behind"]
     state.update(seq=2, answered=clock.t - 0.3)
-    r.offer(chunk(3, 2))
-    check("its pong gives the room back, and the run is reported", reports == [(2, True)], reports)
+    r.offer(chunk(4, 3))
+    check("its pong gives the room back, and the run is reported", reports == [(3, True)], reports)
     state["pending"][b"lost"] = clock.t - 5.0
     state["answered"] = clock.t - 0.1
     check("a ping older than the newest one answered was lost, and stands for no queue", r._lag() == 0.0,
@@ -247,6 +263,107 @@ def main() -> int:
         r.offer(chunk(n, n - 1))
     check("the owner is sent every frame however many are on their way",
           ids(r) == list(range(2, 12)) and reports == [], (ids(r), reports))
+
+    # The encoder is told of each frame every page holds: the owner's and a page's relay
+    # sharing the display's CommonFrames.
+    o, server, _, osock = relay(owner=True)
+    r, _, reports, sock = relay(server=server)
+    for q in (o, r):
+        q.offer(chunk(1, 1, key=True))
+    hand(o, osock)
+    check("a key frame one page holds is not yet common", server.acked == [], server.acked)
+    hand(r, sock)
+    check("once every page holds it the encoder is told", server.acked == [1], server.acked)
+    for n in (2, 3):
+        for q, qs in ((o, osock), (r, sock)):
+            q.offer(chunk(n, n - 1))
+            hand(q, qs)
+            qs.unsent = 0
+    check("and of each frame after it", server.acked == [1, 2, 3], server.acked)
+    full(r, sock)
+    for n in (4, 5, 6):
+        o.offer(chunk(n, n - 1))
+        hand(o, osock)
+        r.offer(chunk(n, n - 1))
+    check("a page without room is left frames, which are not common",
+          r.lost_first == 4 and server.acked == [1, 2, 3], (r.lost_first, server.acked))
+    o.offer(chunk(12, 3, anchor=True))
+    hand(o, osock)
+    r.offer(chunk(12, 3, anchor=True))
+    check("an anchor predicting from a common frame goes to the page without room, ending its run",
+          ids(r)[-1:] == [12] and r.lost_first is None, (ids(r), r.lost_first))
+    hand(r, sock)
+    check("and is common once both hold it", server.acked[-1:] == [12], server.acked)
+    for n in range(13, 13 + REACH - 1):
+        o.offer(chunk(n, n - 1))
+        r.offer(chunk(n, n - 1))
+    check("a page without room is left the frames after it", r.lost_first == 13 and reports == [],
+          (r.lost_first, reports))
+    r.marks.extend(range(FAR))
+    o.offer(chunk(24, 12, anchor=True))
+    r.offer(chunk(24, 12, anchor=True))
+    check("a page too far behind is not sent an anchor, the run now reported as from it",
+          r.lost_first == 24 and ids(r)[-1:] != [24], (r.lost_first, ids(r)))
+    r.offer(chunk(26, 4))
+    check("a frame predicting from one the page was not sent is held back, however long ago",
+          ids(r)[-1:] != [26] and r.lost_first == 24, (ids(r), r.lost_first))
+    r.flush_for_gate()
+    o.offer(chunk(25, 24))
+    hand(o, osock, len(o.backlog))
+    check("a page waiting for a key frame holds no frame back: the owner's are common",
+          server.acked[-1:] == [25], server.acked)
+    r.stop()
+    o.stop()
+
+    # CommonFrames on its own: a page counts from the key frame it is sent, each frame every
+    # page holds is told once, and a page that leaves holds nothing back.
+    acked = []
+    common = wm.CommonFrames(acked.append)
+    a, b = object(), object()
+    common.join(a)
+    common.join(b)
+    common.hold(a, 7, key=True)
+    check("a key frame one joined page holds is not common", acked == [], acked)
+    common.hold(b, 7, key=True)
+    common.hold(b, 7, key=True)
+    common.hold(a, 8)
+    common.hold(b, 8)
+    check("every frame both hold is told once", acked == [7, 8], acked)
+    common.leave(b)
+    common.hold(a, 9)
+    check("the frames of a page alone are common", acked == [7, 8, 9], acked)
+    common.hold(a, 7, key=True)
+    check("the same key frame again is not told twice", acked == [7, 8, 9], acked)
+
+    # The frame after an H.264 key frame goes out without room: an encoder keeping two
+    # long-term references marks it into the second.
+    r, server, reports, sock = relay()
+    r.offer(chunk(1, 1, key=True))
+    full(r, sock)
+    r.offer(chunk(2, 1))
+    check("the frame after a key frame goes out though the page has no room", ids(r)[-1:] == [2]
+          and r.lost_first is None, (ids(r), r.lost_first))
+    r.offer(chunk(3, 2))
+    check("the one after it does not", r.lost_first == 3, r.lost_first)
+
+    # With anchors running, a run waits for room past the second a key frame would end it at.
+    r, server, reports, sock = relay()
+    r.offer(chunk(1, 1, key=True))
+    r.offer(chunk(2, 1))
+    hand(r, sock, 2)
+    sock.unsent = 0
+    r.offer(chunk(12, 2, anchor=True))
+    hand(r, sock)
+    full(r, sock)
+    r.marks.extend(range(FAR))
+    for n in range(13, 16):
+        r.offer(chunk(n, n - 1))
+    clock.t += wm.VIDEO_RELAY_LOST_RECOVERY_SECONDS + 0.5
+    asked = r.offer(chunk(16, 15))
+    check("an anchored run is not answered with a key frame after a second", not asked
+          and r.lost_first == 13, (asked, r.lost_first))
+    clock.t += wm.VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS
+    check("but is past its own limit", r.offer(chunk(17, 16)) is True)
 
     # A stripe stream names its own frame: a drop skips ahead to the next key frame.
     r, server, reports, sock = relay(budget=2000)

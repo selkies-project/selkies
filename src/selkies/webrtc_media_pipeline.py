@@ -61,6 +61,7 @@ from . import stream_stats
 from .audio_control import AudioControl
 from .display_utils import (
     FIRST_FRAME_WAIT_S,
+    FRAME_ANCHOR,
     apply_common_capture_settings,
     no_first_frame,
     format_pixelflux_cursor,
@@ -242,7 +243,7 @@ class MediaPipelinePixel(MediaPipeline):
         # A requested IDR not yet captured: a request landing meanwhile is
         # satisfied by it; one landing after it was captured is not.
         self.idr_pending = False
-        self.produce_data: Callable[..., None] = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None: logger.warning(
+        self.produce_data: Callable[..., None] = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None, anchor=False: logger.warning(
             "unhandled produce_data"
         )
         self.on_pipeline_started: Callable[[], None] = lambda: None
@@ -522,6 +523,13 @@ class MediaPipelinePixel(MediaPipeline):
         if self._is_screen_capturing and self.capture_module is not None:
             self.capture_module.invalidate_reference(frame_id & 0xFFFF)
 
+    def acknowledge_reference(self, frame_id: int, held: bool = True) -> None:
+        """Every consumer holds `frame_id`, or where not `held` was sent it
+        (`CommonFrames`); a pixelflux that cannot take it is not told."""
+        acknowledge = getattr(self.capture_module, "acknowledge_reference", None)
+        if self._is_screen_capturing and acknowledge is not None:
+            acknowledge(frame_id & 0xFFFF, held)
+
     def generate_capture_settings(self) -> Any:
         """Build the pixelflux CaptureSettings snapshot for the current state.
 
@@ -622,9 +630,10 @@ class MediaPipelinePixel(MediaPipeline):
                 if reference != -2:
                     dependency = (frame.frame_id & 0xFFFF, None if reference == -1 else reference)
                 codec = WIRE_VIDEO_MIMES.get(view[1] >> 4) if view[0] == 0x04 else None
+                anchor = view[0] == 0x04 and bool(view[1] & FRAME_ANCHOR)
                 self.async_event_loop.call_soon_threadsafe(
                     functools.partial(self.produce_data, data_bytes, pts, "video", keyframe,
-                                      timing=timing, dependency=dependency, codec=codec)
+                                      timing=timing, dependency=dependency, codec=codec, anchor=anchor)
                 )
 
         except Exception as e:

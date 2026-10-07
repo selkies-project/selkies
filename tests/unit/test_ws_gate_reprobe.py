@@ -99,6 +99,7 @@ def make_server(module: Module, link: Link) -> DataStreamingServer:
     server.rc_mode = SimpleNamespace(value="cbr")
     server.metrics = None
     server.video_relay_groups = {}
+    server.common_frames = {}
     server.display_clients = {"primary": {
         "ws": link, "framerate": FPS, "acknowledged_frame_id": -1, "acked_sent_at": None,
         "last_sent_frame_id": 0, "has_sent_any_frame": False, "sent_timestamps": OrderedDict(),
@@ -298,8 +299,10 @@ res.check("the stall branch still re-probes it", LOG.count("Re-probing stalled c
 
 
 def chunk(fid: int, key: bool) -> dict:
-    """A full-frame video chunk as pixelflux wraps it, the header's row at 0."""
-    head = bytes([0x04, 0x01 if key else 0x00, fid >> 8, fid & 0xFF]) + bytes(8)
+    """A full-frame video chunk as pixelflux wraps it, the header's row at 0, a delta predicting
+    from the frame before it."""
+    ref = fid if key else fid - 1
+    head = bytes([0x04, 0x01 if key else 0x00, fid >> 8, fid & 0xFF]) + bytes(6) + bytes([ref >> 8, ref & 0xFF])
     data = head + bytes(2000)
     return {"data": memoryview(data), "owner": data, "frame_id": fid}
 

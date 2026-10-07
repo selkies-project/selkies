@@ -71,7 +71,8 @@ class ImmediateLoop:
 def pipeline_pts() -> None:
     p = MediaPipelinePixel(async_event_loop=ImmediateLoop(), encoder="h264enc", height=720)
     got = []
-    p.produce_data = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None: got.append((pts, timing))
+    p.produce_data = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None, anchor=False: \
+        got.append((pts, timing))
     base = 1_000_000 * MS
     # 60 fps with an encode time that swings between 2 and 14 ms: only the capture counts.
     for i, enc in enumerate((2, 14, 3, 11, 2)):

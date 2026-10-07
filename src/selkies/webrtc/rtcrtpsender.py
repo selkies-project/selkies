@@ -118,6 +118,17 @@ STILL_REQUEST_S = 0.25
 # A run the pacer cut (`_pacer_resync`) for such a peer is answered the same way, and one the
 # encoder has not predicted past in RESYNC_S costs a key frame, as the WebSockets page's decode
 # gate waits (LOST_RECOVERY_MS in lib/decode-gate.js).
+# Where the encoder is told which frames every peer was sent (`on_frame_out`, its last packet
+# on the wire) and holds (`on_frame_held`: transport-cc reported each of its packets received,
+# or the retransmission of one, within HELD_S, and the frame it predicts from is held), it pins
+# the newest anchor every peer holds, so a run of any depth is predicted past on its report,
+# and flags anchors predicting from a frame every peer was sent (`RTCEncodedFrame.anchor`):
+# such a frame goes to a peer without room as a key frame does, unless the peer is far behind,
+# and ends its run. A frame is numbered for FRAME_NUMBERS_MEMORY frames, as far back as a
+# pinned anchor may be. A peer that lost frames past repair (a NACK for packets gone from the
+# history, or its own PLI) is resynced from the newest frame it holds as a cut run is, where
+# anchors run (`_resync_held`); a stall of such requests past RESYNC_ANCHORED_S, from a decoder
+# that only takes a key frame, is sent one.
 RESYNC_ROOM_FRAMES = 3
 RESYNC_LAG_S = 0.1
 RESYNC_REACH_FRAMES = 5
@@ -126,6 +137,14 @@ RESYNC_FAR_FRAMES = 12
 RESYNC_FAR_S = 1.0
 RESYNC_LOSS_S = 0.5
 RESYNC_S = 1.0
+# Where the encoder pins an anchor every peer holds (an anchor came since the key frame), it
+# predicts past a run of any depth on the report, so a run waits RESYNC_ANCHORED_S for room.
+RESYNC_ANCHORED_S = 4.0
+# An anchor goes to a peer without room only while the queue standing in front of it is under
+# RESYNC_ANCHOR_S: on a link too narrow for the anchors alone they would never let it drain.
+RESYNC_ANCHOR_S = 0.25
+HELD_S = 8.0
+FRAME_NUMBERS_MEMORY = 4096
 # The shortest H.264 frame_num range, which every longer one is a multiple of.
 FRAME_NUM_WRAP = 16
 
@@ -166,13 +185,14 @@ RTP_COLOR_SPACE = {
 class RTCEncodedFrame:
     def __init__(self, payloads: list[bytes], timestamp: int, audio_level: int,
                  keyframe: bool = False, timing: Optional[tuple] = None,
-                 dependency: Optional[tuple] = None):
+                 dependency: Optional[tuple] = None, anchor: bool = False):
         self.payloads = payloads
         self.timestamp = timestamp
         self.audio_level = audio_level
         self.keyframe = keyframe
         self.timing = timing
         self.dependency = dependency
+        self.anchor = anchor
 
 
 def video_timing_legs(timing: Optional[tuple], now_ns: int, arrival_delta_ms: int) -> tuple:
@@ -266,6 +286,21 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self._resync_told = False
         self._since_key = 0
         self._resyncs = 0
+        # Told each described frame on the wire to the peer and each it holds, as `(frame id,
+        # key frame)`, and each key frame sent it; the described frames sent and not yet held,
+        # oldest first, as (frame id, frame predicted from, key frame, when sent,
+        # [(transport-wide, media sequence number)]); the newest frames held; and the
+        # transport-wide sequence number each retransmitted packet last went out under.
+        self.on_frame_out: Optional[Callable[[int, bool], None]] = None
+        self.on_frame_held: Optional[Callable[[int, bool], None]] = None
+        self.on_key_sent: Optional[Callable[[], None]] = None
+        self._anchored = False
+        self.__unheld: deque[tuple] = deque(maxlen=1024)
+        self._stall_since: Optional[float] = None
+        self._stall_last = 0.0
+        self._key_sent_at: Optional[float] = None
+        self.__held: deque[int] = deque(maxlen=64)
+        self.__rtx_twcc: dict[int, int] = {}
         self.__loop = asyncio.get_running_loop()
         self.__mid: Optional[str] = None
         self.__rtp_exited = asyncio.Event()
@@ -540,7 +575,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 if lost and self.__rtp_history.newly_lost(frame, time.time()):
                     self.emit("lost_frame", frame)
                     self._lost_at = time.monotonic()
-            if gone:
+            if gone and not self._resync_held():
                 # Gone from the history: only a key frame brings the peer back.
                 self._emit_pli_event()
         elif isinstance(packet, RtcpXrPacket) and packet.rrtr is not None:
@@ -550,9 +585,11 @@ class RTCRtpSender(AsyncIOEventEmitter):
             self.__rrtrs[packet.ssrc] = ((packet.rrtr >> 16) & 0xFFFFFFFF, time.monotonic_ns())
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_TWCC:
             self.transport._twcc_process_feedback(packet.fci)
+            if self.__unheld:
+                self._confirm()
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt in (RTCP_PSFB_PLI, RTCP_PSFB_FIR):
             # A Full Intra Request (RFC 5104) asks what a PLI does: a key frame.
-            if not self._still_request():
+            if not self._still_request() and not self._resync_held():
                 self._send_keyframe()
                 self._emit_pli_event()
         elif isinstance(packet, RtcpPsfbPacket) and packet.fmt == RTCP_PSFB_APP:
@@ -582,9 +619,11 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 and self.transport._twcc_acked(left[0]))
 
     def _frame_on_wire(self, seq: int, keyframe: bool, timing: Optional[tuple],
-                       captured: int, size: int) -> None:
+                       captured: int, size: int, frame_id: Optional[int] = None) -> None:
         """A frame's last packet left for the wire. One whose encode began after the
         peer last lost a frame predicts past it, as a key frame predicts from nothing."""
+        if frame_id is not None and self.on_frame_out is not None:
+            self.on_frame_out(frame_id, keyframe)
         self._frame_left = (seq, time.monotonic())
         while self.__in_flight and ((seq - self.__in_flight[0][0]) & 0xFFFF) < 0x8000:
             self.__in_flight.popleft()
@@ -635,30 +674,103 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self._repair()
         return True
 
+    def _confirm(self) -> None:
+        """Tell `on_frame_held` of each frame sent the peer now holds: every packet of it
+        reported received, or the retransmission of one, and the frame it predicts from
+        held. A frame not held within HELD_S never will be."""
+        acked = getattr(self.transport, "twcc_arrived", self.transport._twcc_acked)
+        now = time.monotonic()
+        rtx = self.__rtx_twcc
+        kept = []
+        for entry in self.__unheld:
+            frame_id, reference, keyframe, sent_at, packets = entry
+            if now - sent_at > HELD_S:
+                continue
+            if (all(acked(twcc) or (media in rtx and acked(rtx[media])) for twcc, media in packets)
+                    and (keyframe or reference in self.__held)):
+                self.__held.append(frame_id)
+                if self.on_frame_held is not None:
+                    self.on_frame_held(frame_id, keyframe)
+            else:
+                kept.append(entry)
+        self.__unheld.clear()
+        self.__unheld.extend(kept)
+        if len(rtx) > 1024:
+            for media in list(rtx)[:512]:
+                del rtx[media]
+
+    def _resync_held(self) -> bool:
+        """Answer a peer that lost frames past repair as a run the pacer cut is, where it does
+        not own its display and anchors run: the frames sent it after the newest it holds leave
+        the frames it was sent, and the encoder is told the first is lost (`_repair`), so a frame
+        predicting from one it holds comes next. A request while that run is open, or while the
+        key frame it was sent is on its way, is answered by them. False where it cannot, which
+        asks for a key frame: past RESYNC_ANCHORED_S of such requests one after another (a
+        decoder that only takes a key frame), or where it holds nothing and no key frame is due."""
+        now = time.monotonic()
+        if self.selective is None or not self.selective() or not self._anchored:
+            return False
+        if self._stall_since is None or now - self._stall_last > RESYNC_ANCHORED_S:
+            self._stall_since = now
+        self._stall_last = now
+        if now - self._stall_since > RESYNC_ANCHORED_S:
+            self._stall_since = None
+            return False
+        if self._resync_since is not None:
+            return True
+        if not self.__held:
+            return (self._key_sent_at is not None
+                    and now - self._key_sent_at < max(RESYNC_S, 2 * self._video_backlog()[1]))
+        number = self.__frame_numbers.get(self.__held[-1])
+        if number is None:
+            return False
+        after = [fid for fid, n in self.__frame_numbers.items() if 0 < ((n - number) & 0xFFFF) < 0x8000]
+        if not after:
+            return True
+        for fid in after:
+            self.__frame_numbers.pop(fid, None)
+        self._open_run(after[0])
+        self._resync_run = len(after)
+        self._repair()
+        return True
+
     def _video_backlog(self) -> tuple[int, float, float]:
         """The peer's frames in its pacer, how long a packet waits to reach it, and the
         seconds since its path last lost one (`RTCDtlsTransport.video_backlog`)."""
         backlog = getattr(self.transport, "video_backlog", None)
         return backlog() if backlog is not None else (0, 0.0, float("inf"))
 
-    def _forward(self, frame_id: int, reference: Optional[int], keyframe: bool) -> bool:
+    def _forward(self, frame_id: int, reference: Optional[int], keyframe: bool,
+                 anchor: bool = False) -> bool:
         """Whether a frame naming the frame it predicts from goes to this peer; False
         for one left out, or held back for predicting from one (RESYNC_ROOM_FRAMES).
-        The first frame predicting past an open run, which decodes on the peer, ends it."""
+        The first frame predicting past an open run, which decodes on the peer, ends it,
+        and an `anchor` goes without room unless the peer is far behind."""
         if keyframe:
             self._since_key = 0
+            self._anchored = False
             self._close_run()
             return True
         self._since_key += 1
+        self._anchored = self._anchored or anchor
         sent = reference is None or reference in self.__frame_numbers
+        # In H.264 a frame where frame_num may wrap is never left out, nor the one after a key
+        # frame, which an encoder keeping two long-term references marks into the second.
+        kept = self._numbered() and (self._since_key == 1 or not self._since_key % FRAME_NUM_WRAP)
         if self._resync_since is not None:
-            if sent:
+            if sent and (not anchor or kept or self._anchor_room()):
                 self._close_run()
                 return True
+            if sent:
+                # An anchor left out predicts past the run: the encoder is told of it.
+                self._resync_first = frame_id
+                self._resync_told = False
             self._resync_run += 1
             self._repair()
             return False
-        if not sent or self.selective is None or (self._numbered() and not self._since_key % FRAME_NUM_WRAP):
+        if not sent or self.selective is None or kept:
+            return True
+        if anchor and self._anchor_room():
             return True
         frames, wait, _ = self._video_backlog()
         if (frames < RESYNC_ROOM_FRAMES and wait < RESYNC_LAG_S) or not self.selective():
@@ -666,6 +778,19 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self._open_run(frame_id)
         self._repair()
         return False
+
+    def _anchor_room(self) -> bool:
+        """Whether this peer is sent an anchor without room: not far behind, and the queue
+        in front of it under RESYNC_ANCHOR_S."""
+        return not self._far() and self._video_backlog()[1] < RESYNC_ANCHOR_S
+
+    def _far(self) -> bool:
+        """Whether this peer is too far behind to be sent a frame without room: its
+        pacer holds RESYNC_FAR_FRAMES or RESYNC_FAR_S, or its path lost packets within
+        RESYNC_LOSS_S while a queue stood on it."""
+        frames, wait, lost = self._video_backlog()
+        return (frames >= RESYNC_FAR_FRAMES or wait >= RESYNC_FAR_S
+                or (lost < RESYNC_LOSS_S and wait >= RESYNC_LAG_S))
 
     def _numbered(self) -> bool:
         """Whether the stream is H.264, whose frame_num wraps (FRAME_NUM_WRAP)."""
@@ -687,8 +812,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
     def _repair(self) -> None:
         """A frame of the open run was held back: tell the encoder of the run's first
         frame once the peer has room, or sooner where waiting would cost a key frame
-        (RESYNC_REACH_FRAMES); past RESYNC_S, ask for a key frame instead."""
-        if time.monotonic() - self._resync_since > RESYNC_S:
+        (RESYNC_REACH_FRAMES); past RESYNC_S (RESYNC_ANCHORED_S where anchors run), ask
+        for a key frame instead."""
+        if time.monotonic() - self._resync_since > (RESYNC_ANCHORED_S if self._anchored else RESYNC_S):
             logger.info("RTCRtpSender(%s) frame %s was never predicted past; asking for a key frame",
                         self.__kind, self._resync_first)
             self._close_run()
@@ -696,12 +822,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
             return
         if self._resync_told:
             return
-        frames, wait, lost = self._video_backlog()
+        frames, wait, _ = self._video_backlog()
         due = (self._resync_run >= RESYNC_REACH_FRAMES
                or (self._numbered() and -self._since_key % FRAME_NUM_WRAP <= RESYNC_WRAP_LEAD))
-        far = (frames >= RESYNC_FAR_FRAMES or wait >= RESYNC_FAR_S
-               or (lost < RESYNC_LOSS_S and wait >= RESYNC_LAG_S))
-        if (frames < RESYNC_ROOM_FRAMES and wait < RESYNC_LAG_S) or (due and not far):
+        if (frames < RESYNC_ROOM_FRAMES and wait < RESYNC_LAG_S) or (due and not self._far()):
             reach = self._resync_run <= RESYNC_REACH_FRAMES
             self._lost_at = time.monotonic()
             if self.on_resync is not None:
@@ -799,7 +923,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if not payloads:
             return None
 
-        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe, data.timing, data.dependency)
+        return RTCEncodedFrame(payloads, timestamp, None, data.keyframe, data.timing, data.dependency,
+                               getattr(data, "anchor", False))
 
     def _describe(self, frame_id: int, reference: Optional[int], keyframe: bool) -> Optional[tuple]:
         """Number a frame on the wire and measure how far back it predicts, for its
@@ -819,12 +944,13 @@ class RTCRtpSender(AsyncIOEventEmitter):
         number = self.__frame_number
         self.__frame_number = (number + 1) & 0xFFFF
         self.__frame_numbers[frame_id] = number
-        if len(self.__frame_numbers) > 64:
+        if len(self.__frame_numbers) > FRAME_NUMBERS_MEMORY:
             del self.__frame_numbers[next(iter(self.__frame_numbers))]
         return number, fdiff
 
     async def _retransmit(self, packet: RtpPacket) -> bool:
         """Retransmit an RTP packet reported lost; False when the pacer dropped it."""
+        media_seq = packet.sequence_number
         if self.__rtx_payload_type is not None:
             packet = wrap_rtx(
                 packet,
@@ -839,6 +965,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
         packet.extensions.transport_sequence_number = self.transport._twcc_next(
             len(packet.payload)
         )
+        if self.__unheld:
+            self.__rtx_twcc[media_seq] = packet.extensions.transport_sequence_number
         self.__log_debug("> %s", packet)
         return await self._send(packet.serialize(self.__rtp_header_extensions_map),
                                 packet.extensions.transport_sequence_number)
@@ -915,7 +1043,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                 timestamp = uint32_add(timestamp_origin, enc_frame.timestamp)
                 described = None
                 if enc_frame.dependency is not None and self.__rtp_header_extensions_map.has_dependency_descriptor():
-                    if not self._forward(*enc_frame.dependency, enc_frame.keyframe):
+                    if not self._forward(*enc_frame.dependency, enc_frame.keyframe, enc_frame.anchor):
                         self._frame_left = None
                         if self.on_frame_left_out is not None:
                             self.on_frame_left_out()
@@ -1030,9 +1158,19 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     captured = enc_frame.timing[0] if enc_frame.timing else 0
                     self.transport.frame_end(last, self._frame_on_wire, last, enc_frame.keyframe,
                                              enc_frame.timing, captured,
-                                             sum(len(p_) for p_ in enc_frame.payloads))
+                                             sum(len(p_) for p_ in enc_frame.payloads),
+                                             enc_frame.dependency[0] if described is not None else None)
                     if described is not None:
                         self.__in_flight.append((last, enc_frame.dependency[0]))
+                        if enc_frame.keyframe:
+                            self._key_sent_at = time.monotonic()
+                            self.__unheld.clear()
+                            self.__held.clear()
+                            if self.on_key_sent is not None:
+                                self.on_key_sent()
+                        self.__unheld.append((
+                            *enc_frame.dependency, enc_frame.keyframe, time.monotonic(),
+                            [(seq, media) for _, seq, media, _ in outgoing if media is not None]))
                     if self.on_frame_queued is not None:
                         self.on_frame_queued()
                 resyncs = self._resyncs

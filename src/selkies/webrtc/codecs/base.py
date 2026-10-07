@@ -55,16 +55,18 @@ class EncodedPacket:
     frame predicting from nothing), where the encoder tracks its references
     and can be told to leave a lost frame out of them; None where it cannot.
     `codec` is the MIME type of the codec a video frame was coded with, as its
-    capture names it, or None where the source does not say.
+    capture names it, or None where the source does not say. `anchor` says a
+    video delta frame is a long-term reference predicting from a frame every
+    peer holds, which every peer can decode.
     """
 
-    __slots__ = ("data", "pts", "dts", "time_base", "keyframe", "timing", "dependency", "codec")
+    __slots__ = ("data", "pts", "dts", "time_base", "keyframe", "timing", "dependency", "codec", "anchor")
 
     def __init__(self, data: Any, pts: Optional[int] = None,
                  time_base: Optional[Fraction] = None, keyframe: bool = True,
                  timing: Optional[tuple] = None,
                  dependency: Optional[tuple] = None,
-                 codec: Optional[str] = None) -> None:
+                 codec: Optional[str] = None, anchor: bool = False) -> None:
         self.data = data
         self.pts = pts
         self.dts = pts
@@ -73,6 +75,7 @@ class EncodedPacket:
         self.timing = timing
         self.dependency = dependency
         self.codec = codec
+        self.anchor = anchor
 
     def __len__(self) -> int:
         return len(self.data)

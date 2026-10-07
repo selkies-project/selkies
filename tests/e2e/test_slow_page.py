@@ -37,16 +37,18 @@ PAINTER = os.path.join(H.TOOLS, "motion_scene.py")
 BWRELAY = os.path.join(H.TOOLS, "bwrelay.py")
 RELAY_PORT = int(os.environ.get("E2E_SLOW_PAGE_PORT", "18214"))
 # A third of the 8 Mbit/s the moving scene streams at.
-LINK_KBIT = 2500
+LINK_KBIT = int(os.environ.get("E2E_SLOW_PAGE_KBIT", "2500"))
 WINDOW_S = 30
 SETTLE_S = 10
 # Congestion control off: it would fit the stream to the owner's link, which has room, and
 # the narrow link is the second page's alone.
 ENV = {"SELKIES_CONGESTION_CONTROL": "false", "SELKIES_ENCODER": "h264enc", "SELKIES_VIDEO_BITRATE": "8000"}
 
-# Each video frame a page receives over its socket: whether it is a key frame, and when it came.
+# Each video frame a page receives over its socket: whether it is a key frame or an anchor
+# (FRAME_ANCHOR), and when it came.
 FRAME_TAP_JS = """
   window.__keys = 0;
+  window.__anchors = 0;
   window.__frames = [];
   (() => {
     let last = -1;
@@ -59,6 +61,7 @@ FRAME_TAP_JS = """
       last = id;
       window.__lastId = id;
       if ((h[1] & 0x0F) === 0x01) window.__keys++;
+      if (h[1] & 0x08) window.__anchors++;
       window.__frames.push(performance.now());
       if (window.__frames.length > 40000) window.__frames.splice(0, 20000);
     };
@@ -219,9 +222,11 @@ def ws_block() -> "H.Results":
                       C.wait_ws_video(slow, timeout=90) is not None)
             owner.wait_for_timeout(SETTLE_S * 1000)
             keys0, since = owner.evaluate("window.__keys"), slow.evaluate("performance.now()")
+            anchors0 = slow.evaluate("window.__anchors")
             mark = len(H.server_log())
             samples = pictures(owner, slow, WINDOW_S)
             keys = owner.evaluate("window.__keys") - keys0
+            anchors = slow.evaluate("window.__anchors") - anchors0
             frames = slow.evaluate("(t0) => window.__frames.filter((t) => t >= t0)", since)
             log = H.server_log()[mark:]
             keep_log("websockets", log)
@@ -237,9 +242,9 @@ def ws_block() -> "H.Results":
                       lags)
             res.check("the drops were answered by the encoder predicting past them",
                       "lost by a client; the encoder predicts past it" in log)
-            print(f"      owner: {keys} key frames in {WINDOW_S} s; slow page: {len(frames)} frames, "
-                  f"longest stall {stalls(frames):.0f} ms, lag {lags[len(lags) // 2] if lags else '?'} "
-                  f"frames (median), worst picture {worst:.3f}", flush=True)
+            print(f"      owner: {keys} key frames in {WINDOW_S} s; slow page: {len(frames)} frames "
+                  f"({anchors} anchors), longest stall {stalls(frames):.0f} ms, lag "
+                  f"{lags[len(lags) // 2] if lags else '?'} frames (median), worst picture {worst:.3f}", flush=True)
             for browser, _ in pages:
                 C.close_browser(browser)
     finally:

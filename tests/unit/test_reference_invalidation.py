@@ -31,14 +31,14 @@ import helpers as H
 
 from selkies.webrtc.codecs import HEADER_EXTENSIONS
 from selkies.webrtc.rtcrtpparameters import RTCRtpHeaderExtensionParameters, RTCRtpParameters
-from selkies.webrtc.rtcrtpsender import RTCRtpSender
+from selkies.webrtc.rtcrtpsender import FRAME_NUMBERS_MEMORY, RTCRtpSender
 from selkies.webrtc.rtp import (
     DEPENDENCY_DESCRIPTOR_URI, RTCP_RTPFB_NACK, HeaderExtensionsMap, RtcpRtpfbPacket, RtpHistory,
     RtpPacket, dependency_descriptor,
 )
 from selkies.webrtc_engine import RTCApp
 from selkies.webrtc_media_pipeline import MediaPipelinePixel
-from selkies.websockets_mode import _VideoRelay
+from selkies.websockets_mode import CommonFrames, _VideoRelay
 
 res = H.Results("reference-invalidation")
 
@@ -195,11 +195,14 @@ res.check("the number wraps and a frame predicting two back is two back", descri
 res.check("a frame predicting from one this sender never sent is left out", describe(103, 77, False) is None)
 res.check("a key frame forgets the frames before it",
           describe(104, None, True) == (1, None) and describe(105, 102, False) is None)
-for fid in range(200, 270):
+for fid in range(200, 206 + FRAME_NUMBERS_MEMORY):
     describe(fid, fid - 1 if fid > 200 else None, fid == 200)
-res.check("the numbering keeps the last sixty-four frames",
-          len(sender._RTCRtpSender__frame_numbers) == 64 and describe(270, 205, False) is None
-          and describe(271, 269, False) == (72, 1), len(sender._RTCRtpSender__frame_numbers))
+newest = 205 + FRAME_NUMBERS_MEMORY
+number = sender._RTCRtpSender__frame_number
+res.check("the numbering keeps the last FRAME_NUMBERS_MEMORY frames, as far back as a pinned anchor may be",
+          len(sender._RTCRtpSender__frame_numbers) == FRAME_NUMBERS_MEMORY
+          and describe(newest + 1, 205, False) is None and describe(newest + 2, newest, False) == (number, 1),
+          len(sender._RTCRtpSender__frame_numbers))
 
 # --- the sender's answer to a NACK ----------------------------------------------
 async def nacks() -> None:
@@ -215,7 +218,7 @@ async def nacks() -> None:
     stand_in = SimpleNamespace(_RTCRtpSender__rtp_history=history, _retransmit=retransmit,
                                _RTCRtpSender__rtt=None,
                                transport=SimpleNamespace(_send_delay=lambda: 0.0),
-                               _emit_pli_event=lambda: events.append("pli"),
+                               _emit_pli_event=lambda: events.append("pli"), _resync_held=lambda: False,
                                emit=lambda name, *args: events.append((name,) + args))
     nack = lambda *lost: RtcpRtpfbPacket(fmt=RTCP_RTPFB_NACK, ssrc=1, media_ssrc=2, lost=list(lost))
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(2, 3))
@@ -286,8 +289,8 @@ async def pipeline_names() -> None:
     delivered = []
     pipeline = MediaPipelinePixel(async_event_loop=SimpleNamespace(call_soon_threadsafe=lambda fn, *a: fn(*a)),
                                   encoder="h264enc", height=720)
-    pipeline.produce_data = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None: \
-        delivered.append(dependency)
+    pipeline.produce_data = lambda buf, pts, kind, keyframe=True, timing=None, dependency=None, codec=None, \
+        anchor=False: delivered.append(dependency)
     for fid, reference, height in ((0, -1, 4096), (1, 0, 720), (2, 1, 1080), (3, -2, 720)):
         pipeline._screen_capture_callback(captured(fid, reference, height))
     res.check("a tracked frame names what it predicts from whatever size a resize left the pipeline at, "
@@ -305,7 +308,9 @@ def chunk(frame_id: int, key: bool = False, size: int = 100) -> dict:
 
 async def relay_skips_ahead() -> None:
     """A relay holds an asyncio.Event, which needs a running loop to build."""
-    relay = _VideoRelay(SimpleNamespace(), "primary", SimpleNamespace(), budget=250)
+    server = SimpleNamespace(common_frames={})
+    server.common_frames_for = lambda did: server.common_frames.setdefault(did, CommonFrames(lambda fid: None))
+    relay = _VideoRelay(server, "primary", SimpleNamespace(), budget=250)
     res.check("a fresh relay waits for a keyframe", relay.offer(chunk(0)) and not relay.backlog)
     res.check("the keyframe and the frames behind it queue",
               not relay.offer(chunk(1, key=True)) and not relay.offer(chunk(2))

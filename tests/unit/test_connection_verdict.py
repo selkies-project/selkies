@@ -84,7 +84,9 @@ async def websockets_relay() -> dict:
     real = w._broadcast_to_clients
     w._broadcast_to_clients = broadcast
     ws, other = Socket(), Socket()
-    relay = w._VideoRelay(SimpleNamespace(clients={ws, other}), "primary", ws, budget=250)
+    server = SimpleNamespace(clients={ws, other}, common_frames={})
+    server.common_frames_for = lambda did: server.common_frames.setdefault(did, w.CommonFrames(lambda fid: None))
+    relay = w._VideoRelay(server, "primary", ws, budget=250)
     out = {}
     try:
         fid = 0

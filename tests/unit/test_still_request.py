@@ -40,6 +40,7 @@ def sender(asks: list, sent: list) -> SimpleNamespace:
                         _frame_left=(40, time.monotonic() - 0.4), _key_asked_at=0.0, _lost_at=None,
                         transport=SimpleNamespace(_twcc_acked=lambda seq: seq != 41),
                         _send_keyframe=lambda: None, _emit_pli_event=lambda: asks.append("key"),
+                        _resync_held=lambda: False,
                         on_frame_sent=lambda *args: sent.append(args))
     s._still_request = lambda: RTCRtpSender._still_request(s)
     return s

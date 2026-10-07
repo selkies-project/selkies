@@ -90,6 +90,10 @@ V = TypeVar("V")
 TWCC_IDLE_US = 250_000
 # How long a sent packet waits in the transport-cc history for its feedback.
 TWCC_HISTORY_S = 2.0
+# How long the transport-wide sequence numbers transport-cc reported received are kept
+# (`twcc_arrived`): a sender reads from them which frames its peer holds, and a peer on a
+# narrow link with a standing queue reports a packet seconds after it left.
+TWCC_ARRIVED_S = 10.0
 # How far back the least one-way delay is the path's own: short enough that
 # the drift between the two ends' clocks stays a few milliseconds inside it.
 TWCC_DELAY_FLOOR_S = 30.0
@@ -506,6 +510,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_seq = 0
         self._twcc_history: dict[int, tuple[int, float]] = {}
         self._twcc_missing: dict[int, int] = {}
+        self._twcc_arrived: dict[int, float] = {}
         self._twcc_window_id = 0
         self._twcc_pruned_at = 0.0
         self.twcc_estimate: Optional[dict] = None
@@ -1079,6 +1084,11 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
                 self._twcc_missing.pop(old, None)
         return seq
 
+    def twcc_arrived(self, seq: int) -> bool:
+        """Whether transport-cc feedback reported the packet sent under `seq` received
+        within TWCC_ARRIVED_S."""
+        return seq in self._twcc_arrived
+
     def _twcc_acked(self, seq: int) -> bool:
         """Whether transport-cc feedback reported the packet sent under `seq`, sent
         within TWCC_HISTORY_S, received."""
@@ -1205,6 +1215,13 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         matched: list[tuple[float, int]] = []
         in_order: list[tuple[float, float, int]] = []
         delay_min = delay_last = None
+        now = time.monotonic()
+        arrived = self._twcc_arrived
+        for seq, _at in arrivals:
+            arrived.pop(seq, None)
+            arrived[seq] = now
+        while arrived and now - next(iter(arrived.values())) > TWCC_ARRIVED_S:
+            del arrived[next(iter(arrived))]
         for seq, at in arrivals:
             sent = self._twcc_history.pop(seq, None)
             self._twcc_unmark_missing(seq)

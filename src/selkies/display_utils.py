@@ -77,8 +77,9 @@ import zlib
 from asyncio import subprocess
 import asyncio
 import threading
+from collections import deque
 from shutil import which
-from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Tuple, Union
 
 from PIL import Image, ImageMath
 
@@ -1284,6 +1285,62 @@ LOST_FRAME_MEMORY = 64
 #: wrap to 0. A decoder that misses that frame cannot be predicted past the gap,
 #: so the encoder answers a loss covering it with a keyframe.
 FRAME_NUM_WRAP = 16
+
+#: The bit of a video header's type byte (offset 1) a delta frame carries where
+#: the encoder keeps it as a long-term reference predicting from a frame every
+#: page holds (`CommonFrames`): every page can decode it, so it goes to each as a
+#: key frame does. pixelflux sets it only once told which frames those are.
+FRAME_ANCHOR = 0x08
+
+
+class CommonFrames:
+    """The frames every page streaming one display holds, each told to the
+    display's encoder once (`acknowledge_reference`).
+
+    A page joins as its transport takes a key frame for it (`join`), holding
+    nothing until it holds that one, and holds each later frame it is sent,
+    which predicts from one it holds (a transport sends no other): over
+    WebSockets once its relay writes the frame, over WebRTC once transport-cc
+    reported every packet of it received. It leaves when it waits for a key
+    frame again, and when it goes. An encoder told which frames every page holds
+    keeps the newest such long-term reference while it marks another, and
+    predicts the next from a frame every page holds (FRAME_ANCHOR), so each page
+    recovers from a loss of any depth on its own and the stream carries no key
+    frame for it.
+    """
+
+    __slots__ = ("_acknowledge", "_pages", "_told", "_key")
+
+    def __init__(self, acknowledge: Callable[[int], None]) -> None:
+        self._acknowledge = acknowledge
+        self._pages: Dict[Any, deque] = {}
+        self._told: deque = deque(maxlen=LOST_FRAME_MEMORY)
+        self._key: Optional[int] = None
+
+    def join(self, page: Any) -> None:
+        """`page` is sent a key frame: no frame is common until it holds that."""
+        self._pages[page] = deque(maxlen=LOST_FRAME_MEMORY)
+
+    def hold(self, page: Any, frame_id: int, key: bool = False) -> None:
+        """`page` holds `frame_id`, a key frame starting its holdings afresh; a
+        frame every page now holds is told to the encoder."""
+        if key:
+            held = self._pages[page] = deque(maxlen=LOST_FRAME_MEMORY)
+            if frame_id != self._key:
+                self._key = frame_id
+                self._told.clear()
+        else:
+            held = self._pages.get(page)
+            if held is None:
+                return
+        held.append(frame_id)
+        if frame_id not in self._told and all(frame_id in other for other in self._pages.values()):
+            self._told.append(frame_id)
+            self._acknowledge(frame_id)
+
+    def leave(self, page: Any) -> None:
+        """`page` waits for a key frame, or is gone."""
+        self._pages.pop(page, None)
 
 
 def no_first_frame(display_id: str, encoder: str) -> str:
@@ -2671,6 +2728,10 @@ def apply_common_capture_settings(
     if watermark_path and os.path.exists(watermark_path):
         cs.watermark_path = watermark_path.encode("utf-8")
         cs.watermark_location_enum = int(getattr(server, "watermark_location", -1))
+    # Every transport tells the encoder which frames all of a display's pages
+    # hold (`CommonFrames`); a pixelflux that cannot take them has no such field.
+    if hasattr(cs, "acknowledge_references"):
+        cs.acknowledge_references = True
     return cs
 
 
