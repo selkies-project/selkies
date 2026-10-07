@@ -1052,7 +1052,10 @@ const retireCrashCountWhenHealthy = () => {
  * a retry nor the reset the escalation ends in changes that, so the notice stands instead. A
  * decoder still waiting on the engine's answer to its configuration is not silent but unfed:
  * the page's first answer, which pays for the media stack's warm-up, gets the bound a probe
- * does (`DECODER_PROBE_TIMEOUT_MS`) before the wait counts.
+ * does (`DECODER_PROBE_TIMEOUT_MS`) before the wait counts. A hidden page presents nothing and
+ * drops what it decodes, so its silence says nothing about its decoder: the watchdog stands
+ * down while the page is hidden, or a background tab that is still sent video would be taken
+ * through the retry and the ladder's reloads to JPEG.
  */
 function checkVideoOutputWatchdog() {
   // A software retry that is also silent has to be able to trip this again, or the
@@ -1061,7 +1064,7 @@ function checkVideoOutputWatchdog() {
   // The settle window keeps the decoders the switch just replaced from tripping it.
   const retrySettling = softwareDecodeAttempted &&
     performance.now() - softwareDecodeSwitchedAt < SOFTWARE_DECODE_SETTLE_MS;
-  if (isSharedMode || window.isFallingBack || retrySettling || codecRefusalUnanswerable ||
+  if (document.hidden || isSharedMode || window.isFallingBack || retrySettling || codecRefusalUnanswerable ||
       !isVideoPipelineActive || currentEncoderMode === 'jpeg' ||
       typeof VideoDecoder === 'undefined') {
     noOutputStalledSince = 0;
@@ -6155,6 +6158,26 @@ function initWebsockets() {
   /** Whether the tab-hide handler paused the video; only its own pause is resumed, a dashboard stop stays stopped. */
   let videoPausedForHiddenTab = false;
   /**
+   * Pauses a hidden tab's video with STOP_VIDEO; the tab-show resumes it. Also
+   * run for a socket that opens while the tab is hidden (a reload or a
+   * reconnect in a background tab), which no visibilitychange reaches: its
+   * stream would flow to a page that drops every frame.
+   */
+  const pauseVideoForHiddenTab = () => {
+    if (!websocket || websocket.readyState !== WebSocket.OPEN || !isVideoPipelineActive) return;
+    websocket.send('STOP_VIDEO');
+    isVideoPipelineActive = false;
+    videoPausedForHiddenTab = true;
+    window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
+    console.log("Tab hidden: Sent STOP_VIDEO. Clearing canvas visually. Server will send PIPELINE_RESETTING for full state reset.");
+    if (canvasContext && canvas) {
+      try {
+        canvasContext.setTransform(1, 0, 0, 1, 0, 0);
+        canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+      } catch (e) { console.error("Error clearing canvas on tab hidden:", e); }
+    }
+  };
+  /**
    * Pauses video while the tab is hidden and resumes it on show. A shared
    * viewer pauses only its own feed (the server drops this socket from the
    * broadcast and resumes it with a reset and IDR; control, cursor, and audio
@@ -6199,21 +6222,7 @@ function initWebsockets() {
           hiddenVideoStopTimer = null;
           if (!document.hidden) return;
           console.log('Tab is hidden, stopping video pipeline if active.');
-          if (websocket && websocket.readyState === WebSocket.OPEN) {
-            if (isVideoPipelineActive) {
-              websocket.send('STOP_VIDEO');
-              isVideoPipelineActive = false;
-              videoPausedForHiddenTab = true;
-              window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
-              console.log("Tab hidden: Sent STOP_VIDEO. Clearing canvas visually. Server will send PIPELINE_RESETTING for full state reset.");
-              if (canvasContext && canvas) {
-                  try {
-                      canvasContext.setTransform(1, 0, 0, 1, 0, 0);
-                      canvasContext.clearRect(0, 0, canvas.width, canvas.height);
-                  } catch (e) { console.error("Error clearing canvas on tab hidden:", e); }
-              }
-            }
-          }
+          pauseVideoForHiddenTab();
         }, 250);
       }
     } else {
@@ -8505,6 +8514,12 @@ class WorkerWebSocket {
               if (!serverSettingsReceived) {
                 serverSettingsReceived = true;
                 applyStartPolicy(obj.settings);
+                // A socket that opened while the tab is hidden pauses as a hide would have,
+                // after the start policy has said whether video runs at all.
+                if (document.hidden && !isSharedMode) {
+                  console.log('Tab is hidden on connect, pausing video until it is shown.');
+                  pauseVideoForHiddenTab();
+                }
               }
               if (pendingInitialAudioStart) {
                   pendingInitialAudioStart = false;

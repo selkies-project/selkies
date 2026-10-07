@@ -25,7 +25,12 @@ clears gives a new tab its video back, and one that stays takes it to JPEG at it
 The ``held`` block follows the settings a crash resets the same way: the user's own come back
 in a new tab, and one picked again in the crashing tab stays picked.
 
-Usage: python3 tests/e2e/test_software_decode.py [retry|nosoftware|nostart|persisted|newtab|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|held|all]
+The ``hidden`` block is a background tab: a hidden page drops what it decodes, so video still
+sent to it must not read as a silent decoder and take it through the retry and the ladder's
+reloads to JPEG, and a page whose socket opens hidden (a reload or a reconnect in a background
+tab) pauses its video as a hide would have, and resumes it when shown.
+
+Usage: python3 tests/e2e/test_software_decode.py [retry|nosoftware|nostart|persisted|newtab|ladder|healthy|silent|striped|nowebcodecs|cleared|broken|held|hidden|all]
 """
 import json
 import os
@@ -149,10 +154,24 @@ ENCODER_JS = """
   } catch (e) {}
 """
 
+# A load in a background tab: hidden before the client runs, so no visibilitychange reaches it.
+HIDDEN_LOAD_JS = """
+  Object.defineProperty(document, 'hidden', {configurable: true, get: () => true});
+  Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'hidden'});
+"""
+
+# The tab hidden or shown; `tell` fires the visibilitychange the browser would. Untold, the page
+# is hidden with nothing to pause its video, as when video reaches a page already hidden.
+VISIBILITY_JS = """([h, tell]) => {
+  Object.defineProperty(document, 'hidden', {configurable: true, get: () => h});
+  Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => h ? 'hidden' : 'visible'});
+  if (tell) document.dispatchEvent(new Event('visibilitychange'));
+}"""
+
 
 def open_client(pw, fail_mode: str = "none", seed_preference: bool = False,
                 encoder: Optional[str] = None, query: str = "", engine: str = "chromium",
-                soft_h264: str = "yes"):
+                soft_h264: str = "yes", hidden: bool = False):
     """Launch a browser with the decode-failure shim installed.
 
     Args:
@@ -164,6 +183,7 @@ def open_client(pw, fail_mode: str = "none", seed_preference: bool = False,
         engine: ``chromium``, ``firefox``, or ``webkit``. The shim needs WebCodecs, so on an
             engine without it (Playwright WebKit) it no-ops and the client takes its jpeg path.
         soft_h264: Whether the engine has a software H.264 decoder (``shim_js``).
+        hidden: Every load starts hidden, as in a background tab (``HIDDEN_LOAD_JS``).
 
     Returns:
         Tuple of (browser, page) with the stream page loaded; ``page.console_lines`` collects
@@ -178,6 +198,8 @@ def open_client(pw, fail_mode: str = "none", seed_preference: bool = False,
     if encoder:
         ctx.add_init_script(ENCODER_JS % encoder)
     ctx.add_init_script(shim_js(fail_mode, soft_h264=soft_h264))
+    if hidden:
+        ctx.add_init_script(HIDDEN_LOAD_JS)
     page = ctx.new_page()
     page.console_lines = []
     page.on("console", lambda m: page.console_lines.append(m.text))
@@ -721,12 +743,77 @@ def block_silent(r: "H.Results") -> None:
         H.server_stop()
 
 
+def block_hidden(r: "H.Results") -> None:
+    """A background tab. Its video still flowing, a hidden page drops every decoded frame, which
+    must not read as a silent decoder: no software retry, no reload, no ladder. A page whose
+    socket opens hidden, as a reload or a reconnect in a background tab does, pauses its video as
+    a hide would have and resumes it when shown, on its own encoder.
+
+    The page's own full-frame decoder is the one that drops frames while hidden, so the video
+    worker is disabled, as in ``silent``.
+    """
+    from playwright.sync_api import sync_playwright
+    H.server_start(mode="websockets")
+    try:
+        with sync_playwright() as pw:
+            browser, page = open_client(pw, encoder="h264enc", query="offscreen_worker=false")
+            try:
+                state = wait_for(page, lambda s: s["decoded"] > 0, timeout=30)
+                r.check("hidden: the page decodes before its tab hides", state["decoded"] > 0, state)
+                chunks = page.evaluate("window.videoChunksReceived || 0")
+                page.evaluate(VISIBILITY_JS, [True, False])
+                time.sleep(22)
+                hidden = read_state(page)
+                r.check("hidden: video still reached the hidden page",
+                        page.evaluate("window.videoChunksReceived || 0") > chunks + 30)
+                r.check("hidden: which neither retried in software nor reloaded",
+                        hidden["navs"] == 1 and "prefer-software" not in hidden["cfgs"],
+                        (hidden["navs"], hidden["cfgs"][:6]))
+                page.evaluate(VISIBILITY_JS, [False, True])
+                shown = wait_for(page, lambda s: s["decoded"] > hidden["decoded"] + 30, timeout=15)
+                r.check("hidden: shown, it decodes on", shown["decoded"] > hidden["decoded"] + 30,
+                        (hidden["decoded"], shown["decoded"]))
+            finally:
+                browser.close()
+
+            mark = len(H.server_log())
+            browser, page = open_client(pw, encoder="h264enc", query="offscreen_worker=false",
+                                        hidden=True)
+            try:
+                paused = "Received STOP_VIDEO for 'primary'"
+                deadline = time.time() + 20
+                while time.time() < deadline and paused not in H.server_log()[mark:]:
+                    time.sleep(0.5)
+                r.check("hidden on connect: the page pauses its video", paused in H.server_log()[mark:])
+                time.sleep(2)
+                chunks = page.evaluate("window.videoChunksReceived || 0")
+                time.sleep(20)
+                hidden = read_state(page)
+                # On the one load: a reload would start the count over.
+                r.check("hidden on connect: no video reaches it while hidden",
+                        hidden["navs"] == 1 and page.evaluate("window.videoChunksReceived || 0") - chunks <= 2,
+                        hidden["navs"])
+                r.check("hidden on connect: no software retry, no reload",
+                        hidden["navs"] == 1 and "prefer-software" not in hidden["cfgs"],
+                        (hidden["navs"], hidden["cfgs"][:6]))
+                page.evaluate(VISIBILITY_JS, [False, True])
+                shown = wait_for(page, lambda s: s["decoded"] > hidden["decoded"] + 30, timeout=20)
+                # JPEG never reaches a VideoDecoder, so decoded frames are the H.264 stream's.
+                r.check("hidden on connect: shown, it streams H.264 again",
+                        shown["decoded"] > hidden["decoded"] + 30, (hidden["decoded"], shown["decoded"]))
+            finally:
+                browser.close()
+    finally:
+        H.server_stop()
+
+
 BLOCKS = {"retry": block_retry, "nosoftware": block_nosoftware, "nostart": block_nostart,
           "persisted": block_persisted, "newtab": block_newtab,
           "ladder": block_ladder, "healthy": block_healthy,
           "silent": block_silent,
           "striped": block_striped, "nowebcodecs": block_nowebcodecs,
-          "cleared": block_cleared, "broken": block_broken, "held": block_held}
+          "cleared": block_cleared, "broken": block_broken, "held": block_held,
+          "hidden": block_hidden}
 
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"

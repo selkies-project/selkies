@@ -353,7 +353,7 @@ SUITES: list = [
      "selectors": ["x11", "wl"]},
     {"path": "e2e/test_software_decode.py", "tier": "e2e", "timeout": 900,
      "selectors": ["retry", "nosoftware", "nostart", "persisted", "ladder", "healthy", "striped", "nowebcodecs",
-                   "cleared", "broken"]},
+                   "cleared", "broken", "hidden"]},
     {"path": "e2e/test_software_h264.py", "tier": "e2e", "timeout": 600,
      "selectors": ["x11", "wl"]},
     {"path": "e2e/test_webcam.py", "tier": "e2e", "timeout": 900,
