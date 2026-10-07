@@ -11,15 +11,19 @@ seconds of stream a byte budget holds.
 The slow page is a second Chromium page beside the owner: over WebSockets behind a metered TCP
 relay (tests/tools/bwrelay.py), over WebRTC behind narrow UDP relays (the pacer suite's), which
 the page reaches the server through alone: its init script points the server's candidates at
-them and withholds its own, so the server meets it only through them. The owner's key frames
-are counted on its own page. The scene is tests/tools/motion_scene.py, whose every frame spells
-its own index, so the pictures the slow page decodes are checked against the frames they claim
-to be, and its lag behind the owner read off the two pages' pictures.
+them and withholds its own, so the server meets it only through them. The webrtc-firefox block
+makes it Firefox, which answers without the dependency descriptor (on the OpenH264 profile, as
+test_browsers' firefox-wr, its relays on the default route's address, since Firefox gathers
+there alone and pairs none of its candidates with a loopback one). The owner's key frames are
+counted on its own page. The scene is tests/tools/motion_scene.py, whose every frame spells its
+own index, so the pictures the slow page decodes are checked against the frames they claim to
+be, and its lag behind the owner read off the two pages' pictures.
 
-Usage: python3 tests/e2e/test_slow_page.py [websockets|webrtc|all]
+Usage: python3 tests/e2e/test_slow_page.py [websockets|webrtc|webrtc-firefox|all]
 """
 import asyncio
 import os
+import socket
 import sys
 import threading
 import time
@@ -256,20 +260,36 @@ def ws_block() -> "H.Results":
     return res
 
 
-def wr_block() -> "H.Results":
+def default_address() -> str:
+    """The address of the interface the default route leaves by (no packet is sent finding it)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("192.0.2.1", 9))
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
+
+def wr_block(engine: str = "chromium") -> "H.Results":
     from playwright.sync_api import sync_playwright
     import test_pacer as rig
 
-    res = H.Results("slow-page-webrtc")
+    res = H.Results("slow-page-webrtc" if engine == "chromium" else f"slow-page-webrtc-{engine}")
+    if engine == "firefox" and not C.openh264_version():
+        res.skip(f"no OpenH264 GMP plugin in {C.FF_E2E_PROFILE}",
+                 "run tests/tools/fetch-openh264.sh to cover H.264 in Firefox")
+        res.summary()
+        return res
     painter = None
     loop = asyncio.new_event_loop()
     threading.Thread(target=loop.run_forever, daemon=True).start()
     up, down = rig.Shaper(), rig.Shaper(rate_bps=LINK_KBIT * 1000, delay_s=0.03)
+    listen = default_address() if engine == "firefox" else "127.0.0.1"
 
     def shaped_relay(host: str, port: int) -> list:
         """A relay toward one of the server's candidates, shaped on the way to the page."""
         _, addr = asyncio.run_coroutine_threadsafe(
-            rig.make_relay((host, int(port)), up, down, "slow-page"), loop).result(timeout=10)
+            rig.make_relay((host, int(port)), up, down, "slow-page", listen), loop).result(timeout=10)
         return [addr[0], addr[1]]
 
     H.server_start("webrtc", wayland=False, extra_env={
@@ -279,8 +299,12 @@ def wr_block() -> "H.Results":
         with sync_playwright() as p:
             pages = []
             for script in (C.PC_TAP_JS, SHAPED_JS):
-                browser = C.launch_browser(p, "chromium")
-                ctx = browser.new_context(viewport={"width": WIDTH, "height": HEIGHT}, device_scale_factor=1)
+                viewport = {"width": WIDTH, "height": HEIGHT}
+                if script is SHAPED_JS and engine == "firefox":
+                    browser = ctx = C.firefox_persistent_context(p, viewport=viewport, device_scale_factor=1)
+                else:
+                    browser = C.launch_browser(p, "chromium")
+                    ctx = browser.new_context(viewport=viewport, device_scale_factor=1)
                 ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'webrtc';")
                 if script is SHAPED_JS:
                     ctx.expose_function("__shapedRelay", shaped_relay)
@@ -338,6 +362,8 @@ def main() -> None:
         blocks.append(ws_block())
     if which in ("all", "webrtc"):
         blocks.append(wr_block())
+    if which in ("all", "webrtc-firefox"):
+        blocks.append(wr_block("firefox"))
     sys.exit(0 if all(not b.failed() for b in blocks) else 1)
 
 

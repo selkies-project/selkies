@@ -315,7 +315,7 @@ SUITES: list = [
      "selectors": ["classic", "wish", "engines", "webrtc", "settings"]},
     {"path": "e2e/test_webrtc_loss_recovery.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_slow_page.py", "tier": "e2e", "timeout": 900,
-     "selectors": ["websockets", "webrtc"]},
+     "selectors": ["websockets", "webrtc", "webrtc-firefox"]},
     {"path": "e2e/test_wayland_layout_churn.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_clipboard_reads.py", "tier": "e2e", "timeout": 900,

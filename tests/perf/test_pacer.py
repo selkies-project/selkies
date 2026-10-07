@@ -196,8 +196,9 @@ class UDPRelay:
             return
         self.down.push(data, lambda d=data, a=addr: self.vis_tr.sendto(d, a))
 
-async def make_relay(dest_addr: tuple, up: Shaper, down: Shaper, name: str) -> tuple:
-    """Build a UDPRelay toward `dest_addr` and return (relay, advertised_addr)."""
+async def make_relay(dest_addr: tuple, up: Shaper, down: Shaper, name: str,
+                     host: str = "127.0.0.1") -> tuple:
+    """Build a UDPRelay toward `dest_addr`, listening on `host`, and return (relay, advertised_addr)."""
     loop = asyncio.get_running_loop()
 
     class _Far(asyncio.DatagramProtocol):
@@ -213,7 +214,7 @@ async def make_relay(dest_addr: tuple, up: Shaper, down: Shaper, name: str) -> t
             relay.from_near(data, addr)
 
     vis_tr, vis_proto = await loop.create_datagram_endpoint(
-        _Vis, local_addr=("127.0.0.1", 0))
+        _Vis, local_addr=(host, 0))
     relay.vis_tr = vis_tr
     return relay, vis_tr.get_extra_info("sockname")
 
