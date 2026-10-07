@@ -3478,12 +3478,16 @@ class WebRTCService(BaseStreamingService):
         """Accept a signaling WebSocket, refusing with 409 while the WebRTC mode
         is inactive and 503 while it is starting or going away: a page its
         stopping server closed reconnects at once, and a session registered
-        then would find no server peer and keep the shutdown waiting on it."""
+        then would find no server peer and keep the shutdown waiting on it. A
+        plain GET is the page's probe before it reloads: answered 204, that the
+        transport is up, rather than with an error status the browser logs."""
         if self.supervisor.current_mode != self.mode:
             return web.Response(status=409, text="WebRTC mode is inactive")
         if self.peer_manager is None or self._shutdown_called or self.shutdown_event.is_set():
             return web.Response(status=503, headers={"Retry-After": "1"},
                                 text="WebRTC service is starting or stopping")
+        if request.headers.get("Upgrade", "").lower() != "websocket":
+            return web.Response(status=204)
         # autoping=False so the signaling loop sees PONG frames and can feed
         # the upload uplink gauge's clock; the loop answers PING itself.
         ws = web.WebSocketResponse(autoping=False)

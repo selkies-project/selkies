@@ -6967,12 +6967,15 @@ class DataStreamingServer(BaseStreamingService):
         view-only basic-auth credential caps the role at viewer no matter what
         the query string asks for (legacy, non-secure mode); secure mode leaves
         the ceiling unset and lets the token govern. In secure mode an upgrade
-        presents its token (``handshake_session_token``); a plain GET, the
-        client's probe, has already passed the auth middleware on a token of
-        its own and gets the refusal ``prepare`` gives anything but an upgrade.
+        presents its token (``handshake_session_token``). A plain GET is the
+        client's reconnect probe, past the auth middleware on a token of its
+        own: it is answered 204, that the transport is up, rather than with an
+        error status every browser logs as a failed load.
         """
         if self.supervisor.current_mode != self.mode:
             return web.Response(status=409, text="WebSocket mode is inactive")
+        if request.headers.get("Upgrade", "").lower() != "websocket":
+            return web.Response(status=204)
 
         token = ""
         if self.cli_args.master_token and request.headers.get("Upgrade", "").lower() == "websocket":
