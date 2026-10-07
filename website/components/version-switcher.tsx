@@ -23,8 +23,9 @@ function Aliases({ aliases }: Pick<DocsVersion, 'aliases'>) {
 }
 
 /**
- * The sidebar's version dropdown: every version of the site with the current
- * one marked, each opening the reader's page in that version.
+ * The sidebar's version dropdown, styled like the Spacious layout's own: every
+ * version of the site with the current one marked, each opening the reader's
+ * page in that version.
  *
  * Versions are separate builds, so a choice leaves this one with a full
  * navigation rather than the router. A page need not exist in another
@@ -53,7 +54,7 @@ export function VersionSwitcher({ className }: { className?: string }) {
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
         className={[
-          'flex items-center gap-2 rounded-lg border bg-fd-secondary/50 p-2 text-start text-fd-secondary-foreground transition-colors hover:bg-fd-accent data-open:bg-fd-accent data-open:text-fd-accent-foreground',
+          'flex w-full items-center gap-2 rounded-xl border bg-fd-secondary/50 px-2.5 py-2 text-start text-fd-secondary-foreground transition-colors hover:bg-fd-accent data-open:bg-fd-accent data-open:text-fd-accent-foreground',
           className,
         ]
           .filter(Boolean)

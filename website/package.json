@@ -16,10 +16,10 @@
   },
   "dependencies": {
     "@mdx-js/mdx": "^3.1.1",
-    "fumadocs-core": "16.15.10",
+    "fumadocs-core": "16.16.2",
     "fumadocs-mdx": "15.4.0",
     "fumadocs-python": "^1.0.2",
-    "fumadocs-ui": "npm:@fumadocs/base-ui@16.15.10",
+    "fumadocs-ui": "npm:@fumadocs/base-ui@16.16.2",
     "lucide-react": "^1.48.0",
     "next": "16.3.6",
     "react": "^19.2.8",
