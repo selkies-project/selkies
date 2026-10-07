@@ -11,12 +11,18 @@ and the button that started it says so meanwhile and holds the row. What ends
 up installed is the session's fact rather than the browser's, so a page that
 kept no record of the install is still told about it.
 
+A session on a proot-apps local repository installs only what that folder holds,
+so the panel lists the folder's own catalog, served by the server, and never
+reaches for the remote one.
+
 Driven against a stand-in `selkies-proot` -- the runner whose presence publishes
 the panel -- and a stand-in catalog, so nothing here reaches the network.
 
 Usage: python3 tests/e2e/test_apps_panel.py
 """
+import base64
 import os
+import shutil
 import sys
 import time
 
@@ -37,6 +43,16 @@ CATALOG = f"""include:
 """
 # Long enough that the panel is observed mid-command, short enough to wait out.
 INSTALL_SECONDS = 6
+LOCAL_APP = "localapp"
+LOCAL_CATALOG = f"""include:
+  - name: {LOCAL_APP}
+    full_name: Local App
+    description: From the local repository
+    icon: {LOCAL_APP}.png
+"""
+# A 1x1 PNG, so a rendered icon has a size to measure.
+LOCAL_ICON = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 # The stand-in answers `list` from a file it writes on install, the way the real
 # wrapper answers it from the runner's install directory: what is installed is
 # the session's fact, and the panel has to be able to ask for it.
@@ -63,6 +79,18 @@ def runner_stub(directory: str) -> str:
         fh.write(RUNNER.replace("{STATE}", state))
     os.chmod(path, 0o755)
     return directory
+
+
+def local_repository(folder: str) -> str:
+    """Lay out a proot-apps local repository holding one application and its catalog."""
+    shutil.rmtree(folder, ignore_errors=True)
+    os.makedirs(os.path.join(folder, f"ghcr.io_linuxserver_proot-apps_{LOCAL_APP}"))
+    os.makedirs(os.path.join(folder, "metadata", "img"))
+    with open(os.path.join(folder, "metadata", "metadata.yml"), "w") as fh:
+        fh.write(LOCAL_CATALOG)
+    with open(os.path.join(folder, "metadata", "img", f"{LOCAL_APP}.png"), "wb") as fh:
+        fh.write(LOCAL_ICON)
+    return folder
 
 
 def open_apps_modal(page) -> bool:
@@ -147,8 +175,51 @@ def run(mode: str, res: "H.Results") -> None:
     H.server_stop()
 
 
+def run_local_repository(mode: str, res: "H.Results") -> None:
+    """Open the panel over `mode` on a session installing from a local repository.
+
+    Args:
+        mode: Transport mode, ``websockets`` or ``webrtc``.
+        res: Results accumulator shared across both transports.
+    """
+    stub = runner_stub(os.path.join(H.WORKDIR, f"apps-stub-bin-{mode}"))
+    folder = local_repository(os.path.join(H.WORKDIR, f"apps-local-repo-{mode}"))
+    H.server_start(mode=mode, wayland=False, web_root=H.CLASSIC_DIST,
+                   extra_env={"PATH": stub + os.pathsep + os.environ.get("PATH", ""),
+                              "SELKIES_COMMAND_ENABLED": "true", "PA_REPO_FOLDER": folder})
+    with sync_playwright() as pw:
+        browser = C.chromium_launch(pw)
+        ctx = browser.new_context(viewport={"width": 1440, "height": 900}, device_scale_factor=1)
+        ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+        page = ctx.new_page()
+        remote_requests = []
+        page.route("**/raw.githubusercontent.com/**",
+                   lambda route: (remote_requests.append(route.request.url), route.abort()))
+        try:
+            page.goto(H.BASE_URL, wait_until="load")
+            time.sleep(8.0)
+            res.check(f"{mode}: the panel is published on a local repository", open_apps_modal(page))
+            card = page.locator('.apps-modal-content:has-text("Local App")').first
+            res.check(f"{mode}: the repository's own catalog is listed", card.count() > 0)
+            icon = page.locator('.app-card-icon[alt="Local App"]').first
+            width = 0
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                width = icon.evaluate("img => img.naturalWidth") if icon.count() else 0
+                if width:
+                    break
+                time.sleep(0.2)
+            res.check(f"{mode}: its icon is served by the server", width == 1, width)
+            res.check(f"{mode}: the remote catalog is never asked for", not remote_requests, remote_requests[:2])
+        finally:
+            browser.close()
+    H.server_stop()
+
+
 if __name__ == "__main__":
     results = H.Results("apps-panel")
     for transport in ("websockets", "webrtc"):
         run(transport, results)
+    for transport in ("websockets", "webrtc"):
+        run_local_repository(transport, results)
     sys.exit(0 if results.summary() else 1)

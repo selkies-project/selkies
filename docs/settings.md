@@ -139,7 +139,7 @@ Gamepads, keyboard chords, and the input devices published to the session.
 | `--keyboard-shortcuts`<br>`SELKIES_KEYBOARD_SHORTCUTS` | `true`<br>bool | Let the client keep its own chords (Control+Shift with F, M, X, or G, and Control+Shift+click) instead of passing them to the session. Turn it off where an application in the session binds the same chords; the side menu's buttons still reach every function, and pressing Escape three times still leaves gaming mode. Clients may override per user unless the value is locked. |
 | `--mac-cmd-as-ctrl`<br>`SELKIES_MAC_CMD_AS_CTRL` | `true`<br>bool | Send a macOS client's Command chords as their Control chords, so Cmd+C copies in the remote application the way it does locally. Turn it off where the session's window manager takes Super as its own modifier: remapped, a Cmd+Return bound to open a terminal arrives as Ctrl+Return, and Cmd+C interrupts the foreground program instead of copying. Command then arrives as the Super it physically is. Only macOS clients read it. Clients may override per user unless the value is locked. |
 
-## Clipboard, files, and printing
+## Clipboard, files, printing, and apps
 
 What leaves and enters the session besides the stream.
 
@@ -153,6 +153,7 @@ What leaves and enters the session besides the stream.
 | `--file-transfer-limit-mbps`<br>`SELKIES_FILE_TRANSFER_LIMIT_MBPS` | `0.0`<br>float, from 0.0 | Static file-transfer throttle in Mbit/s, one allowance shared by all downloads and uploads, for links whose rate the operator knows. 0 disables. The congestion-control pacing protects the video stream without it, in both directions and end to end through a reverse proxy; the cap is for holding transfers to a fixed share regardless. |
 | `--printing-enabled`<br>`SELKIES_PRINTING_ENABLED` | `true`<br>bool | Hand the documents printed in the session to the browser: a job printed to the session's Selkies queue lands in the print spool as a PDF, and the page opens it in the browser's print dialog. Off refuses the documents and shows no printer section. |
 | `--print-spool-path`<br>`SELKIES_PRINT_SPOOL_PATH` | (empty)<br>str | Directory the session's print queue writes finished jobs into as PDFs, watched for documents to hand to the browser and created at startup when missing; a document is removed once a page has taken it. Empty (default) uses selkies/print under $XDG_STATE_HOME, or under ~/.local/state when that is unset. |
+| `--apps-repo-folder`<br>`SELKIES_APPS_REPO_FOLDER`<br>`PA_REPO_FOLDER` | (empty)<br>str | Directory of a proot-apps local repository (the folder `proot-apps localrepo` fills), mounted into the session read-only. When set, the apps panel lists that folder's catalog (its metadata/metadata.yml and metadata/img, else the applications the folder holds) instead of the remote one, and the runner installs and updates from it; the server passes it to the runner as PA_REPO_FOLDER, the variable proot-apps itself reads, which is also the fallback for this setting. Empty uses the remote repository. |
 
 ## Webcam
 

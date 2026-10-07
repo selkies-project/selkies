@@ -14,11 +14,13 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter }
 import * as yaml from "js-yaml";
 import { t } from "@/i18n";
 import { getLastServerSettings } from "@/utils";
+import { withSessionToken } from "../../../../selkies-web-core/lib/session-token.js";
 import {
     APP_COMMAND_STATE_EVENT,
     INSTALLED_APPS_ROLLBACK_EVENT,
     INSTALLED_APPS_SERVER_EVENT,
     applyServerInstalledApps,
+    appsCatalog,
     pendingAppAction,
     postAppCommand,
     readInstalledApps,
@@ -26,12 +28,14 @@ import {
 } from "../../../../selkies-web-core/lib/app-commands.js";
 
 /**
- * The apps modal: the proot-apps catalog, fetched from its GitHub metadata,
- * with install, remove, update, and launch actions.
+ * The apps modal: the proot-apps catalog, with install, remove, update, and
+ * launch actions.
  *
  * Actions go through the apps command contract both dashboards share
  * (`selkies-web-core/lib/app-commands.js`): it posts the selkies-proot wrapper
- * commands to the core and tracks them for rollback. Which apps are installed
+ * commands to the core and tracks them for rollback, and its `appsCatalog`
+ * says where the catalog is read from (the remote repository's metadata, or
+ * this server's `api/apps/` for a local repository). Which apps are installed
  * comes from the server (`apps_installed` in the settings payload, and an
  * `appsInstalled` message when a command changes it), with localStorage holding
  * the last answer. Commands run server-side only while the `command_enabled`
@@ -42,9 +46,6 @@ import {
  * @module
  */
 
-const REPO_BASE_URL = 'https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/';
-const METADATA_URL = `${REPO_BASE_URL}metadata.yml`;
-const IMAGE_BASE_URL = `${REPO_BASE_URL}img/`;
 const METADATA_FETCH_TIMEOUT_MS = 10000;
 
 /** One catalog entry of the proot-apps metadata. */
@@ -61,10 +62,12 @@ interface App {
 }
 
 /**
- * Session cache of the fetched catalog: the modal is conditionally mounted by
- * its parent, so each open is a fresh mount; a hit here skips the network.
+ * Session cache of the fetched catalog, keyed by where it was read from: the
+ * modal is conditionally mounted by its parent, so each open is a fresh mount;
+ * a hit here skips the network.
  */
 let cachedAppData: { include: App[] } | null = null;
+let cachedCatalogUrl: string | null = null;
 
 interface AppsProps {
     /** Whether the dialog is shown; the parent controls it. */
@@ -82,7 +85,10 @@ interface AppsProps {
  * aborted after a timeout and on close or unmount.
  */
 export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
-    const [appData, setAppData] = useState<{ include: App[] } | null>(() => cachedAppData);
+    const [serverSettings, setServerSettings] = useState<any>(() => getLastServerSettings());
+    const catalog = appsCatalog(serverSettings, withSessionToken);
+    const [appData, setAppData] = useState<{ include: App[] } | null>(
+        () => (cachedCatalogUrl === catalog.metadata ? cachedAppData : null));
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [fetchAttempt, setFetchAttempt] = useState(0);
@@ -116,7 +122,6 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         return () => window.removeEventListener(INSTALLED_APPS_ROLLBACK_EVENT, onRollback);
     }, []);
 
-    const [serverSettings, setServerSettings] = useState<any>(() => getLastServerSettings());
     useEffect(() => {
         const handleWindowMessage = (event: MessageEvent) => {
             if (event.origin !== window.location.origin) return;
@@ -173,7 +178,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         setError(null);
         (async () => {
             try {
-                const response = await fetch(METADATA_URL, { signal: controller.signal });
+                const response = await fetch(catalog.metadata, { signal: controller.signal });
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
@@ -181,6 +186,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                 const parsedData = yaml.load(yamlText) as { include: App[] };
                 if (!active) return;
                 cachedAppData = parsedData;
+                cachedCatalogUrl = catalog.metadata;
                 setAppData(parsedData);
             } catch (e) {
                 if (!active) return;
@@ -196,7 +202,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
             clearTimeout(timeoutId);
             controller.abort();
         };
-    }, [isOpen, appData, fetchAttempt]);
+    }, [isOpen, appData, fetchAttempt, catalog.metadata]);
 
     const handleSearchChange = (event: React.ChangeEvent<HTMLInputElement>) => {
         setSearchTerm(event.target.value.toLowerCase());
@@ -328,7 +334,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                             <CardHeader className="space-y-4">
                                                 <section className="flex items-center gap-4">
                                                     <img 
-                                                        src={`${IMAGE_BASE_URL}${selectedApp.icon}`} 
+                                                        src={catalog.icon(selectedApp.icon)} 
                                                         alt={selectedApp.full_name} 
                                                         className="w-16 h-16 object-contain"
                                                         onError={(e) => { e.currentTarget.style.display = 'none'; }}
@@ -405,7 +411,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                                     <CardContent className="p-4 h-full flex flex-col items-center justify-center">
                                                         <div className="flex flex-col items-center text-center">
                                                             <img 
-                                                                src={`${IMAGE_BASE_URL}${app.icon}`} 
+                                                                src={catalog.icon(app.icon)} 
                                                                 alt={app.full_name} 
                                                                 className="w-12 h-12 object-contain mb-2"
                                                                 loading="lazy"

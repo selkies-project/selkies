@@ -190,6 +190,13 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Enable parsing of command websocket messages. Disabled by default for security; opt in with SELKIES_COMMAND_ENABLED=true (or --command-enabled true).",
     },
     {
+        "name": "apps_repo_folder",
+        "type": "str",
+        "default": "",
+        "env_var": "PA_REPO_FOLDER",
+        "help": "Directory of a proot-apps local repository (the folder `proot-apps localrepo` fills), mounted into the session read-only. When set, the apps panel lists that folder's catalog (its metadata/metadata.yml and metadata/img, else the applications the folder holds) instead of the remote one, and the runner installs and updates from it; the server passes it to the runner as PA_REPO_FOLDER, the variable proot-apps itself reads, which is also the fallback for this setting. Empty uses the remote repository.",
+    },
+    {
         "name": "webrtc_pacer",
         "type": "bool",
         "default": True,
@@ -2180,7 +2187,7 @@ CLIENT_PAYLOAD_EXCLUDED = [
     'webcam_socket_path', 'webcam_device',
     'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind', 'computer_use_token',
     'wayland_host_display', 'app_wayland_display',
-    'audit_webhook_url', 'audit_webhook_timeout',
+    'audit_webhook_url', 'audit_webhook_timeout', 'apps_repo_folder',
 ]
 
 
@@ -2245,7 +2252,10 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
     this host (the software one the pixelflux build's, "x264" or "openh264"
     for H.264) and whether each encodes 4:4:4, from which the dashboards show
     the software encoding switch only where it switches something and the
-    client walks its codec ladder.
+    client walks its codec ladder. `apps_local_repo` says whether the apps
+    panel reads its catalog from this server (`/api/apps/`, a proot-apps
+    local repository) rather than the remote one; the directory itself stays
+    on the host.
     """
     out = {}
     for setting_def in SETTING_DEFINITIONS:
@@ -2284,7 +2294,19 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
     backends = settings.encoder_backends()
     if backends is not None:
         out['encoder_backends'] = {'value': backends}
+    out['apps_local_repo'] = {'value': bool(apps_repo_folder())}
     return out
+
+
+def apps_repo_folder() -> str:
+    """The proot-apps local repository as an absolute path, or "" for the remote one.
+
+    One reading of `apps_repo_folder` for the catalog routes, the runner's
+    environment, and the client payload, so a `~` or a relative path names
+    the same directory everywhere.
+    """
+    folder = (getattr(settings, 'apps_repo_folder', '') or '').strip()
+    return os.path.abspath(os.path.expanduser(folder)) if folder else ''
 
 
 # Bounds for client numerics without declared ones; the min is not 0 because

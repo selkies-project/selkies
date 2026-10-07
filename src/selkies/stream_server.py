@@ -55,7 +55,8 @@ except ImportError:
     import importlib.resources as importlib_resources
 
 from abc import ABCMeta, abstractmethod
-from . import audit, printing
+from . import apps_catalog, audit, printing
+from .settings import apps_repo_folder
 
 
 logger = logging.getLogger("server")
@@ -2755,6 +2756,27 @@ class CentralizedStreamServer:
         return _AuditedFileResponse(pathlib.Path(full), name, event="print.document", remove=True,
                                     headers={"Content-Disposition": "inline"})
 
+    async def handle_apps_catalog(self, request: web.Request) -> web.StreamResponse:
+        """GET /api/apps/metadata.yml: the catalog of the proot-apps local
+        repository the session installs from (`apps_catalog`). Nothing is
+        served where no repository is configured, since the page then reads
+        the remote catalog; a configured directory that is missing is the
+        same answer, and the panel reports the catalog as failed to load
+        rather than offering installs the runner cannot make."""
+        text = apps_catalog.catalog_text(apps_repo_folder())
+        if text is None:
+            return web.Response(status=404, text="No local apps repository")
+        return web.Response(text=text, content_type="text/yaml",
+                            headers={"Cache-Control": "no-cache"})
+
+    async def handle_apps_icon(self, request: web.Request) -> web.StreamResponse:
+        """GET /api/apps/img/<name>: one icon of the local repository's
+        catalog, served from its `metadata/img` directory and nowhere else."""
+        path = apps_catalog.icon_path(apps_repo_folder(), request.match_info.get("name", ""))
+        if path is None:
+            return web.Response(status=404, text="No such icon")
+        return web.FileResponse(pathlib.Path(path))
+
     def _active_service(self) -> Optional[BaseStreamingService]:
         return self.services.get(self.current_mode) if self.current_mode else None
 
@@ -3183,9 +3205,10 @@ class CentralizedStreamServer:
         routes them, present and future, with one rule. The file-browser API
         serves the file-manager directory independently of the static content,
         so a deployment whose frontend is served elsewhere (nginx, `web_root`
-        unset) still gets downloads instead of a 404; and the Prometheus
-        registry is process-global, so one mode-agnostic endpoint serves both
-        streaming modes.
+        unset) still gets downloads instead of a 404; the apps catalog of a
+        proot-apps local repository is served the same way; and the
+        Prometheus registry is process-global, so one mode-agnostic endpoint
+        serves both streaming modes.
 
         Returns:
             The configured application (also stored on ``self.app``).
@@ -3213,6 +3236,8 @@ class CentralizedStreamServer:
             web.post(f"{api_prefix}/api/upload", self.handle_upload),
             web.get(f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler),
             web.get(f"{api_prefix}/api/print/{{name}}", self.handle_print_document),
+            web.get(f"{api_prefix}/api/apps/metadata.yml", self.handle_apps_catalog),
+            web.get(f"{api_prefix}/api/apps/img/{{name}}", self.handle_apps_icon),
             web.get(f"{api_prefix}/api/sessions", self.handle_sessions),
             web.delete(f"{api_prefix}/api/sessions/{{id}}", self.handle_session_delete),
             web.get(f"{api_prefix}/api/recording", self.handle_recording),

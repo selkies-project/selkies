@@ -81,6 +81,7 @@ import {
   INSTALLED_APPS_ROLLBACK_EVENT,
   INSTALLED_APPS_SERVER_EVENT,
   applyServerInstalledApps,
+  appsCatalog,
   pendingAppAction,
   postAppCommand,
   readInstalledApps,
@@ -183,10 +184,6 @@ const DEFAULT_SCALE_LOCALLY = true;
 const DEFAULT_ENABLE_BINARY_CLIPBOARD = true;
 /** What the clipboard box shows for a secret, which the core never hands over. */
 const CLIPBOARD_SECRET_MASK = "\u2022".repeat(8);
-const REPO_BASE_URL =
-  "https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/";
-const METADATA_URL = `${REPO_BASE_URL}metadata.yml`;
-const IMAGE_BASE_URL = `${REPO_BASE_URL}img/`;
 const METADATA_FETCH_TIMEOUT_MS = 10000;
 
 const MAX_NOTIFICATIONS = 3;
@@ -421,10 +418,12 @@ const SelkiesLogo = ({ width = 30, height = 30, className, t, ...props }) => {
 };
 
 /**
- * Session cache of the fetched proot-apps catalog: AppsModal is conditionally
- * mounted, so each open is a fresh mount, and a hit here skips the network.
+ * Session cache of the fetched proot-apps catalog, keyed by where it was read
+ * from: AppsModal is conditionally mounted, so each open is a fresh mount, and
+ * a hit here skips the network.
  */
 let cachedAppData = null;
+let cachedCatalogUrl = null;
 
 /**
  * The last `serverSettings` the core posted, kept from module load and read by
@@ -460,10 +459,12 @@ const readServerSettings = () => latestServerSettings;
  * @param {boolean} props.commandsAvailable Whether the server accepts remote commands; actions are disabled otherwise.
  * @param {boolean} props.commandsKnown Whether `serverSettings` have arrived, so the disabled notice is only shown once known.
  * @param {string[]|undefined} props.installedFromServer App names the runner reports installed; the stored list is only a cache of it.
+ * @param {import("../../../selkies-web-core/lib/app-commands.js").AppsCatalog} props.catalog Where the catalog is read from, as the server says.
  */
 function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown,
-                    installedFromServer }) {
-  const [appData, setAppData] = useState(cachedAppData);
+                    installedFromServer, catalog }) {
+  const [appData, setAppData] = useState(
+    cachedCatalogUrl === catalog.metadata ? cachedAppData : null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [fetchAttempt, setFetchAttempt] = useState(0);
@@ -546,7 +547,7 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown,
     setError(null);
     (async () => {
       try {
-        const response = await fetch(METADATA_URL, {
+        const response = await fetch(catalog.metadata, {
           signal: controller.signal,
         });
         if (!response.ok) {
@@ -556,6 +557,7 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown,
         const parsedData = yaml.load(yamlText);
         if (!active) return;
         cachedAppData = parsedData;
+        cachedCatalogUrl = catalog.metadata;
         setAppData(parsedData);
       } catch (e) {
         if (!active) return;
@@ -576,7 +578,7 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown,
       clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [isOpen, appData, fetchAttempt, t]);
+  }, [isOpen, appData, fetchAttempt, t, catalog.metadata]);
 
   const handleSearchChange = (event) =>
     setSearchTerm(event.target.value.toLowerCase());
@@ -669,7 +671,7 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown,
                   &larr; {t("appsModal.backButton", "Back to list")}
                 </button>
                 <img
-                  src={`${IMAGE_BASE_URL}${selectedApp.icon}`}
+                  src={catalog.icon(selectedApp.icon)}
                   alt={selectedApp.full_name}
                   className="app-detail-icon"
                   onError={(e) => {
@@ -748,7 +750,7 @@ function AppsModal({ isOpen, onClose, t, commandsAvailable, commandsKnown,
                         onClick={() => handleAppClick(app)}
                       >
                         <img
-                          src={`${IMAGE_BASE_URL}${app.icon}`}
+                          src={catalog.icon(app.icon)}
                           alt={app.full_name}
                           className="app-card-icon"
                           loading="lazy"
@@ -4749,7 +4751,8 @@ function Sidebar() {
         <AppsModal isOpen={isAppsModalOpen} onClose={toggleAppsModal} t={t}
           commandsAvailable={serverSettings?.command_enabled?.value === true}
           commandsKnown={serverSettings != null}
-          installedFromServer={serverSettings?.apps_installed?.value} />
+          installedFromServer={serverSettings?.apps_installed?.value}
+          catalog={appsCatalog(serverSettings, withSessionToken)} />
       )}
 
       {isViewerRole && (

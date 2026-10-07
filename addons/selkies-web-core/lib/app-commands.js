@@ -13,6 +13,11 @@
  * settings and again as an `apps_installed` system action when a command
  * changes it. What is stored locally is a cache of it, so a panel opened before
  * the server speaks shows the last answer rather than nothing.
+ *
+ * Where the catalog comes from is the server's answer as well (`appsCatalog`):
+ * the proot-apps repository on GitHub, or, for a session installing from a
+ * proot-apps local repository, that folder's catalog served by the server
+ * under `api/apps/`, so the panel lists exactly what the runner can install.
  * @module
  */
 
@@ -29,6 +34,37 @@ export const APP_COMMAND_STATE_EVENT = "appCommandState";
 
 const PENDING_COMMAND_TTL_MS = 10 * 60 * 1000;
 const LAUNCH_FAILURE_WINDOW_MS = 15 * 1000;
+
+const REMOTE_CATALOG_BASE = "https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/";
+// Page-relative, like the file browser's `api/files/`, so a subfolder
+// deployment resolves it under its prefix.
+const LOCAL_CATALOG_BASE = "api/apps/";
+
+/**
+ * @typedef {object} AppsCatalog
+ * @property {string} metadata URL of the catalog document (YAML).
+ * @property {(name: string) => string} icon URL of an entry's icon, from its `icon` file name.
+ * @property {boolean} local Whether this server serves it from a local repository.
+ */
+
+/**
+ * Where the panel reads its catalog, as the server settings say.
+ *
+ * A server on a proot-apps local repository publishes `apps_local_repo`, and
+ * its catalog is read from the server itself, through the session's own
+ * authentication: `tokenize` (the dashboards' `withSessionToken`) is applied
+ * to those URLs alone, since the remote catalog is another origin and never
+ * sees a session token.
+ * @param {object|null|undefined} serverSettings The last `serverSettings` payload.
+ * @param {(url: string) => string} [tokenize] Adds the session token to a same-origin URL.
+ * @returns {AppsCatalog}
+ */
+export function appsCatalog(serverSettings, tokenize) {
+    const local = serverSettings?.apps_local_repo?.value === true;
+    const base = local ? LOCAL_CATALOG_BASE : REMOTE_CATALOG_BASE;
+    const url = (path) => (local && tokenize ? tokenize(base + path) : base + path);
+    return { metadata: url("metadata.yml"), icon: (name) => url(`img/${name}`), local };
+}
 
 /** Shell command per action; the `selkies-proot` wrapper is on PATH in the image.
  *

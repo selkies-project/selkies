@@ -97,7 +97,8 @@ from .display_utils import (
     wayland_output_id,
 )
 from .settings import RateControlMode
-from .settings import sanitize_client_setting, settings
+from .settings import apps_repo_folder, sanitize_client_setting, settings
+from . import apps_catalog
 from .sessions import token_slots
 from . import audit
 try:
@@ -6775,8 +6776,26 @@ class WebRTCInput:
             return {"x11_display": env_display, "wayland_display": None, "type": "x11"}
         return {"x11_display": None, "wayland_display": wayland, "type": "wayland"}
 
+    def _apps_runner_env(self) -> dict:
+        """The server's environment with the apps repository as the runner reads it.
+
+        proot-apps takes its local repository from `PA_REPO_FOLDER`, while the
+        setting may have come from the command line or `SELKIES_APPS_REPO_FOLDER`,
+        so the setting's reading is written there: set, the runner installs
+        from the folder the panel lists; empty, the variable is withdrawn, so
+        the runner and the panel never read two repositories.
+        """
+        env = dict(os.environ)
+        folder = apps_repo_folder()
+        if folder:
+            env["PA_REPO_FOLDER"] = folder
+        else:
+            env.pop("PA_REPO_FOLDER", None)
+        return env
+
     def app_launch_env(self) -> dict:
-        """Environment for a client-requested command: the server's, with
+        """Environment for a client-requested command: the server's, with the
+        apps repository as the runner reads it (_apps_runner_env), with
         DISPLAY / WAYLAND_DISPLAY / XDG_SESSION_TYPE set for the session the
         applications run in (app_session) and the session bus plus desktop
         identity adopted from that session's processes when the server has
@@ -6785,7 +6804,7 @@ class WebRTCInput:
         so a command burst on a session with no bus does not rescan /proc (a
         synchronous walk on the loop) each time."""
         session = self.app_session()
-        env = dict(os.environ)
+        env = self._apps_runner_env()
         for key in ("DISPLAY", "WAYLAND_DISPLAY"):
             env.pop(key, None)
         if session["x11_display"]:
@@ -6822,10 +6841,13 @@ class WebRTCInput:
 
         Availability is the wrapper plus an environment it can work in; where
         either is missing, dashboards are told to drop the panel rather than
-        offer buttons that can never succeed. `command_enabled` is permission,
-        not availability: with it off the panel still shows and the client
-        explains why its actions are disabled, so an operator flipping the
-        flag does not make the panel itself appear and vanish. The
+        offer buttons that can never succeed. A local repository
+        (`apps_repo_folder`) changes what the panel lists, not whether it
+        shows: the panel reads that catalog from this server (`apps_catalog`)
+        and the runner installs from the same folder. `command_enabled` is
+        permission, not availability: with it off the panel still shows and
+        the client explains why its actions are disabled, so an operator
+        flipping the flag does not make the panel itself appear and vanish. The
         environment answer comes from probe_apps_runner() and is assumed good
         until that probe has spoken, so a working session never flickers the
         panel.
@@ -6849,7 +6871,7 @@ class WebRTCInput:
             return
         try:
             proc = await subprocess.create_subprocess_exec(
-                runner, "check",
+                runner, "check", env=self._apps_runner_env(),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             stdout, _ = await self._communicate_or_kill(
                 proc, APP_RUNNER_CHECK_TIMEOUT_S, f"{APP_RUNNER} check")
@@ -6859,7 +6881,19 @@ class WebRTCInput:
             self._apps_runner_ok = False
             return
         if self._apps_runner_ok:
-            logger_webrtc_input.info("Apps panel enabled: %s can run here.", APP_RUNNER)
+            folder = apps_repo_folder()
+            if not folder:
+                logger_webrtc_input.info("Apps panel enabled: %s can run here.", APP_RUNNER)
+            elif os.path.isdir(folder):
+                count = len(apps_catalog.listed_apps(folder))
+                logger_webrtc_input.info(
+                    "Apps panel enabled: %s can run here, catalog from the local repository "
+                    "%s (%d application%s).", APP_RUNNER, folder, count, "" if count == 1 else "s")
+            else:
+                logger_webrtc_input.warning(
+                    "Apps panel enabled: %s can run here, but the local repository %s is "
+                    "not a directory; the catalog fails to load until it is mounted.",
+                    APP_RUNNER, folder)
             await self.refresh_installed_apps()
         else:
             detail = (stdout or b"").decode("utf-8", "replace").strip().splitlines()
@@ -6892,7 +6926,8 @@ class WebRTCInput:
             return False
         try:
             proc = await subprocess.create_subprocess_exec(
-                runner, "list", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                runner, "list", env=self._apps_runner_env(),
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             stdout, _ = await self._communicate_or_kill(
                 proc, APP_RUNNER_CHECK_TIMEOUT_S, f"{APP_RUNNER} list")
         except Exception as e:

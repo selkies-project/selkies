@@ -53,6 +53,7 @@ const {
     INSTALLED_APPS_ROLLBACK_EVENT,
     INSTALLED_APPS_SERVER_EVENT,
     applyServerInstalledApps,
+    appsCatalog,
     pendingAppAction,
     postAppCommand,
     readInstalledApps,
@@ -148,5 +149,28 @@ postAppCommand('remove', 'krita');
 applyServerInstalledApps(['krita', 'blender']);
 check('a list from before an in-flight remove keeps the optimistic update',
       readInstalledApps().join() === 'blender', JSON.stringify(readInstalledApps()));
+
+// Where the catalog is read from is the server's answer: a session installing
+// from a proot-apps local repository lists that folder's catalog, served by the
+// server behind the session's own authentication, and never the remote one.
+const tokenize = (url) => `${url}?token=t`;
+const remote = appsCatalog({ command_enabled: { value: true } }, tokenize);
+check('without a local repository the catalog is the remote one',
+      remote.local === false
+      && remote.metadata === 'https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/metadata.yml'
+      && remote.icon('firefox.svg') === 'https://raw.githubusercontent.com/linuxserver/proot-apps/master/metadata/img/firefox.svg',
+      JSON.stringify(remote));
+check('no session token ever reaches the remote catalog',
+      !remote.metadata.includes('token') && !remote.icon('x.svg').includes('token'));
+check('before the server settings arrive the catalog is the remote one',
+      appsCatalog(null).local === false && appsCatalog(undefined).local === false);
+const local = appsCatalog({ apps_local_repo: { value: true } }, tokenize);
+check('a local repository is read from the server, page-relative, with the session token',
+      local.local === true
+      && local.metadata === 'api/apps/metadata.yml?token=t'
+      && local.icon('firefox.svg') === 'api/apps/img/firefox.svg?token=t',
+      JSON.stringify(local));
+check('a local repository without a tokenizer is still read from the server',
+      appsCatalog({ apps_local_repo: { value: true } }).metadata === 'api/apps/metadata.yml');
 
 process.exit(failed ? 1 : 0);

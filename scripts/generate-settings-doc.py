@@ -71,9 +71,10 @@ SECTIONS = [
         "gamepad_enabled", "uinput_gamepad", "js_socket_path", "uinput_mouse_socket", "publish_input_devices",
         "keyboard_shortcuts", "mac_cmd_as_ctrl",
     ]),
-    ("Clipboard, files, and printing", "What leaves and enters the session besides the stream.", [
+    ("Clipboard, files, printing, and apps", "What leaves and enters the session besides the stream.", [
         "enable_clipboard", "enable_binary_clipboard", "clipboard_seamless", "file_transfers",
         "file_manager_path", "file_transfer_limit_mbps", "printing_enabled", "print_spool_path",
+        "apps_repo_folder",
     ]),
     ("Webcam", "The camera uplink and the virtual V4L2 device it is published as.", [
         "webcam_enabled", "webcam_encoder", "webcam_width", "webcam_height", "webcam_pixel_format",
