@@ -162,6 +162,14 @@ def webkit_gl_sink_ready() -> bool:
     return _WEBKIT_GL_SINK_READY
 
 
+# GStreamer's hardware VP8 decoders, ranked out of the suites' WebKit so it decodes VP8 as CI's
+# GPU-less runners do. Where one is ranked above vp8dec, WebKit's GStreamer ports decode WebRTC VP8
+# with it instead of libwebrtc's decoder, and that path paints the stream with GStreamer's default
+# matrix for its size (BT.709 above 576 lines) whatever its RTP color space declares: a WebKit
+# fault, not the stream's, which would fail the color checks on a host with NVDEC or VA-API.
+WEBKIT_SOFTWARE_VP8 = "nvvp8dec:0,vavp8dec:0,v4l2slvp8dec:0"
+
+
 def launch_browser(pw: Any, engine: str = "chromium") -> Any:
     """Launch a headless browser for ``engine``: chromium, firefox, or webkit.
 
@@ -184,7 +192,8 @@ def launch_browser(pw: Any, engine: str = "chromium") -> Any:
             raise RuntimeError("GStreamer has no opengl plugin, so WebKit would paint through its "
                                "software fallback sink; install gstreamer1.0-gl "
                                "(playwright install --with-deps webkit)")
-        return pw.webkit.launch(headless=True)
+        ranks = ",".join(filter(None, (os.environ.get("GST_PLUGIN_FEATURE_RANK", ""), WEBKIT_SOFTWARE_VP8)))
+        return pw.webkit.launch(headless=True, env={**os.environ, "GST_PLUGIN_FEATURE_RANK": ranks})
     return chromium_launch(pw)
 
 
