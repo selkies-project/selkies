@@ -12,7 +12,13 @@ owner starts on what the owner streams with, whatever it has stored, a setting
 its user picks changes the display for both, and the owner's own later picks
 leave it be.
 
-Usage: python3 tests/e2e/test_multi_controller.py [websockets|webrtc|settings|settings-wr|all]
+The ``nodisrupt`` block holds the page beside the owner to its own stream over
+WebSockets: its audio starts and stops for itself alone, and its hidden tab
+pauses its own feed, while the owner's audio and video go on as the owner set
+them. Once the owner is gone for good, that page owns the display with full
+control: hidden, it stops the stream nobody else watches.
+
+Usage: python3 tests/e2e/test_multi_controller.py [websockets|webrtc|settings|settings-wr|nodisrupt|all]
 """
 import json
 import os
@@ -22,6 +28,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import helpers as H
 import core_lib as C
+import test_encoders as TENC
 from playwright.sync_api import sync_playwright
 
 
@@ -278,6 +285,121 @@ def run_settings_wr(res: "H.Results") -> None:
         H.server_stop()
 
 
+def control(page, pipeline: str, enabled: bool) -> None:
+    """What a dashboard posts for its user's pipeline toggle."""
+    page.evaluate("([p, on]) => window.postMessage({type: 'pipelineControl', pipeline: p, enabled: on},"
+                  " window.location.origin)", [pipeline, enabled])
+
+
+def frames(page) -> int:
+    """The video frames the page has received."""
+    return page.evaluate("(window.__wsTypes || {})[4] || 0")
+
+
+def gained(page, seconds: float = 2.5) -> int:
+    """How many video frames the page receives over the next `seconds`."""
+    before = frames(page)
+    time.sleep(seconds)
+    return frames(page) - before
+
+
+def hears(page, timeout: float = 10) -> bool:
+    """Whether audio fills the page's playback buffer within `timeout`."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if (page.evaluate("window.currentAudioBufferSize || 0") or 0) > 0:
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def silent(page, settle: float = 2.0, span: float = 2.5) -> bool:
+    """Whether the page's playback buffer, drained for `settle`, stays empty for `span`."""
+    time.sleep(settle)
+    deadline = time.time() + span
+    while time.time() < deadline:
+        if (page.evaluate("window.currentAudioBufferSize || 0") or 0) > 0:
+            return False
+        time.sleep(0.25)
+    return True
+
+
+def states(page) -> list:
+    """The audio and video state messages the server has sent the page."""
+    return page.evaluate("window.__wsStates || []")
+
+
+def hide(page, hidden: bool) -> None:
+    """Hide or show the page's tab, as the browser tells it."""
+    page.evaluate("""(h) => {
+      Object.defineProperty(document, 'hidden', {configurable: true, get: () => h});
+      Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => h ? 'hidden' : 'visible'});
+      document.dispatchEvent(new Event('visibilitychange'));
+    }""", hidden)
+
+
+def run_nodisrupt(res: "H.Results") -> None:
+    H.server_start(mode="websockets")
+    tone = H.pulse_sine()
+    picture = TENC.Picture(False)
+    try:
+        with sync_playwright() as pw:
+            owner_browser, owner, _ = open_page(pw, {})
+            res.check("nodisrupt: the owner streams", video(owner, "websockets"))
+            owner.mouse.click(640, 360)
+            res.check("nodisrupt: and hears the session", hears(owner))
+            control(owner, "audio", False)
+            res.check("nodisrupt: until its user turns its audio off", silent(owner))
+            told = len(states(owner))
+            other_browser, other, _ = open_page(pw, {})
+            res.check("nodisrupt: a page of another tab streams too", video(other, "websockets"))
+            other.mouse.click(640, 360)
+            res.check("nodisrupt: and hears the session by its own start", hears(other))
+            res.check("nodisrupt: while the owner's audio stays off", silent(owner, settle=0)
+                      and "AUDIO_STARTED" not in states(owner)[told:], states(owner)[told:])
+            control(owner, "audio", True)
+            res.check("nodisrupt: until the owner turns it back on", hears(owner))
+            told = len(states(owner))
+            control(other, "audio", False)
+            res.check("nodisrupt: the page beside it turning its audio off stops its own",
+                      silent(other), states(other)[-2:])
+            res.check("nodisrupt: and leaves the owner's playing", hears(owner, timeout=3)
+                      and "AUDIO_STOPPED" not in states(owner)[told:], states(owner)[told:])
+
+            hide(other, True)
+            time.sleep(1.5)
+            before_owner, before_other = frames(owner), frames(other)
+            picture.paint()
+            time.sleep(2.5)
+            res.check("nodisrupt: the page beside it hidden gets no video",
+                      frames(other) == before_other, frames(other) - before_other)
+            res.check("nodisrupt: while the owner's goes on", frames(owner) > before_owner,
+                      frames(owner) - before_owner)
+            told = len(states(other))
+            hide(other, False)
+            time.sleep(2)
+            picture.clear()
+            res.check("nodisrupt: shown again, it resumes on a fresh start",
+                      "PIPELINE_RESETTING primary" in states(other)[told:] and gained(other) > 0,
+                      states(other)[told:])
+
+            owner_browser.close()
+            res.check("nodisrupt: once the owner is gone for good, the page beside it owns the display",
+                      C.wait_log("The controller beside 'primary' owns it now.", timeout=25))
+            time.sleep(3)
+            hide(other, True)
+            res.check("nodisrupt: with full control: hidden, it stops the stream",
+                      C.wait_log("Received STOP_VIDEO for 'primary'. Stopping stream.", timeout=10))
+            hide(other, False)
+            res.check("nodisrupt: and shown, it starts it again", C.wait_log(
+                "Received START_VIDEO for 'primary'. Starting its stream.", timeout=10) and gained(other) > 0)
+            other_browser.close()
+    finally:
+        picture.clear()
+        H.pulse_unload(tone)
+        H.server_stop()
+
+
 def main() -> int:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     res = H.Results(f"multi-controller-{which}")
@@ -288,6 +410,8 @@ def main() -> int:
         run_settings(res)
     if which in ("all", "settings-wr"):
         run_settings_wr(res)
+    if which in ("all", "nodisrupt"):
+        run_nodisrupt(res)
     return 0 if res.summary() else 1
 
 

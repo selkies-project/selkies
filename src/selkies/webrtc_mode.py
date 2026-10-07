@@ -652,6 +652,7 @@ class WebRTCService(BaseStreamingService):
 
         self.rtc_app.request_idr_frame = self.request_idr_for_display
         self.rtc_app.invalidate_reference = self.invalidate_reference_for_display
+        self.rtc_app.peer_owns_display = self._peer_owns_display
         self._invalidation_log: Dict[tuple, tuple] = {}
         self.rtc_app.start_display_media = self.start_display_media
         self.rtc_app.stop_display_media = self.stop_display_media
@@ -1691,7 +1692,11 @@ class WebRTCService(BaseStreamingService):
         the display (`_succeed_display_owner`); its SETTINGS changes the stream
         by its user's picks alone (`_settings_beside_owner`), and its stream
         verbs, its page's own changes, are dropped. The owner's changes to the
-        stream reach the pages beside it."""
+        stream reach the pages beside it. A keyframe request from a peer that
+        does not own the display is taken once a second (`peer_recovery_taken`)."""
+        if msg == "REQUEST_KEYFRAME" and self.rtc_app is not None \
+                and not self.rtc_app.peer_recovery_taken(conn_id, "keyframe"):
+            return None
         if not isinstance(msg, str) or not msg.startswith(self.OWNER_ONLY_PREFIXES + self.STREAM_VERB_PREFIXES):
             return self.input_handler.on_message(msg, display_id, conn_id=conn_id)
         display_id = display_id or "primary"
@@ -1708,6 +1713,13 @@ class WebRTCService(BaseStreamingService):
         if msg.startswith(("SETTINGS,",) + self.STREAM_VERB_PREFIXES) and self._peers_beside_owner(display_id):
             return self._tell_beside_after(result, display_id)
         return result
+
+    def _peer_owns_display(self, client_peer_id: str) -> bool:
+        """Whether a peer is the owner of the display it streams, which any peer
+        is while no owner's tab is known (`peer_recovery_taken`)."""
+        peer = (self.rtc_app.peer_connections.get(client_peer_id) if self.rtc_app else None) or {}
+        owner = self._display_owner_tabs.get(peer.get("display_id") or "primary")
+        return owner is None or self._peer_tabs.get(client_peer_id) == owner
 
     def _owner_peer(self, display_id: str) -> Optional[Dict[str, Any]]:
         """The peer entry of the display's owner."""
@@ -1782,15 +1794,18 @@ class WebRTCService(BaseStreamingService):
 
     async def _succeed_display_owner(self, display_id: str, tab: str) -> None:
         """Once the owner's tab has been gone through the reconnect grace, hand
-        the display to its oldest controller: the settings, density and size
-        that controller asked for meanwhile apply now."""
+        the display to its oldest controller that holds full permissions, else
+        to its oldest controller: the density and size that controller asked
+        for meanwhile apply now, and its own changes from then on."""
         await asyncio.sleep(self.RECONNECT_GRACE_S)
         if self._display_owner_tabs.get(display_id) != tab or tab in self._display_tabs(display_id):
             return
         peers = self.rtc_app.peer_connections if self.rtc_app else {}
-        heir = next((pid for pid, p in peers.items()
-                     if (p.get("display_id") or "primary") == display_id
-                     and p.get("client_type") == "controller" and self._peer_tabs.get(pid)), None)
+        controllers = [pid for pid, p in peers.items()
+                       if (p.get("display_id") or "primary") == display_id
+                       and p.get("client_type") == "controller" and self._peer_tabs.get(pid)]
+        heir = next((pid for pid in controllers if self._holds_full_control(peers[pid])),
+                    controllers[0] if controllers else None)
         if heir is None:
             self._display_owner_tabs.pop(display_id, None)
             return
@@ -3036,9 +3051,12 @@ class WebRTCService(BaseStreamingService):
         that display's encoder within the allowed video_bitrate range — one
         display's congested link never steers another's stream. The queue is
         the deepest any of its peers shows, so a deep buffer is found before it
-        overflows into loss. Only CBR mode has a target to steer. Each peer's
-        own loss and queue also set how many FlexFEC repair packets its sender
-        adds per group (`RTCRtpSender.steer_fec`).
+        overflows into loss. The peers are the display's owner when it sent
+        feedback, as over WebSockets the owner's acks steer: a viewer's or a
+        controller's beside the owner on a slower link do not pull the owner's
+        stream down; all of them otherwise. Only CBR mode has a target to steer.
+        Each peer's own loss and queue also set how many FlexFEC repair packets
+        its sender adds per group (`RTCRtpSender.steer_fec`).
 
         Each peer's feedback is drained per tick, so a decision is taken over a
         tick's worth of it rather than whichever window landed last: a single
@@ -3074,7 +3092,8 @@ class WebRTCService(BaseStreamingService):
             if not rtc_app:
                 continue
             per_display: Dict[str, Dict[str, Any]] = {}
-            for peer in rtc_app.peer_connections.values():
+            by_owner: Dict[str, Dict[str, Any]] = {}
+            for peer_id, peer in rtc_app.peer_connections.items():
                 pc = peer.get("peer_conn")
                 did = peer.get("display_id", "primary") or "primary"
                 if pacer_on:
@@ -3093,15 +3112,17 @@ class WebRTCService(BaseStreamingService):
                 sender = peer.get("video_sender")
                 if sender is not None:
                     sender.steer_fec(window["loss_fraction"], standing is not None and standing > TWCC_QUEUE_MS)
-                bucket = per_display.setdefault(
-                    did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0, "sent_bps": 0})
-                if window["goodput_bps"]:
-                    bucket["goodputs"].append(window["goodput_bps"])
-                bucket["sent_bps"] = max(bucket["sent_bps"], window["sent_bps"])
-                bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
-                if standing is not None:
-                    bucket["queue_ms"] = max(bucket["queue_ms"] or 0.0, standing)
-                    bucket["depth_ms"] = max(bucket["depth_ms"], window["queue_depth_ms"])
+                for buckets in ((per_display, by_owner) if self._peer_owns_display(peer_id) else (per_display,)):
+                    bucket = buckets.setdefault(
+                        did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0, "sent_bps": 0})
+                    if window["goodput_bps"]:
+                        bucket["goodputs"].append(window["goodput_bps"])
+                    bucket["sent_bps"] = max(bucket["sent_bps"], window["sent_bps"])
+                    bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
+                    if standing is not None:
+                        bucket["queue_ms"] = max(bucket["queue_ms"] or 0.0, standing)
+                        bucket["depth_ms"] = max(bucket["depth_ms"], window["queue_depth_ms"])
+            per_display.update(by_owner)
             if self.metrics is not None:
                 self.metrics.set_bridge_drops(rtc_app.bridge_drops())
             for did, bucket in per_display.items():

@@ -121,6 +121,7 @@ class TransportCallerTests(unittest.IsolatedAsyncioTestCase):
                 service._display_setting = lambda did, key: 6000
                 service.display_pipelines = {"primary": pipeline}
                 service._ensure_pacer = Mock()
+                service._display_owner_tabs, service._peer_tabs = {}, {}
                 windows = [dict(goodput_bps=5_000_000, sent_bps=6_000_000,
                                 loss_fraction=loss, queue_ms=0.0,
                                 queue_rising_ms=0.0, queue_depth_ms=0.0)

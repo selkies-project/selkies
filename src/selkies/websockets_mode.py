@@ -1430,8 +1430,15 @@ class DataStreamingServer(BaseStreamingService):
         self._is_reconfiguring = False
         self._reconfigure_pending = False
         self.last_start_video_request_times = {}
-        self.last_viewer_keyframe_request_times = {}
+        # When each page that does not own its display last had a repair of its
+        # stream taken, by kind (`_repair_taken`).
+        self._repair_times: Dict[Tuple[Any, str], float] = {}
         self.video_paused_clients = set()
+        # The audio each controller beside the primary's owner asked for, its own:
+        # the owner's page decides it for itself and the viewers, None until it
+        # says, which leaves it to the start policy (`_hears_audio`).
+        self._beside_audio: Dict[Any, bool] = {}
+        self._session_audio: Optional[bool] = None
         self._deferred_viewer_rejoins = {}
         self.allowed_desync_ms = BACKPRESSURE_ALLOWED_DESYNC_MS
         self.backpressure_check_interval_s = BACKPRESSURE_CHECK_INTERVAL_S
@@ -1651,12 +1658,14 @@ class DataStreamingServer(BaseStreamingService):
 
     async def _promote_co_controller(self, display_id: str) -> bool:
         """Hand a display whose owner is gone for good to the oldest controller
-        beside it: told `DISPLAY_OWNER <display>`, the page sends its settings
-        again, and that SETTINGS takes the entry over. False when none is left
-        to tell."""
+        beside it that holds full permissions, else to the oldest one: told
+        `DISPLAY_OWNER <display>`, the page sends its settings again, and that
+        SETTINGS takes the entry over, with full control of the display, its own
+        changes now applying. False when none is left to tell."""
         joiners = self.co_controllers.get(display_id)
         while joiners:
-            ws, _tab = joiners.popitem(last=False)
+            ws = next((w for w in joiners if not w.closed and self._holds_full_control(w)), next(iter(joiners)))
+            joiners.pop(ws)
             if ws.closed:
                 continue
             try:
@@ -1666,6 +1675,36 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.info(f"The controller beside '{display_id}' owns it now.")
             return True
         return False
+
+    def _owns_display(self, websocket: Any, display_id: Optional[str]) -> bool:
+        """Whether `websocket` is the page that owns `display_id`, the primary for none."""
+        return (self.display_clients.get(display_id or 'primary') or {}).get('ws') is websocket
+
+    def _repair_taken(self, websocket: Any, display_id: Optional[str], kind: str) -> bool:
+        """Whether a page's request to repair its display's stream (`kind`: a
+        keyframe or a lost frame) is taken: always from the page that owns the
+        display, at most once a second from any other, a viewer or a controller
+        beside the owner, since any number of them share the owner's stream."""
+        if self._owns_display(websocket, display_id):
+            return True
+        now = time.monotonic()
+        if now - self._repair_times.get((websocket, kind), 0.0) < 1.0:
+            return False
+        self._repair_times[(websocket, kind)] = now
+        return True
+
+    def _hears_audio(self, websocket: Any) -> bool:
+        """Whether the audio fan-out serves a page: a controller beside the
+        primary's owner by its own START_AUDIO, every other page by the owner's."""
+        if websocket in self.co_controllers.get('primary', ()):
+            return self._beside_audio.get(websocket, False)
+        if self._session_audio is not None:
+            return self._session_audio
+        return pipeline_starts_on('audio', 'primary')
+
+    def _audio_wanted(self) -> bool:
+        """Whether a page the audio fan-out serves wants the capture running."""
+        return any(self._hears_audio(ws) for ws in self._audio_listeners())
 
     def _holds_full_control(self, websocket: Any) -> bool:
         """Whether a page holds a display's full permissions: a controller that
@@ -2146,7 +2185,8 @@ class DataStreamingServer(BaseStreamingService):
         """Broadcast queued Opus audio chunks to the primary-viewer sockets.
 
         Runs as a long-lived task. Secondary-display sockets are excluded (they
-        render video only; audio rides the primary connection), and each
+        render video only; audio rides the primary connection), as is a page
+        whose audio is off (`_hears_audio`), and each
         socket's send runs on its own (`_send_audio_chunk`), so a slow or dead
         socket holds neither the shared stream nor another client's audio. A
         queue that stays silent past the health interval is the cue to ask
@@ -2167,7 +2207,7 @@ class DataStreamingServer(BaseStreamingService):
                     for did, client_info in self.display_clients.items()
                     if did != 'primary' and client_info.get('ws')
                 }
-                primary_viewers = self.clients - secondary_websockets
+                primary_viewers = {ws for ws in self.clients - secondary_websockets if self._hears_audio(ws)}
 
                 if not primary_viewers:
                     self.pcmflux_audio_queue.task_done()
@@ -4730,6 +4770,9 @@ class DataStreamingServer(BaseStreamingService):
                                     pass
                                 self._schedule_idr_for_display(display_id)
  
+                            if display_id == 'primary' and websocket in self._beside_audio:
+                                # Owning the display, its own audio is the session's now.
+                                self._session_audio = self._beside_audio.pop(websocket)
                             if initial_settings_processed:
                                 applied = self._settings_changed_by(websocket, parsed_settings)
                             else:
@@ -4806,7 +4849,10 @@ class DataStreamingServer(BaseStreamingService):
                     elif message == "START_VIDEO":
                         was_paused = websocket in self.video_paused_clients
                         perms = client_permissions.get(websocket)
-                        if perms and perms.get("role") == "viewer":
+                        # A controller beside the display's owner pauses and resumes its
+                        # own feed as a viewer does; the owner's stream goes on.
+                        beside = websocket in self.co_controllers.get(client_display_id or 'primary', ())
+                        if beside or (perms and perms.get("role") == "viewer"):
                             # Monotonic: a clock jump must not wedge the floor or the throttle.
                             now = time.monotonic()
                             if was_paused:
@@ -4836,7 +4882,8 @@ class DataStreamingServer(BaseStreamingService):
                             self.video_paused_clients.discard(websocket)
                             data_logger.info(f"START_VIDEO from resuming client ({remote_address}): rejoining its video feed.")
 
-                        display_entry = self.display_clients.get(client_display_id) if client_display_id else None
+                        display_entry = (self.display_clients.get(client_display_id)
+                                         if client_display_id and not beside else None)
                         if display_entry is not None and display_entry.get('ws') is not websocket:
                             # A superseded connection (reload overlap) must not drive its
                             # successor's stream.
@@ -4922,7 +4969,9 @@ class DataStreamingServer(BaseStreamingService):
                                     await self.reconfigure_displays()
 
                     elif message == "STOP_VIDEO":
-                        stop_entry = self.display_clients.get(client_display_id) if client_display_id else None
+                        beside = websocket in self.co_controllers.get(client_display_id or 'primary', ())
+                        stop_entry = (self.display_clients.get(client_display_id)
+                                      if client_display_id and not beside else None)
                         if stop_entry is not None and stop_entry.get('ws') is not websocket:
                             # A dying page's tab-hide STOP_VIDEO can arrive after the reloaded
                             # page already owns the display.
@@ -4991,21 +5040,16 @@ class DataStreamingServer(BaseStreamingService):
                         except ValueError:
                             continue
                         target_display_id = client_display_id or 'primary'
+                        if not self._repair_taken(websocket, target_display_id, "lost"):
+                            continue
                         now = time.monotonic()
                         if now - self._last_lost_frame.get(target_display_id, 0.0) >= 0.005:
                             self._last_lost_frame[target_display_id] = now
                             self._schedule_invalidation(target_display_id, lost_frame_id)
 
                     elif message == "REQUEST_KEYFRAME":
-                        # Viewers get a stricter per-socket throttle: any number of them
-                        # share one stream.
-                        perms = client_permissions.get(websocket)
-                        if perms and perms.get("role") == "viewer":
-                            now = time.monotonic()
-                            last = self.last_viewer_keyframe_request_times.get(websocket, 0.0)
-                            if now - last < 1.0:
-                                continue
-                            self.last_viewer_keyframe_request_times[websocket] = now
+                        if not self._repair_taken(websocket, client_display_id, "keyframe"):
+                            continue
                         target_display_id = client_display_id or 'primary'
                         instance = self.capture_instances.get(target_display_id)
                         module = instance.get('module') if instance else None
@@ -5051,7 +5095,17 @@ class DataStreamingServer(BaseStreamingService):
                                         started = True
                                         data_logger.debug("START_AUDIO: pcmflux audio pipeline already active.")
                                     if started:
-                                        await _broadcast_to_clients(self.clients, "AUDIO_STARTED", watched=True)
+                                        # A page beside the primary's owner starts its own
+                                        # audio; the owner's starts its own and the viewers'.
+                                        beside = set(self.co_controllers.get('primary', ()))
+                                        if websocket in beside:
+                                            self._beside_audio[websocket] = True
+                                            told = {websocket}
+                                        else:
+                                            self._session_audio = True
+                                            told = self.clients - beside
+                                        for ws in await _broadcast_to_clients(told, "AUDIO_STARTED", watched=True):
+                                            self.clients.discard(ws)
                                 else:
                                     data_logger.warning("START_AUDIO: Cannot start server-to-client audio (pcmflux not available).")
                                     try:
@@ -5070,10 +5124,17 @@ class DataStreamingServer(BaseStreamingService):
                         async def _handle_stop_audio_request():
                             async with self._audio_lock:
                                 data_logger.debug("Received STOP_AUDIO")
-                                if self.is_pcmflux_capturing:
+                                beside = set(self.co_controllers.get('primary', ()))
+                                if websocket in beside:
+                                    self._beside_audio[websocket] = False
+                                    told = {websocket}
+                                else:
+                                    self._session_audio = False
+                                    told = self.clients - beside
+                                if self.is_pcmflux_capturing and not self._audio_wanted():
                                     await self._stop_pcmflux_pipeline()
-                                if self.clients:
-                                    await _broadcast_to_clients(self.clients, "AUDIO_STOPPED", watched=True)
+                                for ws in await _broadcast_to_clients(told, "AUDIO_STOPPED", watched=True):
+                                    self.clients.discard(ws)
                         _spawn_background_task(_handle_stop_audio_request(), name="stop-audio")
 
                     elif message.startswith("SET_NATIVE_CURSOR_RENDERING,"):
@@ -5129,7 +5190,8 @@ class DataStreamingServer(BaseStreamingService):
             )
         finally:
             self.last_start_video_request_times.pop(websocket, None)
-            self.last_viewer_keyframe_request_times.pop(websocket, None)
+            for kind in ("keyframe", "lost"):
+                self._repair_times.pop((websocket, kind), None)
             self.video_paused_clients.discard(websocket)
             self._stats_subscribers.discard(websocket)
             self._cancel_deferred_rejoin(websocket)
@@ -5175,13 +5237,18 @@ class DataStreamingServer(BaseStreamingService):
             for joiners in self.co_controllers.values():
                 joiners.pop(websocket, None)
             self._page_settings.pop(websocket, None)
+            had_own_audio = self._beside_audio.pop(websocket, False)
             if self.data_ws is websocket:
                 self.data_ws = None
-            # A departing non-capable client may let the rest enable RED.
+            # A departing non-capable client may let the rest enable RED; a page
+            # beside the owner that kept the capture running for itself ends it.
             self.audio_redundancy_by_ws.pop(websocket, None)
             if self.is_pcmflux_capturing:
                 async with self._audio_lock:
-                    await self._regate_audio_redundancy()
+                    if had_own_audio and not self._audio_wanted():
+                        await self._stop_pcmflux_pipeline()
+                    else:
+                        await self._regate_audio_redundancy()
 
             disconnected_display_id = None
             for disp_id, client_info in self.display_clients.items():

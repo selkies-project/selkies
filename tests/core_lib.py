@@ -279,17 +279,24 @@ def firefox_persistent_context(pw: Any, viewport: Optional[dict] = None,
     return pw.firefox.launch_persistent_context(**installed_firefox(kwargs))
 
 
-# Counts the page's WebSocket binary frames (`window.__wsFrames`): headless rAF
-# throttling makes the client's own fps counter read 0 while the stream flows.
-# Also records clipboard, display and role postMessages for the checks.
+# Counts the page's WebSocket binary frames (`window.__wsFrames`, and by their
+# first byte in `window.__wsTypes`): headless rAF throttling makes the client's
+# own fps counter read 0 while the stream flows. Also records the server's audio
+# and video state messages, and clipboard, display and role postMessages.
 PAGE_TAP_JS = """
       window.__wsFrames = 0;
+      window.__wsTypes = {};
+      window.__wsStates = [];
       (() => {
         const tap = (e) => {
-          if (e.data instanceof ArrayBuffer) window.__wsFrames++;
-          else if (typeof e.data === 'string') {
+          if (e.data instanceof ArrayBuffer) {
+            window.__wsFrames++;
+            const type = e.data.byteLength ? new Uint8Array(e.data, 0, 1)[0] : -1;
+            window.__wsTypes[type] = (window.__wsTypes[type] || 0) + 1;
+          } else if (typeof e.data === 'string') {
             window.__wsTexts = window.__wsTexts || [];
             if (e.data.includes('DISPLAY_CONFIG_UPDATE')) window.__wsTexts.push(e.data);
+            if (/^(AUDIO_|VIDEO_|PIPELINE_RESETTING)/.test(e.data)) window.__wsStates.push(e.data);
           }
         };
         const WS = window.WebSocket;

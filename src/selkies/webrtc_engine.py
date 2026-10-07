@@ -703,6 +703,11 @@ class RTCApp:
 
         self.request_idr_frame = lambda display_id='primary': logger.warning('unhandled request_idr_frame')
         self.invalidate_reference = lambda display_id, frame_id, dropped=False: logger.warning('unhandled invalidate_reference')
+        # Whether a peer is its display's owner (a predicate on the peer id): a peer that is
+        # not, a viewer or a controller beside the owner, has its keyframe requests and lost
+        # frames taken at most once a second each, since they cost the owner's stream.
+        self.peer_owns_display: Callable[[str], bool] = lambda client_peer_id: True
+        self._peer_recovery_times: Dict[Tuple[str, str], float] = {}
 
         self.on_video_consumer_active = None
         self.on_audio_consumer_active = None
@@ -2368,9 +2373,23 @@ class RTCApp:
         else:
             logger.debug(f"Unhandled peer connection state: {state}", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
 
+    def peer_recovery_taken(self, client_peer_id: str, kind: str) -> bool:
+        """Whether a peer's request to repair the stream (`kind`: a keyframe or a lost
+        frame) reaches its display's encoder: always from the display's owner, at most
+        once a second from any other peer (`peer_owns_display`)."""
+        if self.peer_owns_display(client_peer_id):
+            return True
+        now = time.monotonic()
+        if now - self._peer_recovery_times.get((client_peer_id, kind), 0.0) < 1.0:
+            return False
+        self._peer_recovery_times[(client_peer_id, kind)] = now
+        return True
+
     def on_pli(self, client_peer_id: str, client_type: str) -> None:
         """Translate a peer's RTP PLI into an IDR request for its display."""
         logger.debug("PLI occurred, triggering IDR frame request", extra={'client_peer_id': client_peer_id, 'client_type': client_type})
+        if not self.peer_recovery_taken(client_peer_id, "keyframe"):
+            return
         peer_obj = self.peer_connections.get(client_peer_id) or {}
         display_id = peer_obj.get("display_id") or "primary"
         asyncio.run_coroutine_threadsafe(self.request_idr_frame(display_id), self.async_event_loop)
@@ -2378,6 +2397,8 @@ class RTCApp:
     def on_lost_frame(self, client_peer_id: str, frame_id: int) -> None:
         """A peer lost a frame past what retransmission recovered: its display's encoder
         leaves the frame out of every later prediction."""
+        if not self.peer_recovery_taken(client_peer_id, "lost"):
+            return
         peer_obj = self.peer_connections.get(client_peer_id) or {}
         self.invalidate_reference(peer_obj.get("display_id") or "primary", frame_id)
 
@@ -2928,6 +2949,8 @@ class RTCApp:
                        role="controller" if peer_obj.get("client_type") is ClientType.CONTROLLER else "viewer",
                        slot=peer_obj.get("client_slot"),
                        duration_s=round(time.time() - peer_obj["connected_at"], 3))
+        for kind in ("keyframe", "lost"):
+            self._peer_recovery_times.pop((client_peer_id, kind), None)
         await self._cancel_channel_consumers(peer_obj)
         await self._stop_mic_playback_state(peer_obj.get("mic_state"))
         self._close_webcam_state(peer_obj.get("webcam_state"))

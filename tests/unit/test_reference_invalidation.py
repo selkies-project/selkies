@@ -261,7 +261,8 @@ asyncio.run(nacks())
 # --- the engine routes a lost frame to the peer's own display ---------------------
 routed = []
 app = SimpleNamespace(peer_connections={"peer-2": {"display_id": "display2"}},
-                      invalidate_reference=lambda display, frame: routed.append((display, frame)))
+                      invalidate_reference=lambda display, frame: routed.append((display, frame)),
+                      peer_recovery_taken=lambda peer_id, kind: True)
 RTCApp.on_lost_frame(app, "peer-2", 77)
 RTCApp.on_lost_frame(app, "unknown-peer", 78)
 res.check("a peer's lost frame reaches its own display's encoder, an unknown peer's the primary",
