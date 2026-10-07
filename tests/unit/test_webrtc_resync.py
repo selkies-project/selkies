@@ -136,7 +136,7 @@ clock = Clock()
 sender_mod.time = clock
 
 # A pacer cut: the frames whose last packet had not left are lost to the peer.
-s, events, history, _ = sender_with()
+s, events, history, _ = sender_with(selective=True)
 send(s, 1, None, 10, key=True)
 send(s, 2, 1, 20)
 send(s, 3, 2, 30)
@@ -159,7 +159,7 @@ res.check("the first frame predicting past the cut goes out, and the run ends",
 res.check("its descriptor points back to frame 2's number past the two cut",
           resumed == (4, 3), resumed)
 
-s, events, _, _ = sender_with()
+s, events, _, _ = sender_with(selective=True)
 send(s, 1, None, 10, key=True)
 send(s, 2, 1, 20)
 s._pacer_resync(15)
@@ -168,12 +168,17 @@ send(s, 3, 2, 30)
 res.check("a cut the encoder never predicts past within RESYNC_S is answered with a key frame",
           "pli" in events and s._resync_since is None, events)
 
-s, events, _, _ = sender_with(dd=False)
+s, events, _, _ = sender_with(dd=False, selective=True)
 s._RTCRtpSender__in_flight.append((10, 1))
 res.check("without the dependency descriptor the sender leaves the pacer its key frame",
           s._pacer_resync(5) is False and events == [], events)
-s, events, _, _ = sender_with()
+s, events, _, _ = sender_with(selective=True)
 res.check("and with nothing it described in flight", s._pacer_resync(5) is False and events == [], events)
+s, events, _, _ = sender_with()
+send(s, 1, None, 10, key=True)
+send(s, 2, 1, 20)
+res.check("and for the display's owner, whose receiver closes the gap on a key frame",
+          s._pacer_resync(15) is False and events == [], events)
 
 # A peer beside the owner whose pacer has no room is left frames, and resynced.
 s, events, _, backlog = sender_with(selective=True)

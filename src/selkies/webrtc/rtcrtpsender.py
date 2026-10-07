@@ -115,9 +115,9 @@ STILL_REQUEST_S = 0.25
 # frames past a key frame, a frame never left out), unless the peer is far behind:
 # RESYNC_FAR_FRAMES or RESYNC_FAR_S, or a path that lost packets within RESYNC_LOSS_S while a
 # queue stood on it, which says it drops what overflows its buffer rather than queueing it.
-# A run the pacer cut (`_pacer_resync`) is answered the same way, and one the encoder has not
-# predicted past in RESYNC_S costs a key frame, as the WebSockets page's decode gate waits
-# (LOST_RECOVERY_MS in lib/decode-gate.js).
+# A run the pacer cut (`_pacer_resync`) for such a peer is answered the same way, and one the
+# encoder has not predicted past in RESYNC_S costs a key frame, as the WebSockets page's decode
+# gate waits (LOST_RECOVERY_MS in lib/decode-gate.js).
 RESYNC_ROOM_FRAMES = 3
 RESYNC_LAG_S = 0.1
 RESYNC_REACH_FRAMES = 5
@@ -604,14 +604,19 @@ class RTCRtpSender(AsyncIOEventEmitter):
     def _pacer_resync(self, first_tag: Optional[int]) -> bool:
         """A pacer GOP reset (`RtpPacer._reset_gop`), told the oldest packet it dropped.
 
-        Where the encoder names each frame's reference and the peer reads the
-        dependency descriptor, the frames whose last packet had not left are
-        lost to the peer: they leave the frames it was sent, so `_forward`
-        holds back whatever predicts from them, NACKs for the dropped packets
-        go unanswered, and the run is answered as a run left out is. False
-        where this sender cannot, which leaves the pacer its key frame.
+        Where the encoder names each frame's reference, the peer reads the
+        dependency descriptor and does not own its display (`selective`), the
+        frames whose last packet had not left are lost to the peer: they leave
+        the frames it was sent, so `_forward` holds back whatever predicts from
+        them, NACKs for the dropped packets go unanswered, and the run is
+        answered as a run left out is. False where this sender cannot, which
+        leaves the pacer its key frame, and for the display's owner: the cut
+        leaves a gap in its sequence numbers that no retransmission fills, which
+        its receiver closes on a key frame (a burst of loss on a software
+        encoder's stream otherwise took one to two seconds to close).
         """
-        if (first_tag is None or not self.__in_flight
+        if (first_tag is None or not self.__in_flight or self.selective is None
+                or not self.selective()
                 or not self.__rtp_header_extensions_map.has_dependency_descriptor()):
             return False
         lost = [fid for tag, fid in self.__in_flight if ((tag - first_tag) & 0xFFFF) < 0x8000]
