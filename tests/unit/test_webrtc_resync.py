@@ -247,6 +247,16 @@ s.taken = True
 send(s, n + 1, n, 0)
 res.check("and is reported on the next held frame once taken",
           events == [("resync", 2, False)], events)
+s, events, _, backlog = sender_with(selective=True, taken=False, mime="video/AV1")
+send(s, 1, None, 10, key=True)
+send(s, 2, 1, 20, anchor=True)
+backlog[:2] = [RESYNC_FAR_FRAMES, 0.0]
+for n in range(3, 5 + RESYNC_REACH_FRAMES):
+    send(s, n, n - 1, 10 * n)
+backlog[:2] = [0, 0.0]
+send(s, 5 + RESYNC_REACH_FRAMES, 4 + RESYNC_REACH_FRAMES, 0)
+res.check("where two anchors run, a run past the reach is within it, told once the peer has room",
+          events == [("resync", 3, True)], events)
 
 # A path dropping what overflows its buffer shows no deeper queue than the buffer holds: loss
 # while a queue stands is far behind too, and loss on an empty path is not.
