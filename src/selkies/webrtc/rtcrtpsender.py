@@ -916,10 +916,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
         due = (self._resync_run >= RESYNC_REACH_FRAMES
                or (self._numbered() and -self._since_key % FRAME_NUM_WRAP <= RESYNC_WRAP_LEAD))
         if (frames < RESYNC_ROOM_FRAMES and wait < RESYNC_LAG_S) or (due and not self._far()):
-            # Where two anchors run, a run of any depth is predicted past from the one pinned;
-            # H.264 keeps one, which its schedule replaces.
-            reach = (self._resync_run <= RESYNC_REACH_FRAMES
-                     or (self._anchored and not self._numbered()))
+            # Where anchors run, a run of any depth is predicted past from the one pinned.
+            reach = self._resync_run <= RESYNC_REACH_FRAMES or self._anchored
             self._lost_at = time.monotonic()
             if self.on_resync is not None:
                 self._resync_told = self.on_resync(self._resync_first, reach)
