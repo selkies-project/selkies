@@ -245,8 +245,8 @@ res.check("once it has room, a run past the reach waits while its key-frame requ
           events == [], events)
 s.taken = True
 send(s, n + 1, n, 0)
-res.check("and is reported on the next held frame once taken, the frame after the key frame sent",
-          events == [("resync", 3, False)], events)
+res.check("and is reported on the next held frame once taken",
+          events == [("resync", 2, False)], events)
 
 # A path dropping what overflows its buffer shows no deeper queue than the buffer holds: loss
 # while a queue stands is far behind too, and loss on an empty path is not.
@@ -291,13 +291,16 @@ for n in range(100, 100 + 70):
 res.check("a frame is numbered for longer than the 64 recent ones, as a pinned anchor is",
           s._describe(200, 100, False) is not None)
 
-# The frame after an H.264 key frame goes out without room, and an anchored run waits
+# The frame after an H.264 key frame is left out as any other, and an anchored run waits
 # RESYNC_ANCHORED_S rather than RESYNC_S for one.
 s, events, _, backlog = sender_with(selective=True)
 send(s, 1, None, 10, key=True)
 backlog[:2] = [RESYNC_FAR_FRAMES, 0.0]
-res.check("the frame after a key frame goes out though the peer is far behind",
-          send(s, 2, 1, 20) is not None and s._resync_since is None, s._resync_since)
+res.check("the frame after a key frame is left out where the peer is far behind",
+          send(s, 2, 1, 20) is None and s._resync_since is not None, s._resync_since)
+s, events, _, backlog = sender_with(selective=True)
+send(s, 1, None, 10, key=True)
+send(s, 2, 1, 20)
 backlog[:2] = [RESYNC_ROOM_FRAMES, 0.0]
 send(s, 3, 2, 30, anchor=True)
 send(s, 4, 3, 40)

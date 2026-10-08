@@ -349,9 +349,8 @@ class PipelineBridge:
     a frame FRAME_NUM_WRAP frames or a multiple of it past a keyframe dropped:
     an H.264 decoder that misses the frame whose frame_num wraps to 0 cannot
     be predicted past the gap, so the encoder answers such a drop with a
-    keyframe. Queued, such an H.264 frame, and the one after a keyframe, which
-    an encoder keeping two long-term references marks into the second, is not
-    let go for a newer frame either: the newer one is, as behind a keyframe.
+    keyframe. Queued, such an H.264 frame is not let go for a newer frame
+    either: the newer one is, as behind a keyframe.
     """
     def __init__(self, maxsize: int = 1,
                  request_keyframe: Optional[Callable[[], None]] = None,
@@ -470,8 +469,8 @@ class PipelineBridge:
                 self._hold(frame_id, getattr(data, "timing", None))
                 return
             kept = (str(getattr(data, "codec", "") or "").lower() == "video/h264"
-                    and (self._since_key == 1 or not self._since_key % FRAME_NUM_WRAP))
-            if self._since_key % FRAME_NUM_WRAP and not kept and self._budget_full():
+                    and not self._since_key % FRAME_NUM_WRAP)
+            if self._since_key % FRAME_NUM_WRAP and self._budget_full():
                 self.over_budget += 1
                 self._drop(data)
                 return

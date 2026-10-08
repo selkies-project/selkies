@@ -171,8 +171,7 @@ def main() -> int:
     for n in range(1, 1 + FAR):
         r.offer(chunk(n, n, key=True))
     hand(r, sock, len(r.backlog))
-    r.offer(chunk(1 + FAR, FAR))  # the frame after an H.264 key frame goes out
-    first = 2 + FAR
+    first = 1 + FAR
     for n in range(first, first + REACH + 2):
         r.offer(chunk(n, n - 1))
     check("a page far behind is not answered at the reach", reports == [], reports)
@@ -185,8 +184,7 @@ def main() -> int:
 
     # A frame_num can wrap only a multiple of FRAME_NUM_WRAP frames past a key frame, and the
     # encoder answers a run covering that frame with a key frame: a run open just ahead of it
-    # is reported at once, and the frame itself is never left out, nor the frame after a key
-    # frame, which an encoder keeping two long-term references marks into the second.
+    # is reported at once, and the frame itself is never left out.
     r, server, reports, sock = relay()
     r.offer(chunk(1, 1, key=True))
     for n in range(2, WRAP - 1):
@@ -335,16 +333,13 @@ def main() -> int:
     common.hold(a, 7, key=True)
     check("the same key frame again is not told twice", acked == [7, 8, 9], acked)
 
-    # The frame after an H.264 key frame goes out without room: an encoder keeping two
-    # long-term references marks it into the second.
+    # The frame after an H.264 key frame is left out as any other.
     r, server, reports, sock = relay()
     r.offer(chunk(1, 1, key=True))
     full(r, sock)
     r.offer(chunk(2, 1))
-    check("the frame after a key frame goes out though the page has no room", ids(r)[-1:] == [2]
-          and r.lost_first is None, (ids(r), r.lost_first))
-    r.offer(chunk(3, 2))
-    check("the one after it does not", r.lost_first == 3, r.lost_first)
+    check("the frame after a key frame is left out where the page has no room",
+          ids(r)[-1:] == [1] and r.lost_first == 2, (ids(r), r.lost_first))
 
     # With anchors running, a run waits for room past the second a key frame would end it at.
     r, server, reports, sock = relay()

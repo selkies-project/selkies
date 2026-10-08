@@ -772,9 +772,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self._since_key += 1
         self._anchored = self._anchored or anchor
         sent = reference is None or reference in self.__frame_numbers
-        # In H.264 a frame where frame_num may wrap is never left out, nor the one after a key
-        # frame, which an encoder keeping two long-term references marks into the second.
-        kept = self._numbered() and (self._since_key == 1 or not self._since_key % FRAME_NUM_WRAP)
+        # In H.264 a frame where frame_num may wrap is never left out.
+        kept = self._numbered() and not self._since_key % FRAME_NUM_WRAP
         if self._resync_since is not None:
             if sent and (not anchor or kept or self._anchor_room()):
                 self._close_run()

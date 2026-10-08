@@ -1097,9 +1097,8 @@ class _VideoRelay:
         client; None where only a key frame brings the client back. The first
         frame predicting past an open run, which decodes on the client, ends it,
         and an `anchor` goes without room unless the client is too far behind."""
-        # In H.264 a frame where frame_num may wrap is never left out, nor the one after a key
-        # frame, which an encoder keeping two long-term references marks into the second.
-        kept = self.numbered and (self.since_key == 1 or not self.since_key % FRAME_NUM_WRAP)
+        # In H.264 a frame where frame_num may wrap is never left out.
+        kept = self.numbered and not self.since_key % FRAME_NUM_WRAP
         if reference not in self.sent:
             self._lose(frame_id)
             return self._repair()
