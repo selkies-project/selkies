@@ -17,9 +17,11 @@ test_browsers' firefox-wr, its relays on the default route's address, since Fire
 there alone and pairs none of its candidates with a loopback one). The owner's key frames are
 counted on its own page. The scene is tests/tools/motion_scene.py, whose every frame spells its
 own index, so the pictures the slow page decodes are checked against the frames they claim to
-be, and its lag behind the owner read off the two pages' pictures.
+be, and its lag behind the owner read off the two pages' pictures. The -wayland blocks run the
+same on pixelflux's compositor, the scene drawn by its Wayland twin (wl_motion_scene.py).
 
-Usage: python3 tests/e2e/test_slow_page.py [websockets|webrtc|webrtc-firefox|all]
+Usage: python3 tests/e2e/test_slow_page.py
+    [websockets|webrtc|webrtc-firefox|websockets-wayland|webrtc-wayland|all]
 """
 import asyncio
 import os
@@ -200,14 +202,23 @@ def stalls(times: List[float]) -> float:
     return max((b - a for a, b in zip(times, times[1:])), default=float("inf"))
 
 
-def ws_block() -> "H.Results":
+def scene(wayland: bool):
+    """The moving scene on the display under test, as a process to kill at the end."""
+    if not wayland:
+        return H.spawn([sys.executable, PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"])
+    client = H.WlObs("wayland-1", tool="wl_motion_scene.py", WLOBS_DURATION="900")
+    client.ready(timeout=30)
+    return client.proc
+
+
+def ws_block(wayland: bool = False) -> "H.Results":
     from playwright.sync_api import sync_playwright
 
-    res = H.Results("slow-page-websockets")
+    res = H.Results("slow-page-websockets" + ("-wayland" if wayland else ""))
     painter = relay = None
-    H.server_start(mode="websockets", wayland=False, extra_env=ENV)
+    H.server_start(mode="websockets", wayland=wayland, extra_env=ENV)
     try:
-        painter = H.spawn([sys.executable, PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"])
+        painter = scene(wayland)
         relay = H.spawn([sys.executable, BWRELAY, str(RELAY_PORT), str(H.PORT), str(LINK_KBIT)])
         with sync_playwright() as p:
             pages = []
@@ -270,11 +281,12 @@ def default_address() -> str:
             return "127.0.0.1"
 
 
-def wr_block(engine: str = "chromium") -> "H.Results":
+def wr_block(engine: str = "chromium", wayland: bool = False) -> "H.Results":
     from playwright.sync_api import sync_playwright
     import test_pacer as rig
 
-    res = H.Results("slow-page-webrtc" if engine == "chromium" else f"slow-page-webrtc-{engine}")
+    res = H.Results("slow-page-webrtc" + ("" if engine == "chromium" else f"-{engine}")
+                    + ("-wayland" if wayland else ""))
     if engine == "firefox" and not C.openh264_version():
         res.skip(f"no OpenH264 GMP plugin in {C.FF_E2E_PROFILE}",
                  "run tests/tools/fetch-openh264.sh to cover H.264 in Firefox")
@@ -292,10 +304,10 @@ def wr_block(engine: str = "chromium") -> "H.Results":
             rig.make_relay((host, int(port)), up, down, "slow-page", listen), loop).result(timeout=10)
         return [addr[0], addr[1]]
 
-    H.server_start("webrtc", wayland=False, extra_env={
+    H.server_start("webrtc", wayland=wayland, extra_env={
         **ENV, "SELKIES_WEBRTC_PACER": "true", "SELKIES_STUN_HOST": "", "SELKIES_TURN_REST_URI": ""})
     try:
-        painter = H.spawn([sys.executable, PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"])
+        painter = scene(wayland)
         with sync_playwright() as p:
             pages = []
             for script in (C.PC_TAP_JS, SHAPED_JS):
@@ -367,6 +379,10 @@ def main() -> None:
         blocks.append(wr_block())
     if which in ("all", "webrtc-firefox"):
         blocks.append(wr_block("firefox"))
+    if which in ("all", "websockets-wayland"):
+        blocks.append(ws_block(wayland=True))
+    if which in ("all", "webrtc-wayland"):
+        blocks.append(wr_block(wayland=True))
     sys.exit(0 if all(not b.failed() for b in blocks) else 1)
 
 
