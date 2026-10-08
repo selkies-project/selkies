@@ -3152,7 +3152,8 @@ const wireCodecString = (typeByte, payload, width, height) => {
  * Picks the canvas `image-rendering`: pixelated for a 1:1 display or when
  * anti-aliasing is off, smoothed whenever the picture is scaled (manual
  * resolution, high-DPR CSS scaling, shared mode). Part of cssText, so the box
- * is re-mirrored to the active sink.
+ * is re-mirrored to the active sink. A filter change must also be mirrored
+ * immediately when no frames are arriving from a static desktop.
  */
 const updateCanvasImageRendering = () => {
   if (!canvas) return;
@@ -5315,6 +5316,7 @@ function receiveMessage(event) {
         console.log(`Set antiAliasingEnabled to ${antiAliasingEnabled} and persisted.`);
         if (changed) {
           updateCanvasImageRendering();
+          syncSinkToCanvasStyle();
         }
       } else {
         console.warn("Invalid value received for setAntiAliasing:", message.value);
