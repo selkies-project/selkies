@@ -89,13 +89,15 @@ def icon_path(folder: str, name: str) -> Optional[str]:
     """The file behind one catalog icon, or None where there is none to serve.
 
     `name` is a file name the catalog gave, so a value that is not one -- a
-    path, a traversal, a name resolving outside the image directory through a
-    link -- names nothing.
+    path, a traversal, a NUL byte, a name resolving outside the image
+    directory through a link -- names nothing.
     """
-    if not folder or not name or name in (".", "..") or "/" in name or os.sep in name:
+    if not folder or not name or name in (".", "..") or "/" in name or os.sep in name or "\0" in name:
         return None
     images = os.path.realpath(os.path.join(folder, METADATA_DIR, IMAGE_DIR))
     path = os.path.realpath(os.path.join(images, name))
+    if not path.startswith(images + os.sep):
+        return None
     if os.path.dirname(path) != images or not os.path.isfile(path):
         return None
     return path

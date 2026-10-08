@@ -56,7 +56,7 @@ def run() -> "H.Results":
                   icon == os.path.join(folder, "metadata", "img", "firefox.svg"), icon)
         res.check("an icon the catalog does not have is none",
                   apps_catalog.icon_path(folder, "missing.svg") is None)
-        for name in ("../metadata.yml", "..", "img/../../SHALAYER", ""):
+        for name in ("../metadata.yml", "..", "img/../../SHALAYER", "", "firefox.svg\0.png"):
             res.check(f"a name that is not a file name is refused: {name!r}",
                       apps_catalog.icon_path(folder, name) is None)
         os.symlink(os.path.join(folder, "SHALAYER"), os.path.join(folder, "metadata", "img", "out.svg"))

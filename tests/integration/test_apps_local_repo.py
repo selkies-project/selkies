@@ -104,6 +104,8 @@ def run() -> "H.Results":
         res.check("its icon is served", status == 200 and body == ICON, (status, body[:80]))
         status, _ = get("/api/apps/img/..%2Fmetadata.yml")
         res.check("a path in place of an icon name is refused", status == 404, status)
+        status, _ = get("/api/apps/img/localapp.svg%00.png")
+        res.check("as is a name with a NUL byte in it", status == 404, status)
         status, _ = get("/api/apps/img/absent.svg")
         res.check("an icon the repository lacks is not found", status == 404, status)
         res.check("the folder is logged as the catalog's source",
