@@ -139,8 +139,9 @@ RESYNC_FAR_FRAMES = 12
 RESYNC_FAR_S = 1.0
 RESYNC_LOSS_S = 0.5
 RESYNC_S = 1.0
-# Where the encoder pins an anchor every peer holds (an anchor came since the key frame), it
-# predicts past a run of any depth on the report, so a run waits RESYNC_ANCHORED_S for room.
+# Where the encoder pins an anchor every peer holds (an anchor came since the codec's first
+# frame, its key frame being the first anchor), it predicts past a run of any depth on the
+# report, so a run waits RESYNC_ANCHORED_S for room.
 RESYNC_ANCHORED_S = 4.0
 # An anchor goes to a peer without room only while the queue standing in front of it is under
 # RESYNC_ANCHOR_S: on a link too narrow for the anchors alone they would never let it drain.
@@ -514,6 +515,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         codec = self.negotiated_codec(mime_type)
         self.__send_codec = codec
         self.__encoder = None
+        self._anchored = False
         self.__rtx_payload_type = self._rtx_payload_type_for(codec) if codec else None
         return codec is not None
 
@@ -791,7 +793,6 @@ class RTCRtpSender(AsyncIOEventEmitter):
         and an `anchor` goes without room unless the peer is far behind."""
         if keyframe:
             self._since_key = 0
-            self._anchored = False
             self._close_run()
             return True
         self._since_key += 1

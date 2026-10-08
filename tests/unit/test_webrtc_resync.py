@@ -368,6 +368,11 @@ clock.t += 1.5
 res.check("a key frame on its way is waited for a round trip past its queue", s._resync_held() is True)
 clock.t += 0.2
 res.check("and asked again past that", s._resync_held() is False)
+s, _, _, _ = sender_with(selective=True)
+send(s, 1, None, 10, key=True)
+send(s, 2, 1, 20, anchor=True)
+send(s, 3, None, 30, key=True)
+res.check("a key frame, the encoder's first anchor, leaves the stream anchored", s._anchored is True)
 o, _, _, _ = sender_with()
 send(o, 1, None, 10, key=True)
 send(o, 2, 1, 20, anchor=True)
