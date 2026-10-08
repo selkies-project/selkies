@@ -327,7 +327,10 @@ def wr_block(engine: str = "chromium") -> "H.Results":
             own, sl = ({k: a[k] - b[k] for k in a} for a, b in zip(after, before))
             lags = lag_frames(samples)
             worst = max((b["mismatch"] for _, b in samples), default=1.0)
-            res.check("the owner decodes on beside it", own["decoded"] >= max(WINDOW_S * 10, sl["decoded"]), own)
+            # A page sent a skipped picture for each frame left out (Firefox) decodes every frame the
+            # owner does, and more by the lag it makes up in the window.
+            res.check("the owner decodes on beside it",
+                      own["decoded"] >= max(WINDOW_S * 10, sl["decoded"] - max(lags, default=0)), own)
             res.check("the owner's stream carries no key frame for the slow page", own["keyframes"] <= 1,
                       f"{own['keyframes']} key frames")
             res.check("the slow page keeps decoding frames", sl["decoded"] >= WINDOW_S * 5, sl)
