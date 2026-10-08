@@ -2728,10 +2728,7 @@ def apply_common_capture_settings(
     if watermark_path and os.path.exists(watermark_path):
         cs.watermark_path = watermark_path.encode("utf-8")
         cs.watermark_location_enum = int(getattr(server, "watermark_location", -1))
-    # Every transport tells the encoder which frames all of a display's pages
-    # hold (`CommonFrames`); a pixelflux that cannot take them has no such field.
-    if hasattr(cs, "acknowledge_references"):
-        cs.acknowledge_references = True
+    cs.acknowledge_references = True
     return cs
 
 

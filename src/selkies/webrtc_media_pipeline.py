@@ -524,11 +524,9 @@ class MediaPipelinePixel(MediaPipeline):
             self.capture_module.invalidate_reference(frame_id & 0xFFFF)
 
     def acknowledge_reference(self, frame_id: int, held: bool = True) -> None:
-        """Every consumer holds `frame_id`, or where not `held` was sent it
-        (`CommonFrames`); a pixelflux that cannot take it is not told."""
-        acknowledge = getattr(self.capture_module, "acknowledge_reference", None)
-        if self._is_screen_capturing and acknowledge is not None:
-            acknowledge(frame_id & 0xFFFF, held)
+        """Every consumer holds `frame_id`, or where not `held` was sent it (`CommonFrames`)."""
+        if self._is_screen_capturing and self.capture_module is not None:
+            self.capture_module.acknowledge_reference(frame_id & 0xFFFF, held)
 
     def generate_capture_settings(self) -> Any:
         """Build the pixelflux CaptureSettings snapshot for the current state.

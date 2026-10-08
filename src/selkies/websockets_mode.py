@@ -3091,14 +3091,14 @@ class DataStreamingServer(BaseStreamingService):
         return common
 
     def _acknowledge_frame(self, display_id: str, frame_id: int) -> None:
-        """Tell the display's encoder every client holds `frame_id`; a pixelflux
-        that cannot take it is not told."""
-        acknowledge = getattr(self._opcode_display_module(display_id), "acknowledge_reference", None)
-        if acknowledge is not None:
-            try:
-                acknowledge(frame_id & 0xFFFF)
-            except Exception:
-                pass
+        """Tell the display's encoder every client holds `frame_id` (`CommonFrames`)."""
+        module = self._opcode_display_module(display_id)
+        if not module:
+            return
+        try:
+            module.acknowledge_reference(frame_id & 0xFFFF)
+        except Exception:
+            return
 
     def _schedule_invalidation(self, display_id: str, frame_id: int) -> None:
         """Tell the display's encoder a client lost `frame_id`, so the frames after it stop

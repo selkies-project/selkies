@@ -115,7 +115,7 @@ def sender_with(dd: bool = True, selective: bool = False, taken: bool = True, mi
         _RTCRtpSender__send_codec=SimpleNamespace(mimeType=mime),
         on_frame_sent=None, on_resync=on_resync, taken=taken,
         selective=(lambda: selective),
-        transport=SimpleNamespace(video_backlog=lambda: tuple(backlog), _twcc_acked=acked.__contains__),
+        transport=SimpleNamespace(video_backlog=lambda: tuple(backlog), twcc_arrived=acked.__contains__),
         emit=lambda name, *args: events.append((name,) + args),
         _emit_pli_event=lambda: events.append("pli"))
     for name in ("_describe", "_pacer_resync", "_undecodable", "_frame_on_wire", "_forward",

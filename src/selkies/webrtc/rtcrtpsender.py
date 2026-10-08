@@ -683,7 +683,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         held. A frame not held within HELD_S never will be. A peer without the dependency
         descriptor decodes nothing past a frame it lacks until a key frame, so it holds a
         frame only once it holds every frame sent before it."""
-        acked = getattr(self.transport, "twcc_arrived", self.transport._twcc_acked)
+        acked = self.transport.twcc_arrived
         now = time.monotonic()
         rtx = self.__rtx_twcc
         in_order = not self.__rtp_header_extensions_map.has_dependency_descriptor()
