@@ -124,7 +124,7 @@ async def sender_repairs() -> None:
         _RTCRtpSender__log_debug=lambda *a: None,
         transport=SimpleNamespace(_send_rtp=send_rtp, _twcc_next=lambda n: 7, _send_delay=lambda: 0.0),
         _emit_pli_event=lambda: events.append("pli"), emit=lambda name, *args: events.append((name,) + args),
-        _resync_held=lambda: False)
+        _resync_held=lambda: False, _past_repair=lambda lost: False)
     sender._retransmit = lambda packet: RTCRtpSender._retransmit(sender, packet)
     sender._send = lambda data, twcc_seq=None: RTCRtpSender._send(sender, data, twcc_seq)
     nack = lambda *lost: RtcpRtpfbPacket(fmt=RTCP_RTPFB_NACK, ssrc=1, media_ssrc=2, lost=list(lost))

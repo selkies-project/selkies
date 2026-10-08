@@ -307,6 +307,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self.__unheld: deque[tuple] = deque(maxlen=1024)
         self._stall_since: Optional[float] = None
         self._stall_last = 0.0
+        self._held_at = 0.0
         self._key_sent_at: Optional[float] = None
         self.__held: dict[int, None] = {}
         self._unheld_gap = False
@@ -560,7 +561,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     )
                 )
         elif isinstance(packet, RtcpRtpfbPacket) and packet.fmt == RTCP_RTPFB_NACK:
-            gone = False
+            gone = self._past_repair(packet.lost)
+            if gone:
+                self.__rtp_history.abandon()
             for seq in packet.lost:
                 if self.__rtp_history.abandoned(seq):
                     continue
@@ -586,7 +589,8 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     self.emit("lost_frame", frame)
                     self._lost_at = time.monotonic()
             if gone and not self._resync_held():
-                # Gone from the history: only a key frame brings the peer back.
+                # Gone from the history, or past repair, where no resync answers it: only a key
+                # frame brings the peer back.
                 self._emit_pli_event()
         elif isinstance(packet, RtcpXrPacket) and packet.rrtr is not None:
             self.__rrtrs.pop(packet.ssrc, None)
@@ -706,6 +710,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
                     and (keyframe or reference in self.__held)):
                 self.__held.pop(frame_id, None)
                 self.__held[frame_id] = None
+                self._held_at = now
                 if len(self.__held) > FRAME_NUMBERS_MEMORY:
                     del self.__held[next(iter(self.__held))]
                 if self.on_frame_held is not None:
@@ -718,21 +723,37 @@ class RTCRtpSender(AsyncIOEventEmitter):
             for media in list(rtx)[:512]:
                 del rtx[media]
 
+    def _past_repair(self, lost: list) -> bool:
+        """Whether a NACK from a peer that does not own its display, and reads the dependency
+        descriptor, names more than its pacer queue holds, a first repair going out twice: the
+        burst a link that went dark asks for once it is back, whose retransmissions would
+        overflow the queue and cost every peer a key frame, and hold every newer frame behind
+        them. It is answered as a loss past repair."""
+        if (self.__kind != "video" or self.selective is None or not self.selective()
+                or not self.__rtp_header_extensions_map.has_dependency_descriptor()):
+            return False
+        room = self.transport.video_room()
+        held = (self.__rtp_history.get(seq) for seq in lost)
+        return room is not None and 2 * sum(len(p.payload) for p in held if p is not None) > room
+
     def _resync_held(self) -> bool:
         """Answer a peer that lost frames past repair as a run the pacer cut is, where it does
         not own its display and anchors run: the frames sent it after the newest it holds leave
         the frames it was sent, and the encoder is told the first is lost (`_repair`), so a frame
         predicting from one it holds comes next. A request while that run is open, or while the
         key frame it was sent is on its way, is answered by them. False where it cannot, which
-        asks for a key frame: past RESYNC_ANCHORED_S of such requests one after another (a
-        decoder that only takes a key frame), where it holds nothing and no key frame is due,
-        and for a peer without the dependency descriptor, which decodes nothing past the
-        packets it lacks until a key frame."""
+        asks for a key frame: past RESYNC_ANCHORED_S of such requests one after another while
+        it holds frames it is sent (a decoder that only takes a key frame; one holding nothing
+        new between two requests is starved, as through an outage, and starts the count again),
+        where it holds nothing and no key frame is due, and for a peer without the dependency
+        descriptor, which decodes nothing past the packets it lacks until a key frame. A frame
+        held only after a resync let it go is passed over."""
         now = time.monotonic()
         if (self.selective is None or not self.selective() or not self._anchored
                 or not self.__rtp_header_extensions_map.has_dependency_descriptor()):
             return False
-        if self._stall_since is None or now - self._stall_last > RESYNC_ANCHORED_S:
+        if (self._stall_since is None or now - self._stall_last > RESYNC_ANCHORED_S
+                or self._held_at < self._stall_last):
             self._stall_since = now
         self._stall_last = now
         if now - self._stall_since > RESYNC_ANCHORED_S:
@@ -741,9 +762,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if self._resync_since is not None:
             return True
         if not self.__held:
-            return (self._key_sent_at is not None
-                    and now - self._key_sent_at < max(RESYNC_S, 2 * self._video_backlog()[1]))
-        number = self.__frame_numbers.get(next(reversed(self.__held)))
+            return (self._key_sent_at is not None and now - self._key_sent_at
+                    < max(RESYNC_S, 2 * (self._video_backlog()[1] + (self.__rtt or 0.0))))
+        number = next((n for n in map(self.__frame_numbers.get, reversed(self.__held)) if n is not None), None)
         if number is None:
             return False
         after = [fid for fid, n in self.__frame_numbers.items() if 0 < ((n - number) & 0xFFFF) < 0x8000]

@@ -491,6 +491,10 @@ class RtpPacer:
             logger.debug("pacer keyframe request failed", exc_info=True)
 
     # ------------------------------------------------------------------- send
+    def video_room(self) -> int:
+        """Bytes the video queue takes before a packet overflows it (`_reset_gop`)."""
+        return self._video_cap_bytes() - self._video_bytes
+
     def drain_s(self) -> float:
         """Seconds until what is queued now has left, at the current pace."""
         return self._bytes_queued * 8 / max(self._pace_bps, 1)

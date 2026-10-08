@@ -969,6 +969,10 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
             wait += max(0.0, self._twcc_delay_newest - base)
         return frames, wait, time.monotonic() - self._twcc_lost_at
 
+    def video_room(self) -> Optional[int]:
+        """Bytes of video the pacer queues before it abandons the GOP; None without a pacer."""
+        return None if self._pacer is None else self._pacer.video_room()
+
     def pacer_snapshot(self) -> Optional[dict]:
         return self._pacer.snapshot() if self._pacer is not None else None
 

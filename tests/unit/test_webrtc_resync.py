@@ -107,7 +107,8 @@ def sender_with(dd: bool = True, selective: bool = False, taken: bool = True, mi
         _RTCRtpSender__in_flight=deque(maxlen=64), _RTCRtpSender__frame_numbers={},
         _RTCRtpSender__unheld=deque(maxlen=256), _RTCRtpSender__held={},
         _RTCRtpSender__rtx_twcc={}, on_frame_held=None, on_frame_out=None, acked=acked, _anchored=False,
-        _stall_since=None, _stall_last=0.0, _key_sent_at=None, _unheld_gap=False,
+        _stall_since=None, _stall_last=0.0, _held_at=0.0, _key_sent_at=None, _unheld_gap=False,
+        _RTCRtpSender__rtt=None,
         _RTCRtpSender__frame_number=0, _RTCRtpSender__rtp_history=history,
         _RTCRtpSender__rtp_header_extensions_map=SimpleNamespace(has_dependency_descriptor=lambda: dd),
         _RTCRtpSender__kind="video", _resync_since=None, _resync_first=None, _resync_run=0,
@@ -120,7 +121,7 @@ def sender_with(dd: bool = True, selective: bool = False, taken: bool = True, mi
         _emit_pli_event=lambda: events.append("pli"))
     for name in ("_describe", "_pacer_resync", "_undecodable", "_frame_on_wire", "_forward",
                  "_open_run", "_close_run", "_repair", "_video_backlog", "_numbered", "_far", "_confirm",
-                 "_resync_held", "_anchor_room", "_numbers_frames"):
+                 "_resync_held", "_anchor_room", "_numbers_frames", "_past_repair"):
         setattr(s, name, getattr(RTCRtpSender, name).__get__(s))
     return s, events, history, backlog
 
@@ -336,10 +337,37 @@ res.check("one holding frame 3 is resynced from it", s._resync_held() is True
 res.check("the frames after it are held back", send(s, 6, 5, 60) is None)
 res.check("a request while that run is open is answered by it", s._resync_held() is True
           and events == [("resync", 4, True)], events)
+for _ in range(3):
+    clock.t += sender_mod.RESYNC_ANCHORED_S / 2
+    starved = s._resync_held()
+res.check("requests while it holds nothing new, as through an outage, are no stall", starved is True)
+s._held_at = clock.t
 clock.t += sender_mod.RESYNC_ANCHORED_S / 2
 s._resync_held()
+s._held_at = clock.t
 clock.t += sender_mod.RESYNC_ANCHORED_S / 2 + 0.1
-res.check("a stall of requests past RESYNC_ANCHORED_S is left a key frame", s._resync_held() is False)
+res.check("a stall of requests past RESYNC_ANCHORED_S while it holds what it is sent is left a key frame",
+          s._resync_held() is False)
+s, events, _, _ = sender_with(selective=True)
+for n in range(1, 6):
+    send(s, n, None if n == 1 else n - 1, 10 * n, key=n == 1, anchor=n == 3)
+s._RTCRtpSender__held.update(dict.fromkeys([1, 2, 3]))
+s._resync_held()
+s._RTCRtpSender__held[5] = None
+s._close_run()
+events.clear()
+res.check("a frame held after a resync let it go is passed over for the newest one still numbered",
+          s._resync_held() is True and events == [], events)
+s, events, _, backlog = sender_with(selective=True)
+send(s, 1, None, 10, key=True)
+send(s, 2, 1, 20, anchor=True)
+s._RTCRtpSender__held.clear()
+s._key_sent_at = clock.t
+s._RTCRtpSender__rtt = 0.8
+clock.t += 1.5
+res.check("a key frame on its way is waited for a round trip past its queue", s._resync_held() is True)
+clock.t += 0.2
+res.check("and asked again past that", s._resync_held() is False)
 o, _, _, _ = sender_with()
 send(o, 1, None, 10, key=True)
 send(o, 2, 1, 20, anchor=True)
@@ -404,6 +432,16 @@ s.acked.add(103)
 s._confirm()
 res.check("and none past one it never held, until a key frame",
           held == [1] and [e[0] for e in unheld] == [4] and s._unheld_gap, (held, list(unheld)))
+
+# A NACK from a page beside the owner whose repairs, each first one sent twice, would overflow its
+# pacer queue, the burst a link that went dark asks for, is past repair; the owner's is repaired.
+s, _, _, _ = sender_with(selective=True)
+s.transport.video_room = lambda: 7
+res.check("a NACK whose repairs would overflow the queue is past repair", s._past_repair([1, 2, 3, 4]) is True)
+res.check("one whose repairs fit is repaired", s._past_repair([1, 2, 3]) is False)
+o, _, _, _ = sender_with()
+o.transport.video_room = lambda: 0
+res.check("the display owner's is repaired", o._past_repair([1, 2, 3, 4]) is False)
 
 # A frame predicting from one held long ago, a pinned anchor or the key frame, is held too.
 s, _, _, _ = sender_with()

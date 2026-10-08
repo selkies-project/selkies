@@ -219,6 +219,7 @@ async def nacks() -> None:
                                _RTCRtpSender__rtt=None,
                                transport=SimpleNamespace(_send_delay=lambda: 0.0),
                                _emit_pli_event=lambda: events.append("pli"), _resync_held=lambda: False,
+                               _past_repair=lambda lost: False,
                                emit=lambda name, *args: events.append((name,) + args))
     nack = lambda *lost: RtcpRtpfbPacket(fmt=RTCP_RTPFB_NACK, ssrc=1, media_ssrc=2, lost=list(lost))
     await RTCRtpSender._handle_rtcp_packet(stand_in, nack(2, 3))
