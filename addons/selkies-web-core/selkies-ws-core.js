@@ -10250,6 +10250,8 @@ let lastKeyframeRequestTime = 0;
  * too; debounced here, harder for shared viewers, and rate-limited server-side.
  */
 function requestKeyframe() {
+    // A stream this browser cannot decode, whose encoder it cannot change, is not helped by one.
+    if (codecRefusalUnanswerable) return;
     const now = performance.now();
     if (now - lastKeyframeRequestTime < (isSharedMode ? 1500 : 500)) return;
     lastKeyframeRequestTime = now;

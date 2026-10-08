@@ -25,6 +25,24 @@ from playwright.sync_api import sync_playwright
 
 UNSUPPORTED = "Unsupported Browser"
 NOTICE = "H.265 video, which this browser cannot decode"
+# The key-frame requests the page sends through its transport (`window.selkiesTransport`).
+KEYFRAME_TAP_JS = """
+  window.__keyframeAsks = 0;
+  (() => {
+    let transport = null;
+    Object.defineProperty(window, 'selkiesTransport', {
+      configurable: true,
+      get: () => transport,
+      set: (v) => {
+        transport = v;
+        if (v && v.send) {
+          const send = v.send.bind(v);
+          v.send = (m) => { if (m === 'REQUEST_KEYFRAME') window.__keyframeAsks++; return send(m); };
+        }
+      },
+    });
+  })();
+"""
 H265 = "H.265"
 H264 = "H.264"
 
@@ -125,7 +143,8 @@ def wait_notice(page: Any, timeout: float = 40) -> Optional[str]:
 
 def pinned_block(mode: str) -> "H.Results":
     """The server holding H.265 for browsers that play none: the owner's page
-    and a viewer's both say so instead of staying black and quiet."""
+    and a viewer's both say so instead of staying black and quiet, and then
+    ask for no key frame, which nothing they could play would answer."""
     res = H.Results(f"encoder-pinned-{mode}")
     H.server_start(mode=mode, wayland=False, extra_env={"SELKIES_ENCODER": "h265enc"})
     with sync_playwright() as pw:
@@ -134,6 +153,7 @@ def pinned_block(mode: str) -> "H.Results":
             for role, url_hash in (("owner", ""), ("viewer", "#shared")):
                 ctx = browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1)
                 ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+                ctx.add_init_script(KEYFRAME_TAP_JS)
                 page = ctx.new_page()
                 said: list = []
                 page.on("console", lambda m, said=said: said.append(m.text))
@@ -141,6 +161,11 @@ def pinned_block(mode: str) -> "H.Results":
                 shown = wait_notice(page)
                 res.check(f"{role}: the page says the session streams H.265 video it cannot decode",
                           shown is not None and NOTICE in shown, shown or said[-3:])
+                if mode == "websockets":
+                    asks = page.evaluate("window.__keyframeAsks")
+                    page.wait_for_timeout(5000)
+                    asks = page.evaluate("window.__keyframeAsks") - asks
+                    res.check(f"{role}: then it asks for no key frame", asks == 0, f"{asks} in 5 s")
                 ctx.close()
         finally:
             browser.close()
