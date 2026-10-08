@@ -130,7 +130,9 @@ STILL_REQUEST_S = 0.25
 # pinned anchor may be. A peer that lost frames past repair (a NACK for packets gone from the
 # history, or its own PLI) is resynced from the newest frame it holds as a cut run is, where
 # anchors run (`_resync_held`); a stall of such requests past RESYNC_ANCHORED_S, from a decoder
-# that only takes a key frame, is sent one.
+# that only takes a key frame, is sent one. A request from a peer whose link is dark, packets
+# going to it and none reported received for RESYNC_DARK_S, is answered by the one it makes once
+# it is back.
 RESYNC_ROOM_FRAMES = 3
 RESYNC_LAG_S = 0.1
 RESYNC_REACH_FRAMES = 5
@@ -143,6 +145,7 @@ RESYNC_S = 1.0
 # frame, its key frame being the first anchor), it predicts past a run of any depth on the
 # report, so a run waits RESYNC_ANCHORED_S for room.
 RESYNC_ANCHORED_S = 4.0
+RESYNC_DARK_S = 0.25
 # An anchor goes to a peer without room only while the queue standing in front of it is under
 # RESYNC_ANCHOR_S: on a link too narrow for the anchors alone they would never let it drain.
 RESYNC_ANCHOR_S = 0.25
@@ -749,11 +752,16 @@ class RTCRtpSender(AsyncIOEventEmitter):
         new between two requests is starved, as through an outage, and starts the count again),
         where it holds nothing and no key frame is due, and for a peer without the dependency
         descriptor, which decodes nothing past the packets it lacks until a key frame. A frame
-        held only after a resync let it go is passed over."""
+        held only after a resync let it go is passed over, and a peer whose link is dark
+        (RESYNC_DARK_S) is answered by its request once it is back: neither a resync nor a key
+        frame reaches it now. One sent nothing since its last report, as while it waits for a key
+        frame, is not dark."""
         now = time.monotonic()
         if (self.selective is None or not self.selective() or not self._anchored
                 or not self.__rtp_header_extensions_map.has_dependency_descriptor()):
             return False
+        if 0 < self.transport._twcc_received_at < now - RESYNC_DARK_S < self.transport._twcc_sent_at:
+            return True
         if (self._stall_since is None or now - self._stall_last > RESYNC_ANCHORED_S
                 or self._held_at < self._stall_last):
             self._stall_since = now

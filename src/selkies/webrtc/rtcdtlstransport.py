@@ -524,6 +524,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         self._twcc_delay_newest: Optional[float] = None
         self._twcc_delay_least: Optional[float] = None
         self._twcc_lost_at = 0.0
+        self._twcc_received_at = 0.0
+        self._twcc_sent_at = 0.0
         self._twcc_stand: Optional[dict] = None
         # Receive side of transport-wide congestion control: a sender that
         # negotiates transport-cc runs its bandwidth estimation on this
@@ -1071,7 +1073,7 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         size and send time for matching against the receiver's transport-cc feedback."""
         seq = self._twcc_seq
         self._twcc_seq = (self._twcc_seq + 1) & 0xFFFF
-        now = time.monotonic()
+        now = self._twcc_sent_at = time.monotonic()
         self._twcc_history.pop(seq, None)
         self._twcc_missing.pop(seq, None)
         self._twcc_history[seq] = (size, now)
@@ -1264,6 +1266,8 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         }
         if lost:
             self._twcc_lost_at = time.monotonic()
+        if received:
+            self._twcc_received_at = time.monotonic()
         window = self._twcc_window
         window["received"] += received
         window["lost"] += lost

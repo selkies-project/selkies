@@ -116,7 +116,8 @@ def sender_with(dd: bool = True, selective: bool = False, taken: bool = True, mi
         _RTCRtpSender__send_codec=SimpleNamespace(mimeType=mime),
         on_frame_sent=None, on_resync=on_resync, taken=taken,
         selective=(lambda: selective),
-        transport=SimpleNamespace(video_backlog=lambda: tuple(backlog), twcc_arrived=acked.__contains__),
+        transport=SimpleNamespace(video_backlog=lambda: tuple(backlog), twcc_arrived=acked.__contains__,
+                                  _twcc_received_at=float("inf"), _twcc_sent_at=0.0),
         emit=lambda name, *args: events.append((name,) + args),
         _emit_pli_event=lambda: events.append("pli"))
     for name in ("_describe", "_pacer_resync", "_undecodable", "_frame_on_wire", "_forward",
@@ -332,8 +333,15 @@ for n in range(1, 6):
 res.check("a peer holding no frame, with no key frame on its way, is left one", s._resync_held() is False)
 s._stall_since = None
 s._RTCRtpSender__held.update(dict.fromkeys([1, 2, 3]))
-res.check("one holding frame 3 is resynced from it", s._resync_held() is True
-          and events == [("resync", 4, True)] and 4 not in s._RTCRtpSender__frame_numbers, events)
+s.transport._twcc_received_at = clock.t - sender_mod.RESYNC_DARK_S - 0.01
+s.transport._twcc_sent_at = clock.t
+res.check("one whose link is dark is answered by nothing: no resync, no key frame",
+          s._resync_held() is True and events == [] and s._stall_since is None, events)
+s.transport._twcc_sent_at = s.transport._twcc_received_at
+res.check("one holding frame 3, sent nothing since its last report, is resynced from it",
+          s._resync_held() is True and events == [("resync", 4, True)]
+          and 4 not in s._RTCRtpSender__frame_numbers, events)
+s.transport._twcc_received_at = float("inf")
 res.check("the frames after it are held back", send(s, 6, 5, 60) is None)
 res.check("a request while that run is open is answered by it", s._resync_held() is True
           and events == [("resync", 4, True)], events)
