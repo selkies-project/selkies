@@ -39,13 +39,15 @@ import traceback
 import uuid
 from collections import deque
 from collections.abc import Callable
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 
 from . import clock, rtp
 from .pacer import CLASS_AUDIO, CLASS_VIDEO
 from .codecs import get_capabilities, get_encoder, is_rtx
 from .codecs.base import Encoder
+from .codecs.h264 import H264Encoder
+from .codecs.h264_skip import HEAD_BYTES, SkipPictures
 from .exceptions import InvalidStateError
 from .mediastreams import MediaStreamError, MediaStreamTrack
 from .rtcdtlstransport import RTCDtlsTransport
@@ -185,7 +187,7 @@ RTP_COLOR_SPACE = {
 class RTCEncodedFrame:
     def __init__(self, payloads: list[bytes], timestamp: int, audio_level: int,
                  keyframe: bool = False, timing: Optional[tuple] = None,
-                 dependency: Optional[tuple] = None, anchor: bool = False):
+                 dependency: Optional[tuple] = None, anchor: bool = False, data: Any = None):
         self.payloads = payloads
         self.timestamp = timestamp
         self.audio_level = audio_level
@@ -193,6 +195,7 @@ class RTCEncodedFrame:
         self.timing = timing
         self.dependency = dependency
         self.anchor = anchor
+        self.data = data
 
 
 def video_timing_legs(timing: Optional[tuple], now_ns: int, arrival_delta_ms: int) -> tuple:
@@ -280,6 +283,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # report, the delta frames since the last key frame, and a count of pacer cuts, by
         # which a frame being sent learns a cut took it.
         self.__in_flight: deque[tuple[int, int]] = deque(maxlen=64)
+        # The skipped pictures a peer without the descriptor is sent for the H.264 frames it
+        # is not (`_stand_in`), and how many.
+        self.__skips: Optional[SkipPictures] = None
+        self.stand_ins = 0
         self._resync_since: Optional[float] = None
         self._resync_first: Optional[int] = None
         self._resync_run = 0
@@ -816,6 +823,32 @@ class RTCRtpSender(AsyncIOEventEmitter):
         descriptor."""
         return self.__rtp_header_extensions_map.has_dependency_descriptor() or self._numbered()
 
+    def _learn_parameter_sets(self, enc_frame: RTCEncodedFrame) -> None:
+        """Keep the SPS and PPS a key frame sent this peer carries, which its stand-ins'
+        slice headers are read against (`_stand_in`)."""
+        if enc_frame.data is None:
+            return
+        if self.__skips is None:
+            self.__skips = SkipPictures()
+        self.__skips.learn([bytes(nal) for nal in H264Encoder._split_bitstream(memoryview(enc_frame.data))])
+
+    def _stand_in(self, enc_frame: RTCEncodedFrame) -> Optional[RTCEncodedFrame]:
+        """A picture of skipped macroblocks in place of an H.264 frame left out for a peer
+        without the dependency descriptor (`h264_skip`), under the frame's own frame_num and
+        reference marking: its receiver hands the decoder every frame it is sent by sequence
+        number, and a decoder that refuses a frame_num gap (OpenH264) decodes on, repeating
+        its picture until the frame predicting past the run (`_repair`). Not numbered, so it
+        is neither a frame this peer holds nor one a later frame may predict from. None where
+        the frame cannot stand in, which leaves it out as before."""
+        if self.__skips is None or enc_frame.data is None or not self._numbered():
+            return None
+        built = self.__skips.stand_in(
+            [bytes(nal[:HEAD_BYTES]) for nal in H264Encoder._split_bitstream(memoryview(enc_frame.data))])
+        if built is None:
+            return None
+        self.stand_ins += 1
+        return RTCEncodedFrame(H264Encoder._packetize(built), enc_frame.timestamp, None, False, enc_frame.timing)
+
     def _open_run(self, frame_id: int) -> None:
         self._resync_since = time.monotonic()
         self._resync_first = frame_id
@@ -943,7 +976,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
             return None
 
         return RTCEncodedFrame(payloads, timestamp, None, data.keyframe, data.timing, data.dependency,
-                               getattr(data, "anchor", False))
+                               getattr(data, "anchor", False), data.data)
 
     def _describe(self, frame_id: int, reference: Optional[int], keyframe: bool) -> Optional[tuple]:
         """Number a frame on the wire and measure how far back it predicts, for its
@@ -1061,18 +1094,25 @@ class RTCRtpSender(AsyncIOEventEmitter):
 
                 timestamp = uint32_add(timestamp_origin, enc_frame.timestamp)
                 described = None
+                standing_in = False
                 descriptor = self.__rtp_header_extensions_map.has_dependency_descriptor()
                 if enc_frame.dependency is not None and self._numbers_frames():
                     if not self._forward(*enc_frame.dependency, enc_frame.keyframe, enc_frame.anchor):
                         self._frame_left = None
                         if self.on_frame_left_out is not None:
                             self.on_frame_left_out()
-                        continue
-                    described = self._describe(*enc_frame.dependency, enc_frame.keyframe)
-                    if described is None:
-                        self._frame_left = None
-                        self._undecodable(*enc_frame.dependency)
-                        continue
+                        stand_in = None if descriptor else self._stand_in(enc_frame)
+                        if stand_in is None:
+                            continue
+                        enc_frame, standing_in = stand_in, True
+                    else:
+                        described = self._describe(*enc_frame.dependency, enc_frame.keyframe)
+                        if described is None:
+                            self._frame_left = None
+                            self._undecodable(*enc_frame.dependency)
+                            continue
+                        if not descriptor and enc_frame.keyframe and self._numbered():
+                            self._learn_parameter_sets(enc_frame)
 
                 # abs-capture-time rides the first packet of a key frame and of a
                 # frame a second after the last one, as libwebrtc paces it: the RTP
@@ -1173,7 +1213,9 @@ class RTCRtpSender(AsyncIOEventEmitter):
 
                 last = next((seq for _, seq, media, _ in reversed(outgoing)
                              if media is not None and seq is not None), None)
-                if last is not None and self.__kind == "video":
+                # A stand-in is no frame of the stream's: the pacer counts no frame for it, and
+                # the peer's frame was told left out already.
+                if last is not None and self.__kind == "video" and not standing_in:
                     self._frame_handed = last
                     captured = enc_frame.timing[0] if enc_frame.timing else 0
                     self.transport.frame_end(last, self._frame_on_wire, last, enc_frame.keyframe,

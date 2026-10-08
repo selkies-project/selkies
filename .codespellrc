@@ -11,4 +11,5 @@ skip = ./.git,./build,./tests/tools/protocols,./addons/*/node_modules,./addons/*
 # zink: the Mesa OpenGL-on-Vulkan driver. parm: the v4l2_streamparm member.
 # datas: PipeWire spa_buffer field (buffer->datas, n_datas). propertyst: the X
 # server's propertyst.h header. notin: Kubernetes' NotIn selector operator.
-ignore-words-list = renderd,requestor,requestors,currenty,initialy,chage,anc,zink,parm,datas,propertyst,notin
+# ue: the exp-Golomb ue(v) syntax element.
+ignore-words-list = renderd,requestor,requestors,currenty,initialy,chage,anc,zink,parm,datas,propertyst,notin,ue
