@@ -782,7 +782,12 @@ class RTCRtpSender(AsyncIOEventEmitter):
             return True
         for fid in after:
             self.__frame_numbers.pop(fid, None)
-        self._open_run(after[0])
+        # The encoder is told the newest of them predicting from none of the others: it predicted
+        # past the frames before that one already, and a report naming one of those is ignored.
+        refs = {entry[0]: entry[1] for entry in self.__unheld}
+        later = set(after)
+        self._open_run(next((fid for fid in reversed(after) if fid in refs and refs[fid] not in later),
+                            after[0]))
         self._resync_run = len(after)
         self._repair()
         return True

@@ -376,6 +376,15 @@ clock.t += 1.5
 res.check("a key frame on its way is waited for a round trip past its queue", s._resync_held() is True)
 clock.t += 0.2
 res.check("and asked again past that", s._resync_held() is False)
+s, events, _, _ = sender_with(selective=True)
+send(s, 1, None, 10, key=True)
+send(s, 2, 1, 20, anchor=True)
+for n, ref in ((3, 2), (4, 3), (5, 1), (6, 5)):
+    send(s, n, ref, 10 * n)
+    s._RTCRtpSender__unheld.append((n, ref, False, clock.t, []))
+s._RTCRtpSender__held.update(dict.fromkeys([1, 2]))
+res.check("a resync names the newest frame sent since predicting from none of the others",
+          s._resync_held() is True and events == [("resync", 5, True)], events)
 s, _, _, _ = sender_with(selective=True)
 send(s, 1, None, 10, key=True)
 send(s, 2, 1, 20, anchor=True)
