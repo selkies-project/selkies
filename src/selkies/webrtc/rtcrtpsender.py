@@ -296,9 +296,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
         # Told each described frame on the wire to the peer and each it holds, as `(frame id,
         # key frame)`, and each key frame sent it; the described frames sent and not yet held,
         # oldest first, as (frame id, frame predicted from, key frame, when sent,
-        # [(transport-wide, media sequence number)]); the newest frames held; whether a frame
-        # sent since the key frame was never held (`_confirm`); and the transport-wide
-        # sequence number each retransmitted packet last went out under.
+        # [(transport-wide, media sequence number)]); the frames held, oldest first, as far
+        # back as frames are numbered, since one may predict from a pinned anchor held long
+        # ago; whether a frame sent since the key frame was never held (`_confirm`); and the
+        # transport-wide sequence number each retransmitted packet last went out under.
         self.on_frame_out: Optional[Callable[[int, bool], None]] = None
         self.on_frame_held: Optional[Callable[[int, bool], None]] = None
         self.on_key_sent: Optional[Callable[[], None]] = None
@@ -307,7 +308,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         self._stall_since: Optional[float] = None
         self._stall_last = 0.0
         self._key_sent_at: Optional[float] = None
-        self.__held: deque[int] = deque(maxlen=64)
+        self.__held: dict[int, None] = {}
         self._unheld_gap = False
         self.__rtx_twcc: dict[int, int] = {}
         self.__loop = asyncio.get_running_loop()
@@ -703,7 +704,10 @@ class RTCRtpSender(AsyncIOEventEmitter):
             if (not (in_order and (kept or self._unheld_gap))
                     and all(acked(twcc) or (media in rtx and acked(rtx[media])) for twcc, media in packets)
                     and (keyframe or reference in self.__held)):
-                self.__held.append(frame_id)
+                self.__held.pop(frame_id, None)
+                self.__held[frame_id] = None
+                if len(self.__held) > FRAME_NUMBERS_MEMORY:
+                    del self.__held[next(iter(self.__held))]
                 if self.on_frame_held is not None:
                     self.on_frame_held(frame_id, keyframe)
             else:
@@ -739,7 +743,7 @@ class RTCRtpSender(AsyncIOEventEmitter):
         if not self.__held:
             return (self._key_sent_at is not None
                     and now - self._key_sent_at < max(RESYNC_S, 2 * self._video_backlog()[1]))
-        number = self.__frame_numbers.get(self.__held[-1])
+        number = self.__frame_numbers.get(next(reversed(self.__held)))
         if number is None:
             return False
         after = [fid for fid, n in self.__frame_numbers.items() if 0 < ((n - number) & 0xFFFF) < 0x8000]

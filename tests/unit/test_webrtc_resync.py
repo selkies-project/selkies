@@ -105,7 +105,7 @@ def sender_with(dd: bool = True, selective: bool = False, taken: bool = True, mi
     acked: set = set()
     s = SimpleNamespace(
         _RTCRtpSender__in_flight=deque(maxlen=64), _RTCRtpSender__frame_numbers={},
-        _RTCRtpSender__unheld=deque(maxlen=256), _RTCRtpSender__held=deque(maxlen=64),
+        _RTCRtpSender__unheld=deque(maxlen=256), _RTCRtpSender__held={},
         _RTCRtpSender__rtx_twcc={}, on_frame_held=None, on_frame_out=None, acked=acked, _anchored=False,
         _stall_since=None, _stall_last=0.0, _key_sent_at=None, _unheld_gap=False,
         _RTCRtpSender__frame_number=0, _RTCRtpSender__rtp_history=history,
@@ -320,7 +320,7 @@ for n in range(1, 6):
     send(s, n, None if n == 1 else n - 1, 10 * n, key=n == 1, anchor=n == 3)
 res.check("a peer holding no frame, with no key frame on its way, is left one", s._resync_held() is False)
 s._stall_since = None
-s._RTCRtpSender__held.extend([1, 2, 3])
+s._RTCRtpSender__held.update(dict.fromkeys([1, 2, 3]))
 res.check("one holding frame 3 is resynced from it", s._resync_held() is True
           and events == [("resync", 4, True)] and 4 not in s._RTCRtpSender__frame_numbers, events)
 res.check("the frames after it are held back", send(s, 6, 5, 60) is None)
@@ -333,7 +333,7 @@ res.check("a stall of requests past RESYNC_ANCHORED_S is left a key frame", s._r
 o, _, _, _ = sender_with()
 send(o, 1, None, 10, key=True)
 send(o, 2, 1, 20, anchor=True)
-o._RTCRtpSender__held.extend([1])
+o._RTCRtpSender__held.update(dict.fromkeys([1]))
 res.check("and the display's owner always is", o._resync_held() is False)
 
 # Held: transport-cc reported every packet of the frame, and its reference is held.
@@ -375,7 +375,7 @@ res.check("it is left the frames it has no room for, and the encoder told at the
           out == [None] * RESYNC_REACH_FRAMES and events == [("resync", 3, True)], (out, events))
 res.check("the frame predicting past the run goes out", send(s, 30, 2, 300) == (2, 1))
 s._anchored = True
-s._RTCRtpSender__held.extend([1, 2])
+s._RTCRtpSender__held.update(dict.fromkeys([1, 2]))
 res.check("a loss past repair is left a key frame: its receiver decodes nothing past the hole",
           s._resync_held() is False)
 s, events, _, _ = sender_with(dd=False)
@@ -394,5 +394,17 @@ s.acked.add(103)
 s._confirm()
 res.check("and none past one it never held, until a key frame",
           held == [1] and [e[0] for e in unheld] == [4] and s._unheld_gap, (held, list(unheld)))
+
+# A frame predicting from one held long ago, a pinned anchor or the key frame, is held too.
+s, _, _, _ = sender_with()
+held = []
+s.on_frame_held = lambda frame_id, key: held.append(frame_id)
+unheld = s._RTCRtpSender__unheld
+unheld.extend([(1, None, True, clock.t, [(1000, 1)])]
+              + [(n, 1, False, clock.t, [(1000 + n, n)]) for n in range(2, 200)])
+s.acked.update(range(1000, 1200))
+s._confirm()
+res.check("frames predicting from the key frame are held however many were held since",
+          held == list(range(1, 200)), held[-3:])
 
 sys.exit(0 if res.summary() else 1)
