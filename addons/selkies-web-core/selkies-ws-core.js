@@ -2812,6 +2812,7 @@ function ensureVideoWorker() {
       if (m.ack) { if (videoWorkerInFlight > 0) videoWorkerInFlight--; return; }
       if (m.type === 'error') { deactivateVideoWorker(); return; }
       if (m.type === 'presented') {
+        if (codecRefusalUnanswerable) endCodecRefusal();
         videoWorkerRendered = true;
         if (videoWorkerActive && canvas) canvas.style.display = 'none';
         return;
@@ -3574,9 +3575,17 @@ function settleServerEncoder(encoder, entry) {
     if (!canDecodeEncoder(encoder)) { answerRefusedCodec(encoder, codecOfEncoder(encoder)); return; }
     if (codecRefusalUnanswerable
         && (encoder !== codecRefusalHeld.encoder || video_fullcolor !== codecRefusalHeld.fullcolor)) {
-        codecRefusalUnanswerable = false;
-        if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
+        endCodecRefusal();
     }
+}
+
+/**
+ * Ends an unanswerable refusal and its notice: the server streams something
+ * else now, or this page decoded a picture of the stream after all.
+ */
+function endCodecRefusal() {
+    codecRefusalUnanswerable = false;
+    if (statusDisplayElement) statusDisplayElement.classList.add('hidden');
 }
 
 /**
@@ -4611,6 +4620,7 @@ function armSharedStallWatchdog() {
  * @param {VideoFrame} frame
  */
 function handleDecodedVncStripeFrame(yPos, frame) {
+  if (codecRefusalUnanswerable) endCodecRefusal();
   pageDecode.format = frame.format;
   if (streamStats.open) notePageDecoded(frame);
   if (isFullFrameVideo(currentEncoderMode) && yPos === 0) {

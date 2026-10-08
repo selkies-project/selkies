@@ -342,7 +342,7 @@ def wr_block(engine: str = "chromium", wayland: bool = False) -> "H.Results":
             # A page sent a skipped picture for each frame left out (Firefox) decodes every frame the
             # owner does, and more by the lag it makes up in the window.
             res.check("the owner decodes on beside it",
-                      own["decoded"] >= max(WINDOW_S * 10, sl["decoded"] - max(lags, default=0)), own)
+                      own["decoded"] >= max(WINDOW_S * 10, sl["decoded"] - max([0, *lags])), own)
             res.check("the owner's stream carries no key frame for the slow page", own["keyframes"] <= 1,
                       f"{own['keyframes']} key frames")
             res.check("the slow page keeps decoding frames", sl["decoded"] >= WINDOW_S * 5, sl)
