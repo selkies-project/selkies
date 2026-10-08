@@ -1481,8 +1481,9 @@ def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
 
     A video encoder under Turbo sends every frame and leaves no still screen to
     clean up, so the dashboard shows paint-over off under Turbo and on without
-    it, and sends the server each value it derives. A pick the user makes, or
-    an operator's value, holds through a Turbo change.
+    it, as the server defaults it, and sends the server each value it derives
+    that differs from the server's. A pick the user makes, or an operator's
+    value, holds through a Turbo change.
     """
     res = H.Results(f"paint-over-{dashboard}-{engine}")
     for operator in (None, "true"):
@@ -1536,7 +1537,9 @@ def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
                     res.check(f"{who}: and never sends it off", False not in pushed(), pushed())
                 else:
                     res.check(f"{who}: paint-over defaults off under Turbo", not switch_on(paint), "")
-                    res.check(f"{who}: and the server is sent off", pushed()[-1:] == [False], pushed())
+                    served = page.evaluate("window.use_paint_over_quality")
+                    res.check(f"{who}: as the server defaults it, so nothing turns it on there",
+                              served is False and True not in pushed(), (served, pushed()))
                     flip(turbo)
                     res.check(f"{who}: turning Turbo off turns paint-over on", switch_on(paint), "")
                     res.check(f"{who}: and sends it on", pushed()[-1:] == [True], pushed())

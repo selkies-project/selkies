@@ -2311,7 +2311,9 @@ class CentralizedStreamServer:
         the settings at start, so the encoder knob is brought in line with the
         transport before it starts (a websockets-only encoder such as jpeg or
         striped h264enc cannot ride the WebRTC pipeline, and a switch back
-        restores the operator's menu and value).
+        restores the operator's menu and value), and only then does an unset
+        paint-over resolve, since its default depends on the resolved encoder
+        (JPEG keeps it under Turbo), the order `_post_process_settings` keeps.
 
         Args:
             mode_name: Registered service name ("websockets" or "webrtc").
@@ -2331,6 +2333,7 @@ class CentralizedStreamServer:
             logger.info(f"Starting service: {mode_name}")
             self.settings.mode = mode_name
             self.settings.apply_webrtc_encoder_filter()
+            self.settings.resolve_paint_over_default()
             service = self.services[mode_name]
             task = asyncio.create_task(service.start())
             self.active_task = task

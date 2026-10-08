@@ -722,7 +722,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "use_paint_over_quality",
         "type": "bool",
         "default": True,
-        "help": "Clean up a still screen at the paint-over quality, under CBR and CRF alike and whether or not video_streaming_mode (Turbo) sends every frame: once the picture stops changing, or keeps changing only in small places, a video encoder refreshes what changed at the paint-over CRF, and after a large change sends a key frame at it once the screen holds still. Under CBR the frames instead keep coming after the screen stops, each coded by the rate control, until the picture is clean, and then stop until it moves again, so a blinking cursor on a clean screen costs only its own frames: NVENC and x264 until their rate control reaches that quality (NVENC refreshes the screen a band a frame where the bitrate is too low for it to get there), VA-API until the encoded picture stops improving, x265 and VP9 until theirs codes at it, for half a minute at most; VP8 and SVT-AV1 hold a refresh at it, a key frame within a second of the bitrate; JPEG re-sends still stripes at the paint-over JPEG quality.",
+        "help": "Clean up a still screen at the paint-over quality, under CBR and CRF alike and whether or not video_streaming_mode (Turbo) sends every frame. Unless set, it is off while Turbo drives a video encoder, whose frames refine a still picture as the cleanup would, and on otherwise, JPEG included, as the dashboards default it. When on: once the picture stops changing, or keeps changing only in small places, a video encoder refreshes what changed at the paint-over CRF, and after a large change sends a key frame at it once the screen holds still. Under CBR the frames instead keep coming after the screen stops, each coded by the rate control, until the picture is clean, and then stop until it moves again, so a blinking cursor on a clean screen costs only its own frames: NVENC and x264 until their rate control reaches that quality (NVENC refreshes the screen a band a frame where the bitrate is too low for it to get there), VA-API until the encoded picture stops improving, x265 and VP9 until theirs codes at it, for half a minute at most; VP8 and SVT-AV1 hold a refresh at it, a key frame within a second of the bitrate; JPEG re-sends still stripes at the paint-over JPEG quality.",
     },
     {
         "name": "paint_over_jpeg_quality",
@@ -2036,6 +2036,22 @@ class AppSettings:
             self._pre_webrtc_encoder = None
             self._webrtc_encoder_fallback = None
 
+    def resolve_paint_over_default(self) -> None:
+        """Default paint-over off while Turbo drives a video encoder, whose frames refine a
+        still picture as the cleanup would, and on otherwise, JPEG included: the dashboards'
+        default (`USE_PAINT_OVER_QUALITY_SPEC`), so a client without one gets it as well, and its
+        Turbo frames skip the band hash the cleanup reads.
+
+        An operator's use_paint_over_quality wins; a client's choice lives in its display's
+        state. Called again on a transport switch, which can change the encoder.
+        """
+        if self.was_provided("use_paint_over_quality"):
+            return
+        self.use_paint_over_quality = (
+            canonical_encoder(self.encoder) == "jpeg" or not self.video_streaming_mode[0],
+            self.use_paint_over_quality[1],
+        )
+
     def _post_process_settings(self) -> None:
         """Normalize and cross-check settings whose meaning spans several
         entries.
@@ -2050,7 +2066,9 @@ class AppSettings:
         quality on both transports, so the resolved mode and the menu
         published to clients are CRF alone; the "cbr" default would leave the
         dashboards showing a bitrate slider the encoder ignores and hiding the
-        CRF slider in force. Microphone forwarding requires audio.
+        CRF slider in force. Paint-over defaults off where Turbo drives a video
+        encoder (`resolve_paint_over_default`). Microphone forwarding requires
+        audio.
         A public listener is the both-family wildcard address, so the server
         binds from `addr` alone.
         The clipboard policy is normalized to exactly one of its four values.
@@ -2091,6 +2109,7 @@ class AppSettings:
             )
             if rc_definition is not None:
                 rc_definition["meta"]["allowed"] = ["crf"]
+        self.resolve_paint_over_default()
 
         audio_enabled = self.audio_enabled[0]
         if not audio_enabled and self.microphone_enabled[0]:
