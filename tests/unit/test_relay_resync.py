@@ -70,7 +70,8 @@ def chunk(frame_id: int, reference: int, key: bool = False, size: int = 400, row
 
 def relay(owner: bool = False, taken: bool = True, budget: int = 100_000, server=None):
     """A relay whose server records the lost reports as (frame, within reach), and the
-    frames every relay's page holds as `server.acked`; `server` shares another's."""
+    frames every relay's page holds as `server.acked` (and was handed as `server.handed`);
+    `server` shares another's."""
     reports = []
     sock = Socket()
 
@@ -82,9 +83,9 @@ def relay(owner: bool = False, taken: bool = True, budget: int = 100_000, server
 
     if server is None:
         server = SimpleNamespace(taken=taken, owner=owner, clients=set(), _relay_lost=relay_lost,
-                                 acked=[], common_frames={})
-        server.common_frames_for = lambda display_id: server.common_frames.setdefault(
-            display_id, wm.CommonFrames(server.acked.append))
+                                 acked=[], handed=[], common_frames={})
+        server.common_frames_for = lambda display_id, held=True: server.common_frames.setdefault(
+            (display_id, held), wm.CommonFrames(server.acked.append if held else server.handed.append))
         server._owns_display = lambda ws, display_id: server.owner is ws
     ws = Page(sock)
     if owner:
@@ -268,6 +269,8 @@ def main() -> int:
     r, _, reports, sock = relay(server=server)
     for q in (o, r):
         q.offer(chunk(1, 1, key=True))
+    check("a key frame queued for every page is told handed before either writes it",
+          server.handed == [1] and server.acked == [], (server.handed, server.acked))
     hand(o, osock)
     check("a key frame one page holds is not yet common", server.acked == [], server.acked)
     hand(r, sock)
@@ -285,11 +288,14 @@ def main() -> int:
         r.offer(chunk(n, n - 1))
     check("a page without room is left frames, which are not common",
           r.lost_first == 4 and server.acked == [1, 2, 3], (r.lost_first, server.acked))
+    check("nor handed to every page", server.handed == [1, 2, 3], server.handed)
     o.offer(chunk(12, 3, anchor=True))
     hand(o, osock)
     r.offer(chunk(12, 3, anchor=True))
     check("an anchor predicting from a common frame goes to the page without room, ending its run",
           ids(r)[-1:] == [12] and r.lost_first is None, (ids(r), r.lost_first))
+    check("and is told handed while that page has yet to write it",
+          server.handed[-1:] == [12] and server.acked[-1:] == [3], (server.handed, server.acked))
     hand(r, sock)
     check("and is common once both hold it", server.acked[-1:] == [12], server.acked)
     for n in range(13, 13 + REACH - 1):

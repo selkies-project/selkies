@@ -310,7 +310,8 @@ def chunk(frame_id: int, key: bool = False, size: int = 100) -> dict:
 async def relay_skips_ahead() -> None:
     """A relay holds an asyncio.Event, which needs a running loop to build."""
     server = SimpleNamespace(common_frames={})
-    server.common_frames_for = lambda did: server.common_frames.setdefault(did, CommonFrames(lambda fid: None))
+    server.common_frames_for = lambda did, held=True: server.common_frames.setdefault(
+        (did, held), CommonFrames(lambda fid: None))
     relay = _VideoRelay(server, "primary", SimpleNamespace(), budget=250)
     res.check("a fresh relay waits for a keyframe", relay.offer(chunk(0)) and not relay.backlog)
     res.check("the keyframe and the frames behind it queue",

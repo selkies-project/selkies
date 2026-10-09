@@ -1026,9 +1026,10 @@ class _VideoRelay:
 
     def _leave_common(self) -> None:
         """This client holds no frame the others do until its next key frame."""
-        common = self.server.common_frames.get(self.display_id)
-        if common is not None:
-            common.leave(self)
+        for held in (False, True):
+            common = self.server.common_frames.get((self.display_id, held))
+            if common is not None:
+                common.leave(self)
 
     def _lose(self, frame_id: int) -> None:
         """Count a frame lost to this client, starting a run where none is open."""
@@ -1182,7 +1183,8 @@ class _VideoRelay:
                 self.live_rows.add(row)
                 self._end_lost()
                 self.sent.clear()
-                self.server.common_frames_for(self.display_id).join(self)
+                for held in (False, True):
+                    self.server.common_frames_for(self.display_id, held).join(self)
             elif row not in self.live_rows:
                 deliver = False
                 dropped = True
@@ -1207,18 +1209,21 @@ class _VideoRelay:
             self.backlog.append(item)
             self.backlog_bytes += size
             self._wake.set()
+            if is_video:
+                self._hold(data, held=False)
         self._judge(flushed + (not deliver))
         return dropped and self._want_sync()
 
-    def _hold(self, data: Any) -> None:
-        """This client holds a video frame its relay wrote: a key frame, or a delta
-        frame naming the one it predicts from, which this relay sends only where
-        the client holds that one (`CommonFrames`)."""
+    def _hold(self, data: Any, held: bool = True) -> None:
+        """This client holds a video frame its relay wrote, or where not `held` was
+        handed one its relay queued: a key frame, or a delta frame naming the one
+        it predicts from, which this relay sends only where the client holds that
+        one (`CommonFrames`). A relay that drops its queue leaves both."""
         frame_id = (data[2] << 8) | data[3]
         key = (data[1] & 0x0F) == 0x01
         if (((data[4] << 8) | data[5]) in self.live_rows
                 and (key or ((data[10] << 8) | data[11]) != frame_id)):
-            self.server.common_frames_for(self.display_id).hold(self, frame_id, key)
+            self.server.common_frames_for(self.display_id, held).hold(self, frame_id, key)
 
     async def _run(self) -> None:
         """Drain the backlog onto the socket until stopped or the socket dies."""
@@ -1576,8 +1581,9 @@ class DataStreamingServer(BaseStreamingService):
         video_relay_groups: Display id to `{ws: _VideoRelay}`; the dict's
             presence marks the capture as delivering, and relays are created
             lazily by the fan-out.
-        common_frames: Display id to the frames every one of its relays'
-            clients holds (`CommonFrames`), told to its encoder.
+        common_frames: (display id, held) to the frames every one of its
+            relays' clients holds, or where not held was handed
+            (`CommonFrames`), told to its encoder.
         video_paused_clients: Sockets that sent STOP_VIDEO (hidden tab) —
             any shared client, not viewers alone — excluded from the primary
             video fan-out until their next START_VIDEO while capture, control,
@@ -1731,7 +1737,7 @@ class DataStreamingServer(BaseStreamingService):
         # settings it changed, not the ones it repeats (`_settings_changed_by`).
         self._page_settings: Dict[Any, dict] = {}
         self.video_relay_groups = {}
-        self.common_frames: Dict[str, CommonFrames] = {}
+        self.common_frames: Dict[Tuple[str, bool], CommonFrames] = {}
         self.capture_instances = {}
         # A display's capture while its start is awaited: its module takes rate,
         # tunable and key-frame requests meanwhile, and the settings registered
@@ -3054,7 +3060,8 @@ class DataStreamingServer(BaseStreamingService):
         if group:
             for relay in list(group.values()):
                 relay.stop()
-        self.common_frames.pop(display_id, None)
+        for held in (False, True):
+            self.common_frames.pop((display_id, held), None)
 
     def _schedule_idr_for_display(self, display_id: str) -> None:
         """Ask the encoder for a fresh keyframe on this display.
@@ -3081,21 +3088,23 @@ class DataStreamingServer(BaseStreamingService):
         self._schedule_invalidation(display_id, frame_id)
         return True
 
-    def common_frames_for(self, display_id: str) -> CommonFrames:
-        """The frames every client of the display holds (`CommonFrames`)."""
-        common = self.common_frames.get(display_id)
+    def common_frames_for(self, display_id: str, held: bool = True) -> CommonFrames:
+        """The frames every client of the display holds, or where not `held` was
+        handed (`CommonFrames`)."""
+        common = self.common_frames.get((display_id, held))
         if common is None:
-            common = self.common_frames[display_id] = CommonFrames(
-                functools.partial(self._acknowledge_frame, display_id))
+            common = self.common_frames[(display_id, held)] = CommonFrames(
+                functools.partial(self._acknowledge_frame, display_id, held=held))
         return common
 
-    def _acknowledge_frame(self, display_id: str, frame_id: int) -> None:
-        """Tell the display's encoder every client holds `frame_id` (`CommonFrames`)."""
+    def _acknowledge_frame(self, display_id: str, frame_id: int, held: bool = True) -> None:
+        """Tell the display's encoder every client holds `frame_id`, or where not
+        `held` was handed it (`CommonFrames`)."""
         module = self._opcode_display_module(display_id)
         if not module:
             return
         try:
-            module.acknowledge_reference(frame_id & 0xFFFF)
+            module.acknowledge_reference(frame_id & 0xFFFF, held=held)
         except Exception:
             return
 
