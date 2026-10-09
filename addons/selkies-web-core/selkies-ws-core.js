@@ -145,6 +145,7 @@ import { createChunkStamp } from './lib/chunk-stamp.js';
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
 import { DecodePace } from './lib/decode-pace.js';
+import { DecodeGate } from './lib/decode-gate.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 
@@ -530,7 +531,8 @@ let vncStripeDecoders = {};
  * Chunks one stripe decoder may have outstanding before its deltas are
  * dropped. Past it the row is gated until its next IDR: decoding a backlog
  * late only deepens it, and a dropped delta breaks the row's reference chain.
- * The video worker holds its full-frame decoder to the same contract.
+ * A full-frame decoder, the page's or the video worker's, follows
+ * lib/decode-gate.js instead.
  */
 const STRIPE_DECODE_QUEUE_LIMIT = 8;
 /**
@@ -1123,6 +1125,8 @@ let framerateAsked = null;
  */
 let decodePace = null;
 const pagePace = new DecodePace();
+/** What the page's own full-frame decoder does with each frame, as the video worker's does (lib/decode-gate.js). */
+const pageGate = new DecodeGate();
 /** Tells the server the pace, or that there is none. */
 function sendDecodePace() {
   if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(`DECODE_PACE ${decodePace || 0}`);
@@ -2826,10 +2830,7 @@ function ensureVideoWorker() {
         return;
       }
       if (m.type === 'lostFrame') {
-        if (websocket && websocket.readyState === WebSocket.OPEN) {
-          websocket.send(`LOST_FRAME ${m.id}`);
-          requests.lost++;
-        }
+        sendLostFrame(m.id);
         return;
       }
       if (m.type === 'decodePace') {
@@ -8106,6 +8107,7 @@ class WorkerWebSocket {
                     output: handleDecodedVncStripeFrame.bind(null, vncStripeYStart),
                     error: (e) => handleStripeDecodeError(e, vncStripeYStart)
                 });
+                if (vncStripeYStart === 0) pageGate.configured();
                 if (isFullFrameVideo(currentEncoderMode) && pagePace.cap !== null && !decodeInWorker && decoderInfo
                     && (decoderInfo.width !== stripeWidth || decoderInfo.height !== stripeHeight)) {
                     pagePace.reset();
@@ -8166,15 +8168,27 @@ class WorkerWebSocket {
                     return;
                 }
                 const fullFrame = isFullFrameVideo(currentEncoderMode);
-                if (chunkType === 'key') {
-                    decoderInfo.hasReceivedKeyframe = true;
-                } else if (decoderInfo.decoder.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
-                    if (fullFrame) pagePace.decided(decoderInfo.decoder.decodeQueueSize, true);
+                if (chunkType === 'key') decoderInfo.hasReceivedKeyframe = true;
+                if (fullFrame) {
+                    // A frame naming its reference is let go and named, so the encoder
+                    // predicts past it; a key frame is asked for only where that cannot help.
+                    const queued = decoderInfo.decoder.decodeQueueSize;
+                    const decision = pageGate.decide(chunkType === 'key', vncFrameID, referenceFrameId, queued);
+                    pagePace.decided(queued, decision === 'lost' || decision === 'overload');
+                    if (decision === 'lost') {
+                        sendLostFrame(vncFrameID);
+                        return;
+                    }
+                    if (decision === 'no_key' || decision === 'overload') {
+                        decoderInfo.hasReceivedKeyframe = false;
+                        requestKeyframe();
+                        return;
+                    }
+                } else if (chunkType === 'delta' && decoderInfo.decoder.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
                     decoderInfo.hasReceivedKeyframe = false;
                     requestKeyframe();
                     return;
                 }
-                if (fullFrame) pagePace.decided(decoderInfo.decoder.decodeQueueSize, false);
                 // Striped H.264 carries the frame id in the timestamp so the paint
                 // loop can present whole frames; full-frame keeps a monotonic clock.
                 const chunkTimestamp = (currentEncoderMode === 'h264enc-striped')
@@ -10262,6 +10276,14 @@ function performServerInitiatedVideoReset(reason = "unknown") {
     }
   }
 
+}
+
+/** Tells the server the decoder let frame `id` go, so the encoder predicts past it (`LOST_FRAME`). */
+function sendLostFrame(id) {
+    if (websocket && websocket.readyState === WebSocket.OPEN) {
+        websocket.send(`LOST_FRAME ${id}`);
+        requests.lost++;
+    }
 }
 
 let lastKeyframeRequestTime = 0;
