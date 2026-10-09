@@ -1307,6 +1307,12 @@ class CommonFrames:
     predicts the next from a frame every page holds (FRAME_ANCHOR), so each page
     recovers from a loss of any depth on its own and the stream carries no key
     frame for it.
+
+    A second set counts the frames every page was handed, which it may yet
+    lose: over WebSockets once its relay queues the frame, over WebRTC once its
+    packets leave the pacer. The encoder predicts each anchor from one of those,
+    so a page whose link holds frames for a while costs no anchor reaching back
+    to the last.
     """
 
     __slots__ = ("_acknowledge", "_pages", "_told", "_key")
