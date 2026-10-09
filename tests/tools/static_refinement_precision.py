@@ -23,6 +23,12 @@ import zlib
 from typing import Any, Dict, Tuple
 
 
+def require(condition: bool, message: str) -> None:
+    """Enforce fixture and browser checks even when Python optimization is enabled."""
+    if not condition:
+        raise RuntimeError(message)
+
+
 def png_chunk(kind: bytes, data: bytes) -> bytes:
     """Encode a PNG chunk with its CRC."""
     return (
@@ -74,7 +80,7 @@ def verify_fixture(png: bytes, reference: Dict[str, Any]) -> Dict[str, Any]:
     This is a structural check of the generated fixture, not a general-purpose
     PNG decoder. Browser precision is always checked against ``reference``.
     """
-    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    require(png[:8] == b"\x89PNG\r\n\x1a\n", "Fixture PNG signature differs")
     offset, compressed = 8, bytearray()
     significant = None
     while offset < len(png):
@@ -82,27 +88,30 @@ def verify_fixture(png: bytes, reference: Dict[str, Any]) -> Dict[str, Any]:
         kind = png[offset + 4 : offset + 8]
         data = png[offset + 8 : offset + 8 + length]
         crc = struct.unpack_from(">I", png, offset + 8 + length)[0]
-        assert zlib.crc32(kind + data) == crc
+        require(zlib.crc32(kind + data) == crc, "Fixture PNG CRC differs")
         if kind == b"IHDR":
-            assert struct.unpack(">IIBBBBB", data) == (
-                reference["width"], reference["height"], 16, 2, 0, 0, 0
+            require(
+                struct.unpack(">IIBBBBB", data) == (
+                    reference["width"], reference["height"], 16, 2, 0, 0, 0
+                ),
+                "Fixture PNG dimensions or format differ",
             )
         if kind == b"sBIT":
             significant = list(data)
         if kind == b"IDAT":
             compressed.extend(data)
         offset += length + 12
-    assert significant == [10, 10, 10]
+    require(significant == [10, 10, 10], "Fixture significant bits differ")
     raw = zlib.decompress(compressed)
     stride = reference["width"] * 6 + 1
-    assert len(raw) == stride * reference["height"]
+    require(len(raw) == stride * reference["height"], "Fixture decoded size differs")
     decoded = []
     for y in range(reference["height"]):
         row = raw[y * stride : (y + 1) * stride]
-        assert row[0] == 0
+        require(row[0] == 0, "Fixture row uses an unexpected PNG filter")
         decoded.extend(value[0] >> 6 for value in struct.iter_unpack(">H", row[1:]))
-    assert decoded == reference["codes"]
-    assert len(set(decoded[: reference["width"] * 3])) == 1024
+    require(decoded == reference["codes"], "Fixture ten-bit codes differ")
+    require(len(set(decoded[: reference["width"] * 3])) == 1024, "Fixture gray levels differ")
     return {
         "samples": len(decoded), "exact_samples": len(decoded),
         "container_bits": 16, "significant_bits": significant,
@@ -224,8 +233,11 @@ def main() -> None:
                         help="Fail unless one complete decode/render route preserves every ten-bit code")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+    report_path = args.output / "results.json"
+    report_path.write_text(json.dumps({"status": "incomplete"}) + "\n")
     png, reference = make_fixture()
     results = {
+        "status": "failed",
         "scope": "Synthetic PNG transport and browser canvas memory; not capture or monitor proof",
         "fixture": verify_fixture(png, reference),
     }
@@ -280,6 +292,8 @@ def main() -> None:
         and case.get("arrayType") == "Float16Array"
     ]
     results["precision_gate"] = {
+        "required": args.require_high_precision,
+        "passed": bool(verified),
         "verified_canvas_paths": verified,
         "unsupported_paths": [name for name, case in cases.items() if case["status"] == "unsupported"],
         "measured_loss_paths": [name for name, case in cases.items() if case["status"] == "measured-loss"],
@@ -287,13 +301,22 @@ def main() -> None:
         "physical_display_verified": False,
         "exactness_definition": "All original ten-bit codes recover via round(float_sample * 1023)",
     }
-    (args.output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
-    assert results["browser"]["shared8_equality"]
-    assert cases["blob_bitmap_default8"]["status"] == "measured-loss"
-    assert cases["blob_bitmap_default8"]["gray_levels"] <= 256
-    assert all(case["status"] != "error" for case in cases.values())
-    if args.require_high_precision:
-        assert verified, "No complete ten-bit decode/render route was verified"
+    try:
+        require(results["browser"]["shared8_equality"], "The two eight-bit controls differ")
+        require(cases["blob_bitmap_default8"]["status"] == "measured-loss",
+                "The default eight-bit control did not report measured loss")
+        require(cases["blob_bitmap_default8"]["gray_levels"] <= 256,
+                "The default eight-bit control exceeds 256 gray levels")
+        require(all(case["status"] != "error" for case in cases.values()),
+                "A browser precision route failed unexpectedly")
+        if args.require_high_precision:
+            require(bool(verified), "No complete ten-bit decode/render route was verified")
+        results["status"] = "complete"
+    except RuntimeError as error:
+        results["failure"] = str(error)
+        raise
+    finally:
+        report_path.write_text(json.dumps(results, indent=2) + "\n")
     print(json.dumps(results, indent=2))
 
 
