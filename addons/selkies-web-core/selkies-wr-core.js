@@ -129,7 +129,11 @@ let __clipboardTransferCounter = 0;
 /** The server's `command_enabled`; true until a server advertises otherwise. */
 let serverCommandEnabled = true;
 
-/** Injects the stylesheet for the video container, overlay, and status bar. */
+/**
+ * Injects the stylesheet for the video container, overlay, and status bar.
+ * Resolution handlers size and center the video, including an exact-size box
+ * larger than the viewport. The container clips it without clamping its size.
+ */
 function InitUI() {
 	let style = document.createElement('style');
 	style.textContent = `
@@ -173,8 +177,8 @@ function InitUI() {
 	}
 
 	.video-container video {
-		max-width: 100%;
-		max-height: 100%;
+		max-width: none;
+		max-height: none;
 		object-fit: contain;
 	}
 

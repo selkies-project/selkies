@@ -3180,7 +3180,12 @@ const updateCanvasImageRendering = () => {
   }
 };
 
-/** Installs the page's base stylesheet: the video container, its sinks, the overlay input, and the start button. */
+/**
+ * Installs the page's base stylesheet: the video container, its sinks, the
+ * overlay input, and the start button. Sink geometry is set by the resolution
+ * handlers; an exact-size video can exceed the container and must be clipped
+ * there, without clamping its box independently of its centering offsets.
+ */
 const injectCSS = () => {
   const style = document.createElement('style');
   style.textContent = `
@@ -3220,8 +3225,8 @@ body {
     height: 100%;
 }
 .video-container video {
-  max-width: 100%;
-  max-height: 100%;
+  max-width: none;
+  max-height: none;
   object-fit: contain;
   display: none;
 }
