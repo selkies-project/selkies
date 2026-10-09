@@ -141,6 +141,7 @@ import { StreamStats, DecodeCapability, webcodecsDecoder, FIRST_SAMPLE_MS } from
 import decodeGateSource from './lib/decode-gate.js?raw';
 import decodePaceSource from './lib/decode-pace.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
+import { createChunkStamp } from './lib/chunk-stamp.js';
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
 import { DecodePace } from './lib/decode-pace.js';
@@ -2141,6 +2142,8 @@ ${wireCodecsSource.replace(/^export /gm, '')}
 // stripe clock), else at the frame-id boundary -- with the presented id going
 // back over the wire port so the server paces against what reached the screen.
 const createStripeClock = ${createStripeClock.toString()};
+const createChunkStamp = ${createChunkStamp.toString()};
+const chunkStamp = createChunkStamp();
 const STRIPE_DECODE_QUEUE_LIMIT = ${STRIPE_DECODE_QUEUE_LIMIT};
 const JPEG_STRIPE_REORDER_WINDOW = ${JPEG_STRIPE_REORDER_WINDOW};
 let stripedOn = false, wirePort = null;
@@ -2331,7 +2334,7 @@ function onH264Stripe(buffer, at) {
   try {
     info.meta.push({ frameId: frameId, at: at });
     const data = framed ? annexbToAvcc(bytes) : payload;
-    info.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: performance.now() * 1000, data: data }));
+    info.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: chunkStamp(), data: data }));
     if (key) info.gotKey = true;
   } catch (err) {
     info.meta.pop();
@@ -2418,7 +2421,7 @@ function onWire(message) {
     wireCodec = codec; wireW = w; wireH = h; wireDesc = desc; wireRange = wireFullRange;
     self.postMessage({ type: 'wireDims', w: w, h: h });
   }
-  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, performance.now() * 1000, frameId, reference, at);
+  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, chunkStamp(), frameId, reference, at);
 }
 
 const stripedCaps = {
@@ -3113,7 +3116,7 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec, frameId, reference, arri
     requestKeyframe();
   }
   const data = framed ? annexbToAvcc(new Uint8Array(dataBuf)).buffer : dataBuf;
-  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: performance.now() * 1000, frameId: frameId, reference: reference, at: arrival }, [data]); }
+  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: chunkStamp(), frameId: frameId, reference: reference, at: arrival }, [data]); }
   catch (e) { return false; }
   return true;
 }
@@ -4362,6 +4365,8 @@ let lastPresentedVideoFrameId = null;
 let lastPresentedVideoFrameAt = 0;
 /** When the striped composite holds a whole frame; see lib/stripe-clock.js. */
 const stripeClock = createStripeClock();
+/** The timestamps of the chunks the page hands a decoder, its own or the video worker's (lib/chunk-stamp.js). */
+const chunkStamp = createChunkStamp();
 /**
  * Creates the back-buffer, resized to the canvas.
  * @returns {CanvasRenderingContext2D|null}
@@ -8173,7 +8178,7 @@ class WorkerWebSocket {
                 // Striped H.264 carries the frame id in the timestamp so the paint
                 // loop can present whole frames; full-frame keeps a monotonic clock.
                 const chunkTimestamp = (currentEncoderMode === 'h264enc-striped')
-                    ? vncFrameID : (performance.now() * 1000);
+                    ? vncFrameID : chunkStamp();
                 const chunkData = {
                     type: chunkType,
                     timestamp: chunkTimestamp,
