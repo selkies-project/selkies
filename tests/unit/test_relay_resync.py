@@ -311,7 +311,7 @@ def main() -> int:
     r.offer(chunk(26, 4))
     check("a frame predicting from one the page was not sent is held back, however long ago",
           ids(r)[-1:] != [26] and r.lost_first == 24, (ids(r), r.lost_first))
-    r.flush_for_gate()
+    r.flush_for_gate(False)
     o.offer(chunk(25, 24))
     hand(o, osock, len(o.backlog))
     check("a page waiting for a key frame holds no frame back: the owner's are common",
@@ -366,6 +366,75 @@ def main() -> int:
     clock.t += wm.VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS
     check("but is past its own limit", r.offer(chunk(17, 16)) is True)
 
+    # The owner's backpressure gate on a stream naming each frame's reference: the frames
+    # dropped open a run, and once the client's acks catch up it resumes on the frame
+    # predicting past it, with no key frame.
+    r, server, reports, sock = relay(owner=True)
+    r.offer(chunk(1, 1, key=True))
+    for n in (2, 3):
+        r.offer(chunk(n, n - 1))
+    hand(r, sock, 3)
+    sock.unsent = 0
+    for n in (4, 5):
+        r.offer(chunk(n, n - 1))
+    r.flush_for_gate(True, chunk(6, 5))
+    for n in (7, 8):
+        r.flush_for_gate(True, chunk(n, n - 1))
+    check("a gate drops the queue and the frames held back, a run from the first of them",
+          ids(r) == [] and r.lost_first == 4 and r.live_rows and 4 not in r.sent, (ids(r), r.lost_first))
+    check("and tells the encoder nothing while it holds", reports == [], reports)
+    check("the lift, the client's acks caught up, needs no key frame", r.ungate(True))
+    asked = r.offer(chunk(9, 8))
+    check("the next frame tells the encoder the first frame dropped",
+          reports == [(4, False)] and not asked and ids(r) == [], (reports, asked, ids(r)))
+    asked = r.offer(chunk(10, 1, anchor=True))
+    check("and the client resumes on the frame predicting past them",
+          not asked and ids(r) == [10] and r.lost_first is None, (asked, ids(r), r.lost_first))
+    # Anchors running, a gate longer than any run's wait: the wait starts at the lift, and is
+    # the unanchored one, since the client has room and the frame predicting past comes at once.
+    r, server, reports, sock = relay(owner=True)
+    r.offer(chunk(1, 1, key=True))
+    r.offer(chunk(2, 1, anchor=True))
+    hand(r, sock, 2)
+    sock.unsent = 0
+    r.flush_for_gate(True, chunk(3, 2))
+    clock.t += wm.VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS + 1
+    check("a gate outlasting the anchored wait still lifts with no key frame",
+          r.ungate(True) and r.offer(chunk(4, 3)) is False and [f for f, _ in reports] == [3], reports)
+    clock.t += wm.VIDEO_RELAY_LOST_RECOVERY_SECONDS / 2
+    check("and waits for the frame predicting past it", r.offer(chunk(5, 4)) is False and ids(r) == [], ids(r))
+    clock.t += wm.VIDEO_RELAY_LOST_RECOVERY_SECONDS
+    check("no longer than the unanchored wait", r.offer(chunk(6, 5)) is True)
+    r, server, reports, sock = relay(owner=True)
+    r.offer(chunk(1, 1, key=True))
+    r.offer(chunk(2, 1))
+    hand(r, sock, 2)
+    r.flush_for_gate(True)
+    check("a gate on which nothing was dropped resumes as it stood", r.ungate(True) and r.offer(chunk(3, 2))
+          is False and ids(r) == [3], ids(r))
+    r, server, reports, sock = relay(owner=True)
+    r.offer(chunk(1, 1, key=True))
+    r.offer(chunk(2, 1))
+    hand(r, sock, 2)
+    r.flush_for_gate(True, chunk(3, 2))
+    lifted = not r.ungate(False)
+    r.hold_sync()
+    check("a re-probed client waits for the key frame the lift asks for",
+          lifted and not r.live_rows and r.offer(chunk(4, 3)) is False and ids(r) == [], ids(r))
+    r, server, reports, sock = relay(owner=True)
+    r.offer(chunk(1, 1, key=True))
+    r.offer(chunk(2, 1))
+    hand(r, sock, 2)
+    r.flush_for_gate(False, chunk(3, 2))
+    check("so does a stalled one", not r.ungate(True) and not r.live_rows, r.live_rows)
+    r, server, reports, sock = relay(owner=True)
+    r.offer(chunk(1, 1, key=True))
+    r.offer(chunk(2, 1))
+    hand(r, sock, 2)
+    r.flush_for_gate(True, chunk(3, 2))
+    r.flush_for_gate(True, chunk(4, 4, key=True))
+    check("and one a key frame was dropped for", not r.ungate(True) and not r.live_rows, r.live_rows)
+
     # A stripe stream names its own frame: a drop skips ahead to the next key frame.
     r, server, reports, sock = relay(budget=2000)
     r.offer(chunk(1, 1, key=True))
@@ -375,6 +444,8 @@ def main() -> int:
     check("and tells the encoder nothing", reports == [], reports)
     r.offer(chunk(9, 9))
     check("its deltas wait for that key frame", ids(r) == [], ids(r))
+    r.flush_for_gate(True, chunk(10, 10))
+    check("and its gate waits for the key frame the lift asks for", not r.ungate(True), r.live_rows)
 
     print(f"\n{failures} failure(s)")
     return 1 if failures else 0
