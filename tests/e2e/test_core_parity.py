@@ -17,6 +17,8 @@ persisted gamepad toggle, and one pad's disconnect does not stop polling the
 others. Resize policy: with dynamic resizing disabled a manual resolution
 posted to the primary's page is neither requested nor applied, and the
 desktop keeps its size.
+Rendering: changing anti-aliasing applies to the visible sink immediately,
+including a static desktop that sends no new video frames.
 
 The checks read the wire: r,WxH / js,* / cw,cb messages are tapped at
 WebSocket.send and RTCDataChannel.send inside the page, clipboard reads at
@@ -277,6 +279,52 @@ def video_rendering(page: Any, want: str, timeout: float = 8) -> Optional[str]:
             break
         time.sleep(0.3)
     return got
+
+
+def static_rendering_block(page: Any, mode: str, res: "H.Results") -> None:
+    """Change the visible filter in both directions while the desktop is idle.
+
+    A canvas hidden behind a video can hold the requested filter even while
+    the visible sink keeps its previous one. Read the video and its presented
+    frame count, so a later frame cannot make a stale filter appear correct.
+    """
+    post(page, {"type": "setManualResolution", "width": PRESET_W, "height": PRESET_H})
+    stream_size(page, mode, (PRESET_W, PRESET_H))
+    post(page, {"type": "setScaleLocally", "value": True})
+    post(page, {"type": "setAntiAliasing", "value": True})
+    post(page, {"type": "settings", "settings": {
+        "video_streaming_mode": False, "use_paint_over_quality": False}})
+    probe = """() => {
+      const v = [...document.querySelectorAll('video')].find(
+        v => getComputedStyle(v).display !== 'none' && v.videoWidth > 0);
+      return v ? {rendering: getComputedStyle(v).imageRendering,
+                  frames: v.getVideoPlaybackQuality().totalVideoFrames} : null;
+    }"""
+    try:
+        deadline = time.monotonic() + 15
+        before = None
+        while time.monotonic() < deadline:
+            before = page.evaluate(probe)
+            time.sleep(1)
+            after = page.evaluate(probe)
+            if before and after and before["frames"] == after["frames"]:
+                break
+        idle = bool(before and after and before["frames"] == after["frames"])
+        res.check("static rendering: the visible video receives no new frames", idle, after)
+        if not idle:
+            return
+        for enabled in (False, True):
+            before = page.evaluate(probe)
+            post(page, {"type": "setAntiAliasing", "value": enabled})
+            time.sleep(0.2)
+            after = page.evaluate(probe)
+            accepted = ("auto",) if enabled else ("pixelated", "crisp-edges")
+            res.check(f"static rendering: anti-aliasing {enabled} reaches the visible video",
+                      bool(after and after["rendering"] in accepted), after)
+            res.check(f"static rendering: anti-aliasing {enabled} needs no new frame",
+                      bool(after and before and after["frames"] == before["frames"]), after)
+    finally:
+        post(page, {"type": "settings", "settings": {"video_streaming_mode": True}})
 
 
 def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
@@ -611,6 +659,7 @@ def run(mode: str) -> bool:
                 resolution_block(page, mode, res)
                 emulated_density_block(page, mode, res)
                 hidpi_block(page, mode, res)
+                static_rendering_block(page, mode, res)
                 clipboard_enabled_block(page, res)
                 soft_keyboard_block(page, res)
                 page.context.close()
