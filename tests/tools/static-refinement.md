@@ -6,6 +6,13 @@ presented video frame, input, resize, or video-style change removes the snapshot
 Pending responses are rejected when the client observes such a change, when a
 newer request supersedes them, or when their dimensions differ from the video.
 
+The capture contract proposed in
+[pixelflux's output-capture RFC](https://github.com/selkies-project/pixelflux/issues/45)
+is a prerequisite for production integration. It defines output identity, scene
+and capture ordering, explicit precision, cancellation, and scheduling. Its scene
+identity must distinguish content changes from repeated captures of unchanged
+content; a later paint-over frame must not by itself suppress a valid refinement.
+
 The default probe tests the actual ES module with a manually advanced browser
 video stream and a deterministic RGB pattern. It checks exact canvas pixels,
 fractional geometry at DPR 2, late responses, superseded requests, error paths,
@@ -76,6 +83,65 @@ Selkies PNG API matched all 810,000 pixels of the full Fiji region after moving
 the cursor outside it. Its median request-to-ready time over six loopback samples
 was 50.9 ms for 1,014,173 bytes; this excludes the idle wait and says nothing about
 input latency, WAN behavior, or relative encoder efficiency.
+
+## Precision and study protocol
+
+The live check compares two decoded 8-bit canvas images. It establishes equality
+at that boundary, not preservation of a higher-depth source: both readbacks can
+lose the same information and still compare equal. PixelFlux's screenshot PNG
+uses 8-bit RGBA. Encoding the video at 10 bits does not make that source a native
+10-bit capture, and an application may already map a higher-depth TIFF into an
+8-bit display range before capture.
+
+A precision study needs all 1,024 10-bit values, adjacent one-level differences,
+an independent full-precision reference, and separate decoder/rendering checks.
+PNG16 can transport 10 significant bits reversibly, but neither PNG16 nor a
+successful 10-bit video decode guarantees high-precision canvas or monitor
+presentation. Test the actual allocation and pixel values, rather than accepting
+an API option as proof. SDR precision, HDR/color management, and physical display
+precision are separate results.
+
+Run the synthetic precision probe with the existing Playwright dependency:
+
+```sh
+python tests/tools/static_refinement_precision.py \
+  --output /tmp/refinement-precision --require-high-precision
+```
+
+It generates an RGB PNG16 fixture with ten significant bits, checks its structure
+and original integer codes, and compares multiple decoding routes against those
+codes. It reports `preserved`, `measured-loss`, and `unsupported` separately,
+including actual canvas backing/readback types. `--require-high-precision` fails
+unless one complete decoding/rendering route recovers every ten-bit code; without
+that flag a completed capability survey is not a ten-bit pass. The output always
+states that native capture and physical display precision were not verified.
+`--browser-endpoint-file` selects the prepared remote Chromium fixture using
+SwiftShader; `--executable-path` selects a local isolated Chromium executable.
+
+The two-canvas equality control deliberately demonstrates how an 8-bit equality
+check can succeed after both images lose distinctions. High-precision recovery
+means the original ten-bit codes are recovered by rounding the normalized
+readback, not that all PNG16 or floating-point bit patterns remain identical.
+
+Repeat the historical table on frozen current Selkies, pixelflux, and pcmflux
+revisions before using it as a current product comparison. Record wheel hashes,
+effective settings, browser/driver versions, and source equality. Compare against
+properly configured paint-over and both JPEG and lossless TurboVNC. Confirm fresh
+frames after changing quality; identical stale frames are not a quality result.
+
+Expand the scene set beyond one anatomical slice: fine text and colored lines,
+dark and bright tissue, gradients, and motion followed by stillness. Compare
+native scale separately from HD/4K, DPR 1/2, and fractional scaling against a
+declared reference filter. Cover two equal-size outputs, moved crops, reconnects,
+out-of-order responses/video, and resumed interaction during refinement.
+
+Measure the time from last damage to verified refinement, distinguishing the
+idle policy, capture, compression, transfer, decode, and presentation stages.
+Also measure input latency, frame pacing, unrestricted frame rate, CPU/GPU,
+memory, and bytes under controlled bandwidth, RTT, and loss. Randomize repeated
+paired runs and report uncertainty; frames from one cycle are not independent
+repetitions. Draw completion is not physical presentation, and a loopback result
+does not establish WAN behavior.
 
 ## Limits that prevent integration
 
