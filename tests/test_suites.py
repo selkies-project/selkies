@@ -54,14 +54,14 @@ def keep_logs(case: str, since: float) -> None:
 
 
 # What `helpers.answers_within` prints when a browser stops answering, what
-# Playwright raises when one goes away, and what `core_lib.wait_wr_video` prints
-# when a player never starts on frames its engine decodes. WebKit's video
-# process wedges on a loaded runner often enough to take a suite with it, and
-# every call after that reads as absent video, so a run that says so is not a
-# result: it is repeated once, both attempts printed, and a loss that repeats
-# fails as it did before.
+# Playwright raises when one goes away or a page's process dies, and what
+# `core_lib.wait_wr_video` prints when a player never starts on frames its
+# engine decodes. WebKit's video process wedges on a loaded runner often enough
+# to take a suite with it, and every call after that reads as absent video, so
+# a run that says so is not a result: it is repeated once, both attempts
+# printed, and a loss that repeats fails as it did before.
 STALLED = ("did not answer within", "stopped answering earlier",
-           "Target page, context or browser has been closed",
+           "Target page, context or browser has been closed", "Page crashed",
            "sat at HAVE_NOTHING on a live track")
 
 

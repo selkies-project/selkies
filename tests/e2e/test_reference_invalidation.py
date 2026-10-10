@@ -19,11 +19,13 @@ What the repair itself may spend depends on the encoder that coded the load, rea
 from the server log since a host whose NVENC sessions run out falls back to x264:
 a loss covering the frame where H.264's frame_num wraps is answered with a
 keyframe, every 256 frames on NVENC and every 4096 on x264, whose own sixteen
-values pixelflux carries a byte wider, so the ceiling is worked out from what each
-burst lost (`keyframe_ceiling`). On NVENC a repaired load cost 0 to 3 keyframes
-against ceilings of 5 to 17, and one that asked a keyframe for every loss 46 to
-64. On x264 it cost 0 against ceilings of 2; x264's own sixteen values cost 0 and
-3 there, and a keyframe for every loss 44 to 62.
+values pixelflux carries a byte wider, and so is a burst that let go about as many
+frames as the encoder keeps references, since the frame it would predict past them
+from has left its window, so the ceiling is worked out from what each burst let
+go (`keyframe_ceiling`). On NVENC a repaired load cost 0 to 3 keyframes, and one
+that asked a keyframe for every loss 46 to 64. On x264 it cost 0; x264's own
+sixteen values cost 0 and 3, and a keyframe for every loss 44 to 62. A GitHub
+runner slow enough that nine of 21 bursts ran past the window cost 12.
 
     python3 tests/e2e/test_reference_invalidation.py
 
@@ -101,21 +103,24 @@ def sample_for(page: Any, seconds: float) -> list:
 
 
 def keyframe_ceiling(bursts: list, frame_num_range: int) -> int:
-    """The keyframes a working repair can spend on a load that lost frames in
-    `bursts` (the count named in each burst that lost any), allowing three
-    standard deviations.
+    """The keyframes a working repair can spend on a load that let frames go in
+    `bursts` (the count let go in each burst that lost any, named to the encoder
+    or held back behind one that was), allowing three standard deviations.
 
     A loss is answered with a keyframe when a frame from the lost one to the newest
     encoded carries frame_num 0, which the browsers' FFmpeg decoder cannot be
-    predicted past, or when the encoder has moved on by more than its references;
-    later reports of frames before that keyframe are ignored, so a burst costs at
-    most one. Frames reach the server's loop in order, so a burst that named n
-    frames had the encoder about n frames past the first of them: its odds of
-    covering a wrap are taken as (n + REFERENCES) / frame_num_range, a span longer
-    than any loss the references still hold, and a burst that named REFERENCES or
-    more counts as one.
+    predicted past, or when the frame before the loss, which the encoder would
+    predict the next frame from, has left its window of REFERENCES frames; later
+    reports of frames before that keyframe are ignored, so a burst costs at most
+    one. Every frame a burst let go was encoded after that frame, as were the one
+    that ended the burst and the one the encoder has in hand when the word reaches
+    it, so a burst that let go REFERENCES - 2 or more counts as one. Frames reach
+    the server's loop in order, so a shorter burst that let go n frames had the
+    encoder about n frames past the first of them: its odds of covering a wrap are
+    taken as (n + REFERENCES) / frame_num_range, a span longer than any loss the
+    references still hold.
     """
-    odds = [1.0 if n >= REFERENCES else (n + REFERENCES) / frame_num_range for n in bursts]
+    odds = [1.0 if n >= REFERENCES - 2 else (n + REFERENCES) / frame_num_range for n in bursts]
     return min(len(bursts), math.ceil(sum(odds) + 3 * math.sqrt(sum(p * (1 - p) for p in odds))))
 
 
@@ -123,13 +128,14 @@ def report(res: H.Results, tag: str, samples: list, dropped: int, named: int, bu
            encoders: list, keyframes: int, plis: Optional[int], frames: int) -> None:
     """The checks both transports share: the drops happened, the encoder was told which
     frames to predict past, the recovery cost no keyframe beyond the frame_num wraps the
-    losses covered, and every decoded picture was the frame it claimed to be."""
+    losses covered, and every decoded picture was the frame it claimed to be. `bursts`
+    holds each burst's frames let go and frames named."""
     bad = [s for s in samples if D.corrupt(s)]
     detail = (f"dropped {dropped}, named {named}, keyframes +{keyframes}, "
               f"{'plis +%d, ' % plis if plis is not None else ''}frames +{frames}, "
               f"corrupt {len(bad)}/{len(samples)}")
     print(f"      [{tag}] {detail}, on {' then '.join(encoders) or 'no encoder logged'}, "
-          f"named per burst {bursts}", flush=True)
+          f"let go and named per burst {bursts}", flush=True)
     res.check(f"{tag}: the load really dropped frames", dropped > 0, detail)
     res.check(f"{tag}: the encoder was told which frames to predict past", named > 0, detail)
     # Beyond what the wraps and the deep bursts cost (keyframe_ceiling), one is the
@@ -141,7 +147,7 @@ def report(res: H.Results, tag: str, samples: list, dropped: int, named: int, bu
     known = bool(ranges) and None not in ranges
     res.check(f"{tag}: the load ran on an encoder whose frame_num range is known", known, encoders)
     if known:
-        ceiling = 1 + (len(encoders) - 1) + keyframe_ceiling(bursts, min(ranges))
+        ceiling = 1 + (len(encoders) - 1) + keyframe_ceiling([n for n, _ in bursts], min(ranges))
         res.check(f"{tag}: the drops cost at most one keyframe beyond the frame_num wraps",
                   keyframes <= ceiling,
                   f"keyframes +{keyframes}, ceiling {ceiling} on {encoders[-1]} from {len(bursts)} bursts")
@@ -200,7 +206,7 @@ def webrtc(res: H.Results) -> None:
             load = D.Load(pid, stall=False)
             load.start()
             samples = []
-            named, bursts = named0, []
+            dropped, named, bursts = drops0, named0, []
             end = time.time() + LOAD_S
             while time.time() < end:
                 load.resume()
@@ -210,10 +216,13 @@ def webrtc(res: H.Results) -> None:
                 time.sleep(BURST_ON_S)
                 load.pause()
                 samples += sample_for(page, BURST_OFF_S)
-                named_now = bridge_counter("invalidated")
+                dropped_now, named_now = bridge_counter("dropped"), bridge_counter("invalidated")
                 if named_now > named:
-                    bursts.append(named_now - named)
-                named = named_now
+                    bursts.append((dropped_now - dropped, named_now - named))
+                elif dropped_now > dropped and bursts:
+                    # Held behind a loss named earlier: the burst before goes on.
+                    bursts[-1] = (bursts[-1][0] + dropped_now - dropped, bursts[-1][1])
+                dropped, named = dropped_now, named_now
             load.stop()
             load = None
             samples += sample_for(page, D.SETTLE_S)
