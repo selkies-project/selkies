@@ -11,6 +11,8 @@ import { LOSSLESS_STATIC_REFINEMENT_SPEC as spec, USE_PAINT_OVER_QUALITY_SPEC as
 import { losslessSettingState, readLosslessStatus, subscribeLosslessStatus } from '../../addons/selkies-web-core/lib/lossless-settings.js';
 import { holdDisplaySettings, releaseHeldSettings, restoreHeldPicks } from '../../addons/selkies-web-core/lib/held-settings.js';
 import { getTranslator } from '../../addons/selkies-dashboard/src/translations.js';
+import { WebRTCClient } from '../../addons/selkies-web-core/lib/webrtc.js';
+import { gzipSync } from 'node:zlib';
 
 let passed = 0;
 /** Run one assertion group and fail the process if its contract is violated. */
@@ -105,4 +107,50 @@ check('both dashboards resolve labels and precise unavailable reasons', () => {
         }
     }
 });
+/** Exercise the actual data-channel parser/router without creating a connection. */
+function rtcReceiver() {
+    const errors = [], sent = [];
+    const client = Object.create(WebRTCClient.prototype);
+    Object.assign(client, { _recvQueue: Promise.resolve(), _setError: (error) => errors.push(error),
+        _setDebug: () => {}, sendDataChannelMessage: (message) => sent.push(message) });
+    return { client, errors, sent };
+}
+const unavailable = { version: 1, epoch: 0, supported: false, effective: false,
+    requested: false, reason: 'webrtc-unavailable' };
+check('WebRTC accepts its unsupported response and continues routing controls', () => {
+    const { client, errors, sent } = rtcReceiver();
+    for (const requested of [false, true]) {
+        client._onPeerDataChannelMessage({ data: JSON.stringify({ type: 'lossless_status',
+            data: { ...unavailable, requested } }) });
+    }
+    client._onPeerDataChannelMessage({ data: JSON.stringify({ type: 'ping', data: {} }) });
+    assert.deepEqual(errors, []);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /^pong,/);
+});
+check('WebRTC rejects malformed or enabling status without weakening unknown-message errors', () => {
+    for (const data of [null, {}, { ...unavailable, version: 2 }, { ...unavailable, epoch: 1 },
+        { ...unavailable, supported: true }, { ...unavailable, effective: true },
+        { ...unavailable, requested: 'false' }, { ...unavailable, reason: 'ready' }]) {
+        const { client, errors } = rtcReceiver();
+        client._onPeerDataChannelMessage({ data: JSON.stringify({ type: 'lossless_status', data }) });
+        assert.deepEqual(errors, ['Invalid lossless status for WebRTC']);
+    }
+    const { client, errors } = rtcReceiver();
+    client._onPeerDataChannelMessage({ data: JSON.stringify({ type: 'unknown-protocol-kind' }) });
+    assert.deepEqual(errors, ['Unhandled message received: unknown-protocol-kind']);
+});
+{
+    const { client, errors, sent } = rtcReceiver();
+    const compressed = gzipSync(JSON.stringify({ type: 'lossless_status', data: unavailable }));
+    client._onPeerDataChannelMessage({ data: compressed.buffer.slice(compressed.byteOffset,
+        compressed.byteOffset + compressed.byteLength) });
+    await client._recvQueue;
+    client._onPeerDataChannelMessage({ data: JSON.stringify({ type: 'ping', data: {} }) });
+    check('gzip WebRTC capability response keeps the receive queue usable', () => {
+        assert.deepEqual(errors, []);
+        assert.equal(sent.length, 1);
+        assert.match(sent[0], /^pong,/);
+    });
+}
 console.log(`[lossless-settings] ${passed}/${passed} passed`);

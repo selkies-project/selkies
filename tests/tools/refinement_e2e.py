@@ -46,6 +46,12 @@ def read_producer_commits(path: Path) -> tuple:
     return records, warnings
 
 
+def is_lossless_status_error(text: str) -> bool:
+    """Identify lossless protocol errors even when the logger uses console.log."""
+    return text.strip().endswith(("Unhandled message received: lossless_status",
+                                  "Invalid lossless status for WebRTC"))
+
+
 def main() -> None:
     """Run a bounded private session and retain observations on failure."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -272,10 +278,12 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
         console = open(args.output / "browser-console.log", "w")
         logs.append(console)
         def record_console(message: Any) -> None:
-            """Keep browser diagnostics separate from pass/fail observations."""
+            """Record diagnostics and classify lossless protocol dispatch errors."""
             entry = {"type": message.type, "text": message.text}
             console.write(json.dumps(entry) + "\n")
             console.flush()
+            if is_lossless_status_error(message.text):
+                result.setdefault("lossless_status_errors", []).append(message.text)
             if message.type == "error":
                 result.setdefault("console_errors", []).append(message.text)
         page.on("console", record_console)
@@ -677,6 +685,10 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
         producer_log = args.output / "refinement-fixture.log"
         if producer_log.exists():
             result["producer_commits"], result["producer_diagnostic_warnings"] = read_producer_commits(producer_log)
+        if page is not None:
+            result["checks"].append({"name": "browser-handles-lossless-status",
+                                     "passed": not result.get("lossless_status_errors"),
+                                     "detail": result.get("lossless_status_errors", [])})
         if result.get("playwright_cleanup_error"):
             result["checks"].append({"name": "playwright-runtime-cleanup", "passed": False,
                                      "detail": result["playwright_cleanup_error"]})
