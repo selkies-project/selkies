@@ -66,6 +66,7 @@ dependencies = [
 # (gstreamer1.0-gl, on that dependency list), or its video sink falls back.
 test = [
     "pytest",
+    "numpy",
     "playwright",
     "websockets",
     "pywayland",

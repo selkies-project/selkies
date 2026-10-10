@@ -37,6 +37,14 @@ cadence sizes that display's backpressure window and the matched send
 stamps feed its smoothed RTT. An unchanged id is repeated as a heartbeat,
 so a client that has nothing new to ack is still told apart from one that
 has gone silent (`_run_frame_backpressure_logic`).
+
+Optional lossless stills use versioned, uncompressed JSON sample announcements
+paired with complete video payloads by the same relay. A per-socket lock keeps
+that pair ordered across relay replacement without copying native video bytes.
+PNG chunks use 0x0A, a uint32 transfer ID, a uint32 byte offset, and at most
+16 KiB of payload, paced by the same end-to-end gauge as other bulk transfers.
+`static_refinement` admits only the current native scene and requested epoch;
+the browser's canvas owner checks that identity again at presentation.
 """
 import asyncio
 import inspect
@@ -123,6 +131,7 @@ from .settings import settings as app_settings
 from . import sessions
 from . import audit
 from . import capture_demand
+from .static_refinement import PROTOCOL_VERSION, RefinementUnavailable, SceneSample, StaticRefinement
 from .webcam import (
     MSG_WEBCAM_DISABLED,
     MSG_WEBCAM_KEYFRAME,
@@ -949,7 +958,7 @@ class _VideoRelay:
                  '_next_sync_req', 'verdict', 'sent', 'lost_run', 'lost_since',
                  'lost_first', 'lost_told', 'since_key', 'numbered', 'written',
                  'marks', 'gauged', 'pinged', 'pongs', 'rtt_floor', 'anchored', 'tracked',
-                 'gated', 'lost_gated')
+                 'gated', 'lost_gated', 'refinement_epoch')
 
     def __init__(self, server: "DataStreamingServer", display_id: str,
                  ws: web.WebSocketResponse, budget: int) -> None:
@@ -982,6 +991,7 @@ class _VideoRelay:
         self.tracked = False
         self.gated = False
         self.lost_gated = False
+        self.refinement_epoch: Optional[int] = None
 
     def start(self) -> None:
         self._task = asyncio.create_task(
@@ -1272,6 +1282,39 @@ class _VideoRelay:
                 and (key or ((data[10] << 8) | data[11]) != frame_id)):
             self.server.common_frames_for(self.display_id, held).hold(self, frame_id, key)
 
+    async def _send_picture(self, item: dict) -> bool:
+        """Keep a sample announcement paired with its payload across relay replacement.
+
+        A stopped relay may still be draining one send when a new relay starts
+        on the same socket. Their video pairs share a lock once refinement is
+        used; audio and other control traffic remain independent. A pair that
+        started finishes, and a stopped relay waiting for the lock writes nothing.
+        """
+        metadata = item.get('lossless')
+        lock = getattr(self.ws, '_selkies_refinement_lock', None)
+        if metadata is not None and lock is None:
+            lock = asyncio.Lock()
+            self.ws._selkies_refinement_lock = lock
+        if lock is None:
+            await _send_live(self.ws, item['data'], f"Video relay for '{self.display_id}'")
+            return True
+        async with lock:
+            if self.stopped:
+                return False
+            if metadata is not None:
+                refinement = self.server._refinements.get(self.display_id)
+                if (refinement is not None and refinement.effective
+                        and metadata['epoch'] == refinement.epoch
+                        and self.server._refinement_clients.get(self.ws, False)):
+                    if self.refinement_epoch != refinement.epoch:
+                        await _send_live(self.ws, json.dumps(
+                            self.server._refinement_status(self.display_id, self.ws)),
+                            'Lossless refinement status')
+                        self.refinement_epoch = refinement.epoch
+                    await _send_live(self.ws, json.dumps(metadata), 'Lossless sample identity')
+            await _send_live(self.ws, item['data'], f"Video relay for '{self.display_id}'")
+            return True
+
     async def _run(self) -> None:
         """Drain the backlog onto the socket until stopped or the socket dies."""
         try:
@@ -1297,7 +1340,8 @@ class _VideoRelay:
                     if watch is not None:
                         watch.note_send(getattr(item.get('owner'), 'capture_ns', 0), len(data))
                 try:
-                    await _send_live(self.ws, data, f"Video relay for '{self.display_id}'")
+                    if not await self._send_picture(item):
+                        continue
                     if len(data) >= 12 and data[0] == 0x04 and not self.stopped:
                         self._hold(data)
                     if self.gauged and time.monotonic() - self.pinged >= VIDEO_RELAY_PING_SECONDS:
@@ -1733,6 +1777,7 @@ class DataStreamingServer(BaseStreamingService):
         self.use_cpu = self._initial_use_cpu
         self._initial_use_paint_over_quality = get_initial_value('use_paint_over_quality')
         self.use_paint_over_quality = self._initial_use_paint_over_quality
+        self._initial_lossless_static_refinement = get_initial_value('lossless_static_refinement')
         self._initial_video_bitrate = get_initial_value('video_bitrate')
         self.video_bitrate = self._initial_video_bitrate
 
@@ -1786,6 +1831,12 @@ class DataStreamingServer(BaseStreamingService):
         self.video_relay_groups = {}
         self.common_frames: Dict[Tuple[str, bool], CommonFrames] = {}
         self.capture_instances = {}
+        self._refinements: Dict[str, StaticRefinement] = {}
+        self._refinement_clients: Dict[Any, bool] = {}
+        self._refinement_transfers: Dict[Any, asyncio.Task] = {}
+        self._refinement_tokens: Dict[Any, Tuple[int, SceneSample]] = {}
+        self._refinement_pending: Dict[Any, tuple] = {}
+        self._refinement_transfer_id = 0
         # A display's capture while its start is awaited: its module takes rate,
         # tunable and key-frame requests meanwhile, and the settings registered
         # once it runs carry what was applied (`_opcode_display_module`).
@@ -1942,6 +1993,173 @@ class DataStreamingServer(BaseStreamingService):
         a capture starts."""
         inst = self.capture_instances.get(display_id) or self._starting_captures.get(display_id)
         return inst.get('module') if inst else None
+
+    def _refinement_display(self, websocket: Any) -> str:
+        """Bind captures to the stream this authenticated socket receives."""
+        for display_id, entry in self.display_clients.items():
+            if entry.get('ws') is websocket:
+                return display_id
+        for display_id, controllers in self.co_controllers.items():
+            if websocket in controllers:
+                return display_id
+        return 'primary'
+
+    def _refinement_consumers(self, display_id: str) -> Set[Any]:
+        """Count connected, visible consumers with ordered still presentation."""
+        return {ws for ws, capable in self._refinement_clients.items()
+                if capable and ws in self.clients and ws not in self.video_paused_clients
+                and self._refinement_display(ws) == display_id}
+
+    def _refinement_status(self, display_id: str, websocket: Any) -> dict:
+        """Describe actual per-client availability separately from its preference."""
+        refinement = self._refinements[display_id]
+        status = dict(refinement.status(), displayId=display_id)
+        capable = self._refinement_clients.get(websocket, False)
+        status['supported'] = bool(status['supported'] and capable)
+        status['effective'] = bool(status['effective'] and capable
+                                   and websocket not in self.video_paused_clients)
+        if not capable:
+            status['reason'] = 'canvas-required'
+        return status
+
+    async def _publish_refinement_status(self, display_id: str) -> None:
+        """Send a capability transition only to clients that negotiated the feature."""
+        if display_id not in self._refinements:
+            return
+        messages = [(ws, json.dumps(self._refinement_status(display_id, ws)))
+                    for ws in tuple(self._refinement_clients)
+                    if ws in self.clients and self._refinement_display(ws) == display_id]
+
+        async def send(ws: Any, payload: str) -> None:
+            try:
+                await _send_live(ws, payload, 'Lossless refinement status')
+            except (ConnectionResetError, OSError, RuntimeError):
+                pass
+
+        await asyncio.gather(*(send(ws, payload) for ws, payload in messages))
+
+    async def _refresh_refinement(self, display_id: str) -> None:
+        """Apply the opt-in dependency without restarting or replacing video."""
+        state = self.display_clients.get(display_id, {})
+        requested = bool(state.get('lossless_static_refinement', self._initial_lossless_static_refinement))
+        if display_id not in self._refinements and not requested and not self._refinement_clients:
+            return
+        refinement = self._refinements.setdefault(display_id, StaticRefinement())
+        instance = self.capture_instances.get(display_id, {})
+        encoder = str(state.get('encoder', self.app.encoder))
+        watch = self._stream_watches.get(display_id)
+        info = watch.info if watch is not None else None
+        full_frame = (encoder not in ('jpeg', 'h264enc-striped')
+                      and info is not None and info.get('striped') is False)
+        parent = bool(state.get('use_paint_over_quality', self._initial_use_paint_over_quality))
+        module = None if instance.get('refinement_stopping') else instance.get('module')
+        changed = refinement.configure(module, requested, parent,
+                                       bool(self._refinement_consumers(display_id)), full_frame)
+        await self._publish_refinement_status(display_id)
+        if changed and refinement.effective:
+            self._schedule_idr_for_display(display_id)
+
+    async def _handle_refinement(self, websocket: Any, payload: str) -> None:
+        """Accept bounded scene requests, never a client-supplied output or capture."""
+        if len(payload) > 2048 or websocket not in self.clients:
+            return
+        try:
+            message = json.loads(payload)
+            if (not isinstance(message, dict) or type(message.get('version')) is not int
+                    or message['version'] != PROTOCOL_VERSION):
+                return
+            display_id = self._refinement_display(websocket)
+            operation = message.get('op')
+            if operation == 'capability':
+                self._refinement_clients[websocket] = (
+                    message.get('supported') is True
+                    and message.get('sink') in ('worker-canvas', 'page-canvas', 'track-generator'))
+                self._refinement_tokens.pop(websocket, None)
+                self._refinement_pending.pop(websocket, None)
+                await self._refresh_refinement(display_id)
+                return
+            if operation == 'cancel':
+                token = self._refinement_tokens.get(websocket)
+                canceled = SceneSample.parse(message)
+                if (token is not None and type(message.get('epoch')) is int
+                        and message['epoch'] == token[0] and canceled == token[1]):
+                    self._refinement_tokens.pop(websocket, None)
+                    self._refinement_pending.pop(websocket, None)
+                return
+            if operation != 'request' or websocket not in self._refinement_consumers(display_id):
+                return
+            refinement = self._refinements.get(display_id)
+            epoch = message.get('epoch')
+            stamp = SceneSample.parse(message)
+            if (refinement is None or type(epoch) is not int
+                    or not refinement.valid(epoch, stamp)):
+                return
+            old = self._refinement_transfers.get(websocket)
+            token = (epoch, stamp)
+            self._refinement_tokens[websocket] = token
+            if old is not None and not old.done():
+                self._refinement_pending[websocket] = (display_id, epoch, stamp, token)
+                return
+            task = asyncio.create_task(self._send_refinement(websocket, display_id, epoch, stamp, token))
+            self._refinement_transfers[websocket] = task
+        except (ValueError, TypeError):
+            return
+
+    async def _send_refinement(self, websocket: Any, display_id: str, epoch: int,
+                               stamp: SceneSample, token: Tuple[int, SceneSample]) -> None:
+        """Pace one bounded PNG behind interactive video, stopping between writes.
+
+        Cancellation withdraws admission and results; it never interrupts an
+        already-running native compression or a partially written WS frame.
+        Multiple clients share the display's capture and immutable PNG cache.
+        """
+        refinement = self._refinements.get(display_id)
+
+        def current() -> bool:
+            return bool(self._refinement_tokens.get(websocket) is token
+                        and websocket in self._refinement_consumers(display_id)
+                        and refinement is not None and refinement.valid(epoch, stamp))
+
+        try:
+            if refinement is None:
+                return
+            image = await refinement.capture(epoch, stamp, current)
+            if not current():
+                return
+            self._refinement_transfer_id = (self._refinement_transfer_id % 0xFFFFFFFF) + 1
+            transfer_id = self._refinement_transfer_id
+            begin = dict(image.stamp.wire(), type='lossless_begin', version=PROTOCOL_VERSION,
+                         epoch=epoch, transferId=transfer_id, bytes=len(image.png))
+            await _send_live(websocket, json.dumps(begin), 'Lossless refinement begin')
+            gauge, pacer = socket_gauge(websocket), TransferPacer(adaptive=True)
+            deadline = time.monotonic() + 30.0
+            png_view = memoryview(image.png)
+            for offset in range(0, len(image.png), 16 * 1024):
+                if not current() or time.monotonic() >= deadline:
+                    return
+                chunk = png_view[offset:offset + 16 * 1024]
+                await _bulk_pace(gauge, pacer, len(chunk) + 9)
+                await _await_bulk_window(websocket, min(deadline, time.monotonic() + BULK_DRAIN_TIMEOUT_S))
+                if not current() or time.monotonic() >= deadline:
+                    return
+                await _send_live(websocket, b''.join((struct.pack('!BII', 0x0A, transfer_id, offset), chunk)),
+                                 'Lossless refinement chunk')
+                await asyncio.sleep(0)
+            if current():
+                await _send_live(websocket, json.dumps({
+                    'type': 'lossless_end', 'version': PROTOCOL_VERSION,
+                    'epoch': epoch, 'transferId': transfer_id}), 'Lossless refinement end')
+        except (RefinementUnavailable, ConnectionResetError, OSError, RuntimeError):
+            pass
+        finally:
+            if self._refinement_transfers.get(websocket) is asyncio.current_task():
+                self._refinement_transfers.pop(websocket, None)
+            if self._refinement_tokens.get(websocket) is token:
+                self._refinement_tokens.pop(websocket, None)
+            pending = self._refinement_pending.pop(websocket, None)
+            if pending is not None and self._refinement_tokens.get(websocket) is pending[3]:
+                self._refinement_transfers[websocket] = asyncio.create_task(
+                    self._send_refinement(websocket, *pending))
 
     def _track_capture_settings(self, display_id: str, fresh: Optional[Any] = None,
                                 **live_fields: Any) -> None:
@@ -2978,6 +3196,7 @@ class DataStreamingServer(BaseStreamingService):
 
     async def _publish_stream_info(self, display_id: str, info: Dict[str, Any]) -> None:
         """Tell a display's controller what its capture streams and how."""
+        await self._refresh_refinement(display_id)
         ws = self._controller_socket(display_id)
         if ws is not None:
             await self._send_stream_message(
@@ -4072,6 +4291,7 @@ class DataStreamingServer(BaseStreamingService):
         parsed["video_paintover_crf"] = get_int("video_paintover_crf")
         parsed["video_paintover_burst_frames"] = get_int("video_paintover_burst_frames")
         parsed["use_paint_over_quality"] = get_bool("use_paint_over_quality")
+        parsed["lossless_static_refinement"] = get_bool("lossless_static_refinement")
         parsed["scaling_dpi"] = get_int("scaling_dpi")
         parsed["enable_binary_clipboard"] = get_bool("enable_binary_clipboard")
         parsed["displayId"] = get_str("displayId") or "primary"
@@ -4249,7 +4469,7 @@ class DataStreamingServer(BaseStreamingService):
                 # would reset the stored choice to the server default on every partial update.
                 for key in ("encoder", "framerate", "video_crf", "video_fullcolor", "video_10bit",
                             "video_streaming_mode", "jpeg_quality", "paint_over_jpeg_quality",
-                            "use_paint_over_quality", "video_paintover_crf",
+                            "use_paint_over_quality", "lossless_static_refinement", "video_paintover_crf",
                             "video_paintover_burst_frames", "video_bitrate"):
                     if settings.get(key) is not None:
                         display_state[key] = sanitize_value(key, settings.get(key))
@@ -4484,6 +4704,10 @@ class DataStreamingServer(BaseStreamingService):
             await self._broadcast_live_server_settings(display_id)
         if is_initial_settings and self.client_settings_received and not self.client_settings_received.is_set():
             self.client_settings_received.set()
+        await self._refresh_refinement(display_id)
+        for other_display in tuple(self._refinements):
+            if other_display != display_id:
+                await self._refresh_refinement(other_display)
 
     def _report_client_presence(self) -> None:
         """Tell the supervisor whether any client is connected (idle shutdown gate)."""
@@ -5078,6 +5302,7 @@ class DataStreamingServer(BaseStreamingService):
                                     'video_paintover_crf': self._initial_video_paintover_crf,
                                     'video_paintover_burst_frames': self._initial_video_paintover_burst_frames,
                                     'use_paint_over_quality': self._initial_use_paint_over_quality,
+                                    'lossless_static_refinement': self._initial_lossless_static_refinement,
                                      'rate_control_mode': self.rc_mode.value,
                                      'video_bitrate': self._initial_video_bitrate,
                                      'force_aligned_resolution': self.cli_args.force_aligned_resolution[0],
@@ -5174,6 +5399,9 @@ class DataStreamingServer(BaseStreamingService):
                             data_logger.error(
                                 f"Error processing SETTINGS: {e_set}", exc_info=True
                             )
+
+                    elif message.startswith("LOSSLESS "):
+                        await self._handle_refinement(websocket, message[9:])
 
                     elif stream_stats.stats_request(message) is not None:
                         if not stream_stats.stats_request(message):
@@ -5335,7 +5563,11 @@ class DataStreamingServer(BaseStreamingService):
                                     # A no-op with zero display clients.
                                     await self.reconfigure_displays()
 
+                        await self._refresh_refinement(self._refinement_display(websocket))
+
                     elif message == "STOP_VIDEO":
+                        self._refinement_tokens.pop(websocket, None)
+                        self._refinement_pending.pop(websocket, None)
                         beside = websocket in self.co_controllers.get(client_display_id or 'primary', ())
                         stop_entry = (self.display_clients.get(client_display_id)
                                       if client_display_id and not beside else None)
@@ -5380,6 +5612,8 @@ class DataStreamingServer(BaseStreamingService):
                                 await websocket.send_str("VIDEO_STOPPED")
                             except (ConnectionResetError, OSError, RuntimeError):
                                 pass
+
+                        await self._refresh_refinement(self._refinement_display(websocket))
 
                     elif message.startswith("DECODE_PACE "):
                         # The rate this client's decoder keeps up with, 0 for any: the
@@ -5567,6 +5801,11 @@ class DataStreamingServer(BaseStreamingService):
             # Dropped first: the authority and consumer verdicts below must see
             # the remaining clients only.
             self.clients.discard(websocket)
+            self._refinement_clients.pop(websocket, None)
+            self._refinement_tokens.pop(websocket, None)
+            self._refinement_pending.pop(websocket, None)
+            for refinement_display in tuple(self._refinements):
+                await self._refresh_refinement(refinement_display)
             data_logger.debug(f"Cleaning up Data WS handler for {raddr} (Display ID: {client_display_id})...")
             await capture_demand.sync(self)
             # A tab that dies mid-press never sends 'js,d'; the button would stay
@@ -6178,6 +6417,14 @@ class DataStreamingServer(BaseStreamingService):
         the capture still goes.
         """
         data_logger.info(f"Stopping all streams for display '{display_id}'...")
+        stopping = self.capture_instances.get(display_id)
+        if stopping is not None:
+            stopping['refinement_stopping'] = True
+        refinement = self._refinements.get(display_id)
+        if refinement is not None:
+            refinement.close()
+            await self._publish_refinement_status(display_id)
+            self._refinements.pop(display_id, None)
         reset_sent = await self._ensure_backpressure_task_is_stopped(display_id)
         capture_info = self.capture_instances.pop(display_id, None)
         try:
@@ -6743,6 +6990,7 @@ class DataStreamingServer(BaseStreamingService):
         """
         async with self._video_capture_lock:
             started = await self._start_capture_for_display_impl(display_id, width, height, x_offset, y_offset)
+        await self._refresh_refinement(display_id)
         if started and await self._refresh_second_screen_capacity():
             await self._broadcast_live_server_settings(display_id)
         return started
@@ -6845,6 +7093,15 @@ class DataStreamingServer(BaseStreamingService):
                         # No group means the capture is stopping; the buffer frees with the frame.
                         if group is None:
                             return
+                        refinement = self._refinements.get(display_id)
+                        if refinement is not None and refinement.effective:
+                            stamp = SceneSample.from_frame(frame, item['data'])
+                            refinement.observe(stamp)
+                            if stamp is not None and refinement.valid(refinement.epoch, stamp):
+                                item['lossless'] = dict(
+                                    stamp.wire(), type='lossless_sample', version=PROTOCOL_VERSION,
+                                    epoch=refinement.epoch, frame_id=item['frame_id'], y=0,
+                                    payload_bytes=len(item['data']))
                         owner = self.display_clients.get(display_id)
                         if owner is not None:
                             produced = time.monotonic()

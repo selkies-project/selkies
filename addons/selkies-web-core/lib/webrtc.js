@@ -799,6 +799,13 @@ export class WebRTCClient {
 			if (this.onccrate !== null && msg.data) {
 				this.onccrate(msg.data.kbps);
 			}
+		} else if (msg.type === 'lossless_status') {
+			const status = msg.data;
+			if (!status || status.version !== 1 || status.epoch !== 0 ||
+				status.supported !== false || status.effective !== false ||
+				typeof status.requested !== 'boolean' || status.reason !== 'webrtc-unavailable') {
+				this._setError('Invalid lossless status for WebRTC');
+			}
 		} else {
 			this._setError("Unhandled message received: " + msg.type);
 		}

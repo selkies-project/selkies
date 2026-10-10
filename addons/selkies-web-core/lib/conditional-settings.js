@@ -222,9 +222,18 @@ export const VIDEO_STREAMING_MODE_SPEC = boolSpec("video_streaming_mode", false,
  */
 export const USE_PAINT_OVER_QUALITY_SPEC = {
     ...boolSpec("use_paint_over_quality", true,
-        (value, _ctx, io) => io.postSetting({ use_paint_over_quality: value })),
+        (value, _ctx, io) => {
+            io.postToCore({ type: "setLosslessParentState", enabled: value });
+            io.postSetting({ use_paint_over_quality: value });
+        }),
     conditional: (ctx) => (ctx.videoStreamingMode === undefined ? undefined
         : ctx.encoder === "jpeg" || !ctx.videoStreamingMode),
+};
+/** An explicit preference or operator override opts in; an echoed default cannot. */
+export const LOSSLESS_STATIC_REFINEMENT_SPEC = {
+    ...boolSpec("lossless_static_refinement", false,
+        (value, _ctx, io) => io.postToCore({ type: "setLosslessStaticRefinement", enabled: value })),
+    conditional: () => false,
 };
 export const USE_CPU_SPEC = boolSpec("use_cpu", false,
     (value, _ctx, io) => io.postSetting({ use_cpu: value }));

@@ -1705,6 +1705,9 @@ class WebRTCService(BaseStreamingService):
         verbs, its page's own changes, are dropped. The owner's changes to the
         stream reach the pages beside it. A keyframe request from a peer that
         does not own the display is taken once a second (`peer_recovery_taken`)."""
+        if isinstance(msg, str) and msg.startswith("LOSSLESS "):
+            self._answer_refinement_capability(msg[9:], display_id, conn_id)
+            return None
         if msg == "REQUEST_KEYFRAME" and self.rtc_app is not None \
                 and not self.rtc_app.peer_recovery_taken(conn_id, "keyframe"):
             return None
@@ -1724,6 +1727,27 @@ class WebRTCService(BaseStreamingService):
         if msg.startswith(("SETTINGS,",) + self.STREAM_VERB_PREFIXES) and self._peers_beside_owner(display_id):
             return self._tell_beside_after(result, display_id)
         return result
+
+    def _answer_refinement_capability(self, payload: str, display_id: str,
+                                      conn_id: Optional[str]) -> None:
+        """Keep the preference but decline a sink without atomic scene presentation."""
+        if self.rtc_app is None or len(payload) > 2048:
+            return
+        try:
+            message = json.loads(payload)
+        except (ValueError, TypeError):
+            return
+        if (not isinstance(message, dict) or type(message.get('version')) is not int
+                or message['version'] != 1
+                or message.get('op') != 'capability'):
+            return
+        peer = self.rtc_app.peer_connections.get(conn_id) or {}
+        channel = peer.get('data_channel')
+        if channel is not None:
+            self.rtc_app.send_message_to_channel(channel, 'lossless_status', {
+                'version': 1, 'epoch': 0, 'supported': False, 'effective': False,
+                'requested': bool(self._display_setting(display_id, 'lossless_static_refinement')),
+                'reason': 'webrtc-unavailable'})
 
     def _peer_owns_display(self, client_peer_id: str) -> bool:
         """Whether a peer is the owner of the display it streams, which any peer
@@ -2706,6 +2730,7 @@ class WebRTCService(BaseStreamingService):
         current value while its stream keeps running the old one, and the equality
         guards on its own controls would then compare against a value that display
         never ran."""
+        entry.setdefault('lossless_static_refinement', settings.lossless_static_refinement[0])
         for key in list(self._VIDEO_SETTING_APPLIERS) + ["force_aligned_resolution"]:
             if key in entry:
                 continue
@@ -2890,6 +2915,7 @@ class WebRTCService(BaseStreamingService):
             "video_10bit",
             "video_streaming_mode",
             "use_paint_over_quality",
+            "lossless_static_refinement",
             "video_paintover_crf",
             "video_paintover_burst_frames",
         ]
@@ -3544,4 +3570,3 @@ class WebRTCService(BaseStreamingService):
                 {"error": "WebRTC service is still starting"},
                 status=503, headers={"Retry-After": "1"})
         return await self.peer_manager.handle_turn_req(request)
-
