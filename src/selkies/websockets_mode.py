@@ -927,9 +927,13 @@ class _VideoRelay:
         anchored: Whether a FRAME_ANCHOR frame came since the key frame, so a
             run waits VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS for room.
         lost_run: How many frames the run holds.
-        lost_since: When the current run began, 0 for none.
+        lost_since: When the current run began, 0 for none, or a gate's run
+            its lift (`lost_gated`, which waits the unanchored limit).
         lost_first: The run's first frame, the one the encoder is told of.
         lost_told: Whether the encoder took that report (`_relay_lost`).
+        tracked: Whether the stream names each delta frame's reference, so the
+            owner's backpressure gate opens a run (`gated`) rather than every
+            row waiting for a key frame.
         since_key: Delta frames offered since the last key frame, and
             `numbered`, whether the stream is H.264, whose frame_num wraps.
         written: Video bytes handed to the socket, and `marks`, that count
@@ -944,7 +948,8 @@ class _VideoRelay:
                  'backlog_bytes', 'live_rows', 'stopped', '_wake', '_task',
                  '_next_sync_req', 'verdict', 'sent', 'lost_run', 'lost_since',
                  'lost_first', 'lost_told', 'since_key', 'numbered', 'written',
-                 'marks', 'gauged', 'pinged', 'pongs', 'rtt_floor', 'anchored')
+                 'marks', 'gauged', 'pinged', 'pongs', 'rtt_floor', 'anchored', 'tracked',
+                 'gated', 'lost_gated')
 
     def __init__(self, server: "DataStreamingServer", display_id: str,
                  ws: web.WebSocketResponse, budget: int) -> None:
@@ -974,6 +979,9 @@ class _VideoRelay:
         self.pongs = 0
         self.rtt_floor: Optional[float] = None
         self.anchored = False
+        self.tracked = False
+        self.gated = False
+        self.lost_gated = False
 
     def start(self) -> None:
         self._task = asyncio.create_task(
@@ -996,20 +1004,54 @@ class _VideoRelay:
         self._leave_common()
         self._wake.set()
 
-    def flush_for_gate(self, counted: bool = True) -> None:
-        """ACK backpressure engaged: drop the undrained backlog and gate every
-        row, so the client resumes only at the IDR that
+    def flush_for_gate(self, counted: bool = True, item: Optional[dict] = None) -> None:
+        """ACK backpressure engaged: drop the undrained backlog and `item`, the
+        chunk held back. A delivering client of a stream naming each frame's
+        reference (`tracked`) keeps its rows: the frames dropped open a run, and
+        once the gate lifts it resumes on the frame predicting past it (`ungate`).
+        Otherwise every row is gated, so the client resumes only at the IDR that
         _set_backpressure_enabled requests when the gate lifts. The chunk held
         back and the backlog count against the connection unless `counted` is
         False (a stalled client: a page that stopped acking, such as a hidden
         tab, is no judge of its link)."""
         if counted:
             self._judge(1 + len(self.backlog))
+        dropped = [i['data'] for i in (*self.backlog, *([item] if item is not None else ()))]
+        dropped = [d for d in dropped if len(d) >= 12 and d[0] == 0x04]
+        if (counted and self.tracked and (self.gated or self.live_rows)
+                and not any((d[1] & 0x0F) == 0x01 for d in dropped)):
+            self.gated = True
+            for data in dropped:
+                frame_id = (data[2] << 8) | data[3]
+                self.sent.pop(frame_id, None)
+                self._lose(frame_id)
+            self.backlog.clear()
+            self.backlog_bytes = 0
+            return
+        self.gated = False
         if self.backlog or self.live_rows:
             self.backlog.clear()
             self.backlog_bytes = 0
             self.live_rows.clear()
             self._leave_common()
+
+    def ungate(self, resync: bool) -> bool:
+        """The gate lifted: whether this client, whose acks caught up (`resync`),
+        resumes on its own, on the frame predicting past the run its gate opened
+        (`flush_for_gate`), or on the next where none was dropped. Otherwise every
+        row waits for the IDR the lift asks for."""
+        gated, self.gated = self.gated, False
+        if resync and self.tracked and self.live_rows:
+            if self.lost_first is not None:
+                # The run's wait starts at the lift, and is the unanchored one: the
+                # client has room, so the frame predicting past it comes at once.
+                self.lost_since = time.monotonic()
+                self.lost_gated = True
+            return True
+        if gated:
+            self.live_rows.clear()
+            self._leave_common()
+        return False
 
     def hold_sync(self) -> None:
         """A key frame for every row is already asked for (the gate's lift): the
@@ -1045,6 +1087,7 @@ class _VideoRelay:
         self.lost_first = None
         self.lost_since = 0.0
         self.lost_told = False
+        self.lost_gated = False
 
     def _frames_ahead(self) -> int:
         """This client's frames still on their way out of this host: those queued
@@ -1130,8 +1173,10 @@ class _VideoRelay:
         predict from, and in H.264 VIDEO_RELAY_WRAP_LEAD frames ahead of a
         frame_num wrap (FRAME_NUM_WRAP), which is never left out. False while
         the run waits; None once it has waited VIDEO_RELAY_LOST_RECOVERY_SECONDS,
-        or VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS where anchors run."""
-        limit = VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS if self.anchored else VIDEO_RELAY_LOST_RECOVERY_SECONDS
+        or VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS where anchors run and the run
+        is not one a gate opened (`ungate`)."""
+        limit = (VIDEO_RELAY_ANCHORED_RECOVERY_SECONDS if self.anchored and not self.lost_gated
+                 else VIDEO_RELAY_LOST_RECOVERY_SECONDS)
         if time.monotonic() - self.lost_since > limit:
             return None
         if not self.lost_told:
@@ -1176,6 +1221,8 @@ class _VideoRelay:
             row = (data[4] << 8) | data[5]
             frame_id = (data[2] << 8) | data[3]
             reference = (data[10] << 8) | data[11]
+            if not is_idr:
+                self.tracked = reference != frame_id
             if is_idr:
                 self.since_key = 0
                 self.numbered = (data[1] >> 4) == WIRE_H264
@@ -3272,12 +3319,16 @@ class DataStreamingServer(BaseStreamingService):
             for ws in dropped:
                 self.clients.discard(ws)
 
-    def _set_backpressure_enabled(self, display_id: str, display_state: dict, enabled: bool) -> None:
+    def _set_backpressure_enabled(self, display_id: str, display_state: dict, enabled: bool,
+                                  resync: bool = False) -> None:
         """Update the backpressure flag, requesting an IDR when it lifts.
 
         While backpressure was active, delta frames were dropped, so on the
         False->True (LIFTED) transition the client needs a keyframe to resync;
-        otherwise it decodes deltas against a reference it never received. The
+        otherwise it decodes deltas against a reference it never received. A
+        client whose acks caught up (`resync`) on a stream naming each frame's
+        reference resumes instead on the frame predicting past the ones dropped
+        (`_VideoRelay.ungate`); a re-probed one still gets the keyframe. The
         deltas encoded before that keyframe still reach the client's relay
         first and are dropped there, and a request of the relay's own landing
         after the encoder took this one would cost a second keyframe, so the
@@ -3288,9 +3339,11 @@ class DataStreamingServer(BaseStreamingService):
         if enabled != prev_enabled:
             display_state['gate_moved_at'] = time.monotonic()
         if enabled and not prev_enabled:
+            relay = self.video_relay_groups.get(display_id, {}).get(display_state.get('ws'))
+            if relay is not None and relay.ungate(resync):
+                return
             self._schedule_idr_for_display(display_id)
             _expect_key_frame(display_state)
-            relay = self.video_relay_groups.get(display_id, {}).get(display_state.get('ws'))
             if relay is not None:
                 relay.hold_sync()
 
@@ -3500,7 +3553,7 @@ class DataStreamingServer(BaseStreamingService):
                     display_state['desync_gated'] = None
                     if not display_state.get('backpressure_enabled', True):
                         data_logger.info(f"Backpressure LIFTED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f <= Allowed:{allowed_desync_frames:.1f}f).")
-                    self._set_backpressure_enabled(display_id, display_state, True)
+                    self._set_backpressure_enabled(display_id, display_state, True, resync=True)
                 if steered:
                     self._steer_bitrate_to_link(display_id, display_state, now)
 
@@ -6813,11 +6866,11 @@ class DataStreamingServer(BaseStreamingService):
                             if (pc_ws is not None and pc_ws in targets
                                     and not ps.get('backpressure_enabled', True)):
                                 # ACK backpressure throttles the controller only; its relay
-                                # stays warm but gated, resuming at the IDR the lift requests.
+                                # stays warm but gated, resuming where the lift says.
                                 targets.discard(pc_ws)
                                 relay = group.get(pc_ws)
                                 if relay is not None:
-                                    relay.flush_for_gate(ps.get('stall_gated_at') is None)
+                                    relay.flush_for_gate(ps.get('stall_gated_at') is None, item)
                         else:
                             ci = self.display_clients.get(display_id)
                             ws = ci.get('ws') if ci else None
@@ -6828,7 +6881,7 @@ class DataStreamingServer(BaseStreamingService):
                                 targets = set()
                                 relay = group.get(ws) if ws is not None else None
                                 if relay is not None:
-                                    relay.flush_for_gate(ci.get('stall_gated_at') is None)
+                                    relay.flush_for_gate(ci.get('stall_gated_at') is None, item)
                         # A socket gone for good (disconnect, pause, demotion to
                         # secondary) takes its relay with it; gated sockets stay in keep.
                         if len(group) > len(keep):

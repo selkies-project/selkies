@@ -17,6 +17,8 @@ persisted gamepad toggle, and one pad's disconnect does not stop polling the
 others. Resize policy: with dynamic resizing disabled a manual resolution
 posted to the primary's page is neither requested nor applied, and the
 desktop keeps its size.
+Rendering: changing anti-aliasing applies to the visible sink immediately,
+including a static desktop that sends no new video frames.
 
 The checks read the wire: r,WxH / js,* / cw,cb messages are tapped at
 WebSocket.send and RTCDataChannel.send inside the page, clipboard reads at
@@ -143,6 +145,8 @@ def new_page(browser: Any, mode: str, extra_init: Optional[list] = None) -> Any:
         ctx.add_init_script(script)
     page = ctx.new_page()
     page.goto(H.BASE_URL + "/", wait_until="load")
+    # Dashboards can constrain media globally, as Wish's Tailwind preflight does.
+    page.add_style_tag(content="video { max-width: 100%; height: auto; }")
     return page
 
 
@@ -224,24 +228,25 @@ def button_reports(page: Any) -> int:
 
 
 def sink_box(page: Any, mode: str) -> Optional[dict]:
-    """The CSS box the transport's sink is styled to.
+    """Measure the visible sink relative to its container.
 
-    Read off the style: the websockets core hides the canvas once a sink
-    renders, so its layout measures zero. Each core names its own element --
-    the WebRTC one creates a `stream` video, the websockets one styles the
-    `videoCanvas` every sink of its own follows.
+    The WebSockets canvas can be hidden behind a video or worker canvas.
+    Measure the sink actually displayed: inline dimensions alone do not catch
+    a stylesheet clamping the video while leaving its centering offsets intact.
 
     Returns:
         `width`, `height`, `left`, and `top` in CSS pixels, or None where the
         page has no such element, which a check reports rather than raising.
     """
-    sink = "stream" if mode == "webrtc" else "videoCanvas"
+    sinks = ["stream"] if mode == "webrtc" else ["videoStream", "videoWorkerCanvas", "videoCanvas"]
     return page.evaluate(f"""(() => {{
-      const el = document.getElementById('{sink}');
+      const el = {sinks!r}.map(id => document.getElementById(id)).find(
+        el => el && getComputedStyle(el).display !== 'none' && el.getBoundingClientRect().width > 0);
       if (!el) return null;
-      const s = el.style;
-      return {{width: parseFloat(s.width), height: parseFloat(s.height),
-               left: parseFloat(s.left), top: parseFloat(s.top)}};
+      const box = el.getBoundingClientRect();
+      const parent = el.parentElement.getBoundingClientRect();
+      return {{width: box.width, height: box.height,
+               left: box.left - parent.left, top: box.top - parent.top}};
     }})()""")
 
 
@@ -274,6 +279,52 @@ def video_rendering(page: Any, want: str, timeout: float = 8) -> Optional[str]:
             break
         time.sleep(0.3)
     return got
+
+
+def static_rendering_block(page: Any, mode: str, res: "H.Results") -> None:
+    """Change the visible filter in both directions while the desktop is idle.
+
+    A canvas hidden behind a video can hold the requested filter even while
+    the visible sink keeps its previous one. Read the video and its presented
+    frame count, so a later frame cannot make a stale filter appear correct.
+    """
+    post(page, {"type": "setManualResolution", "width": PRESET_W, "height": PRESET_H})
+    stream_size(page, mode, (PRESET_W, PRESET_H))
+    post(page, {"type": "setScaleLocally", "value": True})
+    post(page, {"type": "setAntiAliasing", "value": True})
+    post(page, {"type": "settings", "settings": {
+        "video_streaming_mode": False, "use_paint_over_quality": False}})
+    probe = """() => {
+      const v = [...document.querySelectorAll('video')].find(
+        v => getComputedStyle(v).display !== 'none' && v.videoWidth > 0);
+      return v ? {rendering: getComputedStyle(v).imageRendering,
+                  frames: v.getVideoPlaybackQuality().totalVideoFrames} : null;
+    }"""
+    try:
+        deadline = time.monotonic() + 15
+        before = None
+        while time.monotonic() < deadline:
+            before = page.evaluate(probe)
+            time.sleep(1)
+            after = page.evaluate(probe)
+            if before and after and before["frames"] == after["frames"]:
+                break
+        idle = bool(before and after and before["frames"] == after["frames"])
+        res.check("static rendering: the visible video receives no new frames", idle, after)
+        if not idle:
+            return
+        for enabled in (False, True):
+            before = page.evaluate(probe)
+            post(page, {"type": "setAntiAliasing", "value": enabled})
+            time.sleep(0.2)
+            after = page.evaluate(probe)
+            accepted = ("auto",) if enabled else ("pixelated", "crisp-edges")
+            res.check(f"static rendering: anti-aliasing {enabled} reaches the visible video",
+                      bool(after and after["rendering"] in accepted), after)
+            res.check(f"static rendering: anti-aliasing {enabled} needs no new frame",
+                      bool(after and before and after["frames"] == before["frames"]), after)
+    finally:
+        post(page, {"type": "settings", "settings": {"video_streaming_mode": True}})
 
 
 def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
@@ -324,6 +375,24 @@ def resolution_block(page: Any, mode: str, res: "H.Results") -> None:
         res.check("a manual resolution scaled to fit is smoothed", got == "auto", got)
         post(page, {"type": "setScaleLocally", "value": False})
         time.sleep(0.3)
+    sent = page.evaluate("window.__resSent")
+
+    # An exact 4K stream exceeds this viewport even at DPR 2.
+    seen = len(sent)
+    post(page, {"type": "setManualResolution", "width": 3840, "height": 2160})
+    wait_new_request(page, seen)
+    size = stream_size(page, mode, (3840, 2160))
+    res.check("oversized manual stream is realized", size == (3840, 2160), size)
+    for fit in (False, True, False):
+        post(page, {"type": "setScaleLocally", "value": fit})
+        time.sleep(0.3)
+        box = sink_box(page, mode)
+        want_w, want_h = (VIEW_W, VIEW_W * 2160 / 3840) if fit else (3840 / DPR, 2160 / DPR)
+        expected = {"width": want_w, "height": want_h,
+                    "left": (VIEW_W - want_w) / 2, "top": (VIEW_H - want_h) / 2}
+        matches = bool(box) and all(abs(box[key] - value) < 1 for key, value in expected.items())
+        res.check(f"oversized visible sink follows scale-locally={fit}", matches,
+                  f"{box} want {expected}")
     sent = page.evaluate("window.__resSent")
 
     seen = len(sent)
@@ -590,6 +659,7 @@ def run(mode: str) -> bool:
                 resolution_block(page, mode, res)
                 emulated_density_block(page, mode, res)
                 hidpi_block(page, mode, res)
+                static_rendering_block(page, mode, res)
                 clipboard_enabled_block(page, res)
                 soft_keyboard_block(page, res)
                 page.context.close()

@@ -16,8 +16,9 @@ makes it Firefox, which answers without the dependency descriptor (on the OpenH2
 test_browsers' firefox-wr, its relays on the default route's address, since Firefox gathers
 there alone and pairs none of its candidates with a loopback one). The owner's key frames are
 counted on its own page. The scene is tests/tools/motion_scene.py, whose every frame spells its
-own index, so the pictures the slow page decodes are checked against the frames they claim to
-be, and its lag behind the owner read off the two pages' pictures. The -wayland blocks run the
+own index, so the pictures both pages decode are checked against the frames they claim to be (a
+frame the encoder got wrong for the one shows on the other too), and the slow page's lag behind
+the owner read off the two pages' pictures. The -wayland blocks run the
 same on pixelflux's compositor, the scene drawn by its Wayland twin (wl_motion_scene.py).
 
 Usage: python3 tests/e2e/test_slow_page.py
@@ -247,19 +248,23 @@ def ws_block(wayland: bool = False) -> "H.Results":
             keep_log("websockets", log)
             lags = lag_frames(samples)
             worst = max((b["mismatch"] for _, b in samples), default=1.0)
+            owner_worst = max((a["mismatch"] for a, _ in samples), default=1.0)
             res.check("the owner's stream carries no key frame for the slow page", keys <= 1, f"{keys} key frames")
             res.check("the slow page keeps receiving frames", len(frames) >= WINDOW_S * 5, f"{len(frames)} frames")
             res.check("without a stall past two seconds", stalls(frames) < 2000, f"{stalls(frames):.0f} ms")
             res.check("every picture it decodes is the frame it claims to be",
                       len(samples) >= WINDOW_S // 2 and worst < D.CORRUPT_FRACTION,
                       f"{len(samples)} samples, worst {worst:.3f}")
+            res.check("and so is every picture the owner decodes", owner_worst < D.CORRUPT_FRACTION,
+                      f"worst {owner_worst:.3f}")
             res.check("it trails the owner by under a second", bool(lags) and lags[len(lags) // 2] < 60,
                       lags)
             res.check("the drops were answered by the encoder predicting past them",
                       "lost by a client; the encoder predicts past it" in log)
             print(f"      owner: {keys} key frames in {WINDOW_S} s; slow page: {len(frames)} frames "
                   f"({anchors} anchors), longest stall {stalls(frames):.0f} ms, lag "
-                  f"{lags[len(lags) // 2] if lags else '?'} frames (median), worst picture {worst:.3f}", flush=True)
+                  f"{lags[len(lags) // 2] if lags else '?'} frames (median), worst picture {worst:.3f} "
+                  f"(the owner's {owner_worst:.3f})", flush=True)
             for browser, _ in pages:
                 C.close_browser(browser)
     finally:
@@ -339,6 +344,7 @@ def wr_block(engine: str = "chromium", wayland: bool = False) -> "H.Results":
             own, sl = ({k: a[k] - b[k] for k in a} for a, b in zip(after, before))
             lags = lag_frames(samples)
             worst = max((b["mismatch"] for _, b in samples), default=1.0)
+            owner_worst = max((a["mismatch"] for a, _ in samples), default=1.0)
             # A page sent a skipped picture for each frame left out (Firefox) decodes every frame the
             # owner does, and more by the lag it makes up in the window.
             res.check("the owner decodes on beside it",
@@ -350,6 +356,8 @@ def wr_block(engine: str = "chromium", wayland: bool = False) -> "H.Results":
             res.check("every picture it decodes is the frame it claims to be",
                       len(samples) >= WINDOW_S // 2 and worst < D.CORRUPT_FRACTION,
                       f"{len(samples)} samples, worst {worst:.3f}")
+            res.check("and so is every picture the owner decodes", owner_worst < D.CORRUPT_FRACTION,
+                      f"worst {owner_worst:.3f}")
             res.check("it trails the owner by under a second", bool(lags) and lags[len(lags) // 2] < 60, lags)
             res.check("its drops were answered by the encoder predicting past them",
                       "lost by a peer; the encoder predicts past it" in log and "GOP reset" not in log,
@@ -357,7 +365,7 @@ def wr_block(engine: str = "chromium", wayland: bool = False) -> "H.Results":
             print(f"      owner: {own['keyframes']} key frames, {own['decoded']} decoded; slow page: "
                   f"{sl['decoded']} decoded, {sl['keyframes']} key frames, {sl['plis']} PLIs, "
                   f"{sl['freezes']} freezes ({sl['frozen']:.1f} s), lag {lags[len(lags) // 2] if lags else '?'} "
-                  f"frames (median), worst picture {worst:.3f}; pacer cuts "
+                  f"frames (median), worst picture {worst:.3f} (the owner's {owner_worst:.3f}); pacer cuts "
                   f"{log.count('the sender resyncs its peer')}", flush=True)
             for browser, _ in pages:
                 C.close_browser(browser)

@@ -141,9 +141,11 @@ import { StreamStats, DecodeCapability, webcodecsDecoder, FIRST_SAMPLE_MS } from
 import decodeGateSource from './lib/decode-gate.js?raw';
 import decodePaceSource from './lib/decode-pace.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
+import { createChunkStamp } from './lib/chunk-stamp.js';
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
 import { DecodePace } from './lib/decode-pace.js';
+import { DecodeGate } from './lib/decode-gate.js';
 import { WebcamCapture, WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
 import { createPrintJobs, printDocument } from './lib/print-jobs.js';
 
@@ -529,7 +531,8 @@ let vncStripeDecoders = {};
  * Chunks one stripe decoder may have outstanding before its deltas are
  * dropped. Past it the row is gated until its next IDR: decoding a backlog
  * late only deepens it, and a dropped delta breaks the row's reference chain.
- * The video worker holds its full-frame decoder to the same contract.
+ * A full-frame decoder, the page's or the video worker's, follows
+ * lib/decode-gate.js instead.
  */
 const STRIPE_DECODE_QUEUE_LIMIT = 8;
 /**
@@ -1122,6 +1125,8 @@ let framerateAsked = null;
  */
 let decodePace = null;
 const pagePace = new DecodePace();
+/** What the page's own full-frame decoder does with each frame, as the video worker's does (lib/decode-gate.js). */
+const pageGate = new DecodeGate();
 /** Tells the server the pace, or that there is none. */
 function sendDecodePace() {
   if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send(`DECODE_PACE ${decodePace || 0}`);
@@ -2141,6 +2146,8 @@ ${wireCodecsSource.replace(/^export /gm, '')}
 // stripe clock), else at the frame-id boundary -- with the presented id going
 // back over the wire port so the server paces against what reached the screen.
 const createStripeClock = ${createStripeClock.toString()};
+const createChunkStamp = ${createChunkStamp.toString()};
+const chunkStamp = createChunkStamp();
 const STRIPE_DECODE_QUEUE_LIMIT = ${STRIPE_DECODE_QUEUE_LIMIT};
 const JPEG_STRIPE_REORDER_WINDOW = ${JPEG_STRIPE_REORDER_WINDOW};
 let stripedOn = false, wirePort = null;
@@ -2331,7 +2338,7 @@ function onH264Stripe(buffer, at) {
   try {
     info.meta.push({ frameId: frameId, at: at });
     const data = framed ? annexbToAvcc(bytes) : payload;
-    info.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: performance.now() * 1000, data: data }));
+    info.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: chunkStamp(), data: data }));
     if (key) info.gotKey = true;
   } catch (err) {
     info.meta.pop();
@@ -2418,7 +2425,7 @@ function onWire(message) {
     wireCodec = codec; wireW = w; wireH = h; wireDesc = desc; wireRange = wireFullRange;
     self.postMessage({ type: 'wireDims', w: w, h: h });
   }
-  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, performance.now() * 1000, frameId, reference, at);
+  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, chunkStamp(), frameId, reference, at);
 }
 
 const stripedCaps = {
@@ -2823,10 +2830,7 @@ function ensureVideoWorker() {
         return;
       }
       if (m.type === 'lostFrame') {
-        if (websocket && websocket.readyState === WebSocket.OPEN) {
-          websocket.send(`LOST_FRAME ${m.id}`);
-          requests.lost++;
-        }
+        sendLostFrame(m.id);
         return;
       }
       if (m.type === 'decodePace') {
@@ -3113,7 +3117,7 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec, frameId, reference, arri
     requestKeyframe();
   }
   const data = framed ? annexbToAvcc(new Uint8Array(dataBuf)).buffer : dataBuf;
-  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: performance.now() * 1000, frameId: frameId, reference: reference, at: arrival }, [data]); }
+  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: chunkStamp(), frameId: frameId, reference: reference, at: arrival }, [data]); }
   catch (e) { return false; }
   return true;
 }
@@ -3152,7 +3156,8 @@ const wireCodecString = (typeByte, payload, width, height) => {
  * Picks the canvas `image-rendering`: pixelated for a 1:1 display or when
  * anti-aliasing is off, smoothed whenever the picture is scaled (manual
  * resolution, high-DPR CSS scaling, shared mode). Part of cssText, so the box
- * is re-mirrored to the active sink.
+ * is re-mirrored to the active sink. A filter change must also be mirrored
+ * immediately when no frames are arriving from a static desktop.
  */
 const updateCanvasImageRendering = () => {
   if (!canvas) return;
@@ -3180,7 +3185,12 @@ const updateCanvasImageRendering = () => {
   }
 };
 
-/** Installs the page's base stylesheet: the video container, its sinks, the overlay input, and the start button. */
+/**
+ * Installs the page's base stylesheet: the video container, its sinks, the
+ * overlay input, and the start button. Sink geometry is set by the resolution
+ * handlers; an exact-size video can exceed the container and must be clipped
+ * there, without clamping its box independently of its centering offsets.
+ */
 const injectCSS = () => {
   const style = document.createElement('style');
   style.textContent = `
@@ -3220,8 +3230,8 @@ body {
     height: 100%;
 }
 .video-container video {
-  max-width: 100%;
-  max-height: 100%;
+  max-width: none;
+  max-height: none;
   object-fit: contain;
   display: none;
 }
@@ -4356,6 +4366,8 @@ let lastPresentedVideoFrameId = null;
 let lastPresentedVideoFrameAt = 0;
 /** When the striped composite holds a whole frame; see lib/stripe-clock.js. */
 const stripeClock = createStripeClock();
+/** The timestamps of the chunks the page hands a decoder, its own or the video worker's (lib/chunk-stamp.js). */
+const chunkStamp = createChunkStamp();
 /**
  * Creates the back-buffer, resized to the canvas.
  * @returns {CanvasRenderingContext2D|null}
@@ -5315,6 +5327,7 @@ function receiveMessage(event) {
         console.log(`Set antiAliasingEnabled to ${antiAliasingEnabled} and persisted.`);
         if (changed) {
           updateCanvasImageRendering();
+          syncSinkToCanvasStyle();
         }
       } else {
         console.warn("Invalid value received for setAntiAliasing:", message.value);
@@ -8094,6 +8107,7 @@ class WorkerWebSocket {
                     output: handleDecodedVncStripeFrame.bind(null, vncStripeYStart),
                     error: (e) => handleStripeDecodeError(e, vncStripeYStart)
                 });
+                if (vncStripeYStart === 0) pageGate.configured();
                 if (isFullFrameVideo(currentEncoderMode) && pagePace.cap !== null && !decodeInWorker && decoderInfo
                     && (decoderInfo.width !== stripeWidth || decoderInfo.height !== stripeHeight)) {
                     pagePace.reset();
@@ -8154,19 +8168,31 @@ class WorkerWebSocket {
                     return;
                 }
                 const fullFrame = isFullFrameVideo(currentEncoderMode);
-                if (chunkType === 'key') {
-                    decoderInfo.hasReceivedKeyframe = true;
-                } else if (decoderInfo.decoder.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
-                    if (fullFrame) pagePace.decided(decoderInfo.decoder.decodeQueueSize, true);
+                if (chunkType === 'key') decoderInfo.hasReceivedKeyframe = true;
+                if (fullFrame) {
+                    // A frame naming its reference is let go and named, so the encoder
+                    // predicts past it; a key frame is asked for only where that cannot help.
+                    const queued = decoderInfo.decoder.decodeQueueSize;
+                    const decision = pageGate.decide(chunkType === 'key', vncFrameID, referenceFrameId, queued);
+                    pagePace.decided(queued, decision === 'lost' || decision === 'overload');
+                    if (decision === 'lost') {
+                        sendLostFrame(vncFrameID);
+                        return;
+                    }
+                    if (decision === 'no_key' || decision === 'overload') {
+                        decoderInfo.hasReceivedKeyframe = false;
+                        requestKeyframe();
+                        return;
+                    }
+                } else if (chunkType === 'delta' && decoderInfo.decoder.decodeQueueSize > STRIPE_DECODE_QUEUE_LIMIT) {
                     decoderInfo.hasReceivedKeyframe = false;
                     requestKeyframe();
                     return;
                 }
-                if (fullFrame) pagePace.decided(decoderInfo.decoder.decodeQueueSize, false);
                 // Striped H.264 carries the frame id in the timestamp so the paint
                 // loop can present whole frames; full-frame keeps a monotonic clock.
                 const chunkTimestamp = (currentEncoderMode === 'h264enc-striped')
-                    ? vncFrameID : (performance.now() * 1000);
+                    ? vncFrameID : chunkStamp();
                 const chunkData = {
                     type: chunkType,
                     timestamp: chunkTimestamp,
@@ -10250,6 +10276,14 @@ function performServerInitiatedVideoReset(reason = "unknown") {
     }
   }
 
+}
+
+/** Tells the server the decoder let frame `id` go, so the encoder predicts past it (`LOST_FRAME`). */
+function sendLostFrame(id) {
+    if (websocket && websocket.readyState === WebSocket.OPEN) {
+        websocket.send(`LOST_FRAME ${id}`);
+        requests.lost++;
+    }
 }
 
 let lastKeyframeRequestTime = 0;
