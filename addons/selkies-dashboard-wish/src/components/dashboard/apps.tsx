@@ -6,11 +6,12 @@
 
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { ChevronLeft, Loader2, X } from "lucide-react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
+import { Check, ChevronLeft, CircleAlert, Download, Info, Loader2, Play, RotateCw, Search, SearchX, Trash2, X } from "lucide-react";
 import * as yaml from "js-yaml";
 import { t } from "@/i18n";
 import { getLastServerSettings } from "@/utils";
@@ -77,8 +78,47 @@ interface AppsProps {
 }
 
 /**
+ * The catalog icon, or the app's initial on a muted tile when the image does
+ * not load, so an unreachable image host never leaves the tile blank.
+ * @param props The catalog entry whose icon is shown, the icon's URL from
+ *     the catalog the modal reads, and the classes sizing it.
+ * @returns The icon image, or the fallback tile carrying the app's initial.
+ */
+function AppIcon({ app, src, className }: { app: App; src: string; className?: string }) {
+    const [failed, setFailed] = useState(false);
+    if (failed) {
+        return (
+            <div
+                aria-hidden="true"
+                className={cn("flex items-center justify-center rounded-lg bg-muted font-medium text-muted-foreground", className)}
+            >
+                {app.full_name.charAt(0).toUpperCase()}
+            </div>
+        );
+    }
+    return (
+        <img
+            src={src}
+            alt=""
+            loading="lazy"
+            onError={() => setFailed(true)}
+            className={className}
+        />
+    );
+}
+
+/**
  * Renders the catalog grid, its search box, and the per-app detail view
  * inside a dialog controlled by the parent.
+ *
+ * The popup holds no fixed width: it spans the viewport on small screens and
+ * tracks 90% of it up to 72rem on larger ones, and the grid reflows between
+ * two and six columns to the width it is given. Its height is the viewport
+ * minus 2rem at each edge rather than content-capped: the scroll region
+ * sizes itself as a percentage of the popup, and a browser resolves that
+ * percentage only against a definite height, so a content-capped popup
+ * leaves the region the height of its content with nothing to scroll. The
+ * header stays outside the scroll region.
  *
  * The catalog is fetched once per modal open, plus explicit Retry presses; a
  * failure settles into the error view rather than refetching. The fetch is
@@ -205,7 +245,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
     }, [isOpen, appData, fetchAttempt, catalog.metadata]);
 
     const handleSearchChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-        setSearchTerm(event.target.value.toLowerCase());
+        setSearchTerm(event.target.value);
     };
 
     const handleAppClick = (app: App) => {
@@ -238,146 +278,141 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         postAppCommand('launch', appName);
     };
 
+    const needle = searchTerm.toLowerCase();
     const filteredApps = appData?.include?.filter(app =>
         !app.disabled &&
-        (app.full_name?.toLowerCase().includes(searchTerm) ||
-         app.name?.toLowerCase().includes(searchTerm) ||
-         app.description?.toLowerCase().includes(searchTerm))
+        (app.full_name?.toLowerCase().includes(needle) ||
+         app.name?.toLowerCase().includes(needle) ||
+         app.description?.toLowerCase().includes(needle))
     ) || [];
 
     const isAppInstalled = (appName: string) => installedApps.includes(appName);
 
     return (
-        <>
-            <Dialog open={isOpen} onOpenChange={handleModalClose}>
-                <DialogContent className="max-h-screen sm:max-w-[50vw] p-0">
-                    <DialogHeader className="sticky top-0 z-10 bg-background p-6 border-b">
-                        <div className="flex flex-col space-y-6">
-                            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
-                                <div>
-                                    <DialogTitle>{t('sections.apps.title')}</DialogTitle>
-                                    <DialogDescription>
-                                        {t('apps.subtitle')}
-                                    </DialogDescription>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <Input
-                                        type="text"
-                                        placeholder={t('appsModal.searchPlaceholder')}
-                                        value={searchTerm}
-                                        onChange={handleSearchChange}
-                                        className="w-full sm:w-[300px]"
-                                    />
-                                    <Button
-                                        variant="secondary"
-                                        size="icon"
-                                        onClick={() => handleModalClose(false)}
-                                        className="h-10 w-10"
-                                    >
-                                        <X className="h-4 w-4" />
-                                        <span className="sr-only">{t('common.close')}</span>
-                                    </Button>
-                                </div>
-                            </div>
+        <Dialog open={isOpen} onOpenChange={handleModalClose}>
+            <DialogContent
+                showCloseButton={false}
+                className="flex! flex-col gap-0! h-[calc(100dvh-4rem)]! p-0! overflow-hidden sm:max-w-[min(90vw,72rem)]!"
+            >
+                <DialogHeader className="gap-4 border-b p-5 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                        <DialogTitle>{t('sections.apps.title')}</DialogTitle>
+                        <DialogDescription>{t('apps.subtitle')}</DialogDescription>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                        <div className="relative">
+                            <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                            <Input
+                                type="text"
+                                placeholder={t('appsModal.searchPlaceholder')}
+                                value={searchTerm}
+                                onChange={handleSearchChange}
+                                className="w-full pl-8 sm:w-56"
+                            />
                         </div>
-                    </DialogHeader>
+                        <Button
+                            variant="secondary"
+                            size="icon"
+                            onClick={() => handleModalClose(false)}
+                            aria-label={t('appsModal.closeAlt')}
+                        >
+                            <X />
+                        </Button>
+                    </div>
+                </DialogHeader>
 
-                    <ScrollArea className="h-[calc(98vh-8rem)]">
+                <ScrollArea className="min-h-0 flex-1">
+                    <div className="p-5">
                         {commandsKnown && !commandsAvailable && (
-                            <div className="p-6 pb-0">
-                                <Card className="border-destructive">
-                                    <CardContent className="p-4 text-sm text-muted-foreground">
-                                        {t('appsModal.commandsDisabled')}
-                                    </CardContent>
-                                </Card>
+                            <div className="mb-4 flex items-start gap-2.5 rounded-lg border bg-muted/40 p-3.5 text-muted-foreground">
+                                <Info className="mt-0.5 size-4 shrink-0" />
+                                <p>{t('appsModal.commandsDisabled')}</p>
                             </div>
                         )}
                         {isLoading && (
-                            <div className="flex justify-center items-center w-full h-full p-6">
-                                <div className="flex flex-col items-center gap-4">
-                                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-                                    <span className="text-muted-foreground">{t('appsModal.loading')}</span>
-                                </div>
+                            <div
+                                role="status"
+                                aria-label={t('appsModal.loading')}
+                                className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8"
+                            >
+                                {Array.from({ length: 12 }, (_, i) => (
+                                    <div key={i} className="h-28 animate-pulse rounded-lg bg-muted" />
+                                ))}
                             </div>
                         )}
                         {error && (
-                            <div className="p-6">
-                                <Card className="border-destructive">
-                                    <CardContent className="p-6 space-y-4">
-                                        <div className="flex items-center gap-2 text-destructive">
-                                            <X className="h-4 w-4" />
-                                            <p>{error}</p>
-                                        </div>
-                                        <Button
-                                            variant="outline"
-                                            onClick={() => setFetchAttempt(n => n + 1)}
-                                        >
-                                            {t('appsModal.retryButton')}
-                                        </Button>
-                                    </CardContent>
-                                </Card>
+                            <div className="flex flex-col items-center justify-center gap-4 py-16 text-center">
+                                <span className="flex size-11 items-center justify-center rounded-full bg-destructive/10">
+                                    <CircleAlert className="size-5 text-destructive" />
+                                </span>
+                                <p className="max-w-md text-muted-foreground">{error}</p>
+                                <Button variant="outline" onClick={() => setFetchAttempt(n => n + 1)}>
+                                    <RotateCw />
+                                    {t('appsModal.retryButton')}
+                                </Button>
                             </div>
                         )}
                         {!isLoading && !error && appData && (
-                            <div className="p-6">
-                                {selectedApp ? (
-                                    <div className="space-y-6">
-                                        <Button 
-                                            variant="outline" 
-                                            onClick={handleBackToGrid} 
-                                            className="mb-4"
-                                        >
-                                            <ChevronLeft className="mr-2 h-4 w-4" />
-                                            {t('appsModal.backButton')}
-                                        </Button>
-                                        <Card className="bg-background/95">
-                                            <CardHeader className="space-y-4">
-                                                <section className="flex items-center gap-4">
-                                                    <img 
-                                                        src={catalog.icon(selectedApp.icon)} 
-                                                        alt={selectedApp.full_name} 
-                                                        className="w-16 h-16 object-contain"
-                                                        onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                                                    />
-                                                    <header className="space-y-1">
-                                                        <CardTitle className="text-xl">{selectedApp.full_name}</CardTitle>
-                                                        <CardDescription className="text-base">{selectedApp.description}</CardDescription>
-                                                    </header>
-                                                </section>
-                                            </CardHeader>
-                                            <CardFooter className="flex gap-2 justify-end">
-                                                {(() => {
+                            selectedApp ? (
+                                <div className="space-y-4">
+                                    <Button variant="ghost" size="sm" onClick={handleBackToGrid} className="-ml-2">
+                                        <ChevronLeft />
+                                        {t('appsModal.backButton')}
+                                    </Button>
+                                    <Card>
+                                        <CardHeader>
+                                            <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+                                                <AppIcon app={selectedApp} src={catalog.icon(selectedApp.icon)} className="size-16 shrink-0 object-contain" />
+                                                <div className="min-w-0 space-y-1.5">
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <CardTitle className="text-base">{selectedApp.full_name}</CardTitle>
+                                                        {isAppInstalled(selectedApp.name) && (
+                                                            <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[0.625rem] font-medium text-primary">
+                                                                <Check className="size-2.5" />
+                                                                {t('appsModal.installedBadge')}
+                                                            </span>
+                                                        )}
+                                                        <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.625rem] text-muted-foreground">
+                                                            {selectedApp.name}
+                                                        </span>
+                                                    </div>
+                                                    <CardDescription>{selectedApp.description}</CardDescription>
+                                                </div>
+                                            </div>
+                                        </CardHeader>
+                                        <CardFooter className="justify-end gap-2 border-t">
+                                            {(() => {
                                                 const running = commandTick >= 0 && pendingAppAction(selectedApp.name);
                                                 const held = !commandsAvailable || !!running;
                                                 const spin = (action: string) =>
-                                                    running === action ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null;
+                                                    running === action ? <Loader2 className="animate-spin" /> : null;
                                                 return isAppInstalled(selectedApp.name) ? (
                                                     <>
                                                         <Button
                                                             variant="default"
                                                             onClick={() => handleLaunch(selectedApp.name)}
                                                             disabled={held}
-                                                            className="w-auto"
                                                         >
                                                             {spin('launch')}
+                                                            <Play />
                                                             {t('apps.launchApp', { name: selectedApp.name })}
                                                         </Button>
                                                         <Button
                                                             variant="outline"
                                                             onClick={() => handleUpdate(selectedApp.name)}
                                                             disabled={held}
-                                                            className="w-auto"
                                                         >
                                                             {spin('update')}
+                                                            <RotateCw />
                                                             {t('apps.updateApp', { name: selectedApp.name })}
                                                         </Button>
                                                         <Button
                                                             variant="destructive"
                                                             onClick={() => handleRemove(selectedApp.name)}
                                                             disabled={held}
-                                                            className="w-auto"
                                                         >
                                                             {spin('remove')}
+                                                            <Trash2 />
                                                             {t('apps.removeApp', { name: selectedApp.name })}
                                                         </Button>
                                                     </>
@@ -386,64 +421,52 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
                                                         variant="default"
                                                         onClick={() => handleInstall(selectedApp.name)}
                                                         disabled={held}
-                                                        className="w-auto"
                                                     >
                                                         {spin('install')}
+                                                        <Download />
                                                         {t('apps.installApp', { name: selectedApp.name })}
                                                     </Button>
                                                 );
-                                                })()}
-                                            </CardFooter>
-                                        </Card>
-                                    </div>
-                                ) : (
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-                                        {filteredApps.length > 0 ? (
-                                            filteredApps.map(app => (
-                                                <Card 
-                                                    key={app.name} 
-                                                    className="cursor-pointer hover:bg-accent/50 transition-colors bg-background/95 relative aspect-square group"
-                                                    onClick={() => handleAppClick(app)}
-                                                >
-                                                    {isAppInstalled(app.name) && (
-                                                        <div className="absolute top-2 right-2 w-2 h-2 rounded-full bg-green-500" />
-                                                    )}
-                                                    <CardContent className="p-4 h-full flex flex-col items-center justify-center">
-                                                        <div className="flex flex-col items-center text-center">
-                                                            <img 
-                                                                src={catalog.icon(app.icon)} 
-                                                                alt={app.full_name} 
-                                                                className="w-12 h-12 object-contain mb-2"
-                                                                loading="lazy"
-                                                                onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }}
-                                                            />
-                                                            <div>
-                                                                <CardTitle className="text-sm line-clamp-2 group-hover:text-primary transition-colors">
-                                                                    {app.full_name}
-                                                                </CardTitle>
-                                                            </div>
-                                                        </div>
-                                                    </CardContent>
-                                                </Card>
-                                            ))
-                                        ) : (
-                                            <Card className="col-span-full">
-                                                <CardContent className="p-6">
-                                                    <div className="flex flex-col items-center justify-center text-center">
-                                                        <p className="text-muted-foreground">
-                                                            {t('appsModal.noAppsFound')}
-                                                        </p>
-                                                    </div>
+                                            })()}
+                                        </CardFooter>
+                                    </Card>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8">
+                                    {filteredApps.length > 0 ? (
+                                        filteredApps.map(app => (
+                                            <Card
+                                                key={app.name}
+                                                size="sm"
+                                                className="group/tile relative cursor-pointer transition-colors hover:bg-accent/50 hover:ring-primary/30"
+                                                onClick={() => handleAppClick(app)}
+                                            >
+                                                {isAppInstalled(app.name) && (
+                                                    <span className="absolute top-1.5 right-1.5 flex size-4 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                                                        <Check className="size-2.5" />
+                                                        <span className="sr-only">{t('appsModal.installedBadge')}</span>
+                                                    </span>
+                                                )}
+                                                <CardContent className="flex flex-col items-center gap-2">
+                                                    <AppIcon app={app} src={catalog.icon(app.icon)} className="size-10 object-contain" />
+                                                    <CardTitle className="line-clamp-2 text-center text-xs group-hover/tile:text-primary">
+                                                        {app.full_name}
+                                                    </CardTitle>
                                                 </CardContent>
                                             </Card>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
+                                        ))
+                                    ) : (
+                                        <div className="col-span-full flex flex-col items-center justify-center gap-3 py-16 text-center">
+                                            <SearchX className="size-8 text-muted-foreground/50" />
+                                            <p className="text-muted-foreground">{t('appsModal.noAppsFound')}</p>
+                                        </div>
+                                    )}
+                                </div>
+                            )
                         )}
-                    </ScrollArea>
-                </DialogContent>
-            </Dialog>
-        </>
+                    </div>
+                </ScrollArea>
+            </DialogContent>
+        </Dialog>
     );
 }

@@ -1,0 +1,41 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# Development container for the wish dashboard: the reference desktop image
+# with this dashboard's built `dist` served as the web root.
+#
+#   npm run build
+#   docker compose up -d        # http://localhost:8080 (ubuntu / PASSWD)
+#   docker compose restart      # after a rebuild
+
+services:
+  selkies-wish-dev:
+    image: ghcr.io/selkies-project/selkies/desktop:latest-ubuntu26.04
+    environment:
+      # Streaming mode: websockets, or both transports with dual mode
+      SELKIES_MODE: websockets
+      SELKIES_ENABLE_DUAL_MODE: "true"
+      SELKIES_PORT: "8080"
+      SELKIES_ENABLE_HTTPS: "false"
+      # Login password of the unprivileged user
+      PASSWD: mypasswd
+      # Start a full LXQt session, vs just the display server
+      START_LXQT: "true"
+      SELKIES_WAYLAND: "false"
+      # The dashboard build this directory produces, served by the session
+      SELKIES_WEB_ROOT: /opt/wish-dashboard
+      # Remote commands, so the Apps modal's command paths render locally
+      SELKIES_COMMAND_ENABLED: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - type: bind
+        source: ./dist
+        target: /opt/wish-dashboard
+        read_only: true
+    # The browsers in the image allocate their shared memory here; the 64 MB
+    # Docker default makes them abort on the first heavy page
+    shm_size: "2gb"
+    stdin_open: true
+    tty: true

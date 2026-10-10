@@ -14,8 +14,8 @@ import { isSecondaryDisplay, isViewerUrlMode, getLastServerSettings } from '../u
 import '../styles/Overlay.css';
 
 /**
- * The dashboard chrome portaled over the stream: the top menu, whose gamepad
- * dropdown holds the gamepad preview, and the mobile virtual-keyboard button.
+ * The dashboard chrome portaled over the stream: the top menu, whose gamepads
+ * panel holds the gamepad preview, and the mobile virtual-keyboard button.
  *
  * Owns the pipeline, gamepad, and touch-gamepad state the menu and the preview
  * share. State follows the core's echoes rather than local toggles: a
@@ -25,8 +25,9 @@ import '../styles/Overlay.css';
  * `clientRoleUpdate` (viewers get no control UI, only the floating
  * touch-gamepad toggle on a touch client), `serverSettings`
  * (`ui_show_sidebar` hides the whole chrome, `ui_sidebar_show_gamepads` the
- * gamepad preview and that button alone), and the core-owned hotkey messages `toggleDashboard` and
- * `toggleTouchGamepad`. The touch overlay is driven with
+ * gamepad preview and that button alone), and the core-owned hotkey message
+ * `toggleTouchGamepad` (`toggleDashboard` belongs to the menu, which slides
+ * itself up). The touch overlay is driven with
  * `TOUCH_GAMEPAD_SETUP` and `TOUCH_GAMEPAD_VISIBILITY`.
  * @module
  */
@@ -49,7 +50,7 @@ const TOUCH_GAMEPAD_HOST_DIV_ID = 'touch-gamepad-host';
  */
 function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElement | null {
   const [isGamepadEnabled, setIsGamepadEnabled] = useState<boolean>(true);
-  const [showStats, setShowStats] = useState<boolean>(true);
+  const [isKeyboardButtonVisible, setIsKeyboardButtonVisible] = useState<boolean>(true);
   const [isTouchGamepadActive, setIsTouchGamepadActive] = useState<boolean>(false);
   const [isTouchGamepadSetup, setIsTouchGamepadSetup] = useState<boolean>(false);
   const [isVideoActive, setIsVideoActive] = useState<boolean>(true);
@@ -167,9 +168,7 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
       if (event.origin !== window.location.origin) return;
       const message = event.data;
       if (!message || typeof message !== "object") return;
-      if (message.type === "toggleDashboard") {
-        setShowStats((prev) => !prev);
-      } else if (message.type === "toggleTouchGamepad") {
+      if (message.type === "toggleTouchGamepad") {
         handleToggleTouchGamepad();
       }
     };
@@ -185,7 +184,7 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
   return ReactDOM.createPortal(
     <TooltipProvider>
       <div className="h-screen w-screen">
-        {showStats && !isViewer && showSidebar && (
+        {!isViewer && showSidebar && (
           <TopMenu
             isVideoActive={isVideoActive}
             isAudioActive={isAudioActive}
@@ -199,7 +198,8 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
             onGamepadToggle={handleGamepadToggle}
             isTouchGamepadActive={isTouchGamepadActive}
             onToggleTouchGamepad={handleToggleTouchGamepad}
-            toggleStats={() => setShowStats(false)}
+            isKeyboardButtonVisible={isKeyboardButtonVisible}
+            onKeyboardButtonVisible={setIsKeyboardButtonVisible}
           />
         )}
 
@@ -209,8 +209,8 @@ function DashboardOverlay({ container }: DashboardOverlayProps): React.ReactElem
 
         {/* Input is owned by the primary display, so the button follows the
             menu's chrome gates plus its own ui_sidebar_show_gamepads. */}
-        {isGamepadEnabled && !isSecondaryDisplay && showStats && !isViewer && showSidebar && showGamepadCard && (
-          <VirtualKeyboardButton />
+        {isGamepadEnabled && !isSecondaryDisplay && !isViewer && showSidebar && showGamepadCard && (
+          <VirtualKeyboardButton visible={isKeyboardButtonVisible} />
         )}
       </div>
     </TooltipProvider>,

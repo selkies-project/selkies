@@ -6,22 +6,21 @@
 
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { X } from "lucide-react";
+import { Download, Upload, X } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { computeRenderableSettings, getLastServerSettings } from "@/utils";
 import { t } from "@/i18n";
 import { withSessionToken } from "../../../../selkies-web-core/lib/session-token.js";
 
 /**
- * The files panel (upload and download buttons) and the Download Files
- * dialog.
+ * The files view of the overflow menu (upload and download buttons) and the
+ * Download Files dialog.
  *
- * The dialog is not rendered by the panel: the panel lives inside a menubar
- * submenu, and Radix closes every open menu when the window blurs, which a
- * click inside the file-manager iframe causes. A dialog mounted in the submenu
- * would be torn down by that click, so TopMenu hosts `FilesDialog` beside the
- * menubar, as it does the Apps modal, and only the request to open it comes
- * from the panel. Uploads are requested with the `requestFileUpload` window
+ * The dialog is not rendered by the view: the view lives inside the
+ * overflow menu's popup and unmounts with it, while the file manager is a
+ * window the user keeps open. TopMenu hosts `FilesDialog` beside the
+ * toolbar, as it does the Apps modal, and only the request to open it comes
+ * from the view. Uploads are requested with the `requestFileUpload` window
  * event; `serverSettings` messages gate which buttons show.
  * @module
  */
@@ -64,22 +63,24 @@ export function Files({ onOpenDownloads }: FilesProps) {
     if (!showUpload && !showDownload) return null;
 
     return (
-        <div className="w-auto p-4 flex flex-col gap-2">
+        <div className="flex w-full flex-col gap-2 p-2">
             {showUpload && (
                 <Button
                     variant="outline"
-                    className="mb-2"
+                    size="sm"
                     onClick={handleUploadClick}
                 >
+                    <Upload className="h-4 w-4" />
                     {t('sections.files.uploadButton')}
                 </Button>
             )}
             {showDownload && (
                 <Button
                     variant="outline"
-                    className="mb-2"
+                    size="sm"
                     onClick={onOpenDownloads}
                 >
+                    <Download className="h-4 w-4" />
                     {t('sections.files.downloadButtonTitle')}
                 </Button>
             )}

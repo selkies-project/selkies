@@ -32,6 +32,11 @@
  * specs of `selkies-web-core/lib/conditional-settings.js`, which honor pinned,
  * locked, and operator-overridden server values: a derived write never pins
  * them, and an unmarked stored echo is dropped once the ladder moves on.
+ *
+ * Each tab is an accordion of cards (Video: Format, Performance; Audio:
+ * Quality, Devices; Resolution: Display, Resolution). Opening one card closes
+ * the others in its tab, the first visible card starts open, and a card none
+ * of whose controls is visible is not rendered.
  * @module
  */
 
@@ -48,6 +53,7 @@ import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
     DropdownMenu,
@@ -56,8 +62,9 @@ import {
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
-import { ChevronUp } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { SectionAccordion, SectionItem } from "@/components/dashboard/section-accordion";
 import { getPrefixedKey, computeRenderableSettings, getLastServerSettings,
     getLastEffectiveCursorState, getLastAudioDevices, isSecondaryDisplay } from "@/utils";
 import { t, tl } from "@/i18n";
@@ -1043,6 +1050,34 @@ export function Settings() {
     const encoderRenderable = renderableSettings.encoder ?? true;
     const webcamEncoderRenderable = (renderableSettings.webcamEncoder ?? true) && !isWebrtc;
 
+    const showStreamMode = !!(renderableSettings.enableDualMode ?? (window as any).__SELKIES_DUAL_MODE__ ?? false);
+    const showFullColorSwitch = isH264 && showFullColor && (renderableSettings.videoFullColor ?? true) && fullColorDecodable;
+    const showTenBitSwitch = isH264 && show10Bit && (renderableSettings.video10Bit ?? true) && tenBitDecodable;
+    const showFramerate = renderableSettings.framerate ?? true;
+    const showRateControlSelect = isH264 && showRateControl;
+    const showBitrateSlider = isH264 && appliedRateControlMode === 'cbr' && (renderableSettings.videoBitrate ?? true);
+    const showCrfSlider = isH264 && appliedRateControlMode === 'crf' && (renderableSettings.videoCRF ?? true);
+    const showTurbo = isH264 && (renderableSettings.videoStreamingMode ?? true);
+    const showJpegQualitySlider = showJpegOptions && (renderableSettings.jpegQuality ?? true);
+    const showPaintOverSwitch = (isH264 || activeEncoder === 'jpeg') && (renderableSettings.usePaintOverQuality ?? true);
+    const showPaintoverCrf = isH264 && usePaintOverQuality && (renderableSettings.videoPaintoverCRF ?? true);
+    const showPaintoverBurst = isH264 && usePaintOverQuality && (renderableSettings.videoPaintoverBurstFrames ?? true);
+    const showPaintOverJpeg = showJpegOptions && usePaintOverQuality && (renderableSettings.paintOverJpegQuality ?? true);
+    const showCpuSwitch = softwareChoiceAvailable(activeEncoder, conditionalCtx.encoderBackends) && (renderableSettings.useCpu ?? true);
+    const showAudioBitrate = renderableSettings.audioBitrate ?? true;
+    const showHidpi = !isSecondaryDisplay && (renderableSettings.hidpi ?? true);
+    const showForceAligned = !isSecondaryDisplay && (renderableSettings.forceAlignedResolution ?? true);
+    const showUiScaling = !isSecondaryDisplay && (renderableSettings.uiScaling ?? true);
+    const showResolutionControls = !serverSettings?.manual_resolution?.locked
+        && (isSecondaryDisplay || serverSettings?.enable_resize?.value !== false);
+
+    const showFormatCard = showStreamMode || encoderRenderable || webcamEncoderRenderable
+        || showFullColorSwitch || showTenBitSwitch;
+    const showPerformanceCard = showFramerate || showRateControlSelect || showBitrateSlider || showCrfSlider
+        || showTurbo || showJpegQualitySlider || showPaintOverSwitch || showPaintoverCrf
+        || showPaintoverBurst || showPaintOverJpeg || showCpuSwitch;
+    const showQualityCard = showAudioBitrate;
+
     const showVideoTab = renderableSettings.videoSettings !== false;
     const showAudioTab = renderableSettings.audioSettings !== false;
     const showResolutionTab = renderableSettings.screenSettings !== false;
@@ -1059,13 +1094,13 @@ export function Settings() {
     }
 
     return (
-        <Card className="w-[300px] p-0 pb-4 bg-background border shadow-sm">
+        <Card className="w-[264px] gap-1 py-1">
             <Tabs
                 defaultValue={defaultTab}
                 onValueChange={(value) => { if (value === "audio") ensureAudioDevices(); }}
-                className="w-full"
+                className="w-full px-1"
             >
-                <TabsList className={`grid w-full bg-muted/50 ${visibleTabCount === 3 ? 'grid-cols-3' : visibleTabCount === 2 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                <TabsList className="w-full">
                     {showVideoTab && <TabsTrigger value="video">{t('settingsTabs.video')}</TabsTrigger>}
                     {showAudioTab && <TabsTrigger value="audio">{t('settingsTabs.audio')}</TabsTrigger>}
                     {showResolutionTab && <TabsTrigger value="resolution">{t('settingsTabs.resolution')}</TabsTrigger>}
@@ -1073,360 +1108,375 @@ export function Settings() {
 
                 {showResolutionTab && (
                 <TabsContent value="resolution">
-                    <CardContent className="space-y-4">
-                        {/* Per-display capable settings (the core routes them with a
-                            _display2 suffix): available on secondary displays too. */}
-                        <div className="flex items-center justify-between">
-                            <div className="space-y-0.5">
-                                <label className="text-sm font-medium">{t('sections.screen.antiAliasingLabel')}</label>
-                            </div>
-                            <Switch
-                                checked={antiAliasing}
-                                onCheckedChange={handleAntiAliasingToggle}
-                            />
-                        </div>
+                    <CardContent className="px-0">
 
-                        {(renderableSettings.useBrowserCursors ?? true) && (
+                        <SectionAccordion defaultValue={["display"]}>
+                        <SectionItem value="display" title={t('settingsSections.display')}>
+                            {/* Per-display capable settings (the core routes them with a
+                                _display2 suffix): available on secondary displays too. */}
                             <div className="flex items-center justify-between">
-                                <div className="space-y-0.5">
-                                    <label className="text-sm font-medium">{t('sections.screen.useNativeCursorStylesLabel')}</label>
-                                </div>
-                                <Switch
-                                    checked={effectiveCursor !== null ? effectiveCursor : useBrowserCursors}
-                                    onCheckedChange={handleUseBrowserCursorsToggle}
+                                <Label>{t('sections.screen.antiAliasingLabel')}</Label>
+                                <Switch size="sm"
+                                    checked={antiAliasing}
+                                    onCheckedChange={handleAntiAliasingToggle}
                                 />
                             </div>
-                        )}
 
-                        {(renderableSettings.rawPointerMotion ?? true) && (
-                            <div className="flex items-center justify-between">
-                                <div className="space-y-0.5">
-                                    <label className="text-sm font-medium"
-                                        title={t(rawPointerMotion
-                                            ? 'sections.screen.rawPointerMotionDisableTitle'
-                                            : 'sections.screen.rawPointerMotionEnableTitle')}>
-                                        {t('sections.screen.rawPointerMotionLabel')}
-                                    </label>
+                            {(renderableSettings.useBrowserCursors ?? true) && (
+                                <div className="flex items-center justify-between">
+                                    <Label>{t('sections.screen.useNativeCursorStylesLabel')}</Label>
+                                    <Switch size="sm"
+                                        checked={effectiveCursor !== null ? effectiveCursor : useBrowserCursors}
+                                        onCheckedChange={handleUseBrowserCursorsToggle}
+                                    />
                                 </div>
-                                <Switch
-                                    checked={rawPointerMotion}
-                                    onCheckedChange={handleRawPointerMotionToggle}
-                                />
-                            </div>
-                        )}
+                            )}
 
-                        {(renderableSettings.macCmdAsCtrl ?? false) && (
-                            <div className="flex items-center justify-between">
-                                <div className="space-y-0.5">
-                                    <label className="text-sm font-medium"
-                                        title={t(macCmdAsCtrl
-                                            ? 'sections.screen.macCmdAsCtrlDisableTitle'
-                                            : 'sections.screen.macCmdAsCtrlEnableTitle')}>
-                                        {t('sections.screen.macCmdAsCtrlLabel')}
-                                    </label>
+                            {(renderableSettings.rawPointerMotion ?? true) && (
+                                <div className="flex items-center justify-between">
+                                    <Label
+                                            title={t(rawPointerMotion
+                                                ? 'sections.screen.rawPointerMotionDisableTitle'
+                                                : 'sections.screen.rawPointerMotionEnableTitle')}>
+                                            {t('sections.screen.rawPointerMotionLabel')}
+                                        </Label>
+                                    <Switch size="sm"
+                                        checked={rawPointerMotion}
+                                        onCheckedChange={handleRawPointerMotionToggle}
+                                    />
                                 </div>
-                                <Switch
-                                    checked={macCmdAsCtrl}
-                                    onCheckedChange={handleMacCmdAsCtrlToggle}
-                                />
-                            </div>
-                        )}
+                            )}
 
-                        {!isSecondaryDisplay && (
-                            <>
-                                {(renderableSettings.hidpi ?? true) && (
-                                    <div className="flex items-center justify-between">
-                                        <div className="space-y-0.5">
-                                            <label className="text-sm font-medium"
-                                                title={serverSettings?.enable_resize?.value === false
-                                                    ? t('sections.screen.hidpiDisabledNoResizeTitle')
-                                                    : conditionalCtx.manualActive
-                                                    ? t('sections.screen.hidpiDisabledManualTitle')
-                                                    : undefined}>{t('sections.screen.hidpiLabel')}</label>
-                                        </div>
-                                        <Switch
-                                            checked={hidpiEnabled}
-                                            onCheckedChange={handleHidpiToggle}
-                                            disabled={serverSettings?.enable_resize?.value === false
-                                                || conditionalCtx.manualActive}
-                                        />
-                                    </div>
-                                )}
+                            {(renderableSettings.macCmdAsCtrl ?? false) && (
+                                <div className="flex items-center justify-between">
+                                    <Label
+                                            title={t(macCmdAsCtrl
+                                                ? 'sections.screen.macCmdAsCtrlDisableTitle'
+                                                : 'sections.screen.macCmdAsCtrlEnableTitle')}>
+                                            {t('sections.screen.macCmdAsCtrlLabel')}
+                                        </Label>
+                                    <Switch size="sm"
+                                        checked={macCmdAsCtrl}
+                                        onCheckedChange={handleMacCmdAsCtrlToggle}
+                                    />
+                                </div>
+                            )}
 
-                                {(renderableSettings.forceAlignedResolution ?? true) && (
-                                    <div className="flex items-center justify-between">
-                                        <div className="space-y-0.5">
-                                            <label className="text-sm font-medium" title={t('sections.screen.forceAlignedResolutionDetails')}>{t('sections.screen.forceAlignedResolutionLabel')}</label>
-                                        </div>
-                                        <Switch
-                                            checked={forceAlignedResolution}
-                                            onCheckedChange={handleForceAlignedResolutionToggle}
-                                        />
-                                    </div>
-                                )}
+                            {showHidpi && (
+                                <div className="flex items-center justify-between">
+                                    <Label
+                                            title={serverSettings?.enable_resize?.value === false
+                                                ? t('sections.screen.hidpiDisabledNoResizeTitle')
+                                                : conditionalCtx.manualActive
+                                                ? t('sections.screen.hidpiDisabledManualTitle')
+                                                : undefined}>{t('sections.screen.hidpiLabel')}</Label>
+                                    <Switch size="sm"
+                                        checked={hidpiEnabled}
+                                        onCheckedChange={handleHidpiToggle}
+                                        disabled={serverSettings?.enable_resize?.value === false
+                                            || conditionalCtx.manualActive}
+                                    />
+                                </div>
+                            )}
 
-                                {(renderableSettings.uiScaling ?? true) && (
-                                    <div className="space-y-2">
-                                        <label className="text-sm font-medium">{t('sections.screen.uiScalingLabel')}</label>
-                                        <DropdownMenu>
-                                            <DropdownMenuTrigger
-                                                render={<Button variant="outline" className="w-full justify-between" disabled={dpiScalingDisabled} />}
-                                            >
-                                                {dpiScalingChoices.find(option => option.value === selectedDpi)?.label || "100%"}
-                                                <ChevronUp className="h-4 w-4 rotate-180" />
-                                            </DropdownMenuTrigger>
-                                            <DropdownMenuContent className="w-full">
-                                                {dpiScalingChoices.map((option) => (
-                                                    <DropdownMenuItem
-                                                        key={option.value}
-                                                        onClick={() => handleDpiScalingChange(option.value.toString())}
-                                                    >
-                                                        {option.label}
-                                                    </DropdownMenuItem>
-                                                ))}
-                                            </DropdownMenuContent>
-                                        </DropdownMenu>
-                                    </div>
-                                )}
-                            </>
-                        )}
+                            {showForceAligned && (
+                                <div className="flex items-center justify-between">
+                                    <Label title={t('sections.screen.forceAlignedResolutionDetails')}>{t('sections.screen.forceAlignedResolutionLabel')}</Label>
+                                    <Switch size="sm"
+                                        checked={forceAlignedResolution}
+                                        onCheckedChange={handleForceAlignedResolutionToggle}
+                                    />
+                                </div>
+                            )}
 
-                        {!serverSettings?.manual_resolution?.locked
-                            && (isSecondaryDisplay || serverSettings?.enable_resize?.value !== false) && (
-                            <>
+                            {showUiScaling && (
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium">{tl('sections.screen.presetLabel')}</label>
+                                    <Label>{t('sections.screen.uiScalingLabel')}</Label>
                                     <DropdownMenu>
                                         <DropdownMenuTrigger
-                                            render={<Button variant="outline" className="w-full justify-between" />}
+                                            render={<Button variant="outline" size="xs" className="w-full justify-between" disabled={dpiScalingDisabled} />}
                                         >
-                                            {presetValue || t('sections.screen.resolutionPresetSelect')}
-                                            <ChevronUp className="h-4 w-4 rotate-180" />
+                                            {dpiScalingChoices.find(option => option.value === selectedDpi)?.label || "100%"}
+                                            <ChevronDown />
                                         </DropdownMenuTrigger>
-                                        <DropdownMenuContent className="w-full">
-                                            {commonResolutionValues.slice(1).map((res) => (
+                                        <DropdownMenuContent>
+                                            {dpiScalingChoices.map((option) => (
                                                 <DropdownMenuItem
-                                                    key={res}
-                                                    onClick={() => {
-                                                        setPresetValue(res);
-                                                        const parts = res.split('x');
-                                                        if (parts.length === 2) {
-                                                            const width = parseInt(parts[0], 10);
-                                                            const height = parseInt(parts[1], 10);
-
-                                                            if (!isNaN(width) && width > 0 && !isNaN(height) && height > 0) {
-                                                                const evenWidth = roundDownToEven(width);
-                                                                const evenHeight = roundDownToEven(height);
-
-                                                                setManualWidth(evenWidth.toString());
-                                                                setManualHeight(evenHeight.toString());
-                                                                localStorage.setItem(getPrefixedKey('manual_width'), evenWidth.toString());
-                                                                localStorage.setItem(getPrefixedKey('manual_height'), evenHeight.toString());
-                                                                window.postMessage({ type: 'setManualResolution', width: evenWidth, height: evenHeight }, window.location.origin);
-                                                                deriveHidpiForResolution(true);
-                                                                deriveDpiForResolution();
-                                                            }
-                                                        }
-                                                    }}
+                                                    key={option.value}
+                                                    onClick={() => handleDpiScalingChange(option.value.toString())}
                                                 >
-                                                    {res}
+                                                    {option.label}
                                                 </DropdownMenuItem>
                                             ))}
                                         </DropdownMenuContent>
                                     </DropdownMenu>
                                 </div>
+                            )}
+                        </SectionItem>
 
-                                <div className="flex gap-2">
-                                    <div className="flex-1 space-y-2">
-                                        <label className="text-sm font-medium">{tl('sections.screen.widthLabel')}</label>
-                                        <Input
-                                            type="number"
-                                            value={manualWidth}
-                                            onChange={handleManualWidthChange}
-                                            placeholder={t('sections.screen.widthPlaceholder')}
-                                            min="1"
-                                            step="2"
-                                            className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                        />
+                        <SectionItem value="resolution" title={t('settingsSections.resolution')}>
+                            {showResolutionControls && (
+                                <>
+                                    <div className="space-y-2">
+                                        <Label>{tl('sections.screen.presetLabel')}</Label>
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger
+                                                render={<Button variant="outline" size="xs" className="w-full justify-between" />}
+                                            >
+                                                {presetValue || t('sections.screen.resolutionPresetSelect')}
+                                                <ChevronDown />
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent>
+                                                {commonResolutionValues.slice(1).map((res) => (
+                                                    <DropdownMenuItem
+                                                        key={res}
+                                                        onClick={() => {
+                                                            setPresetValue(res);
+                                                            const parts = res.split('x');
+                                                            if (parts.length === 2) {
+                                                                const width = parseInt(parts[0], 10);
+                                                                const height = parseInt(parts[1], 10);
+
+                                                                if (!isNaN(width) && width > 0 && !isNaN(height) && height > 0) {
+                                                                    const evenWidth = roundDownToEven(width);
+                                                                    const evenHeight = roundDownToEven(height);
+
+                                                                    setManualWidth(evenWidth.toString());
+                                                                    setManualHeight(evenHeight.toString());
+                                                                    localStorage.setItem(getPrefixedKey('manual_width'), evenWidth.toString());
+                                                                    localStorage.setItem(getPrefixedKey('manual_height'), evenHeight.toString());
+                                                                    window.postMessage({ type: 'setManualResolution', width: evenWidth, height: evenHeight }, window.location.origin);
+                                                                    deriveHidpiForResolution(true);
+                                                                    deriveDpiForResolution();
+                                                                }
+                                                            }
+                                                        }}
+                                                    >
+                                                        {res}
+                                                    </DropdownMenuItem>
+                                                ))}
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
                                     </div>
-                                    <div className="flex-1 space-y-2">
-                                        <label className="text-sm font-medium">{tl('sections.screen.heightLabel')}</label>
-                                        <Input
-                                            type="number"
-                                            value={manualHeight}
-                                            onChange={handleManualHeightChange}
-                                            placeholder={t('sections.screen.heightPlaceholder')}
-                                            min="1"
-                                            step="2"
-                                            className="[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                        />
+
+                                    <div className="flex gap-2">
+                                        <div className="flex-1 space-y-2">
+                                            <Label>{tl('sections.screen.widthLabel')}</Label>
+                                            <Input
+                                                type="number"
+                                                value={manualWidth}
+                                                onChange={handleManualWidthChange}
+                                                placeholder={t('sections.screen.widthPlaceholder')}
+                                                min="1"
+                                                step="2"
+                                            />
+                                        </div>
+                                        <div className="flex-1 space-y-2">
+                                            <Label>{tl('sections.screen.heightLabel')}</Label>
+                                            <Input
+                                                type="number"
+                                                value={manualHeight}
+                                                onChange={handleManualHeightChange}
+                                                placeholder={t('sections.screen.heightPlaceholder')}
+                                                min="1"
+                                                step="2"
+                                            />
+                                        </div>
                                     </div>
-                                </div>
 
-                                <div className="flex gap-2">
-                                    <Button
-                                        variant="outline"
-                                        className="flex-1"
-                                        onClick={handleSetManualResolution}
-                                    >
-                                        {t('screen.setButton')}
-                                    </Button>
-                                    <Button
-                                        variant="outline"
-                                        className="flex-1"
-                                        onClick={handleResetResolution}
-                                    >
-                                        {t('sections.screen.resetButton')}
-                                    </Button>
-                                </div>
-                            </>
-                        )}
+                                    <div className="flex gap-2">
+                                        <Button
+                                            variant="outline"
+                                            size="xs"
+                                            className="flex-1"
+                                            onClick={handleSetManualResolution}
+                                        >
+                                            {t('screen.setButton')}
+                                        </Button>
+                                        <Button
+                                            variant="outline"
+                                            size="xs"
+                                            className="flex-1"
+                                            onClick={handleResetResolution}
+                                        >
+                                            {t('sections.screen.resetButton')}
+                                        </Button>
+                                    </div>
+                                </>
+                            )}
 
-                        <Button
-                            variant={scaleLocally ? "default" : "outline"}
-                            className="w-full"
-                            onClick={handleScaleLocallyToggle}
-                        >
-                            {tl('sections.screen.scaleLocallyLabel')}: {t(scaleLocally ? 'sections.screen.scaleLocallyOn' : 'sections.screen.scaleLocallyOff')}
-                        </Button>
+                            <Button
+                                variant={scaleLocally ? "default" : "outline"}
+                                size="xs"
+                                className="w-full"
+                                onClick={handleScaleLocallyToggle}
+                            >
+                                {tl('sections.screen.scaleLocallyLabel')}: {t(scaleLocally ? 'sections.screen.scaleLocallyOn' : 'sections.screen.scaleLocallyOff')}
+                            </Button>
+                        </SectionItem>
+                        </SectionAccordion>
                     </CardContent>
                 </TabsContent>
                 )}
 
                 {showVideoTab && (
                 <TabsContent value="video">
-                    <CardContent className="space-y-4">
-                        {(renderableSettings.enableDualMode ?? (window as any).__SELKIES_DUAL_MODE__ ?? false) && (
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium">{t('streamingModeTitle')}</label>
-                                <DropdownMenu>
-                                    <DropdownMenuTrigger
-                                        render={<Button variant="outline" className="w-full justify-between" />}
-                                    >
-                                        {displayLabel(streamMode)}
-                                        <ChevronUp className="h-4 w-4 rotate-180" />
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent className="w-full">
-                                        {STREAMING_MODES.map(mode => (
-                                            <DropdownMenuItem
-                                                key={mode}
-                                                onClick={() => handleStreamModeChange(mode)}
+                    <CardContent className="px-0">
+
+                        <SectionAccordion defaultValue={[showFormatCard ? "format" : "performance"]}>
+                        {showFormatCard && (
+                            <SectionItem value="format" title={t('settingsSections.format')}>
+                                {showStreamMode && (
+                                    <div className="space-y-2">
+                                        <Label>{t('streamingModeTitle')}</Label>
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger
+                                                render={<Button variant="outline" size="xs" className="w-full justify-between" />}
                                             >
-                                                {displayLabel(mode)}
-                                            </DropdownMenuItem>
-                                        ))}
-                                    </DropdownMenuContent>
-                                </DropdownMenu>
-                            </div>
-                        )}
-
-                        {encoderRenderable && (
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium">{tl('sections.video.encoderLabel')}</label>
-                                <DropdownMenu>
-                                    <DropdownMenuTrigger
-                                        render={<Button variant="outline" className="w-full justify-between" />}
-                                    >
-                                        {displayLabel(activeEncoder)}
-                                        <ChevronUp className="h-4 w-4 rotate-180" />
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent className="w-full">
-                                        {dynamicEncoderOptions.map(enc => (
-                                            <DropdownMenuItem
-                                                key={enc}
-                                                disabled={!canPlayEncoder(enc, isWebrtc)}
-                                                onClick={() => handleEncoderChange(enc)}
-                                            >
-                                                {displayLabel(enc)}
-                                                {!canPlayEncoder(enc, isWebrtc) && (
-                                                    <span className="ml-auto pl-3 text-xs text-muted-foreground">
-                                                        {tl('sections.video.encoderUnsupported')}
-                                                    </span>
-                                                )}
-                                            </DropdownMenuItem>
-                                        ))}
-                                    </DropdownMenuContent>
-                                </DropdownMenu>
-                            </div>
-                        )}
-
-                        {webcamEncoderRenderable && (
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium">{tl('sections.video.webcamEncoderLabel')}</label>
-                                <DropdownMenu>
-                                    <DropdownMenuTrigger
-                                        render={
-                                            <Button
-                                                variant="outline"
-                                                className="w-full justify-between"
-                                                disabled={!!serverSettings?.webcam_encoder?.locked}
-                                            />
-                                        }
-                                    >
-                                        {displayLabel(webcamEncoder)}
-                                        <ChevronUp className="h-4 w-4 rotate-180" />
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent className="w-full">
-                                        {webcamEncoderOptions.map(pref => (
-                                            <DropdownMenuItem
-                                                key={pref}
-                                                onClick={() => handleWebcamEncoderChange(pref)}
-                                            >
-                                                {displayLabel(pref)}
-                                            </DropdownMenuItem>
-                                        ))}
-                                    </DropdownMenuContent>
-                                </DropdownMenu>
-                            </div>
-                        )}
-
-                        {(renderableSettings.framerate ?? true) && (
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium">
-                                    {tl(framerateFollows ? 'sections.video.framerateDisplayLabel' : 'sections.video.framerateLabel',
-                                        { framerate: framerateLabel(framerateFollows && displayFramerate !== null ? displayFramerate : framerate) })}
-                                </label>
-                                <div className="flex items-center gap-2">
-                                    <Slider
-                                        min={0}
-                                        max={framerateOptions.stops.length - 1}
-                                        step={1}
-                                        value={[framerateIndex]}
-                                        onValueChange={(value) => handleFramerateChange(Array.isArray(value) ? value[0] : value)}
-                                        className="flex-1"
-                                    />
-                                </div>
-                            </div>
-                        )}
-
-
-                        {isH264 && (
-                            <>
-                                {showRateControl && (
-                                <div className="space-y-2">
-                                    <label className="text-sm font-medium">{t('sections.video.rateControlLabel')}</label>
-                                    <DropdownMenu>
-                                        <DropdownMenuTrigger
-                                            render={<Button variant="outline" className="w-full justify-between" />}
-                                        >
-                                            {displayLabel(rateControlMode)}
-                                            <ChevronUp className="h-4 w-4 rotate-180" />
-                                        </DropdownMenuTrigger>
-                                        <DropdownMenuContent className="w-full">
-                                            {(serverSettings?.rate_control_mode?.allowed || rateControlOptions).map((mode: string) => (
-                                                <DropdownMenuItem key={mode} onClick={() => handleRateControlChange(mode)}>
-                                                    {displayLabel(mode)}
-                                                </DropdownMenuItem>
-                                            ))}
-                                        </DropdownMenuContent>
-                                    </DropdownMenu>
-                                </div>
+                                                {displayLabel(streamMode)}
+                                                <ChevronDown />
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent>
+                                                {STREAMING_MODES.map(mode => (
+                                                    <DropdownMenuItem
+                                                        key={mode}
+                                                        onClick={() => handleStreamModeChange(mode)}
+                                                    >
+                                                        {displayLabel(mode)}
+                                                    </DropdownMenuItem>
+                                                ))}
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
+                                    </div>
                                 )}
 
-                                {appliedRateControlMode === 'cbr' && (renderableSettings.videoBitrate ?? true) && (
-                                <div className="space-y-2">
-                                    <label className="text-sm font-medium">{tl('sections.video.bitrateLabel', { bitrate: formatBitrate(videoBitRate) })}</label>
-                                    <div className="flex items-center gap-2">
+                                {encoderRenderable && (
+                                    <div className="space-y-2">
+                                        <Label>{tl('sections.video.encoderLabel')}</Label>
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger
+                                                render={<Button variant="outline" size="xs" className="w-full justify-between" />}
+                                            >
+                                                {displayLabel(activeEncoder)}
+                                                <ChevronDown />
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent>
+                                                {dynamicEncoderOptions.map(enc => (
+                                                    <DropdownMenuItem
+                                                        key={enc}
+                                                        disabled={!canPlayEncoder(enc, isWebrtc)}
+                                                        onClick={() => handleEncoderChange(enc)}
+                                                    >
+                                                        {displayLabel(enc)}
+                                                        {!canPlayEncoder(enc, isWebrtc) && (
+                                                            <span className="ml-auto pl-3 text-sm text-muted-foreground">
+                                                                {tl('sections.video.encoderUnsupported')}
+                                                            </span>
+                                                        )}
+                                                    </DropdownMenuItem>
+                                                ))}
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
+                                    </div>
+                                )}
+
+                                {webcamEncoderRenderable && (
+                                    <div className="space-y-2">
+                                        <Label>{tl('sections.video.webcamEncoderLabel')}</Label>
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger
+                                                render={
+                                                    <Button
+                                                        variant="outline"
+                                                        size="xs" className="w-full justify-between"
+                                                        disabled={!!serverSettings?.webcam_encoder?.locked}
+                                                    />
+                                                }
+                                            >
+                                                {displayLabel(webcamEncoder)}
+                                                <ChevronDown />
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent>
+                                                {webcamEncoderOptions.map(pref => (
+                                                    <DropdownMenuItem
+                                                        key={pref}
+                                                        onClick={() => handleWebcamEncoderChange(pref)}
+                                                    >
+                                                        {displayLabel(pref)}
+                                                    </DropdownMenuItem>
+                                                ))}
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
+                                    </div>
+                                )}
+
+                                {/* Paint-over, Turbo, and 4:4:4 are pixelflux encoder features shared by both transports. */}
+                                {showFullColorSwitch && (
+                                    <div className="flex items-center justify-between">
+                                        <Label>{t('sections.video.fullColorLabel')}</Label>
+                                        <Switch size="sm"
+                                            checked={videoFullColor}
+                                            onCheckedChange={handleH264FullColorToggle}
+                                            disabled={!serverSettings || serverSettings.video_fullcolor?.locked}
+                                        />
+                                    </div>
+                                )}
+
+                                {showTenBitSwitch && (
+                                    <div className="flex items-center justify-between">
+                                        <Label>{t('sections.video.tenBitLabel')}</Label>
+                                        <Switch size="sm"
+                                            checked={video10Bit}
+                                            onCheckedChange={handle10BitToggle}
+                                            disabled={!serverSettings || serverSettings.video_10bit?.locked}
+                                        />
+                                    </div>
+                                )}
+                            </SectionItem>
+                        )}
+
+                        {showPerformanceCard && (
+                            <SectionItem value="performance" title={t('settingsSections.performance')}>
+                                {showFramerate && (
+                                    <div className="space-y-2">
+                                        <Label>
+                                            {tl(framerateFollows ? 'sections.video.framerateDisplayLabel' : 'sections.video.framerateLabel',
+                                                { framerate: framerateLabel(framerateFollows && displayFramerate !== null ? displayFramerate : framerate) })}
+                                        </Label>
+                                        <Slider
+                                            min={0}
+                                            max={framerateOptions.stops.length - 1}
+                                            step={1}
+                                            value={[framerateIndex]}
+                                            onValueChange={(value) => handleFramerateChange(Array.isArray(value) ? value[0] : value)}
+                                        />
+                                    </div>
+                                )}
+
+                                {showRateControlSelect && (
+                                    <div className="space-y-2">
+                                        <Label>{t('sections.video.rateControlLabel')}</Label>
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger
+                                                render={<Button variant="outline" size="xs" className="w-full justify-between" />}
+                                            >
+                                                {displayLabel(rateControlMode)}
+                                                <ChevronDown />
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent>
+                                                {(serverSettings?.rate_control_mode?.allowed || rateControlOptions).map((mode: string) => (
+                                                    <DropdownMenuItem key={mode} onClick={() => handleRateControlChange(mode)}>
+                                                        {displayLabel(mode)}
+                                                    </DropdownMenuItem>
+                                                ))}
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
+                                    </div>
+                                )}
+
+                                {showBitrateSlider && (
+                                    <div className="space-y-2">
+                                        <Label>{tl('sections.video.bitrateLabel', { bitrate: formatBitrate(videoBitRate) })}</Label>
                                         <Slider
                                             min={0}
                                             max={videoBitrateOptions.length - 1}
@@ -1437,16 +1487,13 @@ export function Settings() {
                                                 if (selected !== undefined) handleVideoBitRateChange(selected);
                                             }}
                                             disabled={!serverSettings || serverSettings.video_bitrate?.min === serverSettings.video_bitrate?.max}
-                                            className="flex-1"
                                         />
                                     </div>
-                                </div>
                                 )}
 
-                                {appliedRateControlMode === 'crf' && (renderableSettings.videoCRF ?? true) && (
-                                <div className="space-y-2">
-                                    <label className="text-sm font-medium">{tl('sections.video.crfLabel', { crf: videoCRF })}</label>
-                                    <div className="flex items-center gap-2">
+                                {showCrfSlider && (
+                                    <div className="space-y-2">
+                                        <Label>{tl('sections.video.crfLabel', { crf: videoCRF })}</Label>
                                         <Slider
                                             min={0}
                                             max={videoCRFChoices.length - 1}
@@ -1457,97 +1504,51 @@ export function Settings() {
                                                 if (newCRF !== undefined) handleVideoCRFChange(newCRF);
                                             }}
                                             disabled={!serverSettings || serverSettings.video_crf?.min === serverSettings.video_crf?.max}
-                                            className="flex-1"
                                         />
                                     </div>
-                                </div>
                                 )}
-                            </>
-                        )}
 
-                        {/* Paint-over, Turbo, and 4:4:4 are pixelflux encoder features shared by both transports. */}
-                        {isH264 && (
-                            <>
-                                {showFullColor && (renderableSettings.videoFullColor ?? true) && fullColorDecodable && (
-                                <div className="flex items-center justify-between">
-                                    <div className="space-y-0.5">
-                                        <label className="text-sm font-medium">{t('sections.video.fullColorLabel')}</label>
+                                {showTurbo && (
+                                    <div className="flex items-center justify-between">
+                                        <Label title={t('sections.video.streamingModeDetails')}>{t('sections.video.streamingModeLabel')}</Label>
+                                        <Switch size="sm"
+                                            checked={videoStreamingMode}
+                                            onCheckedChange={handleH264StreamingModeToggle}
+                                            disabled={!serverSettings || serverSettings.video_streaming_mode?.locked}
+                                        />
                                     </div>
-                                    <Switch
-                                        checked={videoFullColor}
-                                        onCheckedChange={handleH264FullColorToggle}
-                                        disabled={!serverSettings || serverSettings.video_fullcolor?.locked}
-                                    />
-                                </div>
                                 )}
 
-                                {show10Bit && (renderableSettings.video10Bit ?? true) && tenBitDecodable && (
-                                <div className="flex items-center justify-between">
-                                    <div className="space-y-0.5">
-                                        <label className="text-sm font-medium">{t('sections.video.tenBitLabel')}</label>
+                                {/* Base JPEG quality is independent of paint-over. */}
+                                {showJpegQualitySlider && (
+                                    <div className="space-y-2">
+                                        <Label>{t('sections.video.jpegQualityLabel', { jpegQuality })}</Label>
+                                        <Slider
+                                            min={serverSettings?.jpeg_quality?.min || 1}
+                                            max={serverSettings?.jpeg_quality?.max || 100}
+                                            step={1}
+                                            value={[jpegQuality]}
+                                            onValueChange={(value) => handleJpegQualityChange(Array.isArray(value) ? value[0] : value)}
+                                            disabled={!serverSettings || serverSettings.jpeg_quality?.min === serverSettings.jpeg_quality?.max}
+                                        />
                                     </div>
-                                    <Switch
-                                        checked={video10Bit}
-                                        onCheckedChange={handle10BitToggle}
-                                        disabled={!serverSettings || serverSettings.video_10bit?.locked}
-                                    />
-                                </div>
                                 )}
 
-                                {(renderableSettings.videoStreamingMode ?? true) && (
-                                <div className="flex items-center justify-between">
-                                    <div className="space-y-0.5">
-                                        <label className="text-sm font-medium" title={t('sections.video.streamingModeDetails')}>{t('sections.video.streamingModeLabel')}</label>
+                                {/* Server honors paint-over quality for every H.264 encoder and jpeg. */}
+                                {showPaintOverSwitch && (
+                                    <div className="flex items-center justify-between">
+                                        <Label>{t('sections.video.usePaintOverQualityLabel')}</Label>
+                                        <Switch size="sm"
+                                            checked={usePaintOverQuality}
+                                            onCheckedChange={handleUsePaintOverQualityToggle}
+                                            disabled={!serverSettings || serverSettings.use_paint_over_quality?.locked}
+                                        />
                                     </div>
-                                    <Switch
-                                        checked={videoStreamingMode}
-                                        onCheckedChange={handleH264StreamingModeToggle}
-                                        disabled={!serverSettings || serverSettings.video_streaming_mode?.locked}
-                                    />
-                                </div>
                                 )}
 
-                            </>
-                        )}
-
-                        {/* Base JPEG quality is independent of paint-over. */}
-                        {showJpegOptions && (renderableSettings.jpegQuality ?? true) && (
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium">{t('sections.video.jpegQualityLabel', { jpegQuality })}</label>
-                                <div className="flex items-center gap-2">
-                                    <Slider
-                                        min={serverSettings?.jpeg_quality?.min || 1}
-                                        max={serverSettings?.jpeg_quality?.max || 100}
-                                        step={1}
-                                        value={[jpegQuality]}
-                                        onValueChange={(value) => handleJpegQualityChange(Array.isArray(value) ? value[0] : value)}
-                                        disabled={!serverSettings || serverSettings.jpeg_quality?.min === serverSettings.jpeg_quality?.max}
-                                        className="flex-1"
-                                    />
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Server honors paint-over quality for every H.264 encoder and jpeg. */}
-                        {(isH264 || activeEncoder === 'jpeg') && (renderableSettings.usePaintOverQuality ?? true) && (
-                            <div className="flex items-center justify-between">
-                                <div className="space-y-0.5">
-                                    <label className="text-sm font-medium">{t('sections.video.usePaintOverQualityLabel')}</label>
-                                </div>
-                                <Switch
-                                    checked={usePaintOverQuality}
-                                    onCheckedChange={handleUsePaintOverQualityToggle}
-                                    disabled={!serverSettings || serverSettings.use_paint_over_quality?.locked}
-                                />
-                            </div>
-                        )}
-
-                        {isH264 && usePaintOverQuality && (
-                            <>
-                                {(renderableSettings.videoPaintoverCRF ?? true) && (
-                                <div className="space-y-2">
-                                    <label className="text-sm font-medium">{tl('sections.video.paintoverCrfLabel', { crf: videoPaintoverCRF })}</label>
-                                    <div className="flex items-center gap-2">
+                                {showPaintoverCrf && (
+                                    <div className="space-y-2">
+                                        <Label>{tl('sections.video.paintoverCrfLabel', { crf: videoPaintoverCRF })}</Label>
                                         <Slider
                                             min={0}
                                             max={videoPaintoverCRFChoices.length - 1}
@@ -1558,15 +1559,12 @@ export function Settings() {
                                                 if (newCRF !== undefined) handleH264PaintoverCRFChange(newCRF);
                                             }}
                                             disabled={!serverSettings || serverSettings.video_paintover_crf?.min === serverSettings.video_paintover_crf?.max}
-                                            className="flex-1"
                                         />
                                     </div>
-                                </div>
                                 )}
-                                {(renderableSettings.videoPaintoverBurstFrames ?? true) && (
-                                <div className="space-y-2">
-                                    <label className="text-sm font-medium">{tl('sections.video.paintoverBurstLabel', { frames: videoPaintoverBurstFrames })}</label>
-                                    <div className="flex items-center gap-2">
+                                {showPaintoverBurst && (
+                                    <div className="space-y-2">
+                                        <Label>{tl('sections.video.paintoverBurstLabel', { frames: videoPaintoverBurstFrames })}</Label>
                                         <Slider
                                             min={serverSettings?.video_paintover_burst_frames?.min || 1}
                                             max={serverSettings?.video_paintover_burst_frames?.max || 30}
@@ -1574,129 +1572,93 @@ export function Settings() {
                                             value={[videoPaintoverBurstFrames]}
                                             onValueChange={(value) => handleH264PaintoverBurstChange(Array.isArray(value) ? value[0] : value)}
                                             disabled={!serverSettings || serverSettings.video_paintover_burst_frames?.min === serverSettings.video_paintover_burst_frames?.max}
-                                            className="flex-1"
                                         />
                                     </div>
-                                </div>
                                 )}
-                            </>
-                        )}
 
-                        {showJpegOptions && usePaintOverQuality && (renderableSettings.paintOverJpegQuality ?? true) && (
-                            <div className="space-y-2">
-                                <label className="text-sm font-medium">{t('sections.video.paintOverJpegQualityLabel', { paintOverJpegQuality })}</label>
-                                <div className="flex items-center gap-2">
-                                    <Slider
-                                        min={serverSettings?.paint_over_jpeg_quality?.min || 1}
-                                        max={serverSettings?.paint_over_jpeg_quality?.max || 100}
-                                        step={1}
-                                        value={[paintOverJpegQuality]}
-                                        onValueChange={(value) => handlePaintOverJpegQualityChange(Array.isArray(value) ? value[0] : value)}
-                                        disabled={!serverSettings || serverSettings.paint_over_jpeg_quality?.min === serverSettings.paint_over_jpeg_quality?.max}
-                                        className="flex-1"
-                                    />
-                                </div>
-                            </div>
-                        )}
+                                {showPaintOverJpeg && (
+                                    <div className="space-y-2">
+                                        <Label>{t('sections.video.paintOverJpegQualityLabel', { paintOverJpegQuality })}</Label>
+                                        <Slider
+                                            min={serverSettings?.paint_over_jpeg_quality?.min || 1}
+                                            max={serverSettings?.paint_over_jpeg_quality?.max || 100}
+                                            step={1}
+                                            value={[paintOverJpegQuality]}
+                                            onValueChange={(value) => handlePaintOverJpegQualityChange(Array.isArray(value) ? value[0] : value)}
+                                            disabled={!serverSettings || serverSettings.paint_over_jpeg_quality?.min === serverSettings.paint_over_jpeg_quality?.max}
+                                        />
+                                    </div>
+                                )}
 
-                        {softwareChoiceAvailable(activeEncoder, conditionalCtx.encoderBackends) && (renderableSettings.useCpu ?? true) && (
-                            <div className="flex items-center justify-between">
-                                <div className="space-y-0.5">
-                                    <label className="text-sm font-medium">{t('sections.video.useCpuLabel')}</label>
-                                </div>
-                                <Switch
-                                    checked={useCpu}
-                                    onCheckedChange={handleUseCpuToggle}
-                                    disabled={!serverSettings || serverSettings.use_cpu?.locked}
-                                />
-                            </div>
+                                {showCpuSwitch && (
+                                    <div className="flex items-center justify-between">
+                                        <Label>{t('sections.video.useCpuLabel')}</Label>
+                                        <Switch size="sm"
+                                            checked={useCpu}
+                                            onCheckedChange={handleUseCpuToggle}
+                                            disabled={!serverSettings || serverSettings.use_cpu?.locked}
+                                        />
+                                    </div>
+                                )}
+                            </SectionItem>
                         )}
+                        </SectionAccordion>
                     </CardContent>
                 </TabsContent>
                 )}
 
                 {showAudioTab && (
                 <TabsContent value="audio">
-                    <CardContent className="space-y-4">
-                        {(renderableSettings.audioBitrate ?? true) && (
-                        <div className="space-y-2">
-                            <label className="text-sm font-medium">{tl('sections.audio.bitrateLabel', { bitrate: audioBitRate / 1000 })}</label>
-                            <div className="flex items-center gap-2">
-                                <Slider
-                                    min={0}
-                                    max={audioBitrateChoices.length - 1}
-                                    step={1}
-                                    value={[Math.max(0, audioBitrateChoices.indexOf(audioBitRate))]}
-                                    onValueChange={(value) => {
-                                        const index = Array.isArray(value) ? value[0] : value;
-                                        const selectedBitrate = audioBitrateChoices[index];
-                                        if (selectedBitrate !== undefined) {
-                                            setAudioBitRate(selectedBitrate);
-                                            localStorage.setItem(getPrefixedKey('audio_bitrate'), selectedBitrate.toString());
-                                            debouncedPostSetting({ audio_bitrate: selectedBitrate });
-                                        }
-                                    }}
-                                    className="flex-1"
-                                />
-                            </div>
-                        </div>
+                    <CardContent className="px-0">
+
+                        <SectionAccordion defaultValue={[showQualityCard ? "quality" : "devices"]}>
+                        {showQualityCard && (
+                            <SectionItem value="quality" title={t('settingsSections.quality')}>
+                                <div className="space-y-2">
+                                    <Label>{tl('sections.audio.bitrateLabel', { bitrate: audioBitRate / 1000 })}</Label>
+                                    <Slider
+                                        min={0}
+                                        max={audioBitrateChoices.length - 1}
+                                        step={1}
+                                        value={[Math.max(0, audioBitrateChoices.indexOf(audioBitRate))]}
+                                        onValueChange={(value) => {
+                                            const index = Array.isArray(value) ? value[0] : value;
+                                            const selectedBitrate = audioBitrateChoices[index];
+                                            if (selectedBitrate !== undefined) {
+                                                setAudioBitRate(selectedBitrate);
+                                                localStorage.setItem(getPrefixedKey('audio_bitrate'), selectedBitrate.toString());
+                                                debouncedPostSetting({ audio_bitrate: selectedBitrate });
+                                            }
+                                        }}
+                                    />
+                                </div>
+                            </SectionItem>
                         )}
 
-                        {audioDeviceError && (
-                            <div className="text-sm text-red-500">{audioDeviceError}</div>
-                        )}
+                        <SectionItem value="devices" title={t('settingsSections.devices')}>
+                            {audioDeviceError && (
+                                <div className="text-sm text-red-500">{audioDeviceError}</div>
+                            )}
 
-                        <div className="space-y-2">
-                            <label className="text-sm font-medium">{tl('sections.audio.inputLabel')}</label>
-                            <DropdownMenu>
-                                <DropdownMenuTrigger
-                                    render={<Button variant="outline" className="w-full justify-between" disabled={isLoadingAudioDevices || !!audioDeviceError} />}
-                                >
-                                    <span className="truncate">
-                                        {audioInputDevices.find(d => d.deviceId === selectedInputDeviceId)?.label || t('audio.defaultDevice')}
-                                    </span>
-                                    <ChevronUp className="h-4 w-4 rotate-180 flex-shrink-0" />
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent className="w-[280px] max-w-[90vw]">
-                                    {audioInputDevices.map(device => (
-                                        <DropdownMenuItem
-                                            key={device.deviceId}
-                                            onClick={() => {
-                                                setSelectedInputDeviceId(device.deviceId);
-                                                window.postMessage({ type: 'audioDeviceSelected', context: 'input', deviceId: device.deviceId }, window.location.origin);
-                                            }}
-                                            className="cursor-pointer"
-                                        >
-                                            <span className="truncate" title={device.label}>
-                                                {device.label}
-                                            </span>
-                                        </DropdownMenuItem>
-                                    ))}
-                                </DropdownMenuContent>
-                            </DropdownMenu>
-                        </div>
-
-                        {isOutputSelectionSupported && (
                             <div className="space-y-2">
-                                <label className="text-sm font-medium">{tl('sections.audio.outputLabel')}</label>
+                                <Label>{tl('sections.audio.inputLabel')}</Label>
                                 <DropdownMenu>
                                     <DropdownMenuTrigger
-                                        render={<Button variant="outline" className="w-full justify-between" disabled={isLoadingAudioDevices || !!audioDeviceError} />}
+                                        render={<Button variant="outline" size="xs" className="w-full justify-between" disabled={isLoadingAudioDevices || !!audioDeviceError} />}
                                     >
                                         <span className="truncate">
-                                            {audioOutputDevices.find(d => d.deviceId === selectedOutputDeviceId)?.label || t('audio.defaultDevice')}
+                                            {audioInputDevices.find(d => d.deviceId === selectedInputDeviceId)?.label || t('audio.defaultDevice')}
                                         </span>
-                                        <ChevronUp className="h-4 w-4 rotate-180 flex-shrink-0" />
+                                        <ChevronDown />
                                     </DropdownMenuTrigger>
                                     <DropdownMenuContent className="w-[280px] max-w-[90vw]">
-                                        {audioOutputDevices.map(device => (
+                                        {audioInputDevices.map(device => (
                                             <DropdownMenuItem
                                                 key={device.deviceId}
                                                 onClick={() => {
-                                                    setSelectedOutputDeviceId(device.deviceId);
-                                                    window.postMessage({ type: 'audioDeviceSelected', context: 'output', deviceId: device.deviceId }, window.location.origin);
+                                                    setSelectedInputDeviceId(device.deviceId);
+                                                    window.postMessage({ type: 'audioDeviceSelected', context: 'input', deviceId: device.deviceId }, window.location.origin);
                                                 }}
-                                                className="cursor-pointer"
                                             >
                                                 <span className="truncate" title={device.label}>
                                                     {device.label}
@@ -1706,11 +1668,43 @@ export function Settings() {
                                     </DropdownMenuContent>
                                 </DropdownMenu>
                             </div>
-                        )}
 
-                        {!isOutputSelectionSupported && !isLoadingAudioDevices && !audioDeviceError && (
-                            <p className="text-sm text-muted-foreground">{t('sections.audio.outputNotSupported')}</p>
-                        )}
+                            {isOutputSelectionSupported && (
+                                <div className="space-y-2">
+                                    <Label>{tl('sections.audio.outputLabel')}</Label>
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger
+                                            render={<Button variant="outline" size="xs" className="w-full justify-between" disabled={isLoadingAudioDevices || !!audioDeviceError} />}
+                                        >
+                                            <span className="truncate">
+                                                {audioOutputDevices.find(d => d.deviceId === selectedOutputDeviceId)?.label || t('audio.defaultDevice')}
+                                            </span>
+                                            <ChevronDown />
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent className="w-[280px] max-w-[90vw]">
+                                            {audioOutputDevices.map(device => (
+                                                <DropdownMenuItem
+                                                    key={device.deviceId}
+                                                    onClick={() => {
+                                                        setSelectedOutputDeviceId(device.deviceId);
+                                                        window.postMessage({ type: 'audioDeviceSelected', context: 'output', deviceId: device.deviceId }, window.location.origin);
+                                                    }}
+                                                >
+                                                    <span className="truncate" title={device.label}>
+                                                        {device.label}
+                                                    </span>
+                                                </DropdownMenuItem>
+                                            ))}
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
+                                </div>
+                            )}
+
+                            {!isOutputSelectionSupported && !isLoadingAudioDevices && !audioDeviceError && (
+                                <p className="text-sm text-muted-foreground">{t('sections.audio.outputNotSupported')}</p>
+                            )}
+                        </SectionItem>
+                        </SectionAccordion>
                     </CardContent>
                 </TabsContent>
                 )}

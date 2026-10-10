@@ -5,6 +5,7 @@
  */
 
 import { Button } from "@/components/ui/button";
+import { SectionAccordion, SectionItem } from "@/components/dashboard/section-accordion";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -31,9 +32,14 @@ import {
 } from "../../../../selkies-web-core/lib/stream-stats-view.js";
 
 /**
- * The stats overlay: what the stream runs on, the graphs that grow while it
- * stays open, the figures under them, and the host's meters, as a compact strip
- * or in full.
+ * The stats overlay: the stream's figures as half-circle gauges, what the
+ * stream runs on, the graphs that grow while it stays open, the figures
+ * under them, and the host's meters, as a compact strip or in full. The
+ * strip reads at a glance, at the toolbar's height — the stream's three
+ * figures against their own scales, then after a divider every meter of the
+ * host's load as shares. The full view keeps the same gauges,
+ * every meter among them, above an accordion of the pipeline rows, the
+ * histories, and the figures, one open at a time, with the uplinks under it.
  *
  * Everything drawn comes from the core's `window.stream_info`,
  * `window.stream_client`, and `window.stream_stats`
@@ -130,14 +136,12 @@ interface GraphProps {
 	series: Array<{ name: string; values: number[] }>;
 	/** The value at the top edge. */
 	max: number;
-	/** Drawn without its head, for the compact strip. */
-	bare?: boolean;
 }
 
 const SERIES_STROKES = ['var(--stat-series-1)', 'var(--stat-series-2)'];
 
 /** One graph: its name, the value under the pointer or else the newest, and its series. */
-function Graph({ label, unit, series, max, bare }: GraphProps) {
+function Graph({ label, unit, series, max }: GraphProps) {
 	const [hover, setHover] = useState<number | null>(null);
 	const paths = useMemo(
 		() => series.map((s) => graphPath(s.values, GRAPH_WIDTH, GRAPH_HEIGHT, max)),
@@ -154,27 +158,25 @@ function Graph({ label, unit, series, max, bare }: GraphProps) {
 	};
 	return (
 		<div className="relative">
-			{!bare && (
-				<div className="mb-0.5 flex items-baseline justify-between gap-2">
-					<span className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</span>
-					<span className="flex gap-2.5 text-xs text-muted-foreground">
-						{series.map((s, i) => (
-							<span key={s.name || i}>
-								{series.length > 1 && (
-									<i className="mr-1 inline-block h-0.5 w-2.5 rounded-sm align-middle" style={{ background: SERIES_STROKES[i] }} />
-								)}
-								<b className="text-sm text-foreground">{at >= 0 ? s.values[at] : 0}</b>
-								{series.length > 1 ? ` ${s.name}` : ` ${unit}`}
-							</span>
-						))}
-					</span>
-				</div>
-			)}
+			<div className="mb-0.5 flex items-baseline justify-between gap-2">
+				<span className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</span>
+				<span className="flex gap-2.5 text-xs text-muted-foreground">
+					{series.map((s, i) => (
+						<span key={s.name || i}>
+							{series.length > 1 && (
+								<i className="mr-1 inline-block h-0.5 w-2.5 rounded-sm align-middle" style={{ background: SERIES_STROKES[i] }} />
+							)}
+							<b className="text-sm text-foreground">{at >= 0 ? s.values[at] : 0}</b>
+							{series.length > 1 ? ` ${s.name}` : ` ${unit}`}
+						</span>
+					))}
+				</span>
+			</div>
 			<svg
-				className={`block w-full rounded-md bg-muted/50 pointer-events-auto ${bare ? 'h-6' : 'h-11'}`}
+				className="block h-11 w-full rounded-md bg-muted/50 pointer-events-auto"
 				viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
 				preserveAspectRatio="none"
-				onPointerMove={bare ? undefined : onMove}
+				onPointerMove={onMove}
 				onPointerLeave={() => setHover(null)}
 				role="img"
 				aria-label={`${label}: ${series.map((s) => `${at >= 0 ? s.values[at] : 0} ${s.name || unit}`).join(', ')}`}
@@ -191,11 +193,60 @@ function Graph({ label, unit, series, max, bare }: GraphProps) {
 						stroke="var(--muted-foreground)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
 				)}
 			</svg>
-			{!bare && (
-				<span className="pointer-events-none absolute bottom-7 right-1 rounded-sm bg-muted px-1 text-[11px] text-muted-foreground">
-					{`${Math.round(max)} ${unit}`}
-				</span>
-			)}
+			<span className="pointer-events-none absolute bottom-7 right-1 rounded-sm bg-muted px-1 text-[11px] text-muted-foreground">
+				{`${Math.round(max)} ${unit}`}
+			</span>
+		</div>
+	);
+}
+
+interface GaugeProps {
+	/** The gauge's short name, drawn under the base line. */
+	label: string;
+	/** The figure drawn in the bowl. */
+	value: string;
+	/** The share of the half circle the arc fills, 0-100. */
+	percent: number;
+	/** Draws the arc in the warn color; set by the figure that fell short. */
+	warn?: boolean;
+	/** A hover note carrying what the arc alone omits, the memory amounts. */
+	title?: string;
+	/** Draws the gauge at the size of the toolbar's controls, for the strip. */
+	compact?: boolean;
+}
+
+/** One gauge of a row: its identity beside what it draws. */
+interface GaugeSpec extends GaugeProps {
+	/** Tells the gauges apart in their row. */
+	key: string;
+}
+
+/**
+ * One half-circle gauge: the arc fills to `percent` of the half circle, the
+ * figure sits in the bowl, and the name sits under the base line. A gauge
+ * reads a figure against its scale in one glance, where a graph has to be
+ * read; the scales themselves belong to the caller.
+ * @param props The gauge's name, figure, fill, and warn state.
+ * @returns The gauge element.
+ */
+function Gauge({ label, value, percent, warn, title, compact }: GaugeProps) {
+	const fill = Math.max(0, Math.min(100, percent));
+	const angle = ((180 + fill * 1.8) * Math.PI) / 180;
+	const endX = (20 + 16 * Math.cos(angle)).toFixed(2);
+	const endY = (20 + 16 * Math.sin(angle)).toFixed(2);
+	return (
+		<div title={title} className={`flex flex-col items-center ${compact ? 'w-9' : 'w-12'}`}>
+			<div className={`relative ${compact ? 'w-9' : 'w-12'}`}>
+				<svg viewBox="0 0 40 22" className={`block w-full ${compact ? 'h-4' : 'h-5.5'}`} role="img" aria-label={`${label}: ${value}`}>
+					<path d="M 4 20 A 16 16 0 0 1 36 20" fill="none" stroke="var(--muted)" strokeWidth={4} strokeLinecap="round" />
+					{fill > 0.5 && (
+						<path d={`M 4 20 A 16 16 0 0 1 ${endX} ${endY}`} fill="none"
+							stroke={warn ? 'var(--stat-warn)' : 'var(--primary)'} strokeWidth={4} strokeLinecap="round" />
+					)}
+				</svg>
+				<b className={`absolute inset-x-0 bottom-0 text-center leading-none text-foreground ${compact ? 'text-[7px]' : 'text-[10px]'}`}>{value}</b>
+			</div>
+			<span className={`mt-0.5 whitespace-nowrap uppercase tracking-wide text-muted-foreground ${compact ? 'text-[7px] leading-none' : 'text-[7px]'}`}>{label}</span>
 		</div>
 	);
 }
@@ -206,7 +257,8 @@ function Graph({ label, unit, series, max, bare }: GraphProps) {
  * long as it is mounted in a visible tab.
  */
 export function SystemMonitoring() {
-	const [isDetailedView, setIsDetailedView] = useState(false);
+	const [isDetailedView, setIsDetailedView] = useState(
+		() => localStorage.getItem(getPrefixedKey('stats_detailed')) === 'true');
 	const [visible, setVisible] = useState(!document.hidden);
 	const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
 	const [copied, setCopied] = useState(false);
@@ -276,6 +328,48 @@ export function SystemMonitoring() {
 	});
 	const number = (key: string): number => (latest && typeof latest[key] === 'number' ? (latest[key] as number) : 0);
 
+	const tiles = streamTiles(latest, client ? client.transport : 'websockets', history);
+	const meters = streamMeters(latest);
+
+	// The gauges both views share. The fps arc fills to the configured
+	// framerate and warns under nine tenths of it — the one figure with a
+	// configured value to fall short of; the latency arc fills as the reading
+	// leaves its axis, so a full arc is the best reading; the bitrate arc is
+	// the reading against the graph's own top, a scale with no good or bad
+	// end. The host meters fill as shares of their wholes.
+	// The bitrate gauge reads the graph's own newest point, so the two always
+	// agree: the graph is bucketed by maximum once the history is long.
+	const mbpsValues = graphs.mbps.series[0].values;
+	const mbpsNow = mbpsValues.length ? mbpsValues[mbpsValues.length - 1] : 0;
+	const streamGauges: GaugeSpec[] = [
+		{
+			key: 'fps',
+			label: 'FPS',
+			value: `${Math.round(number('fps'))}`,
+			percent: (number('fps') / framerate) * 100,
+			warn: number('fps') > 0 && number('fps') < framerate * 0.9,
+		},
+		{
+			key: 'mbps',
+			label: 'Mbps',
+			value: mbpsNow.toFixed(1),
+			percent: (mbpsNow / graphs.mbps.max) * 100,
+		},
+		{
+			key: 'rtt_ms',
+			label: 'RTT',
+			value: `${Math.round(number('rtt_ms'))}`,
+			percent: 100 - (number('rtt_ms') / graphs.rtt.max) * 100,
+		},
+	];
+	const meterGauges: GaugeSpec[] = meters.map((meter) => ({
+		key: meter.key,
+		label: meter.key === 'gpumem' ? 'VRAM' : meter.key.toUpperCase(),
+		value: `${Math.round(meter.percent)}`,
+		percent: meter.percent,
+		title: meter.text,
+	}));
+
 	const toggle = (
 		<Tooltip>
 			<TooltipTrigger
@@ -284,7 +378,10 @@ export function SystemMonitoring() {
 						variant="ghost"
 						size="sm"
 						className="h-7 w-7 p-0 min-w-0 pointer-events-auto"
-						onClick={() => setIsDetailedView((detailed) => !detailed)}
+						onClick={() => {
+							localStorage.setItem(getPrefixedKey('stats_detailed'), String(!isDetailedView));
+							setIsDetailedView(!isDetailedView);
+						}}
 					/>
 				}
 			>
@@ -296,37 +393,6 @@ export function SystemMonitoring() {
 		</Tooltip>
 	);
 
-	if (!isDetailedView) {
-		return (
-			<div className="flex items-center gap-3 rounded-lg border bg-card px-3 py-1.5 text-xs shadow-sm tabular-nums cursor-grab active:cursor-grabbing">
-				<div className="flex items-center gap-1 pointer-events-none">
-					{rows.map((row) => <StatusMark key={row.key} status={row.status} />)}
-				</div>
-				{([['fps', 'fps', graphs.fps], ['mbps', 'Mbps', graphs.mbps], ['rtt_ms', 'ms', graphs.rtt]] as const).map(
-					([key, unit, graph]) => (
-						<div key={key} className="flex items-center gap-1.5 pointer-events-none">
-							<span className="whitespace-nowrap text-muted-foreground">
-								<b className="text-sm text-foreground">{number(key)}</b> {unit}
-							</span>
-							<div className="w-16">
-								<Graph label={unit} unit={unit} series={graph.series.slice(0, 1)} max={graph.max} bare />
-							</div>
-						</div>
-					),
-				)}
-				{toggle}
-			</div>
-		);
-	}
-
-	const tiles = streamTiles(latest, client ? client.transport : 'websockets', history);
-	const meters = streamMeters(latest);
-	const meterLabels: Record<string, string> = {
-		cpu: t('sections.stats.cpuLabel'),
-		mem: t('sections.stats.sysMemLabel'),
-		gpu: t('sections.stats.gpuLabel'),
-		gpumem: t('sections.stats.gpuMemLabel'),
-	};
 	const copy = async () => {
 		try {
 			await navigator.clipboard.writeText(streamReport(info, client, latest));
@@ -337,15 +403,32 @@ export function SystemMonitoring() {
 		}
 	};
 
+	if (!isDetailedView) {
+		return (
+			<div data-drag-handle className="flex h-[42px] items-center gap-2 rounded-lg border bg-background px-2 text-xs shadow-lg tabular-nums cursor-grab active:cursor-grabbing select-none">
+				<div className="flex items-center gap-1 pointer-events-none">
+					{streamGauges.map(({ key, ...gauge }) => <Gauge key={key} compact {...gauge} />)}
+					{meterGauges.length > 0 && (
+						<>
+							<div className="mx-1 h-6 w-px bg-border" aria-hidden />
+							{meterGauges.map(({ key, ...gauge }) => <Gauge key={key} compact {...gauge} />)}
+						</>
+					)}
+				</div>
+				{toggle}
+			</div>
+		);
+	}
+
 	return (
-		<div className="flex min-h-0 w-80 flex-col rounded-lg border bg-background py-2 text-xs shadow-lg tabular-nums cursor-grab active:cursor-grabbing">
+		<div className="flex min-h-0 w-[min(92vw,22rem)] flex-col rounded-lg border bg-background py-2 text-xs shadow-lg tabular-nums">
 			{/* The scroll is an inner box with no background, square corners, and rows that skip rendering
 			    while scrolled out of view. Chromium composites an opaque scroller (on a high-density screen,
 			    any) as a second layer redrawn over the panel with every video frame, and a rounded one through
 			    an offscreen pass; Firefox renders the rows a scroller hides with every frame. The panel's
 			    padding keeps the box clear of its corners. */}
 			<div className="flex min-h-0 flex-col gap-2.5 overflow-y-auto px-3 py-1 [&>*]:[content-visibility:auto] [&>*]:[contain-intrinsic-size:auto_2.75rem]">
-				<div className="flex items-center justify-between">
+				<div data-drag-handle className="flex items-center justify-between cursor-grab active:cursor-grabbing select-none">
 					<h3 className="text-sm font-semibold text-card-foreground pointer-events-none">{t('stats.monitorTitle')}</h3>
 					<div className="flex items-center gap-1">
 						<Tooltip>
@@ -370,60 +453,55 @@ export function SystemMonitoring() {
 					</div>
 				</div>
 
-				<div className="flex flex-col gap-1.5 pointer-events-none">
-					{rows.map((row) => (
-						<div key={row.key} className="grid grid-cols-[14px_76px_1fr] items-start gap-1.5">
-							<StatusMark status={row.status} />
-							<span className="text-[11px] uppercase leading-4 tracking-wide text-muted-foreground">
-								{t(`sections.stats.${row.key}Label`)}
-							</span>
-							<span className="flex min-w-0 flex-col [overflow-wrap:anywhere]">
-								<span className="font-semibold">{row.value || t('sections.stats.tooltipMemoryNA')}</span>
-								{row.detail && <span className="text-muted-foreground">{row.detail}</span>}
-								{row.reason && (
-									<span className="mt-0.5 border-l-2 border-[var(--stat-warn)] pl-1.5 text-muted-foreground">{row.reason}</span>
-								)}
-							</span>
-						</div>
+				<div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border pb-2">
+					{[...streamGauges, ...meterGauges].map(({ key, ...gauge }) => (
+						<Gauge key={key} {...gauge} />
 					))}
 				</div>
 
-				<Graph label={t('sections.stats.fpsLabel')} unit="fps" {...graphs.fps} />
-				<Graph label={t('sections.stats.bandwidthLabel')} unit="Mbps" {...graphs.mbps} />
-				<Graph label={t('sections.stats.latencyLabel')} unit="ms" {...graphs.rtt} />
+				<SectionAccordion defaultValue={["pipeline"]}>
+					<SectionItem value="pipeline" title={t('stats.pipeline')}>
+						<div className="flex flex-col gap-1.5 pointer-events-none">
+							{rows.map((row) => (
+								<div key={row.key} className="grid grid-cols-[14px_76px_1fr] items-start gap-1.5">
+									<StatusMark status={row.status} />
+									<span className="text-[11px] uppercase leading-4 tracking-wide text-muted-foreground">
+										{t(`sections.stats.${row.key}Label`)}
+									</span>
+									<span className="flex min-w-0 flex-col [overflow-wrap:anywhere]">
+										<span className="font-semibold">{row.value || t('sections.stats.tooltipMemoryNA')}</span>
+										{row.detail && <span className="text-muted-foreground">{row.detail}</span>}
+										{row.reason && (
+											<span className="mt-0.5 border-l-2 border-[var(--stat-warn)] pl-1.5 text-muted-foreground">{row.reason}</span>
+										)}
+									</span>
+								</div>
+							))}
+						</div>
+					</SectionItem>
 
-				{(
-					<div className="grid grid-cols-2 gap-1.5 pointer-events-none">
+					<SectionItem value="graphs" title={t('stats.graphs')}>
+						<div className="flex flex-col gap-2.5">
+							<Graph label={t('sections.stats.fpsLabel')} unit="fps" {...graphs.fps} />
+							<Graph label={t('sections.stats.bandwidthLabel')} unit="Mbps" {...graphs.mbps} />
+							<Graph label={t('sections.stats.latencyLabel')} unit="ms" {...graphs.rtt} />
+						</div>
+					</SectionItem>
+
+					<SectionItem value="figures" title={t('stats.figures')}>
+					<div className="grid grid-cols-3 gap-1.5 pointer-events-none">
 						{tiles.map((tile) => (
 							<div key={tile.key}
-								className={`flex flex-col rounded-md border bg-muted/40 px-1.5 py-1${tile.warn ? ' border-[var(--stat-warn)]' : ''}`}
+								className={`flex flex-col rounded-md border bg-muted/40 px-1.5 py-1${tile.warn ? ' border-[var(--stat-warn)]' : ' border-transparent'}`}
 								title={tile.warn ? t('sections.stats.overshoot') : undefined}>
 								<b className="flex items-center gap-1 text-[13px]">{tile.warn && <StatusMark status="warn" />}{tile.value}</b>
-								{tile.detail && <small className="text-[10px] tabular-nums text-muted-foreground">{tile.detail}</small>}
+								{tile.detail && <small className="text-[7px] tabular-nums text-muted-foreground">{tile.detail}</small>}
 								<span className="text-[10.5px] text-muted-foreground">{t(`sections.stats.tiles.${tile.key}`, tile.label)}</span>
 							</div>
 						))}
 					</div>
-				)}
-
-				{meters.length > 0 && (
-					<div className="flex flex-col gap-1">
-						{meters.map((meter) => (
-							<div key={meter.key} title={meter.detail || undefined}
-								className="grid grid-cols-[76px_1fr_2.5rem] items-center gap-2">
-								<span className="text-[11px] uppercase tracking-wide text-muted-foreground">{meterLabels[meter.key]}</span>
-								{meter.bar && (
-									<span className="h-1.5 overflow-hidden rounded-full bg-muted">
-										<span className="block h-full w-full rounded-full bg-primary transition-transform duration-500"
-											style={{ transform: `translateX(${meter.percent - 100}%)` }} />
-									</span>
-								)}
-								<span className={meter.bar ? "text-right text-muted-foreground"
-									: "col-start-2 col-end-[-1] text-muted-foreground"}>{meter.text}</span>
-							</div>
-						))}
-					</div>
-				)}
+					</SectionItem>
+				</SectionAccordion>
 
 				{latest && (latest.mic || latest.webcam) && (
 					<div className="flex flex-col gap-1 text-muted-foreground pointer-events-none">

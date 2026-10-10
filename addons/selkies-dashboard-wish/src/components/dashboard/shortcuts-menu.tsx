@@ -4,18 +4,17 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-import { useState } from "react";
-import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
+import { Fragment, useState } from "react";
+import { Kbd, KbdGroup } from "@/components/ui/kbd";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { computeRenderableSettings, getLastServerSettings, getPrefixedKey } from "@/utils";
 import { t } from "@/i18n";
 
 /**
- * The keyboard-shortcuts card: the core-owned chords, the switch that hands
- * them to the session instead, and the citation notice.
+ * The keyboard-shortcuts view of the overflow menu: the core-owned chords as
+ * dense rows of keys, the switch that hands them to the session instead, and
+ * the citation link.
  * @module
  */
 
@@ -44,47 +43,35 @@ export function ShortcutsMenu() {
 			window.location.origin);
 	};
 	return (
-		<Card className="w-[320px] bg-background border shadow-sm">
-			<CardContent className="p-4">
-				{(renderableSettings.keyboardShortcuts ?? true) && (
-					<div className="flex items-center justify-between mb-3">
-						<Label className="text-sm font-medium" title={t('sections.shortcuts.enabledDetails')}>{t('sections.shortcuts.enabledLabel')}</Label>
-						<Switch checked={enabled} onCheckedChange={toggle} />
-					</div>
-				)}
-				<Alert className="mb-3">
-					<AlertTitle>{t('sections.shortcuts.title')}</AlertTitle>
-					<AlertDescription>
-						<ul className="space-y-3">
-							{shortcuts.map((s, i) => (
-								<li key={i} className="flex flex-col items-center gap-1 text-center">
-									<Badge variant="secondary" className="text-xs px-2 py-0.5 font-mono bg-primary/90 text-primary-foreground whitespace-normal h-auto overflow-visible break-words max-w-full text-center">
-										{s.combo}
-									</Badge>
-									<span className="text-foreground text-sm">
-										{s.label}
-									</span>
-								</li>
-							))}
-						</ul>
-					</AlertDescription>
-				</Alert>
-				<small className="text-foreground">
-					<ul className="list-disc pl-5 text-foreground">
-						<li>
-							<a
-								className="text-violet-600 hover:text-violet-800 dark:text-violet-400 dark:hover:text-violet-300"
-								target="_blank"
-								rel="noopener noreferrer"
-								href="https://docs.selkies.io/citation/"
-							>
-								<b>{t('shortcuts.citeNotice')}{" ↗"}</b>
-							</a>
-						</li>
-					</ul>
-				</small>
-			</CardContent>
-		</Card>
+		<div className="flex w-full flex-col gap-1 p-2">
+			{(renderableSettings.keyboardShortcuts ?? true) && (
+				<div className="flex items-center justify-between px-2 py-1">
+					<Label className="text-sm font-medium" title={t('sections.shortcuts.enabledDetails')}>{t('sections.shortcuts.enabledLabel')}</Label>
+					<Switch checked={enabled} onCheckedChange={toggle} />
+				</div>
+			)}
+			{shortcuts.map((s, i) => (
+				<div key={i} className="flex items-center justify-between gap-3 px-2 py-1">
+					<span className="text-sm text-foreground">{s.label}</span>
+					<KbdGroup>
+						{s.combo.split(' + ').map((key, j) => (
+							<Fragment key={key}>
+								{j > 0 && <span className="text-xs text-muted-foreground">+</span>}
+								<Kbd>{key}</Kbd>
+							</Fragment>
+						))}
+					</KbdGroup>
+				</div>
+			))}
+			<a
+				className="px-2 py-1 text-xs text-violet-600 hover:text-violet-800 dark:text-violet-400 dark:hover:text-violet-300"
+				target="_blank"
+				rel="noopener noreferrer"
+				href="https://docs.selkies.io/citation/"
+			>
+				<b>{t('shortcuts.citeNotice')}{" ↗"}</b>
+			</a>
+		</div>
 	);
 };
 
