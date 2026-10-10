@@ -45,6 +45,7 @@ SUITES: list = [
     {"path": "unit/test_lossless_transport.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_lossless_settings.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_lossless_static.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_refinement_fixture.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_static_refinement.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ice_port_range.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webrtc_port_range_setting.py", "tier": "unit", "timeout": 120},

@@ -24,6 +24,28 @@ import time
 from typing import Any, Callable, Optional
 
 
+def read_producer_commits(path: Path) -> tuple:
+    """Read bounded producer diagnostics without replacing a probe failure."""
+    records, warnings = [], []
+    try:
+        for index, line in enumerate(path.read_text().splitlines(), 1):
+            if not line.startswith("{"):
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                warnings.append("Line {}: {}".format(index, error))
+                continue
+            if isinstance(record, dict) and record.get("kind") == "committed":
+                if len(records) < 32:
+                    records.append(record)
+                else:
+                    warnings.append("Commit record exceeds the 32-image fixture bound")
+    except (OSError, UnicodeError) as error:
+        warnings.append("Could not read producer diagnostics: " + repr(error))
+    return records, warnings
+
+
 def main() -> None:
     """Run a bounded private session and retain observations on failure."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -422,9 +444,15 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
                     page.wait_for_timeout(250)
                 raw = base64.b64decode(row.pop("png"))
                 decoded = np.array(Image.open(io.BytesIO(raw)).convert("RGBA"))
+                producer_commits, producer_warnings = read_producer_commits(args.output / "refinement-fixture.log")
+                matching_commits = [record for record in producer_commits
+                                    if record.get("seed") == seed and record.get("size") == active_geometry]
+                producer_commit = matching_commits[-1] if matching_commits else None
                 row.update(tag=tag, seed=seed, attempts=attempts, expected_sha256=expected_hash,
-                           decoded_png_exact=bool(np.array_equal(decoded, oracle)), state=state())
+                           decoded_png_exact=bool(np.array_equal(decoded, oracle)), state=state(),
+                           producer_commit=producer_commit, producer_diagnostic_warnings=producer_warnings)
                 (args.output / (tag + ".png")).write_bytes(raw)
+                check(tag + "-producer-physical-source", producer_commit is not None, producer_commit)
                 check(tag + "-expected-geometry", [row["width"], row["height"]] == active_geometry, row)
                 result["canvas_samples"].append(row)
                 check(tag + "-visible-rgba-exact", row["sha256"] == row["expected_sha256"]
@@ -646,6 +674,9 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
         result["cleanup_scope"] = "Popen-owned leaders reaped; descendant process-group cleanup requires an external sandbox supervisor"
         for log in logs:
             log.close()
+        producer_log = args.output / "refinement-fixture.log"
+        if producer_log.exists():
+            result["producer_commits"], result["producer_diagnostic_warnings"] = read_producer_commits(producer_log)
         if result.get("playwright_cleanup_error"):
             result["checks"].append({"name": "playwright-runtime-cleanup", "passed": False,
                                      "detail": result["playwright_cleanup_error"]})

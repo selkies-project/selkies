@@ -6,6 +6,8 @@
 
 A committed record identifies the producer image; it is not a capture or browser
 presentation acknowledgement. Retain at most 32 images in this short probe.
+Integer output scales are applied to the SHM buffer, so its physical pixels
+match the output instead of asking the compositor to enlarge a logical image.
 """
 import argparse
 import json
@@ -19,6 +21,27 @@ import sys
 from typing import Any
 
 import numpy as np
+
+
+def buffer_geometry(width: int, height: int, scale: int) -> tuple:
+    """Validate logical dimensions and return the bounded physical buffer size."""
+    if any(type(value) is not int or value <= 0 for value in (width, height, scale)):
+        raise ValueError("Positive integer logical dimensions and output scale required")
+    physical = (width * scale, height * scale)
+    if max(physical) > 8192 or physical[0] * physical[1] > 16777216:
+        raise ValueError("Physical fixture exceeds the probe's pixel budget")
+    return physical
+
+
+def update_output_scale(output: dict, scale: int, state: dict) -> None:
+    """Repaint only the selected configured output when its integer scale changes."""
+    if type(scale) is not int or scale <= 0:
+        raise ValueError("Invalid integer output scale")
+    changed = output["scale"] != scale
+    output["scale"] = scale
+    if changed and state.get("output") is output and state.get("configured"):
+        state["repaint"] = True
+
 
 def pixels(width: int, height: int, seed: int) -> np.ndarray:
     """Independent integer-defined opaque RGBA source shared with the oracle."""
@@ -51,7 +74,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--title", required=True)
     args = parser.parse_args()
-    state = {"stop": False, "size": (0, 0), "generation": 0, "seed": args.seed}
+    state = {"stop": False, "size": (0, 0), "generation": 0, "seed": args.seed,
+             "output": None, "configured": False, "repaint": False}
     signal.signal(signal.SIGTERM, lambda *_: state.update(stop=True))
     display = Display(args.socket)
     display.connect()
@@ -69,8 +93,9 @@ def main() -> None:
                 handles[key] = reg.bind(name, cls, min(version, ceiling))
         if interface == "wl_output":
             output = reg.bind(name, WlOutput, min(version, 2))
-            entry = {"output": output, "x": None}
+            entry = {"output": output, "x": None, "scale": 1}
             output.dispatcher["geometry"] = lambda _, x, *rest: entry.update(x=x)
+            output.dispatcher["scale"] = lambda _, factor: update_output_scale(entry, factor, state)
             outputs.append(entry)
 
     registry.dispatcher["global"] = bind
@@ -78,7 +103,8 @@ def main() -> None:
     display.roundtrip()
     display.roundtrip()
     handles["xdg"].dispatcher["ping"] = lambda wm, serial: wm.pong(serial)
-    target = next(item["output"] for item in outputs if item["x"] == args.output_x)
+    target = next(item for item in outputs if item["x"] == args.output_x)
+    state["output"] = target
 
     def buffer_for(rgba: np.ndarray) -> Any:
         """Create an owned SHM buffer whose lifetime covers this bounded probe."""
@@ -110,9 +136,9 @@ def main() -> None:
         """Commit a new full image and report its producer generation."""
         if state["generation"] >= 32:
             raise RuntimeError("Bounded fixture exhausted")
-        width, height = state["size"]
-        if width <= 0 or height <= 0:
-            raise ValueError("The compositor configured invalid dimensions")
+        logical_width, logical_height = state["size"]
+        scale = target["scale"]
+        width, height = buffer_geometry(logical_width, logical_height, scale)
         callback = surface.frame()
         generation = state["generation"] + 1
         state["generation"] = generation
@@ -120,10 +146,13 @@ def main() -> None:
             "kind": "frame-done", "generation": generation, "size": [width, height],
             "monotonic_ns": time.monotonic_ns()}), flush=True)
         owned.append(callback)
+        surface.set_buffer_scale(scale)
         surface.attach(buffer_for(source_pixels(width, height, state["seed"])), 0, 0)
         surface.damage_buffer(0, 0, width, height)
         surface.commit()
         print(json.dumps({"kind": "committed", "size": [width, height],
+                          "logical_size": [logical_width, logical_height], "buffer_scale": scale,
+                          "output_x": target["x"],
                           "generation": generation, "seed": state["seed"],
                           "monotonic_ns": time.monotonic_ns()}), flush=True)
         display.flush()
@@ -131,10 +160,10 @@ def main() -> None:
     def configured(xdg: Any, serial: int) -> None:
         """Acknowledge the compositor geometry before painting the known source."""
         xdg.ack_configure(serial)
-        paint()
+        state.update(configured=True, repaint=True)
 
     xdg_surface.dispatcher["configure"] = configured
-    toplevel.set_fullscreen(target)
+    toplevel.set_fullscreen(target["output"])
     surface.commit()
     display.flush()
     try:
@@ -151,6 +180,9 @@ def main() -> None:
                 if type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF:
                     raise ValueError("Invalid fixture seed")
                 state["seed"] = seed
+                state["repaint"] = True
+            if state["configured"] and state["repaint"]:
+                state["repaint"] = False
                 paint()
             display.flush()
     finally:

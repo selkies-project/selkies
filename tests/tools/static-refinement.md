@@ -97,6 +97,12 @@ checks require Xvfb. WebRTC and other unavailable sinks are reported explicitly;
 The probe clicks the actual sidebar controls and preserves normal codec and
 renderer selection. It compares visible canvas RGBA8 to a deterministic SHM
 producer across source changes, parent/child toggles, resize, and reload. A
+Wayland producer follows the selected output's integer scale and allocates its
+pattern at physical buffer dimensions, applying `set_buffer_scale` to preserve
+the configured logical size. Its recorded commits include logical size,
+physical size, and scale; they are producer observations, not capture or browser
+presentation timestamps. Fractional-scale rendering is not established by this
+integer-scale fixture. A
 separate instrumented phase delays PNG decoding, then observes the original
 bitmap draw/close calls to test cancellation and an old decode crossing a newer
 presented scene. That phase includes a positive PNG-paint control. It is not a
