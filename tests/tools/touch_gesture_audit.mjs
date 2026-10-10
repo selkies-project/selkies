@@ -546,4 +546,52 @@ function accelSwipe(px, n, dt, speed) {
     check('the trackpad speed setting scales the travel', doubled === 200, `${doubled} of 200`);
 }
 
+// --- a stylus is handled once ------------------------------------------------
+// iPadOS delivers an Apple Pencil both as pen pointer events and as touch
+// events whose `touchType` is `stylus`. The pen pointer path presses at
+// contact, so the touch path has to leave the stylus alone in direct mode;
+// in trackpad mode the pen pointer path sends nothing and the stylus is a
+// finger on the trackpad.
+
+/** A pen pointer event of `type` at (x, y), the tip down for a press and a move. */
+const pen = (type, x, y) => ({
+    type, pointerType: 'pen', isPrimary: true, button: type === 'pointerup' ? 0 : (type === 'pointerdown' ? 0 : -1),
+    buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, screenX: x, screenY: y,
+    ctrlKey: false, shiftKey: false, target: element, timeStamp: now, preventDefault() {},
+});
+const stylus = (id, x, y) => ({ ...touch(id, x, y), touchType: 'stylus' });
+
+/** One Pencil tap at (x, y) as iPadOS reports it: the pen pointer events around the touch events. */
+function pencilTap(input, x, y) {
+    const t = stylus(1, x, y);
+    input._handlePointerDown(pen('pointerdown', x, y));
+    fire(input, 'touchstart', [t], [t]);
+    advance(80);
+    input._handlePointerUp(pen('pointerup', x, y));
+    fire(input, 'touchend', [t], []);
+    advance(1000);
+}
+{
+    const { input, sent } = makeInput(false);
+    pencilTap(input, 400, 300);
+    const all = leftTransitions(sent).map(([, s]) => s).join(',');
+    check('direct touch: a stylus tap is one click', all === 'down,up', all);
+}
+{
+    const { input, sent } = makeInput(false);
+    const t = touch(1, 400, 300);
+    fire(input, 'touchstart', [t], [t]);
+    advance(80);
+    fire(input, 'touchend', [t], []);
+    advance(1000);
+    const all = leftTransitions(sent).map(([, s]) => s).join(',');
+    check('direct touch: a finger tap still clicks', all === 'down,up', all);
+}
+{
+    const { input, sent } = makeInput(true);
+    pencilTap(input, 400, 300);
+    const all = leftTransitions(sent).map(([, s]) => s).join(',');
+    check('trackpad: a stylus tap is one click', all === 'down,up', all);
+}
+
 process.exit(failed === 0 ? 0 : 1);

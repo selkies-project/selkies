@@ -4177,7 +4177,11 @@ export class Input {
      * Direct touch: a tap clicks at the touch point, a drag beyond the tap
      * threshold holds the left button, a long press right-clicks, two fingers
      * scroll or pinch (`_twoFingerMove`), and a third finger releases
-     * everything.
+     * everything. A stylus is left to the pen pointer path, which presses at
+     * contact and carries the barrel button: iPadOS reports an Apple Pencil
+     * as pen pointer events and as touches whose `touchType` is `stylus`,
+     * and taking both would click twice. In trackpad mode the pen pointer
+     * path sends nothing, so there the stylus is a finger on the trackpad.
      */
     _handleTouchEvent(event) {
         if (this._trackpadMode) {
@@ -4185,6 +4189,10 @@ export class Input {
             return;
         }
         if (this._targetHasClass(event.target, WHITELIST_CLASS)) return;
+        if (_stylusTouches(event.changedTouches)) {
+            if (this.element.contains(event.target)) event.preventDefault();
+            return;
+        }
         if (!this._guac_markEvent(event)) return;
         const type = event.type;
         const now = Date.now();
@@ -5633,6 +5641,19 @@ export class Input {
             }
         }
     }
+}
+
+/**
+ * Whether every touch in a list is a stylus, by the `touchType` iPadOS sets.
+ * @param {TouchList|Array<Touch>} touches
+ * @returns {boolean} False for an empty list or any finger in it.
+ */
+function _stylusTouches(touches) {
+    if (!touches || touches.length === 0) return false;
+    for (let i = 0; i < touches.length; i++) {
+        if (touches[i].touchType !== 'stylus') return false;
+    }
+    return true;
 }
 
 /**
