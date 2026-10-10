@@ -4,7 +4,9 @@
 
 """Exercise real opt-in UI and natural rendering routes in a private session.
 
-The visible canvas readback is compared to an independently known SHM source.
+The visible refinement canvas is compared to an independently known SHM source.
+Track-generator checks also observe the original live video and identify two
+post-Off source changes with a lossy-video margin, separate from PNG exactness.
 No renderer/worker/codec override, no HTTP screenshot stand-in, and no physical
 monitor or input-to-photon claim. Unsupported routes are explicitly classified.
 """
@@ -62,6 +64,7 @@ def main() -> None:
     parser.add_argument("--revision", required=True)
     parser.add_argument("--dashboard", choices=("default", "wish"), required=True)
     parser.add_argument("--require-supported", action="store_true")
+    parser.add_argument("--require-sink", choices=("track-generator", "worker-canvas", "page-canvas"))
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--server-python", type=Path, default=Path(sys.executable))
@@ -390,6 +393,58 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
         result["video_before"] = page.evaluate(progress_js)
         wait_for(lambda: state() and state().get("sink") not in (None, "unsettled"))
         result["natural_route"] = state()
+        if args.require_sink:
+            check("required-natural-sink", state().get("sink") == args.require_sink, state())
+        track_segment = {"ids": None}
+        def track_phase(tag: str, new_connection: bool = False) -> Optional[dict]:
+            """Observe live video without treating a delayed rVFC as a commit gate."""
+            current_sink = state().get("sink")
+            if result["natural_route"].get("sink") == "track-generator":
+                check(tag + "-natural-sink-retained", current_sink == "track-generator", state())
+            if current_sink != "track-generator":
+                return None
+            row = page.evaluate("""async () => {
+              const video=document.getElementById('videoStream');
+              if(!video)return {missing:true};
+              const rect=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};
+              const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();
+                return s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)>0&&r.width>0&&r.height>0;};
+              const canvas=document.getElementById('losslessVideoCanvas');
+              let frame=null,timer=null,callback=null;
+              if(video.requestVideoFrameCallback)await new Promise(resolve=>{
+                callback=video.requestVideoFrameCallback((now,m)=>{clearTimeout(timer);
+                  frame={callbackNow:now,mediaTime:m.mediaTime,presentationTime:m.presentationTime,
+                    expectedDisplayTime:m.expectedDisplayTime,presentedFrames:m.presentedFrames,
+                    width:m.width,height:m.height};resolve();});
+                timer=setTimeout(()=>{video.cancelVideoFrameCallback(callback);resolve();},1500);
+              });
+              const tracks=[...(video.srcObject?.getVideoTracks?.()||[])].map(t=>({id:t.id,
+                readyState:t.readyState,enabled:t.enabled,muted:t.muted,settings:t.getSettings()}));
+              return {at:performance.now(),sink:window.losslessRefinementStatus?.sink,
+                visible:visible(video),videoId:video.id,rect:rect(video),width:video.videoWidth,
+                height:video.videoHeight,readyState:video.readyState,paused:video.paused,
+                tracks,frame,overlay:canvas?{visible:visible(canvas),rect:rect(canvas),
+                  width:canvas.width,height:canvas.height,pointerEvents:getComputedStyle(canvas).pointerEvents}:null};
+            }""")
+            row["tag"] = tag
+            result.setdefault("track_video_phases", []).append(row)
+            tracks = row.get("tracks", [])
+            ids = sorted(track["id"] for track in tracks)
+            check(tag + "-original-video-live", row.get("visible") and not row.get("paused")
+                  and row.get("readyState", 0) >= 2 and tracks
+                  and all(track["readyState"] == "live" and track["enabled"] for track in tracks), row)
+            row["rvfc_scope"] = "One bounded observational callback; absence on a quiet healthy sink is not failure"
+            if new_connection or track_segment["ids"] is None:
+                track_segment["ids"] = ids
+            check(tag + "-same-live-track", ids == track_segment["ids"], row)
+            overlay = row.get("overlay")
+            if overlay and overlay["visible"]:
+                aligned = all(abs(overlay["rect"][key] - row["rect"][key]) <= 1
+                              for key in ("x", "y", "width", "height"))
+                check(tag + "-overlay-bounds-match-video", aligned and overlay["pointerEvents"] == "none", row)
+            return row
+
+        track_phase("before-opt-in")
         page.wait_for_timeout(1200)
         check("default-off-without-requests", state().get("requested") is False and not requests(), state())
         open_settings()
@@ -407,7 +462,7 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
         result["feature_exercised"] = supported
         check("capability-matches-user-control", child.is_enabled() == supported, state())
         if args.require_supported:
-            check("required-natural-canvas-route", supported, state())
+            check("required-natural-refinement-route", supported, state())
         if not supported:
             check("unsupported-reason-visible", bool(page.locator('#losslessStaticRefinementStatus').inner_text())
                   and state().get("reason") not in (None, "disabled", "ready"), state())
@@ -420,8 +475,9 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
             result["canvas_samples"] = []
             read_canvas = """async () => {
               const sink=window.losslessRefinementStatus?.sink;
-              const source=document.getElementById(sink==='worker-canvas'?'videoWorkerCanvas':'videoCanvas');
-              if(!source || getComputedStyle(source).display==='none')return null;
+              const source=document.getElementById(sink==='track-generator'?'losslessVideoCanvas':
+                sink==='worker-canvas'?'videoWorkerCanvas':'videoCanvas');
+              if(!source || getComputedStyle(source).display==='none'||getComputedStyle(source).visibility==='hidden')return null;
               const copy=document.createElement('canvas');copy.width=source.width;copy.height=source.height;
               const ctx=copy.getContext('2d',{willReadFrequently:true});ctx.drawImage(source,0,0);
               const rgba=ctx.getImageData(0,0,copy.width,copy.height).data;
@@ -431,7 +487,7 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
                 png:copy.toDataURL('image/png').split(',')[1]};
             }"""
             active_geometry = [args.width, args.height]
-            def exact_canvas(tag: str, seed: int) -> dict:
+            def exact_canvas(tag: str, seed: int, new_connection: bool = False) -> dict:
                 """Compare visible RGBA8 to the known source after bounded presentation."""
                 wait_for(lambda: state().get("presentation", {}).get("shown"), 20)
                 # Read from the same visible canvas, independent of the protocol's claim.
@@ -465,6 +521,7 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
                 result["canvas_samples"].append(row)
                 check(tag + "-visible-rgba-exact", row["sha256"] == row["expected_sha256"]
                       and row["decoded_png_exact"], row)
+                track_phase(tag, new_connection=new_connection)
                 return row
 
             def change_source(seed: int) -> None:
@@ -475,6 +532,50 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
                                      and json.loads(line).get("seed") == seed
                                      for line in (args.output / "refinement-fixture.log").read_text().splitlines()
                                      if line.startswith('{')), 5)
+
+            def off_video_recovery(tag: str, seed: int, previous_seed: int) -> None:
+                """Recognize a changed lossy video source while the overlay is absent.
+
+                A five-code-value mean RGB error margin identifies this deterministic
+                noise source against the preceding seed. It is not a quality or
+                pixel-exact gate and does not observe every intervening frame.
+                """
+                if state().get("sink") != "track-generator":
+                    return
+                change_source(seed)
+                rows = []
+                deadline = time.monotonic() + 5
+                while True:
+                    row = page.evaluate("""() => {
+                      const video=document.getElementById('videoStream');
+                      const canvas=document.createElement('canvas');
+                      canvas.width=video.videoWidth;canvas.height=video.videoHeight;
+                      const ctx=canvas.getContext('2d',{willReadFrequently:true});
+                      ctx.drawImage(video,0,0);return {at:performance.now(),width:canvas.width,
+                        height:canvas.height,png:canvas.toDataURL('image/png').split(',')[1]};
+                    }""")
+                    raw = base64.b64decode(row.pop("png"))
+                    decoded = np.array(Image.open(io.BytesIO(raw)).convert("RGBA"))
+                    rgb = decoded[:, :, :3].astype(np.int16)
+                    errors = {str(value): float(np.abs(rgb - source_pixels(row["width"], row["height"], value)
+                                                      [:, :, :3].astype(np.int16)).mean())
+                              for value in (seed, previous_seed)}
+                    row.update(rgb_mae=errors, seed=seed, previous_seed=previous_seed,
+                               nonblack_fraction=float(np.any(rgb != 0, axis=2).mean()),
+                               sha256=hashlib.sha256(decoded.tobytes()).hexdigest())
+                    rows.append(row)
+                    recognized = errors[str(seed)] + 5 < errors[str(previous_seed)] and row["nonblack_fraction"] > 0.99
+                    if recognized or time.monotonic() >= deadline:
+                        break
+                    page.wait_for_timeout(250)
+                (args.output / (tag + ".png")).write_bytes(raw)
+                result.setdefault("off_video_samples", []).append({"tag": tag, "attempts": rows,
+                    "criterion": "Target mean RGB error at least5 below preceding-source error; >99% nonblack pixels; not PNG exactness"})
+                check(tag + "-changed-video-source-visible", recognized and
+                      [row["width"], row["height"]] == active_geometry, rows)
+                phase = track_phase(tag)
+                overlay = phase.get("overlay") if phase else None
+                check(tag + "-overlay-absent", phase is not None and not (overlay and overlay["visible"]), phase)
 
             child.click()
             wait_for(lambda: state().get("requested") and state().get("effective"))
@@ -496,6 +597,7 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
             off = state()
             check("off-releases-refinement-objects", off.get("presentation", {}).get("retainedVideoFrames") == 0
                   and off.get("presentation", {}).get("backupBytes") == 0, off)
+            track_phase("first-off")
             off_requests = len(requests())
             change_source(713)
             page.wait_for_timeout(1300)
@@ -505,6 +607,7 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
             parent.click()
             wait_for(lambda: not state().get("effective") and not state().get("presentation", {}).get("shown"))
             check("parent-off-preserves-child-preference", state().get("requested") is True, state())
+            track_phase("parent-off")
             parent.click()
             wait_for(lambda: state().get("effective"))
             exact_canvas("parent-reenabled-refined", 713)
@@ -533,7 +636,7 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
                 page.get_by_placeholder("e.g., 1080", exact=True).fill(str(active_geometry[1]))
                 page.get_by_role("button", name="Set", exact=True).click()
             wait_for(lambda: state()["epoch"] > old_epoch)
-            exact_canvas("resized-refined", 713)
+            exact_canvas("resized-refined", 713, new_connection=True)
             result["resized_geometry"] = active_geometry
             open_settings("Video", panel_open=True)
 
@@ -614,7 +717,7 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
             page.reload(wait_until="load")
             wait_for(lambda: state() and state().get("effective"), 30)
             # Resolution and opt-in survive this ordinary same-origin reload.
-            exact_canvas("reconnected-refined", 715)
+            exact_canvas("reconnected-refined", 715, new_connection=True)
             check("reload-preserves-explicit-opt-in", state().get("requested") is True, state())
             result["video_before"] = page.evaluate(progress_js)
             open_settings()
@@ -622,7 +725,12 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
             child.click()
             wait_for(lambda: not state().get("requested") and not state().get("effective"))
             page.wait_for_timeout(1100)
+            final_off_requests = len(requests())
+            off_video_recovery("final-off-source-716", 716, 715)
+            off_video_recovery("final-off-source-717", 717, 716)
+            check("final-off-source-changes-do-not-request-png", len(requests()) == final_off_requests, requests())
 
+        track_phase("final-video")
         collect_segment("final")
         result["video_after"] = page.evaluate(progress_js)
         counter = "decoded" if args.transport == "webrtc" else "chunks"
@@ -633,7 +741,9 @@ print(json.dumps({'python': sys.version, 'module': str(module), 'packages': pack
         result["final_state"] = state()
         result["scope"] = ("Real UI opt-in and native sink selection; PNG8 exactness from visible canvas "
             "readback where supported. This is not a performance, physical presentation, native10 or "
-            "all-frames stale-overlay proof; instrumented decode races are reported separately.")
+            "all-frames stale-overlay proof; instrumented decode races are reported separately. "
+            "Track-generator rVFC is observational, not a presentation fence; post-Off video source "
+            "recognition uses an explicit lossy margin, separate from exact refinement PNG checks.")
         page.screenshot(path=str(args.output / "browser-after.png"))
         check("browser-no-uncaught-page-errors", not result.get("page_errors"), result.get("page_errors", []))
         browser.close()

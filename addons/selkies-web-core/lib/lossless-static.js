@@ -5,19 +5,21 @@
  */
 
 /**
- * Ordered, optional lossless stills for a canvas that also presents video.
+ * Ordered, optional lossless stills for canvas and page-owned video sinks.
  *
  * A native scene identifies identical source pixels, not a decoder timestamp
  * or a period with no input. The socket pairs a versioned `lossless_sample`
  * preface with exactly one full-frame video payload. Its metadata follows the
- * chunk through decoding to the same thread that draws the visible canvas.
+ * chunk through decoding to the thread that owns presentation. A page-owned
+ * track additionally matches compositor callbacks to submitted timestamps.
  * Unknown metadata never delays video and withdraws any refined image.
  *
  * A PNG may replace only the last presented scene, while no later scene is
  * announced. Both conditions are checked again after asynchronous decoding.
  * Subsequent video of that same scene still decodes; while the PNG is shown,
- * one clone of its newest frame is retained so disabling restores the latest
- * lossy reconstruction. All clones, bitmaps, timers, and transfer buffers are
+ * a canvas video sink retains one clone of its newest frame so disabling
+ * restores the latest lossy reconstruction. An independent video sink keeps
+ * presenting beneath its still and needs no clone. All clones, bitmaps, timers, and transfer buffers are
  * bounded and released on invalidation. One PNG decode may finish after
  * cancellation; at most one newer compressed PNG (64 MiB maximum) waits for
  * it, with all scene guards checked again before decoding. Neither this contract nor a canvas
@@ -215,11 +217,13 @@ export function createLosslessProtocol(options = {}) {
  * Failure is terminal for that scene so repeated video samples cannot retry it.
  * @param {object} options
  * @param {function(): *} options.canvas Visible canvas.
- * @param {function(*): void} options.paint Draw without resizing or closing.
+ * @param {function(*): void} options.paint Draw without closing the image.
  * @param {function(*): *} options.backup Copy the normal canvas once.
  * @param {function(ArrayBuffer): Promise<*>} options.decode Decode the PNG.
  * @param {function(*): void} options.send Request/cancel control.
  * @param {function(*): void} [options.changed] Renderer state notification.
+ * @param {boolean} [options.independentVideo] Video keeps presenting beneath a
+ *   separate still; draw receives only its dimensions and never retains it.
  * @param {function(): number} [options.now] Monotonic milliseconds.
  * @param {Function} [options.setTimer] Testable timer scheduler.
  * @param {Function} [options.clearTimer] Testable timer cancellation.
@@ -336,7 +340,7 @@ export function createLosslessRenderer(options) {
     }, 500);
   };
   const draw = (frame, stamp) => {
-    if (!enabled) { options.paint(frame); return true; }
+    if (!enabled) { if (!options.independentVideo) options.paint(frame); return true; }
     const canvas = options.canvas();
     const exact = usable(stamp) && canvas && stamp.width === canvas.width && stamp.height === canvas.height
       && frame.displayWidth === stamp.width && frame.displayHeight === stamp.height;
@@ -346,7 +350,7 @@ export function createLosslessRenderer(options) {
       // An older decoder output must not forget a newer received scene that
       // is still queued for decoding and may be the final quiet picture.
       announced = latest;
-      options.paint(frame);
+      if (!options.independentVideo) options.paint(frame);
       return true;
     }
     if (presented && !sameLosslessScene(presented, stamp)) {
@@ -356,6 +360,7 @@ export function createLosslessRenderer(options) {
     }
     presented = stamp;
     if (bitmap) {
+      if (options.independentVideo) return true;
       try {
         const retained = !!restoreFrame;
         const next = frame.clone();
@@ -369,7 +374,7 @@ export function createLosslessRenderer(options) {
         return true;
       }
     }
-    options.paint(frame);
+    if (!options.independentVideo) options.paint(frame);
     arm();
     return true;
   };
@@ -397,7 +402,7 @@ export function createLosslessRenderer(options) {
       if (token !== generation || !canOffer(stamp) || !canvas
           || decoded.width !== stamp.width || decoded.height !== stamp.height
           || canvas.width !== stamp.width || canvas.height !== stamp.height) return false;
-      if (!bitmap) backup = options.backup(canvas);
+      if (!bitmap && !options.independentVideo) backup = options.backup(canvas);
       close(bitmap); bitmap = decoded; decoded = null;
       options.paint(bitmap);
       finishRequest();
@@ -421,4 +426,114 @@ export function createLosslessRenderer(options) {
     }
   };
   return { configure, observe, draw, offer, invalidate, reset, status };
+}
+
+/**
+ * Bind a separate still to the page generator's compositor notifications.
+ *
+ * Writing a VideoFrame only submits it to a track. Its timestamp must also
+ * appear in requestVideoFrameCallback before that scene can request a PNG.
+ * The bounded ledger owns metadata only; normal frames keep their existing
+ * write/close contract, including backpressure drops. A missing timestamp or
+ * changed geometry withdraws the still instead of guessing a nearby sample.
+ * Submitted timestamps must increase across resets, as the page's chunk clock
+ * does; duplicate identities cannot be disambiguated by a compositor callback.
+ * Received scene changes retire the still before the page can write their
+ * decoded frames. The video remains visible underneath, so withdrawal needs
+ * neither a restoration frame nor a copy of the normal video.
+ *
+ * This adapter requires submission and scene observation on the same thread.
+ * It does not associate a worker-owned generator through asynchronous page
+ * messages, and compositor callbacks do not establish physical display time.
+ * @param {object} options
+ * @param {function(): *} options.video The page-owned HTML video sink.
+ * @param {function(*): void} options.paint Paint only a decoded PNG.
+ * @param {function(ArrayBuffer): Promise<*>} options.decode
+ * @param {function(*): void} options.send
+ * @param {function(*): void} [options.changed] Hide the overlay when not shown.
+ * @param {function(): number} [options.now]
+ * @param {Function} [options.setTimer]
+ * @param {Function} [options.clearTimer]
+ * @returns {{configure: Function, observe: Function, submitted: Function,
+ *   offer: Function, invalidate: Function, reset: Function, status: Function}}
+ */
+export function createLosslessTrackRenderer(options) {
+  const samples = new Map();
+  const geometry = { width: 0, height: 0 };
+  let enabled = false, epoch = 0, generation = 0, callback = null, video = null;
+  let presentedTimestamp = null;
+  let lastSubmittedTimestamp = -Infinity;
+  const renderer = createLosslessRenderer({ ...options, independentVideo: true,
+    canvas: () => geometry, backup: () => null,
+    changed: (state) => {
+      if (options.changed) options.changed({ ...state, presentedTimestamp });
+    },
+  });
+  const status = () => ({ ...renderer.status(), presentedTimestamp,
+    trackedSamples: samples.size, callbackPending: callback !== null });
+  const cancel = () => {
+    generation++;
+    if (callback !== null && video) video.cancelVideoFrameCallback(callback);
+    callback = null; video = null; samples.clear(); presentedTimestamp = null;
+  };
+  const watch = () => {
+    if (!enabled || callback !== null || !video) return;
+    const token = generation;
+    callback = video.requestVideoFrameCallback((_now, metadata) => {
+      if (token !== generation || !enabled) return;
+      callback = null;
+      const timestamp = Math.round(metadata.mediaTime * 1000000);
+      const sample = Number.isSafeInteger(timestamp) ? samples.get(timestamp) : null;
+      for (const key of samples.keys()) if (key <= timestamp) samples.delete(key);
+      if (!sample || sample.width !== metadata.width || sample.height !== metadata.height) {
+        presentedTimestamp = null;
+        renderer.draw({ displayWidth: metadata.width, displayHeight: metadata.height }, null);
+      } else {
+        geometry.width = sample.width; geometry.height = sample.height;
+        presentedTimestamp = timestamp;
+        renderer.draw({ displayWidth: sample.width, displayHeight: sample.height }, sample.stamp);
+      }
+      watch();
+    });
+  };
+  const configure = (config) => {
+    if (!Number.isInteger(config.epoch) || config.epoch < epoch) return;
+    const nextVideo = options.video();
+    const nextEnabled = !!config.enabled && !!nextVideo
+      && typeof nextVideo.requestVideoFrameCallback === 'function'
+      && typeof nextVideo.cancelVideoFrameCallback === 'function';
+    if (enabled === nextEnabled && epoch === config.epoch && (!enabled || video === nextVideo)) return;
+    const replaced = enabled && nextEnabled && video !== nextVideo;
+    cancel();
+    enabled = nextEnabled; epoch = config.epoch; video = enabled ? nextVideo : null;
+    if (replaced) renderer.invalidate('track-replaced');
+    renderer.configure({ enabled, epoch });
+    watch();
+  };
+  const submitted = (frame, stamp) => {
+    if (!enabled) return;
+    if (!Number.isSafeInteger(frame.timestamp) || frame.timestamp <= lastSubmittedTimestamp) {
+      samples.clear(); presentedTimestamp = null;
+      renderer.draw(frame, null);
+      return;
+    }
+    lastSubmittedTimestamp = frame.timestamp;
+    if (!validLosslessStamp(stamp)
+        || stamp.epoch !== epoch || frame.displayWidth !== stamp.width || frame.displayHeight !== stamp.height) {
+      renderer.draw(frame, null);
+      return;
+    }
+    if (samples.size >= 64) samples.delete(samples.keys().next().value);
+    samples.set(frame.timestamp, { stamp, width: frame.displayWidth, height: frame.displayHeight });
+  };
+  const invalidate = (reason) => {
+    samples.clear(); presentedTimestamp = null;
+    renderer.invalidate(reason);
+  };
+  const reset = () => {
+    cancel(); enabled = false; epoch = 0;
+    renderer.reset();
+  };
+  return { configure, observe: renderer.observe, submitted, offer: renderer.offer,
+    invalidate, reset, status };
 }

@@ -10,18 +10,33 @@ setting is `lossless_static_refinement` (`SELKIES_LOSSLESS_STATIC_REFINEMENT`).
 
 This experimental integration requires the scene-identity API in PixelFlux
 commit `449cc49ba479f0fb6c564f5f681ca2c03d28dd6a`, on top of
-[PixelFlux #46](https://github.com/selkies-project/pixelflux/pull/46). A wheel built
+[PixelFlux #46](https://github.com/selkies-project/pixelflux/pull/46), now included in
+[PixelFlux #49](https://github.com/selkies-project/pixelflux/pull/49). A wheel built
 from unmodified upstream PixelFlux does not provide that API. The Selkies change
 must not merge before its native dependency is available; the normal dependency
 version and CI wheel build have not been redirected to a private fork.
 
 The supported route is a local Wayland compositor, a full-frame encoder with
-verified sample association, WebSocket transport, and a canvas that Selkies owns.
+verified sample association, WebSocket transport, and either a canvas that
+Selkies owns or a page-owned MediaStreamTrackGenerator with compositor callbacks.
 Availability follows the actual capture, encoder, and browser sink. The sidebar
 shows why other routes are unavailable. Selecting this feature does not switch
 capture backends, codecs, renderers, or transports. In particular, native WebRTC
-video and MediaStreamTrackGenerator sinks remain unavailable, as do striped
-video, XShm scene tracking, NvFBC, DRI3, and external Wayland hosts.
+video and worker-owned VideoTrackGenerator sinks remain unavailable, as do
+striped video, XShm scene tracking, NvFBC, DRI3, and external Wayland hosts.
+
+The page generator keeps feeding its original video element. A separate PNG
+canvas appears only after requestVideoFrameCallback identifies the exact native
+sample by its submitted VideoFrame timestamp and dimensions. The bounded ledger
+holds 64 metadata entries and no frames. Unknown callbacks withdraw refinement;
+they never use a nearest timestamp or the most recently written frame. Incoming
+scene changes hide the PNG synchronously before their decoded video can be
+submitted on the same page thread. Turning refinement off reveals the video
+already running underneath, without a frame clone, video readback, or decoder
+restart. CSS geometry follows the same scaling and positioning as the video.
+Video-only fullscreen and picture-in-picture retain normal video without this
+separate canvas; refinement is suspended there. Fullscreen of the containing
+Selkies page can include both surfaces.
 
 After a scene settles, the canvas requests its native run/source/scene/sample
 identity. The server waits for at least 500 ms of known scene quiet, shares one
@@ -38,8 +53,9 @@ The feature preserves the captured desktop's RGB8 values. It does not recover
 one PNG, and each client assembles at most one transfer (64 MiB maximum). While
 an obsolete browser decode finishes, one newer compressed PNG may also wait;
 this is not a single-PNG bound on total browser memory. A visible refinement
-retains at most one decoded video-frame clone, or an initial canvas backup, for
-restoring video when disabled. Already-running native compression and browser
+on a canvas video sink retains at most one decoded video-frame clone, or an
+initial canvas backup, for restoring video when disabled. The page-generator
+overlay retains neither and releases its surface on withdrawal. Already-running native compression and browser
 PNG decoding cannot be interrupted; cancellation withdraws admission, transfer,
 and presentation of their results. These limits are separate from PixelFlux's
 native raw-pixel budgets.

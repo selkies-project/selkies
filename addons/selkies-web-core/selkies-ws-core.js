@@ -54,8 +54,8 @@
  * immediately before its full-frame 0x04 payload, `lossless_status`, and
  * `lossless_begin`/`lossless_end` around 0x0A PNG chunks (u32 transfer id,
  * u32 byte offset, both big endian). `LOSSLESS {json}` negotiates the selected
- * canvas sink and requests or cancels a scene. The renderer and bounded wire
- * protocol live in lib/lossless-static.js. Other sinks keep their normal
+ * ordered canvas or page-generator sink and requests or cancels a scene. The
+ * renderer and bounded wire protocol live in lib/lossless-static.js. Other sinks keep their normal
  * video route and report this additional capability unavailable.
  *
  * Video is decoded with WebCodecs: a JPEG stripe through ImageDecoder, an
@@ -151,7 +151,7 @@ import decodeGateSource from './lib/decode-gate.js?raw';
 import decodePaceSource from './lib/decode-pace.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { createChunkStamp } from './lib/chunk-stamp.js';
-import { createLosslessProtocol, createLosslessRenderer } from './lib/lossless-static.js';
+import { createLosslessProtocol, createLosslessRenderer, createLosslessTrackRenderer } from './lib/lossless-static.js';
 import losslessStaticSource from './lib/lossless-static.js?raw';
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
@@ -1933,6 +1933,29 @@ let losslessSink = 'unsettled';
 let losslessServer = { version: 1, epoch: 0, supported: false, effective: false, reason: 'waiting-for-server' };
 let losslessCapabilitySent = '', losslessConfiguration = '', losslessConfigSerial = 0;
 let losslessPresentation = { shown: false, pending: false, retainedVideoFrames: 0, backupBytes: 0 };
+let losslessVideoCanvas = null, losslessVideoShown = false;
+
+/** Mirror the live video's CSS box without reading or copying its pixels. */
+function syncLosslessVideoStyle() {
+  if (!losslessVideoCanvas || !videoElement) return;
+  losslessVideoCanvas.style.cssText = videoElement.style.cssText;
+  losslessVideoCanvas.style.zIndex = '2';
+  losslessVideoCanvas.style.pointerEvents = 'none';
+  losslessVideoCanvas.style.display = losslessVideoShown ? 'block' : 'none';
+}
+
+/** Allocate a separate surface only when a verified PNG is ready to draw. */
+function paintLosslessVideo(bitmap) {
+  if (!losslessVideoCanvas) {
+    losslessVideoCanvas = document.createElement('canvas');
+    losslessVideoCanvas.id = 'losslessVideoCanvas';
+    losslessVideoCanvas.setAttribute('aria-hidden', 'true');
+    videoElement.parentNode.appendChild(losslessVideoCanvas);
+  }
+  losslessVideoCanvas.width = bitmap.width; losslessVideoCanvas.height = bitmap.height;
+  losslessVideoCanvas.getContext('2d', { alpha: false }).drawImage(bitmap, 0, 0);
+  syncLosslessVideoStyle();
+}
 
 /** Sends optional refinement control; a queued worker request cannot re-enable it. */
 function sendLossless(message) {
@@ -1967,6 +1990,35 @@ const pageLossless = createLosslessRenderer({
   },
 });
 
+const trackLossless = createLosslessTrackRenderer({
+  video: () => videoElement,
+  paint: paintLosslessVideo,
+  decode: (png) => createImageBitmap(new Blob([png], { type: 'image/png' }), { colorSpaceConversion: 'none' }),
+  send: sendLossless,
+  changed: (state) => {
+    const visibilityChanged = losslessVideoShown !== state.shown;
+    losslessVideoShown = state.shown;
+    if (!state.shown && losslessVideoCanvas && (losslessVideoCanvas.width || losslessVideoCanvas.height)) {
+      losslessVideoCanvas.width = 0; losslessVideoCanvas.height = 0;
+    }
+    if (visibilityChanged) syncLosslessVideoStyle();
+    if (losslessSink !== 'track-generator') return;
+    losslessPresentation = state;
+    refreshLosslessCapability();
+  },
+});
+
+/** Page-owned submission and compositor callbacks must share scene ordering. */
+function losslessTrackAvailable() {
+  return mstgActive && !!videoElement
+    && typeof videoElement.requestVideoFrameCallback === 'function'
+    && typeof videoElement.cancelVideoFrameCallback === 'function'
+    && document.pictureInPictureElement !== videoElement
+    && document.fullscreenElement !== videoElement;
+}
+
+document.addEventListener('fullscreenchange', refreshLosslessCapability);
+
 /**
  * Reports the selected sink's capability without changing its fallback order.
  * Dashboards read `window.losslessRefinementStatus` or the same-origin
@@ -1975,13 +2027,14 @@ const pageLossless = createLosslessRenderer({
  */
 function refreshLosslessCapability() {
   const canvasSink = losslessSink === 'worker-canvas' || losslessSink === 'page-canvas';
-  const supported = canvasSink && isFullFrameVideo(currentEncoderMode)
+  const orderedSink = canvasSink || (losslessSink === 'track-generator' && losslessTrackAvailable());
+  const supported = orderedSink && isFullFrameVideo(currentEncoderMode)
     && typeof createImageBitmap === 'function';
   const allowed = supported && lossless_static_refinement && use_paint_over_quality && losslessParentAllowed
     && !document.hidden && isVideoPipelineActive;
   const effective = allowed && !!losslessServer.effective;
   const reason = !isFullFrameVideo(currentEncoderMode) ? 'full-frame-required'
-    : !canvasSink ? 'canvas-sink-required' : typeof createImageBitmap !== 'function' ? 'png-decoder-unavailable'
+    : !orderedSink ? 'canvas-sink-required' : typeof createImageBitmap !== 'function' ? 'png-decoder-unavailable'
     : !losslessServer.supported ? losslessServer.reason
     : !lossless_static_refinement ? 'disabled' : (!use_paint_over_quality || !losslessParentAllowed) ? 'paint-over-disabled'
     : document.hidden ? 'page-hidden' : !isVideoPipelineActive ? 'video-stopped'
@@ -1995,13 +2048,14 @@ function refreshLosslessCapability() {
     window.postMessage({ type: 'losslessRefinementStatus', status: state }, window.location.origin);
   }
   const config = { type: 'losslessConfig', allowed, enabled: effective, epoch: losslessServer.epoch,
-    workerCanvas: losslessSink === 'worker-canvas' };
+    sink: losslessSink, workerCanvas: losslessSink === 'worker-canvas' };
   const configKey = JSON.stringify(config);
   if (configKey !== losslessConfiguration) {
     losslessConfiguration = configKey;
     config.serial = ++losslessConfigSerial;
     pageLosslessProtocol.enable(allowed);
     pageLossless.configure({ enabled: effective && losslessSink === 'page-canvas', epoch: config.epoch });
+    trackLossless.configure({ enabled: effective && losslessSink === 'track-generator' && losslessTrackAvailable(), epoch: config.epoch });
     if (websocket && websocket._worker) websocket._worker.postMessage(config);
     if (videoWorker) videoWorker.postMessage(config);
   }
@@ -2025,8 +2079,11 @@ function selectLosslessSink(sink) {
 /** Withdraws pending and visible stills while preserving ordinary video. */
 function invalidateLossless(reason) {
   pageLosslessSamples.clear();
-  if (reason === 'socket-closed') { pageLossless.reset(); pageLosslessProtocol.reset(); }
-  else pageLossless.invalidate(reason);
+  if (reason === 'socket-closed') { pageLossless.reset(); trackLossless.reset(); pageLosslessProtocol.reset(); }
+  else {
+    pageLossless.invalidate(reason);
+    if (reason === 'cleanup') trackLossless.reset(); else trackLossless.invalidate(reason);
+  }
   if (videoWorker) videoWorker.postMessage({ type: 'losslessInvalidate', reason });
 }
 
@@ -2046,7 +2103,8 @@ function receiveLossless(message) {
       return;
     }
     sendLossless({ op: 'received', version: 1, epoch: message.stamp.epoch, transferId: message.transferId });
-    void pageLossless.offer(message.stamp, message.png);
+    const renderer = losslessSink === 'track-generator' ? trackLossless : pageLossless;
+    void renderer.offer(message.stamp, message.png);
   }
 }
 
@@ -2798,10 +2856,11 @@ function teardownMstgWriter() {
  * box re-mirrored whenever it changed; a backpressured sink drops the frame
  * rather than building latency.
  * @param {VideoFrame} frame
+ * @param {*} [stamp] Native identity of this decoded frame, when available.
  * @returns {boolean} True when consumed (the caller must not close it), false
  *     to fall back to the canvas.
  */
-function presentFrameToVideo(frame) {
+function presentFrameToVideo(frame, stamp = null) {
   if (!ensureMstgWriter()) return false;
   if (!mstgActive) {
     mstgActive = true;
@@ -2830,6 +2889,7 @@ function presentFrameToVideo(frame) {
       }
     }
   }
+  selectLosslessSink('track-generator');
   if (canvas && videoElement) {
     if (mstgRendered && canvas.style.display !== 'none') canvas.style.display = 'none';
     if (canvasGeomDirty || mstgLastGeom === null) {
@@ -2838,6 +2898,7 @@ function presentFrameToVideo(frame) {
       videoElement.style.display = 'block';
       videoElement.style.objectFit = 'fill';
       canvasGeomDirty = false;
+      syncLosslessVideoStyle();
     }
   }
   if (!mstgRendered && canvas && canvasContext && canvas.width > 0 && canvas.height > 0) {
@@ -2854,6 +2915,7 @@ function presentFrameToVideo(frame) {
   }
   mstgConsecutiveDrops = 0;
   const activeWriter = videoFrameWriter;
+  trackLossless.submitted(frame, stamp);
   videoFrameWriter.write(frame).catch(() => {
     try { frame.close(); } catch (e) {}
     if (videoFrameWriter === activeWriter) deactivateMstg();
@@ -3339,12 +3401,14 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec, frameId, reference, arri
 /** Returns presentation from the main-thread track generator to the canvas; idempotent. */
 function deactivateMstg() {
   if (!mstgActive) return;
+  trackLossless.invalidate('track-closed');
   mstgActive = false;
   mstgConsecutiveDrops = 0;
   mstgRendered = false; sinkRevealGen++;
   if (videoElement) videoElement.style.display = 'none';
   if (canvas) canvas.style.display = '';
   teardownMstgWriter();
+  selectLosslessSink('unsettled');
 }
 
 /**
@@ -4056,6 +4120,7 @@ function syncSinkToCanvasStyle() {
   if (isMstg) mstgLastGeom = geom; else videoWorkerLastGeom = geom;
   canvasGeomDirty = false;
   if (rendered) canvas.style.display = 'none';
+  syncLosslessVideoStyle();
 }
 
 /**
@@ -4379,6 +4444,8 @@ const initializeUI = () => {
     }
     videoElement.style.display = 'none';
     videoContainer.appendChild(videoElement);
+    videoElement.addEventListener('enterpictureinpicture', refreshLosslessCapability);
+    videoElement.addEventListener('leavepictureinpicture', refreshLosslessCapability);
   }
 
   if (USE_OFFSCREEN_WORKER) {
@@ -4864,8 +4931,8 @@ function handleDecodedVncStripeFrame(yPos, frame) {
       if (streamStats.open) pageShown.superseded(decodedStripesQueue.length);
       decodedStripesQueue.length = 0;
     }
-    if (supportsWindowMSTG && presentFrameToVideo(frame)) {
-      selectLosslessSink('track-generator');
+    if (supportsWindowMSTG && presentFrameToVideo(frame, stamp)) {
+      // The page track keeps presenting beneath an optional verified still.
     } else if (USE_OFFSCREEN_WORKER && presentFrameToWorker(frame, stamp)) {
       // Handed to the worker sink.
     } else {
@@ -8210,6 +8277,7 @@ class WorkerWebSocket {
 
       if (dataTypeByte === 0x03 || dataTypeByte === 0x04) {
         pageLossless.observe(event.stamp || null);
+        trackLossless.observe(event.stamp || null);
         window.videoChunksReceived++;
         lastVideoChunkAt = performance.now();
         if (startVideoWatchdogTimer !== null) {

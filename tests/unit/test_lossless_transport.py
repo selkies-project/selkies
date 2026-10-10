@@ -210,6 +210,23 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status['reason'], 'full-frame-required')
         self.assertEqual(self.native.transitions, [])
 
+    async def test_page_track_requires_explicit_capability_and_preserves_parent_gate(self):
+        await self.capability(supported=False, sink='track-generator')
+        self.assertEqual(self.native.transitions, [])
+        await self.capability(sink='track-generator')
+        controller = self.server._refinements['primary']
+        controller.observe(STAMP)
+        await self.request(controller)
+        await self.drain()
+        self.assertEqual(self.native.calls, 1)
+        self.assertEqual(len(self.messages('lossless_end')), 1)
+        self.server.display_clients['primary']['use_paint_over_quality'] = False
+        await self.server._refresh_refinement('primary')
+        await self.request(controller)
+        await self.drain()
+        self.assertEqual(self.native.calls, 1)
+        self.assertFalse(controller.effective)
+
     async def test_settings_and_capability_cannot_reenable_a_stopping_capture(self):
         controller = await self.activate()
         old_epoch = controller.epoch
@@ -353,7 +370,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         controller = await self.activate()
         viewer = Socket()
         self.server.clients.add(viewer)
-        await self.capability(viewer)
+        await self.capability(viewer, sink='track-generator')
         await self.capability(supported=False)
         self.assertTrue(controller.effective)
         self.assertEqual(self.server._refinement_consumers('primary'), {viewer})

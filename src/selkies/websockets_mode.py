@@ -2005,7 +2005,7 @@ class DataStreamingServer(BaseStreamingService):
         return 'primary'
 
     def _refinement_consumers(self, display_id: str) -> Set[Any]:
-        """Count only connected, visible, negotiated canvas consumers."""
+        """Count connected, visible consumers with ordered still presentation."""
         return {ws for ws, capable in self._refinement_clients.items()
                 if capable and ws in self.clients and ws not in self.video_paused_clients
                 and self._refinement_display(ws) == display_id}
@@ -2073,7 +2073,7 @@ class DataStreamingServer(BaseStreamingService):
             if operation == 'capability':
                 self._refinement_clients[websocket] = (
                     message.get('supported') is True
-                    and message.get('sink') in ('worker-canvas', 'page-canvas'))
+                    and message.get('sink') in ('worker-canvas', 'page-canvas', 'track-generator'))
                 self._refinement_tokens.pop(websocket, None)
                 self._refinement_pending.pop(websocket, None)
                 await self._refresh_refinement(display_id)

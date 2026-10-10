@@ -5,7 +5,7 @@
  */
 
 /** Deterministic protocol and same-canvas ordering/lifetime checks. @module */
-import { createLosslessProtocol, createLosslessRenderer, validLosslessStamp, validLosslessPng } from '../../addons/selkies-web-core/lib/lossless-static.js';
+import { createLosslessProtocol, createLosslessRenderer, createLosslessTrackRenderer, validLosslessStamp, validLosslessPng } from '../../addons/selkies-web-core/lib/lossless-static.js';
 import assert from 'node:assert/strict';
 
 let passed = 0, failed = 0;
@@ -510,6 +510,282 @@ await check('retired sockets cannot dispatch page control, frames, or close into
   ctx.websocket=current;ctx.bind();
   for(const event of ['onopen','onmessage','onerror','onclose'])old[event]({});
   assert.equal(called.length,0);current.onmessage({});assert.deepEqual(called,['message']);
+});
+
+/** Drive compositor callbacks independently of submission and PNG decoding. */
+function trackRig() {
+  const t = timers(), paints = [], sends = [], bitmaps = [], statuses = [], videos = [];
+  let decodeWait = null;
+  const makeVideo = () => {
+    let next = 0;
+    const callbacks = new Map(), canceled = [];
+    const video = {
+      callbacks, canceled,
+      requestVideoFrameCallback(fn) { const id = ++next; callbacks.set(id, fn); return id; },
+      cancelVideoFrameCallback(id) { canceled.push(id); callbacks.delete(id); },
+      fire(timestamp, dimensions = {}) {
+        assert.equal(callbacks.size, 1, 'exactly one outstanding compositor callback');
+        const [id, fn] = callbacks.entries().next().value;
+        callbacks.delete(id);
+        fn(t.now(), { mediaTime: timestamp / 1000000, width: 64, height: 32, ...dimensions });
+      },
+    };
+    videos.push(video);
+    return video;
+  };
+  let video = makeVideo();
+  const renderer = createLosslessTrackRenderer({ video: () => video,
+    paint: image => paints.push(image.label), send: message => sends.push(message),
+    changed: status => statuses.push(status),
+    decode: async () => { const bitmap = frame('png'); bitmaps.push(bitmap); if (decodeWait) await decodeWait; return bitmap; },
+    ...t,
+  });
+  const submit = (timestamp, identity = stamp({ sample: '1' }), changes = {}) => {
+    const f = Object.assign(frame(`video-${timestamp}`), { timestamp }, changes);
+    renderer.submitted(f, identity);
+    return f;
+  };
+  const ready = (identity = stamp({ sample: '1' }), timestamp = 1000001) => {
+    renderer.configure({ enabled: true, epoch: identity.epoch });
+    renderer.observe(identity); submit(timestamp, identity); video.fire(timestamp); t.run(500);
+  };
+  return { renderer, t, paints, sends, bitmaps, statuses, videos, submit, ready,
+    video: () => video, replaceVideo: () => { video = makeVideo(); return video; },
+    defer: () => { let done; decodeWait = new Promise(resolve => { done = resolve; }); return done; },
+  };
+}
+
+await check('disabled track refinement owns no callbacks, ledger entries, timers, or video copies', async () => {
+  const r = trackRig();
+  r.renderer.configure({ enabled: false, epoch: 3 });
+  for (let i = 1; i <= 100; i++) {
+    r.renderer.observe(stamp({ sample: String(i) }));
+    const f = r.submit(i, stamp({ sample: String(i) }));
+    assert.equal(f.closed, 0); assert.equal(f.clones.length, 0);
+  }
+  assert.equal(await r.renderer.offer(stamp(), png()), false);
+  assert.equal(r.renderer.status().trackedSamples, 0);
+  assert.equal(r.renderer.status().callbackPending, false);
+  assert.equal(r.video().callbacks.size, 0); assert.equal(r.t.count(), 0);
+  assert.deepEqual(r.paints, []); assert.deepEqual(r.sends, []); assert.deepEqual(r.bitmaps, []);
+});
+await check('track submission cannot request a still until its exact compositor timestamp is presented', () => {
+  const r = trackRig(), s = stamp({ sample: '1' });
+  r.renderer.configure({ enabled: true, epoch: 3 }); r.renderer.observe(s);
+  const f = r.submit(1234567, s);
+  r.t.run(500); assert.deepEqual(r.sends, []);
+  assert.equal(r.renderer.status().presentedTimestamp, null);
+  r.video().fire(1234567); assert.deepEqual(r.sends, []);
+  r.t.run(500); assert.equal(r.sends.length, 1);
+  assert.equal(r.sends[0].sample, '1'); assert.equal(r.sends[0].op, 'request');
+  assert.equal(r.renderer.status().presentedTimestamp, 1234567);
+  assert.equal(f.closed, 0); assert.equal(f.clones.length, 0); assert.deepEqual(r.paints, []);
+});
+await check('track timestamp lookup never guesses a neighboring submission', () => {
+  for (const timestamp of [999999, 1000001, NaN, Infinity]) {
+    const r = trackRig(), s = stamp({ sample: '1' });
+    r.renderer.configure({ enabled: true, epoch: 3 }); r.renderer.observe(s); r.submit(1000000, s);
+    r.video().fire(timestamp); r.t.run(500);
+    assert.equal(r.renderer.status().shown, false);
+    assert.equal(r.renderer.status().presentedTimestamp, null); assert.deepEqual(r.sends, []);
+  }
+});
+await check('an unknown older presentation cannot forget a newer announced and submitted quiet scene', () => {
+  const r = trackRig(), s = stamp({ sample: '2', scene: '8' });
+  r.renderer.configure({ enabled: true, epoch: 3 });
+  r.renderer.observe(s); r.submit(2000000, s);
+  r.video().fire(1000000); r.t.run(500); assert.deepEqual(r.sends, []);
+  r.video().fire(2000000); r.t.run(500);
+  assert.equal(r.sends.filter(m => m.op === 'request').length, 1);
+  assert.equal(r.sends.at(-1).scene, '8');
+});
+await check('track ledger is bounded and an evicted sample never becomes a presented identity', () => {
+  const r = trackRig(); r.renderer.configure({ enabled: true, epoch: 3 });
+  for (let i = 1; i <= 65; i++) {
+    const s = stamp({ sample: String(i) }); r.renderer.observe(s); r.submit(1000000 + i, s);
+  }
+  assert.equal(r.renderer.status().trackedSamples, 64);
+  r.video().fire(1000001); r.t.run(500); assert.deepEqual(r.sends, []);
+  r.video().fire(1000065); r.t.run(500);
+  assert.equal(r.sends.at(-1).sample, '65'); assert.equal(r.renderer.status().trackedSamples, 0);
+});
+await check('duplicate or regressing track timestamps remain ambiguous across Off and reset until a newer timestamp recovers', async () => {
+  for (const restart of ['none', 'off-on', 'reset']) {
+    for (const ambiguousTimestamp of [2000000, 1999999]) {
+      const r = trackRig(), first = stamp({ sample: '1' });
+      r.renderer.configure({ enabled: true, epoch: 3 }); r.renderer.observe(first); r.submit(2000000, first);
+      if (restart === 'off-on') r.renderer.configure({ enabled: false, epoch: 3 });
+      if (restart === 'reset') r.renderer.reset();
+      if (restart !== 'none') r.renderer.configure({ enabled: true, epoch: 3 });
+      const ambiguous = stamp({ sample: '2', scene: '8' });
+      r.renderer.observe(ambiguous);
+      const f = r.submit(ambiguousTimestamp, ambiguous);
+      assert.equal(r.renderer.status().trackedSamples, 0, restart + ' must retire every ambiguous entry');
+      r.video().fire(ambiguousTimestamp); r.video().fire(2000000); r.t.run(500);
+      assert.equal(r.renderer.status().presentedTimestamp, null);
+      assert.equal(await r.renderer.offer(ambiguous, png()), false);
+      assert.deepEqual(r.sends, []); assert.deepEqual(r.paints, []);
+      assert.equal(f.closed, 0); assert.equal(f.clones.length, 0);
+      const newer = stamp({ sample: '3', scene: '9' });
+      r.renderer.observe(newer); r.submit(2000001, newer); r.video().fire(2000001); r.t.run(500);
+      assert.equal(r.sends.length, 1); assert.equal(r.sends[0].sample, '3');
+      assert.equal(await r.renderer.offer(newer, png()), true);
+      assert.deepEqual(r.paints, ['png']); assert.equal(r.renderer.status().presentedTimestamp, 2000001);
+    }
+  }
+});
+await check('track geometry must agree at submission and compositor presentation', () => {
+  for (const dimensions of [{ width: 63 }, { height: 31 }]) {
+    const r = trackRig(), s = stamp({ sample: '1' });
+    r.renderer.configure({ enabled: true, epoch: 3 }); r.renderer.observe(s); r.submit(1000000, s);
+    r.video().fire(1000000, dimensions); r.t.run(500);
+    assert.deepEqual(r.sends, []); assert.equal(r.renderer.status().shown, false);
+  }
+  for (const changes of [{ displayWidth: 63 }, { displayHeight: 31 }, { timestamp: NaN }]) {
+    const r = trackRig(); r.renderer.configure({ enabled: true, epoch: 3 });
+    r.renderer.observe(stamp({ sample: '1' })); r.submit(1000000, stamp({ sample: '1' }), changes);
+    assert.equal(r.renderer.status().trackedSamples, 0);
+  }
+});
+await check('a track PNG never replaces normal video frames or retains a restore copy', async () => {
+  const r = trackRig(), s = stamp({ sample: '1' }); r.ready(s);
+  assert.equal(await r.renderer.offer(s, png()), true);
+  const next = stamp({ sample: '2' }); r.renderer.observe(next);
+  const f = r.submit(2000000, next); r.video().fire(2000000);
+  assert.deepEqual(r.paints, ['png']); assert.equal(f.clones.length, 0); assert.equal(f.closed, 0);
+  assert.equal(r.renderer.status().retainedVideoFrames, 0); assert.equal(r.renderer.status().backupBytes, 0);
+  r.renderer.configure({ enabled: false, epoch: 3 });
+  assert.equal(r.renderer.status().shown, false); assert.equal(r.bitmaps[0].closed, 1);
+  assert.equal(r.renderer.status().trackedSamples, 0); assert.equal(r.video().callbacks.size, 0);
+  assert.equal(r.t.count(), 0); assert.deepEqual(r.paints, ['png']);
+});
+await check('a late track PNG decode after Off closes without painting or requesting again', async () => {
+  const r = trackRig(), s = stamp({ sample: '1' }); r.ready(s);
+  const done = r.defer(), pending = r.renderer.offer(s, png());
+  r.renderer.configure({ enabled: false, epoch: 3 }); done();
+  assert.equal(await pending, false); assert.equal(r.bitmaps[0].closed, 1);
+  assert.deepEqual(r.paints, []); assert.equal(r.video().callbacks.size, 0); assert.equal(r.t.count(), 0);
+  assert.equal(r.sends.filter(m => m.op === 'request').length, 1);
+});
+await check('a newly received scene retires a track still before its new video is presented', async () => {
+  const r = trackRig(), a = stamp({ sample: '1' }); r.ready(a);
+  assert.equal(await r.renderer.offer(a, png()), true);
+  const b = stamp({ scene: '8', sample: '2' }); r.renderer.observe(b);
+  assert.equal(r.renderer.status().shown, false); assert.equal(r.bitmaps[0].closed, 1);
+  assert.equal(r.statuses.at(-1).shown, false);
+  r.submit(2000000, b); r.t.run(500);
+  assert.equal(r.sends.filter(m => m.op === 'request').length, 1);
+  r.video().fire(2000000); r.t.run(500);
+  assert.equal(await r.renderer.offer(b, png()), true); assert.deepEqual(r.paints, ['png', 'png']);
+});
+await check('retired track compositor callbacks cannot consume the new session ledger', () => {
+  const r = trackRig(), s = stamp({ sample: '1' });
+  r.renderer.configure({ enabled: true, epoch: 3 }); r.renderer.observe(s); r.submit(1000000, s);
+  const old = r.video().callbacks.values().next().value;
+  r.renderer.reset(); r.renderer.configure({ enabled: true, epoch: 3 });
+  r.renderer.observe(s); r.submit(2000000, s);
+  old(0, { mediaTime: 2, width: 64, height: 32 });
+  assert.equal(r.renderer.status().trackedSamples, 1); assert.equal(r.video().callbacks.size, 1);
+  r.t.run(500); assert.deepEqual(r.sends, []);
+  r.video().fire(2000000); r.t.run(500); assert.equal(r.sends.at(-1).op, 'request');
+});
+await check('replacing a track video element within one epoch retires its old still and request', async () => {
+  for (const visible of [false, true]) {
+    const r = trackRig(), s = stamp({ sample: '1' }); r.ready(s);
+    if (visible) assert.equal(await r.renderer.offer(s, png()), true);
+    const oldVideo = r.video(), oldCallback = oldVideo.callbacks.values().next().value;
+    r.replaceVideo(); r.renderer.configure({ enabled: true, epoch: 3 });
+    assert.equal(r.renderer.status().shown, false); assert.equal(r.renderer.status().pending, false);
+    assert.equal(oldVideo.callbacks.size, 0); assert.equal(r.t.count(), 0);
+    if (visible) assert.equal(r.bitmaps[0].closed, 1);
+    const next = stamp({ sample: '2' }); r.renderer.observe(next); r.submit(2000000, next);
+    oldCallback(0, { mediaTime: 2, width: 64, height: 32 });
+    assert.equal(r.renderer.status().trackedSamples, 1);
+    r.video().fire(2000000); r.t.run(500);
+    assert.equal(r.sends.filter(m => m.op === 'request').length, 2);
+  }
+});
+await check('an old track PNG decode cannot paint over a newer presented scene and queued PNG', async () => {
+  const r = trackRig(), a = stamp({ sample: '1' }); r.ready(a);
+  const done = r.defer(), old = r.renderer.offer(a, png());
+  const b = stamp({ scene: '8', sample: '2' }); r.renderer.observe(b);
+  r.submit(2000000, b); r.video().fire(2000000); r.t.run(500);
+  assert.equal(await r.renderer.offer(b, png()), false);
+  assert.equal(r.renderer.status().queuedPngBytes, 33);
+  done(); assert.equal(await old, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(r.bitmaps.length, 2); assert.equal(r.bitmaps[0].closed, 1);
+  assert.equal(r.bitmaps[1].closed, 0); assert.deepEqual(r.paints, ['png']);
+  assert.equal(r.renderer.status().scene, '8'); assert.equal(r.renderer.status().shown, true);
+  assert.equal(r.renderer.status().retainedVideoFrames, 0); assert.equal(r.renderer.status().backupBytes, 0);
+});
+await check('the actual page track path preserves frame identity and excludes backpressure drops from its ledger', async () => {
+  const { readFileSync } = await import('node:fs'), vm = await import('node:vm');
+  const source = readFileSync(new URL('../../addons/selkies-web-core/selkies-ws-core.js', import.meta.url), 'utf8');
+  const start = source.indexOf('function presentFrameToVideo('), end = source.indexOf('\n}\n', start) + 2;
+  assert(start >= 0 && end > start);
+  for (const desiredSize of [0, -1, 1]) {
+    const writes = [], submitted = [], calls = [];
+    const writer = { desiredSize, write: f => { writes.push(f); return Promise.resolve(); } };
+    const context = { ensureMstgWriter: () => true, mstgActive: true, mstgRendered: true,
+      mstgLastGeom: 'geometry', canvasGeomDirty: false,
+      canvas: { style: { display: 'none' }, width: 64, height: 32 },
+      videoElement: { style: {} }, canvasContext: { drawImage: () => calls.push('draw') },
+      selectLosslessSink: () => {}, syncLosslessVideoStyle: () => {},
+      videoFrameWriter: writer, mstgConsecutiveDrops: 0, SINK_STALL_DROP_LIMIT: 30,
+      streamStats: { open: false }, trackLossless: { submitted: (f, s) => submitted.push([f, s]) },
+      deactivateMstg: () => calls.push('deactivate'), console,
+    };
+    vm.runInNewContext(source.slice(start, end) + '\nthis.present = presentFrameToVideo;', context);
+    const f = Object.assign(frame('ordinary'), { timestamp: 1234567,
+      colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false } });
+    const identity = stamp({ sample: '1' }), color = f.colorSpace;
+    assert.equal(context.present(f, identity), true);
+    assert.equal(f.clones.length, 0); assert.deepEqual(calls, []);
+    if (desiredSize <= 0) {
+      assert.equal(f.closed, 1); assert.deepEqual(writes, []); assert.deepEqual(submitted, []);
+    } else {
+      assert.equal(f.closed, 0); assert.equal(writes.length, 1); assert.equal(writes[0], f);
+      assert.equal(submitted.length, 1); assert.equal(submitted[0][0], f); assert.equal(submitted[0][1], identity);
+      assert.equal(f.timestamp, 1234567); assert.equal(f.colorSpace, color);
+      writer.write = () => Promise.reject(Error('writer closed'));
+      context.present(frame('rejected'), identity);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(calls, ['deactivate']);
+    }
+  }
+});
+await check('actual capability refresh transfers refinement ownership between page canvas and track within one epoch', async () => {
+  const { readFileSync } = await import('node:fs'), vm = await import('node:vm');
+  const source = readFileSync(new URL('../../addons/selkies-web-core/selkies-ws-core.js', import.meta.url), 'utf8');
+  const extract = name => {
+    const start = source.indexOf(`function ${name}(`), end = source.indexOf('\n}\n', start) + 2;
+    assert(start >= 0 && end > start);
+    return source.slice(start, end);
+  };
+  const owner = () => ({ enabled: false, epochs: [], configure(config) {
+    this.enabled = config.enabled; this.epochs.push(config.epoch);
+  } });
+  const canvasOwner = owner(), trackOwner = owner();
+  const context = { losslessSink: 'page-canvas', lossless_static_refinement: true,
+    use_paint_over_quality: true, losslessParentAllowed: true, isVideoPipelineActive: true,
+    currentEncoderMode: 'h264enc', isFullFrameVideo: () => true, losslessTrackAvailable: () => true,
+    createImageBitmap: () => {}, document: { hidden: false },
+    window: { location: { origin: 'https://private-test.invalid' }, postMessage: () => {} },
+    losslessServer: { epoch: 3, supported: true, effective: true, reason: 'ready' },
+    losslessPresentation: {}, losslessConfiguration: '', losslessConfigSerial: 0, losslessCapabilitySent: '',
+    pageLosslessProtocol: { enable: () => {} }, pageLossless: canvasOwner, trackLossless: trackOwner,
+    websocket: null, videoWorker: null, sendLossless: () => {}, invalidateLossless: () => {},
+  };
+  vm.runInNewContext(extract('refreshLosslessCapability') + '\n' + extract('selectLosslessSink')
+    + '\nthis.refresh = refreshLosslessCapability; this.select = selectLosslessSink;', context);
+  context.refresh();
+  assert.deepEqual([canvasOwner.enabled, trackOwner.enabled], [true, false]);
+  context.select('track-generator');
+  assert.deepEqual([canvasOwner.enabled, trackOwner.enabled], [false, true]);
+  context.select('page-canvas');
+  assert.deepEqual([canvasOwner.enabled, trackOwner.enabled], [true, false]);
+  assert.deepEqual(canvasOwner.epochs, [3, 3, 3]); assert.deepEqual(trackOwner.epochs, [3, 3, 3]);
 });
 
 console.log(`[lossless-static] ${passed}/${passed + failed} passed`);
