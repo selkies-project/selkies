@@ -1,15 +1,128 @@
 # Experimental lossless still refinement
 
-This is a review fixture, not a feature enabled in a streaming core or dashboard.
+## Integrated opt-in
+
+Both dashboards expose **Lossless static refinement** under the existing
+paint-over/static-image improvement control. The child is off by default and
+requires the parent to be enabled. Its preference is scoped to the display;
+turning the parent off retains that preference but stops refinement. The server
+setting is `lossless_static_refinement` (`SELKIES_LOSSLESS_STATIC_REFINEMENT`).
+
+This experimental integration requires the scene-identity API in PixelFlux
+commit `449cc49ba479f0fb6c564f5f681ca2c03d28dd6a`, on top of
+[PixelFlux #46](https://github.com/selkies-project/pixelflux/pull/46). A wheel built
+from unmodified upstream PixelFlux does not provide that API. The Selkies change
+must not merge before its native dependency is available; the normal dependency
+version and CI wheel build have not been redirected to a private fork.
+
+The supported route is a local Wayland compositor, a full-frame encoder with
+verified sample association, WebSocket transport, and a canvas that Selkies owns.
+Availability follows the actual capture, encoder, and browser sink. The sidebar
+shows why other routes are unavailable. Selecting this feature does not switch
+capture backends, codecs, renderers, or transports. In particular, native WebRTC
+video and MediaStreamTrackGenerator sinks remain unavailable, as do striped
+video, XShm scene tracking, NvFBC, DRI3, and external Wayland hosts.
+
+After a scene settles, the canvas requests its native run/source/scene/sample
+identity. The server waits for at least 500 ms of known scene quiet, shares one
+capture across consumers, and delivers a bounded PNG behind video using the
+existing bulk-transfer pacing. Metadata travels with the exact video payload
+through relay selection and decoding. The canvas validates the current scene
+again after asynchronous PNG decoding. A newer scene retires the refinement;
+later video samples of the same scene do not undo it. This is ordering relative
+to received and presented video, not knowledge of future network messages or
+physical monitor presentation.
+
+The feature preserves the captured desktop's RGB8 values. It does not recover
+10-bit TIFF data or application detail lost before capture. One display caches
+one PNG, and each client assembles at most one transfer (64 MiB maximum). While
+an obsolete browser decode finishes, one newer compressed PNG may also wait;
+this is not a single-PNG bound on total browser memory. A visible refinement
+retains at most one decoded video-frame clone, or an initial canvas backup, for
+restoring video when disabled. Already-running native compression and browser
+PNG decoding cannot be interrupted; cancellation withdraws admission, transfer,
+and presentation of their results. These limits are separate from PixelFlux's
+native raw-pixel budgets.
+
+Each requested refinement has an absolute 35-second deadline covering capture,
+transfer, and browser decoding. A failed or expired request stops being pending
+and cannot present a late PNG. Repeated video samples do not retry that scene;
+a new scene or explicit reactivation can request again. The normal video keeps
+running throughout, including when no PNG response arrives.
+
+The focused tests exercise the controller, real transport methods, shared
+settings, actual embedded worker parser, and renderer state machine:
+
+```sh
+python tests/unit/test_static_refinement.py
+python tests/unit/test_lossless_transport.py
+python tests/unit/test_lossless_settings.py
+python tests/unit/test_lossless_static.py
+```
+
+The JavaScript wrappers require Node in `PATH`. Run the repository's full
+preflight and private browser/GPU suites before publishing a changed source
+tree; unit tests do not establish browser scheduling, latency, or visual quality.
+
+### Reproduce the integrated UI path
+
+Use a prepared Linux sandbox with the matching PixelFlux scene API, normal
+Selkies dependencies, and the dashboard built from the same source tree. The
+controller interpreter needs Playwright, Pillow, and NumPy; the server/fixture
+interpreter also needs NumPy and pywayland. Playwright's selected browser must
+be installed in that sandbox. No desktop display or existing session is used.
+
+From the repository root, set `PF_REVISION` to the installed native source
+revision and run:
+
+```sh
+probe_root=$(mktemp -d /tmp/selkies-refinement.XXXXXX)
+python tests/tools/refinement_e2e.py --selkies-repo "$PWD" \
+  --web-root "$PWD/addons/selkies-dashboard/dist" --dashboard default \
+  --backend wayland --transport websockets --browser firefox \
+  --revision "$PF_REVISION" \
+  --runtime "$probe_root/runtime" --output "$probe_root/results" \
+  --strict --require-supported
+```
+
+For Wish, select `addons/selkies-dashboard-wish/dist` and `--dashboard wish`.
+`--server-python` can name a separate server interpreter, and the optional
+`--browser-endpoint-file` connects to a private Playwright run-server with a
+matching client version. The revision argument is a label; the report separately
+records installed module hashes, source state, webroot hashes, and script hashes.
+`--width 3840 --height 2160` exercises the same path at 4K. X11 negative-capability
+checks require Xvfb. WebRTC and other unavailable sinks are reported explicitly;
+`--require-supported` makes an unavailable route fail a requested positive check.
+
+The probe clicks the actual sidebar controls and preserves normal codec and
+renderer selection. It compares visible canvas RGBA8 to a deterministic SHM
+producer across source changes, parent/child toggles, resize, and reload. A
+separate instrumented phase delays PNG decoding, then observes the original
+bitmap draw/close calls to test cancellation and an old decode crossing a newer
+presented scene. That phase includes a positive PNG-paint control. It is not a
+latency benchmark, physical-display measurement, or proof over every possible
+browser schedule.
+
+Each invocation requires fresh runtime and output directories. The server uses
+a private home and XDG directories, binds loopback only, and restricts file
+manager access to its output directory. The script reaps its owned process
+leaders; run it under the sandbox's supervisor when process-group cleanup is
+required. Results and screenshots can contain local paths and the isolated
+fixture desktop; inspect them before sharing.
+
+## Historical standalone fixture
+
+The earlier standalone review fixture remains available for reproducing the
+historical studies below. It is separate from the integrated opt-in above.
 It preserves the live video and temporarily places an RGB snapshot over it. A new
 presented video frame, input, resize, or video-style change removes the snapshot.
 Pending responses are rejected when the client observes such a change, when a
 newer request supersedes them, or when their dimensions differ from the video.
 
-The capture contract proposed in
+The historical capture contract proposed in
 [pixelflux's output-capture RFC](https://github.com/selkies-project/pixelflux/issues/45)
-is a prerequisite for production integration. It defines output identity, scene
-and capture ordering, explicit precision, cancellation, and scheduling. Its scene
+motivated the limited integrated route described above. It defines output
+identity, scene and capture ordering, explicit precision, cancellation, and scheduling. Its scene
 identity must distinguish content changes from repeated captures of unchanged
 content; a later paint-over frame must not by itself suppress a valid refinement.
 
@@ -88,8 +201,11 @@ input latency, WAN behavior, or relative encoder efficiency.
 
 The live check compares two decoded 8-bit canvas images. It establishes equality
 at that boundary, not preservation of a higher-depth source: both readbacks can
-lose the same information and still compare equal. PixelFlux's screenshot PNG
-uses 8-bit RGBA. Encoding the video at 10 bits does not make that source a native
+lose the same information and still compare equal. The historical screenshot
+fixture and the active snapshots used by this integration preserve eight bits.
+The separate standalone X11 depth-30 screenshot path now emits RGB16 with ten
+significant bits; it is not the source for this integrated refinement.
+Encoding the video at 10 bits does not make an RGB8 source a native
 10-bit capture, and an application may already map a higher-depth TIFF into an
 8-bit display range before capture.
 
@@ -143,7 +259,7 @@ paired runs and report uncertainty; frames from one cycle are not independent
 repetitions. Draw completion is not physical presentation, and a loopback result
 does not establish WAN behavior.
 
-## Limits that prevent integration
+## Limits of the historical standalone fixture
 
 - The screenshot API includes the cursor and captures the X11 root across
   outputs. The probe rejects a size mismatch; it cannot determine that a same-size
@@ -159,8 +275,8 @@ does not establish WAN behavior.
 - Zero error matches a lossless reference. Beating TurboVNC's lossless mode on
   latency, bandwidth, CPU/GPU use, or refinement time requires a matched benchmark.
 
-The integration proposal reuses the existing paint-over damage/idle information,
-keeps lossless encoding off the interactive path, and bounds and cancels pending
-work. It requires equivalent behavior across both transports, capture backends,
-dashboards, and supported sinks, followed by input-latency and frame-pacing
-measurements before any automatic mode becomes a default.
+Broader integration remains future work beyond the opt-in route above. Making
+automatic refinement a default requires coverage across transports, capture
+backends, dashboards, and supported sinks, followed by input-latency and
+frame-pacing measurements. The current limited route does not establish that
+parity or justify changing the default.

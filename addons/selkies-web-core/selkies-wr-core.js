@@ -92,7 +92,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
-import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
+import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, LOSSLESS_STATIC_REFINEMENT_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canDecodeTenBit, tenBitFormat, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers, rememberCcStart, forgetCcStart } from './lib/util.js';
 import { codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit } from './lib/wire-codecs.js';
 import { WEBCAM_ENCODER_PREFERENCES } from './lib/webcam-capture.js';
@@ -644,7 +644,7 @@ export default function webrtc() {
 	const PER_DISPLAY_SETTINGS = [
 		'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
 		'video_streaming_mode', 'use_cpu',
-		'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
+		'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality', 'lossless_static_refinement',
 		'manual_resolution', 'manual_width', 'manual_height',
 		'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
 		'video_bitrate', 'force_aligned_resolution', 'scaling_dpi'
@@ -695,6 +695,24 @@ export default function webrtc() {
 				safeSetItem(prefixedKey, value.toString());
 		}
 	};
+	/** Resolve only an explicit display preference or an operator's configured value. */
+	function resolvedLosslessPreference() {
+		return !!resolveSpec(LOSSLESS_STATIC_REFINEMENT_SPEC, lastServerSettings, {}, (key) => {
+			const storedKey = storageKeyFor(key);
+			return window.localStorage.getItem(`${storedKey}_explicit_choice`) === 'true'
+				? window.localStorage.getItem(storedKey) : null;
+		});
+	}
+	let losslessStaticRefinement = resolvedLosslessPreference();
+	/** Report this sink's limitation without discarding a preference shared with WebSockets. */
+	function publishLosslessUnavailable() {
+		const status = { version: 1, requested: losslessStaticRefinement, supported: false,
+			effective: false, reason: 'webrtc-unavailable', sink: 'webrtc-video', epoch: 0, rgbBits: 8 };
+		if (JSON.stringify(window.losslessRefinementStatus) === JSON.stringify(status)) return;
+		window.losslessRefinementStatus = status;
+		window.postMessage({ type: 'losslessRefinementStatus', status }, window.location.origin);
+	}
+	publishLosslessUnavailable();
 	const getStringParam = (key, default_value) => {
 		const prefixedKey = storageKeyFor(key);
 		const value = window.localStorage.getItem(prefixedKey);
@@ -1366,12 +1384,12 @@ export default function webrtc() {
 			'encoder', 'manual_resolution',
 			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
 			'rate_control_mode', 'video_crf', 'use_cpu', 'force_aligned_resolution',
-			'video_fullcolor', 'video_10bit', 'video_streaming_mode', 'use_paint_over_quality',
+			'video_fullcolor', 'video_10bit', 'video_streaming_mode', 'use_paint_over_quality', 'lossless_static_refinement',
 			'video_paintover_crf', 'video_paintover_burst_frames'
 		];
 		const booleanSettingKeys = [
 			'manual_resolution', 'enable_binary_clipboard', 'use_cpu',
-			'video_fullcolor', 'video_10bit', 'video_streaming_mode', 'use_paint_over_quality',
+			'video_fullcolor', 'video_10bit', 'video_streaming_mode', 'use_paint_over_quality', 'lossless_static_refinement',
 			'force_aligned_resolution'
 		];
 		const integerSettingKeys = [
@@ -1393,7 +1411,7 @@ export default function webrtc() {
 					// Sent only beside the explicit-choice marker: the core stores every
 					// value it applies, so an unmarked paint-over may be the echo of the
 					// off an older dashboard derived under Turbo.
-					if (baseKey === 'use_paint_over_quality'
+					if (['use_paint_over_quality', 'lossless_static_refinement'].includes(baseKey)
 						&& localStorage.getItem(`${key}_explicit_choice`) !== 'true') {
 						continue;
 					}
@@ -2016,6 +2034,11 @@ export default function webrtc() {
 					console.warn("Invalid value received for setUseCssScaling:", message.value);
 				}
 				break;
+			case 'setLosslessStaticRefinement':
+				if (!isSharedMode) handleSettingsMessage({ lossless_static_refinement: !!message.enabled });
+				break;
+			case 'setLosslessParentState':
+				break;
 			case "settings":
 				console.log("Received settings msg from dashboard:", message.settings);
 				handleSettingsMessage(message.settings);
@@ -2308,6 +2331,12 @@ export default function webrtc() {
 		if (settings.video_10bit !== undefined) passthrough.video_10bit = !!settings.video_10bit;
 		if (settings.video_streaming_mode !== undefined) passthrough.video_streaming_mode = !!settings.video_streaming_mode;
 		if (settings.use_paint_over_quality !== undefined) passthrough.use_paint_over_quality = !!settings.use_paint_over_quality;
+		if (settings.lossless_static_refinement !== undefined) {
+			losslessStaticRefinement = !!settings.lossless_static_refinement;
+			storeBool('lossless_static_refinement', losslessStaticRefinement);
+			passthrough.lossless_static_refinement = losslessStaticRefinement;
+			publishLosslessUnavailable();
+		}
 		if (settings.video_paintover_crf !== undefined) passthrough.video_paintover_crf = parseInt(settings.video_paintover_crf, 10);
 		if (settings.video_paintover_burst_frames !== undefined) passthrough.video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames, 10);
 		if (settings.force_aligned_resolution !== undefined) passthrough.force_aligned_resolution = !!settings.force_aligned_resolution;
@@ -2461,6 +2490,10 @@ export default function webrtc() {
 		if (changed.video_bitrate !== undefined) videoBitRate = parseInt(changed.video_bitrate, 10);
 		if (changed.audio_bitrate !== undefined) audioBitRate = parseInt(changed.audio_bitrate, 10);
 		if (changed.rate_control_mode !== undefined) rateControlMode = changed.rate_control_mode;
+		if (changed.lossless_static_refinement !== undefined) {
+			losslessStaticRefinement = !!changed.lossless_static_refinement;
+			publishLosslessUnavailable();
+		}
 		const rate = parseFloat(changed.framerate);
 		if (Number.isFinite(rate)) videoFramerate = framerateAsked = rate;
 		if (lastServerSettings) {
@@ -3365,6 +3398,9 @@ export default function webrtc() {
 			 */
 			webrtc.ondatachannelopen = () => {
 				console.log("Data channel opened");
+				webrtc.sendDataChannelMessage(`LOSSLESS ${JSON.stringify({ op: 'capability', version: 1,
+					supported: false, sink: 'webrtc-video' })}`);
+				publishLosslessUnavailable();
 				streamStats.subscribe();
 				try {
 					taggedClipboardFetch.armLegacyWindow(5000);
@@ -3702,6 +3738,8 @@ export default function webrtc() {
 				console.log("Received server settings payload:", obj.settings);
 				lastServerSettings = obj.settings;
 				const changes = sanitizeAndStoreSettings(obj.settings);
+				losslessStaticRefinement = resolvedLosslessPreference();
+				publishLosslessUnavailable();
 				if (Number.isFinite(window.video_crf)) crf = Math.round(window.video_crf);
 				if (Number.isFinite(window.video_bitrate)) videoBitRate = Math.round(window.video_bitrate);
 				const fr = obj.settings.framerate;

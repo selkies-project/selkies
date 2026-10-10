@@ -42,9 +42,10 @@ import { BITRATE_STOPS, CRF_STOPS, FRAMERATE_STOPS, framerateStopIndex, stopInde
 import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from "../../../../selkies-web-core/lib/display-refresh.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
-    USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
+    USE_PAINT_OVER_QUALITY_SPEC, LOSSLESS_STATIC_REFINEMENT_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
     tenBitStream,
     RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
+import { readLosslessStatus, subscribeLosslessStatus, losslessSettingState } from "../../../../selkies-web-core/lib/lossless-settings.js";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
 import { Input } from "@/components/ui/input";
@@ -57,7 +58,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { ChevronUp } from "lucide-react";
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useSyncExternalStore } from "react";
 import { getPrefixedKey, computeRenderableSettings, getLastServerSettings,
     getLastEffectiveCursorState, getLastAudioDevices, isSecondaryDisplay } from "@/utils";
 import { t, tl } from "@/i18n";
@@ -218,6 +219,7 @@ const rateControlOptions = ["cbr", "crf"];
 const readHidpiStored = readExplicitStored(HIDPI_SPEC);
 const readRateControlStored = readExplicitStored(RATE_CONTROL_SPEC);
 const readPaintOverStored = readExplicitStored(USE_PAINT_OVER_QUALITY_SPEC);
+const readLosslessStored = readExplicitStored(LOSSLESS_STATIC_REFINEMENT_SPEC);
 /** Default `video_bitrate` in kbps, the unit the slider and the wire share. */
 const DEFAULT_VIDEO_BITRATE = 8000;
 
@@ -455,6 +457,10 @@ export function Settings() {
     );
     const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
         USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings], readPaintOverStored);
+    const [losslessStaticRefinement, setLosslessStaticRefinement] = useConditionalSetting(
+        LOSSLESS_STATIC_REFINEMENT_SPEC, serverSettings, conditionalCtx, [serverSettings], readLosslessStored);
+    const losslessStatus = useSyncExternalStore(subscribeLosslessStatus, readLosslessStatus);
+    const losslessState = losslessSettingState(losslessStatus, losslessStaticRefinement, usePaintOverQuality);
     // Push the resolved paint-over value so the encoder agrees.
     useEffect(() => {
         if (!serverSettings) return;
@@ -1532,9 +1538,10 @@ export function Settings() {
                         {(isH264 || activeEncoder === 'jpeg') && (renderableSettings.usePaintOverQuality ?? true) && (
                             <div className="flex items-center justify-between">
                                 <div className="space-y-0.5">
-                                    <label className="text-sm font-medium">{t('sections.video.usePaintOverQualityLabel')}</label>
+                                    <label htmlFor="usePaintOverQualityToggle" className="text-sm font-medium">{t('sections.video.usePaintOverQualityLabel')}</label>
                                 </div>
                                 <Switch
+                                    id="usePaintOverQualityToggle"
                                     checked={usePaintOverQuality}
                                     onCheckedChange={handleUsePaintOverQualityToggle}
                                     disabled={!serverSettings || serverSettings.use_paint_over_quality?.locked}
@@ -1542,6 +1549,26 @@ export function Settings() {
                             </div>
                         )}
 
+                        {(isH264 || activeEncoder === 'jpeg') && usePaintOverQuality && (
+                            <div className="flex flex-col gap-2">
+                                <div className="flex items-center justify-between">
+                                    <label htmlFor="losslessStaticRefinementToggle" className="text-sm font-medium">{t('losslessStatic.label')}</label>
+                                    <Switch
+                                        id="losslessStaticRefinementToggle"
+                                        checked={losslessState.checked}
+                                        onCheckedChange={() => writeConditional(LOSSLESS_STATIC_REFINEMENT_SPEC,
+                                            !losslessStaticRefinement, setLosslessStaticRefinement, { persist: true })}
+                                        disabled={!serverSettings || serverSettings.lossless_static_refinement?.locked || !losslessState.available}
+                                        aria-describedby="losslessStaticRefinementStatus"
+                                    />
+                                </div>
+                                <p className="text-xs text-muted-foreground">{t('losslessStatic.help')}</p>
+                                <p id="losslessStaticRefinementStatus" role="status" className="text-xs text-muted-foreground">
+                                    {t(`losslessStatic.reasons.${serverSettings?.lossless_static_refinement?.locked
+                                        ? 'operator-locked' : losslessState.reason}`)}
+                                </p>
+                            </div>
+                        )}
                         {isH264 && usePaintOverQuality && (
                             <>
                                 {(renderableSettings.videoPaintoverCRF ?? true) && (

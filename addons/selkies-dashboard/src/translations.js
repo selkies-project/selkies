@@ -17,6 +17,27 @@ const simpleInterpolate = (str, variables) => {
 
 // --- English Translations (Default) ---
 const en = {
+    losslessStatic: {
+        "label": "Lossless static refinement",
+        "help": "Finish still images without capture compression loss. May use more data.",
+        "reasons": {
+            "ready": "Enabled for this display.",
+            "disabled": "Off.",
+            "waiting-for-server": "Waiting for the display capability.",
+            "disconnected": "Unavailable while disconnected.",
+            "paint-over-disabled": "Enable Paint-Over Quality first.",
+            "capture-unavailable": "This capture path does not provide scene tracking.",
+            "full-frame-required": "Requires a full-frame video encoder.",
+            "canvas-required": "Requires a compatible canvas renderer.",
+            "canvas-sink-required": "Requires a compatible canvas renderer.",
+            "png-decoder-unavailable": "This browser cannot decode the still image in this renderer.",
+            "webrtc-unavailable": "Unavailable over WebRTC; use WebSockets with a compatible renderer.",
+            "page-hidden": "Paused while this page is hidden.",
+            "video-stopped": "Paused while video is stopped.",
+            "operator-locked": "This preference is fixed by the server.",
+            "unavailable": "Unavailable for the current capture or renderer."
+        }
+    },
     selkiesLogoAlt: "Selkies Logo",
     toggleThemeTitle: "Toggle Theme",
     openDashboardTitle: "Open Dashboard",
@@ -326,6 +347,27 @@ const en = {
 
 // --- Spanish Translations (Complete) ---
 const es = {
+    losslessStatic: {
+        "label": "Refinamiento estático sin pérdida",
+        "help": "Completa las imágenes estáticas sin pérdida por compresión de la captura. Puede consumir más datos.",
+        "reasons": {
+            "ready": "Activado para esta pantalla.",
+            "disabled": "Desactivado.",
+            "waiting-for-server": "Esperando la capacidad de esta pantalla.",
+            "disconnected": "No disponible durante la desconexión.",
+            "paint-over-disabled": "Activa primero la calidad de repintado.",
+            "capture-unavailable": "Esta ruta de captura no permite seguir los cambios de escena.",
+            "full-frame-required": "Requiere un codificador de vídeo de fotograma completo.",
+            "canvas-required": "Requiere un renderizador de lienzo compatible.",
+            "canvas-sink-required": "Requiere un renderizador de lienzo compatible.",
+            "png-decoder-unavailable": "El navegador no puede decodificar la imagen estática en este renderizador.",
+            "webrtc-unavailable": "No disponible mediante WebRTC; usa WebSockets con un renderizador compatible.",
+            "page-hidden": "En pausa mientras esta página está oculta.",
+            "video-stopped": "En pausa mientras el vídeo está detenido.",
+            "operator-locked": "El servidor ha fijado esta preferencia.",
+            "unavailable": "No disponible para la captura o el renderizador actual."
+        }
+    },
     selkiesLogoAlt: "Logo de Selkies",
     toggleThemeTitle: "Cambiar Tema",
     openDashboardTitle: "Abrir el panel",
@@ -635,6 +677,27 @@ const es = {
 
 // --- Chinese (Simplified) Translations ---
 const zh_cn = {
+    losslessStatic: {
+        "label": "无损静态画面优化",
+        "help": "在捕获时无压缩损失地完善静态画面。可能增加数据用量。",
+        "reasons": {
+            "ready": "已为此显示器启用。",
+            "disabled": "已关闭。",
+            "waiting-for-server": "正在等待显示器功能信息。",
+            "disconnected": "断开连接时不可用。",
+            "paint-over-disabled": "请先启用重绘画质优化。",
+            "capture-unavailable": "此捕获路径不提供场景跟踪。",
+            "full-frame-required": "需要全帧视频编码器。",
+            "canvas-required": "需要兼容的画布渲染器。",
+            "canvas-sink-required": "需要兼容的画布渲染器。",
+            "png-decoder-unavailable": "此浏览器无法在此渲染器中解码静态图像。",
+            "webrtc-unavailable": "WebRTC 不支持此功能；请使用 WebSockets 和兼容的渲染器。",
+            "page-hidden": "此页面隐藏时暂停。",
+            "video-stopped": "视频停止时暂停。",
+            "operator-locked": "此偏好设置由服务器固定。",
+            "unavailable": "当前捕获方式或渲染器不支持此功能。"
+        }
+    },
     selkiesLogoAlt: "Selkies 徽标",
     toggleThemeTitle: "切换主题",
     openDashboardTitle: "打开仪表板",
@@ -944,6 +1007,27 @@ const zh_cn = {
 
 // --- Hindi Translations ---
 const hi = {
+    losslessStatic: {
+        "label": "दोषरहित स्थिर छवि सुधार",
+        "help": "कैप्चर संपीड़न में हानि के बिना स्थिर छवियाँ सुधारें। अधिक डेटा लग सकता है।",
+        "reasons": {
+            "ready": "इस डिस्प्ले के लिए सक्षम है।",
+            "disabled": "बंद है।",
+            "waiting-for-server": "डिस्प्ले की क्षमता की जानकारी की प्रतीक्षा है।",
+            "disconnected": "कनेक्शन बंद होने पर उपलब्ध नहीं है।",
+            "paint-over-disabled": "पहले Paint-Over Quality सक्षम करें।",
+            "capture-unavailable": "यह कैप्चर विधि दृश्य ट्रैकिंग प्रदान नहीं करती।",
+            "full-frame-required": "पूर्ण-फ़्रेम वीडियो एन्कोडर आवश्यक है।",
+            "canvas-required": "संगत कैनवास रेंडरर आवश्यक है।",
+            "canvas-sink-required": "संगत कैनवास रेंडरर आवश्यक है।",
+            "png-decoder-unavailable": "यह ब्राउज़र इस रेंडरर में स्थिर छवि डिकोड नहीं कर सकता।",
+            "webrtc-unavailable": "WebRTC पर उपलब्ध नहीं है; संगत रेंडरर के साथ WebSockets का उपयोग करें।",
+            "page-hidden": "यह पेज छिपा होने पर रुका हुआ है।",
+            "video-stopped": "वीडियो बंद होने पर रुका हुआ है।",
+            "operator-locked": "यह प्राथमिकता सर्वर द्वारा तय की गई है।",
+            "unavailable": "वर्तमान कैप्चर विधि या रेंडरर के लिए उपलब्ध नहीं है।"
+        }
+    },
     selkiesLogoAlt: "सेल्कीस लोगो",
     toggleThemeTitle: "थीम बदलें",
     openDashboardTitle: "डैशबोर्ड खोलें",
@@ -1253,6 +1337,27 @@ const hi = {
 
 // --- Portuguese Translations ---
 const pt = {
+    losslessStatic: {
+        "label": "Refinamento estático sem perdas",
+        "help": "Complete imagens estáticas sem perda na compressão da captura. Pode usar mais dados.",
+        "reasons": {
+            "ready": "Ativado para esta tela.",
+            "disabled": "Desativado.",
+            "waiting-for-server": "Aguardando a capacidade da tela.",
+            "disconnected": "Indisponível enquanto desconectado.",
+            "paint-over-disabled": "Ative primeiro a qualidade de refinamento.",
+            "capture-unavailable": "Este modo de captura não oferece rastreamento de cena.",
+            "full-frame-required": "Requer um codificador de vídeo de quadro completo.",
+            "canvas-required": "Requer um renderizador de canvas compatível.",
+            "canvas-sink-required": "Requer um renderizador de canvas compatível.",
+            "png-decoder-unavailable": "Este navegador não pode decodificar a imagem estática neste renderizador.",
+            "webrtc-unavailable": "Indisponível por WebRTC; use WebSockets com um renderizador compatível.",
+            "page-hidden": "Pausado enquanto esta página está oculta.",
+            "video-stopped": "Pausado enquanto o vídeo está parado.",
+            "operator-locked": "Esta preferência é fixada pelo servidor.",
+            "unavailable": "Indisponível para a captura ou o renderizador atual."
+        }
+    },
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Alternar Tema",
     openDashboardTitle: "Abrir o painel",
@@ -1562,6 +1667,27 @@ const pt = {
 
 // --- French Translations ---
 const fr = {
+    losslessStatic: {
+        "label": "Affinage statique sans perte",
+        "help": "Complète les images fixes sans perte de compression de la capture. Peut utiliser plus de données.",
+        "reasons": {
+            "ready": "Activé pour cet écran.",
+            "disabled": "Désactivé.",
+            "waiting-for-server": "En attente des capacités de l’écran.",
+            "disconnected": "Indisponible sans connexion.",
+            "paint-over-disabled": "Activez d’abord la qualité de retouche.",
+            "capture-unavailable": "Ce mode de capture ne fournit pas de suivi de scène.",
+            "full-frame-required": "Nécessite un encodeur vidéo en image complète.",
+            "canvas-required": "Nécessite un moteur de rendu canvas compatible.",
+            "canvas-sink-required": "Nécessite un moteur de rendu canvas compatible.",
+            "png-decoder-unavailable": "Ce navigateur ne peut pas décoder l’image fixe avec ce moteur de rendu.",
+            "webrtc-unavailable": "Indisponible avec WebRTC ; utilisez WebSockets et un moteur de rendu compatible.",
+            "page-hidden": "En pause lorsque cette page est masquée.",
+            "video-stopped": "En pause lorsque la vidéo est arrêtée.",
+            "operator-locked": "Cette préférence est imposée par le serveur.",
+            "unavailable": "Indisponible pour la capture ou le moteur de rendu actuel."
+        }
+    },
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Changer de thème",
     openDashboardTitle: "Ouvrir le tableau de bord",
@@ -1872,6 +1998,27 @@ const fr = {
 
 // --- Russian Translations ---
 const ru = {
+    losslessStatic: {
+        "label": "Уточнение статичного изображения без потерь",
+        "help": "Улучшает неподвижные изображения без потерь сжатия захвата. Может увеличить трафик.",
+        "reasons": {
+            "ready": "Включено для этого дисплея.",
+            "disabled": "Выключено.",
+            "waiting-for-server": "Ожидание сведений о возможностях дисплея.",
+            "disconnected": "Недоступно без подключения.",
+            "paint-over-disabled": "Сначала включите улучшение качества перерисовки.",
+            "capture-unavailable": "Этот способ захвата не поддерживает отслеживание сцены.",
+            "full-frame-required": "Требуется полнокадровый видеокодировщик.",
+            "canvas-required": "Требуется совместимый рендерер canvas.",
+            "canvas-sink-required": "Требуется совместимый рендерер canvas.",
+            "png-decoder-unavailable": "Этот браузер не может декодировать статичное изображение в данном рендерере.",
+            "webrtc-unavailable": "Недоступно через WebRTC; используйте WebSockets с совместимым рендерером.",
+            "page-hidden": "Приостановлено, пока эта страница скрыта.",
+            "video-stopped": "Приостановлено, пока видео остановлено.",
+            "operator-locked": "Эта настройка задана сервером.",
+            "unavailable": "Недоступно для текущего способа захвата или рендерера."
+        }
+    },
     selkiesLogoAlt: "Логотип Selkies",
     toggleThemeTitle: "Переключить тему",
     openDashboardTitle: "Открыть панель",
@@ -2181,6 +2328,27 @@ const ru = {
 
 // --- German Translations ---
 const de = {
+    losslessStatic: {
+        "label": "Verlustfreie Verfeinerung statischer Bilder",
+        "help": "Vervollständigt Standbilder ohne Kompressionsverlust bei der Aufnahme. Kann mehr Daten übertragen.",
+        "reasons": {
+            "ready": "Für diesen Bildschirm aktiviert.",
+            "disabled": "Ausgeschaltet.",
+            "waiting-for-server": "Warten auf die Bildschirmfunktionen.",
+            "disconnected": "Ohne Verbindung nicht verfügbar.",
+            "paint-over-disabled": "Aktivieren Sie zuerst die Nachbesserungsqualität.",
+            "capture-unavailable": "Dieser Aufnahmepfad bietet keine Szenenverfolgung.",
+            "full-frame-required": "Erfordert einen Vollbild-Videokodierer.",
+            "canvas-required": "Erfordert einen kompatiblen Canvas-Renderer.",
+            "canvas-sink-required": "Erfordert einen kompatiblen Canvas-Renderer.",
+            "png-decoder-unavailable": "Dieser Browser kann das Standbild in diesem Renderer nicht dekodieren.",
+            "webrtc-unavailable": "Über WebRTC nicht verfügbar; verwenden Sie WebSockets mit einem kompatiblen Renderer.",
+            "page-hidden": "Pausiert, solange diese Seite ausgeblendet ist.",
+            "video-stopped": "Pausiert, solange das Video angehalten ist.",
+            "operator-locked": "Diese Einstellung wird vom Server vorgegeben.",
+            "unavailable": "Für die aktuelle Aufnahme oder den Renderer nicht verfügbar."
+        }
+    },
     selkiesLogoAlt: "Selkies-Logo",
     toggleThemeTitle: "Theme wechseln",
     openDashboardTitle: "Dashboard öffnen",
@@ -2490,6 +2658,27 @@ const de = {
 
 // --- Turkish Translations ---
 const tr = {
+    losslessStatic: {
+        "label": "Kayıpsız durağan görüntü iyileştirme",
+        "help": "Durağan görüntüleri yakalama sıkıştırma kaybı olmadan tamamlar. Daha fazla veri kullanabilir.",
+        "reasons": {
+            "ready": "Bu ekran için etkin.",
+            "disabled": "Kapalı.",
+            "waiting-for-server": "Ekranın özellikleri bekleniyor.",
+            "disconnected": "Bağlantı kesildiğinde kullanılamaz.",
+            "paint-over-disabled": "Önce yeniden çizim kalitesini etkinleştirin.",
+            "capture-unavailable": "Bu yakalama yolu sahne takibi sağlamıyor.",
+            "full-frame-required": "Tam kare video kodlayıcısı gerektirir.",
+            "canvas-required": "Uyumlu bir canvas işleyicisi gerektirir.",
+            "canvas-sink-required": "Uyumlu bir canvas işleyicisi gerektirir.",
+            "png-decoder-unavailable": "Bu tarayıcı, bu işleyicide durağan görüntünün kodunu çözemiyor.",
+            "webrtc-unavailable": "WebRTC üzerinden kullanılamaz; uyumlu bir işleyiciyle WebSockets kullanın.",
+            "page-hidden": "Bu sayfa gizliyken duraklatılır.",
+            "video-stopped": "Video durdurulduğunda duraklatılır.",
+            "operator-locked": "Bu tercih sunucu tarafından sabitlenmiştir.",
+            "unavailable": "Geçerli yakalama veya işleyici için kullanılamaz."
+        }
+    },
     selkiesLogoAlt: "Selkies Logosu",
     toggleThemeTitle: "Temayı Değiştir",
     openDashboardTitle: "Paneli aç",
@@ -2799,6 +2988,27 @@ const tr = {
 
 // --- Italian Translations ---
 const it = {
+    losslessStatic: {
+        "label": "Rifinitura statica senza perdita",
+        "help": "Completa le immagini ferme senza perdita nella compressione della cattura. Può utilizzare più dati.",
+        "reasons": {
+            "ready": "Attivo per questo schermo.",
+            "disabled": "Disattivato.",
+            "waiting-for-server": "In attesa delle funzionalità dello schermo.",
+            "disconnected": "Non disponibile senza connessione.",
+            "paint-over-disabled": "Attiva prima la qualità di rifinitura.",
+            "capture-unavailable": "Questa modalità di cattura non offre il tracciamento della scena.",
+            "full-frame-required": "Richiede un codificatore video a fotogramma intero.",
+            "canvas-required": "Richiede un renderer canvas compatibile.",
+            "canvas-sink-required": "Richiede un renderer canvas compatibile.",
+            "png-decoder-unavailable": "Questo browser non può decodificare l’immagine statica con questo renderer.",
+            "webrtc-unavailable": "Non disponibile tramite WebRTC; usa WebSockets con un renderer compatibile.",
+            "page-hidden": "In pausa quando questa pagina è nascosta.",
+            "video-stopped": "In pausa quando il video è fermo.",
+            "operator-locked": "Questa preferenza è imposta dal server.",
+            "unavailable": "Non disponibile per la cattura o il renderer attuale."
+        }
+    },
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Cambia Tema",
     openDashboardTitle: "Apri la dashboard",
@@ -3108,6 +3318,27 @@ const it = {
 
 // --- Dutch Translations ---
 const nl = {
+    losslessStatic: {
+        "label": "Verliesloze verfijning van stilstaande beelden",
+        "help": "Voltooit stilstaande beelden zonder compressieverlies bij de opname. Kan meer data gebruiken.",
+        "reasons": {
+            "ready": "Ingeschakeld voor dit scherm.",
+            "disabled": "Uitgeschakeld.",
+            "waiting-for-server": "Wachten op de mogelijkheden van het scherm.",
+            "disconnected": "Niet beschikbaar zonder verbinding.",
+            "paint-over-disabled": "Schakel eerst de nabewerkingskwaliteit in.",
+            "capture-unavailable": "Deze opnamemethode biedt geen scènetracking.",
+            "full-frame-required": "Vereist een video-encoder voor volledige frames.",
+            "canvas-required": "Vereist een compatibele canvas-renderer.",
+            "canvas-sink-required": "Vereist een compatibele canvas-renderer.",
+            "png-decoder-unavailable": "Deze browser kan het stilstaande beeld niet decoderen met deze renderer.",
+            "webrtc-unavailable": "Niet beschikbaar via WebRTC; gebruik WebSockets met een compatibele renderer.",
+            "page-hidden": "Gepauzeerd zolang deze pagina verborgen is.",
+            "video-stopped": "Gepauzeerd zolang de video is gestopt.",
+            "operator-locked": "Deze voorkeur is vastgelegd door de server.",
+            "unavailable": "Niet beschikbaar voor de huidige opname of renderer."
+        }
+    },
     selkiesLogoAlt: "Selkies-logo",
     toggleThemeTitle: "Thema wisselen",
     openDashboardTitle: "Dashboard openen",
@@ -3417,6 +3648,27 @@ const nl = {
 
 // --- Arabic Translations ---
 const ar = {
+    losslessStatic: {
+        "label": "تحسين الصور الثابتة دون فقد",
+        "help": "إكمال الصور الثابتة دون فقد بسبب ضغط الالتقاط. قد يستهلك المزيد من البيانات.",
+        "reasons": {
+            "ready": "مفعّل لهذه الشاشة.",
+            "disabled": "متوقف.",
+            "waiting-for-server": "بانتظار معلومات إمكانات الشاشة.",
+            "disconnected": "غير متاح أثناء انقطاع الاتصال.",
+            "paint-over-disabled": "فعّل جودة إعادة الرسم أولًا.",
+            "capture-unavailable": "مسار الالتقاط هذا لا يوفر تتبع المشهد.",
+            "full-frame-required": "يتطلب مرمّز فيديو للإطار الكامل.",
+            "canvas-required": "يتطلب عارض canvas متوافقًا.",
+            "canvas-sink-required": "يتطلب عارض canvas متوافقًا.",
+            "png-decoder-unavailable": "لا يستطيع هذا المتصفح فك ترميز الصورة الثابتة في هذا العارض.",
+            "webrtc-unavailable": "غير متاح عبر WebRTC؛ استخدم WebSockets مع عارض متوافق.",
+            "page-hidden": "متوقف مؤقتًا عندما تكون هذه الصفحة مخفية.",
+            "video-stopped": "متوقف مؤقتًا عندما يكون الفيديو متوقفًا.",
+            "operator-locked": "هذا التفضيل محدد من الخادم.",
+            "unavailable": "غير متاح للالتقاط أو العارض الحالي."
+        }
+    },
     selkiesLogoAlt: "شعار Selkies",
     toggleThemeTitle: "تبديل السمة",
     openDashboardTitle: "فتح لوحة التحكم",
@@ -3726,6 +3978,27 @@ const ar = {
 
 // --- Korean Translations ---
 const ko = {
+    losslessStatic: {
+        "label": "무손실 정지 화면 개선",
+        "help": "캡처 압축 손실 없이 정지 화면을 완성합니다. 데이터를 더 사용할 수 있습니다.",
+        "reasons": {
+            "ready": "이 디스플레이에 활성화되었습니다.",
+            "disabled": "꺼짐.",
+            "waiting-for-server": "디스플레이 기능 정보를 기다리는 중입니다.",
+            "disconnected": "연결이 끊어진 동안 사용할 수 없습니다.",
+            "paint-over-disabled": "먼저 다시 그리기 품질을 활성화하세요.",
+            "capture-unavailable": "이 캡처 경로는 장면 추적을 제공하지 않습니다.",
+            "full-frame-required": "전체 프레임 비디오 인코더가 필요합니다.",
+            "canvas-required": "호환되는 캔버스 렌더러가 필요합니다.",
+            "canvas-sink-required": "호환되는 캔버스 렌더러가 필요합니다.",
+            "png-decoder-unavailable": "이 브라우저는 이 렌더러에서 정지 이미지를 디코딩할 수 없습니다.",
+            "webrtc-unavailable": "WebRTC에서는 사용할 수 없습니다. 호환되는 렌더러와 WebSockets를 사용하세요.",
+            "page-hidden": "이 페이지가 숨겨진 동안 일시 중지됩니다.",
+            "video-stopped": "비디오가 중지된 동안 일시 중지됩니다.",
+            "operator-locked": "이 설정은 서버에서 고정했습니다.",
+            "unavailable": "현재 캡처 방식 또는 렌더러에서는 사용할 수 없습니다."
+        }
+    },
     selkiesLogoAlt: "Selkies 로고",
     toggleThemeTitle: "테마 전환",
     openDashboardTitle: "대시보드 열기",
@@ -4035,6 +4308,27 @@ const ko = {
 
 // --- Japanese Translations ---
 const ja = {
+    losslessStatic: {
+        "label": "静止画の可逆補正",
+        "help": "キャプチャの圧縮損失なしで静止画を補正します。データ使用量が増える場合があります。",
+        "reasons": {
+            "ready": "このディスプレイで有効です。",
+            "disabled": "オフです。",
+            "waiting-for-server": "ディスプレイの機能情報を待っています。",
+            "disconnected": "切断中は利用できません。",
+            "paint-over-disabled": "先に再描画品質を有効にしてください。",
+            "capture-unavailable": "このキャプチャ方式はシーン追跡に対応していません。",
+            "full-frame-required": "フルフレーム動画エンコーダーが必要です。",
+            "canvas-required": "対応するキャンバスレンダラーが必要です。",
+            "canvas-sink-required": "対応するキャンバスレンダラーが必要です。",
+            "png-decoder-unavailable": "このブラウザーは、このレンダラーで静止画像をデコードできません。",
+            "webrtc-unavailable": "WebRTCでは利用できません。対応するレンダラーとWebSocketsを使用してください。",
+            "page-hidden": "このページが非表示の間は一時停止します。",
+            "video-stopped": "動画が停止している間は一時停止します。",
+            "operator-locked": "この設定はサーバーによって固定されています。",
+            "unavailable": "現在のキャプチャ方式またはレンダラーでは利用できません。"
+        }
+    },
     selkiesLogoAlt: "Selkies ロゴ",
     toggleThemeTitle: "テーマを切り替え",
     openDashboardTitle: "ダッシュボードを開く",
@@ -4344,6 +4638,27 @@ const ja = {
 
 // --- Vietnamese Translations ---
 const vi = {
+    losslessStatic: {
+        "label": "Tinh chỉnh ảnh tĩnh không mất dữ liệu",
+        "help": "Hoàn thiện ảnh tĩnh không bị mất dữ liệu do nén ảnh chụp. Có thể dùng thêm dữ liệu.",
+        "reasons": {
+            "ready": "Đã bật cho màn hình này.",
+            "disabled": "Đã tắt.",
+            "waiting-for-server": "Đang chờ thông tin khả năng của màn hình.",
+            "disconnected": "Không khả dụng khi mất kết nối.",
+            "paint-over-disabled": "Trước tiên hãy bật chất lượng vẽ lại.",
+            "capture-unavailable": "Phương thức chụp này không cung cấp tính năng theo dõi cảnh.",
+            "full-frame-required": "Cần bộ mã hóa video toàn khung hình.",
+            "canvas-required": "Cần trình kết xuất canvas tương thích.",
+            "canvas-sink-required": "Cần trình kết xuất canvas tương thích.",
+            "png-decoder-unavailable": "Trình duyệt này không thể giải mã ảnh tĩnh bằng trình kết xuất này.",
+            "webrtc-unavailable": "Không khả dụng qua WebRTC; hãy dùng WebSockets với trình kết xuất tương thích.",
+            "page-hidden": "Tạm dừng khi trang này bị ẩn.",
+            "video-stopped": "Tạm dừng khi video đã dừng.",
+            "operator-locked": "Tùy chọn này do máy chủ ấn định.",
+            "unavailable": "Không khả dụng với phương thức chụp hoặc trình kết xuất hiện tại."
+        }
+    },
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Chuyển đổi Chủ đề",
     openDashboardTitle: "Mở bảng điều khiển",
@@ -4653,6 +4968,27 @@ const vi = {
 
 // --- Thai Translations ---
 const th = {
+    losslessStatic: {
+        "label": "ปรับภาพนิ่งแบบไม่สูญเสียข้อมูล",
+        "help": "ทำให้ภาพนิ่งสมบูรณ์โดยไม่สูญเสียข้อมูลจากการบีบอัดภาพที่จับ อาจใช้ข้อมูลเพิ่มขึ้น",
+        "reasons": {
+            "ready": "เปิดใช้งานสำหรับจอแสดงผลนี้แล้ว",
+            "disabled": "ปิดอยู่",
+            "waiting-for-server": "กำลังรอข้อมูลความสามารถของจอแสดงผล",
+            "disconnected": "ใช้งานไม่ได้ขณะตัดการเชื่อมต่อ",
+            "paint-over-disabled": "เปิดใช้คุณภาพการวาดทับก่อน",
+            "capture-unavailable": "วิธีจับภาพนี้ไม่มีการติดตามฉาก",
+            "full-frame-required": "ต้องใช้ตัวเข้ารหัสวิดีโอแบบเต็มเฟรม",
+            "canvas-required": "ต้องใช้ตัวเรนเดอร์ canvas ที่เข้ากันได้",
+            "canvas-sink-required": "ต้องใช้ตัวเรนเดอร์ canvas ที่เข้ากันได้",
+            "png-decoder-unavailable": "เบราว์เซอร์นี้ไม่สามารถถอดรหัสภาพนิ่งด้วยตัวเรนเดอร์นี้ได้",
+            "webrtc-unavailable": "ใช้งานผ่าน WebRTC ไม่ได้ โปรดใช้ WebSockets กับตัวเรนเดอร์ที่เข้ากันได้",
+            "page-hidden": "หยุดชั่วคราวขณะที่หน้านี้ถูกซ่อน",
+            "video-stopped": "หยุดชั่วคราวขณะที่วิดีโอหยุดอยู่",
+            "operator-locked": "เซิร์ฟเวอร์กำหนดการตั้งค่านี้ไว้แล้ว",
+            "unavailable": "ใช้ไม่ได้กับวิธีจับภาพหรือตัวเรนเดอร์ปัจจุบัน"
+        }
+    },
     selkiesLogoAlt: "โลโก้ Selkies",
     toggleThemeTitle: "สลับธีม",
     openDashboardTitle: "เปิดแดชบอร์ด",
@@ -4962,6 +5298,27 @@ const th = {
 
 // --- Filipino Translations ---
 const fil = {
+    losslessStatic: {
+        "label": "Walang-pagkawalang paglinaw ng static na larawan",
+        "help": "Kumpletuhin ang mga larawang hindi gumagalaw nang walang pagkawala sa compression ng kuha. Maaaring gumamit ng mas maraming data.",
+        "reasons": {
+            "ready": "Naka-enable para sa display na ito.",
+            "disabled": "Naka-off.",
+            "waiting-for-server": "Hinihintay ang kakayahan ng display.",
+            "disconnected": "Hindi available habang walang koneksyon.",
+            "paint-over-disabled": "I-enable muna ang kalidad ng muling pagguhit.",
+            "capture-unavailable": "Walang pagsubaybay ng eksena ang paraang ito ng pagkuha.",
+            "full-frame-required": "Nangangailangan ng full-frame na video encoder.",
+            "canvas-required": "Nangangailangan ng katugmang canvas renderer.",
+            "canvas-sink-required": "Nangangailangan ng katugmang canvas renderer.",
+            "png-decoder-unavailable": "Hindi ma-decode ng browser na ito ang still image gamit ang renderer na ito.",
+            "webrtc-unavailable": "Hindi available sa WebRTC; gumamit ng WebSockets na may katugmang renderer.",
+            "page-hidden": "Naka-pause habang nakatago ang pahinang ito.",
+            "video-stopped": "Naka-pause habang nakahinto ang video.",
+            "operator-locked": "Itinakda ng server ang kagustuhang ito.",
+            "unavailable": "Hindi available para sa kasalukuyang pagkuha o renderer."
+        }
+    },
     selkiesLogoAlt: "Logo ng Selkies",
     toggleThemeTitle: "I-toggle ang Tema",
     openDashboardTitle: "Buksan ang dashboard",
@@ -5271,6 +5628,27 @@ const fil = {
 
 // --- Danish Translations ---
 const da = {
+    losslessStatic: {
+        "label": "Tabsfri forbedring af stillbilleder",
+        "help": "Færdiggør stillbilleder uden komprimeringstab i optagelsen. Kan bruge mere data.",
+        "reasons": {
+            "ready": "Aktiveret for denne skærm.",
+            "disabled": "Slået fra.",
+            "waiting-for-server": "Venter på oplysninger om skærmens funktioner.",
+            "disconnected": "Ikke tilgængelig uden forbindelse.",
+            "paint-over-disabled": "Aktivér først efterbehandlingskvaliteten.",
+            "capture-unavailable": "Denne optagelsesmetode tilbyder ikke scenesporing.",
+            "full-frame-required": "Kræver en videokoder til hele billeder.",
+            "canvas-required": "Kræver en kompatibel canvas-renderer.",
+            "canvas-sink-required": "Kræver en kompatibel canvas-renderer.",
+            "png-decoder-unavailable": "Denne browser kan ikke afkode stillbilledet med denne renderer.",
+            "webrtc-unavailable": "Ikke tilgængelig via WebRTC; brug WebSockets med en kompatibel renderer.",
+            "page-hidden": "Sat på pause, mens denne side er skjult.",
+            "video-stopped": "Sat på pause, mens videoen er stoppet.",
+            "operator-locked": "Denne indstilling er fastsat af serveren.",
+            "unavailable": "Ikke tilgængelig for den aktuelle optagelse eller renderer."
+        }
+    },
     selkiesLogoAlt: "Selkies-logo",
     toggleThemeTitle: "Skift tema",
     openDashboardTitle: "Åbn dashboardet",
@@ -5580,6 +5958,27 @@ const da = {
 
 // --- Chinese (Traditional) Translations ---
 const zh_tw = {
+    losslessStatic: {
+        "label": "無損靜態畫面優化",
+        "help": "在擷取時無壓縮損失地完善靜態畫面。可能增加資料用量。",
+        "reasons": {
+            "ready": "已為此顯示器啟用。",
+            "disabled": "已關閉。",
+            "waiting-for-server": "正在等待顯示器功能資訊。",
+            "disconnected": "中斷連線時無法使用。",
+            "paint-over-disabled": "請先啟用重繪畫質最佳化。",
+            "capture-unavailable": "此擷取路徑不提供場景追蹤。",
+            "full-frame-required": "需要全幀視訊編碼器。",
+            "canvas-required": "需要相容的畫布算繪器。",
+            "canvas-sink-required": "需要相容的畫布算繪器。",
+            "png-decoder-unavailable": "此瀏覽器無法在此算繪器中解碼靜態影像。",
+            "webrtc-unavailable": "WebRTC 不支援此功能；請使用 WebSockets 和相容的算繪器。",
+            "page-hidden": "此頁面隱藏時暫停。",
+            "video-stopped": "視訊停止時暫停。",
+            "operator-locked": "此偏好設定由伺服器固定。",
+            "unavailable": "目前的擷取方式或算繪器不支援此功能。"
+        }
+    },
     selkiesLogoAlt: "Selkies 標誌",
     toggleThemeTitle: "切換介面風格",
     openDashboardTitle: "打開控制面板",

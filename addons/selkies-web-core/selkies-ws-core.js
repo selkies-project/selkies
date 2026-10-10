@@ -50,6 +50,13 @@
  * `clipboard_reply,`, `clipboard_secret`), and JSON objects typed `server_settings`,
  * `server_apps`, `pipeline_status`, `stream_resolution`, `stream_info`, and
  * `stream_stats` (lib/stream-stats.js).
+ * Optional static refinement adds uncompressed `lossless_sample` metadata
+ * immediately before its full-frame 0x04 payload, `lossless_status`, and
+ * `lossless_begin`/`lossless_end` around 0x0A PNG chunks (u32 transfer id,
+ * u32 byte offset, both big endian). `LOSSLESS {json}` negotiates the selected
+ * canvas sink and requests or cancels a scene. The renderer and bounded wire
+ * protocol live in lib/lossless-static.js. Other sinks keep their normal
+ * video route and report this additional capability unavailable.
  *
  * Video is decoded with WebCodecs: a JPEG stripe through ImageDecoder, an
  * H.264 stripe through a VideoDecoder per row offset -- in the video worker
@@ -68,6 +75,7 @@
  * handles `setVolume`, `setMute`, `setScaleLocally`, `setSynth`,
  * `showVirtualKeyboard`, `setUseCssScaling`, `setAntiAliasing`,
  * `setUseBrowserCursors`, `setRawPointerMotion`, `setTrackpadSpeed`,
+ * `setLosslessStaticRefinement`, `setLosslessParentState`,
  * `setGamepadRumble`, `setManualResolution`, `resetResolutionToWindow`,
  * `settings`, `getStats`, `clipboardUpdateFromUI`, `clipboardImageUpdate`,
  * `clipboardCopySecret`, `pipelineStatusUpdate`, `pipelineControl`, `audioDeviceSelected`,
@@ -76,6 +84,7 @@
  * `pipelineStatusUpdate`, `sidebarButtonStatusUpdate`, `serverSettings`,
  * `systemApps`, `stats` (to the parent window), `clientRoleUpdate`,
  * `effectiveCursorState`, `scalingDpiFollowed`, `trackpadModeUpdate`,
+ * `losslessRefinementStatus` (its `status` object also lives on `window`),
  * `clipboardContentUpdate`, the clipboard preview of lib/clipboard-sync.js,
  * `fileUpload`, `displayRefresh` (the display's measured refresh,
  * lib/display-refresh.js), `toggleDashboard`, and `toggleTouchGamepad`. The
@@ -142,6 +151,8 @@ import decodeGateSource from './lib/decode-gate.js?raw';
 import decodePaceSource from './lib/decode-pace.js?raw';
 import { createStripeClock } from './lib/stripe-clock.js';
 import { createChunkStamp } from './lib/chunk-stamp.js';
+import { createLosslessProtocol, createLosslessRenderer } from './lib/lossless-static.js';
+import losslessStaticSource from './lib/lossless-static.js?raw';
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
 import { DecodePace } from './lib/decode-pace.js';
@@ -390,14 +401,14 @@ let displayPosition = 'right';
  * posted is its own, derived under the rules it runs now, and goes whatever
  * the marker (`postedExplicitOnly`).
  */
-const EXPLICIT_ONLY_SETTINGS = ['use_paint_over_quality'];
+const EXPLICIT_ONLY_SETTINGS = ['use_paint_over_quality', 'lossless_static_refinement'];
 /** The explicit-only settings this page's dashboard has posted. */
 const postedExplicitOnly = new Set();
 
 const PER_DISPLAY_SETTINGS = [
     'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
     'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
-    'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
+    'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality', 'lossless_static_refinement',
     'manual_resolution', 'manual_width', 'manual_height',
     'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
     'video_bitrate', 'force_aligned_resolution', 'scaling_dpi'
@@ -1153,6 +1164,8 @@ let use_cpu = false;
 let video_paintover_crf = 18;
 let video_paintover_burst_frames = 5;
 let use_paint_over_quality = true;
+let lossless_static_refinement = false;
+let losslessParentAllowed = true;
 let audio_bitrate = 320000;
 let videoBitrate = 8000;
 let force_aligned_resolution = false;
@@ -1711,6 +1724,8 @@ use_cpu = getBoolParam('use_cpu', use_cpu);
 video_paintover_crf = getIntParam('video_paintover_crf', video_paintover_crf);
 video_paintover_burst_frames = getIntParam('video_paintover_burst_frames', video_paintover_burst_frames);
 use_paint_over_quality = getBoolParam('use_paint_over_quality', use_paint_over_quality);
+lossless_static_refinement = getBoolParam('lossless_static_refinement', false);
+if (window.localStorage.getItem(`${prefixedStorageKey('lossless_static_refinement')}_explicit_choice`) !== 'true') lossless_static_refinement = false;
 audio_bitrate = getIntParam('audio_bitrate', audio_bitrate);
 debug = getBoolParam('debug', debug);
 currentEncoderMode = getStringParam('encoder', 'h264enc');
@@ -1911,7 +1926,132 @@ function checkWorkerSinkAlive() {
     deactivateVideoWorker();
   }
 }
+/** Identity follows a full-frame decoder timestamp; a reset cannot reuse it. */
+const pageLosslessSamples = new Map();
+const pageLosslessProtocol = createLosslessProtocol();
+let losslessSink = 'unsettled';
+let losslessServer = { version: 1, epoch: 0, supported: false, effective: false, reason: 'waiting-for-server' };
+let losslessCapabilitySent = '', losslessConfiguration = '', losslessConfigSerial = 0;
+let losslessPresentation = { shown: false, pending: false, retainedVideoFrames: 0, backupBytes: 0 };
+
+/** Sends optional refinement control; a queued worker request cannot re-enable it. */
+function sendLossless(message) {
+  if (message.op === 'request' && (!lossless_static_refinement || !use_paint_over_quality || !losslessParentAllowed
+      || !losslessServer.effective || message.epoch !== losslessServer.epoch || document.hidden)) return;
+  if (websocket && websocket.readyState === WebSocket.OPEN) websocket.send('LOSSLESS ' + JSON.stringify(message));
+}
+
+/** Copies the normal canvas once, until a newer retained video frame replaces it. */
+function backupLosslessCanvas(source) {
+  const backup = document.createElement('canvas');
+  backup.width = source.width; backup.height = source.height;
+  backup.getContext('2d', { alpha: false }).drawImage(source, 0, 0);
+  return backup;
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) invalidateLossless('page-hidden');
+  refreshLosslessCapability();
+});
+
+const pageLossless = createLosslessRenderer({
+  canvas: () => canvas,
+  paint: (image) => canvasContext.drawImage(image, 0, 0),
+  backup: backupLosslessCanvas,
+  decode: (png) => createImageBitmap(new Blob([png], { type: 'image/png' }), { colorSpaceConversion: 'none' }),
+  send: sendLossless,
+  changed: (state) => {
+    if (losslessSink !== 'page-canvas') return;
+    losslessPresentation = state;
+    refreshLosslessCapability();
+  },
+});
+
+/**
+ * Reports the selected sink's capability without changing its fallback order.
+ * Dashboards read `window.losslessRefinementStatus` or the same-origin
+ * `losslessRefinementStatus` message's `status` object. Unsupported native
+ * capture and unsupported sinks remain distinct from the user's preference.
+ */
+function refreshLosslessCapability() {
+  const canvasSink = losslessSink === 'worker-canvas' || losslessSink === 'page-canvas';
+  const supported = canvasSink && isFullFrameVideo(currentEncoderMode)
+    && typeof createImageBitmap === 'function';
+  const allowed = supported && lossless_static_refinement && use_paint_over_quality && losslessParentAllowed
+    && !document.hidden && isVideoPipelineActive;
+  const effective = allowed && !!losslessServer.effective;
+  const reason = !isFullFrameVideo(currentEncoderMode) ? 'full-frame-required'
+    : !canvasSink ? 'canvas-sink-required' : typeof createImageBitmap !== 'function' ? 'png-decoder-unavailable'
+    : !losslessServer.supported ? losslessServer.reason
+    : !lossless_static_refinement ? 'disabled' : (!use_paint_over_quality || !losslessParentAllowed) ? 'paint-over-disabled'
+    : document.hidden ? 'page-hidden' : !isVideoPipelineActive ? 'video-stopped'
+    : losslessServer.reason;
+  const state = { version: 1, requested: lossless_static_refinement,
+    supported: supported && !!losslessServer.supported, effective, reason, sink: losslessSink,
+    epoch: losslessServer.epoch, rgbBits: 8, presentation: losslessPresentation };
+  const stateKey = JSON.stringify(state);
+  if (JSON.stringify(window.losslessRefinementStatus) !== stateKey) {
+    window.losslessRefinementStatus = state;
+    window.postMessage({ type: 'losslessRefinementStatus', status: state }, window.location.origin);
+  }
+  const config = { type: 'losslessConfig', allowed, enabled: effective, epoch: losslessServer.epoch,
+    workerCanvas: losslessSink === 'worker-canvas' };
+  const configKey = JSON.stringify(config);
+  if (configKey !== losslessConfiguration) {
+    losslessConfiguration = configKey;
+    config.serial = ++losslessConfigSerial;
+    pageLosslessProtocol.enable(allowed);
+    pageLossless.configure({ enabled: effective && losslessSink === 'page-canvas', epoch: config.epoch });
+    if (websocket && websocket._worker) websocket._worker.postMessage(config);
+    if (videoWorker) videoWorker.postMessage(config);
+  }
+  const capability = { op: 'capability', version: 1, supported, sink: losslessSink };
+  const capabilityKey = JSON.stringify(capability);
+  if (websocket && websocket.readyState === WebSocket.OPEN && capabilityKey !== losslessCapabilitySent) {
+    losslessCapabilitySent = capabilityKey;
+    sendLossless(capability);
+  }
+}
+
+/** Selects a sink only after the existing video path actually uses it. */
+function selectLosslessSink(sink) {
+  if (losslessSink === sink) return;
+  losslessSink = sink;
+  losslessPresentation = { shown: false, pending: false, retainedVideoFrames: 0, backupBytes: 0 };
+  invalidateLossless('sink-changed');
+  refreshLosslessCapability();
+}
+
+/** Withdraws pending and visible stills while preserving ordinary video. */
+function invalidateLossless(reason) {
+  pageLosslessSamples.clear();
+  if (reason === 'socket-closed') { pageLossless.reset(); pageLosslessProtocol.reset(); }
+  else pageLossless.invalidate(reason);
+  if (videoWorker) videoWorker.postMessage({ type: 'losslessInvalidate', reason });
+}
+
+/** Delivers socket-ordered status and completed PNGs to the page canvas. */
+function receiveLossless(message) {
+  if (message.control) {
+    const control = message.control;
+    if (control.type === 'lossless_status') {
+      if (control.epoch < losslessServer.epoch) return;
+      losslessServer = control;
+      refreshLosslessCapability();
+    } else if (control.type === 'lossless_invalidate') invalidateLossless(control.reason);
+  }
+  if (message.png) {
+    if (losslessSink === 'worker-canvas' && videoWorker) {
+      videoWorker.postMessage({ ...message, type: 'lossless' }, [message.png]);
+      return;
+    }
+    sendLossless({ op: 'received', version: 1, epoch: message.stamp.epoch, transferId: message.transferId });
+    void pageLossless.offer(message.stamp, message.png);
+  }
+}
+
 const VIDEO_WORKER_SRC = `
+${losslessStaticSource.replace(/^export /gm, '')}
 ${decodeGateSource.replace(/^export /gm, '')}
 ${decodePaceSource.replace(/^export /gm, '')}
 // Video sink and optional in-worker decoder. The sink is a worker-only
@@ -1919,6 +2059,45 @@ ${decodePaceSource.replace(/^export /gm, '')}
 // transferred OffscreenCanvas. Encoded chunks are decoded here so no decoded frame
 // crosses the thread boundary; a frame transferred in (m.frame) is the warm-up path.
 let mode = null, oc = null, ctx = null, writer = null, closed = false, presented = false;
+let losslessAllowed = false, losslessConfigSerial = -1;
+const losslessSamples = new Map();
+const lossless = createLosslessRenderer({
+  canvas: () => oc,
+  paint: (image) => ctx.drawImage(image, 0, 0),
+  backup: (source) => {
+    const copy = new OffscreenCanvas(source.width, source.height);
+    copy.getContext('2d', { alpha: false }).drawImage(source, 0, 0);
+    return copy;
+  },
+  decode: (png) => createImageBitmap(new Blob([png], { type: 'image/png' }), { colorSpaceConversion: 'none' }),
+  send: (message) => self.postMessage({ type: 'losslessSend', message }),
+  changed: (state) => self.postMessage({ type: 'losslessPresentation', state }),
+});
+function losslessControl(m) {
+  if (m.type === 'losslessConfig') {
+    if (!Number.isSafeInteger(m.serial) || m.serial <= losslessConfigSerial) return true;
+    losslessConfigSerial = m.serial;
+    losslessAllowed = !!m.allowed;
+    lossless.configure({ enabled: mode === 'canvas' && losslessAllowed && !!m.enabled, epoch: m.epoch });
+    return true;
+  }
+  if (m.type === 'losslessInvalidate') {
+    if (m.reason === 'socket-closed') lossless.reset(); else lossless.invalidate(m.reason);
+    losslessSamples.clear(); return true;
+  }
+  if (m.type !== 'lossless') return false;
+  if (m.control) {
+    if (m.control.type === 'lossless_status') {
+      lossless.configure({ enabled: mode === 'canvas' && losslessAllowed && !!m.control.effective, epoch: m.control.epoch });
+    } else if (m.control.type === 'lossless_invalidate') lossless.invalidate(m.control.reason);
+  }
+  if (m.png) {
+    self.postMessage({ type: 'losslessSend', message: { op: 'received', version: 1,
+      epoch: m.stamp.epoch, transferId: m.transferId } });
+    void lossless.offer(m.stamp, m.png);
+  }
+  return true;
+}
 let dec = null, decConfig = null;
 const gate = new DecodeGate();
 // The frame rate the page asks the server for while the decoder cannot keep up (lib/decode-pace.js).
@@ -2000,7 +2179,7 @@ const sendNeedKey = (reason) => {
 const ack = () => self.postMessage({ ack: true });
 // The decoded frame waiting for the canvas and when it arrived, and when the
 // canvas last finished a draw and how long that draw took.
-let waiting = null, waitingAt = NaN, drawQueued = false, drawnAt = -Infinity, drawCost = 0;
+let waiting = null, waitingAt = NaN, waitingStamp = null, drawQueued = false, drawnAt = -Infinity, drawCost = 0;
 
 // Present one decoded VideoFrame on the active sink, which consumes it; at is
 // when it arrived, NaN where unknown. While this thread keeps up with the
@@ -2013,7 +2192,7 @@ let waiting = null, waitingAt = NaN, drawQueued = false, drawnAt = -Infinity, dr
 // this thread, whose timers then starve while the decode queue grows until
 // the gate drops frames. A frame replaced before its draw is closed and
 // counted as not shown.
-function present(f, at) {
+function present(f, at, stamp) {
   presentedFrames++;
   if (statsOpen) noteDecoded(f);
   if (mode === 'vtg' && writer && !closed) {
@@ -2033,6 +2212,7 @@ function present(f, at) {
   dropWaiting();
   waiting = f;
   waitingAt = at;
+  waitingStamp = stamp;
   if (drawQueued) return;
   if (performance.now() - drawnAt >= drawCost) { drawWaiting(); return; }
   drawQueued = true;
@@ -2050,16 +2230,16 @@ function dropWaiting() {
 
 function drawWaiting() {
   drawQueued = false;
-  const f = waiting, at = waitingAt;
+  const f = waiting, at = waitingAt, stamp = waitingStamp;
   if (!f) return;
   waiting = null;
   try {
     if (oc.width !== f.displayWidth || oc.height !== f.displayHeight) { oc.width = f.displayWidth; oc.height = f.displayHeight; }
     const start = performance.now();
-    ctx.drawImage(f, 0, 0);
+    const painted = lossless.draw(f, stamp);
     drawnAt = performance.now();
     drawCost = drawnAt - start;
-    if (statsOpen) shown.drawn(at);
+    if (painted && statsOpen) shown.drawn(at);
     // Tell the page the OffscreenCanvas has real content so it can hide the
     // main canvas (hiding it before this point flashes black).
     if (!presented) { presented = true; self.postMessage({ type: 'presented' }); }
@@ -2067,6 +2247,8 @@ function drawWaiting() {
 }
 
 function closeDecoder() {
+  lossless.invalidate('decoder-reset');
+  losslessSamples.clear();
   dropWaiting();
   if (dec) { try { if (dec.state !== 'closed') dec.close(); } catch (_) {} dec = null; }
   gate.configured();
@@ -2079,7 +2261,12 @@ function configureDecoder(codec, w, h, software, description) {
   if (decConfig && (decConfig.codedWidth !== w || decConfig.codedHeight !== h)) resetPace();
   closeDecoder();
   try {
-    dec = new VideoDecoder({ output: (f) => { pace.decoded(); statsFormat = f.format; tellFacts(); present(f, statsOpen ? arrivalOf(f.timestamp) : NaN); },
+    dec = new VideoDecoder({ output: (f) => {
+      pace.decoded(); statsFormat = f.format; tellFacts();
+      const stamp = losslessSamples.get(f.timestamp) || null;
+      losslessSamples.delete(f.timestamp);
+      present(f, statsOpen ? arrivalOf(f.timestamp) : NaN, stamp);
+    },
                              error: () => { closeDecoder(); self.postMessage({ type: 'decoderError' }); } });
     // configure() is synchronous, so the next chunk decodes without an async gap and
     // an unsupported config surfaces via error(). The page owns the acceleration
@@ -2100,7 +2287,8 @@ function configureDecoder(codec, w, h, software, description) {
 
 // frameId and reference come off the wire header; a frame that names itself
 // predicts from nothing the encoder can say (DecodeGate).
-function decodeChunk(key, data, timestamp, frameId, reference, at) {
+function decodeChunk(key, data, timestamp, frameId, reference, at, stamp) {
+  lossless.observe(stamp || null);
   if (!dec || dec.state !== 'configured') return;
   const decision = gate.decide(key, frameId, reference, dec.decodeQueueSize);
   pace.decided(dec.decodeQueueSize, decision !== 'decode');
@@ -2112,6 +2300,12 @@ function decodeChunk(key, data, timestamp, frameId, reference, at) {
   if (statsOpen) {
     decodeStarts.set(timestamp, performance.now());
     if (at > 0) arrivedAt.set(Math.trunc(timestamp), at);
+  }
+  if (stamp) {
+    if (stamp) {
+      if (losslessSamples.size >= 64) losslessSamples.clear();
+      losslessSamples.set(timestamp, stamp);
+    }
   }
   try { dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: timestamp, data: data })); }
   catch (err) { closeDecoder(); self.postMessage({ type: 'decoderError' }); }
@@ -2389,9 +2583,12 @@ function onJpegStripe(buffer, at) {
 // A wire message is the bytes, or while the page has its stats open, the bytes
 // with the arrival the socket's thread dated them with.
 function onWire(message) {
+  if (message && losslessControl(message)) return;
+  const stamp = message && message.stamp;
   const buffer = message instanceof ArrayBuffer ? message : message && message.buffer;
   const at = message instanceof ArrayBuffer ? NaN : message && message.at;
   if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 1) return;
+  lossless.observe(stamp || null);
   statsBytes += buffer.byteLength;
   if (stripedOn) {
     const type = new Uint8Array(buffer, 0, 1)[0];
@@ -2425,7 +2622,7 @@ function onWire(message) {
     wireCodec = codec; wireW = w; wireH = h; wireDesc = desc; wireRange = wireFullRange;
     self.postMessage({ type: 'wireDims', w: w, h: h });
   }
-  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, chunkStamp(), frameId, reference, at);
+  decodeChunk(key, framed ? annexbToAvcc(bytes) : payload, chunkStamp(), frameId, reference, at, stamp);
 }
 
 const stripedCaps = {
@@ -2445,6 +2642,7 @@ if (typeof VideoTrackGenerator !== 'undefined') {
 
 self.onmessage = (e) => {
   const m = e.data;
+  if (m && losslessControl(m)) return;
   // WebKit's Skia ports race the page's paint on an accelerated worker canvas and crash
   // the web process; an unaccelerated one stays out of the race.
   if (m.canvas) {
@@ -2460,7 +2658,7 @@ self.onmessage = (e) => {
   if (m.type === 'decodeStats') { postDecodeStats(); return; }
   if (m.type === 'chunk') {
     // Not ready yet; the page will resend a keyframe.
-    decodeChunk(m.key, m.data, m.timestamp, m.frameId, m.reference, m.at);
+    decodeChunk(m.key, m.data, m.timestamp, m.frameId, m.reference, m.at, m.stamp);
     return;
   }
   if (m.type === 'wireIn') {
@@ -2469,8 +2667,9 @@ self.onmessage = (e) => {
     wireChromium = !!m.chromium;
     wireAvcc = !!m.avcc;
     wireFullRange = !!m.fullRange;
+    if (wirePort) wirePort.close();
     wirePort = m.port;
-    m.port.onmessage = (ev) => onWire(ev.data);
+    m.port.onmessage = (ev) => { if (wirePort === m.port) onWire(ev.data); };
     if (!wireStatsTimer) {
       wireStatsTimer = setInterval(() => {
         if (!wireChunks && !presentedFrames) return;
@@ -2493,6 +2692,7 @@ self.onmessage = (e) => {
   }
   if (m.type === 'wireMode') {
     const striped = !!m.striped;
+    if (striped !== stripedOn || wireExpect !== (m.codec || null)) lossless.invalidate('wire-mode');
     wireExpect = m.codec || null;
     if (striped !== stripedOn) {
       stripedOn = striped;
@@ -2506,6 +2706,7 @@ self.onmessage = (e) => {
   if (m.type === 'wireGeom') {
     const know = m.w > 0 && m.h > 0;
     if (know && (m.w !== stripeGeomW || m.h !== stripeGeomH)) {
+      lossless.invalidate('geometry');
       stripeGeomW = m.w; stripeGeomH = m.h;
       if (stripeBack && (stripeBack.width !== m.w || stripeBack.height !== m.h)) {
         // A real geometry change; the server keyframes it, so stale rows go.
@@ -2530,7 +2731,8 @@ self.onmessage = (e) => {
   }
   // Fallback: a main-thread-decoded frame transferred in.
   if (m.frame) {
-    present(m.frame, m.at);
+    lossless.observe(m.stamp || null);
+    present(m.frame, m.at, m.stamp);
     ack();
   }
 };`;
@@ -2778,6 +2980,7 @@ function jpegDecodePath() {
 
 function announceSink(description) {
   currentSink = description;
+  refreshLosslessCapability();
   if (announcedSinks.has(description)) return;
   announcedSinks.add(description);
   console.info(`[Selkies] video sink: ${description}`);
@@ -2818,7 +3021,16 @@ function ensureVideoWorker() {
       if (!m) return;
       if (m.ack) { if (videoWorkerInFlight > 0) videoWorkerInFlight--; return; }
       if (m.type === 'error') { deactivateVideoWorker(); return; }
+      if (m.type === 'losslessSend') { sendLossless(m.message); return; }
+      if (m.type === 'losslessPresentation') {
+        if (losslessSink === 'worker-canvas' && m.state.epoch === losslessServer.epoch) {
+          losslessPresentation = m.state;
+          refreshLosslessCapability();
+        }
+        return;
+      }
       if (m.type === 'presented') {
+        selectLosslessSink(videoWorkerMode === 'canvas' ? 'worker-canvas' : 'track-generator');
         if (codecRefusalUnanswerable) endCodecRefusal();
         videoWorkerRendered = true;
         if (videoWorkerActive && canvas) canvas.style.display = 'none';
@@ -2893,6 +3105,7 @@ function ensureVideoWorker() {
         videoWorkerStripedDecode = !!m.stripedDecode;
         videoWorkerJpegDecode = !!m.jpegDecode;
         if (m.mode === 'vtg' && m.track) {
+          selectLosslessSink('track-generator');
           if (!videoElement) { deactivateVideoWorker(); return; }
           videoWorkerMode = 'vtg';
           videoWorkerTrack = m.track;
@@ -2957,6 +3170,7 @@ function ensureVideoWorker() {
  * asked to be is the one that most needs to say so.
  */
 function deactivateVideoWorker() {
+  selectLosslessSink('unsettled');
   const wasVtg = (videoWorkerMode === 'vtg');
   announceSink(supportsWindowMSTG
     ? 'MediaStreamTrackGenerator on the page.'
@@ -3045,7 +3259,7 @@ function activateWorkerSinkDisplay() {
  * @param {VideoFrame} frame
  * @returns {boolean} True when consumed (the caller must not close it).
  */
-function presentFrameToWorker(frame) {
+function presentFrameToWorker(frame, stamp = null) {
   if (!ensureVideoWorker()) return false;
   if (!activateWorkerSinkDisplay()) return false;
   checkWorkerSinkAlive();
@@ -3056,7 +3270,7 @@ function presentFrameToWorker(frame) {
     return true;
   }
   try {
-    videoWorker.postMessage({ frame, at: streamStats.open ? takeArrival(frame.timestamp) : NaN }, [frame]);
+    videoWorker.postMessage({ frame, at: streamStats.open ? takeArrival(frame.timestamp) : NaN, stamp }, [frame]);
     videoWorkerInFlight++;
   }
   catch (e) { try { frame.close(); } catch (_) {} deactivateVideoWorker(); return true; }
@@ -3100,7 +3314,7 @@ function logWorkerDecoderConfig(codec, w, h) {
  * @param {number} arrival When it arrived, in epoch ms; NaN while the stats are shut.
  * @returns {boolean} True when handled there, false to fall back to main-thread decode.
  */
-function feedWorkerDecoder(isKey, dataBuf, w, h, codec, frameId, reference, arrival) {
+function feedWorkerDecoder(isKey, dataBuf, w, h, codec, frameId, reference, arrival, stamp) {
   if (workerDecodeFailed) return false;
   if (!ensureVideoWorker()) return false;
   if (!activateWorkerSinkDisplay()) return false;
@@ -3117,7 +3331,7 @@ function feedWorkerDecoder(isKey, dataBuf, w, h, codec, frameId, reference, arri
     requestKeyframe();
   }
   const data = framed ? annexbToAvcc(new Uint8Array(dataBuf)).buffer : dataBuf;
-  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: chunkStamp(), frameId: frameId, reference: reference, at: arrival }, [data]); }
+  try { videoWorker.postMessage({ type: 'chunk', key: isKey, data: data, timestamp: chunkStamp(), frameId: frameId, reference: reference, at: arrival, stamp }, [data]); }
   catch (e) { return false; }
   return true;
 }
@@ -3717,6 +3931,7 @@ function getCurrentSettingsPayload() {
         ['video_paintover_crf', () => getIntParam('video_paintover_crf', 18)],
         ['video_paintover_burst_frames', () => getIntParam('video_paintover_burst_frames', 5)],
         ['use_paint_over_quality', () => getBoolParam('use_paint_over_quality', true)],
+        ['lossless_static_refinement', () => getBoolParam('lossless_static_refinement', false)],
         ['scaling_dpi', () => getIntParam('scaling_dpi', 96)],
         ['enable_binary_clipboard', () => getBoolParam('enable_binary_clipboard', false)],
         ['rate_control_mode', () => getStringParam('rate_control_mode', 'cbr')],
@@ -4253,6 +4468,7 @@ const initializeUI = () => {
 
 /** Closes every stripe decoder and forgets their soft-error counts. */
 function clearAllVncStripeDecoders() {
+  invalidateLossless('decoder-reset');
   console.log("Clearing all VNC stripe decoders.");
   for (const yPos in vncStripeDecoders) {
     if (Object.prototype.hasOwnProperty.call(vncStripeDecoders, yPos)) {
@@ -4636,6 +4852,8 @@ function handleDecodedVncStripeFrame(yPos, frame) {
   pageDecode.format = frame.format;
   if (streamStats.open) notePageDecoded(frame);
   if (isFullFrameVideo(currentEncoderMode) && yPos === 0) {
+    const stamp = pageLosslessSamples.get(frame.timestamp) || null;
+    pageLosslessSamples.delete(frame.timestamp);
     pagePace.decoded();
     if (document.hidden || (clientMode === 'websockets' && !isSharedMode && !isVideoPipelineActive)) {
       try { frame.close(); } catch (e) {}
@@ -4647,13 +4865,13 @@ function handleDecodedVncStripeFrame(yPos, frame) {
       decodedStripesQueue.length = 0;
     }
     if (supportsWindowMSTG && presentFrameToVideo(frame)) {
-      // Handed to the main-thread track generator.
-    } else if (USE_OFFSCREEN_WORKER && presentFrameToWorker(frame)) {
+      selectLosslessSink('track-generator');
+    } else if (USE_OFFSCREEN_WORKER && presentFrameToWorker(frame, stamp)) {
       // Handed to the worker sink.
     } else {
       if (canvas && canvasContext && canvas.width > 0 && canvas.height > 0) {
-        canvasContext.drawImage(frame, 0, 0);
-        if (streamStats.open) pageShown.drawn(takeArrival(frame.timestamp));
+        selectLosslessSink('page-canvas');
+        if (pageLossless.draw(frame, stamp) && streamStats.open) pageShown.drawn(takeArrival(frame.timestamp));
       }
       try { frame.close(); } catch (e) {}
     }
@@ -5536,6 +5754,7 @@ function receiveMessage(event) {
         pipelinesToggledByUser.add('video');
         if (isVideoPipelineActive !== desiredState) {
           isVideoPipelineActive = desiredState;
+          refreshLosslessCapability();
           wsMessage = desiredState ? 'START_VIDEO' : 'STOP_VIDEO';
 
           if (!desiredState) {
@@ -5627,6 +5846,15 @@ function receiveMessage(event) {
           console.error(`Error sending ${wsMessage} to WebSocket:`, e);
         }
       }
+      break;
+    }
+    case 'setLosslessStaticRefinement': {
+      handleSettingsMessage({ lossless_static_refinement: !!message.enabled });
+      break;
+    }
+    case 'setLosslessParentState': {
+      losslessParentAllowed = !!message.enabled;
+      refreshLosslessCapability();
       break;
     }
     case 'audioDeviceSelected': {
@@ -5954,8 +6182,15 @@ function handleSettingsMessage(settings, fromServer, send = true) {
   }
   if (settings.use_paint_over_quality !== undefined) {
     use_paint_over_quality = !!settings.use_paint_over_quality;
+    losslessParentAllowed = use_paint_over_quality;
     storeBool('use_paint_over_quality', use_paint_over_quality);
     if (!fromServer) postedExplicitOnly.add('use_paint_over_quality');
+    settingsChanged = true;
+  }
+  if (settings.lossless_static_refinement !== undefined) {
+    lossless_static_refinement = !!settings.lossless_static_refinement;
+    storeBool('lossless_static_refinement', lossless_static_refinement);
+    if (!fromServer) postedExplicitOnly.add('lossless_static_refinement');
     settingsChanged = true;
   }
   if (settings.scaling_dpi !== undefined) {
@@ -6045,6 +6280,7 @@ function handleSettingsMessage(settings, fromServer, send = true) {
     storeBool('force_aligned_resolution', force_aligned_resolution);
     settingsChanged = true;
   }
+  refreshLosslessCapability();
   if (settingsChanged && send) {
     sendFullSettingsUpdateToServer('handleSettingsMessage', fromServer ? null : Object.keys(settings));
   }
@@ -6190,6 +6426,7 @@ function initWebsockets() {
     if (!websocket || websocket.readyState !== WebSocket.OPEN || !isVideoPipelineActive) return;
     websocket.send('STOP_VIDEO');
     isVideoPipelineActive = false;
+    refreshLosslessCapability();
     videoPausedForHiddenTab = true;
     window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
     console.log("Tab hidden: Sent STOP_VIDEO. Clearing canvas visually. Server will send PIPELINE_RESETTING for full state reset.");
@@ -6698,6 +6935,9 @@ function initWebsockets() {
  * directly.
  */
 const SOCKET_WORKER_SRC = `
+${losslessStaticSource.replace(/^export /gm, '')}
+const losslessProtocol = createLosslessProtocol();
+let losslessConfig = null;
 let ws = null, audioPort = null, audioOn = true, primary = true;
 let lastTick = 0;
 
@@ -6756,10 +6996,18 @@ function syncVideoAckTimer() {
 
 self.onmessage = (e) => {
   const m = e.data;
+  if (m.type === 'losslessConfig') {
+    if (!Number.isSafeInteger(m.serial) || (losslessConfig && m.serial <= losslessConfig.serial)) return;
+    losslessConfig = m;
+    losslessProtocol.enable(m.allowed);
+    if (videoPort) videoPort.postMessage(m);
+    return;
+  }
   if (m.type === 'audioPort') { audioPort = m.port; return; }
   if (m.type === 'audioState') { audioOn = !!m.active; return; }
   if (m.type === 'videoPort') {
     videoPort = m.port;
+    if (losslessConfig) videoPort.postMessage(losslessConfig);
     videoPort.onmessage = (ev) => {
       const pm = ev.data;
       if (pm && pm.presentedId !== undefined) { videoLastId = pm.presentedId; videoLastIdAt = performance.now(); }
@@ -6820,11 +7068,30 @@ self.onmessage = (e) => {
     ws.onopen = () => self.postMessage({ type: 'open' });
     ws.onerror = () => self.postMessage({ type: 'error' });
     ws.onclose = (ev) => {
+      losslessProtocol.reset();
+      if (videoPort) videoPort.postMessage({ type: 'losslessInvalidate', reason: 'socket-closed' });
       self.postMessage({ type: 'close', code: ev.code, reason: ev.reason, wasClean: ev.wasClean });
       ws = null;
     };
     ws.onmessage = (ev) => {
       const d = ev.data;
+      const lossless = losslessProtocol.receive(d);
+      if (lossless && lossless.handled) {
+        if (lossless.control || lossless.png) {
+          const message = { type: 'lossless', ...lossless };
+          if (lossless.control && lossless.control.type === 'lossless_status') {
+            self.postMessage({ type: 'lossless', control: lossless.control });
+          }
+          if (videoPort && (videoDivert || (losslessConfig && losslessConfig.workerCanvas))) {
+            videoPort.postMessage(message, lossless.png ? [lossless.png] : []);
+          }
+          else if (!lossless.control || lossless.control.type !== 'lossless_status') {
+            self.postMessage(message, lossless.png ? [lossless.png] : []);
+          }
+        }
+        return;
+      }
+      const stamp = lossless ? lossless.stamp : null;
       const at = statsOn ? performance.timeOrigin + performance.now() : 0;
       if (audioPort && audioOn && primary && d instanceof ArrayBuffer &&
           d.byteLength >= 2 && new Uint8Array(d, 0, 1)[0] === 0x01) {
@@ -6843,12 +7110,12 @@ self.onmessage = (e) => {
             videoLastId = (head[0] << 8) | head[1];
             videoLastIdAt = performance.now();
           }
-          if (at) videoPort.postMessage({ buffer: d, at }, [d]);
+          if (at || stamp) videoPort.postMessage({ buffer: d, at, stamp }, [d]);
           else videoPort.postMessage(d, [d]);
           return;
         }
       }
-      if (d instanceof ArrayBuffer) self.postMessage({ type: 'message', data: d, at }, [d]);
+      if (d instanceof ArrayBuffer) self.postMessage({ type: 'message', data: d, at, stamp }, [d]);
       else self.postMessage({ type: 'message', data: d });
     };
     return;
@@ -6892,8 +7159,9 @@ class WorkerWebSocket {
     URL.revokeObjectURL(workerURL);
     this._worker.onmessage = (e) => {
       const m = e.data;
+      if (m.type === 'lossless') { if (websocket === this) receiveLossless(m); return; }
       if (m.type === 'message') {
-        const ev = { data: m.data, at: m.at };
+        const ev = { data: m.data, at: m.at, stamp: m.stamp };
         if (this.onmessage) this.onmessage(ev);
         this._emit('message', ev);
         return;
@@ -6907,6 +7175,10 @@ class WorkerWebSocket {
       }
       if (m.type === 'open') {
         this.readyState = WebSocket.OPEN;
+        if (websocket === this) {
+          losslessCapabilitySent = ''; losslessConfiguration = '';
+          refreshLosslessCapability();
+        }
         if (this.onopen) this.onopen();
         this._emit('open', {});
         return;
@@ -6914,6 +7186,11 @@ class WorkerWebSocket {
       if (m.type === 'error') { if (this.onerror) this.onerror(m); this._emit('error', m); return; }
       if (m.type === 'close') {
         this.readyState = WebSocket.CLOSED;
+        if (websocket === this) {
+          invalidateLossless('socket-closed');
+          losslessServer = { version: 1, epoch: 0, supported: false, effective: false, reason: 'disconnected' };
+          refreshLosslessCapability();
+        }
         if (this.onclose) this.onclose(m);
         this._emit('close', m);
         this._retire();
@@ -7589,6 +7866,8 @@ class WorkerWebSocket {
    * in-place reconnect.
    */
   const openSessionSocket = () => {
+    pageLosslessProtocol.reset();
+    losslessCapabilitySent = ''; losslessConfiguration = '';
     try {
       if (!socketWorkerEnabled) throw new Error('socket_worker=false');
       websocket = new WorkerWebSocket(websocketEndpointURL.href, displayId === 'primary', tokenProtocols);
@@ -7709,6 +7988,7 @@ class WorkerWebSocket {
    * requests the cache-only clipboard, and starts the metrics and ack timers.
    */
   const onSocketOpen = async () => {
+    const openingSocket = websocket;
     console.log('[websockets] Connection opened!');
     socketOpenedAt = performance.now();
     reconnectUnopened = 0;
@@ -7716,6 +7996,7 @@ class WorkerWebSocket {
     await settleFullColorSupport();
     await settleTenBitSupport();
     if (await h264FramingReady === 'avcc') console.info('[Selkies] H.264 decodes here with an avcC description; frames are reframed for it.');
+    if (websocket !== openingSocket) return;
     // The first answer is the baseline; a later one that differs is a new build.
     entryPageChanged().then((changed) => { if (changed) location.reload(); });
     wsEverOpened = true;
@@ -7736,13 +8017,13 @@ class WorkerWebSocket {
         'video_crf', 'encoder', 'manual_resolution',
         'audio_bitrate', 'video_fullcolor', 'video_10bit', 'video_streaming_mode',
         'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'video_paintover_crf',
-        'video_paintover_burst_frames', 'use_paint_over_quality', 'scaling_dpi',
+        'video_paintover_burst_frames', 'use_paint_over_quality', 'lossless_static_refinement', 'scaling_dpi',
         'enable_binary_clipboard', 'rate_control_mode', 'video_bitrate',
         'force_aligned_resolution'
       ];
       const booleanSettingKeys = [
         'manual_resolution', 'video_fullcolor', 'video_10bit', 'video_streaming_mode',
-        'use_cpu', 'use_paint_over_quality', 'enable_binary_clipboard',
+        'use_cpu', 'use_paint_over_quality', 'lossless_static_refinement', 'enable_binary_clipboard',
         'force_aligned_resolution'
       ];
       const integerSettingKeys = [
@@ -7837,6 +8118,7 @@ class WorkerWebSocket {
     serverSettingsReceived = false;
     pendingInitialAudioStart = false;
     isVideoPipelineActive = true;
+    refreshLosslessCapability();
     isAudioPipelineActive = (displayId === 'primary');
     window.postMessage({
       type: 'pipelineStatusUpdate',
@@ -7927,6 +8209,7 @@ class WorkerWebSocket {
       const arrival = !streamStats.open ? NaN : event.at > 0 ? event.at : performance.timeOrigin + performance.now();
 
       if (dataTypeByte === 0x03 || dataTypeByte === 0x04) {
+        pageLossless.observe(event.stamp || null);
         window.videoChunksReceived++;
         lastVideoChunkAt = performance.now();
         if (startVideoWatchdogTimer !== null) {
@@ -8072,7 +8355,7 @@ class WorkerWebSocket {
                 }
             }
             const workerCodec = workerKeyframeCodec || wireCodecString(video_frame_type_byte, null, stripeWidth, stripeHeight);
-            if (feedWorkerDecoder(isKeyFrame, h264Payload, stripeWidth, stripeHeight, workerCodec, vncFrameID, referenceFrameId, arrival)) {
+            if (feedWorkerDecoder(isKeyFrame, h264Payload, stripeWidth, stripeHeight, workerCodec, vncFrameID, referenceFrameId, arrival, event.stamp)) {
                 return;
             }
         }
@@ -8193,6 +8476,12 @@ class WorkerWebSocket {
                 // loop can present whole frames; full-frame keeps a monotonic clock.
                 const chunkTimestamp = (currentEncoderMode === 'h264enc-striped')
                     ? vncFrameID : chunkStamp();
+                if (isFullFrameVideo(currentEncoderMode) && event.stamp) {
+                    if (event.stamp) {
+                      if (pageLosslessSamples.size >= 64) pageLosslessSamples.clear();
+                      pageLosslessSamples.set(chunkTimestamp, event.stamp);
+                    }
+                }
                 const chunkData = {
                     type: chunkType,
                     timestamp: chunkTimestamp,
@@ -8534,6 +8823,13 @@ class WorkerWebSocket {
               if (typeof window['video_10bit'] === 'boolean') {
                   video_10bit = window['video_10bit'];
               }
+              if (typeof window['lossless_static_refinement'] === 'boolean') {
+                  lossless_static_refinement = window['lossless_static_refinement'];
+              }
+              if (typeof window['use_paint_over_quality'] === 'boolean') {
+                  use_paint_over_quality = window['use_paint_over_quality'];
+              }
+              refreshLosslessCapability();
               const tbEntry = obj.settings && obj.settings.video_10bit;
               tenBitLocked = !!(tbEntry && tbEntry.locked);
               if (video_10bit) declineUndecodableTenBit('10-bit the server announced is not decoded here');
@@ -8652,6 +8948,7 @@ class WorkerWebSocket {
             let statusChanged = false;
             if (obj.video !== undefined && obj.video !== isVideoPipelineActive) {
               isVideoPipelineActive = obj.video;
+              refreshLosslessCapability();
               statusChanged = true;
               if (!isVideoPipelineActive && isVideoEncoder(currentEncoderMode) && !isSharedMode) {
                   clearAllVncStripeDecoders();
@@ -8834,11 +9131,13 @@ class WorkerWebSocket {
         } else if (event.data === 'VIDEO_STARTED' && !isSharedMode) {
           clearStartVideoWatchdog();
           isVideoPipelineActive = true;
+          refreshLosslessCapability();
           window.postMessage({ type: 'pipelineStatusUpdate', video: true }, window.location.origin);
         }
         else if (event.data === 'VIDEO_STOPPED' && !isSharedMode) {
           console.log("Client: Received VIDEO_STOPPED. Updating isVideoPipelineActive=false. Expecting PIPELINE_RESETTING from server for full state reset.");
           isVideoPipelineActive = false;
+          refreshLosslessCapability();
           window.postMessage({ type: 'pipelineStatusUpdate', video: false }, window.location.origin);
         }
         else if (event.data.startsWith('PIPELINE_RESETTING ')) {
@@ -8950,8 +9249,18 @@ class WorkerWebSocket {
     }
   };
 
-  /** Inflates 0x05 frames and routes everything through `__rawWsMessage` in order (see `__wsCtrlChain`). */
+  /**
+   * Pairs native-page socket metadata before the asynchronous gzip control
+   * chain. Refinement JSON is never compressed; video keeps its existing
+   * bypass and its stamp, including when the page forwards it to a worker.
+   * Worker sockets already performed this pairing before their transfer.
+   */
   const onSocketMessage = (event) => {
+    if (!websocket._worker) {
+      const ordered = pageLosslessProtocol.receive(event.data);
+      if (ordered && ordered.handled) { receiveLossless(ordered); return; }
+      if (ordered && ordered.stamp) event = { data: event.data, at: event.at, stamp: ordered.stamp };
+    }
     const d = event.data;
     if (d instanceof ArrayBuffer) {
       if (d.byteLength >= 1 && new Uint8Array(d, 0, 1)[0] === 0x05) {
@@ -9006,6 +9315,9 @@ class WorkerWebSocket {
    */
   const onSocketClose = (event) => {
     console.log('[websockets] Connection closed', event);
+    invalidateLossless('socket-closed');
+    losslessServer = { version: 1, epoch: 0, supported: false, effective: false, reason: 'disconnected' };
+    refreshLosslessCapability();
     streamStats.disconnected();
     // No renewal will come; a rumble playing stops now rather than at its lease.
     if (window.webrtcInput && typeof window.webrtcInput.stopRumble === 'function') window.webrtcInput.stopRumble();
@@ -9086,11 +9398,12 @@ class WorkerWebSocket {
    * @returns {void}
    */
   const bindSessionSocket = () => {
-    gzipTextSends(websocket);
-    websocket.onopen = onSocketOpen;
-    websocket.onmessage = onSocketMessage;
-    websocket.onerror = onSocketError;
-    websocket.onclose = onSocketClose;
+    const socket = websocket;
+    gzipTextSends(socket);
+    socket.onopen = (event) => { if (websocket === socket) return onSocketOpen(event); };
+    socket.onmessage = (event) => { if (websocket === socket) onSocketMessage(event); };
+    socket.onerror = (event) => { if (websocket === socket) onSocketError(event); };
+    socket.onclose = (event) => { if (websocket === socket) onSocketClose(event); };
   };
   bindSessionSocket();
   reopenSessionSocket = () => {
@@ -10173,6 +10486,7 @@ function stopWebcamCapture() {
 
 /** Tears everything down on unload: timers, capture, socket, audio, decoders, and buffers, then resets the UI state. */
 function cleanup() {
+  invalidateLossless('cleanup');
   if (metricsIntervalId) {
     clearInterval(metricsIntervalId);
     metricsIntervalId = null;
@@ -10244,6 +10558,7 @@ function cleanup() {
  * @param {string} [reason] Logged.
  */
 function performServerInitiatedVideoReset(reason = "unknown") {
+  invalidateLossless("pipeline-reset");
   console.log(`Performing server-initiated video reset. Reason: ${reason}. Current lastReceivedVideoFrameId before reset: ${lastReceivedVideoFrameId}`);
 
   lastReceivedVideoFrameId = -1;

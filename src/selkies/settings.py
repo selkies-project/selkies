@@ -725,6 +725,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Clean up a still screen at the paint-over quality, under CBR and CRF alike and whether or not video_streaming_mode (Turbo) sends every frame. Unless set, it is off while Turbo drives a video encoder, whose frames refine a still picture as the cleanup would, and on otherwise, JPEG included, as the dashboards default it. When on: once the picture stops changing, or keeps changing only in small places, a video encoder refreshes what changed at the paint-over CRF, and after a large change sends a key frame at it once the screen holds still. Under CBR the frames instead keep coming after the screen stops, each coded by the rate control, until the picture is clean, and then stop until it moves again, so a blinking cursor on a clean screen costs only its own frames: NVENC and x264 until their rate control reaches that quality (NVENC refreshes the screen a band a frame where the bitrate is too low for it to get there), VA-API until the encoded picture stops improving, x265 and VP9 until theirs codes at it, for half a minute at most; VP8 and SVT-AV1 hold a refresh at it, a key frame within a second of the bitrate; JPEG re-sends still stripes at the paint-over JPEG quality.",
     },
     {
+        "name": "lossless_static_refinement",
+        "type": "bool",
+        "default": False,
+        "help": "Optionally finish still images with a lossless RGB8 capture after paint-over is enabled. Requires a local Wayland capture with scene tracking and a supported full-frame WebSocket canvas sink; unavailable over WebRTC. May use more data and memory. A stored preference does not bypass capture, presentation, or parent-setting requirements.",
+    },
+    {
         "name": "paint_over_jpeg_quality",
         "type": "range",
         "default": "1-100",
@@ -1236,7 +1242,7 @@ CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
 # size and density, and anything its page changes on its own, follow the owner.
 STREAM_SETTINGS = (
     "encoder", "framerate", "video_crf", "video_fullcolor", "video_10bit", "video_streaming_mode",
-    "jpeg_quality", "paint_over_jpeg_quality", "use_paint_over_quality", "video_paintover_crf",
+    "jpeg_quality", "paint_over_jpeg_quality", "use_paint_over_quality", "lossless_static_refinement", "video_paintover_crf",
     "video_paintover_burst_frames", "video_bitrate", "rate_control_mode", "use_cpu", "audio_bitrate",
 )
 
@@ -1479,6 +1485,7 @@ class AppSettings:
     master_token: str
     video_fullcolor: tuple[bool, bool]
     video_10bit: tuple[bool, bool]
+    lossless_static_refinement: tuple[bool, bool]
     subfolder: str
     video_bitrate: tuple[float, float]
     file_transfer_limit_mbps: float
