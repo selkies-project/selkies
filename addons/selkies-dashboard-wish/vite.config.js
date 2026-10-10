@@ -23,7 +23,13 @@ export default ({ mode }) => {
     resolve: {
       alias: {
         "@": path.resolve(import.meta.dirname, "./src"),
+        // The default dashboard's sources, shared rather than copied.
+        "@dashboard": path.resolve(import.meta.dirname, "../selkies-dashboard/src"),
       },
+      // Files imported from the default dashboard sit outside this package, so
+      // react/jsx-runtime would be looked up beside them, where it may not be
+      // installed; resolving React from here keeps one copy in the bundle.
+      dedupe: ["react", "react-dom"],
     },
     server: {
       // Dev-server exposure is opt-in: bind loopback unless SELKIES_VITE_HOST is set

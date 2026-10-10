@@ -13,11 +13,12 @@ import { getPrefixedKey, getPrintJobs, isMobileClient, PrintJob } from "@/utils"
 import { t } from "@/i18n";
 
 /**
- * The printing panel: the switch that prints each document as it arrives,
- * and the documents printed so far, each with a print and a save button.
+ * The printing view of the overflow menu: the switch that prints each document
+ * as it arrives, and the documents printed so far, each with a print and a
+ * save button.
  *
  * The documents are the core's `printDocument` messages, kept in utils so
- * none is missed while the panel is closed; the switch travels on the
+ * none is missed while the view is closed; the switch travels on the
  * `settings` message and a print on `printRequest`. A touch-first client
  * prints only from its own PDF viewer, so there each document has the save
  * button alone, and the notice each raises carries the link that opens it.
@@ -46,7 +47,7 @@ export function Printing() {
     };
 
     return (
-        <div className="w-[300px] p-4 flex flex-col gap-3">
+        <div id="printing-panel" className="w-[300px] p-4 flex flex-col gap-3">
             <div className="flex items-center justify-between">
                 <Label className="text-sm font-medium" title={t('sections.printing.automaticDetails')}>{t('sections.printing.automaticLabel')}</Label>
                 <Switch checked={automatic} onCheckedChange={toggle} />

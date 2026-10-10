@@ -5,14 +5,27 @@
  */
 
 /**
- * The wish dashboard's menu bar and the overlays it owns: the draggable top
- * menu (apps, files, clipboard, sharing, settings, monitoring, second-screen
- * placement, keyboard assistance), the gaming control bar, the ellipsis menu,
- * the mobile soft keys, and the draggable System Monitoring panel.
+ * The wish dashboard's floating toolbar and the overlays it owns: the toolbar
+ * (the project logo linking to the project, the toolbox button opening the
+ * overflow menu, settings, gamepads, monitoring, fullscreen, gaming mode, the
+ * touch controls, and a button that slides the bar up behind the top edge,
+ * leaving a tab to bring it back), the overflow menu that opens the apps
+ * panel, leads with the stream switches, nests the occasional tools
+ * (clipboard, files, printing, sharing, shortcuts) each in its own submenu,
+ * places a second screen, and closes with the branding and the theme toggle
+ * in its footer, plus the mobile soft keys and the floating, draggable
+ * Gamepads and System Monitoring panels. Both panels stay open until their
+ * toolbar button is pressed again and are dragged by their header; the
+ * monitoring panel's open state (`stats_strip`, shared with the default
+ * dashboard), position, and compact or detailed view survive a reload. On a
+ * touch client the keyboard button shows or hides the floating on-screen
+ * keyboard button, which stays away while a hardware keyboard is attached.
  *
- * Reads the `serverSettings` and `trackpadModeUpdate` messages the core posts
- * on `window` and posts `sidebarVisibilityChanged`, `touchinput:trackpad`,
- * `touchinput:touch`, `setSynth`, `setTrackpadSpeed`, and `setGamepadRumble` back; held modifier keys are delivered as
+ * Reads the `serverSettings`, `trackpadModeUpdate`, and `gamingModeUpdate`
+ * messages the core posts on `window` (entering gaming mode, which holds the
+ * pointer and keyboard, slides the bar up and leaves its tab), plus
+ * `toggleDashboard` (Ctrl+Shift+M), which slides it up or back down, and posts `sidebarVisibilityChanged`, `touchinput:trackpad`,
+ * `touchinput:touch`, `setSynth`, and `setTrackpadSpeed` back; held modifier keys are delivered as
  * synthetic KeyboardEvents on `window`, which the core's input handler consumes
  * like real ones. A secondary display opens as a new window on the
  * `#display2-<direction>` fragment, placed with the Window Management API
@@ -23,24 +36,16 @@
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
+import { Menu, MenuCheckboxItem, MenuItem, MenuPopup, MenuSeparator, MenuSub, MenuSubPopup, MenuSubTrigger, MenuTrigger } from "@/components/ui/menu";
 import { ModeToggle } from "@/components/ui/ModeToggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
-  Menubar,
-  MenubarContent,
-  MenubarItem,
-  MenubarMenu,
-  MenubarTrigger,
-  MenubarSeparator,
-  MenubarLabel,
-  MenubarGroup,
-  MenubarSub,
-  MenubarSubContent,
-  MenubarSubTrigger,
-} from "@/components/ui/menubar";
-import {
   Volume2,
+  ChevronDown,
+  ChevronUp,
   Gamepad2,
+  Joystick,
   Monitor,
   Maximize,
   Mic,
@@ -52,13 +57,12 @@ import {
   FileText,
   LayoutGrid,
   Hand,
-  LayoutPanelLeft,
   Keyboard,
+  ToolCase,
   Touchpad,
   ScreenShare,
   Crosshair,
   Printer,
-  Vibrate
 } from "lucide-react";
 
 import { Clipboard } from "@/components/dashboard/clipboard";
@@ -67,7 +71,7 @@ import { Printing } from "@/components/dashboard/printing";
 import { Apps } from "@/components/dashboard/apps";
 import { Settings } from "@/components/dashboard/settings";
 import { SystemMonitoring } from "@/components/dashboard/system-monitoring";
-import { Gamepad } from "@/components/dashboard/gamepad";
+import { GamepadPanel, keyboardWatch, useKeyboardAttached } from "@/components/dashboard/gamepad";
 import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
@@ -106,8 +110,108 @@ interface TopMenuProps {
   onGamepadToggle: () => void;
   /** Toggles the on-screen touch gamepad. */
   onToggleTouchGamepad: () => void;
-  /** Toggles the stats overlay. */
-  toggleStats: () => void;
+  /** The floating on-screen keyboard button is shown. */
+  isKeyboardButtonVisible: boolean;
+  /** Shows or hides the floating on-screen keyboard button. */
+  onKeyboardButtonVisible: (visible: boolean) => void;
+}
+
+/** Where the toolbar's logo and the overflow menu's footer link to. */
+const PROJECT_URL = "https://github.com/selkies-project/selkies";
+
+/**
+ * Leaves fullscreen when in it, otherwise asks the core to enter it. Entering
+ * is the core's, which owns what each mode locks (plain fullscreen locks
+ * neither the pointer nor the keyboard, gaming mode locks both); exiting is the
+ * browser's own call through whichever prefixed API exists.
+ * @param request The core message that enters the mode.
+ */
+function toggleFullscreen(request: "requestFullscreen" | "requestGamingMode"): void {
+  if (!document.fullscreenElement) {
+    window.postMessage({ type: request }, window.location.origin);
+    return;
+  }
+  const doc = document as any;
+  const exit = doc.exitFullscreen || doc.mozCancelFullScreen || doc.webkitExitFullscreen || doc.msExitFullscreen;
+  if (exit) Promise.resolve(exit.call(document)).catch((err: unknown) => console.error("Error exiting fullscreen:", err));
+}
+
+/** Height of the toolbar in pixels, which sliding it up by hides it exactly. */
+const TOOLBAR_HEIGHT = 42;
+
+/**
+ * Drag state for a floating panel. A press starts a drag only on an element
+ * inside a `data-drag-handle` and not on a button in it, and the position is
+ * held inside the window by the panel's measured size.
+ * @param ref The ref on the panel element, which the caller owns so that the
+ *     hook's result holds no ref to read during render.
+ * @param initial Where the panel starts.
+ * @param fallbackSize Size that bounds the drag until the panel is measured.
+ * @param storageKey When given, the position is kept under this prefixed key
+ *     and restored on the next load.
+ * @returns The panel's position, whether it is being dragged, and the
+ *     mouse-down handler to put on it.
+ */
+function useFloatingPanel(
+  ref: React.RefObject<HTMLDivElement | null>,
+  initial: { x: number; y: number },
+  fallbackSize: { w: number; h: number },
+  storageKey?: string,
+) {
+  const [position, setPosition] = React.useState(() => {
+    if (!storageKey) return initial;
+    try {
+      const saved = JSON.parse(localStorage.getItem(getPrefixedKey(storageKey)) ?? "null");
+      if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+        // Kept on screen: the window may be smaller than when it was saved.
+        return {
+          x: Math.max(0, Math.min(saved.x, window.innerWidth - 40)),
+          y: Math.max(0, Math.min(saved.y, window.innerHeight - 40)),
+        };
+      }
+    } catch { /* unreadable: the default stands */ }
+    return initial;
+  });
+  const lastDrag = React.useRef<{ x: number; y: number } | null>(null);
+  const [isDragging, setIsDragging] = React.useState(false);
+  const start = React.useRef({ x: 0, y: 0 });
+  const { w: fallbackW, h: fallbackH } = fallbackSize;
+
+  const onMouseDown = (e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (!target.closest('[data-drag-handle]') || target.closest('button')) return;
+    setIsDragging(true);
+    start.current = { x: e.clientX - position.x, y: e.clientY - position.y };
+  };
+
+  React.useEffect(() => {
+    if (!isDragging) return undefined;
+    const handleMove = (e: MouseEvent) => {
+      const el = ref.current;
+      const maxX = window.innerWidth - (el ? el.offsetWidth : fallbackW);
+      const maxY = window.innerHeight - (el ? el.offsetHeight : fallbackH);
+      const next = {
+        x: Math.max(0, Math.min(e.clientX - start.current.x, maxX)),
+        y: Math.max(0, Math.min(e.clientY - start.current.y, maxY)),
+      };
+      lastDrag.current = next;
+      setPosition(next);
+    };
+    const handleUp = () => {
+      setIsDragging(false);
+      if (storageKey && lastDrag.current) {
+        localStorage.setItem(getPrefixedKey(storageKey), JSON.stringify(lastDrag.current));
+      }
+    };
+    document.addEventListener('mousemove', handleMove);
+    document.addEventListener('mouseup', handleUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMove);
+      document.removeEventListener('mouseup', handleUp);
+    };
+  }, [ref, isDragging, fallbackW, fallbackH, storageKey]);
+
+  return { position, isDragging, onMouseDown };
 }
 
 /**
@@ -127,38 +231,34 @@ export function TopMenu({
   onMicrophoneToggle,
   onWebcamToggle,
   onGamepadToggle,
-  onToggleTouchGamepad }: TopMenuProps) {
+  onToggleTouchGamepad,
+  isKeyboardButtonVisible,
+  onKeyboardButtonVisible }: TopMenuProps) {
 
   const [activePanel, setActivePanel] = React.useState<string | null>(null);
-  // Rumble on this client's pads is client-only; the core persists gamepad_rumble itself.
-  const [gamepadRumble, setGamepadRumble] = React.useState(() => {
-    try {
-      return localStorage.getItem(getPrefixedKey("gamepad_rumble")) !== "false";
-    } catch {
-      return true;
-    }
-  });
-  const toggleGamepadRumble = () => {
-    const next = !gamepadRumble;
-    setGamepadRumble(next);
-    window.postMessage({ type: "setGamepadRumble", value: next }, window.location.origin);
-  };
+  // The overflow menu is controlled so its open state survives the submenu
+  // swaps; closing it folds the submenus with it.
+  const [overflowOpen, setOverflowOpen] = React.useState(false);
   const [showAppsModal, setShowAppsModal] = React.useState(false);
   const [showFilesModal, setShowFilesModal] = React.useState(false);
   const [printJobCount, setPrintJobCount] = React.useState(() => getPrintJobs().length);
-  const [showDropdown, setShowDropdown] = React.useState(false);
-  const [showSystemMonitoring, setShowSystemMonitoring] = React.useState(false);
+  // Kept across reloads under the key the default dashboard's stats strip uses.
+  const [showSystemMonitoring, setShowSystemMonitoring] = React.useState(
+    () => localStorage.getItem(getPrefixedKey("stats_strip")) === "true");
   const [isDragging, setIsDragging] = React.useState(false);
-  const [isSystemMonitoringDragging, setIsSystemMonitoringDragging] = React.useState(false);
+  const [showGamepads, setShowGamepads] = React.useState(false);
+  // Slid up behind the top edge of the window, leaving a tab to bring it back.
+  const [isCollapsed, setIsCollapsed] = React.useState(false);
   const [position, setPosition] = React.useState(() => {
     // Rough centering off an assumed 400px menu; the measured width recenters
     // it after mount.
     const x = window.innerWidth / 2 - 200;
     return { x, y: 0 };
   });
-  const [systemMonitoringPosition, setSystemMonitoringPosition] = React.useState(() => {
-    return { x: 16, y: 64 };
-  });
+  const monitoringRef = React.useRef<HTMLDivElement>(null);
+  const gamepadRef = React.useRef<HTMLDivElement>(null);
+  const monitoringPanel = useFloatingPanel(monitoringRef, { x: 16, y: 64 }, { w: 300, h: 200 }, "stats_panel_position");
+  const gamepadPanel = useFloatingPanel(gamepadRef, { x: Math.max(16, window.innerWidth - 316), y: 64 }, { w: 300, h: 200 });
 
   const [serverSettings, setServerSettings] = React.useState<any>(() => getLastServerSettings());
   const [renderableSettings, setRenderableSettings] = React.useState<any>(() => computeRenderableSettings(getLastServerSettings()));
@@ -168,6 +268,18 @@ export function TopMenu({
   const isMobile = isMobileClient;
   const [hasDetectedTouch, setHasDetectedTouch] = React.useState(false);
   const [isTrackpadModeActive, setIsTrackpadModeActive] = React.useState(false);
+  // An attached keyboard keeps the system's on-screen one down, so the floating
+  // button that pops it goes while one is in use (lib/hardware-keyboard.js).
+  const keyboardAttached = useKeyboardAttached();
+  const toggleKeyboardButton = () => {
+    // Asked for back while a keyboard was assumed: the user knows better.
+    if (keyboardAttached) {
+      keyboardWatch.reset();
+      onKeyboardButtonVisible(true);
+      return;
+    }
+    onKeyboardButtonVisible(!isKeyboardButtonVisible);
+  };
 
   const [availablePlacements, setAvailablePlacements] = React.useState<any>(null);
 
@@ -204,13 +316,9 @@ export function TopMenu({
   });
 
   const dragRef = React.useRef<HTMLDivElement>(null);
-  const ellipsisRef = React.useRef<HTMLDivElement>(null);
-  const dropdownRef = React.useRef<HTMLDivElement>(null);
   const panelRef = React.useRef<HTMLDivElement>(null);
-  const systemMonitoringRef = React.useRef<HTMLDivElement>(null);
 
   const startPosRef = React.useRef({ x: 0, y: 0 });
-  const systemMonitoringStartPosRef = React.useRef({ x: 0, y: 0 });
 
   React.useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -219,6 +327,15 @@ export function TopMenu({
         console.log("Dashboard received server settings:", event.data.payload);
         setServerSettings(event.data.payload);
         setRenderableSettings(computeRenderableSettings(event.data.payload));
+      }
+      if (event.data?.type === 'gamingModeUpdate' && event.data.active) {
+        setIsCollapsed(true);
+      }
+      // Ctrl+Shift+M, owned by the core: the bar slides up or back down.
+      if (event.data?.type === 'toggleDashboard') {
+        setActivePanel(null);
+        setOverflowOpen(false);
+        setIsCollapsed((collapsed) => !collapsed);
       }
       if (event.data?.type === 'trackpadModeUpdate') {
         if (typeof event.data.enabled === 'boolean') {
@@ -235,14 +352,18 @@ export function TopMenu({
     };
   }, []);
 
+  React.useEffect(() => {
+    localStorage.setItem(getPrefixedKey("stats_strip"), String(showSystemMonitoring));
+  }, [showSystemMonitoring]);
+
   // The core reacts to panels opening and closing (input focus); the monitoring
   // overlay is not an activePanel and counts as open too.
   React.useEffect(() => {
     window.postMessage(
-      { type: 'sidebarVisibilityChanged', isOpen: !!activePanel || showSystemMonitoring },
+      { type: 'sidebarVisibilityChanged', isOpen: !!activePanel || showSystemMonitoring || showGamepads },
       window.location.origin
     );
-  }, [activePanel, showSystemMonitoring]);
+  }, [activePanel, showSystemMonitoring, showGamepads]);
 
   // Entering fullscreen (button, gaming mode, Ctrl+Shift+F, or browser UI)
   // folds the dashboard so the user lands in the session.
@@ -325,102 +446,59 @@ export function TopMenu({
     };
   }, [isDragging]);
 
-  /**
-   * Starts dragging the System Monitoring panel, unless the press is on the
-   * scrollbar of a panel taller than the window below it.
-   */
-  const handleSystemMonitoringMouseDown = (e: React.MouseEvent) => {
-    const target = e.target as HTMLElement;
-    if (e.nativeEvent.offsetX >= target.clientWidth || e.nativeEvent.offsetY >= target.clientHeight) return;
-    setIsSystemMonitoringDragging(true);
-    systemMonitoringStartPosRef.current = {
-      x: e.clientX - systemMonitoringPosition.x,
-      y: e.clientY - systemMonitoringPosition.y,
-    };
-  };
-
-  React.useEffect(() => {
-    const handleSystemMonitoringMouseMove = (e: MouseEvent) => {
-      if (!isSystemMonitoringDragging) return;
-
-      const newX = e.clientX - systemMonitoringStartPosRef.current.x;
-      const newY = e.clientY - systemMonitoringStartPosRef.current.y;
-
-      const systemMonitoringElement = systemMonitoringRef.current;
-      const panelWidth = systemMonitoringElement ? systemMonitoringElement.offsetWidth : 300;
-      const panelHeight = systemMonitoringElement ? systemMonitoringElement.offsetHeight : 200;
-
-      const maxX = window.innerWidth - panelWidth;
-      const maxY = window.innerHeight - panelHeight;
-
-      setSystemMonitoringPosition({
-        x: Math.max(0, Math.min(newX, maxX)),
-        y: Math.max(0, Math.min(newY, maxY)),
-      });
-    };
-
-    const handleSystemMonitoringMouseUp = () => {
-      setIsSystemMonitoringDragging(false);
-    };
-
-    if (isSystemMonitoringDragging) {
-      document.addEventListener('mousemove', handleSystemMonitoringMouseMove);
-      document.addEventListener('mouseup', handleSystemMonitoringMouseUp);
-    }
-
-    return () => {
-      document.removeEventListener('mousemove', handleSystemMonitoringMouseMove);
-      document.removeEventListener('mouseup', handleSystemMonitoringMouseUp);
-    };
-  }, [isSystemMonitoringDragging]);
-
-  // An outside click closes the dropdown and the active panel; the System
-  // Monitoring overlay is not a panel and stays.
+  // An outside click closes the active panel; the System Monitoring overlay
+  // is not a panel and stays.
   React.useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
+      if (!activePanel) return;
       const target = event.target as Node;
 
-      if (showDropdown) {
-        const isOutsideEllipsisMenu = ellipsisRef.current && !ellipsisRef.current.contains(target);
-        const isOutsideDropdown = dropdownRef.current && !dropdownRef.current.contains(target);
+      const isOutsideMainMenu = dragRef.current && !dragRef.current.contains(target);
+      const isOutsidePanel = panelRef.current && !panelRef.current.contains(target);
 
-        if (isOutsideEllipsisMenu && isOutsideDropdown) {
-          setShowDropdown(false);
-        }
-      }
+      // Base UI portals a menu popup to the body — the Settings dropdowns —
+      // outside the panel element, so a click in one still belongs to the
+      // panel's controls.
+      const element = target instanceof Element ? target : null;
+      const isOnMenuPopup = element !== null && element.closest('[data-slot="dropdown-menu-content"], [data-base-ui-portal]') !== null;
+      const isOnMenuTrigger = element !== null && element.closest('[data-slot="dropdown-menu-trigger"]') !== null;
 
-      if (activePanel) {
-        const isOutsideMainMenu = dragRef.current && !dragRef.current.contains(target);
-        const isOutsidePanel = panelRef.current && !panelRef.current.contains(target);
-
-        // Base UI portals render outside the panel element, and its menu
-        // triggers, unlike Radix's, let the mousedown through.
-        const isOnPortal = (target as Element).closest('[data-base-ui-portal]') !== null;
-        const isOnMenuTrigger = (target as Element).closest(
-          '[data-slot="dropdown-menu-trigger"], [data-slot="menubar-trigger"]') !== null;
-
-        if (isOutsideMainMenu && isOutsidePanel && !isOnPortal && !isOnMenuTrigger) {
-          setActivePanel(null);
-        }
+      if (isOutsideMainMenu && isOutsidePanel && !isOnMenuPopup && !isOnMenuTrigger) {
+        setActivePanel(null);
       }
     };
 
-    if (activePanel || showDropdown) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
+    document.addEventListener('mousedown', handleClickOutside);
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
     };
-  }, [activePanel, showDropdown]);
+  }, [activePanel]);
+
+  // Escape closes the active panel the way it closes the menus; the capture
+  // phase keeps the key from reaching the stream as well.
+  React.useEffect(() => {
+    if (!activePanel) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      // A popup layered on the panel — a settings dropdown — takes the Escape
+      // first, so the panel survives the key that only closes the popup.
+      const popup = document.querySelector('[data-slot="dropdown-menu-content"][data-open]');
+      if (popup) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setActivePanel(null);
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [activePanel]);
 
   /**
-   * Opens or closes a panel. Apps is a modal, monitoring is an overlay that
-   * closes the active panel, and the remaining panels are mutually exclusive.
+   * Opens or closes the Settings panel. Apps is a modal and monitoring is an
+   * overlay that closes the panel; the overflow menu carries the rest of the
+   * tools in its own popup.
    */
   const handlePanelToggle = (panelName: string) => {
-    setShowDropdown(false);
-
     if (panelName === 'apps') {
       setShowAppsModal(true);
       return;
@@ -437,6 +515,13 @@ export function TopMenu({
     if (newPanel) {
       setShowSystemMonitoring(false);
     }
+  };
+
+  /** Slides the toolbar up behind the top edge, folding what hangs from it. */
+  const collapseToolbar = () => {
+    setActivePanel(null);
+    setOverflowOpen(false);
+    setIsCollapsed(true);
   };
 
   /** Switches touch input between trackpad and direct-touch mode on the core. */
@@ -686,387 +771,261 @@ export function TopMenu({
     window.postMessage({ type: 'setTrackpadSpeed', value }, window.location.origin);
   };
 
-  /** The panel body for the active panel. */
-  const renderPanel = () => {
-    switch (activePanel) {
-      case 'settings':
-        return <Settings />;
-      case 'monitoring':
-        return <SystemMonitoring />;
-      default:
-        return null;
-    }
+  /** Opens the Download Files dialog and folds the overflow menu behind it. */
+  const openDownloadsModal = () => {
+    setOverflowOpen(false);
+    setShowFilesModal(true);
   };
 
 
 
+  // The overflow menu leads with the stream switches, so they render only
+  // when at least one of them is available.
+  const streamsAvailable =
+    (renderableSettings.videoToggle ?? true) ||
+    (renderableSettings.audioToggle ?? true) ||
+    (renderableSettings.microphoneToggle ?? true) ||
+    (renderableSettings.webcamToggle ?? true);
+
+  // The overflow menu carries the stream switches and the tools a session
+  // reaches for only occasionally, so it renders only when at least one of
+  // them is available.
+  const overflowAvailable =
+    streamsAvailable ||
+    ((renderableSettings.apps ?? true) && !isSecondaryDisplay) ||
+    (renderableSettings.shortcuts ?? true) ||
+    (!isSecondaryDisplay &&
+      ((renderableSettings.clipboard ?? true) ||
+        (renderableSettings.files ?? true) ||
+        printJobCount > 0 ||
+        (renderableSettings.sharing ?? true) ||
+        !!serverSettings?.second_screen?.value));
+
   return (
     <>
-      {((renderableSettings.gamingMode ?? true) || (!isSecondaryDisplay && (renderableSettings.gamepadToggle ?? true))) && (
-        <motion.div
-          className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
-          style={{
-            transform: `translate(${position.x - 84}px, ${position.y}px)`,
-          }}
-        >
-          <div className="flex items-center px-2 py-2">
-            <Menubar modal={false} className="h-6 border-0 bg-transparent p-0">
-              <MenubarMenu>
-                <MenubarTrigger
-                  render={
-                    <Button
-                      variant="secondary"
-                      size="icon"
-                      className="h-6 w-6"
-                    />
-                  }
-                >
-                  <Gamepad2 className="h-4 w-4" />
-                </MenubarTrigger>
-                <MenubarContent align="start" className="min-w-[260px] max-w-[300px]">
-                  <MenubarGroup>
-                    <MenubarLabel>{t('topMenu.gaming')}</MenubarLabel>
-                    {(renderableSettings.gamingMode ?? true) && (
-                      <MenubarItem
-                        className="items-start"
-                        onClick={() => {
-                          if (document.fullscreenElement) {
-                            document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
-                          } else {
-                            window.postMessage({ type: 'requestGamingMode' }, window.location.origin);
-                          }
-                        }}
-                      >
-                        <Crosshair className="h-4 w-4 mr-2 mt-0.5" />
-                        <span className="flex-1 min-w-0">
-                          <span className="block">{t('gamingModeTitle')}</span>
-                          <span className="block text-xs text-muted-foreground whitespace-normal">
-                            {t('gamingModeHint')}
-                          </span>
-                        </span>
-                      </MenubarItem>
-                    )}
-                    {!isSecondaryDisplay && (renderableSettings.gamepadToggle ?? true) && (
-                      <MenubarItem
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          onGamepadToggle();
-                        }}
-                      >
-                        <Gamepad2 className="h-4 w-4 mr-2" />
-                        <span className="flex-1">{t('topMenu.gamepadInput')}</span>
-                        <span className="text-xs text-muted-foreground ml-auto">
-                          {isGamepadEnabled ? t('common.on') : t('common.off')}
-                        </span>
-                      </MenubarItem>
-                    )}
-                    {!isSecondaryDisplay && isGamepadEnabled && (renderableSettings.gamepads ?? true) && (
-                      <MenubarItem
-                        data-testid="gamepad-rumble-toggle"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          toggleGamepadRumble();
-                        }}
-                      >
-                        <Vibrate className="h-4 w-4 mr-2" />
-                        <span className="flex-1">{t('topMenu.rumble')}</span>
-                        <span className="text-xs text-muted-foreground ml-auto">
-                          {gamepadRumble ? t('common.on') : t('common.off')}
-                        </span>
-                      </MenubarItem>
-                    )}
-                    {!isSecondaryDisplay && isGamepadEnabled && (renderableSettings.gamepads ?? true) && (
-                      <Gamepad isTouchGamepadActive={isTouchGamepadActive} />
-                    )}
-                  </MenubarGroup>
-                </MenubarContent>
-              </MenubarMenu>
-            </Menubar>
-          </div>
-        </motion.div>
-      )}
-
-      <motion.div
-        ref={ellipsisRef}
-        className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
-        style={{
-          transform: `translate(${position.x - 42}px, ${position.y}px)`,
-        }}
-      >
-        <div className="flex items-center px-2 py-2">
-          <Menubar modal={false} className="h-6 border-0 bg-transparent p-0">
-            <MenubarMenu>
-              <MenubarTrigger
-                render={
-                  <Button
-                    variant="secondary"
-                    size="icon"
-                    className="h-6 w-6"
-                  />
-                }
-              >
-                <LayoutPanelLeft className="h-4 w-4" />
-              </MenubarTrigger>
-              <MenubarContent align="start" className="min-w-[200px]">
-
-                {!isSecondaryDisplay && (renderableSettings.coreButtons ?? true) && (
-                  <>
-                    <MenubarGroup>
-                      <MenubarLabel>{t('topMenu.streamControls')}</MenubarLabel>
-
-                      {(renderableSettings.videoToggle ?? true) && (
-                        <MenubarItem
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            onVideoToggle();
-                          }}
-                        >
-                          <Monitor className="h-4 w-4 mr-2" />
-                          <span className="flex-1">{t('topMenu.videoStream')}</span>
-                          <span className="text-xs text-muted-foreground ml-auto">
-                            {isVideoActive ? t('common.on') : t('common.off')}
-                          </span>
-                        </MenubarItem>
-                      )}
-
-                      {(renderableSettings.audioToggle ?? true) && (
-                        <MenubarItem
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            onAudioToggle();
-                          }}
-                        >
-                          <Volume2 className="h-4 w-4 mr-2" />
-                          <span className="flex-1">{t('topMenu.audioStream')}</span>
-                          <span className="text-xs text-muted-foreground ml-auto">
-                            {isAudioActive ? t('common.on') : t('common.off')}
-                          </span>
-                        </MenubarItem>
-                      )}
-
-                      {(renderableSettings.microphoneToggle ?? true) && (
-                        <MenubarItem
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            onMicrophoneToggle();
-                          }}
-                        >
-                          <Mic className="h-4 w-4 mr-2" />
-                          <span className="flex-1">{t('topMenu.microphone')}</span>
-                          <span className="text-xs text-muted-foreground ml-auto">
-                            {isMicrophoneActive ? t('common.on') : t('common.off')}
-                          </span>
-                        </MenubarItem>
-                      )}
-
-                      {(renderableSettings.webcamToggle ?? true) && (
-                        <MenubarItem
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            onWebcamToggle();
-                          }}
-                        >
-                          <Webcam className="h-4 w-4 mr-2" />
-                          <span className="flex-1">{t('topMenu.webcam')}</span>
-                          <span className="text-xs text-muted-foreground ml-auto">
-                            {isWebcamActive ? t('common.on') : t('common.off')}
-                          </span>
-                        </MenubarItem>
-                      )}
-
-                      {(renderableSettings.gamepadToggle ?? true) && (
-                        <MenubarItem
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            onGamepadToggle();
-                          }}
-                        >
-                          <Gamepad2 className="h-4 w-4 mr-2" />
-                          <span className="flex-1">{t('topMenu.gamepadInput')}</span>
-                          <span className="text-xs text-muted-foreground ml-auto">
-                            {isGamepadEnabled ? t('common.enabled') : t('common.disabled')}
-                          </span>
-                        </MenubarItem>
-                      )}
-                    </MenubarGroup>
-
-                    <MenubarSeparator />
-                  </>
-                )}
-
-                <MenubarGroup>
-                  <MenubarLabel>{t('topMenu.toolsPanels')}</MenubarLabel>
-
-                  {(renderableSettings.clipboard ?? true) && !isSecondaryDisplay && (
-                    <MenubarSub>
-                      <MenubarSubTrigger>
-                        <ClipboardIcon className="h-4 w-4 mr-2" />
-                        {t('sections.clipboard.title')}
-                      </MenubarSubTrigger>
-                      <MenubarSubContent>
-                        <Clipboard />
-                      </MenubarSubContent>
-                    </MenubarSub>
-                  )}
-
-                  {(renderableSettings.files ?? true) && !isSecondaryDisplay && (
-                    <MenubarSub>
-                      <MenubarSubTrigger>
-                        <FileText className="h-4 w-4 mr-2" />
-                        {t('sections.files.title')}
-                      </MenubarSubTrigger>
-                      <MenubarSubContent>
-                        <Files onOpenDownloads={() => setShowFilesModal(true)} />
-                      </MenubarSubContent>
-                    </MenubarSub>
-                  )}
-
-                  {printJobCount > 0 && !isSecondaryDisplay && (
-                    <MenubarSub>
-                      <MenubarSubTrigger>
-                        <Printer className="h-4 w-4 mr-2" />
-                        {t('sections.printing.title')}
-                      </MenubarSubTrigger>
-                      <MenubarSubContent>
-                        <Printing />
-                      </MenubarSubContent>
-                    </MenubarSub>
-                  )}
-
-                  {(renderableSettings.sharing ?? true) && !isSecondaryDisplay && (
-                    <MenubarSub>
-                      <MenubarSubTrigger>
-                        <Share2 className="h-4 w-4 mr-2" />
-                        {t('sections.sharing.title')}
-                      </MenubarSubTrigger>
-                      <MenubarSubContent>
-                        <Sharing show={true} />
-                      </MenubarSubContent>
-                    </MenubarSub>
-                  )}
-
-                  {(renderableSettings.shortcuts ?? true) && (
-                  <MenubarSub>
-                    <MenubarSubTrigger>
-                      <Keyboard className="h-4 w-4 mr-2" />
-                      {t('sections.shortcuts.title')}
-                    </MenubarSubTrigger>
-                    <MenubarSubContent>
-                      <ShortcutsMenu />
-                    </MenubarSubContent>
-                  </MenubarSub>
-                  )}
-                </MenubarGroup>
-
-                <MenubarSeparator />
-
-                {(isMobile || hasDetectedTouch) && (
-                  <>
-                    <MenubarGroup>
-                      <MenubarLabel>{t('topMenu.touchControls')}</MenubarLabel>
-
-                      {!isSecondaryDisplay && (
-                        <MenubarItem onClick={onToggleTouchGamepad}>
-                          <Gamepad2 className="h-4 w-4 mr-2" />
-                          <span className="flex-1">{t('topMenu.touchGamepad')}</span>
-                          <span className="text-xs text-muted-foreground ml-auto">
-                            {isTouchGamepadActive ? t('common.on') : t('common.off')}
-                          </span>
-                        </MenubarItem>
-                      )}
-
-                      {(renderableSettings.trackpad ?? true) && (
-                        <MenubarItem onClick={handleToggleTrackpadMode}>
-                          <Touchpad className="h-4 w-4 mr-2" />
-                          <span className="flex-1">{t('trackpadModeTitle')}</span>
-                          <span className="text-xs text-muted-foreground ml-auto">
-                            {isTrackpadModeActive ? t('common.on') : t('common.off')}
-                          </span>
-                        </MenubarItem>
-                      )}
-
-                      {(renderableSettings.keyboardButton ?? true) && (
-                        <MenubarItem onClick={handleShowVirtualKeyboard}>
-                          <Keyboard className="h-4 w-4 mr-2" />
-                          <span className="flex-1">{t('topMenu.virtualKeyboard')}</span>
-                        </MenubarItem>
-                      )}
-                    </MenubarGroup>
-
-                    <MenubarSeparator />
-                  </>
-                )}
-
-                {/* second_screen is effective availability (admin flag AND backend
-                    capacity) and the server rejects secondaries it cannot back, so the
-                    entry follows it rather than offering a window that would be killed. */}
-                {!isSecondaryDisplay && serverSettings?.second_screen?.value && (
-                  <>
-                    <MenubarItem
-                      onClick={handleAddScreenClick}
-                      title={t('sections.screen.addScreenTitle')}
-                    >
-                      <ScreenShare className="h-4 w-4 mr-2" />
-                      <span className="flex-1">{t('sections.screen.addScreenTitle')}</span>
-                    </MenubarItem>
-                    <MenubarSeparator />
-                  </>
-                )}
-
-                <div className="flex items-center justify-between w-full px-2 py-1">
-                  <a
-                    href="https://github.com/selkies-project/selkies"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 hover:text-primary transition-colors"
-                  >
-                    {uiShowLogo && <SelkiesLogo width={20} height={20} />}
-                    <span className="text-sm font-medium">
-                      {uiTitle}
-                    </span>
-                  </a>
-                  <ModeToggle />
-                </div>
-              </MenubarContent>
-            </MenubarMenu>
-          </Menubar>
-        </div>
-      </motion.div>
-
       <motion.div
         ref={dragRef}
-        className="fixed top-0 left-0 z-50 w-fit rounded-lg border bg-background shadow-lg opacity-30 hover:opacity-100 transition-opacity duration-300"
+        className={`fixed left-0 z-50 w-fit rounded-lg border bg-background shadow-lg`}
         style={{
           transform: `translate(${position.x}px, ${position.y}px)`,
+          // `top` carries the slide so the horizontal placement never animates.
+          top: isCollapsed ? -(TOOLBAR_HEIGHT + position.y) : 0,
+          transition: 'top 300ms',
         }}
       >
-        <div className="flex items-center space-x-4 px-2 py-2">
-          <div className="flex items-center space-x-1">
-            {(renderableSettings.apps ?? true) && !isSecondaryDisplay && (
+        <div className="flex items-center gap-1.5 px-2 py-2">
+          {uiShowLogo && (
+            <a
+              href={PROJECT_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={uiTitle}
+              className="flex items-center pr-1 hover:text-primary transition-colors"
+            >
+              <SelkiesLogo width={20} height={20} />
+            </a>
+          )}
+
+          {/* The overflow menu: the stream switches, the apps panel, then the
+              tools a session reaches for only occasionally, and second-screen
+              placement. Each tool nests its own popup off the list, so the
+              list stays put while the tool is used. */}
+          {overflowAvailable && (
+            <Menu
+              open={overflowOpen}
+              onOpenChange={(open) => {
+                setOverflowOpen(open);
+                // The menu and the settings panel never share the screen:
+                // the menu folds the panel as the panel's button folds the
+                // menu.
+                if (open) setActivePanel(null);
+              }}
+            >
               <Tooltip>
                 <TooltipTrigger
                   render={
-                    <Button
-                      variant="secondary"
-                      size="icon"
-                      className="h-6 w-6"
-                      onClick={() => handlePanelToggle('apps')}
+                    <MenuTrigger
+                      render={
+                        <Button
+                          variant="secondary"
+                          size="icon"
+                          className="h-6 w-6"
+                          aria-label={t('topMenu.menu')}
+                        >
+                          <ToolCase className="h-4 w-4" />
+                        </Button>
+                      }
                     />
                   }
-                >
-                  <LayoutGrid className="h-4 w-4" />
-                </TooltipTrigger>
-                <TooltipContent>{t('sections.apps.title')}</TooltipContent>
+                />
+                <TooltipContent>{t('topMenu.menu')}</TooltipContent>
               </Tooltip>
-            )}
+              {/* The offset is measured from the trigger, which sits inside the
+                  bar's padding, so 15px puts the popup 6px under the bar as the
+                  Settings panel is. */}
+              <MenuPopup align="start" sideOffset={15}>
+                {/* Stream switches, one per direction the session carries,
+                    above the occasional tools. */}
+                {!isSecondaryDisplay && (renderableSettings.coreButtons ?? true) && streamsAvailable && (
+                  <>
+                    {(renderableSettings.videoToggle ?? true) && (
+                      <MenuCheckboxItem
+                        variant="switch"
+                        data-testid="video-stream-toggle"
+                        checked={isVideoActive}
+                        onCheckedChange={onVideoToggle}
+                      >
+                        <span className="flex items-center gap-2">
+                          <Monitor />
+                          {t('topMenu.videoStream')}
+                        </span>
+                      </MenuCheckboxItem>
+                    )}
+                    {(renderableSettings.audioToggle ?? true) && (
+                      <MenuCheckboxItem
+                        variant="switch"
+                        data-testid="audio-stream-toggle"
+                        checked={isAudioActive}
+                        onCheckedChange={onAudioToggle}
+                      >
+                        <span className="flex items-center gap-2">
+                          <Volume2 />
+                          {t('topMenu.audioStream')}
+                        </span>
+                      </MenuCheckboxItem>
+                    )}
+                    {(renderableSettings.microphoneToggle ?? true) && (
+                      <MenuCheckboxItem
+                        variant="switch"
+                        data-testid="microphone-toggle"
+                        checked={isMicrophoneActive}
+                        onCheckedChange={onMicrophoneToggle}
+                      >
+                        <span className="flex items-center gap-2">
+                          <Mic />
+                          {t('topMenu.microphone')}
+                        </span>
+                      </MenuCheckboxItem>
+                    )}
+                    {(renderableSettings.webcamToggle ?? true) && (
+                      <MenuCheckboxItem
+                        variant="switch"
+                        data-testid="webcam-toggle"
+                        checked={isWebcamActive}
+                        onCheckedChange={onWebcamToggle}
+                      >
+                        <span className="flex items-center gap-2">
+                          <Webcam />
+                          {t('topMenu.webcam')}
+                        </span>
+                      </MenuCheckboxItem>
+                    )}
+                    <MenuSeparator />
+                  </>
+                )}
+                {/* The apps modal opens over the session, so alone of the
+                    items it folds the menu. */}
+                {(renderableSettings.apps ?? true) && !isSecondaryDisplay && (
+                  <MenuItem onClick={() => handlePanelToggle('apps')}>
+                    <LayoutGrid />
+                    {t('sections.apps.title')}
+                  </MenuItem>
+                )}
+                {!isSecondaryDisplay && (renderableSettings.clipboard ?? true) && (
+                  <MenuSub>
+                    <MenuSubTrigger>
+                      <ClipboardIcon />
+                      {t('sections.clipboard.title')}
+                    </MenuSubTrigger>
+                    <MenuSubPopup className="w-[340px]">
+                      <Clipboard />
+                    </MenuSubPopup>
+                  </MenuSub>
+                )}
+                {!isSecondaryDisplay && (renderableSettings.files ?? true) && (
+                  <MenuSub>
+                    <MenuSubTrigger>
+                      <FileText />
+                      {t('sections.files.title')}
+                    </MenuSubTrigger>
+                    <MenuSubPopup>
+                      <Files onOpenDownloads={openDownloadsModal} />
+                    </MenuSubPopup>
+                  </MenuSub>
+                )}
+                {!isSecondaryDisplay && printJobCount > 0 && (
+                  <MenuSub>
+                    <MenuSubTrigger>
+                      <Printer />
+                      {t('sections.printing.title')}
+                    </MenuSubTrigger>
+                    <MenuSubPopup>
+                      <Printing />
+                    </MenuSubPopup>
+                  </MenuSub>
+                )}
+                {!isSecondaryDisplay && (renderableSettings.sharing ?? true) && (
+                  <MenuSub>
+                    <MenuSubTrigger>
+                      <Share2 />
+                      {t('sections.sharing.title')}
+                    </MenuSubTrigger>
+                    <MenuSubPopup>
+                      <Sharing show={true} />
+                    </MenuSubPopup>
+                  </MenuSub>
+                )}
+                {(renderableSettings.shortcuts ?? true) && (
+                  <MenuSub>
+                    <MenuSubTrigger>
+                      <Keyboard />
+                      {t('sections.shortcuts.title')}
+                    </MenuSubTrigger>
+                    <MenuSubPopup>
+                      <ShortcutsMenu />
+                    </MenuSubPopup>
+                  </MenuSub>
+                )}
+                {/* second_screen is effective availability (admin flag AND backend
+                    capacity) and the server rejects secondaries it cannot back, so
+                    the entry follows it rather than offering a window that would
+                    be killed. */}
+                {!isSecondaryDisplay && serverSettings?.second_screen?.value && (
+                  <>
+                    <MenuSeparator />
+                    <MenuItem onClick={handleAddScreenClick}>
+                      <ScreenShare />
+                      {t('sections.screen.addScreenTitle')}
+                    </MenuItem>
+                  </>
+                )}
+                {/* The footer: the branding and the theme toggle at its end,
+                    the toggle pushed right whether or not the branding
+                    shows. */}
+                <MenuSeparator />
+                <div className="flex items-center px-2 py-1.5">
+                  {(uiShowLogo || uiTitle) && (
+                    <a
+                      href={PROJECT_URL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-primary"
+                    >
+                      {uiShowLogo && <SelkiesLogo width={16} height={16} />}
+                      <span>{uiTitle}</span>
+                    </a>
+                  )}
+                  <span className="ms-auto">
+                    <ModeToggle />
+                  </span>
+                </div>
+              </MenuPopup>
+            </Menu>
+          )}
 
+          {/* Session controls: the panels, the monitoring overlay, and the
+              display itself. */}
+          <ButtonGroup>
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -1074,6 +1033,8 @@ export function TopMenu({
                     variant={activePanel === 'settings' ? "default" : "secondary"}
                     size="icon"
                     className="h-6 w-6"
+                    aria-label={t('topMenu.settings')}
+                    aria-expanded={activePanel === 'settings'}
                     onClick={() => handlePanelToggle('settings')}
                   />
                 }
@@ -1083,6 +1044,26 @@ export function TopMenu({
               <TooltipContent>{t('topMenu.settings')}</TooltipContent>
             </Tooltip>
 
+            {!isSecondaryDisplay && (((renderableSettings.coreButtons ?? true) && (renderableSettings.gamepadToggle ?? true)) || (renderableSettings.gamepads ?? true)) && (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant={showGamepads ? "default" : "secondary"}
+                      size="icon"
+                      className="h-6 w-6"
+                      aria-label={t('sections.gamepads.title')}
+                      aria-pressed={showGamepads}
+                      onClick={() => setShowGamepads((open) => !open)}
+                    />
+                  }
+                >
+                  <Joystick className="h-4 w-4" />
+                </TooltipTrigger>
+                <TooltipContent>{t('sections.gamepads.title')}</TooltipContent>
+              </Tooltip>
+            )}
+
             {(renderableSettings.stats ?? true) && !isSecondaryDisplay && (
               <Tooltip>
                 <TooltipTrigger
@@ -1091,6 +1072,8 @@ export function TopMenu({
                       variant={showSystemMonitoring ? "default" : "secondary"}
                       size="icon"
                       className="h-6 w-6"
+                      aria-label={t('topMenu.systemMonitoring')}
+                      aria-pressed={showSystemMonitoring}
                       onClick={() => handlePanelToggle('monitoring')}
                     />
                   }
@@ -1109,15 +1092,8 @@ export function TopMenu({
                       variant="secondary"
                       size="icon"
                       className="h-6 w-6"
-                      onClick={() => {
-                        if (document.fullscreenElement) {
-                          document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
-                        } else {
-                          // Plain fullscreen: the core locks neither the pointer nor
-                          // the keyboard, so the bar stays usable.
-                          window.postMessage({ type: 'requestFullscreen' }, window.location.origin);
-                        }
-                      }}
+                      aria-label={t('topMenu.toggleFullscreen')}
+                      onClick={() => toggleFullscreen('requestFullscreen')}
                     />
                   }
                 >
@@ -1126,73 +1102,159 @@ export function TopMenu({
                 <TooltipContent>{t('topMenu.toggleFullscreen')}</TooltipContent>
               </Tooltip>
             )}
+          </ButtonGroup>
 
-            {(renderableSettings.gamingMode ?? true) && (
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <Button
-                      variant="secondary"
-                      size="icon"
-                      className="h-6 w-6"
-                      onClick={() => {
-                        if (document.fullscreenElement) {
-                          document.exitFullscreen().catch(err => console.error("Error exiting fullscreen:", err));
-                        } else {
-                          window.postMessage({ type: 'requestGamingMode' }, window.location.origin);
-                        }
-                      }}
-                    />
-                  }
-                >
-                  <Crosshair className="h-4 w-4" />
-                </TooltipTrigger>
-                <TooltipContent>{t('gamingModeTitle')}</TooltipContent>
-              </Tooltip>
-            )}
-
+          {/* Gaming mode; the gamepad input toggle and the preview live in
+              the overflow menu's Gamepads view. */}
+          {(renderableSettings.gamingMode ?? true) && (
             <Tooltip>
               <TooltipTrigger
                 render={
                   <Button
                     variant="secondary"
                     size="icon"
-                    className="h-6 w-6 cursor-grab active:cursor-grabbing select-none"
-                    onMouseDown={handleMouseDown}
+                    className="h-6 w-6"
+                    aria-label={t('gamingModeTitle')}
+                    onClick={() => toggleFullscreen('requestGamingMode')}
                   />
                 }
               >
-                <Hand className="h-4 w-4" />
+                <Crosshair className="h-4 w-4" />
               </TooltipTrigger>
-              <TooltipContent>{t('topMenu.dragHandle')}</TooltipContent>
+              <TooltipContent>{`${t('gamingModeTitle')} \u2014 ${t('gamingModeHint')}`}</TooltipContent>
             </Tooltip>
-          </div>
+          )}
+
+          {/* Touch controls, from the first touch the session sees. */}
+          {(isMobile || hasDetectedTouch) && (
+            <ButtonGroup>
+              {!isSecondaryDisplay && (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        variant={isTouchGamepadActive ? "default" : "secondary"}
+                        size="icon"
+                        className="h-6 w-6"
+                        aria-label={t('topMenu.touchGamepad')}
+                        aria-pressed={isTouchGamepadActive}
+                        onClick={onToggleTouchGamepad}
+                      />
+                    }
+                  >
+                    <Gamepad2 className="h-4 w-4" />
+                  </TooltipTrigger>
+                  <TooltipContent>{t('topMenu.touchGamepad')}</TooltipContent>
+                </Tooltip>
+              )}
+
+              {(renderableSettings.trackpad ?? true) && (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        variant={isTrackpadModeActive ? "default" : "secondary"}
+                        size="icon"
+                        className="h-6 w-6"
+                        aria-label={t('trackpadModeTitle')}
+                        aria-pressed={isTrackpadModeActive}
+                        onClick={handleToggleTrackpadMode}
+                      />
+                    }
+                  >
+                    <Touchpad className="h-4 w-4" />
+                  </TooltipTrigger>
+                  <TooltipContent>{t('trackpadModeTitle')}</TooltipContent>
+                </Tooltip>
+              )}
+
+              {(renderableSettings.keyboardButton ?? true) && (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        variant={isKeyboardButtonVisible && !keyboardAttached ? "default" : "secondary"}
+                        size="icon"
+                        className="h-6 w-6"
+                        aria-label={t('keyboardButtonToggleTitle', 'Keyboard Button')}
+                        aria-pressed={isKeyboardButtonVisible && !keyboardAttached}
+                        onClick={toggleKeyboardButton}
+                      />
+                    }
+                  >
+                    <Keyboard className="h-4 w-4" />
+                  </TooltipTrigger>
+                  <TooltipContent>{t('keyboardButtonToggleTitle', 'Keyboard Button')}</TooltipContent>
+                </Tooltip>
+              )}
+            </ButtonGroup>
+          )}
+
+          <Button
+            variant="secondary"
+            size="icon"
+            className="h-6 w-6 cursor-grab active:cursor-grabbing select-none"
+            aria-label={t('topMenu.dragHandle')}
+            onMouseDown={handleMouseDown}
+          >
+            <Hand className="h-4 w-4" />
+          </Button>
+
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="secondary"
+                  size="icon"
+                  className="h-6 w-6"
+                  aria-label={t('topMenu.hideToolbar')}
+                  onClick={collapseToolbar}
+                />
+              }
+            >
+              <ChevronUp className="h-4 w-4" />
+            </TooltipTrigger>
+            <TooltipContent>{t('topMenu.hideToolbar')}</TooltipContent>
+          </Tooltip>
         </div>
+
+        {/* What stays in view while the bar is up behind the top edge: a tab
+            hanging from it that brings it back. */}
+        {isCollapsed && (
+          <button
+            type="button"
+            aria-label={t('topMenu.showToolbar')}
+            title={t('topMenu.showToolbar')}
+            onClick={() => setIsCollapsed(false)}
+            className="absolute left-1/2 top-full flex h-4 w-12 -translate-x-1/2 items-center justify-center rounded-b-md border border-t-0 bg-background text-muted-foreground hover:text-foreground"
+          >
+            <ChevronDown className="h-3 w-3" />
+          </button>
+        )}
       </motion.div>
 
 
 
       <AnimatePresence>
-        {showSystemMonitoring && (
+        {showSystemMonitoring && !isSecondaryDisplay && (renderableSettings.stats ?? true) && (
           <motion.div
-            ref={systemMonitoringRef}
+            ref={monitoringRef}
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.95 }}
             style={{
               position: 'fixed',
-              left: systemMonitoringPosition.x,
-              top: systemMonitoringPosition.y,
+              left: monitoringPanel.position.x,
+              top: monitoringPanel.position.y,
               // Held to the window below its top, with a margin under it, and
-              // scrolled within, the panel stays whole wherever the drag clamp
-              // puts it.
+              // scrolled within, the panel stays whole wherever the drag clamp puts it.
               display: 'flex',
               flexDirection: 'column',
-              maxHeight: `calc(100dvh - ${systemMonitoringPosition.y}px - 1rem)`,
+              maxHeight: `calc(100dvh - ${monitoringPanel.position.y}px - 1rem)`,
               zIndex: 30,
-              cursor: isSystemMonitoringDragging ? 'grabbing' : 'grab'
+              cursor: monitoringPanel.isDragging ? 'grabbing' : undefined
             }}
-            onMouseDown={handleSystemMonitoringMouseDown}
+            onMouseDown={monitoringPanel.onMouseDown}
           >
             <SystemMonitoring />
           </motion.div>
@@ -1200,7 +1262,39 @@ export function TopMenu({
       </AnimatePresence>
 
       <AnimatePresence>
-        {activePanel && (
+        {showGamepads && (
+          <motion.div
+            ref={gamepadRef}
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            style={{
+              position: 'fixed',
+              left: gamepadPanel.position.x,
+              top: gamepadPanel.position.y,
+              display: 'flex',
+              flexDirection: 'column',
+              maxHeight: `calc(100dvh - ${gamepadPanel.position.y}px - 1rem)`,
+              zIndex: 30,
+              cursor: gamepadPanel.isDragging ? 'grabbing' : undefined
+            }}
+            onMouseDown={gamepadPanel.onMouseDown}
+          >
+            <GamepadPanel
+              isGamepadEnabled={isGamepadEnabled}
+              onGamepadToggle={onGamepadToggle}
+              isTouchGamepadActive={isTouchGamepadActive}
+              onToggleTouchGamepad={onToggleTouchGamepad}
+              showInputToggle={(renderableSettings.coreButtons ?? true) && (renderableSettings.gamepadToggle ?? true)}
+              showPads={renderableSettings.gamepads ?? true}
+              onClose={() => setShowGamepads(false)}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {activePanel === 'settings' && (
           <motion.div
             ref={panelRef}
             initial={{ opacity: 0, y: -20 }}
@@ -1212,7 +1306,7 @@ export function TopMenu({
               top: position.y + 48,
             }}
           >
-            {renderPanel()}
+            <Settings />
           </motion.div>
         )}
       </AnimatePresence>
@@ -1450,9 +1544,9 @@ export function TopMenu({
         <Apps isOpen={showAppsModal} onClose={() => setShowAppsModal(false)} />
       )}
 
-      {/* Files dialog, beside the menubar like the Apps modal: a click in its
-          iframe blurs the window, which closes every menu, so it cannot live
-          inside the Files submenu. */}
+      {/* Files dialog, beside the toolbar like the Apps modal: a click in its
+          iframe lands outside the panel, which closes on it, so the dialog
+          cannot live inside the Files panel. */}
       {showFilesModal && (
         <FilesDialog open={showFilesModal} onOpenChange={setShowFilesModal} />
       )}
