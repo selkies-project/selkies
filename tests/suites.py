@@ -25,6 +25,7 @@ SUITES: list = [
     {"path": "unit/test_uinput_abi.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_fake_udev_enumeration.py", "tier": "unit", "timeout": 300},
     {"path": "unit/test_input_interposer_signals.py", "tier": "unit", "timeout": 180},
+    {"path": "unit/test_input_interposer_early_calls.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_uinput_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gamepad_authority.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ws_capture_starting.py", "tier": "unit", "timeout": 120},
