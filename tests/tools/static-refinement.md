@@ -33,7 +33,9 @@ they never use a nearest timestamp or the most recently written frame. Incoming
 scene changes hide the PNG synchronously before their decoded video can be
 submitted on the same page thread. Turning refinement off reveals the video
 already running underneath, without a frame clone, video readback, or decoder
-restart. CSS geometry follows the same scaling and positioning as the video.
+restart in the overlay withdrawal itself. The normal settings and pipeline
+reset flows still apply and can recreate the decoder. CSS geometry follows the
+same scaling and positioning as the video.
 Video-only fullscreen and picture-in-picture retain normal video without this
 separate canvas; refinement is suspended there. Fullscreen of the containing
 Selkies page can include both surfaces.
