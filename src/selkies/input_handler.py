@@ -1606,21 +1606,22 @@ class _XTestKeyboard:
         self._settle_until = time.monotonic() + self._BIND_SETTLE_S
         return True
 
-    def bindings_intact(self) -> bool:
-        """True when every overlay binding still resolves to its keysym in the
-        server's map. Distinguishes our own MappingNotify from a foreign layout
-        change by SEMANTICS: servers vary in how many notifies one
-        ChangeKeyboardMapping emits and report the full keycode range, so
-        neither counting nor range matching works — but a self-bind leaves the
-        bindings intact and a foreign change wipes them."""
-        if not self._overlay:
-            return True
+    def bindings_intact(self, first_keycode: int, count: int) -> bool:
+        """True when every overlay binding in a notify's keycode range still
+        resolves to its keysym in the server's map. Distinguishes our own
+        MappingNotify from a foreign layout change by SEMANTICS: servers vary
+        in how many notifies one ChangeKeyboardMapping emits and report the
+        full keycode range, so neither counting nor range matching works — but
+        a self-bind leaves the bindings intact and a foreign change wipes them.
+        Read from the keymap cache the notify just refreshed for its range,
+        not a request per binding (a round trip per overlay entry on the event
+        loop after every bind, while the X server serves every client's keymap
+        refetch); a binding outside the range is one whose own notify is still
+        on its way."""
+        last = first_keycode + count
         try:
-            for ks, kc in self._overlay.items():
-                syms = self._d.get_keyboard_mapping(kc, 1)[0]
-                if not len(syms) or syms[0] != overlay_bind_keysym(ks):
-                    return False
-            return True
+            return all(self._d.keycode_to_keysym(kc, 0) == overlay_bind_keysym(ks)
+                       for ks, kc in self._overlay.items() if first_keycode <= kc < last)
         except Exception:
             return False
 
@@ -5927,12 +5928,7 @@ class WebRTCInput:
                         return
                     if self.keyboard:
                         if down:
-                            self.keyboard.bind_ahead(keysym)
-                            settle = self.keyboard.settle_delay()
-                            if settle > 0:
-                                await asyncio.sleep(settle)
-                            self.keyboard.press(keysym, neutralize=neutralize,
-                                                held_keysyms=held_level_mods)
+                            await self._xtest_press(keysym, neutralize, held_level_mods)
                         else:
                             self.keyboard.release(keysym)
                         return
@@ -5959,14 +5955,23 @@ class WebRTCInput:
                     return
 
                 if down:
-                    self.keyboard.press(keysym, neutralize=neutralize,
-                                        held_keysyms=held_level_mods)
+                    await self._xtest_press(keysym, neutralize, held_level_mods)
                 else:
                     self.keyboard.release(keysym)
             except Exception as e:
                 if self._is_x_conn_closed(e):
                     self._reconnect_xdisplay()
                 await self._type_keysym_fallback(keysym, down)
+
+    async def _xtest_press(self, keysym: int, neutralize: bool, held_keysyms: Iterable[int]) -> None:
+        """Press a keysym through the XTEST shim, with the overlay bind it may
+        need made and its settle awaited first, so the event loop never sleeps
+        it out inside press()."""
+        self.keyboard.bind_ahead(keysym)
+        settle = self.keyboard.settle_delay()
+        if settle > 0:
+            await asyncio.sleep(settle)
+        self.keyboard.press(keysym, neutralize=neutralize, held_keysyms=held_keysyms)
 
     async def _type_text_xtest(self, text: str, neutralize: bool = False) -> bool:
         """Type a string in-process via the XTEST shim.
@@ -8469,12 +8474,15 @@ class WebRTCInput:
             return
         try:
             self.xdisplay.refresh_keyboard_mapping(event)
+            refreshed = True
         except Exception as e:
             logger_webrtc_input.warning(f"keymap cache refresh failed: {e}")
+            refreshed = False
         if kb is None:
             return
         kb.note_mapping_change(event.first_keycode, event.count)
-        if kb.bindings_intact():
+        # bindings_intact() reads the cache, which a failed refresh left stale.
+        if refreshed and kb.bindings_intact(event.first_keycode, event.count):
             # Our own bind, or a change that left the overlay alone.
             return
         logger_webrtc_input.debug(

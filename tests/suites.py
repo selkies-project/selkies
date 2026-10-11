@@ -201,6 +201,7 @@ SUITES: list = [
     {"path": "unit/test_keymap_layout_hint.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_keymap_held_carry.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_shift_navigation.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_x11_ime_binds.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_x11_text_spares.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_reset_queue.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_app_clipboard_poll.py", "tier": "unit", "timeout": 120},
