@@ -48,7 +48,8 @@ if shutil.which("gcc") is None:
 
 with tempfile.TemporaryDirectory() as scratch:
     lib, tool = build(scratch)
-    plain = subprocess.run([tool], capture_output=True, text=True, timeout=20)
+    bare = {k: v for k, v in os.environ.items() if k != "LD_PRELOAD"}
+    plain = subprocess.run([tool], env=bare, capture_output=True, text=True, timeout=20)
     res.check("the calls succeed without the preload", plain.returncode == 0, plain.stderr.strip())
     env = dict(os.environ, LD_PRELOAD=lib, SELKIES_JS_SOCKET_PATH=scratch)
     done = subprocess.run([tool], env=env, capture_output=True, text=True, timeout=20)
