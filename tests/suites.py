@@ -22,6 +22,7 @@ from typing import Iterator, Optional, Sequence
 SUITES: list = [
     # unit
     {"path": "unit/test_dtls_records.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_sctp_hostile_packets.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_uinput_abi.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_fake_udev_enumeration.py", "tier": "unit", "timeout": 300},
     {"path": "unit/test_input_interposer_signals.py", "tier": "unit", "timeout": 180},
