@@ -70,7 +70,8 @@ from .metrics import Metrics
 from . import resource_stats
 from . import stream_stats
 from .settings import (settings, AppSettings, SETTING_DEFINITIONS, STREAM_SETTINGS, RateControlMode, SCALING_DPI_MIN,
-                       SCALING_DPI_MAX, build_client_settings_payload, sanitize_client_setting, socket_dir)
+                       SCALING_DPI_MAX, build_client_settings_payload, sanitize_client_setting, socket_dir,
+                       with_live_stream_settings)
 from types import SimpleNamespace
 from .webrtc_ice_config import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
 from .stream_server import BaseStreamingService, CentralizedStreamServer, CongestionSteer, RateHold, start_kbps
@@ -781,8 +782,9 @@ class WebRTCService(BaseStreamingService):
         self._host_output_capacity = capacity
         return changed
 
-    def _server_settings_payload(self) -> Dict[str, Any]:
-        """get_server_settings with second_screen and ui_sidebar_show_apps
+    def _server_settings_payload(self, display_id: str = "primary") -> Dict[str, Any]:
+        """get_server_settings with what `display_id` streams with in place of
+        the boot values (`with_live_stream_settings`), second_screen and ui_sidebar_show_apps
         published as EFFECTIVE availability — the admin flag AND what the
         backend can actually do — so dashboards never offer a second display
         the server would immediately refuse, nor an apps panel whose every
@@ -793,6 +795,8 @@ class WebRTCService(BaseStreamingService):
         opened somewhere else — absent until the runner has answered, because a
         client told nothing is installed clears its own record."""
         payload = get_server_settings()
+        with_live_stream_settings(payload["settings"],
+                                  {key: self._display_setting(display_id, key) for key in STREAM_SETTINGS})
         available, _ = self._second_screen_availability()
         entry = payload.get("settings", {}).get("second_screen")
         if isinstance(entry, dict) and entry.get("value") and not available:
@@ -812,7 +816,9 @@ class WebRTCService(BaseStreamingService):
         display roster. Sent on ITS channel when given; without one, falls back
         to broadcasting."""
         logger.info("Peer data channel open for input.")
-        server_settings_payload = self._server_settings_payload()
+        peer = None if channel is None else next(
+            (obj for obj in self.rtc_app.peer_connections.values() if obj.get("data_channel") is channel), None)
+        server_settings_payload = self._server_settings_payload((peer or {}).get("display_id") or "primary")
         if channel is not None:
             self.rtc_app.send_message_to_channel(
                 channel, "server_settings", server_settings_payload
@@ -820,8 +826,6 @@ class WebRTCService(BaseStreamingService):
             self.rtc_app.send_message_to_channel(
                 channel, "display_config_update", self._display_config_payload()
             )
-            peer = next((obj for obj in self.rtc_app.peer_connections.values()
-                         if obj.get("data_channel") is channel), None)
             if peer is not None and peer.get("client_type") == ClientType.CONTROLLER \
                     and (peer.get("display_id") or "primary") == "primary":
                 for name, size in self.supervisor.pending_print_documents():

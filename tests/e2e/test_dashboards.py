@@ -1456,6 +1456,84 @@ def rate_control_block(dashboard: str, dist: str, mode: str = "websockets") -> "
     return res
 
 
+def settings_follow_block(dashboard: str, dist: str, mode: str = "websockets") -> "H.Results":
+    """A page with no picks of its own shows what the display streams with.
+
+    The server keeps a display's settings when its page goes, so a page whose
+    storage was cleared, or one in another browser, sends no picks and streams
+    with the ones an earlier page made; its dashboard has to show those, not
+    the boot values. A page picks CRF in the menu and 30 fps through the
+    dashboards' settings message; then its storage and cookies are cleared, and
+    a page opens in a fresh browser context.
+    """
+    res = H.Results(f"settings-follow-{dashboard}-{mode}")
+    H.server_start(mode=mode, wayland=False, web_root=dist, extra_env={"SELKIES_VIDEO_CRF": "30"})
+
+    def shown(page, step: str) -> None:
+        if mode == "webrtc":
+            C.wait_wr_video(page, timeout=60)
+        else:
+            C.wait_ws_video(page, timeout=45)
+        time.sleep(3.0)
+        if not pick_rate_control_open(page, dashboard):
+            res.check(f"{step}: the video settings open", False, "")
+            return
+        text = page.evaluate("() => document.body.innerText")
+        lines = [ln for ln in H.server_log().splitlines() if "Stream settings active" in ln]
+        line = lines[-1] if lines else ""
+        fps = re.search(r"FPS: (\d+)", line)
+        res.check(f"{step}: the dashboard shows the CRF the server streams with",
+                  "CRF: 30" in line and "Video CRF (30)" in text, line[:90])
+        res.check(f"{step}: the dashboard shows the frame rate the server streams with",
+                  bool(fps) and f"({fps.group(1)} FPS)" in text, (fps.group(1) if fps else None))
+
+    try:
+        with sync_playwright() as p:
+            browser = C.chromium_launch(p)
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+            ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+            page = ctx.new_page()
+            page.goto(H.BASE_URL, wait_until="load")
+            if mode == "webrtc":
+                C.wait_wr_video(page, timeout=60)
+            else:
+                C.wait_ws_video(page, timeout=45)
+            time.sleep(2.0)
+            res.check("the menu takes a CRF pick", pick_rate_control(page, dashboard, "crf"), "")
+            page.evaluate("() => window.postMessage({type: 'settings', settings: {framerate: 30}}, window.location.origin)")
+            time.sleep(3.0)
+            page.evaluate("() => localStorage.clear()")
+            ctx.clear_cookies()
+            page.reload(wait_until="load")
+            shown(page, "storage cleared")
+            other = browser.new_context(viewport={"width": 1440, "height": 900})
+            other.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
+            page.close()
+            page2 = other.new_page()
+            page2.goto(H.BASE_URL, wait_until="load")
+            shown(page2, "another browser")
+            C.close_browser(browser)
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
+def pick_rate_control_open(page, dashboard: str) -> bool:
+    """Open either dashboard's video settings, where the rate control and its value show."""
+    try:
+        if dashboard == "classic":
+            if not page.locator('#rateControlSelect').count():
+                classic_open_video(page)
+            return page.locator('#rateControlSelect').count() > 0
+        box = page.locator("div.space-y-2:has(> label:text-is('Encoder Rate Control Mode'))")
+        if not box.count():
+            open_wish_settings_tab(page, "Video")
+        return box.count() > 0
+    except Exception:
+        return False
+
+
 def paint_over_switches(page, dashboard: str):
     """The Turbo and paint-over switches of either dashboard, opening its video
     settings first."""
@@ -1710,6 +1788,12 @@ def main() -> None:
     if which in ("all", "rate-control-webrtc"):
         blocks.append(rate_control_block("classic", H.CLASSIC_DIST, "webrtc"))
         blocks.append(rate_control_block("wish", H.WISH_DIST, "webrtc"))
+    if which in ("all", "settings-follow"):
+        blocks.append(settings_follow_block("classic", H.CLASSIC_DIST))
+        blocks.append(settings_follow_block("wish", H.WISH_DIST))
+    if which in ("all", "settings-follow-webrtc"):
+        blocks.append(settings_follow_block("classic", H.CLASSIC_DIST, "webrtc"))
+        blocks.append(settings_follow_block("wish", H.WISH_DIST, "webrtc"))
     if which in ("all", "paint-over"):
         for engine in ("chromium", "firefox", "webkit"):
             blocks.append(paint_over_block("classic", H.CLASSIC_DIST, engine))

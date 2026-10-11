@@ -2317,6 +2317,30 @@ def build_client_settings_payload() -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def with_live_stream_settings(payload: Dict[str, Dict[str, Any]], live: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """`payload` with what a display streams with in place of the boot values.
+
+    A page that picked none of these keeps and shows the server's, and a page
+    whose storage was cleared or that opens in another browser sends no picks,
+    so it must be told the display's current values, which an earlier page's
+    picks may have replaced, not the boot ones. A range carries its value as
+    `default` (its `value` is the range); a string list as a string.
+    """
+    for key, value in live.items():
+        entry = payload.get(key)
+        if not isinstance(entry, dict) or value is None:
+            continue
+        if 'min' in entry:
+            entry = dict(entry, default=value)
+        else:
+            allowed = entry.get('allowed')
+            if allowed and isinstance(allowed[0], str) and not isinstance(value, bool):
+                value = str(value)
+            entry = dict(entry, value=value)
+        payload[key] = entry
+    return payload
+
+
 def apps_repo_folder() -> str:
     """The proot-apps local repository as an absolute path, or "" for the remote one.
 
