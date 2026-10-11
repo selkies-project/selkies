@@ -24,9 +24,11 @@
 - Out of scope: `website/`, `docs/`, `infra/`, and the prebuilt third-party wheels and patches in `addons/base`.
 
 ## How to exercise it
-- `python -m pytest tests -m unit` runs offline from the source tree (pixelflux and pcmflux are stubbed); the suites
-  in `tests/unit` show how to drive the token table, the auth middleware (aiohttp test client), the input
-  dispatcher and the interposers (`tests/tools` builds a uinput shim and a V4L2 probe).
+- `python -m pytest tests -m unit` runs offline from the source tree (pixelflux and pcmflux are stubbed), as the
+  unprivileged `tester` user the image creates, since some suites check that permission errors are handled;
+  `unit/test_webrtc_topology_settings.py` needs a network interface besides loopback for its ICE host candidates and
+  fails without one. The suites in `tests/unit` show how to drive the token table, the auth middleware (aiohttp test
+  client), the input dispatcher and the interposers (`tests/tools` builds a uinput shim and a V4L2 probe).
 - The parsers can be called directly: `selkies.ice.stun.parse_message`, `selkies.webrtc.rtp`,
   `selkies.webrtc.rtcsctptransport`, `selkies.webrtc.sdp`.
 - The full server needs a display, PulseAudio and a GPU or software encoder; reproducers that need no display are
