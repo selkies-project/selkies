@@ -3,7 +3,7 @@ TARGET_BASENAME = libudev.so
 LIB_VERSION ?= 1.0.0-fake
 FULL_TARGET = $(TARGET_BASENAME).$(LIB_VERSION)
 CC = gcc
-CFLAGS = -Wall -Wextra -fPIC -DPIC -O2 -g -pthread
+CFLAGS ?= -Wall -Wextra -O2 -g
 LDFLAGS = -shared -ldl -pthread
 LDFLAGS += -Wl,--version-script=libudev.sym
 LDFLAGS += -Wl,-soname,$(TARGET_SO)
@@ -47,10 +47,10 @@ $(TARGET_BASENAME_32): $(TARGET_SO_32)
 	@ln -sf $(TARGET_SO_32) $(TARGET_BASENAME_32)
 
 %.o: %.c libudev.h
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -fPIC -DPIC -pthread -c -o $@ $<
 
 %.x86.o: %.c libudev.h
-	$(CC) $(CFLAGS_32) -c -o $@ $<
+	$(CC) $(CFLAGS_32) -fPIC -DPIC -pthread -c -o $@ $<
 
 clean:
 	rm -f $(OBJECTS) $(OBJECTS_32) $(FULL_TARGET) $(TARGET_SO) $(TARGET_BASENAME) $(FULL_TARGET_32) $(TARGET_SO_32) $(TARGET_BASENAME_32) core.* *.core
