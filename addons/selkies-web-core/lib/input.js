@@ -2454,16 +2454,18 @@ export class Input {
      */
     _updateCompositionText(newText) {
         this._dropPendingPreedit();
-        this.compositionString = this._streamTextDiff(this.compositionString, newText || "");
+        this.compositionString = this._streamTextDiff(this.compositionString, newText || "", true);
     }
 
     /**
-     * Sends the backspaces and presses, per codepoint, that turn `oldText` into `newText`.
+     * Sends the backspaces and presses, per codepoint, that turn `oldText` into `newText`; with `asCommit`, the
+     * typed run may go as one text commit (`_sendAsCommit`).
      * @param {string} oldText
      * @param {string} newText
+     * @param {boolean} [asCommit]
      * @returns {string} `newText`, to keep as the typed state.
      */
-    _streamTextDiff(oldText, newText) {
+    _streamTextDiff(oldText, newText, asCommit = false) {
         const oldChars = Array.from(oldText);
         const newChars = Array.from(newText);
         let diff_start = 0;
@@ -2476,13 +2478,29 @@ export class Input {
             this._sendMomentaryKey(KeyTable.XK_BackSpace);
         }
 
+        const typed = [];
         for (let i = diff_start; i < newChars.length; i++) {
             const keysym = Keysyms.lookup(newChars[i].codePointAt(0));
-            if (keysym) {
-                this._sendMomentaryKey(keysym);
-            }
+            if (keysym) typed.push([newChars[i], keysym]);
+        }
+        if (!asCommit || !this._sendAsCommit(typed)) {
+            for (const [, keysym] of typed) this._sendMomentaryKey(keysym);
         }
         return newText;
+    }
+
+    /**
+     * Sends an IME commit of two or more characters past Latin-1 (CJK) as one text commit, which the server types
+     * after binding its new characters in one keymap change, where a press each would cost each its own change.
+     * @param {Array<[string, number]>} typed  The commit's characters with their keysyms.
+     * @returns {boolean} Whether it went as a text commit.
+     */
+    _sendAsCommit(typed) {
+        if (typed.length < 2 || !typed.some(([, keysym]) => keysym >= 0x01000000) || this._chordModifierHeld()) {
+            return false;
+        }
+        this.send("co,end," + typed.map(([ch]) => ch).join(""));
+        return true;
     }
 
     /**
@@ -2640,12 +2658,15 @@ export class Input {
      * @param {string} text
      */
     _typeText(text) {
+        const typed = [];
         for (const char of text) {
             const keysym = Keysyms.lookup(char.codePointAt(0));
-            if (keysym) {
-                this.send("kd," + keysym);
-                this.send("ku," + keysym);
-            }
+            if (keysym) typed.push([char, keysym]);
+        }
+        if (this._sendAsCommit(typed)) return;
+        for (const [, keysym] of typed) {
+            this.send("kd," + keysym);
+            this.send("ku," + keysym);
         }
     }
 
