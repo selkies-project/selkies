@@ -412,6 +412,50 @@ def main() -> int:
     r.flush_for_gate(True)
     check("a gate on which nothing was dropped resumes as it stood", r.ungate(True) and r.offer(chunk(3, 2))
           is False and ids(r) == [3], ids(r))
+    # An anchor predicting from a frame the client was sent goes through the gate, the one the
+    # encoder predicts past the run from (it marks it over the anchor before), and the run
+    # restarts after it.
+    r, server, reports, sock = relay(owner=True)
+    r.offer(chunk(1, 1, key=True))
+    for n in (2, 3):
+        r.offer(chunk(n, n - 1))
+    hand(r, sock, 3)
+    sock.unsent = 0
+    r.flush_for_gate(True, chunk(4, 3))
+    r.flush_for_gate(True, chunk(5, 4))
+    r.flush_for_gate(True, chunk(6, 3, anchor=True))
+    check("a gate passes an anchor predicting from a frame the client was sent",
+          ids(r) == [6] and 6 in r.sent and r.lost_first is None, (ids(r), r.lost_first))
+    for n in (7, 8):
+        r.flush_for_gate(True, chunk(n, n - 1))
+    check("and drops the frames after it, a run from the first of them, the anchor still queued",
+          ids(r) == [6] and r.lost_first == 7 and reports == [], (ids(r), r.lost_first, reports))
+    check("the lift needs no key frame", r.ungate(True))
+    asked = r.offer(chunk(9, 8))
+    check("the next frame tells the encoder the first frame after the anchor",
+          [f for f, _ in reports] == [7] and not asked, (reports, asked))
+    asked = r.offer(chunk(10, 6))
+    check("and the client resumes on the frame predicting past them from the anchor",
+          not asked and ids(r) == [6, 10] and r.lost_first is None, (asked, ids(r), r.lost_first))
+    r, server, reports, sock = relay(owner=True)
+    r.offer(chunk(1, 1, key=True))
+    r.offer(chunk(2, 1))
+    hand(r, sock, 2)
+    sock.unsent = 0
+    r.flush_for_gate(True, chunk(3, 2))
+    r.flush_for_gate(True, chunk(4, 3, anchor=True))
+    check("an anchor predicting from a frame the gate dropped is dropped",
+          ids(r) == [] and r.lost_first == 3, (ids(r), r.lost_first))
+    r, server, reports, sock = relay(owner=True)
+    r.offer(chunk(1, 1, key=True))
+    r.offer(chunk(2, 1))
+    hand(r, sock, 2)
+    sock.unsent = 0
+    r.offer(chunk(3, 2))
+    r.offer(chunk(4, 3, anchor=True))
+    r.flush_for_gate(True, chunk(5, 4))
+    check("as is one queued behind a frame the same flush drops",
+          ids(r) == [] and r.lost_first == 3, (ids(r), r.lost_first))
     r, server, reports, sock = relay(owner=True)
     r.offer(chunk(1, 1, key=True))
     r.offer(chunk(2, 1))
