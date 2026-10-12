@@ -121,6 +121,47 @@ def filter_preferred_codecs(
     return filtered
 
 
+def receive_only_payload_types() -> dict[str, dict[int, int]]:
+    """The payload types a section only the browser encodes for (the webcam, the microphone)
+    takes in place of the shared ones, by kind: payload types no codec of either kind holds,
+    the dynamic range first for video and the unassigned one (35-63) from the top for audio,
+    static ones (G.722, PCMU, PCMA) too. Such a section's codecs differ in parameters from the
+    display's and the playback's (profiles, sps-pps-idr-in-keyframe, the client's stereo, the
+    playback's ptime, which Chromium folds into every codec of its section), and one payload
+    type with two sets of parameters in a BUNDLE group is a collision Chromium logs (and may
+    one day refuse)."""
+    used = {c.payloadType for kind in CODECS for c in CODECS[kind]}
+    mapping: dict[str, dict[int, int]] = {"video": {}, "audio": {}}
+    free_video = [pt for pt in (*rtp.DYNAMIC_PAYLOAD_TYPES, *rtp.UNASSIGNED_PAYLOAD_TYPES) if pt not in used]
+    for c in CODECS["video"]:
+        if c.payloadType not in mapping["video"]:
+            mapping["video"][c.payloadType] = free_video.pop(0)
+    taken = used | set(mapping["video"].values())
+    free_audio = [pt for pt in reversed(rtp.UNASSIGNED_PAYLOAD_TYPES) if pt not in taken]
+    for c in CODECS["audio"]:
+        if c.payloadType not in mapping["audio"]:
+            mapping["audio"][c.payloadType] = free_audio.pop(0)
+    return mapping
+
+
+def with_payload_types(
+    codec: RTCRtpCodecParameters, mapping: dict[int, int]
+) -> RTCRtpCodecParameters:
+    """`codec` under the payload types `mapping` gives, the one an RTX or RED codec names
+    with it."""
+    codec = copy.deepcopy(codec)
+    codec.payloadType = mapping.get(codec.payloadType, codec.payloadType)
+    if is_rtx(codec) and isinstance(codec.parameters.get("apt"), int):
+        codec.parameters["apt"] = mapping.get(codec.parameters["apt"], codec.parameters["apt"])
+    elif is_red(codec):
+        codec.parameters = {
+            "/".join(str(mapping.get(int(pt), int(pt))) if pt.isdigit() else pt
+                     for pt in str(key).split("/")): value
+            for key, value in codec.parameters.items()
+        }
+    return codec
+
+
 def find_common_codecs(
     local_codecs: list[RTCRtpCodecParameters],
     remote_codecs: list[RTCRtpCodecParameters],
@@ -141,8 +182,11 @@ def find_common_codecs(
         for codec in local_codecs:
             if is_codec_compatible(codec, c):
                 codec = copy.deepcopy(codec)
-                if c.payloadType in rtp.DYNAMIC_PAYLOAD_TYPES:
+                if c.payloadType in rtp.DYNAMIC_PAYLOAD_TYPES or c.payloadType in rtp.UNASSIGNED_PAYLOAD_TYPES:
                     codec.payloadType = c.payloadType
+                if is_red(codec):
+                    # The payload type of the codec it wraps, as negotiated.
+                    codec.parameters = dict(c.parameters)
                 codec.rtcpFeedback = list(
                     filter(lambda x: x in c.rtcpFeedback, codec.rtcpFeedback)
                 )
@@ -713,10 +757,16 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         self.__assertNotClosed()
 
         # offer codecs
+        receive_only = receive_only_payload_types()
         for transceiver in self.__transceivers:
             transceiver._codecs = filter_preferred_codecs(
                 CODECS[transceiver.kind][:], transceiver._preferred_codecs
             )
+            if transceiver.direction == "recvonly":
+                transceiver._codecs = [
+                    with_payload_types(c, receive_only[transceiver.kind])
+                    for c in transceiver._codecs
+                ]
             transceiver._headerExtensions = HEADER_EXTENSIONS[transceiver.kind][:]
 
         mids = self.__seenMids.copy()

@@ -53,6 +53,8 @@ RTP_HISTORY_MAX_PACKETS = 9600
 # reserved to avoid confusion with RTCP
 FORBIDDEN_PAYLOAD_TYPES = range(72, 77)
 DYNAMIC_PAYLOAD_TYPES = range(96, 128)
+# Unassigned by RFC 3551 and taken as dynamic by browsers once 96-127 run out (Chromium's red is 63).
+UNASSIGNED_PAYLOAD_TYPES = range(35, 64)
 
 RTP_HEADER_LENGTH = 12
 RTCP_HEADER_LENGTH = 4

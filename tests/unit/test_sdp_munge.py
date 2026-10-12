@@ -121,6 +121,23 @@ async def scenario(res: H.Results) -> None:
               len(audio_out) == 1 and "a=ptime:" in audio_out[0]
               and all("a=ptime:" not in s for s in mic_out), (len(audio_out), len(mic_out)))
 
+    # One BUNDLE group, so a payload type stands for one codec with one set of parameters.
+    def dynamic(section: str) -> set:
+        return {int(pt) for pt in re.findall(r'(?m)^a=rtpmap:(\d+) ', section)}
+
+    shared = set().union(*(dynamic(s) for s in [out_display] + audio_out))
+    own = [dynamic(s) for s in [out_webcam] + mic_out]
+    res.check("the webcam's and the microphone's payload types are their own, apart from the display's and "
+              "the playback's (their parameters differ: profiles, sps-pps-idr-in-keyframe, stereo, ptime)",
+              all(o and not (o & shared) for o in own) and not (own[0] & own[1]) if len(own) == 2 else False,
+              (sorted(shared), [sorted(o) for o in own]))
+    red = re.search(r'(?m)^a=rtpmap:(\d+) red/', mic_out[0]) if mic_out else None
+    opus = re.search(r'(?m)^a=rtpmap:(\d+) opus/', mic_out[0]) if mic_out else None
+    res.check("the microphone's RED wraps the microphone's Opus",
+              bool(red and opus) and re.search(rf'(?m)^a=fmtp:{red.group(1)} {opus.group(1)}/{opus.group(1)}\b',
+                                               mic_out[0]) is not None,
+              (red and red.group(1), opus and opus.group(1)))
+
 
 async def offer_of_app() -> str:
     """One offer from a loopback RTCApp, as the browser receives it."""
