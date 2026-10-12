@@ -5,19 +5,22 @@ with no zwp_virtual_keyboard (KWin).
 Drives the real keyboard worker and _inject_text_via_clipboard against fakes:
 buffered unicode keysyms must flush through the virtual keyboard when it works
 and fall back to save clipboard -> write text -> Shift+Insert -> restore when
-it does not, lifting held modifiers around the chord, restoring binary
+it does not, the text offered as a secret and the restore left until the
+focused app has had time to fetch it, lifting held modifiers around the chord, restoring binary
 clipboards under their mime, clearing when there was nothing to restore, and
 dropping nothing silently unless both engines fail.
 """
 import asyncio
 import os
 import sys
+import time
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 
-from selkies.input_handler import PixelfluxVkUnavailable, WebRTCInput  # noqa: E402
+from selkies.input_handler import (  # noqa: E402
+    CLIPBOARD_PASTE_FETCH_S, PixelfluxVkUnavailable, SecretText, WebRTCInput)
 
 SHIFT_L = 0xFFE1
 INSERT = 0xFF63
@@ -69,12 +72,15 @@ def make_handler(vk_error: bool = True, separate: bool = True,
     h._clipboard_inject_lock = asyncio.Lock()
     h._clipboard_inject_active = False
     h.keys = []
+    h.key_times = []
     h.typed = []
     h.writes = []
+    h.write_times = []
     h.clipboard = clipboard
 
     async def send(keysym, down=True, neutralize=None):
         h.keys.append((keysym, down))
+        h.key_times.append(time.monotonic())
     h.send_x11_keypress = send
 
     async def wl_type(text):
@@ -92,6 +98,7 @@ def make_handler(vk_error: bool = True, separate: bool = True,
         if not write_ok:
             return False
         h.writes.append((data, mime_type))
+        h.write_times.append(time.monotonic())
         return True
     h.write_clipboard = write_clipboard
 
@@ -104,7 +111,7 @@ def make_handler(vk_error: bool = True, separate: bool = True,
     return h
 
 
-async def run_worker(h: WebRTCInput, items: list, settle: float = 0.15) -> None:
+async def run_worker(h: WebRTCInput, items: list, settle: float = 0.4) -> None:
     """Feed `items` through the keyboard worker, then cancel it after `settle`."""
     task = asyncio.create_task(h._keyboard_worker())
     for item in items:
@@ -134,6 +141,11 @@ async def main() -> None:
     check("paste chord is Shift+Insert in order", chord_of(h.keys) == PASTE_CHORD, h.keys)
     check("previous clipboard is restored after the paste",
           h.writes[-1] == ("before", "text/plain"), h.writes)
+    check("the pasted text is offered as a secret, kept out of clipboard histories",
+          isinstance(h.writes[0][0], SecretText) and not isinstance(h.writes[-1][0], SecretText), h.writes)
+    fetch = h.write_times[-1] - h.key_times[-1] if h.key_times and len(h.write_times) > 1 else 0
+    check("the clipboard is restored only once the focused app has had time to fetch the paste",
+          fetch >= CLIPBOARD_PASTE_FETCH_S - 0.005, f"{fetch * 1000:.0f} ms")
     check("unicode keyups are swallowed",
           all(k[0] in (SHIFT_L, INSERT) for k in h.keys), h.keys)
 

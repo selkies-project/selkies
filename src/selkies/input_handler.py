@@ -1606,21 +1606,22 @@ class _XTestKeyboard:
         self._settle_until = time.monotonic() + self._BIND_SETTLE_S
         return True
 
-    def bindings_intact(self) -> bool:
-        """True when every overlay binding still resolves to its keysym in the
-        server's map. Distinguishes our own MappingNotify from a foreign layout
-        change by SEMANTICS: servers vary in how many notifies one
-        ChangeKeyboardMapping emits and report the full keycode range, so
-        neither counting nor range matching works — but a self-bind leaves the
-        bindings intact and a foreign change wipes them."""
-        if not self._overlay:
-            return True
+    def bindings_intact(self, first_keycode: int, count: int) -> bool:
+        """True when every overlay binding in a notify's keycode range still
+        resolves to its keysym in the server's map. Distinguishes our own
+        MappingNotify from a foreign layout change by SEMANTICS: servers vary
+        in how many notifies one ChangeKeyboardMapping emits and report the
+        full keycode range, so neither counting nor range matching works — but
+        a self-bind leaves the bindings intact and a foreign change wipes them.
+        Read from the keymap cache the notify just refreshed for its range,
+        not a request per binding (a round trip per overlay entry on the event
+        loop after every bind, while the X server serves every client's keymap
+        refetch); a binding outside the range is one whose own notify is still
+        on its way."""
+        last = first_keycode + count
         try:
-            for ks, kc in self._overlay.items():
-                syms = self._d.get_keyboard_mapping(kc, 1)[0]
-                if not len(syms) or syms[0] != overlay_bind_keysym(ks):
-                    return False
-            return True
+            return all(self._d.keycode_to_keysym(kc, 0) == overlay_bind_keysym(ks)
+                       for ks, kc in self._overlay.items() if first_keycode <= kc < last)
         except Exception:
             return False
 
@@ -2178,6 +2179,11 @@ def clipboard_markup_has_text(html: bytes) -> bool:
 # that validates mime types can see.
 CLIPBOARD_SECRET_HINTS = ("x-kde-passwordManagerHint", "text/x-kde-passwordManagerHint",
                           "application/x-kde-passwordManagerHint")
+
+# How long the focused app has to fetch a pasted text before the clipboard is
+# restored: Konsole under KWin took 50-80 ms for a session's first paste, and a
+# selection dropped before the fetch pastes nothing.
+CLIPBOARD_PASTE_FETCH_S = 0.15
 
 
 class SecretText(str):
@@ -5927,12 +5933,7 @@ class WebRTCInput:
                         return
                     if self.keyboard:
                         if down:
-                            self.keyboard.bind_ahead(keysym)
-                            settle = self.keyboard.settle_delay()
-                            if settle > 0:
-                                await asyncio.sleep(settle)
-                            self.keyboard.press(keysym, neutralize=neutralize,
-                                                held_keysyms=held_level_mods)
+                            await self._xtest_press(keysym, neutralize, held_level_mods)
                         else:
                             self.keyboard.release(keysym)
                         return
@@ -5959,14 +5960,23 @@ class WebRTCInput:
                     return
 
                 if down:
-                    self.keyboard.press(keysym, neutralize=neutralize,
-                                        held_keysyms=held_level_mods)
+                    await self._xtest_press(keysym, neutralize, held_level_mods)
                 else:
                     self.keyboard.release(keysym)
             except Exception as e:
                 if self._is_x_conn_closed(e):
                     self._reconnect_xdisplay()
                 await self._type_keysym_fallback(keysym, down)
+
+    async def _xtest_press(self, keysym: int, neutralize: bool, held_keysyms: Iterable[int]) -> None:
+        """Press a keysym through the XTEST shim, with the overlay bind it may
+        need made and its settle awaited first, so the event loop never sleeps
+        it out inside press()."""
+        self.keyboard.bind_ahead(keysym)
+        settle = self.keyboard.settle_delay()
+        if settle > 0:
+            await asyncio.sleep(settle)
+        self.keyboard.press(keysym, neutralize=neutralize, held_keysyms=held_keysyms)
 
     async def _type_text_xtest(self, text: str, neutralize: bool = False) -> bool:
         """Type a string in-process via the XTEST shim.
@@ -6247,7 +6257,9 @@ class WebRTCInput:
         data-control clipboard and ordinary key events. Held modifiers are
         lifted around the chord so they cannot corrupt the paste, and
         write_clipboard's baseline keeps the monitor from echoing the injected
-        text back to clients. Returns True once the paste chord is sent."""
+        text back to clients. The text is offered as a secret, so a clipboard
+        history (Klipper) neither records nor re-offers each typed character.
+        Returns True once the paste chord is sent."""
         if self._clipboard_inject_active:
             return False
         async with self._clipboard_inject_lock:
@@ -6259,16 +6271,16 @@ class WebRTCInput:
                 for mod_keysym in held_modifiers:
                     await self.send_x11_keypress(mod_keysym, down=False)
                 old_data, old_mime = await self.read_clipboard(use_binary=True)
-                if not await self.write_clipboard(text):
+                if not await self.write_clipboard(SecretText(text)):
                     return False
-                # The sleeps are the focused app's margins to receive the new
-                # offer and to finish fetching it before the selection is restored.
+                # The focused app's margins to receive the new offer, and to
+                # fetch it before the selection is restored.
                 await asyncio.sleep(0.02)
                 await self.send_x11_keypress(shift_keysym, down=True)
                 await self.send_x11_keypress(insert_keysym, down=True, neutralize=False)
                 await self.send_x11_keypress(insert_keysym, down=False)
                 await self.send_x11_keypress(shift_keysym, down=False)
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(CLIPBOARD_PASTE_FETCH_S)
                 if old_data is not None:
                     await self.write_clipboard(old_data, old_mime or "text/plain")
                 elif self.is_wayland:
@@ -8469,12 +8481,15 @@ class WebRTCInput:
             return
         try:
             self.xdisplay.refresh_keyboard_mapping(event)
+            refreshed = True
         except Exception as e:
             logger_webrtc_input.warning(f"keymap cache refresh failed: {e}")
+            refreshed = False
         if kb is None:
             return
         kb.note_mapping_change(event.first_keycode, event.count)
-        if kb.bindings_intact():
+        # bindings_intact() reads the cache, which a failed refresh left stale.
+        if refreshed and kb.bindings_intact(event.first_keycode, event.count):
             # Our own bind, or a change that left the overlay alone.
             return
         logger_webrtc_input.debug(

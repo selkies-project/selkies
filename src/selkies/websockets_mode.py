@@ -118,7 +118,7 @@ from .input_handler import (
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
-from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, STREAM_SETTINGS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, codec_for_encoder, effective_use_cpu, encoder_for_codec, fps_label, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting, socket_dir
+from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, STREAM_SETTINGS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, with_live_stream_settings, codec_for_encoder, effective_use_cpu, encoder_for_codec, fps_label, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting, socket_dir
 from .settings import settings as app_settings
 from . import sessions
 from . import audit
@@ -3240,11 +3240,12 @@ class DataStreamingServer(BaseStreamingService):
     def _settings_payload_for_display(self, display_id: str) -> dict:
         """Client settings snapshot as it applies to one display.
 
-        build_client_settings_payload() publishes boot config, so the encoder is
-        patched to the one this display is actually captured with (its stored
-        pick, else the session default a fresh capture would use): clients key
-        their wire-format demux off this value and drop every chunk of any other
-        format. Also carried: `ws_max_message_bytes` (transport capacity, so
+        build_client_settings_payload() publishes boot config, so the stream
+        settings are patched to what this display streams with
+        (`with_live_stream_settings`): clients key their wire-format demux off
+        its encoder (its stored pick, else the session default a fresh capture
+        would use) and drop every chunk of any other format, and a page with no
+        pick of its own shows and keeps the display's values. Also carried: `ws_max_message_bytes` (transport capacity, so
         the client sizes multipart chunks to the whole frame), and
         `second_screen` and `ui_sidebar_show_apps` as effective
         availability — the admin flag and what the backend can actually do — so
@@ -3254,11 +3255,10 @@ class DataStreamingServer(BaseStreamingService):
         session opened somewhere else — absent until the runner has answered,
         because a client told nothing is installed clears its own record.
         """
-        payload = build_client_settings_payload()
-        live_encoder = (self.display_clients.get(display_id) or {}).get('encoder') or self.app.encoder
-        if live_encoder and isinstance(payload.get('encoder'), dict):
-            payload['encoder'] = dict(payload['encoder'])
-            payload['encoder']['value'] = live_encoder
+        live = self._display_settings(display_id)
+        if not live.get('encoder') and self.app.encoder:
+            live['encoder'] = self.app.encoder
+        payload = with_live_stream_settings(build_client_settings_payload(), live)
         payload['ws_max_message_bytes'] = {"value": WS_MAX_MESSAGE_BYTES}
         available, _ = self._second_screen_availability()
         entry = payload.get('second_screen')

@@ -656,7 +656,8 @@ static pthread_mutex_t inotify_mutex;
 /* Constructor: logging, recursive table locks, socket directory override, real libc
  * entry points. The locks are made recursive here rather than declared so, because only
  * glibc has a static initializer for it; nothing can be open before this runs, so every
- * hook is on its lock-free path until it does. */
+ * hook is on its lock-free path until it does. The constructors of the application's own
+ * libraries run before this one, so a hook they call resolves its real entry point itself. */
 __attribute__((constructor)) void init_interposer() {
     sji_logging_init();
 
@@ -2191,7 +2192,7 @@ static int common_open_logic(const char *pathname, int flags, js_interposer_t **
 /* Device paths get a socket handle from common_open_logic(); everything else
  * goes to the real open(), with the mode argument pulled only when NEEDS_MODE. */
 int open(const char *pathname, int flags, ...) {
-    if (!real_open) {
+    if (!real_open && load_real_func((void *)&real_open, "open") < 0) {
         errno = EFAULT;
         return -1;
     }
@@ -2219,7 +2220,8 @@ int open(const char *pathname, int flags, ...) {
 
 /* As open(); falls back to the real open() when no real open64 exists. */
 int open64(const char *pathname, int flags, ...) {
-    if (!real_open64 && !real_open) {
+    if (!real_open64 && load_real_func((void *)&real_open64, "open64") < 0 &&
+        !real_open && load_real_func((void *)&real_open, "open") < 0) {
         errno = EFAULT;
         return -1;
     }
@@ -2275,7 +2277,7 @@ static const char *resolve_at_path(int dirfd, const char *pathname, char *full, 
 
 /* As open(), with a relative path resolved against dirfd for the device match. */
 int openat(int dirfd, const char *pathname, int flags, ...) {
-    if (!real_openat) {
+    if (!real_openat && load_real_func((void *)&real_openat, "openat") < 0) {
         errno = EFAULT;
         return -1;
     }
@@ -2306,7 +2308,8 @@ int openat(int dirfd, const char *pathname, int flags, ...) {
 
 /* As openat(); falls back to the real openat() when no real openat64 exists. */
 int openat64(int dirfd, const char *pathname, int flags, ...) {
-    if (!real_openat64 && !real_openat) {
+    if (!real_openat64 && load_real_func((void *)&real_openat64, "openat64") < 0 &&
+        !real_openat && load_real_func((void *)&real_openat, "openat") < 0) {
         errno = EFAULT;
         return -1;
     }
@@ -2613,7 +2616,7 @@ static ssize_t inotify_read(int fd, void *buf, size_t count) {
 }
 
 int close(int fd) {
-    if (!real_close) {
+    if (!real_close && load_real_func((void *)&real_close, "close") < 0) {
         sji_log_error("CRITICAL: real_close not loaded. Cannot proceed with close call.");
         errno = EFAULT;
         return -1;
@@ -2809,7 +2812,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
 }
 
 ssize_t read(int fd, void *buf, size_t count) {
-    if (!real_read) {
+    if (!real_read && load_real_func((void *)&real_read, "read") < 0) {
         sji_log_error("CRITICAL: real_read not loaded. Cannot proceed with read call.");
         errno = EFAULT;
         return -1;
@@ -3021,7 +3024,7 @@ ssize_t __read_chk(int fd, void *buf, size_t nbytes, size_t buflen) {
  * O_NONBLOCK first, as epoll consumers expect; only that handle's connection
  * is affected. */
 int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
-    if (!real_epoll_ctl) {
+    if (!real_epoll_ctl && load_real_func((void *)&real_epoll_ctl, "epoll_ctl") < 0) {
         sji_log_error("CRITICAL: real_epoll_ctl not loaded. Cannot proceed with epoll_ctl call.");
         errno = EFAULT;
         return -1;
@@ -3496,7 +3499,7 @@ exit_ev_ioctl:
  * and a same-slot match is still correct because corr is device-global.
  */
 int ioctl(int fd, ioctl_request_t request, ...) {
-    if (!real_ioctl) {
+    if (!real_ioctl && load_real_func((void *)&real_ioctl, "ioctl") < 0) {
         sji_log_error("CRITICAL: real_ioctl not loaded. Cannot proceed with ioctl call.");
         errno = EFAULT;
         return -1;

@@ -41,7 +41,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from struct import pack, unpack_from
+from struct import error as StructError, pack, unpack_from
 from typing import Deque, Optional, Union, cast
 
 from google_crc32c import value as crc32c
@@ -123,6 +123,8 @@ def decode_params(body: bytes) -> list[tuple[int, bytes]]:
     pos = 0
     while pos <= len(body) - 4:
         param_type, param_length = unpack_from("!HH", body, pos)
+        if param_length < 4:
+            raise ValueError(f"SCTP parameter has an invalid length of {param_length} bytes")
         params.append((param_type, body[pos + 4 : pos + param_length]))
         pos += param_length + padl(param_length)
     return params
@@ -997,7 +999,7 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         """
         try:
             _, _, verification_tag, chunks = parse_packet(data)
-        except ValueError:
+        except (ValueError, StructError):
             return
 
         # is this an init?
@@ -1114,6 +1116,10 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         """
         self.__log_debug("< %s", chunk)
 
+        # Neither INIT nor INIT ACK has named the peer's first TSN yet.
+        if isinstance(chunk, (DataChunk, ForwardTsnChunk)) and self._last_received_tsn is None:
+            return
+
         # common
         if isinstance(chunk, DataChunk):
             await self._receive_data_chunk(chunk)
@@ -1148,7 +1154,11 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             for param in chunk.params:
                 cls = RECONFIG_PARAM_TYPES.get(param[0])
                 if cls is not None:
-                    await self._receive_reconfig_param(cls.parse(param[1]))
+                    try:
+                        parsed = cls.parse(param[1])
+                    except StructError:
+                        continue
+                    await self._receive_reconfig_param(parsed)
 
         # server
         elif isinstance(chunk, InitChunk) and self.is_server:
@@ -1265,6 +1275,13 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         self._sack_needed = True
         if chunk.flags & SCTP_DATA_SACK_IMMEDIATELY:
             self._sack_immediate = True
+
+        # A gap ack block reaches only 65535 TSNs past the cumulative one.
+        if (
+            uint32_gt(chunk.tsn, self._last_received_tsn)
+            and (chunk.tsn - self._last_received_tsn) % SCTP_TSN_MODULO > 0xFFFF
+        ):
+            return
 
         # mark as received
         if self._mark_received(chunk.tsn):
