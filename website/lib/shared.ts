@@ -95,7 +95,11 @@ export function pageUrl(url: string): string {
   return docsVersions ? `${siteUrl}/${docsVersions.default}${url}` : `${siteUrl}${url}`;
 }
 
-/** The Markdown copy of a page, as app/llms.mdx serves it, site-absolute. */
+/**
+ * The Markdown copy of a page, as app/llms.mdx serves it, below the base path:
+ * the page actions taking it prepend that themselves (fumadocs reads it as
+ * `import.meta.env.BASE_URL`, which Next.js sets from `basePath`).
+ */
 export function pageMarkdownUrl(page: { slugs: string[] }): string {
-  return withBasePath(['/llms.mdx', ...page.slugs, 'content.md'].join('/'));
+  return ['/llms.mdx', ...page.slugs, 'content.md'].join('/');
 }
