@@ -1,12 +1,15 @@
 """3. Make sure the second display works properly by moving a window to the right. Then, toggle force aligned resolution, native cursor style, and antialiasing. Try changing resolutions (both preset and manual, UI scaling, and HiDPI (it's supposed to be disabled automatically when a resolution is set), and the reset button as well. See if the desktops or windows respond.
 
 A second page opens `#display2`; a window of the session's Chrome is moved to
-the right of the primary with xdotool and has to show up in the second
-display's stream. The classic dashboard's screen controls are then driven one
+the right of the primary and has to show up in the second display's stream:
+with xdotool on X11; on Wayland by a KWin script where KWin composes (the window
+a native client with no X id), else with xdotool on a Chrome run on XWayland,
+which the compositor places as the client asks. The classic dashboard's screen controls are then driven one
 by one, each checked on the session (its xrandr geometry, its Xft.dpi, and the
 tester page's own size, which is what a maximized window does) and on the page
 (its stream, its canvas style).
 """
+import json
 import re
 import time
 from typing import Any, Optional
@@ -16,6 +19,19 @@ from image_lib import open_sidebar, reveal, session_browser, stop_session_browse
 ITEM = 3
 TITLE = "second display, screen settings"
 SOLID = (255, 0, 255)
+
+
+def kwin_move(target: Any, caption: str, x: int, y: int, w: int, h: int) -> str:
+    """Place the window whose caption starts with `caption` at (x, y), w x h, through a KWin
+    script (KWin 6's scripting over the session's D-Bus); what it printed."""
+    js = (f"for (const win of workspace.windowList()) if (win.caption.startsWith({json.dumps(caption)})) "
+          f"{{ win.frameGeometry = {{x: {x}, y: {y}, width: {w}, height: {h}}}; print('moved ' + win.caption); }}")
+    target.put("/tmp/it-move.js", js.encode())
+    return target.out("q=$(command -v qdbus6 || command -v qdbus); "
+                      "$q org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript it-move >/dev/null 2>&1; "
+                      "id=$($q org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript /tmp/it-move.js it-move) && "
+                      "$q org.kde.KWin /Scripting/Script$id org.kde.kwin.Script.run; sleep 1; "
+                      "$q org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript it-move; echo \"script $id\"")
 
 
 def geometry(cell: Any) -> dict:
@@ -77,8 +93,21 @@ def run(cell: Any) -> None:
     mons = wait(lambda: geometry(cell), lambda m: len(m) >= 2, 20)
     R.check("#display2 adds a second monitor to the session", len(mons) >= 2, mons)
     primary = max(mons.values(), key=lambda g: -g[2]) if mons else (1280, 720, 0, 0)
-    if len(mons) >= 2 and "xdotool" in cell.facts.get("tools", []):
+    tools = cell.facts.get("tools", [])
+    kwin = cell.backend == "wayland" and "kwin_wayland" in tools and ("qdbus6" in tools or "qdbus" in tools)
+    if len(mons) >= 2 and kwin:
         session_browser(cell.target, "chrome", "/solid.html", kiosk=False, profile="solid")
+        time.sleep(5)
+        x = primary[0] + 100
+        said = kwin_move(cell.target, "it-solid", x, 100, 400, 300)
+        time.sleep(3)
+        on2 = wait(lambda: cell.sample(second, [(0.15, 0.3)]), lambda s: bool(s) and _near(s["points"][0], SOLID), 15)
+        R.check("a window moved to the right of the primary shows on the second display",
+                bool(on2) and _near(on2["points"][0], SOLID), {"kwin": said, "x": x, "sample": on2 and on2["points"]})
+        stop_session_browser(cell.target, "chrome", "solid")
+    elif len(mons) >= 2 and "xdotool" in tools:
+        xwayland = "--ozone-platform=x11" if cell.backend == "wayland" else ""
+        session_browser(cell.target, "chrome", "/solid.html", kiosk=False, profile="solid", flags=xwayland)
         wid = wait(lambda: cell.target.out("xdotool search --name '^it-solid' 2>/dev/null | head -1"), bool, 20)
         if wid:
             x = primary[0] + 100
@@ -89,10 +118,11 @@ def run(cell: Any) -> None:
                     bool(on2) and _near(on2["points"][0], SOLID), {"window": wid, "x": x, "sample": on2 and on2["points"]})
         else:
             R.skip("a window moved onto the second display",
-                   f"no X window to move on {cell.backend}: the session's Chrome is a native Wayland client there")
+                   f"no X window of the session's Chrome on {cell.backend} (no XWayland?)")
         stop_session_browser(cell.target, "chrome", "solid")
     else:
-        R.skip("a window moved onto the second display", f"needs a second monitor and xdotool ({mons})")
+        R.skip("a window moved onto the second display",
+               f"needs a second monitor and xdotool, or KWin's scripting on Wayland ({mons})")
     second.close()
 
     open_sidebar(page)

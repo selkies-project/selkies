@@ -120,7 +120,7 @@ for p in ("selkies", "pixelflux", "pcmflux"):
 def facts_of(target: Any) -> dict:
     """What an image brings, read once per target."""
     tools = target.out("for t in xdotool xclip xrandr wmctrl wl-copy wl-paste ffmpeg google-chrome chromium firefox "
-                       "fcitx5 ibus-daemon pw-record parec pactl kwin_x11 kwin_wayland labwc; do "
+                       "fcitx5 ibus-daemon pw-record parec pactl kwin_x11 kwin_wayland labwc qdbus6 qdbus; do "
                        "command -v $t >/dev/null && printf '%s ' $t; done")
     return {"digest": target.digest, "node": getattr(target, "node", ""), "tools": tools.split(),
             "status": target.api("/api/status"),

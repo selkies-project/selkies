@@ -403,9 +403,9 @@ def channel_url(path: str, ch: str) -> str:
 
 
 def session_browser(target: Any, which: str = "chrome", start: str = "/pattern.html", kiosk: bool = True,
-                    profile: str = "main") -> bool:
+                    profile: str = "main", flags: str = "") -> bool:
     """Start the session's Chrome (or Firefox) on the tester site, following the
-    channel named after its profile; whether the browser is installed."""
+    channel named after its profile, Chrome with `flags` added; whether the browser is installed."""
     url = f"{SITE_URL}{channel_url(start, profile)}"
     target.sh(f"rm -f {SITE_ROOT}/next-{profile}")
     if which == "chrome":
@@ -414,7 +414,7 @@ def session_browser(target: Any, which: str = "chrome", start: str = "/pattern.h
             return False
         # A kiosk fills the screen; otherwise an app window, which has no tabs or toolbar.
         mode = f"--kiosk {shlex.quote(url)}" if kiosk else f"--app={shlex.quote(url)}"
-        cmd = f"{exe} {SESSION_FLAGS} --user-data-dir={SITE_ROOT}/chrome-{profile} {mode}"
+        cmd = f"{exe} {SESSION_FLAGS} {flags} --user-data-dir={SITE_ROOT}/chrome-{profile} {mode}"
     else:
         exe = target.out("command -v firefox")
         if not exe:
