@@ -129,7 +129,7 @@ function FilesFrame() {
 export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="max-h-[90vh] sm:max-w-[80vw] p-0">
+            <DialogContent className="allow-native-input max-h-[90vh] sm:max-w-[80vw] p-0">
                 <DialogHeader className="sticky top-0 z-10 bg-background p-6 border-b">
                     <div className="flex flex-col space-y-6">
                         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">

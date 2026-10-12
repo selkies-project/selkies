@@ -292,7 +292,7 @@ export function Apps({ isOpen = false, onClose }: AppsProps = {}) {
         <Dialog open={isOpen} onOpenChange={handleModalClose}>
             <DialogContent
                 showCloseButton={false}
-                className="flex! flex-col gap-0! h-[calc(100dvh-4rem)]! p-0! overflow-hidden sm:max-w-[min(90vw,72rem)]!"
+                className="allow-native-input flex! flex-col gap-0! h-[calc(100dvh-4rem)]! p-0! overflow-hidden sm:max-w-[min(90vw,72rem)]!"
             >
                 <DialogHeader className="gap-4 border-b p-5 sm:flex-row sm:items-center sm:justify-between">
                     <div className="min-w-0">
