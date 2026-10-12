@@ -76,6 +76,12 @@ import { t, tl } from "@/i18n";
 const audioBitrateOptions = [32000, 48000, 64000, 96000, 128000, 192000, 256000, 320000, 384000, 510000];
 const DEFAULT_AUDIO_BITRATE = 128000;
 
+/**
+ * Enlarges a stock `Slider` (control padding and thumb) on coarse pointers,
+ * from the call site so the `ui/` primitive stays as shadcn ships it.
+ */
+const TOUCH_SLIDER = "*:pointer-coarse:py-4 **:data-[slot=slider-thumb]:pointer-coarse:size-6";
+
 /** UI scaling stops offered until the server's `scaling_dpi` enum arrives. */
 const dpiScalingOptions = [
     { label: "100%", value: 96 },
@@ -1444,6 +1450,7 @@ export function Settings() {
                                                 { framerate: framerateLabel(framerateFollows && displayFramerate !== null ? displayFramerate : framerate) })}
                                         </Label>
                                         <Slider
+                                            className={TOUCH_SLIDER}
                                             min={0}
                                             max={framerateOptions.stops.length - 1}
                                             step={1}
@@ -1478,6 +1485,7 @@ export function Settings() {
                                     <div className="space-y-2">
                                         <Label>{tl('sections.video.bitrateLabel', { bitrate: formatBitrate(videoBitRate) })}</Label>
                                         <Slider
+                                            className={TOUCH_SLIDER}
                                             min={0}
                                             max={videoBitrateOptions.length - 1}
                                             step={1}
@@ -1495,6 +1503,7 @@ export function Settings() {
                                     <div className="space-y-2">
                                         <Label>{tl('sections.video.crfLabel', { crf: videoCRF })}</Label>
                                         <Slider
+                                            className={TOUCH_SLIDER}
                                             min={0}
                                             max={videoCRFChoices.length - 1}
                                             step={1}
@@ -1524,6 +1533,7 @@ export function Settings() {
                                     <div className="space-y-2">
                                         <Label>{t('sections.video.jpegQualityLabel', { jpegQuality })}</Label>
                                         <Slider
+                                            className={TOUCH_SLIDER}
                                             min={serverSettings?.jpeg_quality?.min || 1}
                                             max={serverSettings?.jpeg_quality?.max || 100}
                                             step={1}
@@ -1550,6 +1560,7 @@ export function Settings() {
                                     <div className="space-y-2">
                                         <Label>{tl('sections.video.paintoverCrfLabel', { crf: videoPaintoverCRF })}</Label>
                                         <Slider
+                                            className={TOUCH_SLIDER}
                                             min={0}
                                             max={videoPaintoverCRFChoices.length - 1}
                                             step={1}
@@ -1566,6 +1577,7 @@ export function Settings() {
                                     <div className="space-y-2">
                                         <Label>{tl('sections.video.paintoverBurstLabel', { frames: videoPaintoverBurstFrames })}</Label>
                                         <Slider
+                                            className={TOUCH_SLIDER}
                                             min={serverSettings?.video_paintover_burst_frames?.min || 1}
                                             max={serverSettings?.video_paintover_burst_frames?.max || 30}
                                             step={1}
@@ -1580,6 +1592,7 @@ export function Settings() {
                                     <div className="space-y-2">
                                         <Label>{t('sections.video.paintOverJpegQualityLabel', { paintOverJpegQuality })}</Label>
                                         <Slider
+                                            className={TOUCH_SLIDER}
                                             min={serverSettings?.paint_over_jpeg_quality?.min || 1}
                                             max={serverSettings?.paint_over_jpeg_quality?.max || 100}
                                             step={1}
@@ -1617,6 +1630,7 @@ export function Settings() {
                                 <div className="space-y-2">
                                     <Label>{tl('sections.audio.bitrateLabel', { bitrate: audioBitRate / 1000 })}</Label>
                                     <Slider
+                                        className={TOUCH_SLIDER}
                                         min={0}
                                         max={audioBitrateChoices.length - 1}
                                         step={1}
