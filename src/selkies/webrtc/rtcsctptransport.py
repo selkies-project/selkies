@@ -2008,9 +2008,11 @@ class RTCSctpTransport(AsyncIOEventEmitter):
                     protocol_length,
                 ) = unpack_from("!BBHLHH", data)
                 pos = 12
-                label = data[pos : pos + label_length].decode("utf8")
+                # A peer's label or protocol need not be UTF-8 (libwebrtc takes the
+                # bytes as they come); a decode error here would end the DTLS loop.
+                label = data[pos : pos + label_length].decode("utf8", "replace")
                 pos += label_length
-                protocol = data[pos : pos + protocol_length].decode("utf8")
+                protocol = data[pos : pos + protocol_length].decode("utf8", "replace")
 
                 # check channel type
                 maxPacketLifeTime = None
@@ -2053,7 +2055,7 @@ class RTCSctpTransport(AsyncIOEventEmitter):
                 channel._setReadyState("open")
         elif pp_id == WEBRTC_STRING and stream_id in self._data_channels:
             # emit message
-            self._data_channels[stream_id].emit("message", data.decode("utf8"))
+            self._data_channels[stream_id].emit("message", data.decode("utf8", "replace"))
         elif pp_id == WEBRTC_STRING_EMPTY and stream_id in self._data_channels:
             # emit message
             self._data_channels[stream_id].emit("message", "")

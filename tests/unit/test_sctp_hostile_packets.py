@@ -112,6 +112,13 @@ def main() -> bool:
     res.check("DATA past what a gap ack block can name is dropped", ok and not any(gaps), f"SACK gaps {gaps}" if ok else detail)
     ok, detail, _ = deliver(True, tag(chunk(130, struct.pack("!HH", 13, 4 + 13) + struct.pack("!LLLB", 1, 0, 999, 0))))
     res.check("a RECONFIG parameter too short for its fields is dropped", ok, detail)
+    whole = lambda tsn, seq, ppid, body: struct.pack("!BBH", 0, 3, 16 + len(body)) + struct.pack(  # noqa: E731
+        "!LHHL", tsn, 1, seq, ppid) + body + b"\0" * (-len(body) % 4)
+    opening = struct.pack("!BBHLHH", 3, 0, 0, 0, 2, 0) + b"\xff\xcf"
+    ok, detail, sent = deliver(True, tag(whole(1000, 0, 50, opening) + whole(1001, 1, 51, b"\xcf\x00\xff")))
+    acks = [c for p in sent for c in sctp.parse_packet(p)[3] if isinstance(c, sctp.DataChunk) and c.protocol == 50]
+    res.check("a channel's label and a string message not UTF-8 are taken, not raised", ok and len(acks) == 1,
+              f"{len(acks)} DATA_CHANNEL_ACK" if ok else detail)
     ok, detail, sent = deliver(True, tag(data(1000)))
     acked = [c.cumulative_tsn for p in sent for c in sctp.parse_packet(p)[3] if isinstance(c, sctp.SackChunk)]
     res.check("in-window DATA is still received and acknowledged", ok and 1000 in acked, f"SACK cumulative TSNs {acked}")
