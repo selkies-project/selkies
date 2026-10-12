@@ -120,6 +120,13 @@ const TRACKPAD_TAP_HOLD_MS = 180;
 const TRACKPAD_HANDOFF_MS = 200;
 
 /**
+ * Typing pause after which a composition's preedit is shown on the server. Every new character of a preedit costs the
+ * server a keymap change that each of its clients refetches, so a burst of keys sends its commits and the preedit
+ * goes out only once the typist stops; at 5-8 keys a second the stages between commits are never typed.
+ */
+const PREEDIT_IDLE_MS = 200;
+
+/**
  * Trackpad pointer acceleration, on the finger's speed in CSS pixels per
  * millisecond, which does not depend on how often the digitizer reports:
  * travel at up to TRACKPAD_ACCEL_SLOW goes out as it is, for aiming, and the
@@ -2446,6 +2453,7 @@ export class Input {
      * @param {string} newText
      */
     _updateCompositionText(newText) {
+        this._dropPendingPreedit();
         this.compositionString = this._streamTextDiff(this.compositionString, newText || "");
     }
 
@@ -2486,6 +2494,7 @@ export class Input {
     _compositionStart(event) {
         if (!this._guac_markEvent(event)) return;
         this.isComposing = true;
+        this._dropPendingPreedit();
         this.compositionString = "";
         this._lastTextInputCommit = null;
         this._pendingChord = null;
@@ -2518,11 +2527,22 @@ export class Input {
         for (const m of mods.reverse()) this.send("ku," + m);
     }
 
-    /** Composition update: streams the preedit diff. */
+    /** Composition update: the preedit diff, streamed once typing pauses (`PREEDIT_IDLE_MS`). */
     _compositionUpdate(event) {
         if (!this._guac_markEvent(event)) return;
         if (!this.isComposing) return;
-        this._updateCompositionText(event.data);
+        const preedit = event.data;
+        this._dropPendingPreedit();
+        this._preeditTimer = setTimeout(() => {
+            this._preeditTimer = null;
+            if (this.isComposing) this._updateCompositionText(preedit);
+        }, PREEDIT_IDLE_MS);
+    }
+
+    /** Forgets a preedit not yet streamed, which a clear, a commit or a newer stage supersedes. */
+    _dropPendingPreedit() {
+        clearTimeout(this._preeditTimer);
+        this._preeditTimer = null;
     }
 
     /**
