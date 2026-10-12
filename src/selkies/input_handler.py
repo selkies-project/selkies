@@ -2180,6 +2180,11 @@ def clipboard_markup_has_text(html: bytes) -> bool:
 CLIPBOARD_SECRET_HINTS = ("x-kde-passwordManagerHint", "text/x-kde-passwordManagerHint",
                           "application/x-kde-passwordManagerHint")
 
+# How long the focused app has to fetch a pasted text before the clipboard is
+# restored: Konsole under KWin took 50-80 ms for a session's first paste, and a
+# selection dropped before the fetch pastes nothing.
+CLIPBOARD_PASTE_FETCH_S = 0.15
+
 
 class SecretText(str):
     """Session clipboard text its owner marked secret (`CLIPBOARD_SECRET_HINTS`).
@@ -6252,7 +6257,9 @@ class WebRTCInput:
         data-control clipboard and ordinary key events. Held modifiers are
         lifted around the chord so they cannot corrupt the paste, and
         write_clipboard's baseline keeps the monitor from echoing the injected
-        text back to clients. Returns True once the paste chord is sent."""
+        text back to clients. The text is offered as a secret, so a clipboard
+        history (Klipper) neither records nor re-offers each typed character.
+        Returns True once the paste chord is sent."""
         if self._clipboard_inject_active:
             return False
         async with self._clipboard_inject_lock:
@@ -6264,16 +6271,16 @@ class WebRTCInput:
                 for mod_keysym in held_modifiers:
                     await self.send_x11_keypress(mod_keysym, down=False)
                 old_data, old_mime = await self.read_clipboard(use_binary=True)
-                if not await self.write_clipboard(text):
+                if not await self.write_clipboard(SecretText(text)):
                     return False
-                # The sleeps are the focused app's margins to receive the new
-                # offer and to finish fetching it before the selection is restored.
+                # The focused app's margins to receive the new offer, and to
+                # fetch it before the selection is restored.
                 await asyncio.sleep(0.02)
                 await self.send_x11_keypress(shift_keysym, down=True)
                 await self.send_x11_keypress(insert_keysym, down=True, neutralize=False)
                 await self.send_x11_keypress(insert_keysym, down=False)
                 await self.send_x11_keypress(shift_keysym, down=False)
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(CLIPBOARD_PASTE_FETCH_S)
                 if old_data is not None:
                     await self.write_clipboard(old_data, old_mime or "text/plain")
                 elif self.is_wayland:
