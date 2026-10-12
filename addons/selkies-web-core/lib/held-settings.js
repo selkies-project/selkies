@@ -18,7 +18,7 @@
 
 /** What a display streams with, as `display_settings` carries it. */
 export const DISPLAY_SETTINGS = ['encoder', 'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
-  'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_paint_over_quality',
+  'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_paint_over_quality', 'lossless_static_refinement',
   'video_paintover_crf', 'video_paintover_burst_frames', 'video_bitrate', 'rate_control_mode', 'use_cpu',
   'audio_bitrate'];
 /**

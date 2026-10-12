@@ -140,8 +140,16 @@ res.check("a bring-up that dies counts as a GPU the compositor cannot reach",
           crashed["state"])
 res.check("and says so", "did not survive" in crashed["said"], crashed["said"].strip()[:110])
 
-# The last resort is the device-node test, so what it answers depends on this host.
-nvidia_here = bool(glob.glob("/dev/nvidia*")) and bool(shutil.which("nvidia-smi"))
+# Device nodes and the executable can remain visible in a job without a usable GPU.
+nvidia_smi = shutil.which("nvidia-smi")
+nvidia_here = False
+if glob.glob("/dev/nvidia*") and nvidia_smi:
+    try:
+        nvidia_here = subprocess.run(
+            [nvidia_smi], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"note: nvidia-smi host check did not complete: {exc}", flush=True)
 silent = run("exit 1", WAYLAND)
 res.check("no report at all falls back to the driver's own devices",
           ("DRIVER=nvidia" in silent["state"]) == nvidia_here,

@@ -87,6 +87,7 @@ const IMPORTED = { createStripeClock, createChunkStamp, createPresentMeter, isSk
 
 /** Module sources a worker splices in whole, by their `?raw` import name. */
 const RAW_SOURCES = {
+    losslessStaticSource: () => readFileSync(join(WEB, 'lib', 'lossless-static.js'), 'utf8').replace(/^export /gm, ''),
     wireCodecsSource: () => readFileSync(join(WEB, 'lib', 'wire-codecs.js'), 'utf8').replace(/^export /gm, ''),
     decodeGateSource: () => readFileSync(join(WEB, 'lib', 'decode-gate.js'), 'utf8').replace(/^export /gm, ''),
     decodePaceSource: () => readFileSync(join(WEB, 'lib', 'decode-pace.js'), 'utf8').replace(/^export /gm, ''),

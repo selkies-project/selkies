@@ -26,11 +26,15 @@ def check(label: str, ok, detail="") -> None:
 
 
 def extract_worker() -> str:
-    """The worker source, with its interpolated timer intervals made literal."""
+    """Embed the real protocol helper and make test timer intervals literal."""
     src = open(CORE).read()
     m = re.search(r"const SOCKET_WORKER_SRC = `(.*?)\n`;", src, re.S)
     assert m, "SOCKET_WORKER_SRC not found in the core"
-    return re.sub(r"\$\{\w+\}", "50", m.group(1))
+    helper_path = os.path.join(REPO, "addons/selkies-web-core/lib/lossless-static.js")
+    with open(helper_path) as helper_file:
+        helper = re.sub(r"^export ", "", helper_file.read(), flags=re.M)
+    body = m.group(1).replace("${losslessStaticSource.replace(/^export /gm, '')}", helper)
+    return re.sub(r"\$\{\w+\}", "50", body)
 
 
 DRIVER = """

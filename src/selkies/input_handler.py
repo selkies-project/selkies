@@ -167,6 +167,7 @@ VIEWER_ALLOWED_PREFIXES = (
     # never trigger for viewers.
     "STOP_VIDEO",
     "REQUEST_KEYFRAME",
+    "LOSSLESS ",
     "js,",
 )
 VIEWER_COLLAB_EXTRA_PREFIXES = (

@@ -68,6 +68,7 @@ def make_server(*display_ids: str, withdrawable: bool = True):
     srv.video_paused_clients = set()
     srv.display_clients = {}
     srv.capture_instances = {}
+    srv._refinements = {}
     srv.video_relay_groups = {}
     srv._stream_watches = {}
     srv._persistent_capture_modules = {}

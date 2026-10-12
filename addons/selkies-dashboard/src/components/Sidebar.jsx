@@ -67,7 +67,7 @@ import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER
   formatChord, parseChord, readUserChords, writeUserChords } from "../../../selkies-web-core/lib/touch-controls.js";
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
-  USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
+  USE_PAINT_OVER_QUALITY_SPEC, LOSSLESS_STATIC_REFINEMENT_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
   tenBitStream,
   RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
@@ -88,6 +88,7 @@ import {
   resolveFailedAppCommand,
   writeInstalledApps,
 } from "../../../selkies-web-core/lib/app-commands.js";
+import { readLosslessStatus, subscribeLosslessStatus, losslessSettingState } from "../../../selkies-web-core/lib/lossless-settings.js";
 import * as yaml from "js-yaml";
 
 const urlHash = urlFragmentKeyword();
@@ -104,7 +105,7 @@ const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
 const PER_DISPLAY_SETTINGS = [
     'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
     'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
-    'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
+    'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality', 'lossless_static_refinement',
     'manual_resolution', 'manual_width', 'manual_height', 'encoder',
     'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
     'video_bitrate', 'force_aligned_resolution', 'scaling_dpi'
@@ -866,6 +867,7 @@ const readExplicitStored = (spec) => (key) => (isExplicitChoice(spec) ? readStor
 const readHidpiStored = readExplicitStored(HIDPI_SPEC);
 const readRateControlStored = readExplicitStored(RATE_CONTROL_SPEC);
 const readPaintOverStored = readExplicitStored(USE_PAINT_OVER_QUALITY_SPEC);
+const readLosslessStored = readExplicitStored(LOSSLESS_STATIC_REFINEMENT_SPEC);
 
 /**
  * Drives a conditional setting: lazy init, then a re-resolve whenever the
@@ -1435,6 +1437,10 @@ function Sidebar() {
     RATE_CONTROL_SPEC, serverSettings, conditionalCtx, [serverSettings], readRateControlStored);
   const [usePaintOverQuality, setUsePaintOverQuality] = useConditionalSetting(
     USE_PAINT_OVER_QUALITY_SPEC, serverSettings, paintOverCtx, [serverSettings], readPaintOverStored);
+  const [losslessStaticRefinement, setLosslessStaticRefinement] = useConditionalSetting(
+    LOSSLESS_STATIC_REFINEMENT_SPEC, serverSettings, conditionalCtx, [serverSettings], readLosslessStored);
+  const losslessStatus = useSyncExternalStore(subscribeLosslessStatus, readLosslessStatus);
+  const losslessState = losslessSettingState(losslessStatus, losslessStaticRefinement, usePaintOverQuality);
   const [videoFullColor, setVideoFullColor] = useConditionalSetting(
     VIDEO_FULLCOLOR_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   // Full color is 4:4:4 H.264; where the decoder has no such profile the core
@@ -3494,6 +3500,29 @@ function Sidebar() {
                     >
                       <span className="toggle-button-sidebar-knob"></span>
                     </button>
+                  </div>
+                )}
+                {showPaintOverQualityToggle && usePaintOverQuality && (
+                  <div className="dev-setting-item">
+                    <div className="dev-setting-item toggle-item">
+                      <label htmlFor="losslessStaticRefinementToggle">{t("losslessStatic.label")}</label>
+                      <button
+                        id="losslessStaticRefinementToggle"
+                        className={`toggle-button-sidebar ${losslessState.checked ? "active" : ""}`}
+                        aria-pressed={losslessState.checked}
+                        aria-describedby="losslessStaticRefinementStatus"
+                        disabled={!serverSettings || serverSettings.lossless_static_refinement?.locked || !losslessState.available}
+                        onClick={() => writeConditional(LOSSLESS_STATIC_REFINEMENT_SPEC, !losslessStaticRefinement,
+                          setLosslessStaticRefinement, { persist: true })}
+                      >
+                        <span className="toggle-button-sidebar-knob"></span>
+                      </button>
+                    </div>
+                    <small>{t("losslessStatic.help")}</small>
+                    <small id="losslessStaticRefinementStatus" role="status">
+                      {t(`losslessStatic.reasons.${serverSettings?.lossless_static_refinement?.locked
+                        ? "operator-locked" : losslessState.reason}`)}
+                    </small>
                   </div>
                 )}
                 {showCRF && usePaintOverQuality && (renderableSettings.videoPaintoverCRF ?? true) && (
