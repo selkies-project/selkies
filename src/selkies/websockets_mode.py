@@ -1009,25 +1009,50 @@ class _VideoRelay:
         chunk held back. A delivering client of a stream naming each frame's
         reference (`tracked`) keeps its rows: the frames dropped open a run, and
         once the gate lifts it resumes on the frame predicting past it (`ungate`).
-        Otherwise every row is gated, so the client resumes only at the IDR that
-        _set_backpressure_enabled requests when the gate lifts. The chunk held
-        back and the backlog count against the connection unless `counted` is
-        False (a stalled client: a page that stopped acking, such as a hidden
-        tab, is no judge of its link)."""
-        if counted:
-            self._judge(1 + len(self.backlog))
-        dropped = [i['data'] for i in (*self.backlog, *([item] if item is not None else ()))]
+        An anchor predicting from a frame the client was sent still goes: the
+        encoder, which marks it over the anchor before (`settle`), predicts past
+        the run from it, where without it only a key frame would do, and the run
+        restarts after it. Otherwise every row is gated, so the client resumes
+        only at the IDR that _set_backpressure_enabled requests when the gate
+        lifts. The chunk held back and the backlog count against the connection
+        unless `counted` is False (a stalled client: a page that stopped acking,
+        such as a hidden tab, is no judge of its link)."""
+        items = [*self.backlog, *([item] if item is not None else ())]
+        dropped = [i['data'] for i in items]
         dropped = [d for d in dropped if len(d) >= 12 and d[0] == 0x04]
         if (counted and self.tracked and (self.gated or self.live_rows)
                 and not any((d[1] & 0x0F) == 0x01 for d in dropped)):
             self.gated = True
-            for data in dropped:
+            kept = []
+            for it in items:
+                data = it['data']
+                if len(data) < 12 or data[0] != 0x04:
+                    continue
                 frame_id = (data[2] << 8) | data[3]
+                reference = (data[10] << 8) | data[11]
+                if data[1] & FRAME_ANCHOR and reference != frame_id and reference in self.sent:
+                    if it is item:
+                        self.sent[frame_id] = None
+                        if len(self.sent) > VIDEO_RELAY_SENT_MEMORY:
+                            del self.sent[next(iter(self.sent))]
+                        self._hold(data, held=False)
+                    # A run from before it is over; one after it (the anchor still queued from
+                    # an earlier flush) stands.
+                    if self.lost_first is not None and 0 < (frame_id - self.lost_first) % 65536 < 32768:
+                        self._end_lost()
+                    kept.append(it)
+                    continue
                 self.sent.pop(frame_id, None)
                 self._lose(frame_id)
+            self._judge(1 + len(self.backlog) - len(kept))
             self.backlog.clear()
-            self.backlog_bytes = 0
+            self.backlog.extend(kept)
+            self.backlog_bytes = sum(len(it['data']) for it in kept)
+            if kept:
+                self._wake.set()
             return
+        if counted:
+            self._judge(1 + len(self.backlog))
         self.gated = False
         if self.backlog or self.live_rows:
             self.backlog.clear()
