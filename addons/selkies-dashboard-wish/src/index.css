@@ -8,6 +8,7 @@
 @import "tw-animate-css";
 @import "./shadcn-tailwind.css";
 @import "@fontsource-variable/inter";
+@import "shadcn/tailwind.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -52,6 +53,7 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
+  --color-destructive-foreground: var(--destructive-foreground);
 }
 
 /* Both themes carry the palette the classic dashboard uses, in shadcn's token
@@ -62,29 +64,29 @@
    pink is lighter than the accent, because near-black text sits on it. */
 :root {
   --radius: 0.625rem;
-  --background: #f4f5f8;
-  --foreground: #23272f;
-  --card: #ffffff;
-  --card-foreground: #23272f;
-  --popover: #ffffff;
-  --popover-foreground: #23272f;
-  --primary: #a82a69;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: #b83280;
   --primary-foreground: #ffffff;
-  --secondary: #f6f7f9;
-  --secondary-foreground: #23272f;
-  --muted: #f6f7f9;
-  --muted-foreground: #5b6478;
-  --accent: #eceef3;
-  --accent-foreground: #23272f;
-  --destructive: #a12d21;
-  --border: #dfe2ea;
-  --input: #7a8496;
-  --ring: #a82a69;
-  --chart-1: #a82a69;
-  --chart-2: #7b52b0;
-  --chart-3: #2b6cb0;
-  --chart-4: #12703e;
-  --chart-5: #7d5b00;
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: #d5499a;
+  --chart-1: #d5499a;
+  --chart-2: #7967c5;
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
   /* The stats graphs' two series and the status marks: a pair validated for
      this surface (lightness band, chroma floor, CVD and normal-vision
      separation, 3:1 against the card); a status color pairs with an icon. */
@@ -92,52 +94,54 @@
   --stat-series-2: #5b4ba3;
   --stat-good: #0a7d0a;
   --stat-warn: #9a6400;
-  --sidebar: #ffffff;
-  --sidebar-foreground: #23272f;
-  --sidebar-primary: #a82a69;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: #b83280;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #f6f7f9;
-  --sidebar-accent-foreground: #23272f;
-  --sidebar-border: #dfe2ea;
-  --sidebar-ring: #a82a69;
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: #d5499a;
+  --destructive-foreground: var(--color-red-700);
 }
 
 .dark {
-  --background: #12161d;
-  --foreground: #e6ebf3;
-  --card: #181d26;
-  --card-foreground: #e6ebf3;
-  --popover: #1f2530;
-  --popover-foreground: #e6ebf3;
-  --primary: #f795ca;
-  --primary-foreground: #12161d;
-  --secondary: #1f2530;
-  --secondary-foreground: #e6ebf3;
-  --muted: #1f2530;
-  --muted-foreground: #aeb9c9;
-  --accent: #2a3240;
-  --accent-foreground: #e6ebf3;
-  --destructive: #fca5a5;
-  --border: #2b3441;
-  --input: #6e7b94;
-  --ring: #ec4899;
-  --chart-1: #f9a8d4;
-  --chart-2: #c3b1f7;
-  --chart-3: #8ec5f0;
-  --chart-4: #5bd98a;
-  --chart-5: #facc15;
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: #db5ba7;
+  --primary-foreground: oklch(0.145 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: #db5ba7;
+  --chart-1: #db5ba7;
+  --chart-2: #9085e9;
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
   --stat-series-1: #ec4899;
   --stat-series-2: #9085e9;
   --stat-good: #0ca30c;
   --stat-warn: #fab219;
-  --sidebar: #181d26;
-  --sidebar-foreground: #e6ebf3;
-  --sidebar-primary: #f9a8d4;
-  --sidebar-primary-foreground: #12161d;
-  --sidebar-accent: #1f2530;
-  --sidebar-accent-foreground: #e6ebf3;
-  --sidebar-border: #2b3441;
-  --sidebar-ring: #ec4899;
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: #db5ba7;
+  --sidebar-primary-foreground: oklch(0.145 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: #db5ba7;
+  --destructive-foreground: var(--color-red-400);
 }
 
 @layer base {
@@ -151,3 +155,35 @@
     @apply font-sans;
   }
 }
+
+/* selkies-accent:start */
+/* The accent on the open state of accordions and tabs, for every use of them.
+   Kept outside any @layer: unlayered rules beat the components' own utility
+   classes (`data-active:text-foreground` and the like), which sit in the
+   utilities layer. */
+[data-slot="accordion-item"][data-open] {
+  border-color: color-mix(in oklab, var(--primary) 50%, transparent);
+}
+
+[data-slot="accordion-trigger"][aria-expanded="true"],
+[data-slot="tabs-trigger"][data-active] {
+  color: var(--primary);
+}
+
+[data-slot="tabs-trigger"][data-active] {
+  border-color: color-mix(in oklab, var(--primary) 40%, transparent);
+}
+
+/* Separators carry a hint of the accent: the kit's separator, the menus' and
+   button groups', and the rule under an open accordion header. */
+[data-slot="separator"],
+[data-slot="button-group-separator"],
+[data-slot="menu-separator"],
+[data-slot="dropdown-menu-separator"] {
+  background-color: color-mix(in oklab, var(--primary) 35%, var(--border));
+}
+
+[data-slot="accordion-content"] > div {
+  border-top-color: color-mix(in oklab, var(--primary) 35%, var(--border));
+}
+/* selkies-accent:end */

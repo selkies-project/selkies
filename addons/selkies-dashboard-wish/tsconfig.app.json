@@ -15,12 +15,14 @@
     "skipLibCheck": true,
     "types": ["vite/client"],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@dashboard/*": ["../selkies-dashboard/src/*"]
     }
   },
   "include": [
     "src",
     "../selkies-web-core/lib/**/*.js",
-    "../selkies-dashboard/src/translations.js"
+    "../selkies-dashboard/src/translations.js",
+    "../selkies-dashboard/src/components/GamepadVisualizer.jsx"
   ]
 }

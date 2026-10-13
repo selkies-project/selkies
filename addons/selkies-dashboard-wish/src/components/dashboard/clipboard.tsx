@@ -13,8 +13,8 @@ import { computeRenderableSettings, getLastClipboardContent, getLastServerSettin
 import { t } from "@/i18n";
 
 /**
- * The clipboard panel: the server clipboard's text, editable, plus an image
- * upload when the binary clipboard is on.
+ * The clipboard view of the overflow menu: the server clipboard's text,
+ * editable, plus an image upload when the binary clipboard is on.
  *
  * Reads `clipboardContentUpdate` and `serverSettings` messages from the core
  * and posts `clipboardUpdateFromUI` (text, on blur), `clipboardImageUpdate`
@@ -23,20 +23,20 @@ import { t } from "@/i18n";
  * rejected non-image file is reported through the `fileUpload` warning channel
  * core-emitted clipboard skips use.
  *
- * The image picker belongs to the page, not to the panel: the panel lives in a
- * menu that closes, unmounting everything in it, the moment the browser's file
- * dialog takes focus, and a picker unmounted with it never reports the pick.
+ * The image picker belongs to the page, not to the view: the view unmounts the
+ * moment its menu closes, and a picker unmounted with it never reports the
+ * pick; the page outlives every menu.
  * @module
  */
 
 /** The page's image picker, created on first use and kept for the page's life. */
 let imagePicker: HTMLInputElement | null = null;
-/** The image picked last, shown again when the panel mounts. */
+/** The image picked last, shown again when the view mounts. */
 let lastPickedImage: File | null = null;
 
 /**
  * Opens the browser's file dialog for an image and hands the pick to
- * `onPicked`, whether or not the panel that asked is still mounted.
+ * `onPicked`, whether or not the view that asked is still mounted.
  * @param onPicked Receives the chosen file.
  */
 function pickClipboardImage(onPicked: (file: File) => void): void {
@@ -89,8 +89,8 @@ export function Clipboard() {
 		return saved !== null ? saved === 'true' : fallback;
 	};
 	/** A switch's starting state: a locked server value, else the stored
-	 * preference, else the server's value. The panel mounts when its menu
-	 * opens, after the server settings arrived. */
+	 * preference, else the server's value. The panel mounts when it opens,
+	 * after the server settings arrived. */
 	const startingBool = (key: string) => {
 		const server = getLastServerSettings()?.[key];
 		if (server?.locked) return !!server.value;
@@ -225,7 +225,7 @@ export function Clipboard() {
 	};
 
 	return (
-		<div className="w-[300px] p-4 flex flex-col gap-2">
+		<div className="flex w-full flex-col gap-1.5 p-2">
 			{(renderableSettings.clipboardUp ?? true) && (
 				<div className="flex items-center justify-between">
 					<Label className="text-sm font-medium" title={t('sections.clipboard.upDetails')}>{t('sections.clipboard.upLabel')}</Label>
@@ -266,22 +266,22 @@ export function Clipboard() {
 				</div>
 			)}
 
-			<Label htmlFor="dashboardClipboardTextarea">{t('sections.clipboard.title')}</Label>
+			<Label htmlFor="dashboardClipboardTextarea" className="text-sm font-medium">{t('sections.clipboard.title')}</Label>
 			<Textarea
 				id="dashboardClipboardTextarea"
 				value={clipboardSecret ? CLIPBOARD_SECRET_MASK : dashboardClipboardContent}
 				onChange={handleClipboardChange}
 				onBlur={handleClipboardBlur}
 				readOnly={clipboardTruncated || clipboardSecret}
-				rows={5}
+				rows={3}
 				placeholder={t('clipboard.inputPlaceholder')}
-				className="allow-native-input resize-none bg-background/95 overflow-y-auto max-h-[150px]"
+				className="allow-native-input resize-none bg-background/95 overflow-y-auto max-h-[96px] text-sm"
 			/>
 
 			{clipboardSecret && (
-				<div className="flex flex-col gap-2">
+				<div className="flex flex-col gap-1.5">
 					<p className="text-xs text-muted-foreground">{t('sections.clipboard.secretHidden')}</p>
-					<Button variant="outline" size="sm" onClick={handleCopySecret}>
+					<Button variant="outline" size="sm" className="h-7" onClick={handleCopySecret}>
 						{t('sections.clipboard.copySecret')}
 					</Button>
 				</div>
@@ -312,14 +312,12 @@ export function Clipboard() {
 				</div>
 
 				{clipboardImage && (
-					<div className="mt-2">
-						<canvas
-							ref={previewRef}
-							role="img"
-							aria-label={t('clipboard.previewAlt')}
-							className="max-w-full max-h-32 rounded border"
-						/>
-					</div>
+					<canvas
+						ref={previewRef}
+						role="img"
+						aria-label={t('clipboard.previewAlt')}
+						className="max-w-full max-h-24 rounded border"
+					/>
 				)}
 			</div>
 			)}
