@@ -351,11 +351,37 @@ def check_setting(res, browser: str, raw: bool) -> None:
         d.close()
 
 
+# The browsers' windows, and the click and the warps at (700, 450), need this much screen.
+SCREEN = (1920, 1080)
+
+
+def size_screen() -> None:
+    """Give the shared test display its full size back.
+
+    No Selkies server sizes it here, and the suite before this one may have
+    left it at its page's size (test_frame_ancestors' framed page leaves
+    304x150), where the pointer has nowhere to go and the click misses.
+    """
+    size = f"{SCREEN[0]}x{SCREEN[1]}"
+    # The output's own mode where it has one, else the framebuffer alone.
+    for args in (["-s", size], ["--fb", size]):
+        if screen_fits():
+            return
+        subprocess.run(["xrandr", "-display", H.require_display(), *args], capture_output=True, timeout=10)
+
+
+def screen_fits() -> bool:
+    width, height = H.x_root_size()
+    return width >= SCREEN[0] and height >= SCREEN[1]
+
+
 def run() -> "H.Results":
     res = H.Results("pointer-motion")
     browsers = [b for b in ("chrome", "firefox") if binary(b)]
     if not browsers:
         H.skip_suite("neither Chrome nor Firefox is installed")
+    size_screen()
+    res.check("the test display is the size the suite needs", screen_fits(), H.x_root_size())
     serve()
     for browser in browsers:
         for dpr in (1, 1.25, 1.5):
