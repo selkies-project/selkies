@@ -4,9 +4,10 @@
 The X server repeats a held key itself, an XTEST press included (660 ms, 25 Hz), and so does a
 Wayland app (pixelflux's seat says 600 ms), so a press whose release a stalled uplink holds back
 for a second would type a run of the key. The repeat loop lets such a key go once its heartbeats
-are 0.3 s stale, before any repeat is due, and presses it again a tick after one arrives, unless
-the release the stall held back arrives with it. A key whose heartbeats keep coming is never let
-go. Checked on both backends against the presses and releases the handler injects.
+are 0.3 s stale, before any repeat is due, and presses it again a tick after two arrive within
+that grace, unless the release the stall held back arrives with them; a hidden tab's heartbeat, one
+a second, leaves it up. A key whose heartbeats keep coming is never let go. Checked on both
+backends against the presses and releases the handler injects.
 """
 import asyncio
 import os
@@ -116,7 +117,7 @@ async def backend(name: str, h: WebRTCInput, injected, reset) -> None:
           [down for _, down in got] == [True, False] and got[1][0] > 1.0, str(got))
 
     reset()
-    got = await scenario(h, [(0.0, kd), (1.0, kh), (1.0, ku)], injected)
+    got = await scenario(h, [(0.0, kd), (1.0, kh), (1.0, kh), (1.0, ku)], injected)
     check(f"{name}: a heartbeat arriving with the held-back release presses nothing again",
           [down for _, down in got] == [True, False] and got[1][0] < FIRST_REPEAT_S, str(got))
 
@@ -124,6 +125,11 @@ async def backend(name: str, h: WebRTCInput, injected, reset) -> None:
     got = await scenario(h, [(0.0, kd), (1.0, kh), (1.1, kh), (1.2, kh), (1.3, ku)], injected)
     check(f"{name}: a heartbeat after a stall presses the held key again until its release",
           [down for _, down in got] == [True, False, True, False], str(got))
+
+    reset()
+    got = await scenario(h, [(0.0, kd), (1.0, kh), (2.0, kh), (3.0, kh), (3.5, ku)], injected)
+    check(f"{name}: a hidden tab's heartbeat, one a second, leaves the key up",
+          [down for _, down in got] == [True, False], str(got))
 
 
 async def main() -> None:

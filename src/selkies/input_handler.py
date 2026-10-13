@@ -4498,9 +4498,10 @@ class WebRTCInput:
             above ~3x the client's 100 ms heartbeat.
         key_repeat_state: Keysym to the monotonic time of its next due repeat.
         key_suspended: Held keys let go at the server while their heartbeats
-            have stopped (`_key_repeat_loop`), to the time a heartbeat resumed,
-            if one has: pressed again a repeat tick later, unless a key-up the
-            stall held back arrives with it.
+            have stopped (`_key_repeat_loop`), to [the last heartbeat since,
+            when two came within the grace]: pressed again a repeat tick after
+            that, unless a key-up the stall held back arrives with them; a
+            hidden tab's heartbeat, one a second, leaves the key up.
         keymap_watch_task: The session's MappingNotify consumer.
     """
 
@@ -4696,7 +4697,7 @@ class WebRTCInput:
         self.key_repeat_tick = 0.02
         self.key_repeat_heartbeat_grace = 0.3
         self.key_repeat_state = {}
-        self.key_suspended: Dict[int, Optional[float]] = {}
+        self.key_suspended: Dict[int, List[Optional[float]]] = {}
         self.key_repeat_task = None
         self.keymap_watch_task = None
         self.on_update_rate_control_mode = lambda mode, display_id="primary": logger_webrtc_input.warning("unhandled on_update_rate_control_mode")
@@ -5573,14 +5574,14 @@ class WebRTCInput:
             while True:
                 await asyncio.sleep(self.key_repeat_tick)
                 now = time.monotonic()
-                for keysym, resumed in list(self.key_suspended.items()):
-                    if resumed is not None and now - resumed >= self.key_repeat_tick and keysym in self.pressed_keys:
+                for keysym, (_beat, live) in list(self.key_suspended.items()):
+                    if live is not None and now - live >= self.key_repeat_tick and keysym in self.pressed_keys:
                         del self.key_suspended[keysym]
                         await self._inject_held_key(keysym, down=True)
                 for keysym, seen in list(self.pressed_keys.items()):
                     if (now - seen > self.key_repeat_heartbeat_grace and keysym not in self.key_suspended
                             and keysym not in self.MODIFIER_KEYSYMS and keysym not in self.atomically_typed_keys):
-                        self.key_suspended[keysym] = None
+                        self.key_suspended[keysym] = [None, None]
                         await self._inject_held_key(keysym, down=False)
                 if not self.key_repeat_enabled or not self.key_repeat_state:
                     continue
@@ -9108,8 +9109,11 @@ class WebRTCInput:
                     continue
                 if keysym in self.pressed_keys:
                     self.pressed_keys[keysym] = now
-                    if self.key_suspended.get(keysym, now) is None:
-                        self.key_suspended[keysym] = now
+                    beats = self.key_suspended.get(keysym)
+                    if beats is not None:
+                        if beats[0] is not None and now - beats[0] <= self.key_repeat_heartbeat_grace:
+                            beats[1] = beats[1] or now
+                        beats[0] = now
         elif msg_type in ["m", "m2"]:
             relative = msg_type == "m2"
             # Dropped rather than defaulted: a default would warp to the origin.
