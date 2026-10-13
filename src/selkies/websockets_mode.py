@@ -256,6 +256,10 @@ WS_BULK_BACKLOG_POLL_S = 0.002
 RTT_SMOOTHING_SAMPLES = 20
 # RFC 2198 RED redundancy depth (distance=2) for the shared Opus audio stream.
 AUDIO_RED_DISTANCE = 2
+# How long a page that has sent no SETTINGS yet stays out of the RED gate: its
+# SETTINGS says what it decodes, and one that sends none (a viewer) counts as
+# plain-only after this.
+AUDIO_RED_SETTLE_S = 1.0
 # Silence on the audio queue before the broadcast loop asks pcmflux whether its
 # worker died, and the floor between the restarts that answer.
 PCMFLUX_HEALTH_INTERVAL_SECONDS = 2.0
@@ -1673,6 +1677,8 @@ class DataStreamingServer(BaseStreamingService):
             video is bounded per client by the relay byte budget instead.
         audio_redundancy_by_ws: Per-socket Opus+RED capability from the
             `audioRedundancy` settings field.
+        _red_unsettled: Sockets that joined a running capture and have not yet
+            said what they decode (AUDIO_RED_SETTLE_S).
         _active_audio_red_distance: RED distance the running audio pipeline
             was started with.
         _pcmflux_reported_failure: `(module id, reason)` of the failure already
@@ -1832,6 +1838,7 @@ class DataStreamingServer(BaseStreamingService):
         self._pcmflux_reported_failure = None
         self._pcmflux_last_restart = 0.0
         self.audio_redundancy_by_ws = {}
+        self._red_unsettled = set()
         self.audio_redundancy_enabled = bool(settings.audio_redundancy[0])
         self._active_audio_red_distance = 0
         # The vendored WebRTC RedOpusEncoder reads its depth from audio_config,
@@ -2605,13 +2612,16 @@ class DataStreamingServer(BaseStreamingService):
             at least one client AND every connected client advertised
             audioRedundancy; otherwise 0 (plain frames, which decode
             everywhere) — a single non-capable or legacy (field-absent) client
-            falls the whole stream back.
+            falls the whole stream back. A client still settling
+            (`_red_unsettled`) is not counted either way yet.
         """
         if not self.audio_redundancy_enabled:
             return 0
         if not self.clients:
             return 0
         for ws in self.clients:
+            if ws in self._red_unsettled:
+                continue
             if not self.audio_redundancy_by_ws.get(ws):
                 return 0
         return getattr(settings, "audio_redundancy_distance", AUDIO_RED_DISTANCE)
@@ -2636,6 +2646,33 @@ class DataStreamingServer(BaseStreamingService):
         )
         await self._stop_pcmflux_pipeline()
         await self._start_pcmflux_pipeline()
+
+    async def _release_held_input(self, raddr: Any) -> None:
+        """Let go of every button and key a departing input holder left down:
+        a tab that dies mid-drag or mid-press never sends the ups."""
+        if not self.input_handler:
+            return
+        if hasattr(self.input_handler, "release_mouse_buttons"):
+            try:
+                await self.input_handler.release_mouse_buttons()
+            except Exception as e:
+                data_logger.warning(f"Mouse button release on disconnect failed: {e}")
+        try:
+            await self.input_handler.reset_keyboard()
+            data_logger.debug(f"Keyboard reset completed ({raddr}) disconnect.")
+        except Exception as e_reset:
+            data_logger.warning(f"Failed to reset keyboard after client disconnect: {e_reset}")
+
+    async def _settle_red(self, websocket: web.WebSocketResponse) -> None:
+        """Count a page that sent no SETTINGS within AUDIO_RED_SETTLE_S of
+        joining a running capture as plain-only, and re-gate for it."""
+        await asyncio.sleep(AUDIO_RED_SETTLE_S)
+        if websocket not in self._red_unsettled:
+            return
+        self._red_unsettled.discard(websocket)
+        if websocket in self.clients and self.is_pcmflux_capturing:
+            async with self._audio_lock:
+                await self._regate_audio_redundancy()
 
     async def _apply_initial_audio_policy(self, websocket: web.WebSocketResponse,
                                           display_id: str) -> None:
@@ -4738,10 +4775,12 @@ class DataStreamingServer(BaseStreamingService):
 
         try:
             # This socket is in the audio fan-out before its SETTINGS (a viewer never
-            # sends one): absent means not RED-capable, so re-gate a mid-capture join.
+            # sends one). It leaves the gate alone until its SETTINGS says what it
+            # decodes, or AUDIO_RED_SETTLE_S passes: a page reconnecting in place
+            # would otherwise restart the capture twice, down to plain Opus and back.
             if self.is_pcmflux_capturing:
-                async with self._audio_lock:
-                    await self._regate_audio_redundancy()
+                self._red_unsettled.add(websocket)
+                _spawn_background_task(self._settle_red(websocket))
 
             if self._resource_monitor is None:
                 self._resource_monitor = resource_stats.ResourceMonitor(
@@ -4957,6 +4996,7 @@ class DataStreamingServer(BaseStreamingService):
                             self.audio_redundancy_by_ws[websocket] = bool(
                                 parsed_settings.get("audioRedundancy")
                             )
+                            self._red_unsettled.discard(websocket)
 
                             client_perms = client_permissions.get(websocket)
                             client_role = client_perms.get("role") if client_perms else "controller"
@@ -5610,16 +5650,18 @@ class DataStreamingServer(BaseStreamingService):
                 or not any(self._holds_input_authority(ws) for ws in self.clients)
             )
 
-            # A tab that dies mid-drag never sends the button-up mask.
-            if (
-                self.input_handler
-                and departing_input_authority
-                and hasattr(self.input_handler, "release_mouse_buttons")
-            ):
-                try:
-                    await self.input_handler.release_mouse_buttons()
-                except Exception as e:
-                    data_logger.warning(f"Mouse button release on disconnect failed: {e}")
+            # A cut (no close frame: an ingress retiring, the network) leaves the
+            # page to reconnect in place, still holding what it held: its keys and
+            # buttons stay down through the reconnect grace and are let go only if
+            # it does not come back.
+            close_code = getattr(websocket, "close_code", None)
+            hold_input = (
+                departing_input_authority
+                and close_code == WSCloseCode.ABNORMAL_CLOSURE
+                and any(info.get('ws') is websocket for info in self.display_clients.values())
+            )
+            if departing_input_authority and not hold_input:
+                await self._release_held_input(raddr)
 
             # Now rather than at the next fan-out: an idle capture (JPEG, streaming
             # off) sends no chunk to prune a dead relay, which pins its buffers.
@@ -5636,11 +5678,15 @@ class DataStreamingServer(BaseStreamingService):
             # A departing non-capable client may let the rest enable RED; a page
             # beside the owner that kept the capture running for itself ends it.
             self.audio_redundancy_by_ws.pop(websocket, None)
+            self._red_unsettled.discard(websocket)
             if self.is_pcmflux_capturing:
                 async with self._audio_lock:
                     if had_own_audio and not self._audio_wanted():
                         await self._stop_pcmflux_pipeline()
-                    else:
+                    elif self.clients:
+                        # With nobody left the stream keeps its distance: a page
+                        # back in place finds it unchanged, and the grace
+                        # teardown stops the capture if none comes.
                         await self._regate_audio_redundancy()
 
             disconnected_display_id = None
@@ -5655,7 +5701,6 @@ class DataStreamingServer(BaseStreamingService):
                 # on the lock (seconds of black stream per reload).
                 # The code says who ended it: 1000/1001 the page, 1006 a cut with no close
                 # frame (a proxy, the network, or a ping of ours left unanswered), 4xxx this server.
-                close_code = getattr(websocket, "close_code", None)
                 close_error = websocket.exception() if hasattr(websocket, "exception") else None
                 data_logger.info(
                     f"Client for '{disconnected_display_id}' disconnected (code {close_code}"
@@ -5663,7 +5708,8 @@ class DataStreamingServer(BaseStreamingService):
                     f"{self.RECONNECT_GRACE_S:.0f}s for a possible reconnect."
                 )
 
-                async def _teardown_if_unclaimed(did=disconnected_display_id, dead_ws=websocket):
+                async def _teardown_if_unclaimed(did=disconnected_display_id, dead_ws=websocket,
+                                                 held=hold_input):
                     disconnect_ts = time.monotonic()
                     deadline = disconnect_ts + 15.0
                     while True:
@@ -5687,6 +5733,8 @@ class DataStreamingServer(BaseStreamingService):
                     if entry is None or entry.get('ws') is not dead_ws:
                         data_logger.info(f"Display '{did}' was claimed by a new connection during the grace period; teardown skipped.")
                         return
+                    if held:
+                        await self._release_held_input(raddr)
                     del self.display_clients[did]
                     await capture_demand.sync(self)
                     data_logger.info(f"Client for '{did}' did not return within the grace period. Removing and triggering full display reconfiguration.")
@@ -5754,13 +5802,6 @@ class DataStreamingServer(BaseStreamingService):
                 await mic_control.aclose()
                 data_logger.debug(f"Closed sound server control connection for {raddr}.")
 
-
-            if self.input_handler and departing_input_authority:
-                try:
-                    await self.input_handler.reset_keyboard()
-                    data_logger.debug(f"Keyboard reset completed ({raddr}) disconnect.")
-                except Exception as e_reset:
-                    data_logger.warning(f"Failed to reset keyboard after client disconnect: {e_reset}")
 
             # A display-owning socket's last-client teardown ran in the grace task above.
             if disconnected_display_id is None and not self.clients:

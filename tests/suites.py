@@ -326,6 +326,8 @@ SUITES: list = [
     {"path": "e2e/test_reference_invalidation.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_connection_indicator.py", "tier": "e2e", "timeout": 900,
      "selectors": ["classic", "wish", "engines", "webrtc", "settings"]},
+    {"path": "e2e/test_ws_cut.py", "tier": "e2e", "timeout": 900,
+     "selectors": ["chromium", "firefox"]},
     {"path": "e2e/test_webrtc_loss_recovery.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_slow_page.py", "tier": "e2e", "timeout": 900,
      "selectors": ["websockets", "webrtc", "webrtc-firefox", "websockets-wayland", "webrtc-wayland"]},

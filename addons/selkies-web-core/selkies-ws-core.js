@@ -453,6 +453,22 @@ const RECONNECT_STABLE_MS = 10000;
 /** Sockets in a row an answering server never opens before the page reloads instead. */
 const RECONNECT_UNOPENED_MAX = 3;
 /**
+ * A reconnect in place under way, from the drop to the next socket's first
+ * frame: the picture holds, the playback pipeline keeps running, and the
+ * notice and the rest of the teardown wait RECONNECT_NOTICE_MS
+ * (`reconnectNoticeTimer`), most reconnects landing sooner. What the user
+ * chose of the pipelines rides along in `carriedPipelines` for the next
+ * socket, and input in `heldInput` from `inputHeldSince` on.
+ */
+let reconnectingInPlace = false;
+let reconnectNoticeTimer = null;
+let carriedPipelines = null;
+let heldInput = [];
+let inputHeldSince = 0;
+const RECONNECT_NOTICE_MS = 1500;
+/** How long after a drop input is held for the next socket; held longer, only a key's release still goes. */
+const INPUT_HOLD_MS = 2000;
+/**
  * Watchdog for a START_VIDEO lost while the tab was hidden, which would leave a
  * black stream. Armed when the tab becomes visible, cleared on the first
  * VIDEO_STARTED or video chunk.
@@ -4736,10 +4752,89 @@ function hideStreamOverlay() {
   if (playButtonElement) playButtonElement.classList.add('hidden');
 }
 
+/**
+ * Holds an input message for the next socket while a reconnect in place is
+ * under way, until `flushHeldInput` sends what was held. Motion collapses
+ * while its button mask stays the same and carries no scroll pulse (bits 3
+ * to 7): a position replaces the held one and a delta adds to it. A
+ * heartbeat (`kh`, `js,h`) is not kept, the next socket's own coming soon
+ * enough.
+ * @param {string} message
+ * @returns {boolean} Whether it was held.
+ */
+function holdInput(message) {
+  if (!inputHeldSince || typeof message !== 'string') return false;
+  const now = performance.now();
+  if (now - inputHeldSince > INPUT_HOLD_MS) return false;
+  if (message.startsWith('kh,') || message.startsWith('js,h')) return true;
+  const last = heldInput[heldInput.length - 1];
+  if (last && (message.startsWith('m,') || message.startsWith('m2,'))) {
+    const a = last.message.split(','), b = message.split(',');
+    if (a[0] === b[0] && a[3] === b[3] && a[4] === b[4] && (Number(b[3]) & 0xF8) === 0) {
+      if (b[0] === 'm2') {
+        b[1] = String(Number(a[1]) + Number(b[1]));
+        b[2] = String(Number(a[2]) + Number(b[2]));
+      }
+      last.message = b.join(',');
+      last.at = now;
+      return true;
+    }
+  }
+  heldInput.push({ message, at: now });
+  return true;
+}
+
+/**
+ * Sends the input held through a reconnect in place on the new socket, right
+ * behind its SETTINGS, and stops holding. Input held past INPUT_HOLD_MS is
+ * dropped, except a key's release, which can only let go of what the server
+ * still holds.
+ * @returns {void}
+ */
+function flushHeldInput() {
+  const held = heldInput;
+  heldInput = [];
+  inputHeldSince = 0;
+  const now = performance.now();
+  for (const { message, at } of held) {
+    if (now - at > INPUT_HOLD_MS && !message.startsWith('ku,')) continue;
+    websocket.send(message);
+  }
+}
+
+/**
+ * Ends a reconnect in place: the stream is back, or the notice timer gave up
+ * on it being quick.
+ * @returns {void}
+ */
+function endReconnectInPlace() {
+  reconnectingInPlace = false;
+  if (reconnectNoticeTimer !== null) clearTimeout(reconnectNoticeTimer);
+  reconnectNoticeTimer = null;
+}
+
+/**
+ * The user's pipeline choices a reconnect in place carried over, restored on
+ * the new socket once its start policy ran: the uplinks that were on start
+ * again, and video the user stopped is stopped on this socket too.
+ * @returns {void}
+ */
+function resumeCarriedPipelines() {
+  const carried = carriedPipelines;
+  carriedPipelines = null;
+  if (!carried || isSharedMode) return;
+  if (carried.toggled.has('video') && !carried.video && websocket && websocket.readyState === WebSocket.OPEN) {
+    websocket.send('STOP_VIDEO');
+  }
+  if (carried.microphone) startMicrophoneCapture();
+  if (carried.webcam) startWebcamCapture();
+}
+
 /** Marks the stream as started and hides the status bar and start button. */
 const startStream = () => {
   if (streamStarted) return;
   streamStarted = true;
+  endReconnectInPlace();
   hideStreamOverlay();
   console.log("Stream started (UI elements hidden).");
 };
@@ -4767,6 +4862,7 @@ const initializeInput = () => {
 
   let inputInstance;
   const websocketSendInput = (message) => {
+    if (holdInput(message)) return;
     if (websocket && websocket.readyState === WebSocket.OPEN) {
       websocket.send(message);
     } else {
@@ -7098,6 +7194,11 @@ class WorkerWebSocket {
     }
 
     if (window.isAudioInitializing) return;
+    // Kept through a reconnect in place: only the new socket's line to the decoder is new.
+    if (audioDecoderWorker && audioContext && audioContext.state !== 'closed' && audioWorkletNode) {
+      wireSocketToDecoder();
+      return true;
+    }
     window.isAudioInitializing = true;
 
     try {
@@ -7831,16 +7932,19 @@ class WorkerWebSocket {
     taggedClipboardFetch.armLegacyWindow(5000);
     websocket.send('cr');
     console.log('[websockets] Sent initial clipboard request (cr) to server (cache-only).');
+    flushHeldInput();
     // Each connection starts over: the server registers it by the start
-    // policy, applied here again by its first server_settings payload.
-    pipelinesToggledByUser.clear();
+    // policy, applied here again by its first server_settings payload. A
+    // reconnect in place keeps what the user chose (`resumeCarriedPipelines`).
+    const carried = carriedPipelines;
+    pipelinesToggledByUser = carried ? new Set(carried.toggled) : new Set();
     serverSettingsReceived = false;
     pendingInitialAudioStart = false;
-    isVideoPipelineActive = true;
-    isAudioPipelineActive = (displayId === 'primary');
+    isVideoPipelineActive = carried && carried.toggled.has('video') ? carried.video : true;
+    isAudioPipelineActive = carried && carried.toggled.has('audio') ? carried.audio : (displayId === 'primary');
     window.postMessage({
       type: 'pipelineStatusUpdate',
-      video: true,
+      video: isVideoPipelineActive,
       audio: isAudioPipelineActive
     }, window.location.origin);
 
@@ -8407,8 +8511,8 @@ class WorkerWebSocket {
             // would pin a scarce hardware decode session.
         }
 
-        initializeAudio().then(() => {
-          initializeDecoderAudio();
+        initializeAudio().then((kept) => {
+          if (!kept) initializeDecoderAudio();
         });
 
         if (isTokenAuthMode) {
@@ -8423,7 +8527,7 @@ class WorkerWebSocket {
         }
 
         if (playButtonElement) playButtonElement.classList.add('hidden');
-        if (statusDisplayElement) statusDisplayElement.classList.remove('hidden');
+        if (statusDisplayElement && !reconnectingInPlace) statusDisplayElement.classList.remove('hidden');
 
         schedulePaintVideoFrame();
 
@@ -8550,6 +8654,7 @@ class WorkerWebSocket {
               if (!serverSettingsReceived) {
                 serverSettingsReceived = true;
                 applyStartPolicy(obj.settings);
+                resumeCarriedPipelines();
                 // A socket that opened while the tab is hidden pauses as a hide would have,
                 // after the start policy has said whether video runs at all.
                 if (document.hidden && !isSharedMode) {
@@ -9002,7 +9107,12 @@ class WorkerWebSocket {
    * Tears the session down and reconnects in place (`scheduleReconnect`),
    * except after an invalid token (4001) or when another live connection
    * superseded this one, where auto-reconnecting would evict the new holder
-   * and the two pages would trade the session forever.
+   * and the two pages would trade the session forever. A reconnect in place
+   * (`reconnectingInPlace`) keeps the picture, playback, and the wake lock,
+   * holds input, and tells nobody for RECONNECT_NOTICE_MS; the microphone and
+   * webcam stop and start again on the next socket (`resumeCarriedPipelines`).
+   * A drop with no close frame (1006: an ingress retiring its connections,
+   * the network) of a socket that had held reopens at once.
    */
   const onSocketClose = (event) => {
     console.log('[websockets] Connection closed', event);
@@ -9041,25 +9151,54 @@ class WorkerWebSocket {
       clearInterval(backpressureIntervalId);
       backpressureIntervalId = null;
     }
-    releaseWakeLock();
+    const inPlace = !superseded && !reconnectByReload;
+    // A drop of a socket that had opened starts one; an attempt failing inside it does not.
+    if (inPlace && socketOpenedAt && !reconnectingInPlace) {
+      reconnectingInPlace = true;
+      inputHeldSince = performance.now();
+      carriedPipelines = {
+        toggled: new Set(pipelinesToggledByUser), video: isVideoPipelineActive, audio: isAudioPipelineActive,
+        microphone: isMicrophoneActive, webcam: isWebcamActive,
+      };
+    }
     cleanupJpegStripeQueue();
     clearAllVncStripeDecoders();
     deactivateStripeWorker();
-    if (audioDecoderWorker) {
-      audioDecoderWorker.postMessage({
-        type: 'close'
-      });
-      audioDecoderWorker = null;
-    }
     if (!isSharedMode) { stopMicrophoneCapture(); stopWebcamCapture(); }
     isVideoPipelineActive = false;
     isAudioPipelineActive = false;
     isMicrophoneActive = false;
-    window.postMessage({
-      type: 'pipelineStatusUpdate',
-      video: false,
-      audio: false
-    }, window.location.origin);
+    // What a drop that does not come back soon gives up.
+    const teardown = () => {
+      releaseWakeLock();
+      if (audioDecoderWorker) {
+        audioDecoderWorker.postMessage({
+          type: 'close'
+        });
+        audioDecoderWorker = null;
+      }
+      window.postMessage({
+        type: 'pipelineStatusUpdate',
+        video: false,
+        audio: false
+      }, window.location.origin);
+    };
+    if (reconnectingInPlace && inPlace) {
+      // The gap is the sender's silence, not a late delivery to deepen the jitter target for.
+      if (audioWorkletProcessorPort) audioWorkletProcessorPort.postMessage({ quiet: true });
+      if (reconnectNoticeTimer === null) {
+        reconnectNoticeTimer = setTimeout(() => {
+          reconnectNoticeTimer = null;
+          if (streamStarted) return;
+          endReconnectInPlace();
+          teardown();
+          if (statusDisplayElement) statusDisplayElement.classList.remove('hidden');
+        }, RECONNECT_NOTICE_MS);
+      }
+    } else {
+      endReconnectInPlace();
+      teardown();
+    }
     if (isSharedMode) {
         console.log("Shared mode: WebSocket closed. Resetting shared state to 'idle'.");
         sharedClientState = 'idle';
@@ -9072,11 +9211,12 @@ class WorkerWebSocket {
     clearDecodedStripesQueue();
     wsGzTx = false;
     if (!superseded) {
-      // Shown again until the next socket's first frame hides it.
+      // Shown again until the next socket's first frame hides it, after the
+      // notice timer where the reconnect is in place.
       streamStarted = false;
-      if (statusDisplayElement) statusDisplayElement.classList.remove('hidden');
+      if (statusDisplayElement && !reconnectingInPlace) statusDisplayElement.classList.remove('hidden');
       if (socketOpenedAt && performance.now() - socketOpenedAt >= RECONNECT_STABLE_MS) reconnectAttempts = 0;
-      scheduleReconnect();
+      scheduleReconnect(event.code === 1006 && reconnectAttempts === 0);
     }
     socketOpenedAt = 0;
   };
@@ -9108,18 +9248,25 @@ let wsEverOpened = false;
  * the drop, each later one twice as far out up to RECONNECT_MAX_MS. An
  * attempt asks the transport endpoint first (`serverAnswers`) and waits for
  * the next while nothing answers; the network coming back (`online`) starts
- * the ladder over. The page reloads instead (`reloadPossiblyFlippingMode`)
+ * the ladder over. An `immediate` attempt opens the socket at once, unasked:
+ * the first after a cut of a socket that had held, whose server is most
+ * likely still there. The page reloads instead (`reloadPossiblyFlippingMode`)
  * only where no new socket can recover the session: the server now serves
  * WebRTC (a 409), it changed this client's role (4002), or it answers while
  * RECONNECT_UNOPENED_MAX sockets in a row never opened; a socket that opens
  * onto a new build reloads too (`entryPageChanged`). A transport switch in
  * progress owns the page, so an attempt stands down during it.
+ * @param {boolean} [immediate]
  * @returns {void}
  */
-function scheduleReconnect() {
+function scheduleReconnect(immediate = false) {
   if (reconnectTimer !== null || !reopenSessionSocket) return;
   const delay = Math.min(RECONNECT_FIRST_MS * 2 ** reconnectAttempts, RECONNECT_MAX_MS);
   reconnectAttempts++;
+  if (immediate && !window.__selkiesModeSwitching && !reconnectByReload) {
+    reopenInPlace(true);
+    return;
+  }
   const timer = setTimeout(async () => {
     if (window.__selkiesModeSwitching) { reconnectTimer = null; return; }
     // The same path derivation as the data socket, so the probe hits its route.
@@ -9133,16 +9280,27 @@ function scheduleReconnect() {
       reloadPossiblyFlippingMode(res);
       return;
     }
-    reconnectUnopened++;
-    console.log(`[websockets] Reconnecting in place (attempt ${reconnectAttempts}).`);
-    reopenSessionSocket();
-    // A path that swallows the handshake holds the socket connecting for minutes.
-    const sock = websocket;
-    setTimeout(() => {
-      if (websocket === sock && sock.readyState === WebSocket.CONNECTING) sock.close();
-    }, RECONNECT_OPEN_MS);
+    reopenInPlace();
   }, delay);
   reconnectTimer = timer;
+}
+
+/**
+ * Opens the next session socket, one attempt of the reconnect ladder. Only a
+ * socket an answering server failed to open counts toward
+ * RECONNECT_UNOPENED_MAX, so an `unasked` one does not.
+ * @param {boolean} [unasked]
+ * @returns {void}
+ */
+function reopenInPlace(unasked = false) {
+  if (!unasked) reconnectUnopened++;
+  console.log(`[websockets] Reconnecting in place (attempt ${reconnectAttempts}).`);
+  reopenSessionSocket();
+  // A path that swallows the handshake holds the socket connecting for minutes.
+  const sock = websocket;
+  setTimeout(() => {
+    if (websocket === sock && sock.readyState === WebSocket.CONNECTING) sock.close();
+  }, RECONNECT_OPEN_MS);
 }
 
 window.addEventListener('online', () => {
