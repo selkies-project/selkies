@@ -14,16 +14,14 @@ set -eu
 test -f pyproject.toml
 
 # The dashboard carries its own ESLint and eslint.config.js.
-for pkg in addons/selkies-dashboard; do
-    if [ ! -d "${pkg}/node_modules" ]; then
-        # Retried like build-web.sh's install: npm gives a failed registry
-        # fetch two attempts and no more.
-        (cd "${pkg}" && npm ci --no-audit --no-fund \
-            --fetch-retries=5 --fetch-retry-maxtimeout=120000)
-    fi
-    echo "eslint: ${pkg}"
-    (cd "${pkg}" && npm run --silent lint)
-done
+if [ ! -d addons/selkies-dashboard/node_modules ]; then
+    # Retried like build-web.sh's install: npm gives a failed registry
+    # fetch two attempts and no more.
+    (cd addons/selkies-dashboard && npm ci --no-audit --no-fund \
+        --fetch-retries=5 --fetch-retry-maxtimeout=120000)
+fi
+echo "eslint: addons/selkies-dashboard"
+(cd addons/selkies-dashboard && npm run --silent lint)
 
 # The web core and the touch gamepad have no dev dependencies of their own:
 # addons/eslint.config.mjs lints them with the dashboard's ESLint.
