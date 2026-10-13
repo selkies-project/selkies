@@ -4497,6 +4497,10 @@ class WebRTCInput:
             heartbeat is older than this (stalled stream / hidden tab); kept
             above ~3x the client's 100 ms heartbeat.
         key_repeat_state: Keysym to the monotonic time of its next due repeat.
+        key_suspended: Held keys let go at the server while their heartbeats
+            have stopped (`_key_repeat_loop`), to the time a heartbeat resumed,
+            if one has: pressed again a repeat tick later, unless a key-up the
+            stall held back arrives with it.
         keymap_watch_task: The session's MappingNotify consumer.
     """
 
@@ -4692,6 +4696,7 @@ class WebRTCInput:
         self.key_repeat_tick = 0.02
         self.key_repeat_heartbeat_grace = 0.3
         self.key_repeat_state = {}
+        self.key_suspended: Dict[int, Optional[float]] = {}
         self.key_repeat_task = None
         self.keymap_watch_task = None
         self.on_update_rate_control_mode = lambda mode, display_id="primary": logger_webrtc_input.warning("unhandled on_update_rate_control_mode")
@@ -5262,7 +5267,7 @@ class WebRTCInput:
             await self.reset_keyboard()
         if self.key_sweep_task is None:
             self.key_sweep_task = asyncio.create_task(self._key_stale_sweep())
-        if self.key_repeat_enabled and self.key_repeat_task is None:
+        if self.key_repeat_task is None:
             self.key_repeat_task = asyncio.create_task(self._key_repeat_loop())
         if self.xdisplay is not None and self.keymap_watch_task is None:
             self.keymap_watch_task = asyncio.create_task(self._keymap_watch_loop())
@@ -5456,6 +5461,7 @@ class WebRTCInput:
         self.pressed_keys.clear()
         self.reaped_atomic_keys.clear()
         self.key_repeat_state.clear()
+        self.key_suspended.clear()
         self._reset_multipart_clipboard()
 
     async def _key_stale_sweep(self) -> None:
@@ -5488,6 +5494,8 @@ class WebRTCInput:
                     self.pressed_keys.pop(keysym, None)
                     self.key_repeat_state.pop(keysym, None)
                     logger_webrtc_input.warning(f"Auto-releasing key {keysym} (heartbeat lost).")
+                    if self.key_suspended.pop(keysym, 0) != 0:
+                        continue
                     # An atomically-typed key was never physically held on X11.
                     if was_atomic and not self.is_wayland:
                         self.atomically_typed_keys.discard(keysym)
@@ -5523,6 +5531,13 @@ class WebRTCInput:
         except asyncio.CancelledError:
             pass
 
+    async def _inject_held_key(self, keysym: int, down: bool) -> None:
+        """Press or release `keysym` at the server, on the Wayland keyboard queue or by XTEST."""
+        if self.is_wayland:
+            self._keyboard_enqueue(("kd" if down else "ku", keysym))
+        else:
+            await self.send_x11_keypress(keysym, down=down)
+
     async def _key_repeat_loop(self) -> None:
         """X11 server-side key auto-repeat for held keys.
 
@@ -5548,11 +5563,26 @@ class WebRTCInput:
         falling to the co,end path when it has no keycode in the layout.
         Repeat pauses while the key's heartbeats have stopped (stalled stream,
         hidden tab), bounding run-on to the grace rather than the stale window.
+        The X server repeats a held key itself (an XTEST press included), and a
+        Wayland app does, so on both a key whose heartbeats have stopped is let
+        go at the server before its first repeat is due, and pressed again when
+        one arrives: a press whose release a stalled uplink holds back types
+        once, not a run of it. That is all the loop does on Wayland.
         """
         try:
             while True:
                 await asyncio.sleep(self.key_repeat_tick)
-                if not self.key_repeat_state:
+                now = time.monotonic()
+                for keysym, resumed in list(self.key_suspended.items()):
+                    if resumed is not None and now - resumed >= self.key_repeat_tick and keysym in self.pressed_keys:
+                        del self.key_suspended[keysym]
+                        await self._inject_held_key(keysym, down=True)
+                for keysym, seen in list(self.pressed_keys.items()):
+                    if (now - seen > self.key_repeat_heartbeat_grace and keysym not in self.key_suspended
+                            and keysym not in self.MODIFIER_KEYSYMS and keysym not in self.atomically_typed_keys):
+                        self.key_suspended[keysym] = None
+                        await self._inject_held_key(keysym, down=False)
+                if not self.key_repeat_enabled or not self.key_repeat_state:
                     continue
                 # Keys released/reaped since arming: never inject a down after the key-up.
                 for k in [k for k in self.key_repeat_state if k not in self.pressed_keys]:
@@ -5691,6 +5721,7 @@ class WebRTCInput:
         self.pressed_keys.clear()
         self.reaped_atomic_keys.clear()
         self.key_repeat_state.clear()
+        self.key_suspended.clear()
 
     async def _reset_keyboard_wayland(self) -> None:
         """The Wayland reset itself — see reset_keyboard for when it runs and
@@ -9001,6 +9032,7 @@ class WebRTCInput:
             self.on_ping_response(float("%.3f" % ((time.time() - self.ping_start) / 2 * 1000)))
         elif msg_type == "kd":
             keysym = int(toks[1])
+            self.key_suspended.pop(keysym, None)
             # At the cap the oldest entry goes, not the new one: the key is
             # injected below regardless, and untracked it would never auto-release.
             if keysym in self.pressed_keys:
@@ -9041,7 +9073,10 @@ class WebRTCInput:
             keysym = int(toks[1])
             self.pressed_keys.pop(keysym, None)
             self.key_repeat_state.pop(keysym, None)
-            if self.is_wayland:
+            if keysym in self.key_suspended:
+                # Let go when its heartbeats stopped.
+                self.key_suspended.pop(keysym)
+            elif self.is_wayland:
                 self._keyboard_enqueue(("ku", keysym))
             else:
                 if keysym in self.MODIFIER_KEYSYMS:
@@ -9073,6 +9108,8 @@ class WebRTCInput:
                     continue
                 if keysym in self.pressed_keys:
                     self.pressed_keys[keysym] = now
+                    if self.key_suspended.get(keysym, now) is None:
+                        self.key_suspended[keysym] = now
         elif msg_type in ["m", "m2"]:
             relative = msg_type == "m2"
             # Dropped rather than defaulted: a default would warp to the origin.

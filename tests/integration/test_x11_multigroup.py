@@ -152,6 +152,7 @@ def make_handler(xdisplay: Any) -> Any:
     h.pressed_keys = {}
     h.reaped_atomic_keys = set()
     h.key_repeat_state = {}
+    h.key_suspended = {}
     h.SHORTCUT_MODIFIER_XKEY_NAMES = {'Control_L', 'Control_R', 'Alt_L', 'Alt_R',
                                       'Super_L', 'Super_R', 'Meta_L', 'Meta_R'}
     h.ACTION_MODIFIER_KEYSYMS = {0xFFE3, 0xFFE4, 0xFFE9, 0xFFEA, 0xFFE7, 0xFFE8,

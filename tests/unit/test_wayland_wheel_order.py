@@ -128,6 +128,7 @@ def make_handler(seat: FakeSeat) -> WebRTCInput:
     h.reaped_atomic_keys = set()
     h.key_repeat_enabled = False
     h.key_repeat_state = {}
+    h.key_suspended = {}
     h.MODIFIER_KEYSYMS = {0xFFE1, 0xFFE2, CONTROL_L, 0xFFE4, 0xFFE9, 0xFFEA, 0xFE03}
     h.ACTION_MODIFIER_KEYSYMS = {CONTROL_L, 0xFFE4, 0xFFE9, 0xFFEA}
     h.LEVEL_MODIFIER_KEYSYMS = frozenset({0xFFE1, 0xFFE2, 0xFE03})

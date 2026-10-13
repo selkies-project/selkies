@@ -163,6 +163,7 @@ def make_handler(is_wayland: bool, seat=None) -> WebRTCInput:
     h.reaped_atomic_keys = set()
     h.key_repeat_enabled = False
     h.key_repeat_state = {}
+    h.key_suspended = {}
     h.MODIFIER_KEYSYMS = {SHIFT_L, SHIFT_R, CONTROL_L, 0xFFE4, 0xFFE9, 0xFFEA, ALTGR}
     h.ACTION_MODIFIER_KEYSYMS = {CONTROL_L, 0xFFE4, 0xFFE9, 0xFFEA}
     h.LEVEL_MODIFIER_KEYSYMS = frozenset({SHIFT_L, SHIFT_R, ALTGR})
