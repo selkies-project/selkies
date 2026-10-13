@@ -109,8 +109,8 @@ module.rates.clear()
 t = run(20.0, 0.0, 5)
 state["backpressure_enabled"] = False
 run(20.0, t, 0.5, acks=False)
-check("a gated display with nothing acked counts as a queue of unknown depth", module.rates == [2800],
-      module.rates)
+check("a gated display with nothing acked moves nothing: a path or a page holding it is no queue",
+      module.rates == [], module.rates)
 
 state = fresh_state()
 module.rates.clear()

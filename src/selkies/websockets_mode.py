@@ -1845,6 +1845,8 @@ class DataStreamingServer(BaseStreamingService):
         self._pcmflux_last_restart = 0.0
         self.audio_redundancy_by_ws = {}
         self._red_unsettled = set()
+        # When each socket's page last sent anything (pings and pongs are the browser's own).
+        self._heard_at: Dict[Any, float] = {}
         self.audio_redundancy_enabled = bool(settings.audio_redundancy[0])
         self._active_audio_red_distance = 0
         # The vendored WebRTC RedOpusEncoder reads its depth from audio_config,
@@ -3437,16 +3439,18 @@ class DataStreamingServer(BaseStreamingService):
         the queue on the path, the first check shuts it while the client's
         acks move on (the path delivering, behind a queue) and leaves it to
         the next when they stood still for BACKPRESSURE_ACK_HOLD_S (the path
-        holding the stream). A path that holds it longer than a check (no ack
-        moving for a whole check, and a ping written behind the frames when
-        the queue went over still unanswered: a long path's retransmission or
-        a radio's pause) is waited for until the queue has stood over the
-        allowance for PATH_HOLD_MAX_S: what it delivers at once then arrives,
-        where the gate would drop those frames and have the encoder predict
-        past them from whatever it still holds, at a low frame rate an anchor
-        seconds old. Behind a queue the acks keep moving, and a client that
-        stopped acking what it was handed answers the ping, so both are judged
-        as before. A stream resuming after a still screen (a
+        holding the stream). A hold longer than a check (no ack moving for a
+        whole check) is waited for until the queue has stood over the
+        allowance for PATH_HOLD_MAX_S where the path holds the stream (a ping
+        written behind the frames when the queue went over still unanswered:
+        a long path's retransmission, a radio's pause) or the page does (it
+        has sent nothing at all for a check: its thread stalled): what it
+        held then arrives, where the gate would drop those frames and have the
+        encoder predict past them from whatever it still holds, at a low frame
+        rate an anchor seconds old. Behind a queue the acks keep moving, and a
+        client that stopped acking what it was handed (a decoder waiting for a
+        key frame) answers the ping and keeps its heartbeat, so both are
+        judged as before. A stream resuming after a still screen (a
         capture that produced nothing for STILL_SCREEN_GAP_SECONDS) is left
         unjudged for STILL_RESUME_GRACE_SECONDS: every frame it sends
         counts against the client until the client's first ack of them comes
@@ -3583,8 +3587,9 @@ class DataStreamingServer(BaseStreamingService):
                 display_state['queue_over_since'] = over_since if over else None
                 acked_at = display_state.get('acked_at', 0.0)
                 delivering = now - acked_at <= BACKPRESSURE_ACK_HOLD_S
-                # A path holding the stream holds a ping written behind it too, where a client that
-                # stopped acking what it was handed (a stalled presenter) answers it.
+                # A path holding the stream holds a ping written behind it too, and a page whose
+                # thread stalls sends nothing at all, where a client that stopped acking what it was
+                # handed (a decoder waiting for a key frame) answers the ping and keeps its heartbeat.
                 ws = display_state.get('ws')
                 if over and over_at is None and ws is not None:
                     display_state['hold_ping'] = _uplink_session_state(ws)['next_ping']
@@ -3594,7 +3599,9 @@ class DataStreamingServer(BaseStreamingService):
                 ping_out = (uplink is not None and hold_ping is not None
                             and (uplink['next_ping'] <= hold_ping
                                  or hold_ping.to_bytes(8, 'big') in uplink['pending']))
-                holding = (now - acked_at >= self.backpressure_check_interval_s and ping_out
+                heard_at = getattr(self, '_heard_at', {}).get(ws, now)
+                page_silent = now - heard_at >= self.backpressure_check_interval_s
+                holding = (now - acked_at >= self.backpressure_check_interval_s and (ping_out or page_silent)
                            and now - over_since < PATH_HOLD_MAX_S)
                 standing = over and (not display_state.get('backpressure_enabled', True)
                                      or (not holding
@@ -3620,7 +3627,10 @@ class DataStreamingServer(BaseStreamingService):
                     gate = display_state.get('desync_gated')
                     if display_state.get('backpressure_enabled', True) or gate is None:
                         if display_state.get('backpressure_enabled', True):
-                            data_logger.warning(f"Backpressure TRIGGERED for '{display_id}'. S:{server_id}, C:{client_id} (EffDesync:{effective_desync_frames:.1f}f > Allowed:{allowed_desync_frames:.1f}f).")
+                            data_logger.warning(
+                                f"Backpressure TRIGGERED for '{display_id}'. S:{server_id}, C:{client_id} "
+                                f"(EffDesync:{effective_desync_frames:.1f}f > Allowed:{allowed_desync_frames:.1f}f; "
+                                f"path {'holding' if ping_out else 'delivered'}, page heard {now - heard_at:.1f} s ago).")
                         # The pong to a ping written behind the last frame says it all arrived.
                         gate = {'acked': acked_sent_at, 'since': now, 'pinged': now, 'delivered': None}
                         display_state['desync_gated'] = gate
@@ -3726,11 +3736,12 @@ class DataStreamingServer(BaseStreamingService):
         any of goes without, since the path, not the stream, set what it sent.
         A display the backpressure gate holds is judged by the frames
         still acked from before the gate shut, like any window, since a
-        moment's delay trips the gate without a queue behind it; once none
-        are, it counts as a queue of unknown depth. A window with nothing acked
-        otherwise moves nothing: a still screen sends no frames, and a verdict
-        from a round trip measured before it would steer an idle stream on
-        stale evidence.
+        moment's delay trips the gate without a queue behind it; over a path
+        slower than the rate they keep arriving as its queue drains. A window
+        with nothing acked moves nothing: a still screen sends no frames, a
+        verdict from a round trip measured before it would steer an idle stream
+        on stale evidence, and a gate shut on a path that holds the whole
+        stream, or a page that holds its acks, has no queue behind it.
 
         Every display behind one bottleneck sees the same queue and settles on a
         share of it, where the backpressure gate alone pauses whichever falls
@@ -3744,7 +3755,7 @@ class DataStreamingServer(BaseStreamingService):
         display_state['link_tick_sent'] = sent
         window = [a for a in display_state.get('link_acks', ()) if a[0] > last_tick]
         gated = not display_state.get('backpressure_enabled', True)
-        if not window and not gated:
+        if not window:
             return
         target = float(display_state.get('video_bitrate') or 0)
         module = self.capture_instances.get(display_id, {}).get('module')
@@ -3752,32 +3763,29 @@ class DataStreamingServer(BaseStreamingService):
             return
         floor_ms = display_state.get('rtt_floor_ms') or 0.0
         stand = [a[1] for a in display_state.get('link_acks', ())][-max(len(window), 2 * LINK_RISE_ACKS):]
-        least_ms = min(stand, default=0.0) if window else 0.0
-        if not window:
-            delivered_bps, queue_s = 0.0, LINK_QUEUE_MS / 1000.0
-        else:
-            span = window[-1][0] - window[0][0]
-            delivered_bps = (window[-1][2] - window[0][2]) * 8 / span if span > 0 else 0.0
-            newest_ms = window[-1][1] - floor_ms
-            jitter_ms = display_state.get('link_jitter_ms')
-            if jitter_ms is None and len(stand) >= LINK_RISE_ACKS:
-                jitter_ms = display_state['link_jitter_ms'] = _round_trip_jitter(stand)
-            allowed_ms = LINK_QUEUE_MS + (jitter_ms or 0.0) / 2
-            run = LINK_RISE_ACKS + round((jitter_ms or 0.0) / LINK_RISE_JITTER_MS)
-            row = [a[1] for a in display_state['link_acks']][-run:]
-            rising = (len(row) >= LINK_RISE_ACKS and all(b > a for a, b in zip(row, row[1:]))
-                      and row[-1] - floor_ms > allowed_ms)
-            catching_up = (delivered_bps > self._video_bitrate_kbps(display_state) * 1000
-                           and window[-1][1] < window[0][1])
-            queued = (least_ms - floor_ms > allowed_ms or rising) and not catching_up
-            if not queued and not catching_up and jitter_ms is not None:
-                display_state['link_jitter_ms'] = jitter_ms + LINK_JITTER_GAIN * (
-                    _round_trip_jitter(stand) - jitter_ms)
-            queue_s = max(newest_ms, LINK_QUEUE_MS) / 1000.0 if queued else 0.0
-            previous_bps = display_state.get('link_delivered_bps', 0.0)
-            display_state['link_delivered_bps'] = delivered_bps
-            if queued:
-                delivered_bps = max(delivered_bps, previous_bps)
+        least_ms = min(stand, default=0.0)
+        span = window[-1][0] - window[0][0]
+        delivered_bps = (window[-1][2] - window[0][2]) * 8 / span if span > 0 else 0.0
+        newest_ms = window[-1][1] - floor_ms
+        jitter_ms = display_state.get('link_jitter_ms')
+        if jitter_ms is None and len(stand) >= LINK_RISE_ACKS:
+            jitter_ms = display_state['link_jitter_ms'] = _round_trip_jitter(stand)
+        allowed_ms = LINK_QUEUE_MS + (jitter_ms or 0.0) / 2
+        run = LINK_RISE_ACKS + round((jitter_ms or 0.0) / LINK_RISE_JITTER_MS)
+        row = [a[1] for a in display_state['link_acks']][-run:]
+        rising = (len(row) >= LINK_RISE_ACKS and all(b > a for a, b in zip(row, row[1:]))
+                  and row[-1] - floor_ms > allowed_ms)
+        catching_up = (delivered_bps > self._video_bitrate_kbps(display_state) * 1000
+                       and window[-1][1] < window[0][1])
+        queued = (least_ms - floor_ms > allowed_ms or rising) and not catching_up
+        if not queued and not catching_up and jitter_ms is not None:
+            display_state['link_jitter_ms'] = jitter_ms + LINK_JITTER_GAIN * (
+                _round_trip_jitter(stand) - jitter_ms)
+        queue_s = max(newest_ms, LINK_QUEUE_MS) / 1000.0 if queued else 0.0
+        previous_bps = display_state.get('link_delivered_bps', 0.0)
+        display_state['link_delivered_bps'] = delivered_bps
+        if queued:
+            delivered_bps = max(delivered_bps, previous_bps)
         lo_kbps, _ = app_settings.video_bitrate
         current = self._video_bitrate_kbps(display_state)
         held = gated or display_state.get('gate_moved_at', 0.0) > last_tick
@@ -4846,6 +4854,7 @@ class DataStreamingServer(BaseStreamingService):
                 if msg.type == WSMsgType.PONG:
                     note_pong(websocket, msg.data)
                     continue
+                self._heard_at[websocket] = time.monotonic()
                 # A 0x05 frame is gzip-wrapped control text: inflated into a TEXT
                 # message so the dispatch below (permission checks included) sees it as such.
                 if (msg.type == WSMsgType.BINARY and msg.data
@@ -5711,6 +5720,7 @@ class DataStreamingServer(BaseStreamingService):
             # beside the owner that kept the capture running for itself ends it.
             self.audio_redundancy_by_ws.pop(websocket, None)
             self._red_unsettled.discard(websocket)
+            self._heard_at.pop(websocket, None)
             if self.is_pcmflux_capturing:
                 async with self._audio_lock:
                     if had_own_audio and not self._audio_wanted():

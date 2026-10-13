@@ -68,11 +68,15 @@ class Socket:
             self.held.clear()
 
 
-def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -> list:
+def gate_states(script: list, steered: bool = True, acks_moving: bool = False, page: str = "path") -> list:
     """Whether the gate is open after each check, the n-th check seeing
     `script[n]` ms of stream standing in flight past the floor, with congestion
     control steering the display or not, and the client's acks moving on or
-    standing still since the check before."""
+    standing still since the check before. Acks standing still over the
+    allowance are held by `page`: "path" holds the stream, pings and all, and
+    the page goes on sending; "silent" is the page's thread stalled, sending
+    nothing, its socket delivering; "heartbeat" a client that keeps sending,
+    its socket delivering, but acks nothing new."""
     server = DataStreamingServer.__new__(DataStreamingServer)
     server.client_settings_received = None
     server.backpressure_check_interval_s = INTERVAL
@@ -82,6 +86,7 @@ def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -
     server.rc_mode = SimpleNamespace(value=w.RateControlMode.CBR.value)
     server.metrics = None
     server.video_relay_groups = {}
+    server._heard_at = {}
     socket = Socket()
     state = {
         "ws": socket, "framerate": FPS, "acknowledged_frame_id": 100, "acked_sent_at": None,
@@ -112,8 +117,9 @@ def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -
             (101 + i, (now - 0.9 + i / 1000.0, 20000)) for i in range(in_flight))
         state["last_sent_frame_id"] = 100 + in_flight
         state["acked_at"] = now if acks_moving else now - 1.0
-        # Acks standing still over the allowance are the path holding the stream, pings and all.
-        socket.hold(not acks_moving and ms > w.BACKPRESSURE_ALLOWED_DESYNC_MS)
+        held = not acks_moving and ms > w.BACKPRESSURE_ALLOWED_DESYNC_MS
+        socket.hold(held and page == "path")
+        server._heard_at[socket] = now - 1.0 if held and page == "silent" else now
 
     async def one_check_per_sleep(delay, *args, **kwargs):
         if delay == INTERVAL:
@@ -162,6 +168,12 @@ res.check("without congestion control a queue the path goes on delivering behind
 held = gate_states([0, 300, 0, 0], steered=False)
 res.check("without congestion control a moment the path holds the stream, acks standing still, leaves it open",
           all(held), held)
+silent = gate_states([0, 300, 300, 300, 300, 300, 0, 0], page="silent")
+res.check(f"a page that stalls, sending nothing while its socket delivers, is waited for {w.PATH_HOLD_MAX_S} s too",
+          silent[:over_checks + 1] == [True] * (over_checks + 1) and silent[over_checks + 1] is False, silent)
+beating = gate_states([0, 300, 300, 300, 0, 0], page="heartbeat")
+res.check("a client that keeps sending but acks nothing new (a decoder waiting for a key frame) shuts it at the second",
+          beating[:3] == [True, True, False], beating)
 still_held = gate_states([0, 300, 300, 0], steered=False)
 res.check("a hold still there at the next check is waited for", all(still_held), still_held)
 stuck = gate_states([0, 300, 300, 300, 300, 300, 0], steered=False)
