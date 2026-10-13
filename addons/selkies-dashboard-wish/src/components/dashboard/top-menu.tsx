@@ -813,7 +813,8 @@ export function TopMenu({
           transition: 'top 300ms',
         }}
       >
-        <div className="flex items-center gap-1.5 px-2 py-2">
+        {/* Tighter on a phone, where the touch buttons join the bar: 320 pixels hold it. */}
+        <div className="flex items-center gap-1 px-1 py-2 sm:gap-1.5 sm:px-2">
           {uiShowLogo && (
             <a
               href={PROJECT_URL}
