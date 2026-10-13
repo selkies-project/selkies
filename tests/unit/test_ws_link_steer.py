@@ -11,7 +11,8 @@ A round trip at its floor never moves the rate, one key frame's burst does not
 either, round trips a jittering path spreads or a lossy one holds back never do,
 a gate shut on a moment's delay or frames held back a moment and delivered
 together do not either, while a queue behind an encoder running over its target
-still does; a window with nothing acked moves nothing, nor does a queue under a
+still does; a window with nothing acked moves nothing unless the gate holds it on a path that carried less than
+was sent, nor does a queue under a
 still screen's trickle unless the gate held some of it, a page taking the
 display over is measured against its own path, whatever else applies a
 bitrate applies the steered one, and the capture's tracked settings carry it, so
@@ -109,8 +110,17 @@ module.rates.clear()
 t = run(20.0, 0.0, 5)
 state["backpressure_enabled"] = False
 run(20.0, t, 0.5, acks=False)
-check("a gated display with nothing acked moves nothing: a path or a page holding it is no queue",
+check("a gated display with nothing acked, its path having carried what was sent, moves nothing",
       module.rates == [], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5)
+state["backpressure_enabled"] = False
+state["link_delivered_bps"] = state["link_offered_bps"] / 4
+run(20.0, t, 0.5, acks=False)
+check("one whose path carried a quarter of what was sent counts as a queue of unknown depth",
+      module.rates == [2800], module.rates)
 
 state = fresh_state()
 module.rates.clear()
