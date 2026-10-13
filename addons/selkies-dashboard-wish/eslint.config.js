@@ -29,7 +29,7 @@ export default [
   // public/selkies-core.js is the bundled streaming core, not source.
   { ignores: ['dist', 'public/selkies-core.js'] },
   {
-    files: ['*.config.js', 'copy-*.js'],
+    files: ['*.config.js', 'copy-*.js', 'selkies-accent.js'],
     languageOptions: { globals: globals.node },
   },
   {
