@@ -436,11 +436,9 @@ def classic_layout_check(page, res: "H.Results") -> None:
               modal["iframeTheme"] == modal["dashTheme"]
               and modal["iframeBg"] == palettes.get(modal["dashTheme"]), modal)
 
-    # The mirror is live: the dashboard's own mode pick re-renders the modal
+    # The mirror is live: the dashboard's own toggle re-renders the modal
     # frame while its storage write restyles the page inside the frame.
-    page.locator('.sidebar-section-header:has-text("Appearance")').first.click()
-    time.sleep(0.5)
-    page.select_option('#modeSelect', 'light')
+    page.locator('.theme-toggle').click()
     time.sleep(0.6)
     flipped = page.evaluate("""() => {
       const out = {modalBg: getComputedStyle(document.querySelector('.files-modal')).backgroundColor};
@@ -454,7 +452,7 @@ def classic_layout_check(page, res: "H.Results") -> None:
     res.check("frame and file index follow a live theme flip",
               flipped["theme"] == "light" and flipped["bg"] == palettes["light"]
               and flipped["modalBg"] == "rgb(255, 255, 255)", flipped)
-    page.select_option('#modeSelect', 'dark')
+    page.locator('.theme-toggle').click()
     time.sleep(0.4)
     settled = page.evaluate("""() => {
       const f = document.querySelector('.files-modal iframe');
@@ -1208,13 +1206,10 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
                 opened = wish_open_menu_item(page, "Add a second screen")
             else:
                 opened = classic_open_video(page)
-                # The Appearance section too: the arrow check picks the mode there.
                 page.evaluate("""() => {
-                  for (const word of [/screen/i, /appearance/i]) {
-                    const header = [...document.querySelectorAll('.sidebar-section-header')]
-                      .find(e => word.test(e.textContent));
-                    if (header) header.click();
-                  }
+                  const header = [...document.querySelectorAll('.sidebar-section-header')]
+                    .find(e => /screen/i.test(e.textContent));
+                  if (header) header.click();
                 }""")
                 time.sleep(1.0)
                 page.evaluate("""() => {
@@ -1262,7 +1257,7 @@ def classic_arrow_theme_check(page, res: "H.Results") -> None:
     seen = {}
     for flip in (False, True):
         if flip:
-            page.select_option('#modeSelect', 'light')
+            page.evaluate("document.querySelector('.theme-toggle').click()")
             time.sleep(0.5)
         theme = page.evaluate(
             "document.querySelector('.sidebar').className.includes('theme-light') ? 'light' : 'dark'")

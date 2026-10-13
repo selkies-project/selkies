@@ -40,8 +40,8 @@ const flag = (entry, fallback) => (entry && entry.value !== undefined ? entry.va
 /**
  * Derives every visibility flag the panels read from a `serverSettings`
  * payload: the operator's `ui_*` toggles, per-control renderability from each
- * setting's own constraints, the sharing roles, the stream switches, the
- * file-transfer directions, and the appearance choices.
+ * setting's own constraints, the sharing roles, the stream switches, and
+ * the file-transfer directions.
  * @param {object|null} serverSettings The `serverSettings` payload.
  * @returns {Object<string, boolean>} Empty before the payload arrives, so a
  *     missing flag reads as shown.
@@ -119,12 +119,6 @@ export function computeRenderableSettings(serverSettings) {
   const transfers = s.file_transfers && s.file_transfers.value;
   r.fileUpload = transfers !== undefined ? transfers.includes('upload') : true;
   r.fileDownload = transfers !== undefined ? transfers.includes('download') : true;
-
-  // The appearance settings: each choice is offered while the operator left
-  // more than one value to choose from, like any other client setting.
-  r.shellChoice = isSettingRenderable(s.ui_shell);
-  r.modeChoice = isSettingRenderable(s.ui_mode);
-  r.appearance = r.shellChoice || r.modeChoice;
 
   return r;
 }
