@@ -134,6 +134,31 @@ def sacked(gaps: list, ack_first: bool = True) -> tuple:
     return out.get("took", 30.0), out.get("chunks"), out.get("alive", False)
 
 
+def fragments(streams: range, size: int, cap: int) -> tuple:
+    """First fragments of messages never finished, one per stream, with the
+    reassembly ceiling lowered to `cap`: whether the association aborted, the
+    inbound streams it keeps, and whether every TSN was acknowledged."""
+    out: dict = {}
+
+    async def run() -> None:
+        assoc, dtls = await association(True)
+        assoc._max_reassembly_bytes = cap
+        tsn = 1000
+        for stream in streams:
+            body = struct.pack("!LHHL", tsn, stream, 0, 51) + b"x" * size
+            await assoc._handle_data(packet(assoc._local_verification_tag,
+                                            struct.pack("!BBH", 0, 0x02, 4 + len(body)) + body))
+            tsn += 1
+        out["aborted"] = assoc._association_state == sctp.RTCSctpTransport.State.CLOSED
+        out["streams"] = sorted(assoc._inbound_streams)
+        out["acked"] = assoc._last_received_tsn == tsn - 1
+
+    thread = threading.Thread(target=lambda: asyncio.run(run()), daemon=True)
+    thread.start()
+    thread.join(30)
+    return out.get("aborted"), out.get("streams"), out.get("acked")
+
+
 def main() -> bool:
     res = H.Results("sctp-hostile")
     tag = lambda body: lambda assoc: packet(assoc._local_verification_tag, body)  # noqa: E731
@@ -167,6 +192,13 @@ def main() -> bool:
         _took, chunks, alive = sacked(gaps)
         res.check(f"gap blocks {gaps} ack the chunks they name and strike those before the highest",
                   chunks == expect and alive, str(chunks))
+    aborted, _streams, _acked = fragments(range(16), 5000, 64 * 1024)
+    res.check("unfinished messages over many streams are bounded together", aborted is True, aborted)
+    aborted, streams, acked = fragments(range(10), 1000, 64 * 1024)
+    res.check("and below the bound they are kept", aborted is False and streams == list(range(10)), streams)
+    aborted, streams, acked = fragments(range(100, 140), 1000, 64 * 1024)
+    res.check("DATA on streams the peer never opened is acknowledged, not buffered",
+              aborted is False and streams == [] and acked, (aborted, streams, acked))
     ok, detail, sent = deliver(True, tag(data(1000)))
     acked = [c.cumulative_tsn for p in sent for c in sctp.parse_packet(p)[3] if isinstance(c, sctp.SackChunk)]
     res.check("in-window DATA is still received and acknowledged", ok and 1000 in acked, f"SACK cumulative TSNs {acked}")

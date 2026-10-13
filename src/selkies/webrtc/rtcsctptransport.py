@@ -738,12 +738,13 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         # up to 256 KiB, and Firefox/WebKit accept more. RFC 8841's 64 KiB
         # fallback would needlessly cap clipboard/file messages we send.
         self.remote_max_message_size = 262144
-        # Receive-side ceiling per inbound stream: a memory-safety backstop, not
-        # per-message policing. Under burst loss an ORDERED stream legitimately
+        # Receive-side ceiling on what the inbound streams buffer together: a
+        # memory-safety backstop, not per-message policing. Under burst loss an ORDERED stream legitimately
         # buffers several completed messages behind one head-of-line gap while
         # retransmits fill it, so the bound must be generous; only a peer that
         # ignores both our advertised limit and flow control can reach it.
         self._max_reassembly_bytes = 16 * 1024 * 1024
+        self._reassembly_bytes = 0
         self._association_state = self.State.CLOSED
         self.__log_debug: Callable[..., None] = lambda *args: None
         self.__started = False
@@ -982,6 +983,10 @@ class RTCSctpTransport(AsyncIOEventEmitter):
 
         extensions.append(ReconfigChunk.type)
         params.append((SCTP_SUPPORTED_CHUNK_EXT, bytes(extensions)))
+
+    def _inbound_stream_open(self, stream_id: int) -> bool:
+        """Whether the peer's INIT opened this stream id (any, before it is known)."""
+        return not self._inbound_streams_count or stream_id < self._inbound_streams_count
 
     def _get_inbound_stream(self, stream_id: int) -> InboundStream:
         """
@@ -1288,24 +1293,31 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         if self._mark_received(chunk.tsn):
             return
 
+        # A stream the association did not open is acknowledged and its data
+        # discarded (RFC 4960 6.5).
+        if not self._inbound_stream_open(chunk.stream_id):
+            return
+
         # find stream
         inbound_stream = self._get_inbound_stream(chunk.stream_id)
 
         # defragment data
         inbound_stream.add_chunk(chunk)
         self._advertised_rwnd -= len(chunk.user_data)
-        if inbound_stream.buffered_bytes > self._max_reassembly_bytes:
+        self._reassembly_bytes += len(chunk.user_data)
+        if self._reassembly_bytes > self._max_reassembly_bytes:
             # The peer ignored our advertised max-message-size and flow
-            # control; abort instead of buffering without bound.
+            # control, on one stream or spread over many; abort instead of
+            # buffering without bound.
             logger.warning(
-                "RTCSctpTransport aborting: stream %d reassembly exceeded %d bytes",
-                chunk.stream_id,
+                "RTCSctpTransport aborting: reassembly exceeded %d bytes",
                 self._max_reassembly_bytes,
             )
             await self.stop()
             return
         for message in inbound_stream.pop_messages():
             self._advertised_rwnd += len(message[2])
+            self._reassembly_bytes -= len(message[2])
             await self._receive(*message)
 
     async def _receive_forward_tsn_chunk(self, chunk: ForwardTsnChunk) -> None:
@@ -1336,19 +1348,22 @@ class RTCSctpTransport(AsyncIOEventEmitter):
 
         # update reassembly
         for stream_id, stream_seq in chunk.streams:
+            if not self._inbound_stream_open(stream_id):
+                continue
             inbound_stream = self._get_inbound_stream(stream_id)
 
             # advance sequence number and perform delivery
             inbound_stream.sequence_number = uint16_add(stream_seq, 1)
             for message in inbound_stream.pop_messages():
                 self._advertised_rwnd += len(message[2])
+                self._reassembly_bytes -= len(message[2])
                 await self._receive(*message)
 
         # prune obsolete chunks
         for stream_id, inbound_stream in self._inbound_streams.items():
-            self._advertised_rwnd += inbound_stream.prune_chunks(
-                self._last_received_tsn
-            )
+            pruned = inbound_stream.prune_chunks(self._last_received_tsn)
+            self._advertised_rwnd += pruned
+            self._reassembly_bytes -= pruned
 
     async def _receive_sack_chunk(self, chunk: SackChunk) -> None:
         """
@@ -1474,7 +1489,10 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         if isinstance(param, StreamResetOutgoingParam):
             # mark closed inbound streams
             for stream_id in param.streams:
-                self._inbound_streams.pop(stream_id, None)
+                closed = self._inbound_streams.pop(stream_id, None)
+                if closed is not None:
+                    self._advertised_rwnd += closed.buffered_bytes
+                    self._reassembly_bytes -= closed.buffered_bytes
 
                 # close data channel
                 channel = self._data_channels.get(stream_id)
