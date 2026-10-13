@@ -30,6 +30,20 @@ FPS_HIST_BUCKETS = (0, 20, 40, 60)
 WEBRTC_CSV_MAX_HEADERS = 2048
 WEBRTC_CSV_MAX_RETAINED_ROWS = 100000
 
+# What a spreadsheet opening the CSV runs as a formula when a cell starts with it.
+_CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_cell(text: str) -> str:
+    """A stats cell or header from the client as the spreadsheet should show it:
+    one led by a formula character is quoted as text, unless it is a number."""
+    if text.startswith(_CSV_FORMULA_LEADS):
+        try:
+            float(text)
+        except ValueError:
+            return "'" + text
+    return text
+
 
 def _no_follow(path: str, flags: int) -> int:
     """Open a statistics file without following a link at its name, creating it
@@ -319,6 +333,7 @@ class Metrics:
 
         dt = datetime.now()
         timestamp = dt.strftime("%d/%B/%Y:%H:%M:%S")
+        obj = OrderedDict((csv_cell(k), csv_cell(v)) for k, v in obj.items())
         with self._csv_lock:
             try:
                 headers = ["timestamp"]

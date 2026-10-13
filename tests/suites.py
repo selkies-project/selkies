@@ -34,6 +34,7 @@ SUITES: list = [
     {"path": "unit/test_apps_local_repo.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_mode_switch_teardown.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_metrics_reregister.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_stats_csv_cells.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gpu_probe_facts.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_resize_session_screen.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_secondary_shrink.py", "tier": "unit", "timeout": 120},
