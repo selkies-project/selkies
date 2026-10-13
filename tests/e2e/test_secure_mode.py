@@ -7,7 +7,8 @@ routes:      with a master token set and Basic auth off, /api/upload,
              header, as ?token=, or as the client's cookie; a viewer-role
              token cannot upload; the master token is accepted everywhere;
              liveness and the static client stay open; the data WebSocket
-             still takes its token in the handshake.
+             still takes its token in the handshake, and a token entry with
+             no role connects as a viewer that cannot displace the controller.
 websockets:  a browser page loaded with ?token= streams over WebSockets,
              sets the API cookie, uploads through the file input with a
              Bearer header, and opens the file listing (whose links keep the
@@ -54,6 +55,7 @@ import websockets
 MASTER = "e2e-master-token"
 CTRL_TOKEN = "e2e-ctrl-Qx9"
 VIEW_TOKEN = "e2e-view-Zt4"
+ROLELESS_TOKEN = "e2e-player-Rk2"
 COOKIE = "selkies_token"
 BEARER_CHALLENGE = 'Bearer realm="Selkies Restricted"'
 
@@ -161,10 +163,42 @@ async def ws_handshake(query: str, seconds: float = 3.0, subprotocols=None) -> t
     return messages, close_code, refused, selected
 
 
+async def roleless_beside_controller() -> tuple:
+    """A controller's socket claims the primary, then a token entry with no role
+    connects and sends the primary's settings. Returns the role-less socket's
+    AUTH_SUCCESS payload and whether the controller's socket was closed."""
+    settings = json.dumps({"displayId": "primary", "initialClientWidth": 1280, "initialClientHeight": 720,
+                           "framerate": 30, "encoder": "jpeg"})
+    base = f"ws://localhost:{H.PORT}/api/websockets?token="
+    await asyncio.sleep(1.0)  # past the server's reconnect debounce
+    async with websockets.connect(base + CTRL_TOKEN, max_size=None) as ctrl:
+        await ctrl.send(f"SETTINGS,{settings}")
+        await asyncio.sleep(2.0)
+        auth = None
+        async with websockets.connect(base + ROLELESS_TOKEN, max_size=None) as other:
+            deadline = time.monotonic() + 3.0
+            while auth is None and time.monotonic() < deadline:
+                msg = await asyncio.wait_for(other.recv(), timeout=3.0)
+                if isinstance(msg, str) and msg.startswith("AUTH_SUCCESS,"):
+                    auth = json.loads(msg.split(",", 1)[1])
+            await other.send(f"SETTINGS,{settings}")
+            await asyncio.sleep(3.0)
+        closed = False
+        try:
+            while True:
+                await asyncio.wait_for(ctrl.recv(), timeout=0.2)
+        except asyncio.TimeoutError:
+            pass
+        except websockets.exceptions.ConnectionClosed:
+            closed = True
+        return auth, closed
+
+
 def provision(res: "H.Results") -> None:
     status = post_tokens({
         CTRL_TOKEN: {"role": "controller", "slot": 1},
         VIEW_TOKEN: {"role": "viewer", "slot": None},
+        ROLELESS_TOKEN: {"slot": 2},
     })
     res.check("tokens provisioned", status == 200, status)
 
@@ -247,9 +281,12 @@ def run_routes() -> "H.Results":
     res.check("the token subprotocol without selkies is refused before the upgrade", refused == 400, refused)
     _, _, refused, _ = asyncio.run(ws_handshake(""))
     res.check("a handshake with no token is refused before the upgrade", refused == 401, refused)
+    auth, closed = asyncio.run(roleless_beside_controller())
+    res.check("a token entry with no role is told it is a viewer", (auth or {}).get("role") == "viewer", auth)
+    res.check("its primary settings leave the controller's socket open", not closed, "")
     log = H.server_log()
     res.check("session tokens never reach the server log",
-              CTRL_TOKEN not in log and VIEW_TOKEN not in log, "")
+              CTRL_TOKEN not in log and VIEW_TOKEN not in log and ROLELESS_TOKEN not in log, "")
     res.summary()
     return res
 

@@ -79,6 +79,12 @@ def _perms_hold_input_authority(perms: Optional[dict], token: Optional[str] = No
     return perms.get("role", "viewer") == "controller"
 
 
+def token_role(perms: Optional[dict]) -> str:
+    """A session token entry's role as both transports read it: "controller"
+    only where the entry says so, "viewer" for any other or none."""
+    return "controller" if (perms or {}).get("role") == "controller" else "viewer"
+
+
 def _mk_access_verdict(perms: Optional[dict], token: Optional[str] = None) -> bool:
     """The MK_ACCESS verdict a tokened websockets client is told.
 

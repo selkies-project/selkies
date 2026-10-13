@@ -4567,18 +4567,19 @@ class DataStreamingServer(BaseStreamingService):
                 await websocket.close(code=4001, message=b"Invalid authentication token")
                 return
 
+            role = sessions.token_role(permissions)
             client_permissions[websocket] = {
                 "token": token,
-                "role": permissions.get("role"),
+                "role": role,
                 "slot": permissions.get("slot"),
                 "remote_address": remote_address,
                 "data_server": self,
                 "id": secrets.token_hex(4),
                 "connected_at": time.time(),
             }
-            data_logger.debug(f"Client {remote_address} authenticated with token. Role: {permissions.get('role')}, Slot: {permissions.get('slot')}")
+            data_logger.debug(f"Client {remote_address} authenticated with token. Role: {role}, Slot: {permissions.get('slot')}")
             auth_success_payload = json.dumps({
-                "role": permissions.get("role"),
+                "role": role,
                 "slot": permissions.get("slot"),
             })
             await websocket.send_str(f"AUTH_SUCCESS,{auth_success_payload}")
@@ -7345,6 +7346,9 @@ class DataStreamingServer(BaseStreamingService):
                 perms["slot"] = sessions.stored_slot(perms["slot"])
             if perms.get("mk_control", False) and new_mk_owner is None:
                 new_mk_owner = tkn
+        roleless = sum(perms.get("role") not in ("controller", "viewer") for perms in new_token_data.values())
+        if roleless:
+            logger.warning(f"{roleless} token entries name no role 'controller' or 'viewer'; they connect as viewers.")
         sessions.user_tokens = new_token_data
         sessions.active_mk_token = new_mk_owner
         logger.info(f"Updated user tokens. Now tracking {len(sessions.user_tokens)} tokens.")
@@ -7566,7 +7570,7 @@ async def reconcile_clients() -> None:
             should_disconnect, reason = True, "Token revoked"
         else:
             old_role, old_slot = perms.get("role"), perms.get("slot")
-            new_role = new_perms.get("role")
+            new_role = sessions.token_role(new_perms)
             new_slot = new_perms.get("slot")
 
             if old_role != new_role:
