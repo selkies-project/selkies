@@ -255,7 +255,7 @@ def lock(res, label: str, d) -> bool:
     # A browser still opening its window swallows the first click; a machine
     # under load is not a product regression, so the click is repeated.
     for _ in range(15):
-        root.warp_pointer(700, 450)
+        root.warp_pointer(*CLICK)
         d.sync()
         time.sleep(0.5)
         xtest.fake_input(d, X.ButtonPress, 1)
@@ -292,7 +292,7 @@ def measure(res, browser: str, dpr: float) -> None:
                   f"{LATEST.get('lockPath', '')}, motion from {LATEST.get('motionEvent', '')}")
 
         for name, count, delta, gap in PATTERNS:
-            root.warp_pointer(700, 450)
+            root.warp_pointer(*CLICK)
             d.sync()
             settle()
             mark = dict(LATEST)
@@ -351,16 +351,18 @@ def check_setting(res, browser: str, raw: bool) -> None:
         d.close()
 
 
-# The browsers' windows, and the click and the warps at (700, 450), need this much screen.
+# The browsers' windows need this much screen, and the click and the warps go to CLICK.
 SCREEN = (1920, 1080)
+CLICK = (700, 450)
 
 
 def size_screen() -> None:
-    """Give the shared test display its full size back.
+    """Give the shared test display its full size back, its output's mode with it.
 
     No Selkies server sizes it here, and the suite before this one may have
     left it at its page's size (test_frame_ancestors' framed page leaves
-    304x150), where the pointer has nowhere to go and the click misses.
+    304x150), or the screen full size under an output still in that mode,
+    which holds the pointer inside it: either way the click and the warps miss.
     """
     size = f"{SCREEN[0]}x{SCREEN[1]}"
     # The output's own mode where it has one, else the framebuffer alone.
@@ -371,8 +373,19 @@ def size_screen() -> None:
 
 
 def screen_fits() -> bool:
+    """Whether the display is SCREEN in size and the pointer reaches CLICK."""
     width, height = H.x_root_size()
-    return width >= SCREEN[0] and height >= SCREEN[1]
+    if width < SCREEN[0] or height < SCREEN[1]:
+        return False
+    d = H.x_display()
+    try:
+        root = d.screen().root
+        root.warp_pointer(*CLICK)
+        d.sync()
+        pointer = root.query_pointer()
+        return (pointer.root_x, pointer.root_y) == CLICK
+    finally:
+        d.close()
 
 
 def run() -> "H.Results":
@@ -381,7 +394,8 @@ def run() -> "H.Results":
     if not browsers:
         H.skip_suite("neither Chrome nor Firefox is installed")
     size_screen()
-    res.check("the test display is the size the suite needs", screen_fits(), H.x_root_size())
+    res.check("the test display is the size the suite needs and the pointer reaches its click", screen_fits(),
+              H.x_root_size())
     serve()
     for browser in browsers:
         for dpr in (1, 1.25, 1.5):
