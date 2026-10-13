@@ -6,13 +6,15 @@ Drives the real keyboard worker and _inject_text_via_clipboard against fakes:
 buffered unicode keysyms must flush through the virtual keyboard when it works
 and fall back to save clipboard -> write text -> Shift+Insert -> restore when
 it does not, the text offered as a secret and the restore left until the
-focused app has had time to fetch it, lifting held modifiers around the chord, restoring binary
+focused app has fetched it (as the app compositor's selection reports its
+sends, else after a margin), lifting held modifiers around the chord, restoring binary
 clipboards under their mime, clearing when there was nothing to restore, and
 dropping nothing silently unless both engines fail.
 """
 import asyncio
 import os
 import sys
+import threading
 import time
 
 TESTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,7 +22,8 @@ REPO = os.path.dirname(TESTS)
 sys.path.insert(0, os.path.join(REPO, "src"))
 
 from selkies.input_handler import (  # noqa: E402
-    CLIPBOARD_PASTE_FETCH_S, PixelfluxVkUnavailable, SecretText, WebRTCInput)
+    CLIPBOARD_PASTE_FETCH_MAX_S, CLIPBOARD_PASTE_FETCH_S, PixelfluxVkUnavailable, SecretText,
+    WebRTCInput)
 
 SHIFT_L = 0xFFE1
 INSERT = 0xFF63
@@ -50,8 +53,37 @@ class FakeWaylandInput:
         self.set_calls.append(entries)
 
 
+class FetchedWaylandInput(FakeWaylandInput):
+    """An app compositor's selection that reports its sends as pixelflux does
+    (`clipboard_served_app`): `fetches` are the (seconds after the paste
+    chord, mime) reads the focused app and a clipboard history make, `early`
+    the mimes read before the chord."""
+
+    def __init__(self, fetches: list, early: tuple = ()) -> None:
+        super().__init__()
+        self.fetches = fetches
+        self.served = list(early)
+        self.grew = threading.Condition()
+
+    def chord(self) -> None:
+        for delay, mime in self.fetches:
+            timer = threading.Timer(delay, self._serve, (mime,))
+            timer.daemon = True
+            timer.start()
+
+    def _serve(self, mime: str) -> None:
+        with self.grew:
+            self.served.append(mime)
+            self.grew.notify_all()
+
+    def clipboard_served_app(self, after: int, timeout_s: float) -> list:
+        with self.grew:
+            self.grew.wait_for(lambda: len(self.served) > after, timeout=timeout_s)
+            return list(self.served)
+
+
 def make_handler(vk_error: bool = True, separate: bool = True,
-                 clipboard=None, write_ok: bool = True) -> WebRTCInput:
+                 clipboard=None, write_ok: bool = True, wl=None) -> WebRTCInput:
     """A WebRTCInput whose injection dependencies are recording fakes.
 
     Args:
@@ -60,10 +92,11 @@ def make_handler(vk_error: bool = True, separate: bool = True,
         separate: Whether a nested app compositor is reported.
         clipboard: The `(data, mime)` the pre-paste save reads, or None.
         write_ok: Whether clipboard writes succeed.
+        wl: The wayland_input fake, FakeWaylandInput by default.
     """
     h = WebRTCInput.__new__(WebRTCInput)
     h.is_wayland = True
-    h.wayland_input = FakeWaylandInput()
+    h.wayland_input = wl or FakeWaylandInput()
     h.active_modifiers = set()
     h.atomically_typed_keys = set()
     h._wl_text_routed = {}
@@ -81,6 +114,8 @@ def make_handler(vk_error: bool = True, separate: bool = True,
     async def send(keysym, down=True, neutralize=None):
         h.keys.append((keysym, down))
         h.key_times.append(time.monotonic())
+        if keysym == INSERT and down and isinstance(h.wayland_input, FetchedWaylandInput):
+            h.wayland_input.chord()
     h.send_x11_keypress = send
 
     async def wl_type(text):
@@ -201,6 +236,33 @@ async def main() -> None:
     ok = await h._inject_text_via_clipboard("direct")
     check("non-nested topology injects and restores the same way",
           ok and [w[0] for w in h.writes] == ["direct", "before"], h.writes)
+
+    async def restored_after(fetches: list, early: tuple = ()) -> float:
+        """Seconds from the paste chord to the restore, against a selection
+        reporting `fetches` (and `early` reads before the chord)."""
+        h = make_handler(clipboard=("before", "text/plain"), wl=FetchedWaylandInput(fetches, early))
+        ok = await h._inject_text_via_clipboard("느린")
+        chord = h.key_times[h.keys.index((INSERT, True))]
+        assert ok and h.writes[-1] == ("before", "text/plain"), h.writes
+        return h.write_times[-1] - chord
+
+    text = "text/plain;charset=utf-8"
+    took = await restored_after([(0.3, text)])
+    check("a fetch slower than the fixed margin is waited for",
+          took >= 0.3 and took > CLIPBOARD_PASTE_FETCH_S, f"{took * 1000:.0f} ms")
+    took = await restored_after([(0.03, text)])
+    check("a quick fetch is followed at once, sooner than the fixed margin",
+          0.03 <= took < CLIPBOARD_PASTE_FETCH_S - 0.05, f"{took * 1000:.0f} ms")
+    took = await restored_after([(0.02, "application/x-kde-passwordManagerHint"), (0.25, text)])
+    check("a clipboard history's read of the secret hint is not the paste",
+          took >= 0.25, f"{took * 1000:.0f} ms")
+    took = await restored_after([(0.2, text)], early=(text,))
+    check("a read before the chord is not the paste",
+          took >= 0.2, f"{took * 1000:.0f} ms")
+    took = await restored_after([])
+    check("an app that never fetches holds the clipboard no longer than the most it waits",
+          CLIPBOARD_PASTE_FETCH_MAX_S - 0.01 <= took < CLIPBOARD_PASTE_FETCH_MAX_S + 0.15,
+          f"{took * 1000:.0f} ms")
 
 
 asyncio.run(main())

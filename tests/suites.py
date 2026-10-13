@@ -243,6 +243,7 @@ SUITES: list = [
     {"path": "integration/test_clipboard_incr.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_clipboard_flavours.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_clipboard_secret.py", "tier": "integration", "timeout": 300},
+    {"path": "integration/test_clipboard_paste_fetch.py", "tier": "integration", "timeout": 120},
     {"path": "integration/test_audit_webhook.py", "tier": "integration", "timeout": 600},
     {"path": "integration/test_print_queue.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_system_usage.py", "tier": "integration", "timeout": 120},

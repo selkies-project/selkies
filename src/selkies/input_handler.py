@@ -2181,9 +2181,12 @@ CLIPBOARD_SECRET_HINTS = ("x-kde-passwordManagerHint", "text/x-kde-passwordManag
                           "application/x-kde-passwordManagerHint")
 
 # How long the focused app has to fetch a pasted text before the clipboard is
-# restored: Konsole under KWin took 50-80 ms for a session's first paste, and a
-# selection dropped before the fetch pastes nothing.
+# restored where nothing reports the fetch: Konsole under KWin took 50-80 ms for
+# a session's first paste, and a selection dropped before the fetch pastes nothing.
 CLIPBOARD_PASTE_FETCH_S = 0.15
+# Where pixelflux's data-control source reports its sends, the restore follows
+# the fetch itself, waiting this long at most for an app that never pastes.
+CLIPBOARD_PASTE_FETCH_MAX_S = 0.5
 
 
 class SecretText(str):
@@ -6259,6 +6262,8 @@ class WebRTCInput:
         write_clipboard's baseline keeps the monitor from echoing the injected
         text back to clients. The text is offered as a secret, so a clipboard
         history (Klipper) neither records nor re-offers each typed character.
+        The restore waits for the paste's fetch where the app compositor's
+        selection reports it (`_paste_fetched`), else a fixed margin.
         Returns True once the paste chord is sent."""
         if self._clipboard_inject_active:
             return False
@@ -6273,14 +6278,19 @@ class WebRTCInput:
                 old_data, old_mime = await self.read_clipboard(use_binary=True)
                 if not await self.write_clipboard(SecretText(text)):
                     return False
-                # The focused app's margins to receive the new offer, and to
-                # fetch it before the selection is restored.
+                # The focused app's margin to receive the new offer.
                 await asyncio.sleep(0.02)
+                sends = self._paste_sends()
+                # Reads before the chord (a clipboard history's) are no paste.
+                seen = len(await asyncio.to_thread(sends, 0, 0.0)) if sends else 0
                 await self.send_x11_keypress(shift_keysym, down=True)
                 await self.send_x11_keypress(insert_keysym, down=True, neutralize=False)
                 await self.send_x11_keypress(insert_keysym, down=False)
                 await self.send_x11_keypress(shift_keysym, down=False)
-                await asyncio.sleep(CLIPBOARD_PASTE_FETCH_S)
+                if sends is None:
+                    await asyncio.sleep(CLIPBOARD_PASTE_FETCH_S)
+                else:
+                    await self._paste_fetched(sends, seen)
                 if old_data is not None:
                     await self.write_clipboard(old_data, old_mime or "text/plain")
                 elif self.is_wayland:
@@ -6294,6 +6304,28 @@ class WebRTCInput:
                     if mod_keysym in self.active_modifiers:
                         await self.send_x11_keypress(mod_keysym, down=True)
                 self._clipboard_inject_active = False
+
+    def _paste_sends(self) -> Optional[Callable[[int, float], List[str]]]:
+        """pixelflux's report of the mimes the app compositor's selection served
+        (`clipboard_served_app`), or None where a paste is served elsewhere or
+        the wheel predates it."""
+        if not self.is_wayland or not self._has_separate_app_compositor():
+            return None
+        return getattr(self.wayland_input, 'clipboard_served_app', None)
+
+    async def _paste_fetched(self, sends: Callable[[int, float], List[str]], seen: int) -> bool:
+        """Wait until the selection has served text beyond the `seen` sends,
+        at most CLIPBOARD_PASTE_FETCH_MAX_S; a read of the secret hint alone is
+        a clipboard history's, not the paste. True once the text was fetched."""
+        deadline = time.monotonic() + CLIPBOARD_PASTE_FETCH_MAX_S
+        while (left := deadline - time.monotonic()) > 0:
+            served = await asyncio.to_thread(sends, seen, left)
+            if any(mime not in CLIPBOARD_SECRET_HINTS for mime in served[seen:]):
+                return True
+            if len(served) <= seen:
+                return False
+            seen = len(served)
+        return False
 
     async def _clear_injected_clipboard(self) -> None:
         """Drop the selection the injection left behind when there was nothing
