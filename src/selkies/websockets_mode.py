@@ -164,8 +164,9 @@ PATH_HOLD_MAX_S = 1.5
 # round trip stands before congestion control reads a queue on the path
 # (_steer_bitrate_to_link).
 LINK_QUEUE_MS = 40.0
-# The share of what the stream sent that a path's last measured window delivered at or above which
-# a gated window with nothing acked is taken for the path holding the stream, not for a queue.
+# The share of what the stream sent that a path's last window spanning two acks or more delivered
+# at or above which a gated window with nothing acked is taken for the path holding the stream, not
+# for a queue.
 LINK_CARRIED_SHARE = 0.8
 # Weight of each window in the path's jitter.
 LINK_JITTER_GAIN = 0.125
@@ -679,7 +680,7 @@ def _forget_path(display_state: dict) -> None:
     minutes the floor remembers, and congestion control would back its rate
     off on every tick. The steered rate stays as the starting point.
     """
-    for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer', 'link_delivered_bps', 'link_offered_bps',
+    for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer', 'link_delivered_bps', 'link_carried',
                 'link_jitter_ms'):
         display_state.pop(key, None)
 
@@ -3759,9 +3760,7 @@ class DataStreamingServer(BaseStreamingService):
         display_state['link_tick_sent'] = sent
         window = [a for a in display_state.get('link_acks', ()) if a[0] > last_tick]
         gated = not display_state.get('backpressure_enabled', True)
-        carried = (display_state.get('link_delivered_bps', 0.0)
-                   >= LINK_CARRIED_SHARE * display_state.get('link_offered_bps', 0.0))
-        if not window and (not gated or carried):
+        if not window and (not gated or display_state.get('link_carried', True)):
             return
         target = float(display_state.get('video_bitrate') or 0)
         module = self.capture_instances.get(display_id, {}).get('module')
@@ -3775,6 +3774,7 @@ class DataStreamingServer(BaseStreamingService):
         else:
             span = window[-1][0] - window[0][0]
             delivered_bps = (window[-1][2] - window[0][2]) * 8 / span if span > 0 else 0.0
+            measured_bps = delivered_bps if span > 0 else None
             newest_ms = window[-1][1] - floor_ms
             jitter_ms = display_state.get('link_jitter_ms')
             if jitter_ms is None and len(stand) >= LINK_RISE_ACKS:
@@ -3799,8 +3799,8 @@ class DataStreamingServer(BaseStreamingService):
         current = self._video_bitrate_kbps(display_state)
         held = gated or display_state.get('gate_moved_at', 0.0) > last_tick
         offered_bps = (sent - sent_then) * 8 / (now - last_tick) if last_tick and not held else None
-        if offered_bps is not None and window:
-            display_state['link_offered_bps'] = offered_bps
+        if offered_bps is not None and window and measured_bps is not None:
+            display_state['link_carried'] = measured_bps >= LINK_CARRIED_SHARE * offered_bps
         steer = display_state.setdefault('link_steer', CongestionSteer())
         rate = round(steer.target(current, target, float(lo_kbps), delivered_bps, 0.0, now, queue_s,
                                   offered_bps))

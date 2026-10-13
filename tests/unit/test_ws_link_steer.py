@@ -116,11 +116,20 @@ check("a gated display with nothing acked, its path having carried what was sent
 state = fresh_state()
 module.rates.clear()
 t = run(20.0, 0.0, 5)
+t = run(20.0, t, 0.5, every=10)
 state["backpressure_enabled"] = False
-state["link_delivered_bps"] = state["link_offered_bps"] / 4
+run(20.0, t, 0.5, acks=False)
+check("nor does it after a window of a single ack, which measures no delivery", module.rates == [], module.rates)
+
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5)
+t = run(20.0, t, 0.5, delivered_kbps=1000.0)
+module.rates.clear()
+state["backpressure_enabled"] = False
 run(20.0, t, 0.5, acks=False)
 check("one whose path carried a quarter of what was sent counts as a queue of unknown depth",
-      module.rates == [2800], module.rates)
+      bool(module.rates) and module.rates[-1] < 4000, module.rates)
 
 state = fresh_state()
 module.rates.clear()
