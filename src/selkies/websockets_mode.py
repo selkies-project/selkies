@@ -5653,8 +5653,14 @@ class DataStreamingServer(BaseStreamingService):
                 # Deferred: a reloading page takes the entry over with its capture warm;
                 # tearing down here would serialize its startup behind this reconfigure
                 # on the lock (seconds of black stream per reload).
+                # The code says who ended it: 1000/1001 the page, 1006 a cut with no close
+                # frame (a proxy, the network, or a ping of ours left unanswered), 4xxx this server.
+                close_code = getattr(websocket, "close_code", None)
+                close_error = websocket.exception() if hasattr(websocket, "exception") else None
                 data_logger.info(
-                    f"Client for '{disconnected_display_id}' disconnected. Deferring display teardown by {self.RECONNECT_GRACE_S:.0f}s for a possible reconnect."
+                    f"Client for '{disconnected_display_id}' disconnected (code {close_code}"
+                    f"{f': {close_error}' if close_error else ''}). Deferring display teardown by "
+                    f"{self.RECONNECT_GRACE_S:.0f}s for a possible reconnect."
                 )
 
                 async def _teardown_if_unclaimed(did=disconnected_display_id, dead_ws=websocket):
