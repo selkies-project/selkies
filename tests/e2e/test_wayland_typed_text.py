@@ -166,11 +166,13 @@ def run(res: "H.Results", pw, where: str, socket: str, runtime: str, type_text,
 def main() -> int:
     res = H.Results("wayland-typed-text")
     with sync_playwright() as pw:
-        ensure_wayland_display(width=1280, height=720, render_node="", auto_gpu="", cursor_size=24)
+        # The socket the compositor took, not the first in the directory: one an earlier
+        # suite's compositor left there would put the browser on that compositor instead.
+        seat_socket = ensure_wayland_display(width=1280, height=720, render_node="", auto_gpu="", cursor_size=24)
         capture = ScreenCapture()
         seat_runtime = os.environ["XDG_RUNTIME_DIR"]
         owner = IH._WaylandKeymapOwner(capture, capture.get_xkb_keymap_string())
-        run(res, pw, "seat", wayland_socket(seat_runtime), seat_runtime, owner.type_text, ("chromium",))
+        run(res, pw, "seat", seat_socket or wayland_socket(seat_runtime), seat_runtime, owner.type_text, ("chromium",))
 
         if shutil.which("labwc") is None:
             print("SKIP  [wayland-typed-text] the nested checks need labwc", flush=True)
