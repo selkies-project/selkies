@@ -4,14 +4,16 @@
 A document that lands whole in the print spool is announced once, whatever
 way it landed; `/api/print/<name>` serves it, records it for the audit, and
 takes it out of the spool, refusing a viewer, a disabled policy, and any name
-that is not a document in the spool; and each transport announces to the
-primary controller pages alone.
+that is not a document in the spool; each transport announces to the primary
+controller pages alone; and the scheduler's state root outside a runtime
+directory is this user's alone.
 """
 import asyncio
 import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -312,6 +314,40 @@ def scheduler_cases(root: str) -> None:
         printing.PrintQueue.SEARCH_PATH = search
 
 
+def root_claim_cases(tmp: str) -> None:
+    """Without a runtime directory the scheduler's state root sits in the shared
+    temporary directory: it is created for this user alone, and one already
+    there that another account could write, or a link planted at its name, is
+    refused before anything is written into it."""
+    runtime, tempdir = os.environ.pop("XDG_RUNTIME_DIR", None), tempfile.tempdir
+    tempfile.tempdir = tmp
+    try:
+        queue = printing.PrintQueue(os.path.join(tmp, "spool"))
+        check("the state root falls back to the temporary directory",
+              os.path.dirname(queue.root) == tmp, queue.root)
+
+        def claimed() -> bool:
+            try:
+                queue._claim_root()
+                return True
+            except PermissionError:
+                return False
+        check("an absent root is created for this user alone",
+              claimed() and stat.S_IMODE(os.lstat(queue.root).st_mode) == 0o700)
+        check("and taken again on the next start", claimed())
+        os.chmod(queue.root, 0o777)
+        check("a root others can write is refused", not claimed())
+        os.rmdir(queue.root)
+        planted = os.path.join(tmp, "planted")
+        os.mkdir(planted, 0o700)
+        os.symlink(planted, queue.root)
+        check("a link planted at its name is refused", not claimed())
+    finally:
+        tempfile.tempdir = tempdir
+        if runtime is not None:
+            os.environ["XDG_RUNTIME_DIR"] = runtime
+
+
 async def main() -> None:
     root = tempfile.mkdtemp(prefix="selkies-printing-")
     spool, elsewhere = os.path.join(root, "spool"), os.path.join(root, "elsewhere")
@@ -322,6 +358,8 @@ async def main() -> None:
         paper_cases()
         spool_path_cases(os.path.join(root, "state"))
         scheduler_cases(os.path.join(root, "arch"))
+        os.makedirs(os.path.join(root, "tmp"))
+        root_claim_cases(os.path.join(root, "tmp"))
         pending_cases(spool)
         await watcher_cases(spool, elsewhere)
         await route_cases(spool)

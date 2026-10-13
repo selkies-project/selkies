@@ -205,7 +205,21 @@ class PrintQueue:
             return None
         return cupsd, stat.S_IMODE(os.stat(cupsd).st_mode)
 
+    def _claim_root(self) -> None:
+        """Make the state root this user's alone, or refuse it: without a runtime
+        directory it sits in the shared temporary one under a predictable name,
+        where another account could create it first and plant the programs and
+        configuration the scheduler then runs as this user."""
+        try:
+            os.mkdir(self.root, 0o700)
+        except FileExistsError:
+            pass
+        st = os.lstat(self.root)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+            raise PermissionError(f"{self.root} is not a directory this user alone owns and writes")
+
     def _prepare(self, server_bin: str, data_dir: str) -> None:
+        self._claim_root()
         for sub in ("ppd", "state", "cache", "spool", "tmp", "bin/backend"):
             os.makedirs(os.path.join(self.root, sub), exist_ok=True)
         os.makedirs(self.spool, exist_ok=True)
