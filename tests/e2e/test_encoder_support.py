@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import helpers as H
 import core_lib as C
-from test_dashboard_matrix import open_settings, encoder_menu_button
+from test_dashboard_matrix import encoder_menu_button
+from test_dashboards import open_wish_settings_tab
 from playwright.sync_api import sync_playwright
 
 UNSUPPORTED = "Unsupported Browser"
@@ -74,8 +75,8 @@ def classic_menu(page: Any) -> Optional[list]:
 
 def wish_menu(page: Any) -> Optional[list]:
     """The wish dashboard's encoder menu items as `(text, disabled)`, opened
-    from its Settings panel; None when the menu never renders."""
-    if not open_settings(page):
+    from its Settings panel's Format card; None when the menu never renders."""
+    if not open_wish_settings_tab(page, "Video", "Format"):
         return None
     button = encoder_menu_button(page)
     if button is None:

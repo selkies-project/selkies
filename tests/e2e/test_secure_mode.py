@@ -52,6 +52,9 @@ import helpers as H
 import core_lib as C
 import websockets
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from test_dashboards import wish_open_menu_item  # noqa: E402
+
 MASTER = "e2e-master-token"
 CTRL_TOKEN = "e2e-ctrl-Qx9"
 VIEW_TOKEN = "e2e-view-Zt4"
@@ -607,22 +610,8 @@ def open_files_modal(page, dashboard: str) -> bool:
             time.sleep(0.5)
             page.locator('.sidebar-section-header:has-text("Files")').first.click()
             time.sleep(0.5)
-        else:
-            triggers = page.locator('[role="menubar"] button')
-            opened = False
-            for i in range(triggers.count()):
-                triggers.nth(i).click()
-                time.sleep(0.5)
-                item = page.locator('[role="menu"] [role="menuitem"]:has-text("Files")').first
-                if item.count():
-                    item.click()
-                    time.sleep(0.8)
-                    opened = True
-                    break
-                page.keyboard.press("Escape")
-                time.sleep(0.2)
-            if not opened:
-                return False
+        elif not wish_open_menu_item(page, "Files"):
+            return False
         page.locator('button:has-text("Download Files")').first.click()
         time.sleep(1.0)
         return True

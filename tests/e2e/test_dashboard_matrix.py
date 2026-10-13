@@ -20,7 +20,6 @@ gates-webrtc-x11 / gates-ws-wl / gates-webrtc-wl:
 Usage: python3 tests/e2e/test_dashboard_matrix.py [<cell>|all]
 """
 import os
-import re
 import sys
 import time
 from typing import Any, Optional
@@ -104,11 +103,10 @@ def log_since(mark: int, substr: str, timeout: float = 12) -> bool:
 
 
 def open_settings(page: Any) -> bool:
-    """Open the Wish Settings panel (the Settings2 icon in the control strip)."""
-    trig = page.locator('button:has(svg.lucide-settings-2)').first
-    if not trig.count():
+    """Open the Wish Settings panel at its video Performance card, whose first
+    slider is the frame rate."""
+    if not TD.open_wish_settings_tab(page, "Video", "Performance"):
         return False
-    trig.click(force=True, timeout=3000)
     deadline = time.time() + 6
     while time.time() < deadline:
         if page.locator('[data-slot="slider-thumb"]').count() > 0:
@@ -164,14 +162,14 @@ def wish_block(cell: str) -> "H.Results":
         try:
             info = wait_video(page, mode)
             res.check("video streams", info is not None, info)
-            # The chrome arrives with the page; the gamepad preview in its
-            # dropdown follows the server settings payload.
+            # The chrome arrives with the page; the Gamepads panel's pads part
+            # follows the server settings payload.
             deadline = time.time() + 10
             card = False
             while time.time() < deadline and not card:
-                card = TD.wish_gamepad_preview(page)
+                card = TD.wish_gamepad_panel(page)["pads"]
                 time.sleep(0.5)
-            res.check("dashboard chrome renders", page.locator('[role="menubar"]').count() > 0)
+            res.check("dashboard chrome renders", page.locator(TD.WISH_CHROME).count() > 0)
             res.check("gamepad card shown by default", card)
 
             push = f"e2e-{cell}-s2c-{int(time.time())}"
@@ -214,9 +212,7 @@ def wish_block(cell: str) -> "H.Results":
                 time.sleep(0.5)
             res.check("clipboard: text typed into the panel reached the server", sent and got_text == probe,
                       repr(got_text)[:80])
-            for _ in range(3):
-                page.keyboard.press("Escape")
-                time.sleep(0.2)
+            TD.wish_close_menus(page)
 
             res.check("settings panel opens", open_settings(page))
             mark = len(H.server_log())
@@ -235,6 +231,7 @@ def wish_block(cell: str) -> "H.Results":
             # (WebRTC streams h264enc alone, so there it is hidden).
             allowed = page.evaluate(
                 "(window.__serverSettings && window.__serverSettings.encoder || {}).allowed || []")
+            TD.open_wish_settings_tab(page, "Video", "Format")
             button = encoder_menu_button(page)
             picked = None
             if len(allowed) <= 1:
@@ -265,11 +262,9 @@ def wish_block(cell: str) -> "H.Results":
             page.keyboard.press("Escape")
             time.sleep(0.3)
 
-            apps = page.locator('button:has(svg.lucide-layout-grid)').first
             opened = False
             notice = False
-            if apps.count():
-                apps.click(force=True, timeout=3000)
+            if TD.wish_open_menu_item(page, "Apps"):
                 deadline = time.time() + 6
                 while time.time() < deadline and not opened:
                     opened = page.locator('[role="dialog"]:has-text("Apps")').count() > 0
@@ -305,7 +300,8 @@ def gates_block(cell: str) -> "H.Results":
             res.check(f"{dashboard}: video streams with the sidebar hidden", wait_video(page, mode) is not None)
             time.sleep(2.0)
             chrome = page.evaluate(
-                """(() => !!document.querySelector('.sidebar, [role="menubar"], .top-menu, .sidebar-container'))()""")
+                """(() => !!document.querySelector('.sidebar, .top-menu, .sidebar-container, WISH_CHROME'))()"""
+                .replace("WISH_CHROME", TD.WISH_CHROME))
             res.check(f"{dashboard}: ui_show_sidebar=false hides chrome", not chrome, chrome)
             browser.close()
         H.server_start(mode=mode, wayland=wayland, web_root=dist, extra_env={
@@ -338,7 +334,7 @@ def gates_block(cell: str) -> "H.Results":
             else:
                 body = page.evaluate("document.body.innerText")
                 menu = ""
-                triggers = page.locator('[role="menubar"] button')
+                triggers = page.locator(TD.WISH_MENU_TRIGGERS)
                 for i in range(triggers.count()):
                     try:
                         triggers.nth(i).click()
@@ -350,8 +346,9 @@ def gates_block(cell: str) -> "H.Results":
                     except Exception:
                         pass
                 body += menu
-                mic, cam, pad = "Microphone" in menu, "Webcam" in menu, "Gamepad Input" in menu
-                section = re.search(r"^Gamepad \d+$", menu, re.M) is not None
+                gamepads = TD.wish_gamepad_panel(page)
+                mic, cam, pad = "Microphone" in menu, "Webcam" in menu, gamepads["input"]
+                section = gamepads["pads"]
             res.check(f"{dashboard}: ui_sidebar_show_shortcuts=false hides the Shortcuts section",
                       "Shortcuts" not in body)
             res.check(f"{dashboard}: core buttons reachable (microphone toggle present)", mic)

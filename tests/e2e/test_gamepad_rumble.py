@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from test_gamepad_rumble import build_interposer  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_dashboards import wish_open_menu_item  # noqa: E402
+from test_dashboards import wish_show_toolbar  # noqa: E402
 
 # A standard pad whose motors record what they are asked to play, in the
 # shape the engine gives its pads: `vibrationActuator` for Chromium and WebKit,
@@ -365,8 +365,19 @@ def click_rumble_toggle(page, dashboard: str) -> bool:
         toggle.first.click()
         time.sleep(0.5)
         return True
-    ok = wish_open_menu_item(page, "Rumble")
-    page.keyboard.press("Escape")
+    # Wish keeps it in the Gamepads panel its top bar opens.
+    wish_show_toolbar(page)
+    panel = page.locator('button[aria-label="Gamepads"]').first
+    if not panel.count():
+        return False
+    panel.click()
+    time.sleep(0.6)
+    toggle = page.locator("div:has(> label:text-is('Rumble')) > [role='switch']").first
+    ok = toggle.count() > 0
+    if ok:
+        toggle.click()
+        time.sleep(0.5)
+    panel.click()
     return ok
 
 

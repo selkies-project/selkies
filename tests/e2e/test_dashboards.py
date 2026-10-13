@@ -112,21 +112,57 @@ def set_range_slider(page, idx: int, value) -> None:
     }""", [idx, value])
 
 
-def wish_open_menu_item(page, label: str) -> bool:
-    """Open the Wish menubar menu that carries `label` and click that item.
+#: The Wish top bar's buttons that open a menu (its Menu dropdown).
+WISH_MENU_TRIGGERS = '[data-slot="tooltip-trigger"][aria-haspopup="menu"]'
+#: Anything in the Wish top bar, which the chrome checks look for.
+WISH_CHROME = '[data-slot="button-group"]'
 
-    The top menu is several Radix menubars; each is opened in turn until one
-    renders a menu item with the label (a submenu trigger counts).
+
+def wish_close_menus(page) -> None:
+    """Close the Wish menus left open: a submenu (the clipboard's) takes an
+    Escape of its own before the menu under it, which would take the next
+    click."""
+    for _ in range(3):
+        menus = page.locator('[role="menu"]')
+        if not menus.count():
+            return
+        # Escape reaches a menu only from within it: a field blurred in place
+        # leaves the focus on the page.
+        try:
+            menus.last.focus(timeout=1000)
+        except Exception:
+            pass
+        page.keyboard.press("Escape")
+        time.sleep(0.3)
+
+
+def wish_show_toolbar(page) -> None:
+    """Close any Wish menu left open, whose trigger would only close it, and
+    bring the top bar back where gaming mode slid it up behind the top edge,
+    leaving only the tab that shows it again."""
+    wish_close_menus(page)
+    show = page.locator('button[aria-label="Show toolbar"]')
+    if show.count():
+        show.first.click()
+        time.sleep(0.6)
+
+
+def wish_open_menu_item(page, label: str) -> bool:
+    """Open the Wish top-bar menu that carries `label` and click that item.
+
+    Each menu the top bar opens is tried in turn until one renders a menu
+    item with the label (a submenu trigger or a checkbox item counts).
 
     Returns:
         True when the item was found and clicked.
     """
-    triggers = page.locator('[role="menubar"] button')
+    wish_show_toolbar(page)
+    triggers = page.locator(WISH_MENU_TRIGGERS)
     for i in range(triggers.count()):
         try:
             triggers.nth(i).click()
             time.sleep(0.5)
-            item = page.locator(f'[role="menu"] [role="menuitem"]:has-text("{label}")').first
+            item = page.locator(f'[role="menu"] [role^="menuitem"]:has-text("{label}")').first
             if item.count():
                 item.click()
                 time.sleep(0.8)
@@ -138,22 +174,22 @@ def wish_open_menu_item(page, label: str) -> bool:
     return False
 
 
-def wish_gamepad_preview(page) -> bool:
-    """Whether the Wish gamepad dropdown carries the gamepad preview, a visualizer
-    titled "Gamepad 0": each menubar menu is opened, read, and closed again."""
-    triggers = page.locator('[role="menubar"] button')
-    for i in range(triggers.count()):
-        try:
-            triggers.nth(i).click()
-            time.sleep(0.5)
-            found = page.locator('[role="menu"]').locator('text=/^Gamepad \\d+$/').count() > 0
-            page.keyboard.press("Escape")
-            time.sleep(0.2)
-            if found:
-                return True
-        except Exception:
-            pass
-    return False
+def wish_gamepad_panel(page) -> dict:
+    """What the Wish Gamepads panel offers, opened from its top-bar button and
+    closed again: the gamepad input switch (`input`), and the pads part that
+    ui_sidebar_show_gamepads gates (`pads`: the touch gamepad, rumble, and the
+    pad preview), told by its Rumble switch."""
+    wish_show_toolbar(page)
+    button = page.locator('button[aria-label="Gamepads"]').first
+    if not button.count():
+        return {"input": False, "pads": False}
+    button.click()
+    time.sleep(0.6)
+    got = {"input": page.locator("label:text-is('Gamepad Input')").count() > 0,
+           "pads": page.locator("label:text-is('Rumble')").count() > 0}
+    button.click()
+    time.sleep(0.3)
+    return got
 
 
 def wish_clipboard_seed_check(page, res: "H.Results") -> None:
@@ -183,8 +219,7 @@ def wish_clipboard_seed_check(page, res: "H.Results") -> None:
             shown = f"<no textarea: {e}>"
     res.check("clipboard panel opens with the text that arrived while closed",
               opened and shown == push, shown[:80])
-    page.keyboard.press("Escape")
-    time.sleep(0.3)
+    wish_close_menus(page)
 
 
 def wish_stats_fit_check(page, res: "H.Results") -> None:
@@ -196,9 +231,9 @@ def wish_stats_fit_check(page, res: "H.Results") -> None:
     drag clamp, pinning its top at 0, cannot bring them.
     """
     measure = """() => {
-      const h3 = [...document.querySelectorAll('h3')].find((h) => h.closest('div.w-80'));
+      const h3 = [...document.querySelectorAll('h3')].find((h) => h.innerText.trim() === 'System Performance Monitor');
       if (!h3) return null;
-      const panel = h3.closest('div.w-80');
+      const panel = h3.closest('[class*="rounded"]');
       const scroller = [panel, ...panel.querySelectorAll('div')].find(
         (el) => /auto|scroll/.test(getComputedStyle(el).overflowY)) || panel;
       scroller.scrollTop = scroller.scrollHeight;
@@ -542,8 +577,6 @@ def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
               page.evaluate("window.__clipImages"))
     if dashboard == "wish":
         # The dialog closed the menu; the panel shows the pick again when reopened.
-        page.keyboard.press("Escape")
-        time.sleep(0.3)
         open_clipboard_panel(page, dashboard)
         time.sleep(0.4)
     # Nothing points at a URL for the picked file: the preview draws its pixels.
@@ -730,8 +763,8 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
 
         chrome = page.evaluate("""(() => ({
             body: document.body.innerText.length,
-            sidebar: !!document.querySelector('.sidebar, [role="menubar"], .top-menu, .sidebar-container'),
-        }))()""")
+            sidebar: !!document.querySelector('.sidebar, .top-menu, .sidebar-container, ' + WISH_CHROME),
+        }))()""".replace("WISH_CHROME", repr(WISH_CHROME)))
         res.check("dashboard chrome renders", chrome["sidebar"] or chrome["body"] > 400,
                   chrome)
         info = wait_canvas(page)
@@ -741,7 +774,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         if dashboard == "classic":
             section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
         else:
-            section = wish_gamepad_preview(page)
+            section = wish_gamepad_panel(page)["pads"]
         res.check("gamepads section shown by default", section, section)
 
         if dashboard == "wish":
@@ -777,18 +810,11 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
             except Exception as e:
                 print("classic slider err:", e)
         else:
-            # The sliders are driven by click-to-focus plus arrow keys.
+            # The sliders are driven by click-to-focus plus arrow keys; the
+            # frame rate is the first of the Performance card.
             try:
-                opened = False
-                trig = page.locator('button:has(svg.lucide-settings-2)').first
-                if trig.count():
-                    trig.click(force=True, timeout=3000)
-                    time.sleep(1.2)
-                    opened = page.locator('[data-slot="slider-thumb"]').count() > 0
-                if not opened:
-                    page.get_by_role("button", name=lambda n: "settings" in (n or "").lower()).first.click(force=True, timeout=2500)
-                    time.sleep(1.2)
-                    opened = page.locator('[data-slot="slider-thumb"]').count() > 0
+                opened = (open_wish_settings_tab(page, "Video", "Performance")
+                          and page.locator('[data-slot="slider-thumb"]').count() > 0)
                 if opened:
                     track = page.locator('[data-slot="slider-thumb"]').first
                     track.click(force=True, timeout=2000)
@@ -885,7 +911,8 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
         page = ctx.new_page()
         page.goto(H.BASE_URL, wait_until="load")
         time.sleep(8.0)
-        chrome = page.evaluate("""(() => !!document.querySelector('.sidebar, [role="menubar"], .top-menu, .sidebar-container'))()""")
+        chrome = page.evaluate("""(() => !!document.querySelector('.sidebar, .top-menu, .sidebar-container, WISH_CHROME'))()"""
+                               .replace("WISH_CHROME", WISH_CHROME))
         res.check("ui_show_sidebar=false hides chrome", not chrome, chrome)
         # The shortcuts gate needs the sidebar enabled, so it gets its own boot.
         browser.close()
@@ -926,7 +953,7 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
             section = page.locator('.sidebar-section-header:has-text("Gamepads")').count() > 0
         else:
             menu = ""
-            triggers = page.locator('[role="menubar"] button')
+            triggers = page.locator(WISH_MENU_TRIGGERS)
             for i in range(triggers.count()):
                 try:
                     triggers.nth(i).click()
@@ -937,9 +964,9 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
                     time.sleep(0.2)
                 except Exception:
                     pass
-            mic, cam, pad = "Microphone" in menu, "Webcam" in menu, "Gamepad Input" in menu
-            # The preview renders a titled visualizer ("Gamepad 0") in the same menu when shown.
-            section = re.search(r"^Gamepad \d+$", menu, re.M) is not None
+            gamepads = wish_gamepad_panel(page)
+            mic, cam, pad = "Microphone" in menu, "Webcam" in menu, gamepads["input"]
+            section = gamepads["pads"]
         res.check("core buttons reachable (microphone toggle present)", mic, mic)
         res.check("ui_sidebar_show_webcam=false hides webcam toggle", not cam, cam)
         res.check("ui_sidebar_show_gamepads=false keeps the gamepad input toggle", pad, pad)
@@ -951,7 +978,7 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
             time.sleep(0.8)
             preset = page.locator('#resolutionPresetSelect').count()
         else:
-            open_wish_settings_tab(page, "Resolution")
+            open_wish_settings_tab(page, "Resolution", "Resolution")
             preset = page.locator('button:has-text("Select Preset")').count()
         # The button beside the resolution controls, so an unopened panel cannot pass.
         scale = page.locator('button:has-text("Scale Locally")').count()
@@ -1302,19 +1329,30 @@ def second_screen_auto_block(dashboard: str, dist: str) -> "H.Results":
     return res
 
 
-def open_wish_settings_tab(page, tab: str) -> bool:
+def open_wish_settings_tab(page, tab: str, card: str = "") -> bool:
     """Open the Wish Settings panel (the Settings2 icon in the control strip)
-    and switch it to the tab labeled `tab`."""
-    trig = page.locator('button:has(svg.lucide-settings-2)').first
-    if not trig.count():
-        return False
-    trig.click(force=True, timeout=3000)
-    time.sleep(1.0)
+    unless it is open, switch it to the tab labeled `tab`, and open the card
+    titled `card` there: a tab's cards are an accordion that keeps one open.
+    A bar that gaming mode slid up behind the top edge is brought back first."""
+    wish_show_toolbar(page)
+    if not page.locator('[role="tab"]').count():
+        trig = page.locator('button:has(svg.lucide-settings-2)').first
+        if not trig.count():
+            return False
+        trig.click(force=True, timeout=3000)
+        time.sleep(1.0)
     tab_button = page.locator(f'[role="tab"]:has-text("{tab}")').first
     if not tab_button.count():
         return False
     tab_button.click()
     time.sleep(0.8)
+    if card:
+        trigger = page.locator('[data-slot="accordion-trigger"]:visible', has_text=card).first
+        if not trigger.count():
+            return False
+        if trigger.get_attribute("aria-expanded") != "true":
+            trigger.click()
+            time.sleep(0.6)
     return True
 
 
@@ -1336,7 +1374,7 @@ def click_raw_pointer_motion(page, dashboard: str) -> bool:
         if not open_wish_settings_tab(page, "Resolution"):
             return False
         toggle = page.locator(
-            'div:has(> div > label:has-text("Raw pointer motion")) > [role="switch"]')
+            'div:has(> label:has-text("Raw pointer motion")) > [role="switch"]')
     if not toggle.count():
         return False
     toggle.first.scroll_into_view_if_needed()
@@ -1406,7 +1444,7 @@ def pick_rate_control(page, dashboard: str, mode: str) -> bool:
             return True
         box = page.locator("div.space-y-2:has(> label:text-is('Encoder Rate Control Mode'))")
         if not box.count():
-            open_wish_settings_tab(page, "Video")
+            open_wish_settings_tab(page, "Video", "Performance")
         box.first.locator("button").first.click(timeout=5000)
         item = "CRF (Constant Quality)" if mode == "crf" else "CBR (Constant Bitrate)"
         page.locator(f"[role='menuitem']:has-text('{item}')").first.click(timeout=5000)
@@ -1542,7 +1580,7 @@ def pick_rate_control_open(page, dashboard: str) -> bool:
             return page.locator('#rateControlSelect').count() > 0
         box = page.locator("div.space-y-2:has(> label:text-is('Encoder Rate Control Mode'))")
         if not box.count():
-            open_wish_settings_tab(page, "Video")
+            open_wish_settings_tab(page, "Video", "Performance")
         return box.count() > 0
     except Exception:
         return False
@@ -1556,10 +1594,10 @@ def paint_over_switches(page, dashboard: str):
             classic_open_video(page)
         return page.locator('#videoStreamingModeToggle'), page.locator('#usePaintOverQualityToggle')
     if not page.locator("label:text-is('Use Paint-Overs')").count():
-        open_wish_settings_tab(page, "Video")
+        open_wish_settings_tab(page, "Video", "Performance")
 
     def row(label: str):
-        return page.locator(f"div.justify-between:has(> div > label:text-is('{label}')) [role='switch']").first
+        return page.locator(f"div.justify-between:has(> label:text-is('{label}')) > [role='switch']").first
     return row("Turbo"), row("Use Paint-Overs")
 
 
