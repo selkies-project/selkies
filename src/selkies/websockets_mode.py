@@ -268,7 +268,7 @@ TARGET_FRAMERATE = 60
 # Secure mode: the messages only the input-authority holder may send. A set, and
 # built once, because the check runs per client message.
 SECURE_INPUT_PREFIXES = frozenset((
-    "kd", "ku", "kh", "kr", "m", "m2", "co", "cmd",
+    "kd", "ku", "kh", "kr", "m", "m2", "co", "cmd", "sf", "sfe",
     "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb",
     "REQUEST_CLIPBOARD",
 ))

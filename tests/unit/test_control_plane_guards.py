@@ -6,8 +6,9 @@ rides the data WebSocket URL as a query parameter), the mode-switch POST must be
 held to the same Origin rule as the WebSocket upgrades unless the Bearer master
 token authenticates it, a secure-mode session token is looked up in constant
 time, the MK_ACCESS verdict a websockets client is told on connect matches
-the one WebRTC pushes at channel open (a viewer additionally needs collab), and
-a client's gzip frame cannot inflate past the per-message ceiling.
+the one WebRTC pushes at channel open (a viewer additionally needs collab), a
+client's gzip frame cannot inflate past the per-message ceiling, and the
+WebSockets secure-mode input gate holds every verb the WebRTC one does.
 """
 import asyncio
 import base64
@@ -272,11 +273,25 @@ def _raises(exc, payload: bytes) -> bool:
     return False
 
 
+def secure_gate_cases() -> None:
+    """Every input verb the WebRTC secure gate holds to input authority, the
+    WebSockets one does too (it matches whole verbs, WebRTC prefixes)."""
+    from selkies import websockets_mode as wm
+    from selkies.input_handler import VIEWER_COLLAB_EXTRA_PREFIXES
+    # Exempt on both: the bare clipboard read-back and the pointer echo inject nothing.
+    verbs = {p.rstrip(",") for p in VIEWER_COLLAB_EXTRA_PREFIXES} - {"cr", "_pointer_echo"}
+    missing = sorted(verbs - wm.SECURE_INPUT_PREFIXES)
+    check("the WebSockets secure gate holds every input verb the WebRTC one does", not missing, missing)
+    check("a finger scroll and its end are held to input authority on WebSockets",
+          {"sf", "sfe"} <= wm.SECURE_INPUT_PREFIXES)
+
+
 def main() -> bool:
     asyncio.run(access_log_cases())
     asyncio.run(switch_origin_cases())
     mk_verdict_cases()
     gz_bomb_cases()
+    secure_gate_cases()
     print(f"[control-plane] {passed}/{passed + failed} passed", flush=True)
     return failed == 0
 
