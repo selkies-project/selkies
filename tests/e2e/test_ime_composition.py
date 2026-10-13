@@ -13,10 +13,9 @@ Chromium (platform-spoofed via CDP where a branch needs it):
   commit. The end must see the stamp and clear the preedit instead of typing
   the text a second time.
 
-The preedit itself goes out only once typing pauses: a burst of keys sends its
-commits, and a stage left standing appears on the wire after the pause. A commit
-of several CJK characters goes as one text commit, which the server binds in one
-keymap change.
+Each preedit stage goes out as it is typed, and a commit of several CJK
+characters goes as one text commit, which the server binds in one keymap
+change.
 
 A dashboard soft modifier is then held over the two soft-keyboard anatomies:
 Android Chromium reports a tap as keyCode 229 with no key or code and the
@@ -254,12 +253,10 @@ def run_branch(pw: Any, tag: str, platform: Optional[str], ua: Optional[str],
                 page.evaluate("(g) => window.__replay(g)", gseq)
             time.sleep(0.4)
             if mid is not None:
-                # A burst of keys sends its commits; each probe sits mid-syllable, its preedit not yet shown.
                 got_mid = page.evaluate("window.__mid")
-                burst = [""] + mid[:-1]
-                one_mid = (got_mid == burst)
-                check(f"{tag}: a burst of keys streams the commits, not each preedit stage",
-                      one_mid, f"mid={got_mid!r} expect={burst!r}")
+                one_mid = (got_mid == mid)
+                check(f"{tag}: preedit text rolls forward mid-syllable",
+                      one_mid, f"mid={got_mid!r} expect={mid!r}")
                 return one_mid
             return True
 
@@ -276,26 +273,24 @@ def run_branch(pw: Any, tag: str, platform: Optional[str], ua: Optional[str],
         page.evaluate("window.__sent = []")
         page.evaluate("() => { window.__dispatch('compositionstart', ''); window.__dispatch('compositionupdate', '한'); }")
         during = page.evaluate("window.__decodeWire()")
-        time.sleep(0.35)
-        paused = page.evaluate("window.__decodeWire()")
         page.evaluate("() => window.__dispatch('compositionend', '')")
-        shown = during == "" and paused == "한"
+        shown = during == "한"
         ok = ok and shown
-        check(f"{tag}: the preedit shows once typing pauses", shown, f"during={during!r} paused={paused!r}")
+        check(f"{tag}: a preedit stage shows as it is typed", shown, f"during={during!r}")
         page.evaluate("window.__sent = []")
         # The commit rides the end, or the textInput after a clear-only end where the engine commits there.
         page.evaluate("""() => {
             window.__dispatch('compositionstart', ''); window.__dispatch('compositionupdate', 'nihao');
             window.__dispatch('compositionend', '你好');
-            if (!window.__sent.some((m) => !m.startsWith('kh,'))) {
+            if (!window.__sent.some((m) => m.startsWith('co,'))) {
                 try { window.__dispatch('textInput', '你好'); } catch (e) { /* no TextEvent */ }
             }
         }""")
         time.sleep(0.35)
-        wire = [m for m in page.evaluate("window.__sent") if not m.startswith("kh,")]
-        whole = wire == ["co,end,你好"]
+        commits = [m for m in page.evaluate("window.__sent") if m.startswith("co,")]
+        whole = commits == ["co,end,你好"]
         ok = ok and whole
-        check(f"{tag}: a commit of several CJK characters goes as one text commit", whole, f"wire={wire}")
+        check(f"{tag}: a commit of several CJK characters goes as one text commit", whole, f"commits={commits}")
         return ok
 
     finally:
