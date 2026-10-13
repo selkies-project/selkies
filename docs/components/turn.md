@@ -9,7 +9,7 @@ description: The coTURN container and the TURN-REST credential service for the o
 >
 > [Pion TURN](https://github.com/pion/turn)'s `turn-server-simple` executable or [eturnal](https://eturnal.net) are recommended alternative TURN server implementations that support Windows as well as Linux or MacOS. [STUNner](https://github.com/l7mp/stunner) is a Kubernetes native STUN and TURN deployment if Helm is possible to be used.
 
-The [coTURN Container](https://github.com/selkies-project/selkies/tree/main/addons/coturn) is a reference container which provides the [coTURN](https://github.com/coturn/coturn) TURN server. Other than options including `-e TURN_SHARED_SECRET=`, `-e TURN_REALM=`, `-e TURN_PORT=`, `-e TURN_MIN_PORT=` (at least `49152`), and `-e TURN_MAX_PORT=` (at most `65535`), add more command-line options in `-e TURN_EXTRA_ARGS=`.
+The [coTURN Container](https://github.com/selkies-project/selkies/tree/main/addons/coturn) is a reference container which provides the [coTURN](https://github.com/coturn/coturn) TURN server. Other than options including `-e TURN_SHARED_SECRET=` (required: the container refuses to start without a secret of your own), `-e TURN_REALM=`, `-e TURN_PORT=`, `-e TURN_MIN_PORT=` (at least `49152`), and `-e TURN_MAX_PORT=` (at most `65535`), add more command-line options in `-e TURN_EXTRA_ARGS=`.
 
 Run the Docker®/Podman container built from the [`coTURN Dockerfile`](https://github.com/selkies-project/selkies/tree/main/addons/coturn/Dockerfile) (**replace `main` to `latest` for the latest stable release**):
 

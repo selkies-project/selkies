@@ -23,6 +23,12 @@
 
 set -e
 
+# The secret is the relay's only credential: refuse to start on a guessable one.
+if [ -z "${TURN_SHARED_SECRET}" ] || [ "${TURN_SHARED_SECRET}" = "changeme" ]; then
+    echo "Set TURN_SHARED_SECRET to a secret of your own, the one Selkies or the TURN-REST container mints credentials with." >&2
+    exit 1
+fi
+
 export TURN_EXTERNAL_IP="${TURN_EXTERNAL_IP:-$(detect_external_ip)}"
 
 # NOTE that the listening IP must be bound to only the IPs you will be responding to if not using "0.0.0.0" or "::".
@@ -43,7 +49,7 @@ turnserver \
     --max-port="${TURN_MAX_PORT:-65535}" \
     --channel-lifetime="${TURN_CHANNEL_LIFETIME:--1}" \
     --use-auth-secret \
-    --static-auth-secret="${TURN_SHARED_SECRET:-changeme}" \
+    --static-auth-secret="${TURN_SHARED_SECRET}" \
     --no-cli \
     --userdb="/tmp/turnserver-turndb" \
     --pidfile="/tmp/turnserver.pid" \
