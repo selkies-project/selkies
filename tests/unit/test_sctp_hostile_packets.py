@@ -11,6 +11,7 @@ import os
 import struct
 import sys
 import threading
+import time
 import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
@@ -94,6 +95,45 @@ def deliver(established: bool, raw: bytes) -> tuple:
     return ok, "dropped, association answers" if ok else outcome, outcome["sent"]
 
 
+def outstanding(assoc, n: int) -> list:
+    """n DATA chunks sent once and unacknowledged, from the association's next TSN."""
+    chunks = []
+    for i in range(n):
+        c = sctp.DataChunk()
+        c.tsn = (assoc._local_tsn + i) % sctp.SCTP_TSN_MODULO
+        c.user_data = b"x"
+        c._acked = c._abandoned = c._retransmit = False
+        c._book_size, c._expiry, c._max_retransmits = 100, None, None
+        c._misses, c._sent_count, c._sent_time = 0, 1, time.time()
+        assoc._sent_queue.append(c)
+        assoc._flight_size_increase(c)
+        chunks.append(c)
+    return chunks
+
+
+def sacked(gaps: list, ack_first: bool = True) -> tuple:
+    """Eight chunks outstanding, then a SACK with these gap blocks: the seconds it
+    took, each chunk's (acked, misses) or None once cumulatively acked, and
+    whether the association still answers."""
+    out: dict = {}
+
+    async def run() -> None:
+        assoc, dtls = await association(True)
+        chunks = outstanding(assoc, 8)
+        cumulative = chunks[0].tsn if ack_first else (chunks[0].tsn - 1) % sctp.SCTP_TSN_MODULO
+        body = struct.pack("!LLHH", cumulative, 131072, len(gaps), 0) + b"".join(struct.pack("!HH", *g) for g in gaps)
+        start = time.monotonic()
+        await assoc._handle_data(packet(assoc._local_verification_tag, chunk(3, body)))
+        out["took"] = time.monotonic() - start
+        out["chunks"] = [(c._acked, c._misses) if c in assoc._sent_queue else None for c in chunks]
+        out["alive"] = await answers_heartbeat(assoc, dtls)
+
+    thread = threading.Thread(target=lambda: asyncio.run(run()), daemon=True)
+    thread.start()
+    thread.join(30)
+    return out.get("took", 30.0), out.get("chunks"), out.get("alive", False)
+
+
 def main() -> bool:
     res = H.Results("sctp-hostile")
     tag = lambda body: lambda assoc: packet(assoc._local_verification_tag, body)  # noqa: E731
@@ -119,6 +159,14 @@ def main() -> bool:
     acks = [c for p in sent for c in sctp.parse_packet(p)[3] if isinstance(c, sctp.DataChunk) and c.protocol == 50]
     res.check("a channel's label and a string message not UTF-8 are taken, not raised", ok and len(acks) == 1,
               f"{len(acks)} DATA_CHANNEL_ACK" if ok else detail)
+    took, _chunks, alive = sacked([(1, 65535)] * 370, ack_first=False)
+    res.check("a SACK of gap blocks spanning millions of TSNs takes no time", took < 0.2 and alive,
+              f"{took:.3f} s, answers {alive}")
+    expect = [None, (False, 1), (True, 0), (True, 0), (False, 1), (True, 0), (False, 0), (False, 0)]
+    for gaps in ([(2, 3), (5, 5)], [(5, 5), (2, 3), (3, 2), (2, 2), (3, 3)]):
+        _took, chunks, alive = sacked(gaps)
+        res.check(f"gap blocks {gaps} ack the chunks they name and strike those before the highest",
+                  chunks == expect and alive, str(chunks))
     ok, detail, sent = deliver(True, tag(data(1000)))
     acked = [c.cumulative_tsn for p in sent for c in sctp.parse_packet(p)[3] if isinstance(c, sctp.SackChunk)]
     res.check("in-window DATA is still received and acknowledged", ok and 1000 in acked, f"SACK cumulative TSNs {acked}")

@@ -32,6 +32,7 @@
 #   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import asyncio
+import bisect
 import enum
 import hmac
 import logging
@@ -1379,21 +1380,32 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         # handle gap blocks
         loss = False
         if chunk.gaps:
-            seen = set()
-            # A malformed SACK whose gap ranges are all empty must not leave the
-            # highest-seen TSN undefined; the cumulative TSN is the neutral floor.
+            # The gap ranges, offsets from the cumulative TSN, merged: each chunk
+            # sent is looked up in them, never each offset they span (a packet of
+            # blocks names millions). Empty ranges leave the cumulative TSN as the
+            # highest seen.
+            ranges: list = []
+            for start, end in sorted(g for g in chunk.gaps if g[0] <= g[1]):
+                if ranges and start <= ranges[-1][1] + 1:
+                    ranges[-1][1] = max(ranges[-1][1], end)
+                else:
+                    ranges.append([start, end])
+            starts = [r[0] for r in ranges]
             highest_seen_tsn = chunk.cumulative_tsn
-            for gap in chunk.gaps:
-                for pos in range(gap[0], gap[1] + 1):
-                    highest_seen_tsn = (chunk.cumulative_tsn + pos) % SCTP_TSN_MODULO
-                    seen.add(highest_seen_tsn)
+            if ranges:
+                highest_seen_tsn = (chunk.cumulative_tsn + ranges[-1][1]) % SCTP_TSN_MODULO
+
+            def gap_acked(tsn: int) -> bool:
+                offset = (tsn - chunk.cumulative_tsn) % SCTP_TSN_MODULO
+                i = bisect.bisect_right(starts, offset) - 1
+                return i >= 0 and offset <= ranges[i][1]
 
             # determined Highest TSN Newly Acked (HTNA)
             highest_newly_acked = chunk.cumulative_tsn
             for schunk in self._sent_queue:
                 if uint32_gt(schunk.tsn, highest_seen_tsn):
                     break
-                if schunk.tsn in seen and not schunk._acked:
+                if not schunk._acked and gap_acked(schunk.tsn):
                     done_bytes += schunk._book_size
                     schunk._acked = True
                     self._flight_size_decrease(schunk)
@@ -1403,7 +1415,7 @@ class RTCSctpTransport(AsyncIOEventEmitter):
             for schunk in self._sent_queue:
                 if uint32_gt(schunk.tsn, highest_newly_acked):
                     break
-                if schunk.tsn not in seen:
+                if not gap_acked(schunk.tsn):
                     schunk._misses += 1
                     if schunk._misses == 3:
                         schunk._misses = 0
