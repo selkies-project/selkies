@@ -264,8 +264,6 @@ class WebRTCService(BaseStreamingService):
         self._last_resize_request: Optional[Tuple[int, int]] = None
         # Set once the primary's controller sent its size or its settings.
         self._primary_sized = asyncio.Event()
-        # The primary's size before its controller's hello resized it, which the size wait reads a change against.
-        self._unsized_dims: Optional[Tuple[int, int]] = None
         self._wm_swap = MultiMonitorWindowManager()
         self._congestion_steer: Dict[str, CongestionSteer] = {}
         self._rate_holds: Dict[str, RateHold] = {}
@@ -1250,10 +1248,12 @@ class WebRTCService(BaseStreamingService):
         """
         if display_id == "primary" and self.media_pipeline:
             self._cancel_primary_stop_grace()
-            resized = await self._await_primary_size()
-            if resized and IS_WAYLAND:
-                # The page's size reached a capture yet to start, which sizes
-                # the view alone: the screen has to hold it first.
+            await self._await_primary_size()
+            # A capture start sizes the view alone: the screen has to hold it
+            # first, also for a page at the server's own size, which asks for
+            # no resize.
+            starting = IS_WAYLAND and not self.media_pipeline.is_screen_capturing()
+            if starting:
                 await self._size_wayland_screen(
                     self.media_pipeline.width, self.media_pipeline.height, grow_only=True)
             consumers = self._display_consumers("primary")
@@ -1273,7 +1273,7 @@ class WebRTCService(BaseStreamingService):
                       if IS_WAYLAND else None)
             if caveat:
                 logger.warning(f"Primary Wayland capture started with a caveat: {caveat}")
-            if resized and IS_WAYLAND and self.media_pipeline.is_screen_capturing():
+            if starting and self.media_pipeline.is_screen_capturing():
                 await self._settle_wayland_primary()
             if await self._refresh_second_screen_capacity() and self.rtc_app:
                 self.rtc_app.send_media_data_over_channel(
@@ -1289,35 +1289,26 @@ class WebRTCService(BaseStreamingService):
         if (size is None or self.display_clients or not self.media_pipeline
                 or self.media_pipeline.is_screen_capturing()):
             return
-        self._unsized_dims = (self.media_pipeline.width, self.media_pipeline.height)
         await self.on_resize_handler(f"{size[0]}x{size[1]}")
 
-    async def _await_primary_size(self) -> bool:
+    async def _await_primary_size(self) -> None:
         """Hold a first capture of the primary until its controller's page has
         sent its size (`on_resize_handler`) or its settings, which a page that
         keeps the server's size sends instead, for `PRIMARY_SIZE_WAIT_S` at
         most. A capture started first opens on the display's old size, and
         that picture is the page's first key frame, shown until the resized
         one arrives: seconds at a low rate. A running capture, a display the
-        page cannot resize, and viewers alone start at once.
-
-        Returns:
-            Whether the page's size, from its hello or while it waited, changed
-            the pipeline's.
-        """
-        unsized, self._unsized_dims = self._unsized_dims, None
+        page cannot resize, and viewers alone start at once."""
         if (not any(p.get("client_type") == ClientType.CONTROLLER
                     for p in self._display_consumers("primary"))
                 or self.media_pipeline.is_screen_capturing() or not self.args.enable_resize
                 or self._server_locked_dims() is not None):
-            return False
-        size = unsized or (self.media_pipeline.width, self.media_pipeline.height)
+            return
         try:
             await asyncio.wait_for(self._primary_sized.wait(), PRIMARY_SIZE_WAIT_S)
         except asyncio.TimeoutError:
             logger.info(f"No size from the primary's page within {PRIMARY_SIZE_WAIT_S} s; "
                         "starting its capture at the display's size.")
-        return (self.media_pipeline.width, self.media_pipeline.height) != size
 
     async def stop_display_media(self, display_id: str) -> None:
         """Release a display's pipeline: the primary's stop is deferred by a

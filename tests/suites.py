@@ -387,6 +387,8 @@ SUITES: list = [
     {"path": "e2e/test_wayland_primary_shrink.py", "tier": "e2e", "timeout": 600},
     {"path": "e2e/test_wayland_secondary_shrink.py", "tier": "e2e", "timeout": 600,
      "selectors": ["websockets", "webrtc"]},
+    {"path": "e2e/test_wayland_screen_size.py", "tier": "e2e", "timeout": 600,
+     "selectors": ["websockets", "webrtc"]},
     {"path": "e2e/test_display_positions.py", "tier": "e2e", "timeout": 900},
     {"path": "e2e/test_cross_display_drag.py", "tier": "e2e", "timeout": 900,
      "selectors": ["x11", "wl"]},
