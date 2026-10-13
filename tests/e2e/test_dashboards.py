@@ -587,7 +587,21 @@ def clipboard_image_check(page, res: "H.Results", dashboard: str) -> None:
 def touch_gamepad_layer_check(page, res: "H.Results", dashboard: str) -> None:
     """The touch gamepad is drawn over the whole viewport, so the dashboard's own
     panels have to sit above it: two controls stacked on the same pixels compete
-    for the same tap, and the one that wins is the one nobody can see."""
+    for the same tap, and the one that wins is the one nobody can see. Only
+    the page's own origin drives it: a frame of another posting its setup draws
+    nothing."""
+    page.evaluate("""() => {
+      const frame = document.createElement('iframe');
+      frame.sandbox = 'allow-scripts';
+      frame.style.display = 'none';
+      frame.srcdoc = "<script>parent.postMessage({type: 'TOUCH_GAMEPAD_SETUP', payload: " +
+        "{targetDivId: 'touch-gamepad-host', visible: true}}, '*');<" + "/script>";
+      document.body.appendChild(frame);
+    }""")
+    time.sleep(1.2)
+    foreign = page.evaluate(
+        "() => document.querySelectorAll('#universal-touch-gamepad-controls-overlay *').length")
+    res.check(f"{dashboard}: a frame of another origin cannot set the touch gamepad up", foreign == 0, foreign)
     page.evaluate("""() => window.postMessage({
       type: 'TOUCH_GAMEPAD_SETUP',
       payload: { targetDivId: 'touch-gamepad-host', visible: true },

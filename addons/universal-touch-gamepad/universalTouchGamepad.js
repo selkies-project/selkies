@@ -933,6 +933,8 @@
     }
 
     window.addEventListener('message', (event) => {
+        // The dashboards post from the page's own origin; a frame of another may not drive the pad.
+        if (event.origin !== window.location.origin) return;
         const { data } = event;
         if (!data || typeof data !== 'object') return;
 
