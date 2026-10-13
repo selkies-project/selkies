@@ -7,7 +7,8 @@ host address (failing loudly on one in use, warning that a port range yields
 to the UDP mux) and `get_rtc_config` carries the muxes and the lite choice to
 every peer, leaving STUN/TURN out of an ICE-lite agent's configuration. A
 real RTCPeerConnection then offers an SDP whose host candidates sit on the
-mux ports, with a passive TCP candidate and `a=ice-lite`.
+mux ports, with a passive TCP candidate and `a=ice-lite`. The TURN servers a
+peer is configured with reach the debug log without their credentials.
 """
 import asyncio
 import logging
@@ -183,9 +184,33 @@ async def app_and_offers() -> None:
         logging.getLogger("webrtc").removeHandler(capture)
 
 
+async def turn_credentials_unlogged() -> None:
+    """The TURN servers a peer is configured with reach the debug log without
+    the username and credential their URLs carry."""
+    app = RTCApp(async_event_loop=asyncio.get_running_loop(), encoder="h264enc", stun_servers=[],
+                 turn_servers=["turn://turn-user-7f:s3cret%40pass@turn.example.test:3478?transport=udp"])
+    capture = Capture()
+    log = logging.getLogger("webrtc")
+    level = log.level
+    log.addHandler(capture)
+    log.setLevel(logging.DEBUG)
+    try:
+        config = app.get_rtc_config()
+    finally:
+        log.setLevel(level)
+        log.removeHandler(capture)
+    text = "\n".join(r.getMessage() for r in capture.records)
+    turn = [s for s in config.iceServers if s.username]
+    check("the peer is configured with the TURN credential", turn and turn[0].credential == "s3cret@pass",
+          config.iceServers)
+    check("the debug log names the TURN server but not its username or credential",
+          "turn.example.test" in text and "s3cret" not in text and "turn-user-7f" not in text, text[-300:])
+
+
 def main() -> int:
     definitions_and_parsing()
     asyncio.run(app_and_offers())
+    asyncio.run(turn_credentials_unlogged())
     print(f"[ice-topology] {passed} passed, {failed} failed", flush=True)
     return 1 if failed else 0
 
