@@ -9,7 +9,8 @@ a port in use fails `open` at once, naming the reason, and leaves nothing
 bound; an address the mux was not opened on is bound on first use; NAT1TO1
 rewrites a muxed candidate like any other; a configured port range yields to
 the mux; and a datagram nobody attached for is dropped without disturbing a
-session. Every case runs on the stock loop and on uvloop, which the service
+session; a check without the session's credentials is refused and its source
+never learned. Every case runs on the stock loop and on uvloop, which the service
 prefers and which reports a refused bind as a wrapper of its own. Runs against
 the vendored `selkies.ice` alone.
 """
@@ -269,8 +270,48 @@ async def late_address_nat1to1_and_port_range() -> None:
         await mux.close()
 
 
+async def checks_need_credentials() -> None:
+    """A check naming a session's fragment is answered by that session, but one
+    without MESSAGE-INTEGRITY or with the wrong key is refused with 400 and its
+    source is not learned; a check carrying the credentials is learned."""
+    port = free_udp_port()
+    mux = UdpMux(port)
+    await mux.open([LOOPBACK])
+    server = Connection(ice_controlling=False, use_ipv6=False, udp_mux=mux)
+    stranger = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    stranger.bind((LOOPBACK, 0))
+    stranger.setblocking(False)
+    loop = asyncio.get_running_loop()
+    try:
+        await gather_loopback(server)
+
+        async def check_with(key):
+            request = stun.Message(message_method=stun.Method.BINDING, message_class=stun.Class.REQUEST)
+            request.attributes["USERNAME"] = server.local_username + ":peerfragment"
+            request.attributes["PRIORITY"] = 1
+            if key is not None:
+                request.add_message_integrity(key)
+            stranger.sendto(bytes(request), (LOOPBACK, port))
+            answer = stun.parse_message(await asyncio.wait_for(loop.sock_recv(stranger, 1500), 2))
+            learned = stranger.getsockname() in mux._sockets[LOOPBACK].point.by_addr
+            return answer.message_class, answer.attributes.get("ERROR-CODE"), learned
+
+        for label, key in (("without MESSAGE-INTEGRITY", None), ("with the wrong key", b"not-the-password")):
+            kind, error, learned = await check_with(key)
+            check(f"a check {label} is refused with 400 and not learned",
+                  kind == stun.Class.ERROR and error and error[0] == 400 and not learned, (kind, error, learned))
+        kind, error, learned = await check_with(server.local_password.encode())
+        check("a check with the session's credentials is answered and learned",
+              kind == stun.Class.RESPONSE and learned, (kind, error, learned))
+    finally:
+        stranger.close()
+        await server.close()
+        await mux.close()
+
+
 async def main_async() -> None:
     await two_sessions_one_port()
+    await checks_need_credentials()
     await srflx_through_the_mux()
     await truncated_attribute_is_dropped()
     await port_in_use_fails_open()

@@ -420,6 +420,11 @@ class MuxedStunProtocol(StunProtocol):
         finally:
             self.transport.forget_response(request.transaction_id)
 
+    def peer_authenticated(self, addr: tuple) -> None:
+        """A check from `addr` carried this connection's credentials: the mux
+        routes the address's datagrams here from now on."""
+        self.transport.learn_peer(addr)
+
     def __repr__(self) -> str:
         return "protocol(%s, muxed)" % self.id
 
@@ -1411,8 +1416,13 @@ class Connection:
             self.respond_error(message, addr, protocol, (400, "Bad Request"))
             return
 
-        # authenticate request
+        # authenticate request: short-term credentials need both attributes (RFC 5389 10.1.2)
         try:
+            username = message.attributes.get("USERNAME")
+            if "MESSAGE-INTEGRITY" not in message.attributes or not isinstance(username, str):
+                raise ValueError("No message integrity or username")
+            if username.split(":", 1)[0] != self.local_username:
+                raise ValueError("Wrong username")
             stun.parse_message(
                 raw_data, integrity_key=self.local_password.encode("utf8")
             )
@@ -1424,6 +1434,9 @@ class Connection:
             self.respond_error(message, addr, protocol, (400, "Bad Request"))
             return
         self.last_received = time.monotonic()
+        peer_authenticated = getattr(protocol, "peer_authenticated", None)
+        if peer_authenticated is not None:
+            peer_authenticated(addr)
 
         # 7.2.1.1. Detecting and Repairing Role Conflicts
         if self.ice_controlling and "ICE-CONTROLLING" in message.attributes:

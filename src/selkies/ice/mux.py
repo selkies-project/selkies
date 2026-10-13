@@ -16,9 +16,10 @@ address already known belongs to the connection it was learned for. One from
 an unknown address is only ever STUN: a request names its connection in the
 USERNAME (`local:remote` fragments); a response answers a transaction that an
 attached protocol registered when it sent the request, a connectivity check or
-a server-reflexive query. A peer's address is learned from its request or from
-its answer to a check, never from a STUN server's answer, so a STUN server
-shared by every session maps to none of them. Anything else is dropped.
+a server-reflexive query. A peer's address is learned from its request once
+the connection has authenticated it, or from its answer to a check, never from
+a STUN server's answer, so a STUN server shared by every session maps to none
+of them. Anything else is dropped.
 
 ICE-TCP (RFC 6544) rides the TCP port. Each accepted stream carries RFC 4571
 frames, a 16-bit length ahead of every packet, and its first frame must be the
@@ -129,10 +130,8 @@ class _MuxPoint:
                 if names_peer:
                     self.learn(addr, protocol)
         elif message.message_class == stun.Class.REQUEST:
-            owner = self.by_ufrag.get(username_fragment(message) or "")
-            if owner is not None:
-                protocol = owner
-                self.learn(addr, owner)
+            # Learned only once the connection authenticates it (`learn_peer`).
+            protocol = self.by_ufrag.get(username_fragment(message) or "")
         return protocol
 
 
@@ -160,6 +159,10 @@ class _MuxTransport:
 
     def forget_response(self, transaction_id: bytes) -> None:
         self._point.by_tid.pop(transaction_id, None)
+
+    def learn_peer(self, addr: tuple) -> None:
+        """Route `addr`'s datagrams to this protocol: a check from it authenticated."""
+        self._point.learn(addr, self.protocol)
 
     def close(self) -> None:
         if self._closed:
