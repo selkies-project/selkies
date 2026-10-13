@@ -192,6 +192,10 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
+# Longest remote SDP answer taken: a browser's runs to tens of kilobytes, and the
+# parse runs on the event loop every session shares.
+MAX_REMOTE_SDP = 256 * 1024
+
 # Raw bytes per bulk (clipboard) chunk before base64 expansion, and the SCTP
 # queue cap a transfer waits below. Both sized for latency: a chunk is the unit
 # at which input and the media streams can overtake a transfer, and the cap
@@ -740,6 +744,8 @@ class RTCApp:
             raise RTCAppError('ERROR: sdp type is not "answer"')
         if sdp is None:
             raise RTCAppError("ERROR: sdp can't be None")
+        if len(sdp) > MAX_REMOTE_SDP:
+            raise RTCAppError(f"ERROR: sdp longer than {MAX_REMOTE_SDP} characters")
         if not client_peer_id:
             raise RTCAppError("ERROR: client_peer_id is required to set sdp")
 

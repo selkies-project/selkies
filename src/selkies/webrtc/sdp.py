@@ -49,6 +49,12 @@ from .rtcrtpparameters import (
 )
 from .rtcsctptransport import RTCSctpCapabilities
 
+# Most a media section may name of each, far past what a browser sends: parsing a
+# remote description, which arrives over signaling, stays linear in its length.
+MAX_CODECS = 256
+MAX_SSRCS = 512
+MAX_RTCP_FB = 512
+
 DIRECTIONS = ["inactive", "sendonly", "recvonly", "sendrecv"]
 
 DTLS_ROLE_SETUP = {"auto": "actpass", "client": "active", "server": "passive"}
@@ -434,11 +440,6 @@ class SessionDescription:
         ice_password = None
         ice_usernameFragment = None
 
-        def find_codec(pt: int) -> Optional[RTCRtpCodecParameters]:
-            return next(
-                filter(lambda x: x.payloadType == pt, current_media.rtp.codecs), None
-            )
-
         session_lines, media_groups = grouplines(sdp)
 
         # parse session
@@ -515,6 +516,7 @@ class SessionDescription:
             )
             current_media.ice_options = ice_options
             session.media.append(current_media)
+            ssrcs: dict[int, SsrcDescription] = {}
 
             for line in media_lines[1:]:
                 if line.startswith("c="):
@@ -618,6 +620,8 @@ class SessionDescription:
                             )
                         except ValueError:
                             continue
+                        if len(current_media.rtp.codecs) >= MAX_CODECS:
+                            raise ValueError(f"A media section names more than {MAX_CODECS} codecs")
                         current_media.rtp.codecs.append(codec)
                     elif attr == "sctpmap":
                         if not value or " " not in value:
@@ -648,12 +652,11 @@ class SessionDescription:
                             continue
                         ssrc_attr, ssrc_value = ssrc_desc.split(":", 1)
 
-                        try:
-                            ssrc_info = next(
-                                (x for x in current_media.ssrc if x.ssrc == ssrc)
-                            )
-                        except StopIteration:
-                            ssrc_info = SsrcDescription(ssrc=ssrc)
+                        ssrc_info = ssrcs.get(ssrc)
+                        if ssrc_info is None:
+                            if len(ssrcs) >= MAX_SSRCS:
+                                raise ValueError(f"A media section names more than {MAX_SSRCS} SSRCs")
+                            ssrc_info = ssrcs[ssrc] = SsrcDescription(ssrc=ssrc)
                             current_media.ssrc.append(ssrc_info)
                         if ssrc_attr in SSRC_INFO_ATTRS:
                             setattr(ssrc_info, ssrc_attr, ssrc_value)
@@ -662,6 +665,10 @@ class SessionDescription:
                 current_media.dtls = None
 
             # requires codecs to have been parsed
+            by_pt: dict[int, list[RTCRtpCodecParameters]] = {}
+            for codec in current_media.rtp.codecs:
+                by_pt.setdefault(codec.payloadType, []).append(codec)
+            feedback = 0
             for line in media_lines[1:]:
                 if line.startswith("a="):
                     attr, value = parse_attr(line)
@@ -670,26 +677,35 @@ class SessionDescription:
                             continue
                         format_id, format_desc = value.split(" ", 1)
                         try:
-                            codec = find_codec(int(format_id))
+                            named = by_pt.get(int(format_id))
                         except ValueError:
                             continue
-                        if codec is None:
+                        if not named:
                             continue
-                        codec.parameters = parameters_from_sdp(format_desc)
+                        named[0].parameters = parameters_from_sdp(format_desc)
                     elif attr == "rtcp-fb":
                         if not value:
                             continue
                         bits = value.split(" ", 2)
                         if len(bits) < 2:
                             continue
-                        for codec in current_media.rtp.codecs:
-                            if bits[0] in ["*", str(codec.payloadType)]:
-                                codec.rtcpFeedback.append(
-                                    RTCRtcpFeedback(
-                                        type=bits[1],
-                                        parameter=bits[2] if len(bits) > 2 else None,
-                                    )
+                        feedback += 1
+                        if feedback > MAX_RTCP_FB:
+                            raise ValueError(f"A media section names more than {MAX_RTCP_FB} feedback lines")
+                        if bits[0] == "*":
+                            named = current_media.rtp.codecs
+                        else:
+                            try:
+                                named = by_pt.get(int(bits[0]), [])
+                            except ValueError:
+                                continue
+                        for codec in named:
+                            codec.rtcpFeedback.append(
+                                RTCRtcpFeedback(
+                                    type=bits[1],
+                                    parameter=bits[2] if len(bits) > 2 else None,
                                 )
+                            )
 
         return session
 
