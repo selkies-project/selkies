@@ -294,6 +294,7 @@ SUITES: list = [
     # e2e
     {"path": "e2e/test_ime_composition.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_wayland_typed_text.py", "tier": "e2e", "timeout": 300},
+    {"path": "e2e/test_wayland_virtual_keyboard.py", "tier": "e2e", "timeout": 300},
     {"path": "e2e/test_wayland_popups.py", "tier": "e2e", "timeout": 300,
      "selectors": ["layer", "window"]},
     {"path": "e2e/test_cc_start_rate.py", "tier": "e2e", "timeout": 600},
