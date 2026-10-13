@@ -56,7 +56,7 @@ from .webrtc_media_pipeline import (MediaPipelinePixel,
 from .webrtc.codecs import configure_multiopus
 from .webrtc.rtcdtlstransport import TWCC_QUEUE_MS
 from .webrtc_signaling_client import WebRTCSignalingClient
-from .webrtc_signaling_server import WebRTCPeerManagement
+from .webrtc_signaling_server import SERVER_PEER_SECRET, WebRTCPeerManagement
 from .input_handler import WebRTCInput
 from .display_utils import (resize_display, refresh_output_mode, applied_dpi, set_dpi, set_cursor_size, parse_gpu_id,
                             compute_dual_layout, apply_extended_layout, get_new_res,
@@ -464,7 +464,7 @@ class WebRTCService(BaseStreamingService):
             enable_basic_auth=using_basic_auth,
             basic_auth_user=username,
             basic_auth_password=password,
-            server_token=getattr(self.settings, "master_token", None),
+            server_token=getattr(self.settings, "master_token", None) or SERVER_PEER_SECRET,
             unix_socket=sock_path or None,
         )
         return client

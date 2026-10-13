@@ -44,6 +44,7 @@ control-plane table (`/api/tokens`), read per handshake.
 import os
 import hmac
 import json
+import secrets
 import uuid
 import logging
 import asyncio
@@ -57,6 +58,10 @@ from .webrtc_ice_config import _is_trusted_config_file
 from .settings import settings as app_settings
 from .sessions import _lookup_session_token
 from .stream_server import note_pong
+
+# What the in-process server peer proves itself with outside secure mode: random
+# per process, and sent only over the local signaling connection.
+SERVER_PEER_SECRET = secrets.token_urlsafe(32)
 
 logger = logging.getLogger("signaling")
 
@@ -564,7 +569,9 @@ class WebRTCPeerManagement:
                             ),
                             callee_id,
                         )
-                    if callee_id not in self.peers:
+                    # Only the streaming server is called: a session with another
+                    # page would hand it this page's offer and overwrite its state.
+                    if getattr(self.peers.get(callee_id), "peer_type", None) != "server":
                         await ws.send_str("ERROR peer server not found")
                         continue
                     await ws.send_str("SESSION_OK " + str(callee_id))
@@ -675,20 +682,20 @@ class WebRTCPeerManagement:
             return True
         return _lookup_session_token(client_token) is None
 
-    def _secure_server_token_rejected(self, server_token: Any) -> bool:
-        """Secure mode: the server peer owns the media graph for every client, and a
-        server peer leaving closes all of them, so registering as one is an
-        administrative act. Only the in-process signaling client (and anything else
-        holding the master token) may claim it — the auth middleware forwards WS
-        upgrades without Basic in secure mode, so this is the gate that stands between
-        an unauthenticated socket and impersonating the streaming server."""
-        if not app_settings.master_token:
-            return False
+    def _server_token_rejected(self, server_token: Any) -> bool:
+        """The server peer owns the media graph for every client, and a server peer
+        leaving closes all of them, so registering as one is an administrative act.
+        Only the in-process signaling client may claim it, with this process's
+        `SERVER_PEER_SECRET`, and in secure mode anything holding the master token:
+        a credential that only lets a page in (Basic, view-only Basic, or none
+        behind a proxy) is no proof of being the streaming server."""
         if not server_token or not isinstance(server_token, str):
             return True
-        return not hmac.compare_digest(
-            server_token.encode("utf-8"), str(app_settings.master_token).encode("utf-8")
-        )
+        accepted = [SERVER_PEER_SECRET]
+        if app_settings.master_token:
+            accepted.append(str(app_settings.master_token))
+        token = server_token.encode("utf-8")
+        return not any(hmac.compare_digest(token, a.encode("utf-8")) for a in accepted)
 
     def _secure_effective_client_type(
         self, client_type: Optional[str], client_token: Any
@@ -858,10 +865,10 @@ class WebRTCPeerManagement:
                     raise Exception(
                         "Rejecting client from {!r}: missing or invalid token in secure mode".format(raddr)
                     )
-                if peer_type == "server" and self._secure_server_token_rejected(server_token):
+                if peer_type == "server" and self._server_token_rejected(server_token):
                     await ws.close(code=4001, message=b"Invalid authentication token")
                     raise Exception(
-                        "Rejecting server peer from {!r}: missing or invalid master token in secure mode".format(raddr)
+                        "Rejecting server peer from {!r}: it proved no claim to the server role".format(raddr)
                     )
 
                 if peer_type == "client":

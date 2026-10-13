@@ -90,8 +90,9 @@ class WebRTCSignalingClient:
 
         Args:
             server: WebSocket server URL (e.g., 'ws://localhost:8080/ws').
-            server_token: Master token proving this peer may claim the server
-                role; required by the signaling server in secure mode.
+            server_token: What proves this peer may claim the server role: the
+                master token in secure mode, else the signaling server's
+                per-process `SERVER_PEER_SECRET`.
             unix_socket: Path of the Unix domain socket the signaling server
                 listens on instead of a TCP port; the connection goes there and
                 `server` supplies only the scheme, host, and path.
@@ -142,9 +143,8 @@ class WebRTCSignalingClient:
     def _hello_message(self) -> str:
         """Registration line for this peer.
 
-        In secure mode the signaling server only lets a peer claim the server
-        role when it presents the master token, so carry it in the metadata
-        object whenever one is configured.
+        The signaling server only lets a peer claim the server role with a
+        proof of it (`server_token`), carried in the metadata object.
         """
         if not self.server_token:
             return "HELLO {}".format(self.peer_type)
