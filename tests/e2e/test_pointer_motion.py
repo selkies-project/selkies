@@ -19,6 +19,7 @@ The `raw_pointer_motion` setting is checked against the same engines: turned off
 it must keep the client from asking at all, and turned on it must ask, whatever
 the engine then answers.
 """
+import asyncio
 import http.server
 import json
 import os
@@ -363,29 +364,34 @@ def size_screen() -> None:
     left it at its page's size (test_frame_ancestors' framed page leaves
     304x150), or the screen full size under an output still in that mode,
     which holds the pointer inside it: either way the click and the warps miss.
+    Selkies' own resize sets the output's mode, making one where it has none.
     """
-    size = f"{SCREEN[0]}x{SCREEN[1]}"
-    # The output's own mode where it has one, else the framebuffer alone.
-    for args in (["-s", size], ["--fb", size]):
-        if screen_fits():
-            return
-        subprocess.run(["xrandr", "-display", H.require_display(), *args], capture_output=True, timeout=10)
+    if screen_fits()[0]:
+        return
+    from selkies import display_utils as DU
+    os.environ["DISPLAY"] = H.require_display()
+    DU._drop_module_display()
+    asyncio.run(DU.resize_display(f"{SCREEN[0]}x{SCREEN[1]}"))
 
 
-def screen_fits() -> bool:
-    """Whether the display is SCREEN in size and the pointer reaches CLICK."""
-    width, height = H.x_root_size()
-    if width < SCREEN[0] or height < SCREEN[1]:
-        return False
+def screen_fits() -> tuple:
+    """Whether the display is SCREEN in size and the pointer reaches CLICK, and
+    the root size, where the pointer went, and the outputs and monitors."""
+    size = H.x_root_size()
     d = H.x_display()
     try:
         root = d.screen().root
         root.warp_pointer(*CLICK)
         d.sync()
         pointer = root.query_pointer()
-        return (pointer.root_x, pointer.root_y) == CLICK
+        at = (pointer.root_x, pointer.root_y)
     finally:
         d.close()
+    fits = size[0] >= SCREEN[0] and size[1] >= SCREEN[1] and at == CLICK
+    monitors = "" if fits else subprocess.run(
+        ["xrandr", "-display", H.require_display(), "--listmonitors"],
+        capture_output=True, text=True, timeout=10).stdout.splitlines()[1:]
+    return fits, f"root {size}, pointer at {at}; " + "; ".join(m.split()[2] for m in monitors if len(m.split()) > 2)
 
 
 def run() -> "H.Results":
@@ -394,8 +400,7 @@ def run() -> "H.Results":
     if not browsers:
         H.skip_suite("neither Chrome nor Firefox is installed")
     size_screen()
-    res.check("the test display is the size the suite needs and the pointer reaches its click", screen_fits(),
-              H.x_root_size())
+    res.check("the test display is the size the suite needs and the pointer reaches its click", *screen_fits())
     serve()
     for browser in browsers:
         for dpr in (1, 1.25, 1.5):
