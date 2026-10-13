@@ -97,8 +97,8 @@
  * nothing, so a fresh profile keeps every key unset and server-pushed
  * defaults stay re-pushable; only genuine user actions, and
  * sanitizeAndStoreSettings for keys the user already overrode, write
- * localStorage. Keys in `PER_DISPLAY_SETTINGS` carry a `_display2` suffix on
- * the secondary display. The frame rate asked for follows the display's
+ * localStorage. Keys in `lib/storage-keys.js`'s `PER_DISPLAY_SETTINGS` carry a
+ * `_display2` suffix on the secondary display. The frame rate asked for follows the display's
  * refresh where the stored choice is `display` or where there is none
  * (`requestedStreamFramerate`).
  * @module
@@ -129,6 +129,7 @@ import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionToken
 import { urlFragmentKeyword } from './lib/page-url.js';
 import { storageKeyForServerKey, resolveSpec, tenBitStream, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { CRASH_SAFE_SETTINGS, holdKeys, holdDisplaySettings, releaseHeldSettings, restoreHeldPicks } from './lib/held-settings.js';
+import { PER_DISPLAY_SETTINGS, settingStorageKey } from './lib/storage-keys.js';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, canDecodeTenBit, tenBitDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers, rememberCcStart, recalledCcStart, forgetCcStart } from './lib/util.js';
 import {
   wireCodecName, wireFrameIsKey, codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit, codecStringFor,
@@ -394,14 +395,6 @@ const EXPLICIT_ONLY_SETTINGS = ['use_paint_over_quality'];
 /** The explicit-only settings this page's dashboard has posted. */
 const postedExplicitOnly = new Set();
 
-const PER_DISPLAY_SETTINGS = [
-    'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
-    'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
-    'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
-    'manual_resolution', 'manual_width', 'manual_height',
-    'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
-    'video_bitrate', 'force_aligned_resolution', 'scaling_dpi'
-];
 let micStream = null;
 /**
  * The microphone start waiting on getUserMedia, which a permission prompt holds
@@ -1399,40 +1392,28 @@ let overlayInput;
 let rateControlMode = 'cbr';
 
 /**
- * Reads an integer setting from localStorage under the app prefix; keys in
- * `PER_DISPLAY_SETTINGS` carry a `_display2` suffix on the secondary display.
- * The get/set helpers below share that key scheme.
+ * Reads an integer setting from localStorage under the app prefix, with the
+ * `_display2` suffix of `lib/storage-keys.js` on the secondary display. The
+ * get/set helpers below share that key scheme.
  * @param {string} key
  * @param {number|null} default_value Returned when the key is unset.
  * @returns {number|null}
  */
 const getIntParam = (key, default_value) => {
-  const prefixedKey = `${storageAppName}_${key}`;
-  let finalKey = prefixedKey;
-  if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
-    finalKey = `${prefixedKey}_${displayId}`;
-  }
+  const finalKey = settingStorageKey(storageAppName, displayId, key);
   const value = window.localStorage.getItem(finalKey);
   return (value === null || value === undefined) ? default_value : parseInt(value);
 };
 /** Float variant of getIntParam, for range settings with fractional bounds. */
 const getFloatParam = (key, default_value) => {
-  const prefixedKey = `${storageAppName}_${key}`;
-  let finalKey = prefixedKey;
-  if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
-    finalKey = `${prefixedKey}_${displayId}`;
-  }
+  const finalKey = settingStorageKey(storageAppName, displayId, key);
   const value = window.localStorage.getItem(finalKey);
   const parsed = parseFloat(value);
   return (value === null || value === undefined || isNaN(parsed)) ? default_value : parsed;
 };
 /** Stores an integer setting; `null` removes the key. */
 const setIntParam = (key, value) => {
-  const prefixedKey = `${storageAppName}_${key}`;
-  let finalKey = prefixedKey;
-  if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
-    finalKey = `${prefixedKey}_${displayId}`;
-  }
+  const finalKey = settingStorageKey(storageAppName, displayId, key);
   if (value === null || value === undefined) {
     window.localStorage.removeItem(finalKey);
   } else {
@@ -1440,18 +1421,10 @@ const setIntParam = (key, value) => {
   }
 };
 /** The localStorage key a setting is stored under, display suffix included. */
-const prefixedStorageKey = (key) => {
-  const prefixedKey = `${storageAppName}_${key}`;
-  return (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key))
-    ? `${prefixedKey}_${displayId}` : prefixedKey;
-};
+const prefixedStorageKey = (key) => settingStorageKey(storageAppName, displayId, key);
 /** Reads a boolean setting stored as `'true'`/`'false'`. */
 const getBoolParam = (key, default_value) => {
-  const prefixedKey = `${storageAppName}_${key}`;
-  let finalKey = prefixedKey;
-  if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
-    finalKey = `${prefixedKey}_${displayId}`;
-  }
+  const finalKey = settingStorageKey(storageAppName, displayId, key);
   const v = window.localStorage.getItem(finalKey);
   if (v === null) {
     return default_value;
@@ -1460,11 +1433,7 @@ const getBoolParam = (key, default_value) => {
 };
 /** Stores a boolean setting; `null` removes the key. */
 const setBoolParam = (key, value) => {
-  const prefixedKey = `${storageAppName}_${key}`;
-  let finalKey = prefixedKey;
-  if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
-    finalKey = `${prefixedKey}_${displayId}`;
-  }
+  const finalKey = settingStorageKey(storageAppName, displayId, key);
   if (value === null || value === undefined) {
     window.localStorage.removeItem(finalKey);
   } else {
@@ -1473,21 +1442,13 @@ const setBoolParam = (key, value) => {
 };
 /** Reads a string setting. */
 const getStringParam = (key, default_value) => {
-  const prefixedKey = `${storageAppName}_${key}`;
-  let finalKey = prefixedKey;
-  if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
-    finalKey = `${prefixedKey}_${displayId}`;
-  }
+  const finalKey = settingStorageKey(storageAppName, displayId, key);
   const value = window.localStorage.getItem(finalKey);
   return (value === null || value === undefined) ? default_value : value;
 };
 /** Stores a string setting; `null` removes the key. */
 const setStringParam = (key, value) => {
-  const prefixedKey = `${storageAppName}_${key}`;
-  let finalKey = prefixedKey;
-  if (displayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
-    finalKey = `${prefixedKey}_${displayId}`;
-  }
+  const finalKey = settingStorageKey(storageAppName, displayId, key);
   if (value === null || value === undefined) {
     window.localStorage.removeItem(finalKey);
   } else {

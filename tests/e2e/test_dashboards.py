@@ -436,9 +436,11 @@ def classic_layout_check(page, res: "H.Results") -> None:
               modal["iframeTheme"] == modal["dashTheme"]
               and modal["iframeBg"] == palettes.get(modal["dashTheme"]), modal)
 
-    # The mirror is live: the dashboard's own toggle re-renders the modal
+    # The mirror is live: the dashboard's own mode pick re-renders the modal
     # frame while its storage write restyles the page inside the frame.
-    page.locator('.theme-toggle').click()
+    page.locator('.sidebar-section-header:has-text("Appearance")').first.click()
+    time.sleep(0.5)
+    page.select_option('#modeSelect', 'light')
     time.sleep(0.6)
     flipped = page.evaluate("""() => {
       const out = {modalBg: getComputedStyle(document.querySelector('.files-modal')).backgroundColor};
@@ -452,7 +454,7 @@ def classic_layout_check(page, res: "H.Results") -> None:
     res.check("frame and file index follow a live theme flip",
               flipped["theme"] == "light" and flipped["bg"] == palettes["light"]
               and flipped["modalBg"] == "rgb(255, 255, 255)", flipped)
-    page.locator('.theme-toggle').click()
+    page.select_option('#modeSelect', 'dark')
     time.sleep(0.4)
     settled = page.evaluate("""() => {
       const f = document.querySelector('.files-modal iframe');
@@ -728,7 +730,7 @@ def dash_block(dashboard: str, dist: str) -> "H.Results":
         The Results accumulator for this dashboard's checks.
     """
     res = H.Results(f"dash-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard)
     # The served document names the tab. Left to the client script, the browser
     # shows the host URL there until the bundle runs.
     shell = H.curl("/")[1].decode("utf-8", "replace")
@@ -899,7 +901,7 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
     enable_resize=false offers no resolution to pick on the primary, whose
     size the server keeps."""
     res = H.Results(f"gates-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist,
+    H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard,
                    extra_env={
                        "SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false",
                        "SELKIES_UI_SHOW_SIDEBAR": "false",
@@ -916,7 +918,7 @@ def gates_block(dashboard: str, dist: str) -> "H.Results":
         res.check("ui_show_sidebar=false hides chrome", not chrome, chrome)
         # The shortcuts gate needs the sidebar enabled, so it gets its own boot.
         browser.close()
-    H.server_start(mode="websockets", wayland=False, web_root=dist,
+    H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard,
                    extra_env={
                        "SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false",
                        "SELKIES_UI_SIDEBAR_SHOW_WEBCAM": "false",
@@ -997,7 +999,7 @@ def hidpi_default_block(dashboard: str, dist: str, mode: str = "websockets") -> 
     core sends is what it is actually applying. Both cores resolve it, so both
     transports are driven."""
     res = H.Results(f"hidpi-{dashboard}-{mode}")
-    H.server_start(mode=mode, wayland=False, web_root=dist,
+    H.server_start(mode=mode, wayland=False, web_root=dist, shell=dashboard,
                    extra_env={"SELKIES_MANUAL_WIDTH": "1280",
                               "SELKIES_MANUAL_HEIGHT": "800"})
     # The core persists every `useCssScaling` it applies, so the stored value is
@@ -1074,7 +1076,7 @@ def transport_advice_block(dashboard: str, dist: str, dual: bool, engine: str = 
     button and says who can switch."""
     res = H.Results(f"transport-advice-{dashboard}-{'dual' if dual else 'single'}"
                     + ("" if engine == "chromium" else f"-{engine}"))
-    H.server_start(mode="webrtc", wayland=False, web_root=dist,
+    H.server_start(mode="webrtc", wayland=False, web_root=dist, shell=dashboard,
                    extra_env={"SELKIES_ENABLE_DUAL_MODE": "true" if dual else "false"})
     if dashboard == "classic":
         notice, button = ".notification-item.transport", ".notification-transport-switch"
@@ -1141,12 +1143,11 @@ def dpi_for_resolution_block(dashboard: str, dist: str) -> "H.Results":
     says nothing about it, and the dashboard posts its own derived value over
     the core's whenever the two differ. Driven through the control a user uses,
     at dpr 1, where the display itself would ask for 96 whatever the resolution
-    is. The classic dashboard's selects are what can be driven; the Wish
-    dashboard mirrors the same formula, which
-    tests/unit/test_dpi_default_mirror.py holds it to.
+    is. The classic dashboard's selects are what can be driven; both dashboards
+    derive the pick through the core's own rule (lib/stream-density.js).
     """
     res = H.Results(f"dpi-for-resolution-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard)
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
@@ -1192,7 +1193,7 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
     appearing to do nothing at all.
     """
     res = H.Results(f"second-screen-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard)
     arrows = "[...document.querySelectorAll('.screen-placement-overlay button')]"
     try:
         with sync_playwright() as p:
@@ -1207,10 +1208,13 @@ def second_screen_block(dashboard: str, dist: str) -> "H.Results":
                 opened = wish_open_menu_item(page, "Add a second screen")
             else:
                 opened = classic_open_video(page)
+                # The Appearance section too: the arrow check picks the mode there.
                 page.evaluate("""() => {
-                  const header = [...document.querySelectorAll('.sidebar-section-header')]
-                    .find(e => /screen/i.test(e.textContent));
-                  if (header) header.click();
+                  for (const word of [/screen/i, /appearance/i]) {
+                    const header = [...document.querySelectorAll('.sidebar-section-header')]
+                      .find(e => word.test(e.textContent));
+                    if (header) header.click();
+                  }
                 }""")
                 time.sleep(1.0)
                 page.evaluate("""() => {
@@ -1258,7 +1262,7 @@ def classic_arrow_theme_check(page, res: "H.Results") -> None:
     seen = {}
     for flip in (False, True):
         if flip:
-            page.evaluate("document.querySelector('.theme-toggle').click()")
+            page.select_option('#modeSelect', 'light')
             time.sleep(0.5)
         theme = page.evaluate(
             "document.querySelector('.sidebar').className.includes('theme-light') ? 'light' : 'dark'")
@@ -1280,7 +1284,7 @@ def second_screen_auto_block(dashboard: str, dist: str) -> "H.Results":
     Management API answers nothing without it.
     """
     res = H.Results(f"second-screen-auto-{dashboard}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard)
     profile = tempfile.mkdtemp(prefix=f"selkies-screens-{dashboard}-")
     try:
         with sync_playwright() as p:
@@ -1392,7 +1396,7 @@ def raw_pointer_motion_block(dashboard: str, dist: str, mode: str = "websockets"
     transports, since each core applies the setting itself.
     """
     res = H.Results(f"raw-motion-{dashboard}-{mode}")
-    H.server_start(mode=mode, wayland=False, web_root=dist)
+    H.server_start(mode=mode, wayland=False, web_root=dist, shell=dashboard)
     state = "() => window.webrtcInput ? window.webrtcInput.constructor.rawPointerMotion : null"
     stored = """(() => {
       for (let i = 0; i < localStorage.length; i++) {
@@ -1464,7 +1468,7 @@ def rate_control_block(dashboard: str, dist: str, mode: str = "websockets") -> "
     would move the stream off what the page shows.
     """
     res = H.Results(f"rate-control-{dashboard}-{mode}")
-    H.server_start(mode=mode, wayland=False, web_root=dist,
+    H.server_start(mode=mode, wayland=False, web_root=dist, shell=dashboard,
                    extra_env={"SELKIES_VIDEO_CRF": "30", "SELKIES_VIDEO_BITRATE": "4000"})
     steps = (
         {"pick": "crf", "label": "Video CRF (", "shown": "(30)", "line": "CRF: 30",
@@ -1519,7 +1523,7 @@ def settings_follow_block(dashboard: str, dist: str, mode: str = "websockets") -
     a page opens in a fresh browser context.
     """
     res = H.Results(f"settings-follow-{dashboard}-{mode}")
-    H.server_start(mode=mode, wayland=False, web_root=dist, extra_env={"SELKIES_VIDEO_CRF": "30"})
+    H.server_start(mode=mode, wayland=False, web_root=dist, shell=dashboard, extra_env={"SELKIES_VIDEO_CRF": "30"})
 
     def shown(page, step: str) -> None:
         if mode == "webrtc":
@@ -1616,7 +1620,7 @@ def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
     res = H.Results(f"paint-over-{dashboard}-{engine}")
     for operator in (None, "false"):
         who = "operator off" if operator else "unset"
-        H.server_start(mode="websockets", wayland=False, web_root=dist,
+        H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard,
                        extra_env={"SELKIES_USE_PAINT_OVER_QUALITY": operator} if operator else {})
         try:
             with sync_playwright() as p:
@@ -1702,7 +1706,7 @@ def page_socket_block(dashboard: str, dist: str, engine: str) -> "H.Results":
     listeners are up, WebKit's first among them; the dashboard still starts from them, so the
     controls they gate come up enabled."""
     res = H.Results(f"page-socket-{dashboard}-{engine}")
-    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard)
     try:
         with sync_playwright() as p:
             browser = C.launch_browser(p, engine)
@@ -1753,7 +1757,7 @@ def layout_block() -> "H.Results":
     palette open) and a 320-pixel phone; the wish dashboard's top bar and soft
     keys fit that phone."""
     res = H.Results("dash-layout")
-    H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, shell="classic")
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
@@ -1788,7 +1792,7 @@ def layout_block() -> "H.Results":
             browser.close()
     finally:
         H.server_stop()
-    H.server_start(mode="websockets", wayland=False, web_root=H.WISH_DIST)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, shell="wish")
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
@@ -1813,59 +1817,59 @@ def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
     if which in ("all", "classic"):
-        blocks.append(dash_block("classic", H.CLASSIC_DIST))
+        blocks.append(dash_block("classic", H.DASHBOARD_DIST))
     if which in ("all", "wish"):
-        blocks.append(dash_block("wish", H.WISH_DIST))
+        blocks.append(dash_block("wish", H.DASHBOARD_DIST))
     if which in ("all", "gates"):
-        blocks.append(gates_block("classic", H.CLASSIC_DIST))
-        blocks.append(gates_block("wish", H.WISH_DIST))
+        blocks.append(gates_block("classic", H.DASHBOARD_DIST))
+        blocks.append(gates_block("wish", H.DASHBOARD_DIST))
     if which in ("all", "hidpi"):
-        blocks.append(hidpi_default_block("classic", H.CLASSIC_DIST))
-        blocks.append(hidpi_default_block("wish", H.WISH_DIST))
+        blocks.append(hidpi_default_block("classic", H.DASHBOARD_DIST))
+        blocks.append(hidpi_default_block("wish", H.DASHBOARD_DIST))
     if which in ("all", "hidpi-webrtc"):
-        blocks.append(hidpi_default_block("classic", H.CLASSIC_DIST, "webrtc"))
-        blocks.append(hidpi_default_block("wish", H.WISH_DIST, "webrtc"))
+        blocks.append(hidpi_default_block("classic", H.DASHBOARD_DIST, "webrtc"))
+        blocks.append(hidpi_default_block("wish", H.DASHBOARD_DIST, "webrtc"))
     if which in ("all", "raw-motion"):
-        blocks.append(raw_pointer_motion_block("classic", H.CLASSIC_DIST))
-        blocks.append(raw_pointer_motion_block("wish", H.WISH_DIST))
+        blocks.append(raw_pointer_motion_block("classic", H.DASHBOARD_DIST))
+        blocks.append(raw_pointer_motion_block("wish", H.DASHBOARD_DIST))
     if which in ("all", "raw-motion-webrtc"):
-        blocks.append(raw_pointer_motion_block("classic", H.CLASSIC_DIST, "webrtc"))
-        blocks.append(raw_pointer_motion_block("wish", H.WISH_DIST, "webrtc"))
+        blocks.append(raw_pointer_motion_block("classic", H.DASHBOARD_DIST, "webrtc"))
+        blocks.append(raw_pointer_motion_block("wish", H.DASHBOARD_DIST, "webrtc"))
     if which in ("all", "rate-control"):
-        blocks.append(rate_control_block("classic", H.CLASSIC_DIST))
-        blocks.append(rate_control_block("wish", H.WISH_DIST))
+        blocks.append(rate_control_block("classic", H.DASHBOARD_DIST))
+        blocks.append(rate_control_block("wish", H.DASHBOARD_DIST))
     if which in ("all", "rate-control-webrtc"):
-        blocks.append(rate_control_block("classic", H.CLASSIC_DIST, "webrtc"))
-        blocks.append(rate_control_block("wish", H.WISH_DIST, "webrtc"))
+        blocks.append(rate_control_block("classic", H.DASHBOARD_DIST, "webrtc"))
+        blocks.append(rate_control_block("wish", H.DASHBOARD_DIST, "webrtc"))
     if which in ("all", "settings-follow"):
-        blocks.append(settings_follow_block("classic", H.CLASSIC_DIST))
-        blocks.append(settings_follow_block("wish", H.WISH_DIST))
+        blocks.append(settings_follow_block("classic", H.DASHBOARD_DIST))
+        blocks.append(settings_follow_block("wish", H.DASHBOARD_DIST))
     if which in ("all", "settings-follow-webrtc"):
-        blocks.append(settings_follow_block("classic", H.CLASSIC_DIST, "webrtc"))
-        blocks.append(settings_follow_block("wish", H.WISH_DIST, "webrtc"))
+        blocks.append(settings_follow_block("classic", H.DASHBOARD_DIST, "webrtc"))
+        blocks.append(settings_follow_block("wish", H.DASHBOARD_DIST, "webrtc"))
     if which in ("all", "paint-over"):
         for engine in ("chromium", "firefox", "webkit"):
-            blocks.append(paint_over_block("classic", H.CLASSIC_DIST, engine))
-            blocks.append(paint_over_block("wish", H.WISH_DIST, engine))
+            blocks.append(paint_over_block("classic", H.DASHBOARD_DIST, engine))
+            blocks.append(paint_over_block("wish", H.DASHBOARD_DIST, engine))
     if which in ("all", "page-socket"):
         for engine in ("chromium", "firefox", "webkit"):
-            blocks.append(page_socket_block("classic", H.CLASSIC_DIST, engine))
-            blocks.append(page_socket_block("wish", H.WISH_DIST, engine))
+            blocks.append(page_socket_block("classic", H.DASHBOARD_DIST, engine))
+            blocks.append(page_socket_block("wish", H.DASHBOARD_DIST, engine))
     if which in ("all", "dpi-resolution"):
-        blocks.append(dpi_for_resolution_block("classic", H.CLASSIC_DIST))
+        blocks.append(dpi_for_resolution_block("classic", H.DASHBOARD_DIST))
     if which in ("all", "transport-advice"):
         for dual in (True, False):
-            blocks.append(transport_advice_block("classic", H.CLASSIC_DIST, dual))
-            blocks.append(transport_advice_block("wish", H.WISH_DIST, dual))
+            blocks.append(transport_advice_block("classic", H.DASHBOARD_DIST, dual))
+            blocks.append(transport_advice_block("wish", H.DASHBOARD_DIST, dual))
         for engine in ("firefox", "webkit"):
-            blocks.append(transport_advice_block("classic", H.CLASSIC_DIST, True, engine))
+            blocks.append(transport_advice_block("classic", H.DASHBOARD_DIST, True, engine))
     if which in ("all", "layout"):
         blocks.append(layout_block())
     if which in ("all", "second-screen"):
-        blocks.append(second_screen_block("classic", H.CLASSIC_DIST))
-        blocks.append(second_screen_block("wish", H.WISH_DIST))
-        blocks.append(second_screen_auto_block("classic", H.CLASSIC_DIST))
-        blocks.append(second_screen_auto_block("wish", H.WISH_DIST))
+        blocks.append(second_screen_block("classic", H.DASHBOARD_DIST))
+        blocks.append(second_screen_block("wish", H.DASHBOARD_DIST))
+        blocks.append(second_screen_auto_block("classic", H.DASHBOARD_DIST))
+        blocks.append(second_screen_auto_block("wish", H.DASHBOARD_DIST))
     failed = sum(len(b.failed()) for b in blocks)
     total = sum(len(b.items) for b in blocks)
     print(f"\n=== DASH: {total - failed}/{total} passed ===")

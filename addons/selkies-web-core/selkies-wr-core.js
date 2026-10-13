@@ -101,6 +101,7 @@ import { StreamStats, DecodeCapability, webrtcDecoder, FIRST_SAMPLE_MS } from '.
 import { createPresentMeter, watchVideo } from './lib/present-meter.js';
 import { FRAMERATE_DISPLAY, requestedFramerate, watchDisplayRefresh } from './lib/display-refresh.js';
 import { DISPLAY_SETTINGS, holdDisplaySettings, releaseHeldSettings, restoreHeldPicks } from './lib/held-settings.js';
+import { PER_DISPLAY_SETTINGS, settingStorageKey } from './lib/storage-keys.js';
 
 installAuthGuard();
 installSessionCookie();
@@ -641,21 +642,7 @@ export default function webrtc() {
 			handleResizeUI();
 		}
 	}
-	const PER_DISPLAY_SETTINGS = [
-		'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
-		'video_streaming_mode', 'use_cpu',
-		'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
-		'manual_resolution', 'manual_width', 'manual_height',
-		'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
-		'video_bitrate', 'force_aligned_resolution', 'scaling_dpi'
-	];
-	const storageKeyFor = (key) => {
-		const prefixedKey = `${storageAppName}_${key}`;
-		if (storageDisplayId === 'display2' && PER_DISPLAY_SETTINGS.includes(key)) {
-			return `${prefixedKey}_${storageDisplayId}`;
-		}
-		return prefixedKey;
-	};
+	const storageKeyFor = (key) => settingStorageKey(storageAppName, storageDisplayId, key);
 	// A tab that holds nothing gets its picks back (lib/held-settings.js).
 	restoreHeldPicks(storageKeyFor, storageAppName);
 

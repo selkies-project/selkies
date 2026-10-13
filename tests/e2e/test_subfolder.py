@@ -87,7 +87,7 @@ def drive(label: str, web_root: str, mode: str) -> None:
 
 drive("core-ws", H.CORE_DIST, "websockets")
 drive("core-wr", H.CORE_DIST, "webrtc")
-drive("classic", H.CLASSIC_DIST, "websockets")
-drive("wish", H.WISH_DIST, "websockets")
+drive("classic", H.DASHBOARD_DIST, "websockets")
+drive("wish", H.DASHBOARD_DIST, "websockets")
 
 sys.exit(0 if res.summary() else 1)

@@ -69,7 +69,7 @@ def xft_dpi() -> int:
 def run() -> int:
     """Drive each DPR through a fresh browser context and compare Xft.dpi."""
     res = H.Results("dpi-accuracy")
-    H.server_start(mode="websockets", web_root=H.CLASSIC_DIST)
+    H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST, shell="classic")
     subprocess.run(["xrdb", "-remove"], capture_output=True,
                    env={**os.environ, "DISPLAY": H.require_display()})
     with sync_playwright() as p:

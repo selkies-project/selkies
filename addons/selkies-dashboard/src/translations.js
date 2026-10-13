@@ -17,6 +17,10 @@ const simpleInterpolate = (str, variables) => {
 
 // --- English Translations (Default) ---
 const en = {
+    appearance: {
+        switchTitle: "Switch to the {name} dashboard",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Selkies Logo",
     toggleThemeTitle: "Toggle Theme",
     openDashboardTitle: "Open Dashboard",
@@ -326,6 +330,10 @@ const en = {
 
 // --- Spanish Translations (Complete) ---
 const es = {
+    appearance: {
+        switchTitle: "Cambiar al panel {name}",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Logo de Selkies",
     toggleThemeTitle: "Cambiar Tema",
     openDashboardTitle: "Abrir el panel",
@@ -635,6 +643,10 @@ const es = {
 
 // --- Chinese (Simplified) Translations ---
 const zh_cn = {
+    appearance: {
+        switchTitle: "切换到 {name} 仪表板",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Selkies 徽标",
     toggleThemeTitle: "切换主题",
     openDashboardTitle: "打开仪表板",
@@ -944,6 +956,10 @@ const zh_cn = {
 
 // --- Hindi Translations ---
 const hi = {
+    appearance: {
+        switchTitle: "{name} डैशबोर्ड पर जाएँ",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "सेल्कीस लोगो",
     toggleThemeTitle: "थीम बदलें",
     openDashboardTitle: "डैशबोर्ड खोलें",
@@ -1253,6 +1269,10 @@ const hi = {
 
 // --- Portuguese Translations ---
 const pt = {
+    appearance: {
+        switchTitle: "Mudar para o painel {name}",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Alternar Tema",
     openDashboardTitle: "Abrir o painel",
@@ -1562,6 +1582,10 @@ const pt = {
 
 // --- French Translations ---
 const fr = {
+    appearance: {
+        switchTitle: "Passer au tableau de bord {name}",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Changer de thème",
     openDashboardTitle: "Ouvrir le tableau de bord",
@@ -1872,6 +1896,10 @@ const fr = {
 
 // --- Russian Translations ---
 const ru = {
+    appearance: {
+        switchTitle: "Переключиться на панель {name}",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Логотип Selkies",
     toggleThemeTitle: "Переключить тему",
     openDashboardTitle: "Открыть панель",
@@ -2181,6 +2209,10 @@ const ru = {
 
 // --- German Translations ---
 const de = {
+    appearance: {
+        switchTitle: "Zum {name}-Dashboard wechseln",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Selkies-Logo",
     toggleThemeTitle: "Theme wechseln",
     openDashboardTitle: "Dashboard öffnen",
@@ -2490,6 +2522,10 @@ const de = {
 
 // --- Turkish Translations ---
 const tr = {
+    appearance: {
+        switchTitle: "{name} panosuna geç",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Selkies Logosu",
     toggleThemeTitle: "Temayı Değiştir",
     openDashboardTitle: "Paneli aç",
@@ -2799,6 +2835,10 @@ const tr = {
 
 // --- Italian Translations ---
 const it = {
+    appearance: {
+        switchTitle: "Passa al pannello {name}",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Cambia Tema",
     openDashboardTitle: "Apri la dashboard",
@@ -3108,6 +3148,10 @@ const it = {
 
 // --- Dutch Translations ---
 const nl = {
+    appearance: {
+        switchTitle: "Overschakelen naar het {name}-dashboard",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Selkies-logo",
     toggleThemeTitle: "Thema wisselen",
     openDashboardTitle: "Dashboard openen",
@@ -3417,6 +3461,10 @@ const nl = {
 
 // --- Arabic Translations ---
 const ar = {
+    appearance: {
+        switchTitle: "التبديل إلى لوحة {name}",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "شعار Selkies",
     toggleThemeTitle: "تبديل السمة",
     openDashboardTitle: "فتح لوحة التحكم",
@@ -3726,6 +3774,10 @@ const ar = {
 
 // --- Korean Translations ---
 const ko = {
+    appearance: {
+        switchTitle: "{name} 대시보드로 전환",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Selkies 로고",
     toggleThemeTitle: "테마 전환",
     openDashboardTitle: "대시보드 열기",
@@ -4035,6 +4087,10 @@ const ko = {
 
 // --- Japanese Translations ---
 const ja = {
+    appearance: {
+        switchTitle: "{name} ダッシュボードに切り替え",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Selkies ロゴ",
     toggleThemeTitle: "テーマを切り替え",
     openDashboardTitle: "ダッシュボードを開く",
@@ -4344,6 +4400,10 @@ const ja = {
 
 // --- Vietnamese Translations ---
 const vi = {
+    appearance: {
+        switchTitle: "Chuyển sang bảng điều khiển {name}",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Logo Selkies",
     toggleThemeTitle: "Chuyển đổi Chủ đề",
     openDashboardTitle: "Mở bảng điều khiển",
@@ -4653,6 +4713,10 @@ const vi = {
 
 // --- Thai Translations ---
 const th = {
+    appearance: {
+        switchTitle: "สลับไปยังแดชบอร์ด {name}",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "โลโก้ Selkies",
     toggleThemeTitle: "สลับธีม",
     openDashboardTitle: "เปิดแดชบอร์ด",
@@ -4962,6 +5026,10 @@ const th = {
 
 // --- Filipino Translations ---
 const fil = {
+    appearance: {
+        switchTitle: "Lumipat sa {name} dashboard",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Logo ng Selkies",
     toggleThemeTitle: "I-toggle ang Tema",
     openDashboardTitle: "Buksan ang dashboard",
@@ -5271,6 +5339,10 @@ const fil = {
 
 // --- Danish Translations ---
 const da = {
+    appearance: {
+        switchTitle: "Skift til {name}-dashboardet",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Selkies-logo",
     toggleThemeTitle: "Skift tema",
     openDashboardTitle: "Åbn dashboardet",
@@ -5580,6 +5652,10 @@ const da = {
 
 // --- Chinese (Traditional) Translations ---
 const zh_tw = {
+    appearance: {
+        switchTitle: "切換到 {name} 儀表板",
+        shells: { classic: "Classic", wish: "Wish" },
+    },
     selkiesLogoAlt: "Selkies 標誌",
     toggleThemeTitle: "切換介面風格",
     openDashboardTitle: "打開控制面板",

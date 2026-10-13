@@ -4,8 +4,185 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-/* src/index.css */
-body {
-    margin: 0;
-    padding: 0;
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "./shadcn-tailwind.css";
+@import "@fontsource-variable/inter";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --font-heading: var(--font-sans);
+  --font-sans: 'Inter Variable', sans-serif;
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+  --color-destructive-foreground: var(--destructive-foreground);
 }
+
+/* Both themes carry the palette the classic dashboard uses, in shadcn's token
+   names so every component follows: layered slate surfaces (page, card,
+   popover are three distinct steps), the logo's magenta as the accent, and
+   borders solid enough to read as edges rather than a wash of the surface.
+   Text colors are picked against the surface they land on — a filled button's
+   pink is lighter than the accent, because near-black text sits on it. */
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: #b83280;
+  --primary-foreground: #ffffff;
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: #d5499a;
+  --chart-1: #d5499a;
+  --chart-2: #7967c5;
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  /* The stats graphs' two series and the status marks: a pair validated for
+     this surface (lightness band, chroma floor, CVD and normal-vision
+     separation, 3:1 against the card); a status color pairs with an icon. */
+  --stat-series-1: #a82a69;
+  --stat-series-2: #5b4ba3;
+  --stat-good: #0a7d0a;
+  --stat-warn: #9a6400;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: #b83280;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: #d5499a;
+  --destructive-foreground: var(--color-red-700);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: #db5ba7;
+  --primary-foreground: oklch(0.145 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: #db5ba7;
+  --chart-1: #db5ba7;
+  --chart-2: #9085e9;
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --stat-series-1: #ec4899;
+  --stat-series-2: #9085e9;
+  --stat-good: #0ca30c;
+  --stat-warn: #fab219;
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: #db5ba7;
+  --sidebar-primary-foreground: oklch(0.145 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: #db5ba7;
+  --destructive-foreground: var(--color-red-400);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+/* selkies-accent:start */
+/* The accent on the open state of accordions and tabs, for every use of them.
+   Kept outside any @layer: unlayered rules beat the components' own utility
+   classes (`data-active:text-foreground` and the like), which sit in the
+   utilities layer. */
+[data-slot="accordion-item"][data-open] {
+  border-color: color-mix(in oklab, var(--primary) 50%, transparent);
+}
+
+[data-slot="accordion-trigger"][aria-expanded="true"],
+[data-slot="tabs-trigger"][data-active] {
+  color: var(--primary);
+}
+
+[data-slot="tabs-trigger"][data-active] {
+  border-color: color-mix(in oklab, var(--primary) 40%, transparent);
+}
+
+/* Separators carry a hint of the accent: the kit's separator, the menus' and
+   button groups', and the rule under an open accordion header. */
+[data-slot="separator"],
+[data-slot="button-group-separator"],
+[data-slot="menu-separator"],
+[data-slot="dropdown-menu-separator"] {
+  background-color: color-mix(in oklab, var(--primary) 35%, var(--border));
+}
+
+[data-slot="accordion-content"] > div {
+  border-top-color: color-mix(in oklab, var(--primary) 35%, var(--border));
+}
+/* selkies-accent:end */

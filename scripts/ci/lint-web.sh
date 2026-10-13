@@ -3,8 +3,8 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
-# ESLint over the dashboards, the web core, the touch gamepad and the scripts
-# outside them, plus the Wish dashboard's TypeScript check. Run from the
+# ESLint over the dashboard, the web core, the touch gamepad and the scripts
+# outside them, plus the dashboard's TypeScript check. Run from the
 # repository root; requires npm.
 #
 # The CI lint gate and the pre-commit hook both call this, so the two cannot
@@ -13,8 +13,8 @@ set -eu
 
 test -f pyproject.toml
 
-# The two dashboards carry their own ESLint and eslint.config.js.
-for pkg in addons/selkies-dashboard addons/selkies-dashboard-wish; do
+# The dashboard carries its own ESLint and eslint.config.js.
+for pkg in addons/selkies-dashboard; do
     if [ ! -d "${pkg}/node_modules" ]; then
         # Retried like build-web.sh's install: npm gives a failed registry
         # fetch two attempts and no more.
@@ -26,7 +26,7 @@ for pkg in addons/selkies-dashboard addons/selkies-dashboard-wish; do
 done
 
 # The web core and the touch gamepad have no dev dependencies of their own:
-# addons/eslint.config.mjs lints them with the classic dashboard's ESLint.
+# addons/eslint.config.mjs lints them with the dashboard's ESLint.
 echo "eslint: addons/selkies-web-core addons/universal-touch-gamepad"
 (cd addons && selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
     selkies-web-core universal-touch-gamepad)
@@ -37,7 +37,7 @@ echo "eslint: tests/tools website/scripts tests/image/site"
 addons/selkies-dashboard/node_modules/.bin/eslint --max-warnings 0 \
     'tests/tools/**/*.mjs' 'website/scripts/**/*.mjs' 'tests/image/site/**/*.js'
 
-# The Wish dashboard is the only typed package. Its own build runs tsc as well,
-# but that is downstream of this gate.
-echo "tsc: addons/selkies-dashboard-wish"
-(cd addons/selkies-dashboard-wish && npm run --silent typecheck)
+# The dashboard is the typed package. Its own build runs tsc as well, but
+# that is downstream of this gate.
+echo "tsc: addons/selkies-dashboard"
+(cd addons/selkies-dashboard && npm run --silent typecheck)

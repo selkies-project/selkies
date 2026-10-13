@@ -1,13 +1,14 @@
-// Prebuild: take the streaming core from selkies-web-core's build into src/,
-// which main.jsx imports and vite bundles. Copied at build time so this
-// dashboard cannot drift behind the core the rest of the project ships.
+// Prebuild: take the streaming core from selkies-web-core's build into public/,
+// which vite serves at the site root where main.jsx loads it from. Copied at
+// build time so this dashboard cannot drift behind the core the rest of the
+// project ships.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const src = path.resolve(here, '../selkies-web-core/dist/selkies-core.js');
-const dst = path.resolve(here, 'src/selkies-core.js');
+const dst = path.resolve(here, 'public/selkies-core.js');
 
 if (!fs.existsSync(src)) {
   // Unlike the gamepad DB this is not a degradation: without the core the
@@ -19,5 +20,6 @@ if (!fs.existsSync(src)) {
   );
   process.exit(1);
 }
+fs.mkdirSync(path.dirname(dst), { recursive: true });
 fs.copyFileSync(src, dst);
-console.log(`core: ${(fs.statSync(dst).size / 1024).toFixed(0)} KiB copied into src/`);
+console.log(`core: ${(fs.statSync(dst).size / 1024).toFixed(0)} KiB copied into public/`);

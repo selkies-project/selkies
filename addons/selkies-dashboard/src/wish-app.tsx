@@ -1,0 +1,45 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+import React from 'react';
+import './index.css';
+import DashboardOverlay from './components/DashboardOverlay';
+import { ThemeProvider } from './components/ui/theme-provider';
+import { UploadNotifications } from './components/dashboard/upload-notifications';
+import { TransportNotice } from './components/dashboard/transport-notice';
+import { ConnectionIndicator } from './components/dashboard/connection-indicator';
+import { Toaster } from 'sonner';
+
+/**
+ * Root of the wish shell: its stylesheet, the theme provider, the overlay
+ * portaled into the dashboard root, upload and transport notices, the
+ * poor-connection mark, and the toaster.
+ * @module
+ */
+
+interface AppProps {
+  /** Element the dashboard chrome is portaled into. */
+  dashboardRoot: Element;
+}
+
+/** Wraps the dashboard overlay in the providers every card relies on. */
+function App({ dashboardRoot }: AppProps): React.ReactElement {
+  return (
+    <ThemeProvider>
+      <DashboardOverlay container={dashboardRoot} />
+      <UploadNotifications />
+      <TransportNotice />
+      <ConnectionIndicator />
+      <Toaster
+        position="bottom-right"
+        richColors
+        closeButton
+      />
+    </ThemeProvider>
+  );
+}
+
+export default App; 

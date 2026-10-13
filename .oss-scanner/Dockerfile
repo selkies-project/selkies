@@ -19,7 +19,7 @@ RUN python3 -m venv /opt/venv && python3 scripts/ci/unit-deps.py > /tmp/unit-req
 RUN for dir in addons/input-interposer addons/v4l2-interposer addons/fake-udev tests/tools; do \
       make -C "$dir" CFLAGS="-O1 -g -fno-omit-frame-pointer" || exit 1; \
     done
-RUN for dir in addons/selkies-web-core addons/selkies-dashboard addons/selkies-dashboard-wish; do \
+RUN for dir in addons/selkies-web-core addons/selkies-dashboard; do \
       (cd "$dir" && npm ci --no-audit --no-fund) || exit 1; \
     done
 

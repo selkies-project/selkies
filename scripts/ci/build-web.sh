@@ -20,29 +20,12 @@ npm_install() {
     npm ci --no-audit --no-fund --fetch-retries=5 --fetch-retry-maxtimeout=120000
 }
 
-# The core is built first: both dashboards take it, and the gamepad DB and WASM
-# codecs built alongside it, out of its dist through their own
+# The core is built first: the dashboard takes it, and the gamepad DB and WASM
+# codecs built alongside it, out of its dist through its own
 # copy-core.js/copy-assets.js build steps.
 (cd addons/selkies-web-core && npm_install && npm run build)
 
-# The Wish dashboard is an alternative front end the wheel does not ship, built
-# here so a break in it fails the build and the dashboard e2e tier has a bundle.
-# Installs run in turn so two npm processes never write one cache entry; the
-# builds share only the core's dist, already there, so they run together.
-(cd addons/selkies-dashboard && npm_install)
-(cd addons/selkies-dashboard-wish && npm_install)
-(cd addons/selkies-dashboard && SELKIES_INJECT=1 npm run build) &
-classic_build=$!
-(cd addons/selkies-dashboard-wish && npm run build) &
-wish_build=$!
-# Each is waited on by pid, so `set -e` sees the failing one rather than the
-# exit status of whichever finished last.
-wait "${classic_build}"
-wait "${wish_build}"
-
-mkdir -p addons/selkies-dashboard/dist/src
-cp addons/selkies-web-core/dist/selkies-core.js addons/selkies-dashboard/dist/src/
-cp addons/universal-touch-gamepad/universalTouchGamepad.js addons/selkies-dashboard/dist/src/
+(cd addons/selkies-dashboard && npm_install && SELKIES_INJECT=1 npm run build)
 
 # .gitignore keeps src/selkies/selkies_web out of git; it is generated here
 rm -rf src/selkies/selkies_web

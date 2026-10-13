@@ -257,7 +257,7 @@ def print_preview_open(browser: Any) -> bool:
 def dashboard_round(res: "H.Results", pw: Any, mode: str, dashboard: str) -> None:
     fresh_spool()
     pending = spool("Pending.pdf")
-    H.server_start(mode=mode, wayland=False, web_root=H.CLASSIC_DIST if dashboard == "classic" else H.WISH_DIST,
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, shell=dashboard,
                    extra_env=SERVER_ENV)
     browser, page = new_page(pw, mode)
     try:
@@ -331,7 +331,7 @@ def transport_block(mode: str) -> "H.Results":
             if shutil.which("google-chrome") and H.TEST_DISPLAY:
                 fresh_spool()
                 spool("Preview.pdf")
-                H.server_start(mode=mode, wayland=False, web_root=H.CLASSIC_DIST, extra_env=SERVER_ENV)
+                H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, shell="classic", extra_env=SERVER_ENV)
                 browser, page = new_page(pw, mode, headed_chrome=True)
                 try:
                     res.check("Chrome: video streams", wait_video(page, mode) is not None)
@@ -350,7 +350,7 @@ def policy_block() -> "H.Results":
     with sync_playwright() as pw:
         fresh_spool()
         spool("Off.pdf")
-        H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST,
+        H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, shell="classic",
                        extra_env={**SERVER_ENV, "SELKIES_PRINTING_ENABLED": "false"})
         res.check("printing off: no queue is started", not os.path.exists(CUPS_SOCKET))
         res.check("printing off: the route refuses", route_status("Off.pdf") == 403, route_status("Off.pdf"))
@@ -366,7 +366,7 @@ def policy_block() -> "H.Results":
             browser.close()
 
         fresh_spool()
-        H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST, extra_env=SERVER_ENV)
+        H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, shell="classic", extra_env=SERVER_ENV)
         owner_browser, owner = new_page(pw, "websockets")
         viewer_browser, viewer = new_page(pw, "websockets", url_hash="#shared")
         try:

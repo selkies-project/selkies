@@ -23,6 +23,9 @@
     <div id="app"></div>
     <div id="root"></div>
     <div id="touch-gamepad-host"></div>
+    <!-- Defer the runtime-served core, which main.jsx loads, so it can probe
+         /status for the active mode first. -->
+    <script>window.__SELKIES_DEFER_INITIALIZATION = true;</script>
     <script type="module" src="src/main.jsx"></script>
   </body>
 </html>

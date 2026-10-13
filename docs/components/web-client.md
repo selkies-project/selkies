@@ -1,6 +1,6 @@
 ---
 title: Web Client and Dashboards
-description: The bundled HTML5 client, the two reference dashboards and what each is for, the on-screen touch gamepad, and the settings that shape what the interface shows.
+description: The bundled HTML5 client, the two dashboards and how a session picks one, the on-screen touch gamepad, and the settings that shape what the interface shows.
 ---
 
 ## Web Client
@@ -13,14 +13,16 @@ The core is embeddable in any HTML5 page and is what a custom interface builds o
 
 ## Dashboards
 
-Two reference dashboards ship with the client, and the server chooses which is served. Both are React, both put the same controls in a sidebar, and both are starting points for a dashboard of your own rather than a required component:
+Two dashboards ship in one package, [`selkies-dashboard`](https://github.com/selkies-project/selkies/tree/main/addons/selkies-dashboard), and a page loads the one it is set to. Both are React, both put the same controls over the stream, both are starting points for a dashboard of your own rather than a required component, and the logic they share that is not about drawing (the storage keys the streaming cores read, the settings ladder, which controls the server's settings leave to the user) lives once in the core's library:
 
 | Dashboard | Purpose |
 | --- | --- |
-| [Selkies Dashboard](https://github.com/selkies-project/selkies/tree/main/addons/selkies-dashboard) | The default: the classic sidebar with the display, audio, microphone, webcam, and gamepad toggles up top, and the video, screen, and audio settings, stats, shortcuts, clipboard, file transfer, apps, sharing, and gamepad sections below |
-| [Selkies Dashboard (Wish)](https://github.com/selkies-project/selkies/tree/main/addons/selkies-dashboard-wish) | The TypeScript variant with the same sections in a different layout, written as the example a modern toolchain starts from |
+| Classic (`src/classic`) | The default: the sidebar with the display, audio, microphone, webcam, and gamepad toggles up top, and the video, screen, and audio settings, stats, shortcuts, clipboard, file transfer, apps, sharing, gamepad, and appearance sections below |
+| Wish (`src/components`) | The TypeScript variant on shadcn/ui with the same controls behind a floating top bar, a settings card, and floating stats and gamepad panels |
 
-What the shipped interface *shows* is a server setting rather than a build: `--ui-title` and `--ui-show-logo` name and brand the sidebar header, `--ui-show-sidebar` and `--ui-show-core-buttons` drop the sidebar or its device toggles entirely, and one `--ui-sidebar-show-<section>` flag per section — video, screen, and audio settings, stats, shortcuts, clipboard, files, apps, sharing, gamepads, webcam, fullscreen, gaming mode, trackpad, keyboard button, soft buttons — hides just that one. These govern the page only: the capability behind a hidden control keeps working, so the feature's own setting (`--webcam-enabled`, `--file-transfers`, `--enable-sharing`) is what actually turns it off. The [Settings Reference](../settings.md#client-interface) lists them.
+Which one a page shows, and in which color mode, are two client settings kept per browser like the stream settings and offered, narrowed, or locked by the server the same way: `--ui-shell` (`classic` or `wish`) and `--ui-mode` (`dark`, `light`, or `system`, which follows the browser's preference). Each takes a comma-separated list that narrows what the dashboards' Appearance block offers and makes the first the default, and a single value locks the choice and hides it, as `--encoder` does for the encoder menu. The block is the classic sidebar's Appearance section and the wish settings card's Appearance tab; it is where the dark and light switch lives, and it is not shown at all when both choices are locked. Picking the other dashboard reloads the page into it.
+
+What the shipped interface *shows* is a server setting rather than a build: `--ui-title` and `--ui-show-logo` name and brand the header, `--ui-show-sidebar` and `--ui-show-core-buttons` drop the dashboard or its device toggles entirely, and one `--ui-sidebar-show-<section>` flag per section — video, screen, and audio settings, stats, shortcuts, clipboard, files, apps, sharing, gamepads, webcam, fullscreen, gaming mode, trackpad, keyboard button, soft buttons — hides just that one in either dashboard. These govern the page only: the capability behind a hidden control keeps working, so the feature's own setting (`--webcam-enabled`, `--file-transfers`, `--enable-sharing`) is what actually turns it off. The [Settings Reference](../settings.md#client-interface) lists them.
 
 The apps panel of both dashboards is backed by [proot-apps](https://github.com/linuxserver/proot-apps) in the container images, which [Desktop Container](desktop-image.md) describes.
 
