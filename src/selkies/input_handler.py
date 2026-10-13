@@ -8848,7 +8848,11 @@ class WebRTCInput:
                                 pass
 
                         if keysym == 65288 and unicode_buffer:
-                            unicode_buffer.pop()
+                            # One character, as the client counts them: an IME
+                            # commit waits here whole.
+                            last = unicode_buffer.pop()
+                            if len(last) > 1:
+                                unicode_buffer.append(last[:-1])
                             continue
 
                         if (not is_unicode_fallback

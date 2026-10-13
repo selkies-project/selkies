@@ -2659,13 +2659,19 @@ export class Input {
      * compositionend. The preedit still on the server is erased first, the
      * commit landing where it stood: WebKit commits a dead key's letter with
      * no update before it, so erasing after would take the letter and leave
-     * the accent.
+     * the accent. A commit the composition's last update already streamed is
+     * the preedit as it stands, and is left there rather than typed twice.
      */
     _handleTextInput(event) {
         if (!event.data) return;
         if (this._chordEchoPending()) return;
-        if (this.isComposing) this._updateCompositionText("");
-        this._typeText(event.data);
+        if (this.isComposing && this.compositionString === event.data) {
+            // Blink's last update carried the commit, so the server holds it already.
+            this.compositionString = "";
+        } else {
+            if (this.isComposing) this._updateCompositionText("");
+            this._typeText(event.data);
+        }
         this._lastTextInputCommit = { data: event.data, at: performance.now() };
         this._clearCompositionHostSoon();
     }

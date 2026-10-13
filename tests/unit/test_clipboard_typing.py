@@ -95,6 +95,10 @@ def make_handler(vk_error: bool = True, separate: bool = True,
         wl: The wayland_input fake, FakeWaylandInput by default.
     """
     h = WebRTCInput.__new__(WebRTCInput)
+    # The key path's sets, as __init__ (not run here) makes them.
+    h.MODIFIER_KEYSYMS = {65505, 65506, 65507, 65508, 65513, 65514, 65027, 65511, 65512,
+                          65515, 65516, 65517, 65518}
+    h.ACTION_MODIFIER_KEYSYMS = {65507, 65508, 65513, 65514, 65511, 65512, 65515, 65516, 65517, 65518}
     h.is_wayland = True
     h.wayland_input = wl or FakeWaylandInput()
     h.active_modifiers = set()
@@ -189,6 +193,15 @@ async def main() -> None:
                          ("kd", BACKSPACE)])
     check("backspace pops the buffer before it flushes",
           [w[0] for w in h.writes][:1] == ["가"], h.writes)
+
+    # Blink's order for an IME commit: the last update streams it as a text
+    # commit, then textInput erases and retypes it.
+    h = make_handler(clipboard=("before", "text/plain"))
+    await run_worker(h, [("co_end", "你好"), ("kd", BACKSPACE), ("ku", BACKSPACE),
+                         ("kd", BACKSPACE), ("ku", BACKSPACE), ("co_end", "你好")])
+    check("a backspace takes one character off a commit waiting to be typed",
+          [w[0] for w in h.writes][:1] == ["你好"] and (BACKSPACE, True) not in h.keys,
+          (h.writes, h.keys))
 
     h = make_handler(clipboard=None)
     await run_worker(h, [("co_end", "組み合わせ")])

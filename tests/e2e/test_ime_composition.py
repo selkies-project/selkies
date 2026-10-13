@@ -15,7 +15,7 @@ Chromium (platform-spoofed via CDP where a branch needs it):
 
 Each preedit stage goes out as it is typed, and a commit of several CJK
 characters goes as one text commit, which the server binds in one keymap
-change.
+change; a commit the last update already streamed goes out once.
 
 A dashboard soft modifier is then held over the two soft-keyboard anatomies:
 Android Chromium reports a tap as keyCode 229 with no key or code and the
@@ -291,6 +291,21 @@ def run_branch(pw: Any, tag: str, platform: Optional[str], ua: Optional[str],
         whole = commits == ["co,end,你好"]
         ok = ok and whole
         check(f"{tag}: a commit of several CJK characters goes as one text commit", whole, f"commits={commits}")
+        page.evaluate("window.__sent = []")
+        # Blink's order for a commit (CDP's insertText too): the last update carries it, then textInput and the end.
+        page.evaluate("""() => {
+            window.__dispatch('compositionstart', ''); window.__dispatch('compositionupdate', 'nihao');
+            window.__dispatch('compositionupdate', '你好');
+            try { window.__dispatch('textInput', '你好'); } catch (e) { /* no TextEvent */ }
+            window.__dispatch('compositionend', '你好');
+        }""")
+        time.sleep(0.35)
+        sent = page.evaluate("window.__sent")
+        once = ([m for m in sent if m.startswith("co,")] == ["co,end,你好"]
+                and sent.count("kd,65288") == 5 and page.evaluate("window.__decodeWire()") == "你好")
+        ok = ok and once
+        check(f"{tag}: a commit the last update streamed is not typed again", once,
+              f"sent={[m for m in sent if not m.startswith('ku,')]}")
         return ok
 
     finally:
