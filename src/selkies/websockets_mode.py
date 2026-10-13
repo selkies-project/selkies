@@ -154,6 +154,12 @@ STILL_RESUME_GRACE_SECONDS = 1.0
 # link; one such sample would skew the flat smoothing window for its lifetime.
 RTT_SAMPLE_SANE_MAX_MS = 10000
 BACKPRESSURE_CHECK_INTERVAL_S = 0.5
+# How long a path may hold a display's whole stream (no ack for a check while its queue stands
+# over the allowance) before the backpressure gate takes it for a queue. A long path's lost
+# segment or a Wi-Fi radio holds the stream a second and then delivers it at once; a gate shut
+# on that drops frames the encoder then predicts past from as far back as it holds, at a low
+# frame rate an anchor seconds old.
+PATH_HOLD_MAX_S = 1.5
 # How far past its floor, beyond half the path's own jitter, a display's frame
 # round trip stands before congestion control reads a queue on the path
 # (_steer_bitrate_to_link).
@@ -3431,7 +3437,16 @@ class DataStreamingServer(BaseStreamingService):
         the queue on the path, the first check shuts it while the client's
         acks move on (the path delivering, behind a queue) and leaves it to
         the next when they stood still for BACKPRESSURE_ACK_HOLD_S (the path
-        holding the stream). A stream resuming after a still screen (a
+        holding the stream). A path that holds it longer than a check (no ack
+        moving for a whole check, and a ping written behind the frames when
+        the queue went over still unanswered: a long path's retransmission or
+        a radio's pause) is waited for until the queue has stood over the
+        allowance for PATH_HOLD_MAX_S: what it delivers at once then arrives,
+        where the gate would drop those frames and have the encoder predict
+        past them from whatever it still holds, at a low frame rate an anchor
+        seconds old. Behind a queue the acks keep moving, and a client that
+        stopped acking what it was handed answers the ping, so both are judged
+        as before. A stream resuming after a still screen (a
         capture that produced nothing for STILL_SCREEN_GAP_SECONDS) is left
         unjudged for STILL_RESUME_GRACE_SECONDS: every frame it sends
         counts against the client until the client's first ack of them comes
@@ -3564,11 +3579,28 @@ class DataStreamingServer(BaseStreamingService):
                         and now - display_state.get('resumed_at', 0.0) >= STILL_RESUME_GRACE_SECONDS)
                 over_at = display_state.get('queue_over_at')
                 display_state['queue_over_at'] = now if over else None
-                delivering = now - display_state.get('acked_at', 0.0) <= BACKPRESSURE_ACK_HOLD_S
+                over_since = (display_state.get('queue_over_since') or now) if over_at is not None else now
+                display_state['queue_over_since'] = over_since if over else None
+                acked_at = display_state.get('acked_at', 0.0)
+                delivering = now - acked_at <= BACKPRESSURE_ACK_HOLD_S
+                # A path holding the stream holds a ping written behind it too, where a client that
+                # stopped acking what it was handed (a stalled presenter) answers it.
+                ws = display_state.get('ws')
+                if over and over_at is None and ws is not None:
+                    display_state['hold_ping'] = _uplink_session_state(ws)['next_ping']
+                    _spawn_background_task(ping_behind(ws))
+                hold_ping = display_state.get('hold_ping')
+                uplink = _uplink_session_state(ws) if ws is not None else None
+                ping_out = (uplink is not None and hold_ping is not None
+                            and (uplink['next_ping'] <= hold_ping
+                                 or hold_ping.to_bytes(8, 'big') in uplink['pending']))
+                holding = (now - acked_at >= self.backpressure_check_interval_s and ping_out
+                           and now - over_since < PATH_HOLD_MAX_S)
                 standing = over and (not display_state.get('backpressure_enabled', True)
-                                     or (not steered and delivering)
-                                     or (over_at is not None
-                                         and now - over_at <= 1.5 * self.backpressure_check_interval_s))
+                                     or (not holding
+                                         and ((not steered and delivering)
+                                              or (over_at is not None
+                                                  and now - over_at <= 1.5 * self.backpressure_check_interval_s))))
 
                 if unanswered_for > STALLED_CLIENT_TIMEOUT_SECONDS:
                     display_state['desync_gated'] = None

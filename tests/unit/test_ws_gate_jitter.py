@@ -6,11 +6,15 @@ Each check runs the real backpressure loop, one check per step of a script of
 how much stream stands in flight past the path's floor: a moment's hold (a
 lost segment's retransmission, a Wi-Fi hop's jitter) that one check sees and
 the next does not leaves the gate open, however often it recurs; a queue that
-stands through two checks in a row shuts it, which stays shut while the queue
-stands and lifts once it drains. Without the steer, which bounds a queue on the
-path, the gate is that bound: the first check over the allowance shuts it while
-the client's acks move on, a queue the path delivers behind, and a check whose
-acks stood still, a hold, leaves it to the next.
+the client's acks move on behind through two checks in a row shuts it, which
+stays shut while the queue stands and lifts once it drains. Without the steer,
+which bounds a queue on the path, the gate is that bound: the first check over
+the allowance shuts it while the client's acks move on, a queue the path
+delivers behind. A path that holds the whole stream, its acks standing still
+for a check, is waited for, steered or not, until the queue has stood over the
+allowance for PATH_HOLD_MAX_S: what it held arrives at once, where frames the
+gate dropped would be predicted past from whatever the encoder still holds.
+Time is the checks': each moves the loop's clock on by a check interval.
 """
 import asyncio
 import os
@@ -43,10 +47,25 @@ class Module:
 
 class Socket:
     """The client's socket, as far as the gate reaches it: a browser answers a
-    ping once everything written before it arrived, here at once."""
+    ping once everything written before it arrived, here at once, or once a
+    path holding the stream (`holding`) lets it through."""
+
+    def __init__(self) -> None:
+        self.holding = False
+        self.held = []
 
     async def ping(self, payload: bytes) -> None:
-        note_pong(self, payload)
+        if self.holding:
+            self.held.append(payload)
+        else:
+            note_pong(self, payload)
+
+    def hold(self, holding: bool) -> None:
+        self.holding = holding
+        if not holding:
+            for payload in self.held:
+                note_pong(self, payload)
+            self.held.clear()
 
 
 def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -> list:
@@ -63,8 +82,9 @@ def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -
     server.rc_mode = SimpleNamespace(value=w.RateControlMode.CBR.value)
     server.metrics = None
     server.video_relay_groups = {}
+    socket = Socket()
     state = {
-        "ws": Socket(), "framerate": FPS, "acknowledged_frame_id": 100, "acked_sent_at": None,
+        "ws": socket, "framerate": FPS, "acknowledged_frame_id": 100, "acked_sent_at": None,
         "last_sent_frame_id": 100, "has_sent_any_frame": True, "sent_timestamps": OrderedDict(),
         "rtt_samples": deque(maxlen=20), "smoothed_rtt": 0.0, "backpressure_enabled": True,
         "unacked_since": None, "stall_gated_at": None, "rtt_floor_ms": FLOOR_MS,
@@ -73,15 +93,27 @@ def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -
     steps = list(script)
     seen = []
     real_sleep = asyncio.sleep
+    clock = [1000.0]
+
+    class Clock:
+        """The loop's `time`, its monotonic clock the checks'."""
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def monotonic(self) -> float:
+            return clock[0]
 
     def stand(ms: float) -> None:
-        now = time.monotonic()
+        now = clock[0]
         in_flight = round((FLOOR_MS + ms) / 1000.0 * FPS)
         state["acked_sent_at"] = now - 1.0
         state["sent_timestamps"] = OrderedDict(
             (101 + i, (now - 0.9 + i / 1000.0, 20000)) for i in range(in_flight))
         state["last_sent_frame_id"] = 100 + in_flight
         state["acked_at"] = now if acks_moving else now - 1.0
+        # Acks standing still over the allowance are the path holding the stream, pings and all.
+        socket.hold(not acks_moving and ms > w.BACKPRESSURE_ALLOWED_DESYNC_MS)
 
     async def one_check_per_sleep(delay, *args, **kwargs):
         if delay == INTERVAL:
@@ -89,17 +121,20 @@ def gate_states(script: list, steered: bool = True, acks_moving: bool = False) -
                 seen.append(state["backpressure_enabled"])
             if not steps:
                 raise asyncio.CancelledError
+            clock[0] += INTERVAL
             stand(steps.pop(0))
         return await real_sleep(0)
 
     async def run() -> None:
         asyncio.sleep = one_check_per_sleep
+        w.time = Clock()
         try:
             await server._run_frame_backpressure_logic("primary")
         except asyncio.CancelledError:
             pass
         finally:
             asyncio.sleep = real_sleep
+            w.time = time
 
     asyncio.run(run())
     return seen
@@ -110,10 +145,16 @@ res.check("a moment's 300 ms hold past the floor, gone at the next check, leaves
           all(moment), moment)
 recurring = gate_states([300, 0, 300, 0, 300, 0])
 res.check("moments a check apart, each released by the next check, never shut it", all(recurring), recurring)
-standing = gate_states([0, 300, 300, 300, 0, 0])
-res.check("a queue standing through two checks shuts it at the second", standing[:3] == [True, True, False], standing)
+standing = gate_states([0, 300, 300, 300, 0, 0], acks_moving=True)
+res.check("a queue the path delivers behind, standing through two checks, shuts it at the second",
+          standing[:3] == [True, True, False], standing)
 res.check("it stays shut while the queue stands and lifts once it drains",
           standing[3:] == [False, True, True], standing)
+hold = gate_states([0, 300, 300, 300, 300, 300, 0, 0])
+over_checks = round(w.PATH_HOLD_MAX_S / INTERVAL)
+res.check(f"a path holding the stream, acks standing still, is waited for {w.PATH_HOLD_MAX_S} s before it shuts",
+          hold[:over_checks + 1] == [True] * (over_checks + 1) and hold[over_checks + 1] is False, hold)
+res.check("and the gate lifts once the hold has delivered", hold[-1] is True, hold)
 res.check("a stream in flight within the allowance never shuts it", all(gate_states([100, 150, 200, 150])))
 delivered = gate_states([0, 300, 0], steered=False, acks_moving=True)
 res.check("without congestion control a queue the path goes on delivering behind shuts it at once",
@@ -121,7 +162,10 @@ res.check("without congestion control a queue the path goes on delivering behind
 held = gate_states([0, 300, 0, 0], steered=False)
 res.check("without congestion control a moment the path holds the stream, acks standing still, leaves it open",
           all(held), held)
-stuck = gate_states([0, 300, 300, 0], steered=False)
-res.check("a hold still there at the next check shuts it", stuck == [True, True, False, True], stuck)
+still_held = gate_states([0, 300, 300, 0], steered=False)
+res.check("a hold still there at the next check is waited for", all(still_held), still_held)
+stuck = gate_states([0, 300, 300, 300, 300, 300, 0], steered=False)
+res.check(f"one that outlasts {w.PATH_HOLD_MAX_S} s shuts it", stuck[:over_checks + 1] == [True] * (over_checks + 1)
+          and stuck[over_checks + 1] is False, stuck)
 
 sys.exit(0 if res.summary() else 1)
