@@ -302,8 +302,12 @@ async def keygate(res: H.Results, tag: str, encoder: str) -> None:
         keys = [f for f in c.since(t0) if f[2]]
         recovered = keys[0][0] - t0 if keys else None
         late = c.since(t0 + 7)
+        # The gate closes at a check (every 0.5 s) once the held acks fall a quarter second
+        # behind, re-probes two seconds after they stop moving, counted from an ack the held
+        # client sends once a second, and then sends the IDR: 3.5-4 s here, a step or two more
+        # on a slow runner.
         res.check(f"{tag} keygate: the keyframe the client waits for reaches it",
-                  recovered is not None and recovered < 5.0,
+                  recovered is not None and recovered < 6.0,
                   f"after {recovered and round(recovered, 2)} s, {ev}")
         res.check(f"{tag} keygate: and its stream flows on", len(late) > 60,
                   f"{len(late)} frames in the last 3 s, {ev}")
