@@ -33,7 +33,10 @@ class Sock:
     """A signaling socket fed by the test: lines, a cut (the stream ends with
     no close frame), or the page's close frame."""
 
+    made: list = []
+
     def __init__(self, *lines: str) -> None:
+        Sock.made.append(self)
         self.q: asyncio.Queue = asyncio.Queue()
         self.closed = False
         self.close_args = None
@@ -88,8 +91,12 @@ def hello(client_type: str = "controller", key: str = KEY) -> str:
 
 
 async def settle() -> None:
-    for _ in range(20):
+    """Until every scripted socket's lines were read, and what they set off ran."""
+    for _ in range(10000):
         await asyncio.sleep(0)
+        if all(sock.q.empty() for sock in Sock.made):
+            break
+    await asyncio.sleep(0.05)
 
 
 class Rig:
@@ -121,7 +128,7 @@ class Rig:
 
 
 async def scenario(res: H.Results) -> None:
-    S.SESSION_HOLD_S = 0.2
+    S.SESSION_HOLD_S = 1.0
 
     rig = await Rig().start()
     rig.page.cut()
