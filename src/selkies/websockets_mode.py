@@ -662,6 +662,29 @@ def _note_round_trip(display_state: dict, rtt_ms: float, sent_bytes: int, now: f
     display_state.setdefault('link_acks', deque(maxlen=LINK_ACK_HISTORY)).append((now, rtt_ms, sent_bytes))
 
 
+def _queued_round_trips(acks, floor_ms: float) -> List[float]:
+    """The round trips of acked frames, each after the first less the time its
+    own bytes took to cross the path. The path carries at least what the acks
+    delivered over their span, and at least what any frame of a quarter of the
+    largest's bytes or more shows, its bytes over its round trip past the
+    floor; none is taken off where one of those crossed at the floor. A frame
+    at a low frame rate is a large share of a second's rate, and over a path
+    not much faster than the stream it takes much of a frame interval to cross
+    with no queue ahead of it (a budget at 8 fps over a path a quarter faster
+    than the rate: 100 ms), which taken whole reads as a queue standing under
+    every frame."""
+    acks = list(acks)
+    sizes = [(a[1], max(a[2] - b[2], 0)) for b, a in zip(acks, acks[1:])]
+    largest = max((n for _, n in sizes), default=0)
+    crossed = [(rtt - floor_ms, n) for rtt, n in sizes if n > 0 and 4 * n >= largest]
+    if not crossed or min(ms for ms, _ in crossed) <= 0:
+        return [a[1] for a in acks]
+    span = acks[-1][0] - acks[0][0]
+    carried = (acks[-1][2] - acks[0][2]) * 8 / span if span > 0 else 0.0
+    bps = max(carried, max(n * 8000 / ms for ms, n in crossed))
+    return [a[1] for a in acks[:1]] + [rtt - n * 8 / bps * 1000 for rtt, n in sizes]
+
+
 def _round_trip_jitter(round_trips: List[float]) -> float:
     """The mean change between successive round trips, less the change they
     share: a queue building or draining moves every round trip by the same
@@ -3694,9 +3717,10 @@ class DataStreamingServer(BaseStreamingService):
         over WebSockets, where no receiver estimate exists), once per
         backpressure check.
 
-        The frames the client acked since the last check are the window. A
-        queue on the path shows as the least round trip among them standing
-        `LINK_QUEUE_MS` past the floor, the least round trip of the last ten
+        The frames the client acked since the last check are the window, each
+        round trip less the time its own bytes took to cross the path
+        (`_queued_round_trips`). A queue on the path shows as the least round
+        trip among them standing `LINK_QUEUE_MS` past the floor, the least round trip of the last ten
         minutes (`_note_round_trip`), so a queue that stands a while is not
         taken for the path itself. The least rather than the mean: a key
         frame's burst delays the frames behind it for a moment on any link,
@@ -3767,7 +3791,8 @@ class DataStreamingServer(BaseStreamingService):
         if target <= 0 or module is None:
             return
         floor_ms = display_state.get('rtt_floor_ms') or 0.0
-        stand = [a[1] for a in display_state.get('link_acks', ())][-max(len(window), 2 * LINK_RISE_ACKS):]
+        queued_ms = _queued_round_trips(display_state.get('link_acks', ()), floor_ms)
+        stand = queued_ms[-max(len(window), 2 * LINK_RISE_ACKS):]
         least_ms = min(stand, default=0.0) if window else 0.0
         if not window:
             delivered_bps, queue_s = 0.0, LINK_QUEUE_MS / 1000.0
@@ -3775,13 +3800,13 @@ class DataStreamingServer(BaseStreamingService):
             span = window[-1][0] - window[0][0]
             delivered_bps = (window[-1][2] - window[0][2]) * 8 / span if span > 0 else 0.0
             measured_bps = delivered_bps if span > 0 else None
-            newest_ms = window[-1][1] - floor_ms
+            newest_ms = queued_ms[-1] - floor_ms
             jitter_ms = display_state.get('link_jitter_ms')
             if jitter_ms is None and len(stand) >= LINK_RISE_ACKS:
                 jitter_ms = display_state['link_jitter_ms'] = _round_trip_jitter(stand)
             allowed_ms = LINK_QUEUE_MS + (jitter_ms or 0.0) / 2
             run = LINK_RISE_ACKS + round((jitter_ms or 0.0) / LINK_RISE_JITTER_MS)
-            row = [a[1] for a in display_state['link_acks']][-run:]
+            row = queued_ms[-run:]
             rising = (len(row) >= LINK_RISE_ACKS and all(b > a for a, b in zip(row, row[1:]))
                       and row[-1] - floor_ms > allowed_ms)
             catching_up = (delivered_bps > self._video_bitrate_kbps(display_state) * 1000

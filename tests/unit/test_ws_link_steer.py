@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Congestion control over WebSockets: a CBR display whose acked frames all stand
-a queue above the round-trip floor through one half-second window is backed off
-at once by the transports' shared steer, to the headroom of what the path
-delivered through that window less the queue's drain; it is held while that
-queue drains, then stepped back up while the round trip stays at its floor. A
-queue still building is read before it stands a whole window, and a gated
-display is measured by the frames still acked from before the gate shut. A
-window a stall acked late backs off from what the path delivered just before.
-A round trip at its floor never moves the rate, one key frame's burst does not
+"""Congestion control over WebSockets: a CBR display whose acked frames all stand a
+queue above the round-trip floor through one half-second window is backed off at
+once by the transports' shared steer, to the headroom of what the path delivered
+through that window less the queue's drain; it is held while that queue drains,
+then stepped back up while the round trip stays at its floor. A queue still
+building is read before it stands a whole window, and a gated display is
+measured by the frames still acked from before the gate shut. A window a stall
+acked late backs off from what the path delivered just before. A round trip at
+its floor never moves the rate, nor does the time a low frame rate's frames take
+to cross a path not much faster than the stream, one key frame's burst does not
 either, round trips a jittering path spreads or a lossy one holds back never do,
 a gate shut on a moment's delay or frames held back a moment and delivered
 together do not either, while a queue behind an encoder running over its target
-still does; a window with nothing acked moves nothing unless the gate holds it on a path that carried less than
-was sent, nor does a queue under a
-still screen's trickle unless the gate held some of it, a page taking the
-display over is measured against its own path, whatever else applies a
-bitrate applies the steered one, and the capture's tracked settings carry it, so
-the target the stats report is the rate the encoder runs at.
+still does; a window with nothing acked moves nothing unless the gate holds it
+on a path that carried less than was sent, nor does a queue under a still
+screen's trickle unless the gate held some of it, a page taking the display over
+is measured against its own path, whatever else applies a bitrate applies the
+steered one, and the capture's tracked settings carry it, so the target the
+stats report is the rate the encoder runs at.
 """
 import os
 import random
@@ -239,6 +240,39 @@ module.rates.clear()
 t = run(2.0, 0.0, 5)
 run(60.0, t, 1)
 check("where the old path's floor stayed, that round trip read as one", module.rates != [], module.rates)
+
+
+def frames_at(fps, path_kbps, start, seconds):
+    """Frames of a budget each at `fps`, every one acked once its bytes have crossed a path of
+    `path_kbps` behind whatever is still queued on it, the steer running every half second."""
+    t, free = start, start
+    step = 1.0 / fps
+    tick = start
+    while t < start + seconds - 1e-9:
+        t = round(t + step, 4)
+        budget = server._video_bitrate_kbps(state) * 125 / fps
+        state["sent_bytes"] += budget
+        state["acked_bytes"] += budget
+        free = max(free, t) + budget * 8 / (path_kbps * 1000)
+        _note_round_trip(state, 20.0 + (free - t) * 1000, state["acked_bytes"], free)
+        if free >= tick + 0.5:
+            tick = free
+            server._steer_bitrate_to_link("display2", state, free)
+    return t
+
+
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5, sent_kbps=40.0)
+frames_at(8, 5000, t, 15)
+check("frames at 8 fps over a path a quarter faster than the rate, each taking 100 ms to cross it, move nothing",
+      module.rates == [], module.rates)
+state = fresh_state()
+module.rates.clear()
+t = run(20.0, 0.0, 5, sent_kbps=40.0)
+frames_at(8, 3200, t, 5)
+check("while over a path slower than the rate their queue still backs the rate off",
+      bool(module.rates) and module.rates[0] < 3200, module.rates)
 
 state = fresh_state()
 module.rates.clear()
