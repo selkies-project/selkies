@@ -443,7 +443,7 @@ def block_cpu(mode: str, wayland: bool, res: "H.Results", engine: str = "chromiu
 
 def block_switch(mode: str, wayland: bool, res: "H.Results", engine: str = "chromium") -> None:
     tag = "switch" if engine == "chromium" else "switch " + engine
-    H.server_start(mode=mode, wayland=wayland, web_root=H.CLASSIC_DIST)
+    H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST, shell="classic")
     picture = Picture(wayland)
     try:
         picture.paint()

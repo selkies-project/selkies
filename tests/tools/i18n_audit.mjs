@@ -1,8 +1,10 @@
-// Resolve every translation key the dashboards ask for, the way they resolve it.
+// Resolve every translation key the dashboard asks for, the way it resolves it.
 //
-// Both translators return the key itself on a miss, so a wrong or absent key is
+// The translator returns the key itself on a miss, so a wrong or absent key is
 // invisible until it renders as "clipboard.uploadImage" on screen. Emits JSON:
-// {dashboard: {unresolved: {key: [site]}, gaps: {locale: [key]}, keys: n}}.
+// {dictionary: {unresolved: {key: [site]}, gaps: {locale: [key]}, keys: n}},
+// one entry for the base dictionary (translations.js) and one for the extras
+// (translations-extra.ts) overlaid on it.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -17,8 +19,7 @@ const ROUTES = {
   "zh": "zh_cn", "zh-CN": "zh_cn", "zh-SG": "zh_cn", "zh-Hans": "zh_cn", "zh-Hans-SG": "zh_cn",
   "zh-TW": "zh_tw", "zh-HK": "zh_tw", "zh-MO": "zh_tw", "zh-Hant": "zh_tw", "zh-Hant-TW": "zh_tw", "zh-Hant-HK": "zh_tw",
 };
-const CLASSIC = `${ADDONS}/selkies-dashboard`;
-const WISH = `${ADDONS}/selkies-dashboard-wish`;
+const DASHBOARD = `${ADDONS}/selkies-dashboard`;
 
 function walk(dir, out = []) {
   for (const e of readdirSync(dir)) {
@@ -46,9 +47,9 @@ function literal(src, name) {
 }
 
 const statsView = await import(pathToFileURL(resolve(`${ADDONS}/selkies-web-core/lib/stream-stats-view.js`)).href);
-const classicSrc = readFileSync(`${CLASSIC}/src/translations.js`, "utf8");
-const { resolveLocale } = await import(pathToFileURL(resolve(`${CLASSIC}/src/translations.js`)).href);
-const extraSrc = readFileSync(`${WISH}/src/translations-extra.ts`, "utf8");
+const classicSrc = readFileSync(`${DASHBOARD}/src/translations.js`, "utf8");
+const { resolveLocale } = await import(pathToFileURL(resolve(`${DASHBOARD}/src/translations.js`)).href);
+const extraSrc = readFileSync(`${DASHBOARD}/src/translations-extra.ts`, "utf8");
 const classic = Object.fromEntries(LOCALES.map((l) => [l, literal(classicSrc, l)]));
 const extra = Object.fromEntries(LOCALES.map((l) => [l, literal(extraSrc, l)]));
 
@@ -86,8 +87,8 @@ const KEY = /\b(?:t|tl)\(\s*(['"])([^'"\n]+)\1/g;
 
 const report = {};
 for (const [name, dir, dicts] of [
-  ["classic", `${CLASSIC}/src`, [classic.en]],
-  ["wish", `${WISH}/src`, [extra.en, classic.en]],
+  ["base", `${DASHBOARD}/src`, [extra.en, classic.en]],
+  ["extra", `${DASHBOARD}/src`, [extra.en, classic.en]],
 ]) {
   const unresolved = {};
   let keys = 0;
@@ -104,7 +105,7 @@ for (const [name, dir, dicts] of [
   }
   // A key defined in English but absent elsewhere silently serves English, so
   // it never surfaces as a raw key while still being an untranslated string.
-  const dict = name === "classic" ? classic : extra;
+  const dict = name === "base" ? classic : extra;
   const enKeys = flatten(dict.en);
   const gaps = {};
   for (const l of LOCALES.filter((x) => x !== "en")) {
@@ -123,14 +124,14 @@ for (const [name, dir, dicts] of [
   }
   report[name] = { keys, locales: LOCALES.length, enKeys: enKeys.length, unresolved, gaps,
                    punctuation };
-  if (name === "classic") {
+  if (name === "base") {
     // The stats figures are worded by their key at render time, which the scan
     // above cannot see, so every figure either transport shows needs its label.
     const shown = new Set(["websockets", "webrtc"].flatMap((transport) =>
       statsView.streamTiles(null, transport).map((tile) => tile.key)));
     report[name].tiles = { shown: shown.size,
                            unlabeled: [...shown].filter((key) => !has(dict.en, `sections.stats.tiles.${key}`)) };
-    // Both dashboards read the classic resolver, and a key it names must exist.
+    // The resolver's answer must be a dictionary that exists.
     const misrouted = {};
     for (const [tag, want] of Object.entries(ROUTES)) {
       const got = resolveLocale(tag);

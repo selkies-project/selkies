@@ -39,7 +39,7 @@ import core_lib as C  # noqa: E402
 import test_dashboards as TD  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-DASHES = {"classic": H.CLASSIC_DIST, "wish": H.WISH_DIST}
+DASHES = {"classic": H.DASHBOARD_DIST, "wish": H.DASHBOARD_DIST}
 WL_SOCKET = "wayland-1"
 # Stays under python-xlib's request size (it has no BIG-REQUESTS), as the
 # server's own selection owner does.

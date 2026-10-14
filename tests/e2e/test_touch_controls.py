@@ -100,7 +100,7 @@ def keys_since(watcher: XWatcher, t: float, codes: dict) -> list:
 
 def palette_block(res: "H.Results", dashboard: str, dist: str, engine: str, mode: str) -> None:
     tag = f"{dashboard} {engine} {mode}"
-    H.server_start(mode=mode, web_root=dist)
+    H.server_start(mode=mode, web_root=dist, shell=dashboard)
     watcher = None
     try:
         with sync_playwright() as pw:
@@ -210,7 +210,7 @@ def keyboard_button_block(res: "H.Results", dashboard: str, dist: str, engine: s
     not on a letter, which an on-screen keyboard types too; each dashboard's
     own keyboard control brings it back (the classic tile, Wish's menu button)."""
     tag = f"{dashboard} {engine}"
-    H.server_start(mode="websockets", web_root=dist)
+    H.server_start(mode="websockets", web_root=dist, shell=dashboard)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, engine, "websockets")
@@ -291,7 +291,7 @@ def keyboard_posture_block(res: "H.Results", dashboard: str, dist: str, engine: 
     attached. The keyboard button follows at once, with no key pressed and no
     touch needed, and a touch does not bring it back while the keyboard is on."""
     tag = f"{dashboard} {engine} posture"
-    H.server_start(mode="websockets", web_root=dist)
+    H.server_start(mode="websockets", web_root=dist, shell=dashboard)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, engine, "websockets", init_js=POINTER_POSTURE_JS)
@@ -433,7 +433,7 @@ def trackpad_button(page: Any, dashboard: str, engine: str = "") -> bool:
 
 def speed_block(res: "H.Results", dashboard: str, dist: str, mode: str, engine: str = "chromium") -> None:
     tag = f"{dashboard} {engine} {mode}"
-    H.server_start(mode=mode, web_root=dist)
+    H.server_start(mode=mode, web_root=dist, shell=dashboard)
     try:
         with sync_playwright() as pw:
             browser, page = open_client(pw, engine, mode)
@@ -479,7 +479,7 @@ def speed_block(res: "H.Results", dashboard: str, dist: str, mode: str, engine: 
 
 def wayland_block(res: "H.Results", mode: str, engine: str = "chromium") -> None:
     tag = f"classic wayland {engine} {mode}"
-    H.server_start(mode=mode, wayland=True, web_root=H.CLASSIC_DIST)
+    H.server_start(mode=mode, wayland=True, web_root=H.DASHBOARD_DIST, shell="classic")
     obs = None
     try:
         with sync_playwright() as pw:
@@ -520,12 +520,12 @@ def main() -> None:
     only = sys.argv[2] if len(sys.argv) > 2 else ""
     res = H.Results(f"touch-controls-{which}")
     if which == "x11":
-        for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+        for dashboard, dist in (("classic", H.DASHBOARD_DIST), ("wish", H.DASHBOARD_DIST)):
             for mode in ("websockets", "webrtc") if only != "keyboard" else ():
                 for engine in ("chromium", "firefox", "webkit"):
                     palette_block(res, dashboard, dist, engine, mode)
                     speed_block(res, dashboard, dist, mode, engine)
-        for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+        for dashboard, dist in (("classic", H.DASHBOARD_DIST), ("wish", H.DASHBOARD_DIST)):
             for engine in ("chromium", "firefox", "webkit"):
                 keyboard_button_block(res, dashboard, dist, engine)
                 keyboard_posture_block(res, dashboard, dist, engine)

@@ -383,8 +383,8 @@ def transport_block(mode: str) -> "H.Results":
     fresh_files_dir()
     H.server_start(mode=mode, wayland=False, extra_env={"SELKIES_FILE_MANAGER_PATH": FILES_DIR})
     api_checks(res, full=(mode == "websockets"))
-    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
-        H.server_start(mode=mode, wayland=False, web_root=dist,
+    for dashboard, dist in (("classic", H.DASHBOARD_DIST), ("wish", H.DASHBOARD_DIST)):
+        H.server_start(mode=mode, wayland=False, web_root=dist, shell=dashboard,
                        extra_env={"SELKIES_FILE_MANAGER_PATH": FILES_DIR})
         with sync_playwright() as pw:
             browser, page = dashboard_page(pw, mode)
@@ -441,9 +441,9 @@ def policy_block() -> "H.Results":
     """`file_transfers` values and the viewer ceiling."""
     res = H.Results("files-policy")
     for value, upload_ok, download_ok in (("upload", True, False), ("download", False, True), ("none", False, False)):
-        for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+        for dashboard, dist in (("classic", H.DASHBOARD_DIST), ("wish", H.DASHBOARD_DIST)):
             fresh_files_dir()
-            H.server_start(mode="websockets", wayland=False, web_root=dist,
+            H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard,
                            extra_env={"SELKIES_FILE_MANAGER_PATH": FILES_DIR, "SELKIES_FILE_TRANSFERS": value})
             if dashboard == "classic":
                 status, _ = client_upload(f"{value}.bin", b"policy")
@@ -475,7 +475,7 @@ def policy_block() -> "H.Results":
                     browser.close()
 
     fresh_files_dir()
-    H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST, extra_env={
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, shell="classic", extra_env={
         "SELKIES_FILE_MANAGER_PATH": FILES_DIR, "SELKIES_ENABLE_BASIC_AUTH": "true",
         "SELKIES_BASIC_AUTH_USER": BASIC_USER, "SELKIES_BASIC_AUTH_PASSWORD": BASIC_PASSWORD,
         "SELKIES_BASIC_AUTH_VIEWONLY_PASSWORD": VIEWONLY_PASSWORD})

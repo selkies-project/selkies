@@ -31,9 +31,9 @@ updates:
   # only raise the floor. Worse, the updater ignores `requires-python`, so those
   # bumps land on releases that no longer support the 3.9 this package supports.
 
-  # Web client: core, dashboard, and the Wish dashboard
+  # Web client: the core and the dashboard
   - package-ecosystem: npm
-    directories: ["/addons/selkies-web-core", "/addons/selkies-dashboard", "/addons/selkies-dashboard-wish"]
+    directories: ["/addons/selkies-web-core", "/addons/selkies-dashboard"]
     schedule:
       interval: weekly
     groups:

@@ -77,7 +77,7 @@ def ws_block(dashboard: str, dist: str, engine: str = "chromium") -> "H.Results"
 
     res = H.Results(f"connection-{dashboard}" + ("" if engine == "chromium" else f"-{engine}"))
     painter = relay = None
-    H.server_start(mode="websockets", wayland=False, web_root=dist, extra_env=ENV)
+    H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard, extra_env=ENV)
     try:
         painter = H.spawn([sys.executable, PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"])
         relay = H.spawn([sys.executable, BWRELAY, str(RELAY_PORT), str(H.PORT), str(LINK_KBIT)])
@@ -183,7 +183,7 @@ def settings_block(dashboard: str, dist: str) -> "H.Results":
     cases = [("the setting hides the mark", {"SELKIES_UI_SHOW_CONNECTION_INDICATOR": "false"}, False),
              ("hiding the sidebar leaves the mark", {"SELKIES_UI_SHOW_SIDEBAR": "false"}, True)]
     for label, env, shown in cases:
-        H.server_start(mode="websockets", wayland=False, web_root=dist, extra_env=env)
+        H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard, extra_env=env)
         try:
             with sync_playwright() as p:
                 browser = C.chromium_launch(p)
@@ -199,7 +199,7 @@ def settings_block(dashboard: str, dist: str) -> "H.Results":
         finally:
             H.server_stop()
     if dashboard == "wish":
-        H.server_start(mode="websockets", wayland=False, web_root=dist)
+        H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard)
         try:
             with sync_playwright() as p:
                 browser = C.chromium_launch(p)
@@ -227,17 +227,17 @@ def main() -> None:
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     blocks = []
     if which in ("all", "classic"):
-        blocks.append(ws_block("classic", H.CLASSIC_DIST))
+        blocks.append(ws_block("classic", H.DASHBOARD_DIST))
     if which in ("all", "wish"):
-        blocks.append(ws_block("wish", H.WISH_DIST))
+        blocks.append(ws_block("wish", H.DASHBOARD_DIST))
     if which in ("all", "engines"):
         for engine in ("firefox", "webkit"):
-            blocks.append(ws_block("classic", H.CLASSIC_DIST, engine))
+            blocks.append(ws_block("classic", H.DASHBOARD_DIST, engine))
     if which in ("all", "webrtc"):
         blocks.append(webrtc_block())
     if which in ("all", "settings"):
-        blocks.append(settings_block("classic", H.CLASSIC_DIST))
-        blocks.append(settings_block("wish", H.WISH_DIST))
+        blocks.append(settings_block("classic", H.DASHBOARD_DIST))
+        blocks.append(settings_block("wish", H.DASHBOARD_DIST))
     failed = sum(len(b.failed()) for b in blocks)
     total = sum(len(b.items) for b in blocks)
     print(f"\n=== CONNECTION: {total - failed}/{total} passed ===")

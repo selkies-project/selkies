@@ -502,7 +502,7 @@ def block_nowebcodecs(r: "H.Results") -> None:
     browser update brings it, stream video."""
     from playwright.sync_api import sync_playwright
     import test_dashboards as TD
-    H.server_start(mode="websockets", web_root=H.CLASSIC_DIST)
+    H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST, shell="classic")
     try:
         with sync_playwright() as pw:
             browser = C.chromium_launch(pw)
@@ -547,7 +547,7 @@ def block_nowebcodecs(r: "H.Results") -> None:
                         state["codec"])
                 other.close()
                 # A fresh server, so what the later visit streams comes from its own storage.
-                H.server_start(mode="websockets", web_root=H.CLASSIC_DIST)
+                H.server_start(mode="websockets", web_root=H.DASHBOARD_DIST, shell="classic")
                 later = browser.new_context(storage_state=storage, viewport={"width": 1280, "height": 720},
                                             device_scale_factor=1)
                 later.add_init_script(NAV_JS)

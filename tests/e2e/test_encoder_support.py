@@ -95,7 +95,7 @@ def wish_menu(page: Any) -> Optional[list]:
 
 def menu_block(dashboard: str, mode: str) -> "H.Results":
     res = H.Results(f"encoder-menu-{dashboard}-{mode}")
-    H.server_start(mode=mode, wayland=False, web_root=H.WISH_DIST if dashboard == "wish" else H.CLASSIC_DIST)
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, shell=dashboard)
     with sync_playwright() as pw:
         browser = C.chromium_launch(pw)
         try:

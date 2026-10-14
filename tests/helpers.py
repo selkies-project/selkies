@@ -325,8 +325,9 @@ PORT = int(os.environ.get("E2E_PORT") or _free_port())
 BASE_URL = f"http://127.0.0.1:{PORT}"
 
 CORE_DIST = os.path.join(REPO, "addons/selkies-web-core/dist")
-CLASSIC_DIST = os.path.join(REPO, "addons/selkies-dashboard/dist")
-WISH_DIST = os.path.join(REPO, "addons/selkies-dashboard-wish/dist")
+DASHBOARD_DIST = os.path.join(REPO, "addons/selkies-dashboard/dist")
+#: The two dashboards, as `SELKIES_UI_SHELL` names them; a suite drives both.
+SHELLS = ("classic", "wish")
 
 WORKDIR = os.environ.get("E2E_WORKDIR", os.path.join(tempfile.gettempdir(), "selkies-tests"))
 os.makedirs(WORKDIR, exist_ok=True)
@@ -573,7 +574,8 @@ def inherited_env() -> dict:
 def server_start(mode: str = "websockets", wayland: bool = False,
                  web_root: str = CORE_DIST,
                  extra_env: Optional[dict] = None,
-                 port: int = PORT, log: str = LOG) -> subprocess.Popen:
+                 port: int = PORT, log: str = LOG,
+                 shell: Optional[str] = None) -> subprocess.Popen:
     """Start a selkies server and wait until /api/status answers.
 
     Any previous server on the port is stopped first; the environment is built
@@ -585,6 +587,8 @@ def server_start(mode: str = "websockets", wayland: bool = False,
         wayland: Capture backend; False runs against the X test display.
         web_root: Directory served as the web client.
         extra_env: Extra environment variables merged over the base set.
+        shell: The dashboard shell the server locks the page to
+            (`SELKIES_UI_SHELL`), one of `SHELLS`; None leaves the default.
         port: HTTP port the server listens on.
         log: File that receives the server's combined stdout/stderr.
 
@@ -607,6 +611,8 @@ def server_start(mode: str = "websockets", wayland: bool = False,
         "SELKIES_WAYLAND": "true" if wayland else "false",
         "SELKIES_ENABLE_HTTPS": "false",
     }
+    if shell:
+        env["SELKIES_UI_SHELL"] = shell
     # WebRTC works over host candidates alone on a loopback run; a TURN REST
     # endpoint is only wired in when one is offered.
     if os.environ.get("E2E_TURN_REST_URI"):

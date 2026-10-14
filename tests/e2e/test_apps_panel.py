@@ -115,7 +115,7 @@ def run(mode: str, res: "H.Results") -> None:
         res: Results accumulator shared across both transports.
     """
     stub = runner_stub(os.path.join(H.WORKDIR, f"apps-stub-bin-{mode}"))
-    H.server_start(mode=mode, wayland=False, web_root=H.CLASSIC_DIST,
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, shell="classic",
                    extra_env={"PATH": stub + os.pathsep + os.environ.get("PATH", ""),
                               "SELKIES_COMMAND_ENABLED": "true"})
     with sync_playwright() as pw:
@@ -184,7 +184,7 @@ def run_local_repository(mode: str, res: "H.Results") -> None:
     """
     stub = runner_stub(os.path.join(H.WORKDIR, f"apps-stub-bin-{mode}"))
     folder = local_repository(os.path.join(H.WORKDIR, f"apps-local-repo-{mode}"))
-    H.server_start(mode=mode, wayland=False, web_root=H.CLASSIC_DIST,
+    H.server_start(mode=mode, wayland=False, web_root=H.DASHBOARD_DIST, shell="classic",
                    extra_env={"PATH": stub + os.pathsep + os.environ.get("PATH", ""),
                               "SELKIES_COMMAND_ENABLED": "true", "PA_REPO_FOLDER": folder})
     with sync_playwright() as pw:

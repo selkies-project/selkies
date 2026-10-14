@@ -430,6 +430,20 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Show the Selkies logo in the sidebar.",
     },
     {
+        "name": "ui_shell",
+        "type": "enum",
+        "default": "classic",
+        "meta": {"allowed": ["classic", "wish"]},
+        "help": 'The dashboard a page shows: "classic" (the sidebar) or "wish" (the floating top bar). A comma-separated list narrows what the appearance settings offer and makes the first the default; a single value locks it and hides the choice.',
+    },
+    {
+        "name": "ui_mode",
+        "type": "enum",
+        "default": "dark",
+        "meta": {"allowed": ["dark", "light", "system"]},
+        "help": 'Color mode of the dashboard: "dark", "light", or "system" (the browser\'s own preference). A comma-separated list narrows what the appearance settings offer and makes the first the default; a single value locks it and hides the choice.',
+    },
+    {
         "name": "ui_show_core_buttons",
         "type": "bool",
         "default": True,
@@ -475,7 +489,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "ui_sidebar_show_shortcuts",
         "type": "bool",
         "default": True,
-        "help": "Show the keyboard shortcuts section in the sidebar (both dashboards honor this).",
+        "help": "Show the keyboard shortcuts section in the sidebar.",
     },
     {
         "name": "ui_sidebar_show_clipboard",
@@ -511,7 +525,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "ui_sidebar_show_webcam",
         "type": "bool",
         "default": True,
-        "help": "Show the webcam toggle among the core buttons (classic sidebar) and stream controls (wish top menu). Hides the control only; webcam_enabled governs whether the server accepts webcam frames.",
+        "help": "Show the webcam toggle among the stream controls of either shell. Hides the control only; webcam_enabled governs whether the server accepts webcam frames.",
     },
     {
         "name": "ui_sidebar_show_fullscreen",

@@ -1039,27 +1039,31 @@ FILE_INDEX_HEADER: str = """<!DOCTYPE html>
     <title>Desktop Files</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>
-        /* Mirror the dashboard's stored theme (both front ends are same
-           origin, classic under "theme", wish under "vite-ui-theme"); wish's
-           "system" and denied storage leave the pick to the media query. */
+        /* Mirror the color mode the dashboard draws, which it keeps as
+           ui_mode_effective under its storage namespace (lib/storage-keys.js:
+           the origin and the page's path with every other character an
+           underscore), derived here from this listing's own URL with the
+           api/files route cut off. Nothing stored (a listing opened before
+           the dashboard) leaves the pick to the media query. */
         (function () {
             var apply = function () {
                 var v = null;
                 try {
-                    v = localStorage.getItem('theme') || localStorage.getItem('vite-ui-theme');
+                    var page = location.pathname.replace(/[/]api[/]files[/].*$/, '/');
+                    var ns = (location.origin + page).replace(/[^a-zA-Z0-9._-]/g, '_');
+                    v = localStorage.getItem(ns + '_ui_mode_effective');
                 } catch (e) { return; }
-                if (v === 'system') { delete document.documentElement.dataset.theme; }
-                else { document.documentElement.dataset.theme = v || 'dark'; }
+                if (v === 'dark' || v === 'light') { document.documentElement.dataset.theme = v; }
+                else { delete document.documentElement.dataset.theme; }
             };
             apply();
             window.addEventListener('storage', apply);
         })();
     </script>
     <style>
-        /* The dashboards' palette and type scale, so the file browser reads as
+        /* The dashboard's palette and type scale, so the file browser reads as
            part of the same session rather than a page from somewhere else.
-           The script above stamps the dashboard's stored theme choice; with
-           nothing stored it stamps the dark both dashboards default to. */
+           The script above stamps the color mode the dashboard draws. */
         :root {
             --accent: #a82a69;
             --accent-text: #a82a69;

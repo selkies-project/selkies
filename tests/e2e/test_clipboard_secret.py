@@ -322,9 +322,9 @@ def viewer_checks(res: "H.Results", tag: str, browser, mode: str, wayland: bool)
 
 def block(mode: str, wayland: bool) -> "H.Results":
     res = H.Results(f"clipsecret-{'wl' if wayland else mode}")
-    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+    for dashboard, dist in (("classic", H.DASHBOARD_DIST), ("wish", H.DASHBOARD_DIST)):
         tag = f"[{'wl' if wayland else mode}/{dashboard}]"
-        H.server_start(mode=mode, wayland=wayland, web_root=dist)
+        H.server_start(mode=mode, wayland=wayland, web_root=dist, shell=dashboard)
         with sync_playwright() as p:
             closer, page, connected = open_page(p, "chromium", mode, dashboard)
             try:
@@ -343,7 +343,7 @@ def block(mode: str, wayland: bool) -> "H.Results":
 def engines_block() -> "H.Results":
     """Firefox and WebKit: masked and kept nowhere; nothing read to take it back."""
     res = H.Results("clipsecret-engines")
-    H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, shell="classic")
     for engine in ("firefox", "webkit"):
         tag = f"[websockets/{engine}]"
         with sync_playwright() as p:

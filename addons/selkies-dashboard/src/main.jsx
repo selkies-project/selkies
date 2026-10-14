@@ -5,37 +5,36 @@
  */
 
 /**
- * Entry point of the dashboard bundle.
+ * Entry point of the dashboard.
  *
  * Probes `/api/status` for the server's streaming mode and dual-mode flag,
- * publishes them on `window.__SELKIES_STREAMING_MODE__` and
- * `window.__SELKIES_DUAL_MODE__`, then loads selkies-core with
- * `window.__SELKIES_DEFER_INITIALIZATION` set and starts it through
- * `window.selkiesCoreInitialize()` so the core comes up in the detected mode.
- * The `#shared` and `#player2` to `#player4` hashes render no dashboard and
- * mount only the floating touch-gamepad toggle: always for the player slots,
- * and once touch is detected for the shared viewer. The touch gamepad is
- * bundled straight from the universal-touch-gamepad addon, so a fresh
- * checkout builds without a vendored copy.
+ * publishes them as `window.__SELKIES_STREAMING_MODE__` and
+ * `window.__SELKIES_DUAL_MODE__`, loads the runtime-served core script from
+ * beside the page (never bundled, so a deployment can swap it), waits for it
+ * to expose `window.selkiesCoreInitialize` and starts it, then mounts the
+ * dashboard: the shell `App` picks under `#root` for the primary display,
+ * only the floating gamepad button for the `#player2`..`#player4` hashes,
+ * and the same button once touch is detected for `#shared`.
  * @module
  */
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import App from './App.jsx';
-import PlayerGamepadButton from './components/PlayerGamepadButton.jsx';
-import './index.css';
+import App from './App.tsx';
+import PlayerGamepadButton from './components/dashboard/PlayerGamepadButton.tsx';
 import { getRoutePrefix } from '../../selkies-web-core/lib/util.js';
 import { urlFragmentKeyword } from '../../selkies-web-core/lib/page-url.js';
+// Bundled straight from the addon it lives in, so a fresh checkout builds
+// without a vendored copy in src/.
 import "../../universal-touch-gamepad/universalTouchGamepad.js";
 
 /**
- * Publishes the server's streaming mode and dual-mode flag on `window` before
- * selkies-core is imported.
- *
- * The dual-mode flag lets the dashboard show the WebSocket/WebRTC toggle
- * before `serverSettings` arrive over the stream, so a WebRTC session that
- * never connects still leaves a visible way back to WebSockets. A failed
- * probe is logged and leaves both globals unset.
+ * Asks the server for the active streaming mode so the core (deferred via the
+ * inline flag in index.html) initializes into the right transport even when
+ * localStorage disagrees with the server. Also publishes whether the server
+ * permits switching transports, so the dashboard can show the
+ * WebSocket/WebRTC toggle before `serverSettings` arrive over the stream;
+ * otherwise a WebRTC session that never connects would leave no visible way
+ * back to WebSockets.
  * @returns {Promise<void>}
  */
 async function detectInitialMode() {
@@ -44,11 +43,10 @@ async function detectInitialMode() {
       credentials: 'same-origin',
       signal: AbortSignal.timeout(2000),
     });
-    if (!resp.ok) 
+    if (!resp.ok)
       throw new Error(`Failed to fetch initial mode, status: ${resp.status}`);
     const data = await resp.json();
     if (data && data.current_mode) {
-      console.log(`Received initial streaming mode: ${data.current_mode}`);
       window.__SELKIES_STREAMING_MODE__ = data.current_mode;
     }
     if (data && typeof data.enable_dual_mode !== 'undefined') {
@@ -59,23 +57,61 @@ async function detectInitialMode() {
   }
 }
 
+/**
+ * Loads the core from beside the page. A script element rather than a tag in
+ * index.html, which Vite's dependency scan would try to resolve as a module
+ * of the project, and relative rather than rooted so a page served under a
+ * subfolder finds it.
+ */
+function loadCore() {
+  const script = document.createElement('script');
+  script.type = 'module';
+  script.src = 'selkies-core.js';
+  document.head.appendChild(script);
+}
+
+/**
+ * Waits for the core, which arrives as a separate runtime script and is never
+ * bundled here, to expose its deferred entry point.
+ * @param {number} [timeoutMs] Give-up deadline in milliseconds.
+ * @returns {Promise<void>}
+ * @throws {Error} When the core has not loaded by the deadline.
+ */
+async function waitForCore(timeoutMs = 10000) {
+  const deadline = performance.now() + timeoutMs;
+  while (typeof window.selkiesCoreInitialize !== 'function') {
+    if (performance.now() > deadline) {
+      throw new Error('selkies-core.js did not load; cannot initialize streaming');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 const currentHash = urlFragmentKeyword();
 const noDashboardModes = ['#shared', '#player2', '#player3', '#player4'];
 const playerClientModes = ['#player2', '#player3', '#player4'];
 
 (async () => {
+  loadCore();
   await detectInitialMode();
-  window.__SELKIES_DEFER_INITIALIZATION = true;
-  await import('./selkies-core.js');
-  window.selkiesCoreInitialize();
+  try {
+    await waitForCore();
+    window.selkiesCoreInitialize();
+  } catch (err) {
+    console.error(err);
+  }
+
   if (!noDashboardModes.includes(currentHash)) {
     const dashboardRootElement = document.createElement('div');
     dashboardRootElement.id = 'dashboard-root';
-    // Keystrokes on dashboard controls drive the UI, not the game: the input
-    // core skips events whose target sits under an allow-native-input ancestor.
+    // Keystrokes on dashboard controls (slider arrows, dropdown nav) drive the
+    // UI, not the game: the input core skips events whose target sits under an
+    // allow-native-input ancestor.
     dashboardRootElement.classList.add('allow-native-input');
     document.body.appendChild(dashboardRootElement);
+
     const appMountPoint = document.getElementById('root');
+
     if (appMountPoint) {
       ReactDOM.createRoot(appMountPoint).render(
         <React.StrictMode>

@@ -391,7 +391,7 @@ def session(engine: str) -> "H.Results":
     res = H.Results(f"ws-cut-{engine}")
     painter = tone = None
     relay = CutRelay(RELAY_PORT, H.PORT)
-    H.server_start(mode="websockets", wayland=False, web_root=H.CLASSIC_DIST)
+    H.server_start(mode="websockets", wayland=False, web_root=H.DASHBOARD_DIST, shell="classic")
     try:
         painter = H.spawn([sys.executable, PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"])
         tone = H.pulse_sine()

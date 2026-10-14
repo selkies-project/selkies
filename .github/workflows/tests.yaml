@@ -136,7 +136,6 @@ jobs:
           cache-dependency-path: |
             addons/selkies-web-core/package.json
             addons/selkies-dashboard/package.json
-            addons/selkies-dashboard-wish/package.json
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}

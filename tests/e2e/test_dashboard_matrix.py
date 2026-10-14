@@ -142,7 +142,7 @@ def wish_block(cell: str) -> "H.Results":
     server-side, apps panel, gamepad card."""
     mode, wayland = cell_parts(cell)
     res = H.Results(cell)
-    H.server_start(mode=mode, wayland=wayland, web_root=H.WISH_DIST,
+    H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST, shell="wish",
                    extra_env={"PATH": app_runner_stub_path() + os.pathsep
                               + os.environ.get("PATH", "")})
     with sync_playwright() as pw:
@@ -288,8 +288,8 @@ def gates_block(cell: str) -> "H.Results":
     """The admin UI gates on one transport/backend for both dashboards."""
     mode, wayland = cell_parts(cell)
     res = H.Results(cell)
-    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
-        H.server_start(mode=mode, wayland=wayland, web_root=dist,
+    for dashboard, dist in (("classic", H.DASHBOARD_DIST), ("wish", H.DASHBOARD_DIST)):
+        H.server_start(mode=mode, wayland=wayland, web_root=dist, shell=dashboard,
                        extra_env={"SELKIES_UI_SHOW_SIDEBAR": "false"})
         with sync_playwright() as pw:
             browser = C.chromium_launch(pw)
@@ -304,7 +304,7 @@ def gates_block(cell: str) -> "H.Results":
                 .replace("WISH_CHROME", TD.WISH_CHROME))
             res.check(f"{dashboard}: ui_show_sidebar=false hides chrome", not chrome, chrome)
             browser.close()
-        H.server_start(mode=mode, wayland=wayland, web_root=dist, extra_env={
+        H.server_start(mode=mode, wayland=wayland, web_root=dist, shell=dashboard, extra_env={
             "SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false",
             "SELKIES_UI_SIDEBAR_SHOW_WEBCAM": "false",
             "SELKIES_UI_SIDEBAR_SHOW_GAMEPADS": "false",

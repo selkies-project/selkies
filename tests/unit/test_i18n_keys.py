@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Every translation key the dashboards ask for has to resolve.
+"""Every translation key the dashboard asks for has to resolve.
 
-Both translators return the key itself when a lookup misses, so a misspelled or
+The translator returns the key itself when a lookup misses, so a misspelled or
 absent key ships looking fine and renders as "clipboard.uploadImage" to the
 user. The stats figures are worded by their key at render time, so each figure
 either transport shows is checked for a label of its own. The resolution itself

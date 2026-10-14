@@ -5,8 +5,8 @@
  */
 
 // The web core and the touch gamepad have no dev dependencies of their own:
-// they lint with the classic dashboard's ESLint, and these packages resolve
-// from its node_modules (scripts/ci/lint-web.sh installs them).
+// they lint with the dashboard's ESLint, and these packages resolve from its
+// node_modules (scripts/ci/lint-web.sh installs them).
 import { createRequire } from 'node:module'
 
 const require = createRequire(new URL('selkies-dashboard/', import.meta.url))

@@ -623,12 +623,12 @@ def open_files_modal(page, dashboard: str) -> bool:
 def run_dashboards() -> "H.Results":
     from playwright.sync_api import sync_playwright
     res = H.Results("dashboards")
-    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+    for dashboard, dist in (("classic", H.DASHBOARD_DIST), ("wish", H.DASHBOARD_DIST)):
         if not os.path.isfile(os.path.join(dist, "index.html")):
             res.skip(f"{dashboard}: dist not built", dist)
             continue
         fresh_files_dir()
-        H.server_start(mode="websockets", wayland=False, web_root=dist,
+        H.server_start(mode="websockets", wayland=False, web_root=dist, shell=dashboard,
                        extra_env=secure_env(SELKIES_ENABLE_DUAL_MODE="true"))
         provision(res)
         with sync_playwright() as pw:

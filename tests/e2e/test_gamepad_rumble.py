@@ -390,10 +390,10 @@ def dashboards(pw, mode: str, preload: str, res: "H.Results") -> None:
       return null;
     })()"""
     state = "() => window.webrtcInput ? window.webrtcInput.gamepadRumble : null"
-    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
+    for dashboard, dist in (("classic", H.DASHBOARD_DIST), ("wish", H.DASHBOARD_DIST)):
         tag = f"{dashboard} {mode}"
         H.server_stop()
-        H.server_start(mode=mode, web_root=dist)
+        H.server_start(mode=mode, web_root=dist, shell=dashboard)
         browser, _, page = open_page(pw, "chromium", mode, init=PAD_INIT % ("false", "false"))
         try:
             wait_video(page, mode)
@@ -447,10 +447,10 @@ def run(mode: str, res: "H.Results") -> None:
             takeover(pw, mode, preload, res)
             # The touch gamepad lives in the dashboards.
             H.server_stop()
-            H.server_start(mode=mode, web_root=H.CLASSIC_DIST)
+            H.server_start(mode=mode, web_root=H.DASHBOARD_DIST, shell="classic")
             touch(pw, mode, preload, res, "classic", ("chromium", "firefox", "webkit"))
             H.server_stop()
-            H.server_start(mode=mode, web_root=H.WISH_DIST)
+            H.server_start(mode=mode, web_root=H.DASHBOARD_DIST, shell="wish")
             touch(pw, mode, preload, res, "wish", ("chromium",))
             dashboards(pw, mode, preload, res)
     finally:
