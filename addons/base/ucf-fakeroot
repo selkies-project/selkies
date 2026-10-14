@@ -1,0 +1,20 @@
+#!/bin/sh
+
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# ucf and ucfr, through fakeroot.
+#
+# Both clear their environment of all but a few variables before asking
+# `id -u` whether they run as root. Under fakeroot (the layers that run as the
+# session user, and sudo in the session) that drops the variables that make
+# them root, so they fall back to a mode that installs and registers nothing:
+# the configuration files they manage, LibreOffice's registry among them, are
+# never written, and LibreOffice cannot start. Installed as /usr/bin/ucf and
+# /usr/bin/ucfr, this runs the packaged script, diverted to
+# /usr/bin/<name>.distrib, with fakeroot's variables among those it keeps; a
+# script that clears its environment some other way runs as packaged.
+tool="/usr/bin/$(basename "$0")"
+script="$(sed 's/^\([[:space:]]*\)UCF_\*) ;;$/&\n\1FAKEROOTKEY|FAKED_MODE|FAKEROOT_FD_BASE|LD_PRELOAD|LD_LIBRARY_PATH) ;;/' "${tool}.distrib")" || exit 1
+exec /bin/sh -c "$script" "$tool" "$@"

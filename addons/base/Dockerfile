@@ -292,6 +292,8 @@ RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https:
 # Ownership of the image's setuid and setgid files, used at both ends of the
 # rootless build below and by every image layered on this one
 COPY addons/base/selkies-privileged-files /usr/local/bin/selkies-privileged-files
+# ucf and ucfr for the rootless layers and sudo in the session (`ucf-fakeroot`)
+COPY addons/base/ucf-fakeroot /usr/local/bin/ucf-fakeroot
 
 ARG DEBIAN_FRONTEND="noninteractive"
 # Configure rootless user environment for constrained conditions without escalated root privileges inside containers
@@ -308,6 +310,7 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
         locales \
         ssl-cert \
         sudo \
+        ucf \
         udev \
         tzdata && \
     # The 32-bit compiler and runtime, on the architecture that has one. Here
@@ -323,6 +326,10 @@ RUN apt-get clean && apt-get update && apt-get dist-upgrade -y && apt-get instal
     # Only use sudo-root for root-owned directory (/dev, /proc, /sys) or user/group permission operations, not for apt-get installation or file/directory operations
     mv -f /usr/bin/sudo /usr/bin/sudo-root && \
     ln -snf /usr/bin/fakeroot /usr/bin/sudo && \
+    for tool in ucf ucfr; do \
+        dpkg-divert --quiet --local --rename --add "/usr/bin/${tool}" && \
+        ln -snf /usr/local/bin/ucf-fakeroot "/usr/bin/${tool}" || exit 1; \
+    done && \
     groupadd -g 1000 ubuntu || echo 'Failed to add ubuntu group' && \
     useradd -ms /bin/bash ubuntu -u 1000 -g 1000 || echo 'Failed to add ubuntu user' && \
     usermod -a -G adm,audio,cdrom,dialout,dip,fax,floppy,games,input,lp,plugdev,render,ssl-cert,sudo,tape,tty,video,voice ubuntu && \
