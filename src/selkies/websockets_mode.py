@@ -164,6 +164,17 @@ PATH_HOLD_MAX_S = 1.5
 # round trip stands before congestion control reads a queue on the path
 # (_steer_bitrate_to_link).
 LINK_QUEUE_MS = 40.0
+# The share of what a path carries (_path_rate) a still screen's cleanup may run at
+# (pixelflux's update_link_rate), the least it showed over its last LINK_ALLOWANCE_TICKS steer
+# ticks that acked frames, and the most video_bitrate allows over a path too fast to tell: a
+# frame the size of the one that set the round-trip floor reads as crossing at once, now and
+# then several times what the path carries.
+LINK_ALLOWANCE_SHARE = 0.9
+LINK_ALLOWANCE_TICKS = 20
+# Bytes a frame carries for its crossing time to tell what the path carries: under them it is
+# lost in a millisecond's jitter, and a still screen's trickle crosses at the floor whatever
+# the path.
+LINK_MEASURE_BYTES = 4096
 # The share of what the stream sent that a path's last window spanning two acks or more delivered
 # at or above which a gated window with nothing acked is taken for the path holding the stream, not
 # for a queue.
@@ -662,27 +673,39 @@ def _note_round_trip(display_state: dict, rtt_ms: float, sent_bytes: int, now: f
     display_state.setdefault('link_acks', deque(maxlen=LINK_ACK_HISTORY)).append((now, rtt_ms, sent_bytes))
 
 
-def _queued_round_trips(acks, floor_ms: float) -> List[float]:
-    """The round trips of acked frames, each after the first less the time its
-    own bytes took to cross the path. The path carries at least what the acks
-    delivered over their span, and at least what any frame of a quarter of the
-    largest's bytes or more shows, its bytes over its round trip past the
-    floor; none is taken off where one of those crossed at the floor. A frame
-    at a low frame rate is a large share of a second's rate, and over a path
-    not much faster than the stream it takes much of a frame interval to cross
-    with no queue ahead of it (a budget at 8 fps over a path a quarter faster
-    than the rate: 100 ms), which taken whole reads as a queue standing under
-    every frame."""
+def _path_rate(acks, floor_ms: float) -> Optional[float]:
+    """What the path carries, in bits a second, as the acked frames show it: at
+    least what they delivered over their span, and at least what any frame of
+    `LINK_MEASURE_BYTES` and a quarter of the largest's bytes or more shows, its
+    bytes over its round trip past the floor, a delay at least its own crossing;
+    infinite where one of those crossed at the floor, a path too fast to tell,
+    and None where none was acked."""
     acks = list(acks)
     sizes = [(a[1], max(a[2] - b[2], 0)) for b, a in zip(acks, acks[1:])]
     largest = max((n for _, n in sizes), default=0)
-    crossed = [(rtt - floor_ms, n) for rtt, n in sizes if n > 0 and 4 * n >= largest]
-    if not crossed or min(ms for ms, _ in crossed) <= 0:
-        return [a[1] for a in acks]
+    crossed = [(rtt - floor_ms, n) for rtt, n in sizes if n >= max(LINK_MEASURE_BYTES, largest / 4)]
+    if not crossed:
+        return None
+    if min(ms for ms, _ in crossed) <= 0:
+        return float('inf')
     span = acks[-1][0] - acks[0][0]
     carried = (acks[-1][2] - acks[0][2]) * 8 / span if span > 0 else 0.0
-    bps = max(carried, max(n * 8000 / ms for ms, n in crossed))
-    return [a[1] for a in acks[:1]] + [rtt - n * 8 / bps * 1000 for rtt, n in sizes]
+    return max(carried, max(n * 8000 / ms for ms, n in crossed))
+
+
+def _queued_round_trips(acks, bps: Optional[float]) -> List[float]:
+    """The round trips of acked frames, each after the first less the time its
+    own bytes took to cross a path carrying `bps` (`_path_rate`), and none taken
+    off where that is too fast to tell or unknown. A frame at a low frame rate is
+    a large share of a second's rate, and over a path not much faster than the
+    stream it takes much of a frame interval to cross with no queue ahead of it
+    (a budget at 8 fps over a path a quarter faster than the rate: 100 ms), which
+    taken whole reads as a queue standing under every frame."""
+    acks = list(acks)
+    if bps is None or bps == float('inf'):
+        return [a[1] for a in acks]
+    return [a[1] for a in acks[:1]] + [
+        a[1] - max(a[2] - b[2], 0) * 8 / bps * 1000 for b, a in zip(acks, acks[1:])]
 
 
 def _round_trip_jitter(round_trips: List[float]) -> float:
@@ -704,7 +727,7 @@ def _forget_path(display_state: dict) -> None:
     off on every tick. The steered rate stays as the starting point.
     """
     for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer', 'link_delivered_bps', 'link_carried',
-                'link_jitter_ms'):
+                'link_jitter_ms', 'link_rates'):
         display_state.pop(key, None)
 
 
@@ -3791,7 +3814,17 @@ class DataStreamingServer(BaseStreamingService):
         if target <= 0 or module is None:
             return
         floor_ms = display_state.get('rtt_floor_ms') or 0.0
-        queued_ms = _queued_round_trips(display_state.get('link_acks', ()), floor_ms)
+        path_now = _path_rate(display_state.get('link_acks', ()), floor_ms)
+        rates = display_state.setdefault('link_rates', deque(maxlen=LINK_ALLOWANCE_TICKS))
+        if window and path_now is not None:
+            rates.append(path_now)
+        queued_ms = _queued_round_trips(display_state.get('link_acks', ()), path_now)
+        path_bps = min(rates, default=None)
+        allowance = (0 if path_bps is None else app_settings.video_bitrate[1] if path_bps == float('inf')
+                     else max(1, round(path_bps * LINK_ALLOWANCE_SHARE / 1000)))
+        if allowance != display_state.get('link_allowance_kbps') and hasattr(module, 'update_link_rate'):
+            display_state['link_allowance_kbps'] = allowance
+            module.update_link_rate(allowance)
         stand = queued_ms[-max(len(window), 2 * LINK_RISE_ACKS):]
         least_ms = min(stand, default=0.0) if window else 0.0
         if not window:

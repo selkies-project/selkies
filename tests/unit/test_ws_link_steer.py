@@ -26,7 +26,7 @@ from collections import deque
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
-from selkies.websockets_mode import DataStreamingServer, _forget_path, _note_round_trip  # noqa: E402
+from selkies.websockets_mode import DataStreamingServer, _forget_path, _note_round_trip, app_settings  # noqa: E402
 
 passed = failed = 0
 
@@ -43,9 +43,13 @@ def check(label: str, ok, detail="") -> None:
 class Module:
     def __init__(self):
         self.rates = []
+        self.links = []
 
     def update_video_bitrate(self, kbps):
         self.rates.append(kbps)
+
+    def update_link_rate(self, kbps):
+        self.links.append(kbps)
 
 
 server = DataStreamingServer.__new__(DataStreamingServer)
@@ -90,6 +94,8 @@ def run(rtt_ms, start, seconds, delivered_kbps=None, acks=True, spike_at=None, e
 t = run(20.0, 0.0, 10, delivered_kbps=3000.0)
 check("a round trip at its floor leaves the target alone", module.rates == [] and
       server._video_bitrate_kbps(state) == 4000, module.rates)
+check("and lets a still screen's cleanup run at the most allowed over a path too fast to tell",
+      module.links == [app_settings.video_bitrate[1]], module.links)
 t = run(20.0, t, 2, delivered_kbps=3000.0, spike_at=t + 0.3)
 check("one key frame's burst inside a window moves nothing", module.rates == [], module.rates)
 t = run(320.0, t, 0.5, delivered_kbps=3000.0)
@@ -267,6 +273,8 @@ t = run(20.0, 0.0, 5, sent_kbps=40.0)
 frames_at(8, 5000, t, 15)
 check("frames at 8 fps over a path a quarter faster than the rate, each taking 100 ms to cross it, move nothing",
       module.rates == [], module.rates)
+check("and tell the encoder a still screen's cleanup may run at most of what that path carries",
+      module.links[-1:] == [4500], module.links)
 state = fresh_state()
 module.rates.clear()
 t = run(20.0, 0.0, 5, sent_kbps=40.0)
