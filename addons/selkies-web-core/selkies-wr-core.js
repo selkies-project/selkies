@@ -3264,6 +3264,18 @@ export default function webrtc() {
 			};
 
 			/**
+			 * The media path needs no signaling once connected, so a cut of the
+			 * signaling socket alone resumes the session over a new one, and the
+			 * picture, playback, and input run on through it. A path that failed
+			 * meanwhile, whose recovery waited for signaling, starts a new session.
+			 */
+			signaling.resumable = () => !fatalConnectionHalt && !window.__selkiesModeSwitching
+				&& !!webrtc.peerConnection && webrtc.peerConnection.connectionState === 'connected';
+			signaling.onresumed = () => {
+				if (webrtc.peerConnection.connectionState !== 'connected') signaling.reconnect();
+			};
+
+			/**
 			 * A fatal server verdict (invalid slot, superseded takeover): stay
 			 * down. The peer connection goes `failed` shortly after, and the
 			 * recovery timer must not reload into an eviction ping-pong. A

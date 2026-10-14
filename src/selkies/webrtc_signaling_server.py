@@ -18,8 +18,11 @@ Wire protocol (text frames, space-separated): a peer opens with
 `display_position`, `fullcolor_codecs`: the codec names the client decodes at
 4:4:4, `tenbit_codecs`: the formats it decodes at 10 bits, a codec name for 4:2:0
 and the name with `444` after it for 4:4:4, `client_tab_id`, `cc_start_kbps`: the rate congestion control last held
-the page's display at, `page_size`: the `[width, height]` its first resize will ask for) and is answered `HELLO`.
-A server that does not know a key ignores it. `SESSION <peer-id|server>` pairs
+the page's display at, `page_size`: the `[width, height]` its first resize will ask for, `resume_key`: a secret of
+the page's session) and is answered `HELLO`. A server that does not know a key ignores it. A client whose
+socket was cut with no close frame keeps its session for SESSION_HOLD_S: a hello naming its `resume_key` is
+answered `RESUMED <callee-id>` and carries on that session, under its old peer id, with what was addressed to it
+meanwhile; the media path never needed the socket. `SESSION <peer-id|server>` pairs
 the caller with the callee: the caller gets `SESSION_OK <callee-id>`, the callee
 `SESSION_START <caller-id> <client_type> <display_id> <display_position>
 [<client_token>] [fullcolor=<codec,...>] [tenbit=<format,...>]`, and a disconnect sends the partner `SESSION_END <peer-id>
@@ -49,7 +52,7 @@ import uuid
 import logging
 import asyncio
 import concurrent.futures
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from aiohttp.web_ws import WebSocketResponse
 from aiohttp import web, WSMessage, WSMsgType
 from typing import Awaitable, Callable, Dict, Set, Optional, Any, Tuple, List
@@ -64,6 +67,11 @@ from .stream_server import note_pong
 SERVER_PEER_SECRET = secrets.token_urlsafe(32)
 
 logger = logging.getLogger("signaling")
+
+# How long a client whose signaling socket was cut keeps its session for a hello that resumes it.
+SESSION_HOLD_S = 3.0
+# Lines addressed to a held client, kept for its resume.
+HELD_LINES_MAX = 256
 
 # The largest side a hello's `page_size` may name; the page caps its requests at 4080.
 MAX_PAGE_SIZE = 8192
@@ -108,6 +116,9 @@ class Peer:
         page_size: The width and height the page's first resize will ask
             for, which a primary's capture can start at; None for a page that
             names none, as one before it did not.
+        resume_key: The secret a hello names to carry on this client's
+            session after its socket was cut; None for a page that names none.
+        held: Lines addressed to this client while its session is held.
     """
 
     uid: str
@@ -126,6 +137,8 @@ class Peer:
     tab_id: Optional[str] = None
     cc_start_kbps: Any = None
     page_size: Optional[Tuple[int, int]] = None
+    resume_key: Optional[str] = None
+    held: List[str] = field(default_factory=list)
 
 
 class WebRTCPeerManagement:
@@ -147,6 +160,7 @@ class WebRTCPeerManagement:
             when no resolved config was supplied.
         _eviction_times: Recent newest-wins takeover times per identity key,
             the takeover-storm window `_eviction_storm` reads.
+        _holds: The pending end of each held session, by peer uid.
     """
 
     def __init__(self, options: Any) -> None:
@@ -155,6 +169,7 @@ class WebRTCPeerManagement:
         self.rooms: Dict[str, Set[str]] = {}
         self.on_client_presence: Optional[Callable[[bool], None]] = None
         self._eviction_times: Dict[Any, List[float]] = {}
+        self._holds: Dict[str, "asyncio.Task[None]"] = {}
 
         self.keepalive_timeout: int = options.keepalive_timeout
 
@@ -357,7 +372,7 @@ class WebRTCPeerManagement:
         self.peers.pop(pid, None)
         return deferred
 
-    async def remove_peer(self, uid: str) -> None:
+    async def remove_peer(self, uid: str, ws: Optional[WebSocketResponse] = None) -> None:
         """Remove a peer and clean up its session, room, and socket.
 
         A server peer leaving closes every client connection, since the server
@@ -371,9 +386,13 @@ class WebRTCPeerManagement:
 
         Args:
             uid: Peer ID to remove.
+            ws: The socket that ended, when the peer is removed for it: a peer
+                that resumed on another socket since stays.
         """
         deferred_closes: List[Callable[[], Awaitable[Any]]] = []
         async with self.lock:
+            if ws is not None and getattr(self.peers.get(uid), "ws", ws) is not ws:
+                return
             await self.cleanup_session(uid)
 
             peer = self.peers.get(uid)
@@ -413,6 +432,30 @@ class WebRTCPeerManagement:
             except Exception as exc:
                 logger.debug("Deferred peer close failed/timed out: {}".format(exc))
 
+    async def hold_session(self, uid: str, ws: WebSocketResponse) -> bool:
+        """Keep the session of a client whose socket `ws` was cut for
+        SESSION_HOLD_S, for a hello naming its resume key, and end it after.
+
+        Returns:
+            Whether it is held: a client in no session, one that named no key,
+            and one that resumed on another socket since are not.
+        """
+        async with self.lock:
+            peer = self.peers.get(uid)
+            if (peer is None or peer.ws is not ws or peer.peer_type != "client"
+                    or peer.peer_status != "session" or not peer.resume_key):
+                return False
+            self._holds[uid] = asyncio.create_task(self._end_hold(uid, ws))
+        logger.info(f"Signaling socket of peer {uid} cut; its session is held {SESSION_HOLD_S:.0f}s for a resume.")
+        return True
+
+    async def _end_hold(self, uid: str, ws: WebSocketResponse) -> None:
+        """End a held session that no hello resumed in time."""
+        await asyncio.sleep(SESSION_HOLD_S)
+        self._holds.pop(uid, None)
+        await self.remove_peer(uid, ws)
+        self._notify_client_presence()
+
     async def close_clients(self) -> None:
         """Close every client socket still registered, as going away (1001),
         for a service that is shutting down: its server peer may already be
@@ -434,7 +477,7 @@ class WebRTCPeerManagement:
         client_type: Optional[str] = None,
         client_slot: Optional[int] = None,
         client_strict_viewer: Optional[bool] = None,
-    ) -> None:
+    ) -> bool:
         """Serve a registered peer's message loop until it disconnects.
 
         Relays session messages between paired partners, room messages between
@@ -458,8 +501,12 @@ class WebRTCPeerManagement:
             client_type: For clients, either "viewer" or "controller".
             client_slot: Player slot number (1-4), or -1 when unassigned.
             client_strict_viewer: Whether the client is a strict viewer.
+
+        Returns:
+            Whether the socket was cut: it ended with no close frame.
         """
         peer_status = None
+        cut = False
         logger.info(
             f"Registered peer {uid} at {raddr} with peer_type {peer_type} and client_type {client_type}"
         )
@@ -471,9 +518,10 @@ class WebRTCPeerManagement:
                 if msg_obj.type in [WSMsgType.CLOSE, WSMsgType.CLOSING]:
                     logger.info(f"Peer connection closed: {uid!r}")
                     break
-                elif msg_obj.type == WSMsgType.ERROR:
-                    logger.error("Peer Connection error")
-                    raise Exception(f"Peer Connection error: {uid!r}")
+                elif msg_obj.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
+                    logger.info(f"Peer connection cut: {uid!r}")
+                    cut = True
+                    break
 
                 # autoping is off: answer PING here, feed PONG to the uplink gauge.
                 if msg_obj.type == WSMsgType.PING:
@@ -520,7 +568,12 @@ class WebRTCPeerManagement:
                         wso = other_peer.ws
                         logger.debug("{} -> {}: {}".format(uid, other_id, msg))
                         msg_string = "{} {}".format(uid, msg_string)
-                        await wso.send_str(msg_string)
+                        try:
+                            await wso.send_str(msg_string)
+                        except ConnectionError:
+                            # A cut partner's lines wait for its resume.
+                            if len(other_peer.held) < HELD_LINES_MAX:
+                                other_peer.held.append(msg_string)
                     elif peer_status:
                         if msg.startswith("ROOM_PEER_MSG"):
                             parts = msg.split(maxsplit=2)
@@ -636,8 +689,12 @@ class WebRTCPeerManagement:
                         await wsp.send_str(msg)
                 else:
                     logger.info("Ignoring unknown message {!r} from {!r}".format(msg, uid))
+        except ConnectionError as e:
+            logger.info(f"Peer connection cut: {uid!r} ({e})")
+            cut = True
         except Exception as e:
             logger.error(f"Error at connection handler for peer {uid!r}: {e}")
+        return cut
 
     def allowed_client_slots(self) -> List[int]:
         """Return the allowed player slot numbers (1 always; 2-4 when enabled)."""
@@ -711,6 +768,39 @@ class WebRTCPeerManagement:
             return client_type
         return "viewer"
 
+    def _resume_locked(
+        self, ws: WebSocketResponse, raddr: str, resume_key: Optional[str], client_type: Optional[str],
+        client_token: Optional[str], display_id: str, deferred: List[Callable[[], Awaitable[Any]]],
+    ) -> Optional[Tuple[Tuple[str, str, Optional[str], Optional[int], Optional[bool]], str, List[str]]]:
+        """Hand a client's session to the socket of a hello naming its resume
+        key, while holding ``self.lock``. The client keeps its peer id and its
+        session; a socket of its still open (the cut reached the page alone)
+        is closed after the lock is released, without ending the session.
+
+        Returns:
+            The hello's result, the session partner's id, and the lines held
+            for the client; None where no session of this client is open to
+            resume (none of its key, another role, display or token, or the
+            partner gone).
+        """
+        if not resume_key:
+            return None
+        peer = next((p for p in self.peers.values() if p.peer_type == "client" and p.resume_key
+                     and hmac.compare_digest(p.resume_key, resume_key)), None)
+        partner = self.peers.get(self.sessions.get(peer.uid, "")) if peer is not None else None
+        if (peer is None or peer.peer_status != "session" or getattr(partner, "peer_type", None) != "server"
+                or (peer.client_type, peer.display_id, peer.client_token) != (client_type, display_id, client_token)):
+            return None
+        hold = self._holds.pop(peer.uid, None)
+        if hold is not None:
+            hold.cancel()
+        if not peer.ws.closed:
+            deferred.append(lambda old=peer.ws: old.close(code=1000, message=b"Resumed on a new connection."))
+        peer.ws, peer.raddr = ws, raddr
+        held, peer.held = peer.held, []
+        return ((peer.uid, peer.peer_type, peer.client_type, peer.client_slot, peer.client_strict_viewer),
+                partner.uid, held)
+
     async def hello_peer(
         self, ws: WebSocketResponse, raddr: str, auth_role_ceiling: Optional[str] = None
     ) -> Tuple[str, str, Optional[str], Optional[int], Optional[bool]]:
@@ -738,7 +828,10 @@ class WebRTCPeerManagement:
         the server starts its capture for a lone viewer (websockets parity),
         while a secondary display exists only through its controller's layout,
         so its viewer is refused without one. Strict shared viewers (the
-        `#shared` URL hash) are refused when `enable_shared` is off.
+        `#shared` URL hash) are refused when `enable_shared` is off. A hello
+        naming the resume key of a client's open session is that page coming
+        back: it takes the session over (`_resume_locked`), is answered
+        RESUMED, and meets none of these checks.
 
         Args:
             ws: The connecting WebSocket.
@@ -781,6 +874,8 @@ class WebRTCPeerManagement:
         fullcolor_codecs = None
         tenbit_codecs = None
         page_size = None
+        resume_key = None
+        resumed = None
         dead_peer_notifications: List[Callable[[], Awaitable[Any]]] = []
 
         def evict_peer_locked(
@@ -826,6 +921,9 @@ class WebRTCPeerManagement:
                         if isinstance(codecs, list):
                             tenbit_codecs = [str(c) for c in codecs if isinstance(c, str) and c.isalnum()]
                         page_size = hello_page_size(json_metadata.get("page_size"))
+                        key = json_metadata.get("resume_key")
+                        if isinstance(key, str) and 16 <= len(key) <= 64 and key.isascii() and key.isalnum():
+                            resume_key = key
                     except json.JSONDecodeError as e:
                         await ws.close(code=1002, message=b"invalid protocol")
                         raise Exception("Invalid JSON metadata from {!r}".format(raddr)) from e
@@ -875,6 +973,9 @@ class WebRTCPeerManagement:
                     client_type = self._secure_effective_client_type(client_type, client_token)
                     if auth_role_ceiling == "viewer" and client_type == "controller":
                         client_type = "viewer"
+                    resumed = self._resume_locked(ws, raddr, resume_key, client_type, client_token,
+                                                  display_id, dead_peer_notifications)
+                if peer_type == "client" and resumed is None:
                     if not self.enable_sharing:
                         existing_clients = [
                             (pid, peer)
@@ -1025,7 +1126,7 @@ class WebRTCPeerManagement:
                             assert controller_entry is not None
                             ctrl_pid, ctrl_peer = controller_entry
                             ctrl_ws = getattr(ctrl_peer, "ws", None)
-                            if ctrl_ws is None or ctrl_ws.closed:
+                            if (ctrl_ws is None or ctrl_ws.closed) and ctrl_pid not in self._holds:
                                 dead_peer_notifications.extend(
                                     self._evict_dead_peer_locked(ctrl_pid)
                                 )
@@ -1046,26 +1147,30 @@ class WebRTCPeerManagement:
                                 )
                             )
 
-                uid = str(uuid.uuid4())
-                puid = "-".join([peer_type, uid])
-                self.peers[puid] = Peer(
-                    uid=puid,
-                    ws=ws,
-                    raddr=raddr,
-                    peer_type=peer_type,
-                    client_type=client_type,
-                    client_slot=client_slot,
-                    client_strict_viewer=client_strict_viewer,
-                    client_token=client_token,
-                    display_id=display_id,
-                    display_position=display_position,
-                    fullcolor_codecs=fullcolor_codecs,
-                    tenbit_codecs=tenbit_codecs,
-                    tab_id=client_tab_id,
-                    cc_start_kbps=cc_start_kbps,
-                    page_size=page_size,
-                )
-                result = (puid, peer_type, client_type, client_slot, client_strict_viewer)
+                if resumed is not None:
+                    result = resumed[0]
+                else:
+                    uid = str(uuid.uuid4())
+                    puid = "-".join([peer_type, uid])
+                    self.peers[puid] = Peer(
+                        uid=puid,
+                        ws=ws,
+                        raddr=raddr,
+                        peer_type=peer_type,
+                        client_type=client_type,
+                        client_slot=client_slot,
+                        client_strict_viewer=client_strict_viewer,
+                        client_token=client_token,
+                        display_id=display_id,
+                        display_position=display_position,
+                        fullcolor_codecs=fullcolor_codecs,
+                        tenbit_codecs=tenbit_codecs,
+                        tab_id=client_tab_id,
+                        cc_start_kbps=cc_start_kbps,
+                        page_size=page_size,
+                        resume_key=resume_key,
+                    )
+                    result = (puid, peer_type, client_type, client_slot, client_strict_viewer)
         finally:
             for make_coro in dead_peer_notifications:
                 try:
@@ -1074,6 +1179,18 @@ class WebRTCPeerManagement:
                     logger.debug(
                         "Deferred dead-peer notification failed/timed out: {}".format(exc)
                     )
+        if resumed is not None:
+            _, partner_id, held = resumed
+            try:
+                await ws.send_str("RESUMED " + partner_id)
+                for line in held:
+                    await ws.send_str(line)
+            except Exception:
+                if not await self.hold_session(result[0], ws):
+                    await self.remove_peer(result[0], ws)
+                raise
+            logger.info(f"Peer {result[0]} resumed its session from {raddr}")
+            return result
         try:
             await ws.send_str("HELLO")
         except Exception:
@@ -1109,8 +1226,9 @@ class WebRTCPeerManagement:
             return
         self._notify_client_presence()
 
+        cut = False
         try:
-            await self.peer_connection_handler(
+            cut = await self.peer_connection_handler(
                 ws,
                 raddr,
                 peer_id,
@@ -1127,7 +1245,8 @@ class WebRTCPeerManagement:
             await ws.close(code=1002, message=b"internal error")
         finally:
             if peer_id:
-                await self.remove_peer(peer_id)
+                if not (cut and await self.hold_session(peer_id, ws)):
+                    await self.remove_peer(peer_id, ws)
                 self._notify_client_presence()
 
     def _notify_client_presence(self) -> None:

@@ -26,12 +26,20 @@
  * Speaks the line protocol of the server's signaling WebSocket. `HELLO
  * <peer type> <json>` registers the client, the JSON carrying its type, slot,
  * strict-viewer flag, secure-mode token, display id, display position, tab,
- * and the start rate congestion control last held its display at;
+ * the start rate congestion control last held its display at, and the
+ * session's resume key;
  * `SESSION server` asks for the server peer and is answered with
  * `SESSION_OK <peer id>`; from then on the SDP and the ICE candidates travel
  * as `<peer id> {"sdp": ...}` and `<peer id> {"ice": ...}` lines, and
  * `ERROR ...` lines report server-side failures. The server always offers
  * and the client answers.
+ *
+ * A socket cut while the app's media still runs (`resumable`) reopens at
+ * once with the same resume key: the server, which holds a cut client's
+ * session for a few seconds, answers `RESUMED <peer id>` and the session
+ * carries on, the peer connection untouched (`onresumed`); a plain `HELLO`
+ * (the hold ran out, or a server that holds none) starts a new session as
+ * after any drop.
  *
  * A failed or dropped connection retries RETRY_FIRST_MS later, each further
  * failure twice as far out up to RETRY_MAX_MS; the fourth consecutive failure
@@ -41,6 +49,11 @@
  */
 
 import { pageTabId, recalledCcStart } from './util.js';
+
+/** A secret naming the page's session to the server, which resumes it after a cut. */
+function newResumeKey() {
+    return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 /** First signaling retry after a failure, doubled per failure up to RETRY_MAX_MS. */
 const RETRY_FIRST_MS = 400;
@@ -52,8 +65,9 @@ const RETRY_MAX_MS = 1000;
  * Callbacks are assigned as properties: `onstatus`, `ondebug`, and `onerror`
  * receive messages, `onsdp` an `RTCSessionDescription`, `onice` an
  * `RTCIceCandidate`, `ondisconnect` whether the app should reconnect,
- * `onshowalert` a reason to show the user, and `onfatalretry` replaces the
- * page reload after repeated failures.
+ * `onshowalert` a reason to show the user, `onfatalretry` replaces the
+ * page reload after repeated failures, `resumable` says whether a cut
+ * socket's session is worth resuming, and `onresumed` follows a resume.
  */
 export class WebRTCSignaling {
     /**
@@ -129,6 +143,19 @@ export class WebRTCSignaling {
 
         /** Called with whether the app should reconnect. @type {?function(boolean): void} */
         this.ondisconnect = null;
+
+        /** Whether the session of a cut socket is worth resuming (its media runs on). @type {?function(): boolean} */
+        this.resumable = null;
+
+        /** Called once the session of a cut socket carries on over a new one. @type {?function(): void} */
+        this.onresumed = null;
+
+        /** The key the hello names; a new session gets a new one. @type {string} */
+        this.resume_key = newResumeKey();
+
+        /** A resume under way, and the lines it holds back until the server answers it. */
+        this._resuming = false;
+        this._resume_lines = [];
 
         /** `'disconnected'`, `'connecting'`, or `'connected'`. @type {string} */
         this.state = 'disconnected';
@@ -245,6 +272,7 @@ export class WebRTCSignaling {
             'display_position': this.display_position,
             'client_tab_id': pageTabId(),
             'cc_start_kbps': recalledCcStart(this.display_id),
+            'resume_key': this.resume_key,
         }
         if (this.capabilities) {
             try { meta.fullcolor_codecs = await this.capabilities(); } catch (e) { /* the server takes silence as decodable */ }
@@ -319,18 +347,34 @@ export class WebRTCSignaling {
         this._ws_conn.send(`SESSION server`);
     }
     /**
-     * Dispatches a server line: `HELLO` (registered, so request the session),
-     * `SESSION_OK <peer id>` (session established), `ERROR ...` (the missing
-     * server peer is retried after a second), and otherwise a
-     * `<peer id> {"sdp": ...}` or `<peer id> {"ice": ...}` line.
+     * Dispatches a server line: `HELLO` (registered, so request the session;
+     * during a resume, the server held none, so a new one starts), `RESUMED
+     * <peer id>` (the session carries on), `SESSION_OK <peer id>` (session
+     * established), `ERROR ...` (the missing server peer is retried after a
+     * second), and otherwise a `<peer id> {"sdp": ...}` or `<peer id>
+     * {"ice": ...}` line.
      * @param {MessageEvent} event
      */
     _onServerMessage(event) {
         this._setDebug("server message: " + event.data);
 
         if (event.data === "HELLO") {
+            if (this._resuming) {
+                this._setStatus("Session not resumed; starting a new one.");
+                this.reconnect();
+                return;
+            }
             this._setStatus("Registered with server.");
             this._setupCall();
+            return;
+        }
+
+        if (event.data.startsWith("RESUMED ")) {
+            this._setStatus("Session resumed.");
+            this.server_peer_id = event.data.split(" ")[1];
+            this._resuming = false;
+            for (const line of this._resume_lines.splice(0)) this._ws_conn.send(line);
+            if (this.onresumed !== null) this.onresumed();
             return;
         }
 
@@ -385,7 +429,9 @@ export class WebRTCSignaling {
      * the server made, the 1001 of a server going away (stopping,
      * restarting, or switching transport) among them, reports
      * `ondisconnect(true)` so the app recovers like the WebSocket transport
-     * (reconnect, and repeated failures reload for re-authentication).
+     * (reconnect, and repeated failures reload for re-authentication), unless
+     * the app's media runs on (`resumable`): then the socket reopens at once
+     * to resume the session.
      * @param {CloseEvent} event
      */
     _onServerClose(event) {
@@ -407,8 +453,13 @@ export class WebRTCSignaling {
                 }
             } else if ((event.code === 1000 || event.code === 1001) && intentional) {
                 this.ondisconnect(false);
+            } else if (this.resumable !== null && this.resumable()) {
+                console.log("Signaling socket cut; resuming the session.");
+                this._resuming = true;
+                this.connect();
             } else {
                 console.log("Reconnecting due to server-side connection closure.");
+                this.resume_key = newResumeKey();
                 this.ondisconnect(true);
             }
         }
@@ -434,8 +485,9 @@ export class WebRTCSignaling {
     }
 
     /**
-     * Starts a new session in place of one whose media path failed while this
-     * socket stayed up: the socket is closed without waiting for its close
+     * Starts a new session, under a new resume key, in place of one whose
+     * media path failed while this socket stayed up, or one whose hold on the
+     * server ran out before a resume: the socket is closed without waiting for its close
      * (which a dead path can hold back for a long time), whatever it still
      * reports is ignored, among it the 4001 the server's newest-wins sends a
      * holder it had not reaped yet, and `ondisconnect(true)` has the app
@@ -447,6 +499,9 @@ export class WebRTCSignaling {
             clearTimeout(this._retry_timer);
             this._retry_timer = null;
         }
+        this.resume_key = newResumeKey();
+        this._resuming = false;
+        this._resume_lines = [];
         try { if (this._ws_conn) this._ws_conn.close(); } catch (e) { /* already closing */ }
         this.state = 'disconnected';
         if (this.ondisconnect !== null) this.ondisconnect(true);
@@ -464,7 +519,7 @@ export class WebRTCSignaling {
      */
     sendICE(ice) {
         this._setDebug("sending ice candidate: " + JSON.stringify(ice));
-        this._ws_conn.send(`${this.server_peer_id} ${JSON.stringify({ 'ice': ice })}`);
+        this._send(`${this.server_peer_id} ${JSON.stringify({ 'ice': ice })}`);
     }
 
     /**
@@ -473,6 +528,12 @@ export class WebRTCSignaling {
      */
     sendSDP(sdp) {
         this._setDebug("sending local sdp: " + JSON.stringify(sdp));
-        this._ws_conn.send(`${this.server_peer_id} ${JSON.stringify({ 'sdp': sdp })}`);
+        this._send(`${this.server_peer_id} ${JSON.stringify({ 'sdp': sdp })}`);
+    }
+
+    /** Sends a session line, or holds it for the server's answer to a resume under way. */
+    _send(line) {
+        if (this._resuming) this._resume_lines.push(line);
+        else this._ws_conn.send(line);
     }
 }
