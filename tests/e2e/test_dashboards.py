@@ -1607,19 +1607,23 @@ def switch_on(switch) -> bool:
 
 
 def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
-    """Paint-over follows Turbo where nothing pins it.
+    """Paint-over follows Turbo where nothing pins it, at a constant quality.
 
     A video encoder under Turbo sends every frame and leaves no still screen to
     clean up, so the dashboard shows paint-over off under Turbo and on without
     it, as the server defaults it, and sends the server each value it derives
     that differs from the server's. A pick the user makes, or an operator's
-    value, holds through a Turbo change.
+    value, holds through a Turbo change. Under CBR, the default, a still screen
+    is cleaned up to the paint-over quality whatever the switch says, so the
+    dashboard hides the switch there and shows that quality.
     """
     res = H.Results(f"paint-over-{dashboard}-{engine}")
     for operator in (None, "true"):
         who = "operator on" if operator else "unset"
-        H.server_start(mode="websockets", wayland=False, web_root=dist,
-                       extra_env={"SELKIES_USE_PAINT_OVER_QUALITY": operator} if operator else {})
+        env = {"SELKIES_RATE_CONTROL_MODE": "crf"}
+        if operator:
+            env["SELKIES_USE_PAINT_OVER_QUALITY"] = operator
+        H.server_start(mode="websockets", wayland=False, web_root=dist, extra_env=env)
         try:
             with sync_playwright() as p:
                 browser = C.launch_browser(p, engine)
@@ -1685,6 +1689,26 @@ def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
                 C.close_browser(browser)
         finally:
             H.server_stop()
+    H.server_start(mode="websockets", wayland=False, web_root=dist)
+    try:
+        with sync_playwright() as p:
+            browser = C.launch_browser(p, engine)
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+            ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+            page = ctx.new_page()
+            page.goto(f"{H.BASE_URL}?socket_worker=false" if engine == "firefox" else H.BASE_URL,
+                      wait_until="load")
+            C.wait_ws_video(page, timeout=45)
+            time.sleep(2.0)
+            turbo, paint = paint_over_switches(page, dashboard)
+            quality = (page.locator("#videoPaintoverCRFSlider") if dashboard == "classic"
+                       else page.locator("label:has-text('Paint-Overs CRF')"))
+            res.check("CBR: the paint-over switch is hidden", turbo.count() == 1 and paint.count() == 0,
+                      f"switches {turbo.count()} {paint.count()}")
+            res.check("CBR: the paint-over quality is shown", quality.count() == 1, quality.count())
+            C.close_browser(browser)
+    finally:
+        H.server_stop()
     res.summary()
     return res
 

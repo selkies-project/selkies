@@ -722,7 +722,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "use_paint_over_quality",
         "type": "bool",
         "default": True,
-        "help": "Clean up a still screen at the paint-over quality. Unless set, it is off while video_streaming_mode (Turbo) drives a video encoder and on otherwise, JPEG included, as the dashboards default it. Under CBR a still screen is cleaned up either way, to the session's own quality (video_crf) with this off and to the paint-over quality with it on, since a rate control alone leaves it short of clean where the bitrate is low for the frame rate; under CRF and for JPEG only with it on. Under Turbo the frames are hashed for the cleanup, on the GPU where NVENC encodes and on the CPU beside the encode otherwise. When on: once the picture stops changing, or keeps changing only in small places, a video encoder refreshes what changed at the paint-over CRF, and after a large change sends a key frame at it once the screen holds still. Under CBR the frames instead keep coming after the screen stops, each coded by the rate control, until the picture is clean, and then stop until it moves again, so a blinking cursor on a clean screen costs only its own frames: NVENC and x264 until their rate control reaches that quality (NVENC refreshes the screen a band a frame where the bitrate is too low for it to get there), VA-API until the encoded picture stops improving, x265 and VP9 until theirs codes at it, for half a minute at most; VP8 and SVT-AV1 hold a refresh at it, a key frame within a second of the bitrate; JPEG re-sends still stripes at the paint-over JPEG quality.",
+        "help": "Clean up a still screen at the paint-over quality. Unless set, it is off while video_streaming_mode (Turbo) drives a video encoder and on otherwise, JPEG included, as the dashboards default it. Under CBR a video stream's still screen is cleaned up to the paint-over quality whatever this says, since a rate control alone leaves it short of clean where the bitrate is low for the frame rate, so this changes CRF sessions and JPEG only and the dashboards hide it under CBR; under CRF and for JPEG a still screen is cleaned up only with it on. Under Turbo the frames are hashed for the cleanup, on the GPU where NVENC encodes and on the CPU beside the encode otherwise. When on: once the picture stops changing, or keeps changing only in small places, a video encoder refreshes what changed at the paint-over CRF, and after a large change sends a key frame at it once the screen holds still. Under CBR the frames instead keep coming after the screen stops, each coded by the rate control, until the picture is clean, and then stop until it moves again, so a blinking cursor on a clean screen costs only its own frames: NVENC and x264 until their rate control reaches that quality (NVENC refreshes the screen a band a frame where the bitrate is too low for it to get there), VA-API until the encoded picture stops improving, x265 and VP9 until theirs codes at it, for half a minute at most; VP8 and SVT-AV1 hold a refresh at it, a key frame within a second of the bitrate; JPEG re-sends still stripes at the paint-over JPEG quality.",
     },
     {
         "name": "paint_over_jpeg_quality",
@@ -736,7 +736,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "range",
         "default": "5-50",
         "meta": {"default_value": 18},
-        "help": 'Paint-over quality index, on the video_crf scale and mapped onto each video codec\'s quantizer, that a still screen is cleaned up at: allowed range, initial value, or both ("18,5-50"); "18-18" locks.',
+        "help": 'Paint-over quality index, on the video_crf scale and mapped onto each video codec\'s quantizer, that a still screen is cleaned up at (under CBR the finest a still screen is refined to, reached as fast as the path carries, whatever use_paint_over_quality says): allowed range, initial value, or both ("18,5-50"); "18-18" locks.',
     },
     {
         "name": "video_paintover_burst_frames",
@@ -2039,8 +2039,8 @@ class AppSettings:
     def resolve_paint_over_default(self) -> None:
         """Default paint-over off while Turbo drives a video encoder and on otherwise, JPEG
         included: the dashboards' default (`USE_PAINT_OVER_QUALITY_SPEC`), so a client without
-        one gets it as well. A constant rate still cleans up a still screen without it, to the
-        session's own quality.
+        one gets it as well. A constant rate cleans up a still screen to the paint-over quality
+        either way, so the default matters to CRF sessions and JPEG.
 
         An operator's use_paint_over_quality wins; a client's choice lives in its display's
         state. Called again on a transport switch, which can change the encoder.

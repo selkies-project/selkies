@@ -2925,7 +2925,6 @@ function Sidebar() {
   const show10Bit = showH264Options && codecCarriesTenBit(codecOfEncoder(activeEncoder))
     && !!tenBitOffered;
   const showJpegOptions = encoder === 'jpeg';
-  const showPaintOverQualityToggle = showH264Options || showJpegOptions;
   /**
    * The mode the encoder is actually using, which picks the quality slider:
    * the server's when rate control is disabled.
@@ -2933,6 +2932,9 @@ function Sidebar() {
   const appliedRateControlMode = rateControlEnabled
     ? rateControlMode
     : (serverSettings?.rate_control_mode?.value ?? rateControlMode);
+  /** Under CBR a video stream's still screen is cleaned up to the paint-over quality whatever the toggle says. */
+  const cbrVideo = showH264Options && appliedRateControlMode === RATE_CONTROL_CBR;
+  const showPaintOverQualityToggle = (showH264Options && !cbrVideo) || showJpegOptions;
 
   /**
    * The slider stops inside the server's ranges; a stored value between stops
@@ -3496,7 +3498,7 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {showCRF && usePaintOverQuality && (renderableSettings.videoPaintoverCRF ?? true) && (
+                {showCRF && (usePaintOverQuality || cbrVideo) && (renderableSettings.videoPaintoverCRF ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="videoPaintoverCRFSlider">
                       {t("sections.video.paintoverCrfLabel", { crf: videoPaintoverCRF })}
@@ -3513,7 +3515,7 @@ function Sidebar() {
                     />
                   </div>
                 )}
-                {showH264Options && usePaintOverQuality && (renderableSettings.videoPaintoverBurstFrames ?? true) && (
+                {showH264Options && (usePaintOverQuality || cbrVideo) && (renderableSettings.videoPaintoverBurstFrames ?? true) && (
                   <div className="dev-setting-item">
                     <label htmlFor="videoPaintoverBurstSlider">
                       {t("sections.video.paintoverBurstLabel", { frames: videoPaintoverBurstFrames }, `Paint-over Burst Frames: ${videoPaintoverBurstFrames}`)}

@@ -1065,9 +1065,11 @@ export function Settings() {
     const showCrfSlider = isH264 && appliedRateControlMode === 'crf' && (renderableSettings.videoCRF ?? true);
     const showTurbo = isH264 && (renderableSettings.videoStreamingMode ?? true);
     const showJpegQualitySlider = showJpegOptions && (renderableSettings.jpegQuality ?? true);
-    const showPaintOverSwitch = (isH264 || activeEncoder === 'jpeg') && (renderableSettings.usePaintOverQuality ?? true);
-    const showPaintoverCrf = isH264 && usePaintOverQuality && (renderableSettings.videoPaintoverCRF ?? true);
-    const showPaintoverBurst = isH264 && usePaintOverQuality && (renderableSettings.videoPaintoverBurstFrames ?? true);
+    // Under CBR a video stream's still screen is cleaned up to the paint-over quality whatever the switch says.
+    const cbrVideo = isH264 && appliedRateControlMode === 'cbr';
+    const showPaintOverSwitch = ((isH264 && !cbrVideo) || activeEncoder === 'jpeg') && (renderableSettings.usePaintOverQuality ?? true);
+    const showPaintoverCrf = isH264 && (usePaintOverQuality || cbrVideo) && (renderableSettings.videoPaintoverCRF ?? true);
+    const showPaintoverBurst = isH264 && (usePaintOverQuality || cbrVideo) && (renderableSettings.videoPaintoverBurstFrames ?? true);
     const showPaintOverJpeg = showJpegOptions && usePaintOverQuality && (renderableSettings.paintOverJpegQuality ?? true);
     const showCpuSwitch = softwareChoiceAvailable(activeEncoder, conditionalCtx.encoderBackends) && (renderableSettings.useCpu ?? true);
     const showAudioBitrate = renderableSettings.audioBitrate ?? true;
