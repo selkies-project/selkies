@@ -4,14 +4,20 @@
    arrives byte for byte. Both run under the interposer preload. Prints PASS or
    FAIL and exits non-zero on failure. */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -38,8 +44,37 @@ static int run_creator(int rd, int wr) {
     snprintf(us.name, sizeof us.name, "%s", DEVNAME);
     if (ioctl(fd, UI_DEV_SETUP, &us) < 0) { dprintf(2, "UI_DEV_SETUP: %s\n", strerror(errno)); return 1; }
     if (ioctl(fd, UI_DEV_CREATE, 0) < 0) { dprintf(2, "UI_DEV_CREATE: %s\n", strerror(errno)); return 1; }
+    /* With no force-feedback request queued, a uinput fd is idle: poll() reports
+       nothing and a non-blocking read() is EAGAIN, never a readable EOF that
+       would spin an application waiting on it. */
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    int prc = poll(&pfd, 1, 50);
+    struct input_event probe;
+    ssize_t rn = read(fd, &probe, sizeof probe);
+    int rerr = errno;
+    if (prc != 0 || rn != -1 || rerr != EAGAIN) {
+        dprintf(2, "creator fd not idle: poll=%d revents=%#x read=%zd errno=%s\n",
+                prc, pfd.revents, rn, strerror(rerr));
+        return 1;
+    }
+    /* A child forked before exec that closes its inherited copy (as launchers
+       do) must neither hang nor tear down the creator's device, which the
+       consumer then opens and reads. */
+    pid_t kid = fork();
+    if (kid < 0) return 1;
+    if (kid == 0) { alarm(5); close(fd); _exit(0); }
+    int kst = 0;
+    waitpid(kid, &kst, 0);
+    if (!WIFEXITED(kst) || WEXITSTATUS(kst) != 0) {
+        dprintf(2, "forked child closing the creator fd did not exit cleanly (status %#x)\n", kst);
+        return 1;
+    }
     char sys[64] = {0};
     ioctl(fd, UI_GET_SYSNAME(sizeof sys), sys);
+    if (getenv("SELKIES_JS_SOCKET_PATH") && strcmp(sys, "event3000") != 0) {
+        dprintf(2, "stale event3000 socket was not reclaimed (got %s)\n", sys);
+        return 1;
+    }
     dprintf(wr, "%s\n", sys);
     char go = 0;
     if (read(rd, &go, 1) != 1) return 1;
@@ -55,6 +90,27 @@ static int run_creator(int rd, int wr) {
     return 0;
 }
 
+/* Whether `node` (a basename) appears in both a readdir and a scandir listing
+   of /dev/input: SDL in a sandbox without udev finds devices only that way. */
+static int listed(const char *node) {
+    int in_readdir = 0, in_scandir = 0;
+    DIR *d = opendir("/dev/input");
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) if (strcmp(e->d_name, node) == 0) in_readdir = 1;
+        closedir(d);
+    }
+    struct dirent **list = NULL;
+    int n = scandir("/dev/input", &list, NULL, alphasort);
+    for (int i = 0; i < n; i++) {
+        if (strcmp(list[i]->d_name, node) == 0) in_scandir = 1;
+        free(list[i]);
+    }
+    free(list);
+    dprintf(2, "listing %s: readdir=%d scandir=%d\n", node, in_readdir, in_scandir);
+    return in_readdir && in_scandir;
+}
+
 static int run_consumer(int rd, int wr) {
     char sys[64] = {0};
     FILE *f = fdopen(rd, "r");
@@ -65,6 +121,7 @@ static int run_consumer(int rd, int wr) {
     int fd = -1;
     for (int t = 0; t < 200 && fd < 0; t++) { fd = open(path, O_RDONLY); if (fd < 0) usleep(10000); }
     if (fd < 0) { dprintf(2, "consumer open %s: %s\n", path, strerror(errno)); return 1; }
+    int list_ok = listed(sys);
 
     char name[80] = {0}; ioctl(fd, EVIOCGNAME(sizeof name), name);
     struct input_id id; memset(&id, 0, sizeof id); ioctl(fd, EVIOCGID, &id);
@@ -99,7 +156,7 @@ static int run_consumer(int rd, int wr) {
     }
     dprintf(2, "stream match=%d\n", matched);
     close(fd);
-    return (matched && name_ok && id_ok && key_ok && abs_ok) ? 0 : 1;
+    return (matched && name_ok && id_ok && key_ok && abs_ok && list_ok) ? 0 : 1;
 }
 
 static volatile sig_atomic_t hold_stop;
@@ -130,15 +187,94 @@ static int run_hold(void) {
     return 0;
 }
 
+/* Leaves a socket file nobody accepts on at `num`, as a creator that died
+   without unlinking it does, with its descriptor beside it. */
+static void plant_stale(const char *dir, int num) {
+    char path[512];
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    snprintf(a.sun_path, sizeof a.sun_path, "%.80s/selkies_event%d.sock", dir, num);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) == 0) listen(s, 1);
+    close(s);
+    snprintf(path, sizeof path, "%s/selkies_event%d.desc", dir, num);
+    FILE *f = fopen(path, "w");
+    if (f) { fputs("stale", f); fclose(f); }
+}
+
+/* Watches /dev/input with inotify the way SDL does without udev, starts a
+   creator, and opens the node from the first event that names it: the node has
+   to be openable as soon as it is announced. */
+static int run_watch(const char *self) {
+    int in = inotify_init1(IN_CLOEXEC);
+    if (in < 0 || inotify_add_watch(in, "/dev/input", IN_CREATE | IN_DELETE | IN_MOVED_TO | IN_MOVED_FROM | IN_ATTRIB) < 0) {
+        dprintf(2, "inotify on /dev/input: %s\n", strerror(errno));
+        return 1;
+    }
+    pid_t kid = fork();
+    if (kid < 0) return 1;
+    if (kid == 0) {
+        prctl(PR_SET_PDEATHSIG, SIGTERM);
+        int nul = open("/dev/null", O_WRONLY);
+        dup2(nul, 1);
+        dup2(nul, 2);
+        execl(self, self, "hold", (char *)NULL);
+        _exit(127);
+    }
+    int opened = 0;
+    alarm(10);
+    char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    while (!opened) {
+        ssize_t n = read(in, buf, sizeof buf);
+        if (n <= 0) break;
+        for (char *p = buf; p < buf + n && !opened;) {
+            struct inotify_event *ev = (struct inotify_event *)p;
+            if (ev->len && strncmp(ev->name, "event", 5) == 0 && (ev->mask & (IN_CREATE | IN_MOVED_TO))) {
+                char path[300];
+                snprintf(path, sizeof path, "/dev/input/%s", ev->name);
+                int fd = open(path, O_RDONLY | O_NONBLOCK);
+                dprintf(2, "watch: %s mask=%#x open=%s\n", ev->name, ev->mask, fd >= 0 ? "ok" : strerror(errno));
+                if (fd >= 0) { opened = 1; close(fd); }
+            }
+            p += sizeof(struct inotify_event) + ev->len;
+        }
+    }
+    kill(kid, SIGTERM);
+    waitpid(kid, NULL, 0);
+    printf("%s (watch)\n", opened ? "PASS" : "FAIL");
+    return opened ? 0 : 1;
+}
+
+/* `peer <binary>` runs the consumer as that binary (`consume <rd> <wr>`), so a
+   creator of one word size can be read by a consumer of the other, as the
+   32-bit Steam client's virtual gamepads are read by 64-bit games. */
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "hold") == 0) return run_hold();
+    if (argc > 1 && strcmp(argv[1], "watch") == 0) return run_watch(argv[0]);
+    if (argc > 3 && strcmp(argv[1], "consume") == 0) return run_consumer(atoi(argv[2]), atoi(argv[3]));
+    const char *peer = (argc > 2 && strcmp(argv[1], "peer") == 0) ? argv[2] : NULL;
+    const char *dir = getenv("SELKIES_JS_SOCKET_PATH");
+    if (dir) plant_stale(dir, 3000);
     int c2p[2], p2c[2];
     if (pipe(c2p) || pipe(p2c)) return 2;
     pid_t pid = fork();
     if (pid < 0) return 2;
-    if (pid == 0) { close(c2p[1]); close(p2c[0]); _exit(run_consumer(c2p[0], p2c[1])); }
+    if (pid == 0) {
+        close(c2p[1]); close(p2c[0]);
+        if (peer) {
+            char rd[16], wr[16];
+            snprintf(rd, sizeof rd, "%d", c2p[0]);
+            snprintf(wr, sizeof wr, "%d", p2c[1]);
+            execl(peer, peer, "consume", rd, wr, (char *)NULL);
+            _exit(127);
+        }
+        _exit(run_consumer(c2p[0], p2c[1]));
+    }
     close(c2p[0]); close(p2c[1]);
     int crc = run_creator(p2c[0], c2p[1]);
+    close(c2p[1]);
+    close(p2c[0]);
     int st = 0;
     waitpid(pid, &st, 0);
     int urc = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
