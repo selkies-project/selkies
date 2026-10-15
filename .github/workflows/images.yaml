@@ -106,7 +106,7 @@ jobs:
           remove_packages_one_command: true
           remove_folders: /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle /usr/local/share/vcpkg
       - name: Download the wheel
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.wheel_artifact || 'selkies-wheel' }}
           path: dist/
@@ -116,7 +116,7 @@ jobs:
       # from the GitHub releases, and the index only where those have nothing
       - name: Download the pixelflux wheels
         if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           pattern: pixelflux-wheels-*
@@ -124,7 +124,7 @@ jobs:
           merge-multiple: true
       - name: Download the pcmflux wheels
         if: ${{ !inputs.capture_stack_published }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           pattern: pcmflux-wheels-*
@@ -198,13 +198,13 @@ jobs:
           mkdir -p /tmp/digests/base /tmp/digests/desktop
           touch "/tmp/digests/base/${BASE_DIGEST#sha256:}"
           touch "/tmp/digests/desktop/${DIGEST#sha256:}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digest-base-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           path: /tmp/digests/base/*
           if-no-files-found: error
           retention-days: 1
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digest-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           path: /tmp/digests/desktop/*
@@ -244,7 +244,7 @@ jobs:
             { echo; echo "# ${image} packages"; dpkg-query --admindir="/tmp/dpkg-${image}" -W -f '${binary:Package}=${Version}\n'; } >> "${out}"
           done
           wc -l "${out}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: images-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           path: selkies-*-images-*.txt
@@ -271,13 +271,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download the base digests for this flavor
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digest-base-${{ matrix.flavor }}-*
           path: /tmp/digests/base
           merge-multiple: true
       - name: Download the desktop digests for this flavor
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digest-${{ matrix.flavor }}-*
           path: /tmp/digests/desktop
@@ -348,7 +348,7 @@ jobs:
         run: |
           mkdir -p /tmp/digests
           touch "/tmp/digests/${DIGEST#sha256:}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digest-${{ matrix.addon }}-${{ matrix.arch.name }}
           path: /tmp/digests/*
@@ -372,7 +372,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download digests for this addon
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: digest-${{ matrix.addon }}-*
           path: /tmp/digests
