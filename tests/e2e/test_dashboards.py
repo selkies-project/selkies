@@ -1607,15 +1607,17 @@ def switch_on(switch) -> bool:
 
 
 def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
-    """Paint-over is on with Turbo or without it where nothing pins it.
+    """Paint-over follows Turbo where nothing pins it.
 
-    The dashboard shows paint-over on under Turbo, as the server defaults it,
-    and a Turbo change neither turns it off nor sends it. A pick the user makes,
-    or an operator's value, holds through a Turbo change.
+    A video encoder under Turbo sends every frame and leaves no still screen to
+    clean up, so the dashboard shows paint-over off under Turbo and on without
+    it, as the server defaults it, and sends the server each value it derives
+    that differs from the server's. A pick the user makes, or an operator's
+    value, holds through a Turbo change.
     """
     res = H.Results(f"paint-over-{dashboard}-{engine}")
-    for operator in (None, "false"):
-        who = "operator off" if operator else "unset"
+    for operator in (None, "true"):
+        who = "operator on" if operator else "unset"
         H.server_start(mode="websockets", wayland=False, web_root=dist,
                        extra_env={"SELKIES_USE_PAINT_OVER_QUALITY": operator} if operator else {})
         try:
@@ -1658,27 +1660,28 @@ def paint_over_block(dashboard: str, dist: str, engine: str) -> "H.Results":
                 turbo, paint = paint_over_switches(page, dashboard)
                 res.check(f"{who}: Turbo starts on", switch_on(turbo), "")
                 if operator:
-                    res.check(f"{who}: paint-over shows the operator's value under Turbo", not switch_on(paint), "")
+                    res.check(f"{who}: paint-over shows the operator's value under Turbo", switch_on(paint), "")
                     flip(turbo)
                     flip(turbo)
-                    res.check(f"{who}: a Turbo change leaves it off", not switch_on(paint), "")
-                    res.check(f"{who}: and never sends it on", True not in pushed(), pushed())
+                    res.check(f"{who}: a Turbo change leaves it on", switch_on(paint), "")
+                    res.check(f"{who}: and never sends it off", False not in pushed(), pushed())
                 else:
-                    res.check(f"{who}: paint-over defaults on under Turbo", switch_on(paint), "")
+                    res.check(f"{who}: paint-over defaults off under Turbo", not switch_on(paint), "")
                     served = page.evaluate("window.use_paint_over_quality")
-                    res.check(f"{who}: as the server defaults it, so nothing turns it off there",
-                              served is True and False not in pushed(), (served, pushed()))
+                    res.check(f"{who}: as the server defaults it, so nothing turns it on there",
+                              served is False and True not in pushed(), (served, pushed()))
                     flip(turbo)
-                    res.check(f"{who}: turning Turbo off leaves paint-over on", switch_on(paint), "")
+                    res.check(f"{who}: turning Turbo off turns paint-over on", switch_on(paint), "")
+                    res.check(f"{who}: and sends it on", pushed()[-1:] == [True], pushed())
                     flip(turbo)
-                    res.check(f"{who}: and so does turning it on again", switch_on(paint), "")
-                    res.check(f"{who}: neither sends it", pushed() == [], pushed())
+                    res.check(f"{who}: turning Turbo on turns it off again", not switch_on(paint), "")
+                    res.check(f"{who}: and sends it off", pushed()[-1:] == [False], pushed())
                     flip(paint)
                     mark = len(pushed())
                     flip(turbo)
                     flip(turbo)
-                    res.check(f"{who}: a user's pick holds through a Turbo change", not switch_on(paint), "")
-                    res.check(f"{who}: and nothing sends it on after", True not in pushed()[mark:], pushed())
+                    res.check(f"{who}: a user's pick holds through a Turbo change", switch_on(paint), "")
+                    res.check(f"{who}: and nothing sends it off after", False not in pushed()[mark:], pushed())
                 C.close_browser(browser)
         finally:
             H.server_stop()
