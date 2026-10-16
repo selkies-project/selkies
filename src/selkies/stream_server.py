@@ -47,7 +47,7 @@ from aiohttp import web
 from aiohttp.abc import AbstractAccessLogger
 from datetime import datetime, timedelta, timezone
 from prometheus_client import generate_latest
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set, Tuple
 try:
     # pyrefly: ignore[missing-import]
     import importlib_resources as importlib_resources  # pyright: ignore[reportMissingImports]
@@ -416,6 +416,35 @@ class CongestionSteer:
         self._cruise_kbps = delivered_kbps * self.HEADROOM
         self.hold_until = self._drain_until + self.SETTLE_S
         return min(current, delivered_kbps * fraction)
+
+
+class LinkAllowance:
+    """The rate (kbps) a display's still-screen cleanup may run at over its path, which pixelflux
+    is told (`update_link_rate`): SHARE of the least the path showed over its last TICKS
+    congestion ticks that measured it, `ceiling` (the most video_bitrate allows) over a path too
+    fast to tell, and 0 before a measurement or while one of no room stands among them. A frame
+    the size of the one that measured the path reads as crossing it at once now and then, several
+    times what the path carries."""
+
+    SHARE = 0.9
+    TICKS = 20
+
+    def __init__(self) -> None:
+        self.rates: Deque[float] = deque(maxlen=self.TICKS)
+        self.kbps: Optional[int] = None
+
+    def note(self, bps: Optional[float], ceiling: float) -> Optional[int]:
+        """Fold in a tick's reading of the path (None where the tick measured none); the
+        allowance where it changed, for the encoder, else None."""
+        if bps is not None:
+            self.rates.append(bps)
+        path = min(self.rates, default=None)
+        kbps = (0 if not path else int(ceiling) if path == float('inf')
+                else max(1, round(path * self.SHARE / 1000)))
+        if kbps == self.kbps:
+            return None
+        self.kbps = kbps
+        return kbps
 
 
 class RateHold:

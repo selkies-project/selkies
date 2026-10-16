@@ -133,10 +133,10 @@ from .webcam import (
     orientation_from_flags,
     webcam_uplink_allowed,
 )
-from .stream_server import (SESSION_TOKEN_PROTOCOL, BaseStreamingService, ConnectionVerdict, CongestionSteer, RateHold,
-                            TransferPacer, UplinkGauge, _observe_rtt_floor, _uplink_session_state,
-                            handshake_session_token, note_pong, ping_behind, start_kbps, uplink_rtt_ms,
-                            socket_gauge)
+from .stream_server import (SESSION_TOKEN_PROTOCOL, BaseStreamingService, ConnectionVerdict, CongestionSteer,
+                            LinkAllowance, RateHold, TransferPacer, UplinkGauge, _observe_rtt_floor,
+                            _uplink_session_state, handshake_session_token, note_pong, ping_behind, start_kbps,
+                            uplink_rtt_ms, socket_gauge)
 from .metrics import Metrics
 
 # How much stream may stand queued past the path's own round trip before the
@@ -164,13 +164,6 @@ PATH_HOLD_MAX_S = 1.5
 # round trip stands before congestion control reads a queue on the path
 # (_steer_bitrate_to_link).
 LINK_QUEUE_MS = 40.0
-# The share of what a path carries (_path_rate) a still screen's cleanup may run at
-# (pixelflux's update_link_rate), the least it showed over its last LINK_ALLOWANCE_TICKS steer
-# ticks that acked frames, and the most video_bitrate allows over a path too fast to tell: a
-# frame the size of the one that set the round-trip floor reads as crossing at once, now and
-# then several times what the path carries.
-LINK_ALLOWANCE_SHARE = 0.9
-LINK_ALLOWANCE_TICKS = 20
 # Bytes a frame carries for its crossing time to tell what the path carries: under them it is
 # lost in a millisecond's jitter, and a still screen's trickle crosses at the floor whatever
 # the path.
@@ -727,7 +720,7 @@ def _forget_path(display_state: dict) -> None:
     off on every tick. The steered rate stays as the starting point.
     """
     for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer', 'link_delivered_bps', 'link_carried',
-                'link_jitter_ms', 'link_rates'):
+                'link_jitter_ms', 'link_allowance'):
         display_state.pop(key, None)
 
 
@@ -3815,16 +3808,11 @@ class DataStreamingServer(BaseStreamingService):
             return
         floor_ms = display_state.get('rtt_floor_ms') or 0.0
         path_now = _path_rate(display_state.get('link_acks', ()), floor_ms)
-        rates = display_state.setdefault('link_rates', deque(maxlen=LINK_ALLOWANCE_TICKS))
-        if window and path_now is not None:
-            rates.append(path_now)
+        told = display_state.setdefault('link_allowance', LinkAllowance()).note(
+            path_now if window else None, app_settings.video_bitrate[1])
+        if told is not None and hasattr(module, 'update_link_rate'):
+            module.update_link_rate(told)
         queued_ms = _queued_round_trips(display_state.get('link_acks', ()), path_now)
-        path_bps = min(rates, default=None)
-        allowance = (0 if path_bps is None else app_settings.video_bitrate[1] if path_bps == float('inf')
-                     else max(1, round(path_bps * LINK_ALLOWANCE_SHARE / 1000)))
-        if allowance != display_state.get('link_allowance_kbps') and hasattr(module, 'update_link_rate'):
-            display_state['link_allowance_kbps'] = allowance
-            module.update_link_rate(allowance)
         stand = queued_ms[-max(len(window), 2 * LINK_RISE_ACKS):]
         least_ms = min(stand, default=0.0) if window else 0.0
         if not window:

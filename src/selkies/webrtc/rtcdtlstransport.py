@@ -978,6 +978,15 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
     def pacer_snapshot(self) -> Optional[dict]:
         return self._pacer.snapshot() if self._pacer is not None else None
 
+    def pacer_room_bps(self) -> Optional[float]:
+        """The rate a still screen's cleanup may take through the pacer (`RtpPacer.room_bps`)."""
+        return self._pacer.room_bps() if self._pacer is not None else None
+
+    def set_pacer_frame_floor(self, size: int) -> None:
+        """Let the pacer's video queue take a cleanup frame of `size` bytes whole."""
+        if self._pacer is not None:
+            self._pacer.set_frame_floor(size)
+
     async def _send_rtp(self, data: bytes, rtc_class: Optional[int] = None,
                         twcc_seq: Optional[int] = None) -> bool:
         """Protect and send one RTP or RTCP packet; False when the pacer dropped

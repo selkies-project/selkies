@@ -523,6 +523,13 @@ class MediaPipelinePixel(MediaPipeline):
         if self._is_screen_capturing and self.capture_module is not None:
             self.capture_module.invalidate_reference(frame_id & 0xFFFF)
 
+    def set_link_rate(self, kbps: int) -> None:
+        """Tell the encoder what the path carries for a still screen's cleanup (pixelflux's
+        `update_link_rate`), 0 where it is not known."""
+        if self._is_screen_capturing and self.capture_module is not None and hasattr(
+                self.capture_module, "update_link_rate"):
+            self.capture_module.update_link_rate(int(kbps))
+
     def acknowledge_reference(self, frame_id: int, held: bool = True) -> None:
         """Every consumer holds `frame_id`, or where not `held` was sent it (`CommonFrames`)."""
         if self._is_screen_capturing and self.capture_module is not None:

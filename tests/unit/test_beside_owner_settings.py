@@ -363,7 +363,7 @@ async def run_webrtc_congestion_checks() -> None:
         service = object.__new__(rm.WebRTCService)
         service.metrics = None
         service.args = SimpleNamespace(congestion_control=True)
-        service._congestion_steer, service._rate_holds = {}, {}
+        service._congestion_steer, service._rate_holds, service._link_allowances = {}, {}, {}
         service._display_setting = lambda did, key: 6000
         service.display_pipelines = {"primary": pipeline}
         service._display_owner_tabs = {"primary": owner} if owner else {}

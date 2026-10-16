@@ -102,6 +102,9 @@ LINK_HEADROOM_FACTOR = 2.0
 LINK_KEEP_FACTOR = 1.5
 LINK_SAMPLES = 5
 LINK_MAX_AGE_S = 2.0
+# The share of the pace a still screen's cleanup may run at (`room_bps`): the pacer drains its
+# frames with room for audio, retransmissions and FEC beside them.
+CLEANUP_PACE_SHARE = 0.8
 # Floor under the burst budget. Credit saturates at the budget, so a budget
 # below one packet leaves that packet unaffordable forever; DTLS records here
 # are MTU-sized and this keeps headroom above them.
@@ -240,6 +243,7 @@ class RtpPacer:
         self._stopped = False
         self._idr_sizes: Deque[int] = deque(maxlen=IDR_WINDOW)
         self._idr_floor_bytes = 0
+        self._frame_floor_bytes = 0
         self._gop_dead = False
         self._last_keyreq = 0.0
         self._keyreq_answered = True
@@ -319,6 +323,23 @@ class RtpPacer:
         else:
             self._link_recent.clear()
         self._apply_pace()
+
+    def room_bps(self) -> Optional[float]:
+        """The rate a still screen's cleanup may take through this pacer: what the wire delivered
+        frames' leading bursts at, typically (the median of the last LINK_SAMPLES estimates,
+        measured within LINK_MAX_AGE_S), within CLEANUP_PACE_SHARE of the pace; 0 where the
+        latest feedback showed the wire losing packets, None where none measured it."""
+        if self._link_bps is None or time.monotonic() - self._link_at > LINK_MAX_AGE_S:
+            return None
+        if not self._link_bps:
+            return 0.0
+        typical = statistics.median(self._link_recent) if self._link_recent else self._link_bps
+        return min(typical, CLEANUP_PACE_SHARE * self._pace_bps)
+
+    def set_frame_floor(self, size: int) -> None:
+        """Take a video frame of `size` bytes into the queue whole (`_video_cap_bytes`): a still
+        screen's cleanup frame at the rate `room_bps` gave."""
+        self._frame_floor_bytes = max(0, int(size))
 
     @property
     def burst_probe_bytes(self) -> float:
@@ -435,7 +456,7 @@ class RtpPacer:
 
     def _video_cap_bytes(self) -> int:
         base = int(self._pace_bps / 8.0 * CAP_MIN_MS / 1000)
-        return max(base, self._idr_floor_bytes)
+        return max(base, self._idr_floor_bytes, self._frame_floor_bytes)
 
     # ----------------------------------------------------------------- inputs
     def note_keyframe(self, total_payload_bytes: int, natural: bool = True) -> None:
@@ -803,5 +824,6 @@ class RtpPacer:
         out["queued_bytes"] = self._bytes_queued
         out["video_bytes"] = self._video_bytes
         out["idr_floor_bytes"] = int(self._idr_floor_bytes)
+        out["frame_floor_bytes"] = int(self._frame_floor_bytes)
         out["gop_dead"] = int(self._gop_dead)
         return out

@@ -74,7 +74,8 @@ from .settings import (settings, AppSettings, SETTING_DEFINITIONS, STREAM_SETTIN
                        with_live_stream_settings)
 from types import SimpleNamespace
 from .webrtc_ice_config import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
-from .stream_server import BaseStreamingService, CentralizedStreamServer, CongestionSteer, RateHold, start_kbps
+from .stream_server import (BaseStreamingService, CentralizedStreamServer, CongestionSteer, LinkAllowance, RateHold,
+                            start_kbps)
 from .audio_control import AudioControl
 
 logger = logging.getLogger("webrtc")
@@ -155,6 +156,11 @@ IS_WAYLAND: bool = bool(settings.wayland[0])
 # the page sends once its data channel opens, or its settings from a page that
 # keeps the server's size. Started first, it streams the old size's picture.
 PRIMARY_SIZE_WAIT_S = 2.0
+# Seconds of the cleanup's rate a still screen's cleanup frame comes to at most (pixelflux's
+# cleanup_cap), and what RTP, FlexFEC and retransmissions add to it on the wire: each peer's
+# pacer takes such a frame into its video queue whole (`RtpPacer.set_frame_floor`).
+CLEANUP_FRAME_S = 0.2
+CLEANUP_FRAME_OVERHEAD = 1.5
 
 def get_server_settings() -> Dict[str, Any]:
     """The server-settings payload every client is greeted with."""
@@ -267,6 +273,7 @@ class WebRTCService(BaseStreamingService):
         self._wm_swap = MultiMonitorWindowManager()
         self._congestion_steer: Dict[str, CongestionSteer] = {}
         self._rate_holds: Dict[str, RateHold] = {}
+        self._link_allowances: Dict[str, LinkAllowance] = {}
         # The browser tab of each peer (its signaling HELLO), and per display the
         # tab whose controller owns it: a controller of another tab streams and
         # drives input beside it, and what would size or configure the display
@@ -3127,9 +3134,14 @@ class WebRTCService(BaseStreamingService):
                     sender.steer_fec(window["loss_fraction"], standing is not None and standing > TWCC_QUEUE_MS)
                 for buckets in ((per_display, by_owner) if self._peer_owns_display(peer_id) else (per_display,)):
                     bucket = buckets.setdefault(
-                        did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0, "sent_bps": 0})
+                        did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0, "sent_bps": 0,
+                              "rooms": [], "transports": []})
                     if window["goodput_bps"]:
                         bucket["goodputs"].append(window["goodput_bps"])
+                    room = getattr(transport, "pacer_room_bps", lambda: None)()
+                    if room is not None:
+                        bucket["rooms"].append(room)
+                    bucket["transports"].append(transport)
                     bucket["sent_bps"] = max(bucket["sent_bps"], window["sent_bps"])
                     bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
                     if standing is not None:
@@ -3163,7 +3175,22 @@ class WebRTCService(BaseStreamingService):
                 target = round(steer.target(
                     current, ceiling, lo_kbps, min(goodputs), worst_loss, now, queue_s,
                     bucket["sent_bps"]))
-                rtc_app.set_video_budget(did, target * 1000)
+                # What the path carries, through each peer's pacer, sets the rate a still
+                # screen's cleanup runs at; the bridge and the pacers take its frames whole. A
+                # pacer reads the path's capacity, not what cross traffic leaves of it: a target
+                # backed off under the display's ceiling reads as no room.
+                room = min(bucket["rooms"], default=None)
+                if room is not None and target < round(ceiling):
+                    room = 0.0
+                told = self._link_allowances.setdefault(did, LinkAllowance()).note(room, hi_kbps)
+                if told is not None and hasattr(pipeline, "set_link_rate"):
+                    pipeline.set_link_rate(told)
+                allowance = self._link_allowances[did].kbps or 0
+                rtc_app.set_video_budget(did, max(target, allowance) * 1000)
+                for transport in bucket["transports"]:
+                    floor = getattr(transport, "set_pacer_frame_floor", None)
+                    if floor is not None:
+                        floor(int(allowance * 1000 / 8 * CLEANUP_FRAME_S * CLEANUP_FRAME_OVERHEAD))
                 held_kbps = self._rate_holds.setdefault(did, RateHold()).note(target, now)
                 if held_kbps is not None:
                     rtc_app.send_cc_rate(did, held_kbps)
