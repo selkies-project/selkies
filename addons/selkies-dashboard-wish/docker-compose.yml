@@ -18,8 +18,10 @@ services:
       SELKIES_ENABLE_DUAL_MODE: "true"
       SELKIES_PORT: "8080"
       SELKIES_ENABLE_HTTPS: "false"
+      # No login in front of the dashboard
+      SELKIES_ENABLE_BASIC_AUTH: "false"
       # Login password of the unprivileged user
-      PASSWD: mypasswd
+      # PASSWD: mypasswd
       # Start a full LXQt session, vs just the display server
       START_LXQT: "true"
       SELKIES_WAYLAND: "false"
@@ -27,6 +29,9 @@ services:
       SELKIES_WEB_ROOT: /opt/wish-dashboard
       # Remote commands, so the Apps modal's command paths render locally
       SELKIES_COMMAND_ENABLED: "true"
+      # Serve the bind-mounted checkout below rather than the installed package
+      SELKIES_DEV_SOURCE: /opt/selkies-src
+      SELKIES_FILE_MANAGER_PATH: /home/ubuntu
     ports:
       - "8080:8080"
     volumes:
@@ -34,8 +39,23 @@ services:
         source: ./dist
         target: /opt/wish-dashboard
         read_only: true
+      - type: bind
+        source: ../..
+        target: /opt/selkies-src
     # The browsers in the image allocate their shared memory here; the 64 MB
     # Docker default makes them abort on the first heavy page
     shm_size: "2gb"
     stdin_open: true
     tty: true
+  desktop-gpu:
+    extends: selkies-wish-dev
+    profiles: ["gpu"]
+    devices:
+      - /dev/dri:/dev/dri
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu", "compute", "utility", "video", "graphics", "display"]
