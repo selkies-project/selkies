@@ -4,7 +4,8 @@
 An ack held longer than the frame it names has been out is an earlier frame's of the
 same id (ids start over with a stream): it yields no round trip and leaves the send
 for that frame's own ack, where clamped to 0 it would be the round-trip floor for ten
-minutes and every later round trip a standing queue to back the rate off from.
+minutes and every later round trip a standing queue to back the rate off from. The
+display says so once a minute.
 """
 import os
 import sys
@@ -31,7 +32,11 @@ class AckRoundTripTests(unittest.TestCase):
 
     def test_an_ack_held_past_its_send_is_an_earlier_frames(self) -> None:
         ds = state(f7=20.0)
-        _note_ack(ds, 7, 5000.0)
+        with self.assertLogs("ws", level="INFO") as logged:
+            _note_ack(ds, 7, 5000.0)
+            _note_ack(ds, 7, 6000.0)
+        self.assertEqual(len(logged.output), 1, "said once a minute")
+        self.assertIn("Ack of frame 7 held 5000 ms", logged.output[0])
         self.assertNotIn("rtt_floor_ms", ds, "no round trip of 0")
         self.assertIn(7, ds["sent_timestamps"], "the send waits for its own ack")
         self.assertNotIn("acked_at", ds)

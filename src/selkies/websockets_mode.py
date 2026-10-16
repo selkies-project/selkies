@@ -156,6 +156,8 @@ RTT_SAMPLE_SANE_MAX_MS = 10000
 # How far an ack's hold may run past the time since its frame was sent and still be that
 # send's ack: the client rounds the hold to a millisecond.
 ACK_HOLD_SLACK_MS = 1.0
+# How often a display logs an ack that names an earlier frame's id.
+STALE_ACK_LOG_S = 60.0
 BACKPRESSURE_CHECK_INTERVAL_S = 0.5
 # How long a path may hold a display's whole stream (no ack for a check while its queue stands
 # over the allowance) before the backpressure gate takes it for a queue. A long path's lost
@@ -607,6 +609,10 @@ def _note_ack(display_state: dict, frame_id: int, held_ms: float) -> None:
     # Held longer than this send has been out, the id is an earlier frame's (ids start
     # over with a stream): a round trip of 0 would be the floor for ten minutes.
     if rtt_sample_ms < -ACK_HOLD_SLACK_MS:
+        if now - display_state.get('stale_ack_logged_at', 0.0) >= STALE_ACK_LOG_S:
+            display_state['stale_ack_logged_at'] = now
+            data_logger.info(f"Ack of frame {frame_id} held {held_ms:.0f} ms, past the "
+                             f"{(now - send_time) * 1000.0:.0f} ms since its send: an earlier frame's, no round trip.")
         return
     sent_ts.pop(frame_id)
     display_state['acked_sent_at'] = send_time
