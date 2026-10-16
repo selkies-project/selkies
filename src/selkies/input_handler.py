@@ -3355,15 +3355,19 @@ class SelkiesGamepad:
         mapper: Button/axis mapper for this pad, built by set_config.
         config_payload_cache: js_config_t payload handed to interposer clients,
             built by set_config.
-        js_clients, evdev_clients: `{writer: {'arch_bits': bits}}`.
-        events_queue: Bounded so one stalled client cannot grow it without
-            limit and wedge delivery for every client; overflow drops the
-            oldest event (see send_event).
+        js_clients, evdev_clients: `{writer: {'arch_bits': bits}}`, plus a
+            `'resync'` task while the handle is shed for not being read
+            (`_fan_out`).
+        events_queue: Bounded so input arriving faster than it is fanned out
+            cannot grow it without limit; overflow drops the oldest event
+            (see send_event).
         _held_controls: Client controls (is_button, index) currently driven
             non-neutral, so reset_state releases exactly what is held.
         _js_state: Last queued js value per (ev_type, number), the source for
             init_state_burst; updated at queue time so the snapshot stays
             truthful even for events the bounded queue drops.
+        _evdev_state: Last queued evdev value per (type, code), kept the same
+            way, the source for evdev_state_burst.
         on_rumble: Called with the strong and weak motor levels (0 to 1) and
             how long to hold them in ms whenever the mix of the effects
             applications play on this pad changes, and again while an effect
@@ -3399,6 +3403,7 @@ class SelkiesGamepad:
 
         self._held_controls = set()
         self._js_state = {}
+        self._evdev_state = {}
 
         self.on_rumble: Optional[Callable[[float, float, int], None]] = None
         self._ff_playing: dict = {}
@@ -3892,6 +3897,9 @@ class SelkiesGamepad:
             if js_data:
                 _, value, ev_type, number = struct.unpack("=IhBB", js_data)
                 self._js_state[(ev_type, number)] = value
+            evdev_template = event_package.get('evdev_event_template')
+            if evdev_template:
+                self._evdev_state[evdev_template[:2]] = evdev_template[2]
             logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: Queuing event: {event_package}")
             try:
                 self.events_queue.put_nowait(event_package)
@@ -3941,12 +3949,19 @@ class SelkiesGamepad:
             parts.append(get_js_event_packed(JS_EVENT_AXIS | JS_EVENT_INIT, idx, value))
         return b"".join(parts)
 
+    def evdev_state_burst(self, arch_bits: int) -> bytes:
+        """Every control this pad has moved, at its latest value, packed for
+        an evdev handle of `arch_bits`; a control never moved is still at rest."""
+        return b"".join(get_evdev_events_packed(ev_type, ev_code, value, arch_bits)
+                        for (ev_type, ev_code), value in self._evdev_state.items())
+
     async def _process_event_queue(self) -> None:
         """Drain the event queue until the None sentinel, fanning each event out
         to JS, EVDEV, and uinput consumers.
 
-        Each client drain is bounded and a stalled client is closed, so a game
-        that stops reading its socket cannot freeze delivery for the others.
+        Nothing here waits on a client: each write is queued on its
+        connection (`_fan_out`), so a handle the application has stopped
+        reading never holds back delivery to the handles it reads.
         """
         logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: Event processor started.")
         while self.running:
@@ -3962,36 +3977,16 @@ class SelkiesGamepad:
                 evdev_template = event_package.get('evdev_event_template') 
 
                 if js_data:
-                    for i, (writer, _client_info) in enumerate(list(self.js_clients.items())):
-                        if not writer.is_closing():
-                            try:
-                                writer.write(js_data)
-                                await asyncio.wait_for(writer.drain(), timeout=1.0)
-                                logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: JS event drained to client #{i}.")
-                            except asyncio.TimeoutError:
-                                logger_selkies_gamepad.warning(f"Gamepad {self.js_sock_path}: JS client #{i} stalled; closing it.")
-                                writer.close()
-                            except (ConnectionResetError, BrokenPipeError): pass
-                            except Exception as e:
-                                logger_selkies_gamepad.error(f"Error sending to JS client #{i}: {e}", exc_info=True)
+                    for writer, client_info in list(self.js_clients.items()):
+                        self._fan_out(writer, client_info, js_data, False)
                 
                 if evdev_template:
                     ev_type, ev_code, ev_value = evdev_template
                     self._emit_uinput(ev_type, ev_code, ev_value)
-                    for i, (writer, client_info) in enumerate(list(self.evdev_clients.items())):
-                        if not writer.is_closing():
-                            try:
-                                client_arch_bits = client_info.get('arch_bits', 64) 
-                                evdev_data = get_evdev_events_packed(ev_type, ev_code, ev_value, client_arch_bits)
-                                writer.write(evdev_data)
-                                await asyncio.wait_for(writer.drain(), timeout=1.0)
-                                logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: EVDEV event drained to client #{i}.")
-                            except asyncio.TimeoutError:
-                                logger_selkies_gamepad.warning(f"Gamepad {self.js_sock_path}: EVDEV client #{i} stalled; closing it.")
-                                writer.close()
-                            except (ConnectionResetError, BrokenPipeError): pass
-                            except Exception as e:
-                                logger_selkies_gamepad.error(f"Error sending to EVDEV client #{i}: {e}", exc_info=True)
+                    for writer, client_info in list(self.evdev_clients.items()):
+                        evdev_data = get_evdev_events_packed(ev_type, ev_code, ev_value,
+                                                             client_info.get('arch_bits', 64))
+                        self._fan_out(writer, client_info, evdev_data, True)
                 
                 self.events_queue.task_done()
             except asyncio.CancelledError:
@@ -4000,6 +3995,60 @@ class SelkiesGamepad:
             except Exception as e:
                 logger_selkies_gamepad.error(f"Gamepad {self.js_sock_path}: Unhandled error in event processor: {e}", exc_info=True)
         logger_selkies_gamepad.debug(f"Gamepad {self.js_sock_path}: Event processor stopped.")
+
+    def _fan_out(self, writer: asyncio.StreamWriter, client_info: dict, data: bytes,
+                 is_evdev: bool) -> None:
+        """Queue one event on an interposer connection, or shed it if the
+        application has stopped reading that handle.
+
+        Applications commonly hold a pad handle they never read (SDL, Wine,
+        or a launcher probing the node beside the one the game reads), and
+        the kernel treats such a reader as behind, never as gone: evdev drops
+        its queue for SYN_DROPPED and joydev replays the pad's state, and the
+        fd stays open. Here, once a connection's buffered writes reach the
+        transport's high-water mark, the handle gets no more events until it
+        reads the backlog down, and is then handed the pad's current state
+        (`_resync_when_drained`), so it resumes where every other handle is.
+        Closing it instead would leave the application a dead fd it may still
+        mean to read; waiting on it would freeze every other handle of the pad.
+        """
+        if writer.is_closing() or 'resync' in client_info:
+            return
+        transport = writer.transport
+        if transport.get_write_buffer_size() >= transport.get_write_buffer_limits()[1]:
+            client_info['resync'] = self.loop.create_task(
+                self._resync_when_drained(writer, client_info, is_evdev))
+            return
+        writer.write(data)
+
+    async def _resync_when_drained(self, writer: asyncio.StreamWriter, client_info: dict,
+                                   is_evdev: bool) -> None:
+        """Wait for a shed handle to read its backlog down, then write the
+        pad's current state to it and let events through again.
+
+        A joydev handle gets the JS_EVENT_INIT replay it gets on open, as
+        joydev itself gives a reader whose buffer overran; an evdev handle
+        gets every control this pad has moved at its latest value, which a
+        reader that skips SYN_DROPPED and one that resyncs alike take as
+        ordinary events.
+        """
+        kind = "EVDEV" if is_evdev else "JS"
+        sock_path = self.evdev_sock_path if is_evdev else self.js_sock_path
+        logger_selkies_gamepad.debug(
+            f"Gamepad {sock_path}: an {kind} handle is not being read; holding its events until it is.")
+        try:
+            await writer.drain()
+            if writer.is_closing():
+                return
+            if is_evdev:
+                writer.write(self.evdev_state_burst(client_info.get('arch_bits', 64)))
+            else:
+                writer.write(self.init_state_burst())
+            logger_selkies_gamepad.debug(f"Gamepad {sock_path}: an {kind} handle caught up; resynced its state.")
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+        finally:
+            client_info.pop('resync', None)
 
 
     async def close(self) -> None:

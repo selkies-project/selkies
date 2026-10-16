@@ -105,6 +105,7 @@ SUITES: list = [
     {"path": "unit/test_pointer_cadence.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gamepad_poll.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_gamepad_rumble.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_gamepad_slow_reader.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_wheel_order.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_tracking.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_wayland_gpu_fallback.py", "tier": "unit", "timeout": 180},
