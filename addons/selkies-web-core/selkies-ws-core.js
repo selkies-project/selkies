@@ -461,6 +461,13 @@ const RECONNECT_UNOPENED_MAX = 3;
  * socket, and input in `heldInput` from `inputHeldSince` on.
  */
 let reconnectingInPlace = false;
+/**
+ * Whether the current socket's MODE has come. Until it does, a reconnect in
+ * place ends only by its notice timer: the last socket's frames, still
+ * decoding or queued when it closed, paint on and are not the next stream
+ * starting, and a reconnect they ended would have that MODE show the notice.
+ */
+let modeSinceOpen = false;
 let reconnectNoticeTimer = null;
 let carriedPipelines = null;
 let heldInput = [];
@@ -4832,7 +4839,7 @@ function resumeCarriedPipelines() {
 
 /** Marks the stream as started and hides the status bar and start button. */
 const startStream = () => {
-  if (streamStarted) return;
+  if (streamStarted || (reconnectingInPlace && !modeSinceOpen)) return;
   streamStarted = true;
   endReconnectInPlace();
   hideStreamOverlay();
@@ -8474,6 +8481,7 @@ class WorkerWebSocket {
         }
       }
       if (event.data === 'MODE websockets') {
+        modeSinceOpen = true;
         clientMode = 'websockets';
         console.log('[websockets] Switched to websockets mode.');
         status = 'initializing';
@@ -9139,6 +9147,7 @@ class WorkerWebSocket {
         stopReconnecting();
     }
     status = 'disconnected';
+    modeSinceOpen = false;
     loadingText = superseded
       ? 'Session opened elsewhere. Reload this page to take over.'
       : 'WebSocket disconnected. Attempting to reconnect...';
