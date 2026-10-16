@@ -21,6 +21,7 @@ the page's thread.)
 """
 import asyncio
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -43,6 +44,7 @@ STABLE_S = 11.0
 # reconnect, by engine: Gecko holds a socket to a host whose last one failed
 # for 200 to 400 ms first (network.websocket.delay-failed-reconnects).
 QUICK_MS = {"chromium": (250, 120), "firefox": (550, 400)}
+CUT_REPORT = re.compile(r"The connection to wss?://\S+ was interrupted while the page was loading\.$")
 
 
 class Pair:
@@ -399,7 +401,9 @@ def session(engine: str) -> "H.Results":
             browser, ctx = launch(p, engine)
             page = ctx.new_page()
             errors: List[str] = []
-            page.on("pageerror", lambda e: errors.append(str(e)))
+            # Gecko now and then reports a socket the cut drops as an error of its own, "interrupted
+            # while the page was loading" (1 run in 16 on 4 CPUs); the check is for the page's.
+            page.on("pageerror", lambda e: None if CUT_REPORT.match(str(e)) else errors.append(str(e)))
             page.goto(f"http://127.0.0.1:{RELAY_PORT}", wait_until="load", timeout=90000)
             res.check("the page streams through the relay", C.wait_ws_video(page, timeout=60) is not None)
             page.mouse.click(WIDTH // 2, HEIGHT // 2)
