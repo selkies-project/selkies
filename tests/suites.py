@@ -128,6 +128,7 @@ SUITES: list = [
     {"path": "unit/test_ws_link_steer.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ws_gate_jitter.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ws_gate_reprobe.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_ws_ack_round_trip.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_ws_send_liveness.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_sequence.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_pointer_echo.py", "tier": "unit", "timeout": 120},

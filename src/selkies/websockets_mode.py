@@ -153,6 +153,9 @@ STILL_RESUME_GRACE_SECONDS = 1.0
 # Ack round trips above this measure a stalled path or an id collision, not the
 # link; one such sample would skew the flat smoothing window for its lifetime.
 RTT_SAMPLE_SANE_MAX_MS = 10000
+# How far an ack's hold may run past the time since its frame was sent and still be that
+# send's ack: the client rounds the hold to a millisecond.
+ACK_HOLD_SLACK_MS = 1.0
 BACKPRESSURE_CHECK_INTERVAL_S = 0.5
 # How long a path may hold a display's whole stream (no ack for a check while its queue stands
 # over the allowance) before the backpressure gate takes it for a queue. A long path's lost
@@ -585,9 +588,10 @@ def _note_ack(display_state: dict, frame_id: int, held_ms: float) -> None:
     """Fold one CLIENT_FRAME_ACK from a display's registered client into its state.
 
     Any ack, a repeated id included, is the client alive. An id matching a send
-    stamp moves the gate's reference to that send, is dated (`acked_at`: acks
-    that keep moving on say the path delivers), and yields a round trip, less
-    the time the client held the id before its ack tick fired. The first ack of
+    stamp, held no longer than that send has been out, moves the gate's
+    reference to that send, is dated (`acked_at`: acks that keep moving on say
+    the path delivers), and yields a round trip, less the time the client held
+    the id before its ack tick fired. The first ack of
     a key frame the client was waiting for starts the drain of the queue that
     key frame put on the path, sized by how far its own round trip stood over
     the floor (`_key_frame_pending`).
@@ -597,11 +601,17 @@ def _note_ack(display_state: dict, frame_id: int, held_ms: float) -> None:
     sent_ts = display_state.get('sent_timestamps')
     if not sent_ts or frame_id not in sent_ts:
         return
-    send_time, sent_bytes = sent_ts.pop(frame_id)
-    display_state['acked_sent_at'] = send_time
+    send_time, sent_bytes = sent_ts[frame_id]
     now = time.monotonic()
+    rtt_sample_ms = (now - send_time) * 1000.0 - held_ms
+    # Held longer than this send has been out, the id is an earlier frame's (ids start
+    # over with a stream): a round trip of 0 would be the floor for ten minutes.
+    if rtt_sample_ms < -ACK_HOLD_SLACK_MS:
+        return
+    sent_ts.pop(frame_id)
+    display_state['acked_sent_at'] = send_time
     display_state['acked_at'] = now
-    rtt_sample_ms = max(0.0, (now - send_time) * 1000.0 - held_ms)
+    rtt_sample_ms = max(0.0, rtt_sample_ms)
     crossing = display_state.get('key_crossing')
     if crossing is not None and crossing['sent'] is not None and send_time >= crossing['sent']:
         display_state['key_crossing'] = None
