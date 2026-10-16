@@ -131,9 +131,13 @@ what runs where.
   consistency, and slightly more GPU or CPU usage is also acceptable if it has no latency impact and brings a
   substantial quality improvement) >> Overall Bandwidth Efficiency (since encoded frames are only used once, unlike
   .mp4/.mkv)
-- Parity between X11 and Wayland, WebSockets and WebRTC, and the default and wish dashboards: anything wired up on
-  one side but not the other is a bug. Prefer deduplicating code that serves the same purpose across modes over
-  keeping parallel copies, when you are confident there is no regression or can validate it.
+- Parity between X11 and Wayland, WebSockets and WebRTC, the default and wish dashboards, and across encoders and
+  codecs (the hardware encoders, NVENC, VA-API, V4L2 M2M and Tegra, and the software ones, x264, OpenH264, x265,
+  kvazaar, libvpx, SVT-AV1 and libjpeg-turbo; H.264, H.265, AV1, VP8, VP9 and JPEG): anything wired up on one side
+  but not the other is a bug, and a fix or a feature made for one encoder or codec is checked against every other
+  its mechanism applies to and carried there, or the reason one cannot take it is stated. Prefer deduplicating code
+  that serves the same purpose across modes over keeping parallel copies, when you are confident there is no
+  regression or can validate it.
 - Screen coroutine usage in Python and JavaScript and thread usage in every language so nothing hangs or lags,
   holding the GIL no longer than the work needs. Zero-copy and latency-reducing measures are always worth
   preserving or adding.
