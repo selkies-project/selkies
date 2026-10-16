@@ -3180,7 +3180,7 @@ class WebRTCService(BaseStreamingService):
                 # pacer reads the path's capacity, not what cross traffic leaves of it: a target
                 # backed off under the display's ceiling reads as no room.
                 room = min(bucket["rooms"], default=None)
-                if room is not None and target < round(ceiling):
+                if target < round(ceiling):
                     room = 0.0
                 told = self._link_allowances.setdefault(did, LinkAllowance()).note(room, hi_kbps)
                 if told is not None and hasattr(pipeline, "set_link_rate"):

@@ -74,7 +74,7 @@ class PacerRoomTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
-    async def tick(self, rc_mode, rooms, steer=None):
+    async def tick(self, rc_mode, rooms, steer=None, before=None):
         links, budgets, floors = [], [], []
         pipeline = SimpleNamespace(rc_mode=rc_mode, video_bitrate=500, set_video_bitrate=AsyncMock(),
                                    set_link_rate=links.append)
@@ -84,6 +84,8 @@ class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
         service._congestion_steer, service._rate_holds, service._link_allowances = {}, {}, {}
         if steer is not None:
             service._congestion_steer["primary"] = steer
+        if before is not None:
+            service._link_allowances["primary"] = before
         service._display_setting = lambda did, key: 500
         service.display_pipelines = {"primary": pipeline}
         service._ensure_pacer = Mock()
@@ -126,6 +128,13 @@ class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_target_backed_off_reads_as_no_room(self) -> None:
         steer = SimpleNamespace(target=lambda *a, **k: 300.0)
         links, budgets, floors = await self.tick(webrtc_mode.RateControlMode.CBR, (2_000_000,), steer)
+        self.assertEqual((links, budgets, floors), ([0], [300 * 1000], [0]))
+
+    async def test_a_target_backed_off_ends_an_allowance_with_no_reading(self) -> None:
+        before = LinkAllowance()
+        before.note(2_000_000, 12000)
+        steer = SimpleNamespace(target=lambda *a, **k: 300.0)
+        links, budgets, floors = await self.tick(webrtc_mode.RateControlMode.CBR, (None,), steer, before)
         self.assertEqual((links, budgets, floors), ([0], [300 * 1000], [0]))
 
     async def test_a_constant_quality_leaves_it_alone(self) -> None:
