@@ -51,6 +51,7 @@ import struct
 import time
 import secrets
 import socket
+import stat
 from collections import OrderedDict, deque
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -399,6 +400,53 @@ def _path_is_within(directory: str, target: str) -> bool:
 
 
 _background_tasks: set[asyncio.Task] = set()
+
+
+# How often the tokens file is checked for a change.
+TOKENS_FILE_POLL_S = 2.0
+
+
+def token_table_error(table: Any) -> Optional[str]:
+    """Why `table` is not a token table `/api/tokens` takes, or None when it is.
+
+    The reason names no token, since the tokens are secrets and it is logged.
+    """
+    if not isinstance(table, dict):
+        return "the table must be a JSON object"
+    if not all(isinstance(perms, dict) for perms in table.values()):
+        return "every token entry must be a JSON object"
+    return None
+
+
+def read_tokens_file(path: str) -> Optional[dict]:
+    """The token table `path` holds, or None when it is unsafe or holds none.
+
+    The file decides who may connect, so it is refused unless root or this
+    process's user owns it and no one else can write to it. A symlink is
+    followed, as a Kubernetes secret mount is one, and the file it reaches is
+    the one checked.
+
+    Args:
+        path: The `tokens_file` setting.
+
+    Returns:
+        The table, or None, with the reason logged.
+    """
+    try:
+        with open(path, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if info.st_uid not in (0, os.getuid()) or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                logger.warning(f"Refusing the tokens file {path!r}: another user owns it or can write to it.")
+                return None
+            table = json.loads(handle.read())
+    except (OSError, ValueError) as exc:
+        logger.warning(f"Could not read the tokens file {path!r}: {exc}")
+        return None
+    error = token_table_error(table)
+    if error:
+        logger.warning(f"Rejected the tokens file {path!r}: {error}.")
+        return None
+    return table
 
 
 def _spawn_background_task(coro, name: Optional[str] = None) -> asyncio.Task:
@@ -7491,17 +7539,27 @@ class DataStreamingServer(BaseStreamingService):
 
         try:
             new_token_data = await request.json()
-            if not isinstance(new_token_data, dict): raise ValueError("Payload must be a JSON object")
             # The whole payload is validated before global auth state changes.
-            for tkn, perms in new_token_data.items():
-                if not isinstance(perms, dict):
-                    raise ValueError(f"Token entry for {tkn!r} must be a JSON object")
-        except (json.JSONDecodeError, ValueError) as e:
+            error = token_table_error(new_token_data)
+        except ValueError as e:
+            error = str(e)
+        if error:
             # The detail names the caller's own payload, but it reaches an unauthenticated
             # endpoint, so it stays in the log.
-            logger.warning(f"Rejected a token table update: {e}")
+            logger.warning(f"Rejected a token table update: {error}")
             return web.Response(status=400, text="Bad Request")
 
+        self.provision_tokens(new_token_data)
+        return web.Response(status=200, text="OK")
+
+    def provision_tokens(self, new_token_data: dict) -> None:
+        """Replace the token table with `new_token_data`, as `/api/tokens` and the
+        tokens file do: the first table opens the config gate, and every one
+        reconciles live clients against it.
+
+        Args:
+            new_token_data: A table `token_table_error` accepts.
+        """
         new_mk_owner = None
         for tkn, perms in new_token_data.items():
             if "slot" in perms:
@@ -7518,7 +7576,38 @@ class DataStreamingServer(BaseStreamingService):
             self.config_gate.set()
             logger.info("Configuration gate is now open. WebSocket server will accept connections.")
         _spawn_background_task(reconcile_clients())
-        return web.Response(status=200, text="OK")
+
+    async def watch_tokens_file(self) -> None:
+        """Provision the token table from `tokens_file`, at start and on every change.
+
+        The file holds the body `/api/tokens` takes and is provisioned the same
+        way, so a restart needs no POST. It is polled rather than watched, so a
+        rename over it or a Kubernetes secret update is seen too. A POST still
+        replaces the table until the file next changes, and a file that cannot
+        be used leaves the table as it was.
+        """
+        path = settings.tokens_file
+        if not settings.master_token:
+            logger.warning("tokens_file is ignored: it needs secure mode, which a master token turns on.")
+            return
+        seen: Any = None
+        while True:
+            try:
+                info = await asyncio.to_thread(os.stat, path)
+            except OSError as exc:
+                if seen != "missing":
+                    logger.warning(f"The tokens file {path!r} cannot be read yet: {exc}")
+                    seen = "missing"
+            else:
+                # The change time moves on a write and on a chmod or chown, which can make a
+                # refused file usable.
+                current = (info.st_ino, info.st_ctime_ns, info.st_size)
+                if current != seen:
+                    seen = current
+                    table = await asyncio.to_thread(read_tokens_file, path)
+                    if table is not None:
+                        self.provision_tokens(table)
+            await asyncio.sleep(TOKENS_FILE_POLL_S)
 
     async def data_ws_handler(self, request: web.Request) -> web.StreamResponse:
         """aiohttp entry point: upgrade to a WebSocket and hand off to ws_handler.
