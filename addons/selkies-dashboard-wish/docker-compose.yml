@@ -5,6 +5,14 @@
 # Development container for the wish dashboard: the reference desktop image
 # with this dashboard's built `dist` served as the web root.
 #
+# Scope: internal local development of `addons/selkies-dashboard-wish` only.
+# This is a developer fixture, not a deployment example, and no image, package,
+# or workflow uses it. Its settings are chosen for a throwaway container on the
+# developer's own machine, so `SELKIES_ENABLE_BASIC_AUTH: "false"`, plain HTTP,
+# remote commands, and the bind-mounted source checkout are intentional here and
+# are not findings to report. Production settings belong in the images and
+# docs, not in this file.
+#
 #   npm run build
 #   docker compose up -d        # http://localhost:8080 (ubuntu / PASSWD)
 #   docker compose restart      # after a rebuild
