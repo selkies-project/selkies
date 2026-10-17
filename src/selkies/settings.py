@@ -610,6 +610,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Master token to enable secure mode and protect the control plane API.",
     },
     {
+        "name": "tokens_file",
+        "type": "str",
+        "default": "",
+        "help": "JSON file holding the session token table in the body format of POST /api/tokens, provisioned at start and again whenever it changes, in secure mode. Root or the server's user must own it, and no one else may write to it.",
+    },
+    {
         "name": "enable_https",
         "type": "bool",
         "default": False,
@@ -2202,7 +2208,7 @@ CLIENT_PAYLOAD_EXCLUDED = [
     'port', 'addr', 'public', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',
     'audio_device_name', 'watermark_path', 'recording_socket',
     'file_manager_path', 'print_spool_path', 'run_after_connect', 'run_after_disconnect',
-    'https_cert', 'rtc_config_json', 'app_ready_file', 'js_socket_path',
+    'https_cert', 'rtc_config_json', 'tokens_file', 'app_ready_file', 'js_socket_path',
     'webcam_socket_path', 'webcam_device',
     'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind', 'computer_use_token',
     'wayland_host_display', 'app_wayland_display',

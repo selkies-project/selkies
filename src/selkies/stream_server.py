@@ -1565,6 +1565,7 @@ class CentralizedStreamServer:
         self.runner: Optional[web.AppRunner] = None
         self.sites: List[web.BaseSite] = []
         self.cert_watcher: Optional[asyncio.Task] = None
+        self.tokens_watcher: Optional[asyncio.Task] = None
         self.ssl_context: Optional[ssl.SSLContext] = None
         self.static_fs_path: str = ""
         limit_mbps = float(self.settings.file_transfer_limit_mbps or 0.0)
@@ -3428,7 +3429,8 @@ class CentralizedStreamServer:
         return f"{self.settings.addr} port {self.settings.port}"
 
     async def start_server(self) -> None:
-        """Start the HTTP/HTTPS server and, under HTTPS, the cert-reload watcher."""
+        """Start the HTTP/HTTPS server, the tokens-file watcher when one is set,
+        and, under HTTPS, the cert-reload watcher."""
         if not self.app:
             await self.initialize_app()
 
@@ -3439,6 +3441,10 @@ class CentralizedStreamServer:
             except Exception as exc:
                 logger.error("Failed to create SSL context at startup: %s", exc)
                 raise
+
+        tokens = self.services.get("websockets")
+        if getattr(self.settings, "tokens_file", "") and tokens is not None:
+            self.tokens_watcher = asyncio.create_task(tokens.watch_tokens_file())
 
         self.runner = web.AppRunner(self.app, access_log_class=PathOnlyAccessLogger)
         await self.runner.setup()
@@ -3466,14 +3472,15 @@ class CentralizedStreamServer:
                 await self.print_queue.start()
 
     async def stop_server(self) -> None:
-        """Stop the server gracefully: cert watcher, active service, listener,
-        extracted web files, and the runner, in that order."""
-        if self.cert_watcher and not self.cert_watcher.done():
-            self.cert_watcher.cancel()
-            try:
-                await self.cert_watcher
-            except asyncio.CancelledError:
-                pass
+        """Stop the server gracefully: the cert and tokens-file watchers, active
+        service, listener, extracted web files, and the runner, in that order."""
+        for watcher in (self.cert_watcher, self.tokens_watcher):
+            if watcher and not watcher.done():
+                watcher.cancel()
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    pass
         if self.print_queue:
             await self.print_queue.stop()
             self.print_queue = None
