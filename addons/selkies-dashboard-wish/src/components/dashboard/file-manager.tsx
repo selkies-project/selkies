@@ -10,7 +10,6 @@ import * as React from "react"
 import {
   ChevronRight,
   Download,
-  Edit2,
   Eye,
   EyeOff,
   File as FileIcon,
@@ -18,9 +17,7 @@ import {
   FolderPlus,
   Grid2X2,
   List,
-  MoreHorizontal,
   Rows3,
-  Trash2,
   UploadCloud,
 } from "lucide-react"
 
@@ -33,18 +30,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+
+import {
+  sessionAuthHeaders,
+  withSessionToken,
+} from "../../../../selkies-web-core/lib/session-token.js"
 
 /** Bytes above which an upload is posted in slices rather than in one request. */
 const UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024
@@ -69,7 +64,9 @@ async function uploadFile(file: File, pathToSend: string, onProgress?: (progress
       xhr.setRequestHeader('Content-Type', 'application/octet-stream')
       xhr.setRequestHeader('X-Upload-Path', encodeURIComponent(pathToSend))
 
-      for (const [name, value] of Object.entries(headers)) {
+      // Secure mode accepts the session token as a Bearer header, so an upload
+      // does not depend on the session cookie having been written.
+      for (const [name, value] of Object.entries(sessionAuthHeaders(headers))) {
         xhr.setRequestHeader(name, value)
       }
 
@@ -96,7 +93,12 @@ async function uploadFile(file: File, pathToSend: string, onProgress?: (progress
     await postChunk(file)
     onProgress?.(100)
   } else {
-    const transferId = crypto.randomUUID()
+    // randomUUID is only exposed in a secure context, and a session reached
+    // over plain HTTP on a LAN address has none, so the id falls back the way
+    // the core uploader does rather than throwing out of the whole loop.
+    const transferId = (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`
 
     for (let offset = 0; offset < file.size; offset += UPLOAD_CHUNK_BYTES) {
       const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.size)
@@ -224,13 +226,9 @@ export function FileManager({
   // Dialogs
   const [uploadOpen, setUploadOpen] = React.useState(false)
   const [newFolderOpen, setNewFolderOpen] = React.useState(false)
-  const [renameOpen, setRenameOpen] = React.useState(false)
-  const [deleteOpen, setDeleteOpen] = React.useState(false)
 
   // Form states
   const [newFolderName, setNewFolderName] = React.useState("")
-  const [renameName, setRenameName] = React.useState("")
-  const [selectedFile, setSelectedFile] = React.useState<FileManagerItem | null>(null)
   const [uploadFiles, setUploadFiles] = React.useState<File[]>([])
   const [uploading, setUploading] = React.useState(false)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
@@ -241,7 +239,10 @@ export function FileManager({
     async (dir: string): Promise<FileManagerItem[]> => {
       const url = new URL(`${apiBase}/_browse`)
       if (dir) url.searchParams.set("path", dir)
-      const resp = await fetch(url.href, { credentials: "same-origin" })
+      const resp = await fetch(url.href, {
+        credentials: "same-origin",
+        headers: sessionAuthHeaders(),
+      })
       const data = await resp.json().catch(() => null)
       if (!resp.ok || !data || data.status !== "ok") {
         throw new Error((data && data.message) || `HTTP ${resp.status}`)
@@ -302,16 +303,23 @@ export function FileManager({
     [ensureLoaded]
   )
 
-  const fileUrl = React.useCallback((entryPath: string) => {
-    const segments = entryPath.split("/").map((seg) => encodeURIComponent(seg))
-    return new URL(["api/files", ...segments].join("/"), window.location.href).href
-  }, [])
+  // A download is a navigation rather than a fetch, so it cannot carry a
+  // header; the query token is what reaches the route in that case.
+  const fileUrl = React.useCallback(
+    (entryPath: string) => {
+      const segments = entryPath.split("/").map((seg) => encodeURIComponent(seg))
+      return withSessionToken(
+        new URL(["api/files", ...segments].join("/"), window.location.href).href,
+      )
+    },
+    []
+  )
 
   async function post(action: string, body: unknown) {
     const resp = await fetch(`${apiBase}/${action}`, {
       method: "POST",
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
+      headers: sessionAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     })
     const data = await resp.json().catch(() => null)
@@ -332,13 +340,11 @@ export function FileManager({
     [allowDownload, fileUrl, navigateTo]
   )
 
-  const handleSelect = React.useCallback(
+  const handleDownload = React.useCallback(
     (path: string) => {
-      if (allowDownload) {
-        window.open(fileUrl(path), "_self")
-      }
+      window.open(fileUrl(path), "_self")
     },
-    [allowDownload, fileUrl]
+    [fileUrl]
   )
 
   const handleCreateFolder = async () => {
@@ -354,39 +360,6 @@ export function FileManager({
       toast.success(t("files.folderCreated", { name }))
     } catch (e: any) {
       toast.error(t("files.folderCreateFailed", { error: e?.message || String(e) }))
-    }
-  }
-
-  const handleRename = async () => {
-    if (!selectedFile) return
-    const name = renameName.trim()
-    if (!name || name === selectedFile.name) {
-      setRenameOpen(false)
-      return
-    }
-
-    try {
-      await post("_rename", { path: selectedFile.path, name })
-      setRenameOpen(false)
-      setSelectedFile(null)
-      await refresh()
-      toast.success(t("files.renamedTo", { name }))
-    } catch (e: any) {
-      toast.error(t("files.renameFailed", { error: e?.message || String(e) }))
-    }
-  }
-
-  const handleDelete = async () => {
-    if (!selectedFile) return
-
-    try {
-      await post("_delete", { path: selectedFile.path })
-      setDeleteOpen(false)
-      setSelectedFile(null)
-      await refresh()
-      toast.success(t("files.deleted", { name: selectedFile.name }))
-    } catch (e: any) {
-      toast.error(t("files.deleteFailed", { error: e?.message || String(e) }))
     }
   }
 
@@ -418,17 +391,6 @@ export function FileManager({
     setUploadOpen(false)
     setUploadFiles([])
     await refresh()
-  }
-
-  const handleRenameClick = (item: FileManagerItem) => {
-    setSelectedFile(item)
-    setRenameName(item.name)
-    setRenameOpen(true)
-  }
-
-  const handleDeleteClick = (item: FileManagerItem) => {
-    setSelectedFile(item)
-    setDeleteOpen(true)
   }
 
   /**
@@ -580,7 +542,7 @@ export function FileManager({
           </div>
         ) : view === "details" ? (
           <div className="overflow-hidden rounded-md border">
-            <div className="grid grid-cols-[minmax(0,1fr)_2rem] gap-3 border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground sm:grid-cols-[minmax(0,1fr)_5rem_2rem] lg:grid-cols-[minmax(0,1fr)_7rem_10rem_2rem]">
+            <div className="grid grid-cols-[minmax(0,1fr)_2rem] gap-3 border-b bg-muted/30 px-3 py-2 text-xs font-medium text-muted-foreground sm:grid-cols-[minmax(0,1fr)_5rem_2rem] lg:grid-cols-[minmax(0,1fr)_5rem_10rem_2rem]">
               <div>{t("files.name")}</div>
               <div className="max-sm:hidden">{t("files.size")}</div>
               <div className="max-lg:hidden">{t("files.modified")}</div>
@@ -591,13 +553,10 @@ export function FileManager({
                 key={file.path}
                 file={file}
                 view="details"
-                canUpload={canUpload}
                 allowDownload={allowDownload}
                 t={t}
                 onOpen={handleOpenItem}
-                onDownload={handleSelect}
-                onRename={handleRenameClick}
-                onDelete={handleDeleteClick}
+                onDownload={handleDownload}
               />
             ))}
           </div>
@@ -608,13 +567,10 @@ export function FileManager({
                 key={file.path}
                 file={file}
                 view={view}
-                canUpload={canUpload}
                 allowDownload={allowDownload}
                 t={t}
                 onOpen={handleOpenItem}
-                onDownload={handleSelect}
-                onRename={handleRenameClick}
-                onDelete={handleDeleteClick}
+                onDownload={handleDownload}
               />
             ))}
           </div>
@@ -729,93 +685,22 @@ export function FileManager({
         </DialogContent>
       </Dialog>
 
-      {/* Rename Dialog */}
-      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
-        <DialogContent className="allow-native-input sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("files.renameTitle")}</DialogTitle>
-            <DialogDescription>
-              {t("files.renameDescription", { name: selectedFile?.name || "" })}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-2">
-            <Label htmlFor="new-name">{t("files.newName")}</Label>
-            <Input
-              id="new-name"
-              autoFocus
-              value={renameName}
-              onChange={(e) => setRenameName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault()
-                  handleRename()
-                }
-              }}
-              placeholder={t("files.newNamePlaceholder")}
-            />
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setRenameOpen(false)}>
-              {t("files.cancel")}
-            </Button>
-            <Button
-              type="button"
-              onClick={handleRename}
-              disabled={!renameName.trim() || renameName === selectedFile?.name}
-            >
-              {t("files.rename")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      {/* Delete Dialog */}
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>
-              {selectedFile?.is_dir ? t("files.deleteFolderTitle") : t("files.deleteFileTitle")}
-            </DialogTitle>
-            <DialogDescription>
-              {t("files.deleteDescription", { name: selectedFile?.name || "" })}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setDeleteOpen(false)}>
-              {t("files.cancel")}
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              onClick={handleDelete}
-            >
-              {t("files.delete")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }
-
 interface FileRowProps {
   /** The entry the row shows. */
   file: FileManagerItem
   /** Which layout the row is drawn in. */
   view: FileManagerView
-  /** Whether the session may change the listing. */
-  canUpload: boolean
   /** Whether files may be fetched. */
   allowDownload: boolean
-  /** Translator for the menu labels. */
+  /** Translator for the row's labels. */
   t: (key: string, vars?: Record<string, unknown>) => string
   /** Called with the entry: a folder opens it, a file downloads it. */
   onOpen: (item: FileManagerItem) => void
   /** Called with the entry's path to download it. */
   onDownload: (path: string) => void
-  /** Called with the entry to rename it. */
-  onRename: (item: FileManagerItem) => void
-  /** Called with the entry to delete it. */
-  onDelete: (item: FileManagerItem) => void
 }
 
 /**
@@ -823,48 +708,45 @@ interface FileRowProps {
  *
  * The details table's columns are per-breakpoint rather than fixed: the name
  * truncates and the size appears from `sm` and the modification time from `lg`,
- * so the row never needs more width than the viewport has. Below `sm` it is a
- * name and its actions, which is all a phone can usefully show.
+ * so the row never needs more width than the viewport has. Below `sm` it is the
+ * name and the download button, which is all a phone can usefully show.
  *
- * The trailing column is pinned to the actions button's width, and the header
+ * The trailing column is pinned to the download button's width, and the header
  * repeats the same template with an empty cell there: left `auto`, the header's
  * empty cell would collapse the track and every label would sit a button's width
  * right of the values under it.
  *
- * @param props The entry, the layout, the permissions and the actions.
+ * @param props The entry, the layout, whether files may be fetched, and the
+ *     two things the row can be asked to do.
  */
-function FileRow({
-  file,
-  view,
-  canUpload,
-  allowDownload,
-  t,
-  onOpen,
-  onDownload,
-  onRename,
-  onDelete,
-}: FileRowProps) {
+function FileRow({ file, view, allowDownload, t, onOpen, onDownload }: FileRowProps) {
   const Icon = file.is_dir ? Folder : FileIcon
 
-  const actions = (
-    <FileManagerActions
-      item={file}
-      canUpload={canUpload}
-      allowDownload={allowDownload}
-      t={t}
-      onDownload={onDownload}
-      onRename={onRename}
-      onDelete={onDelete}
-    />
+  // A folder is opened by clicking its name, so it has nothing to download and
+  // no second control; a file gets an explicit one rather than leaving the
+  // download to be discovered by clicking the row.
+  const download = !file.is_dir && allowDownload ? (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      aria-label={t("files.download")}
+      title={t("files.download")}
+      className="relative"
+      onClick={() => onDownload(file.path)}
+    >
+      <Download className="h-4 w-4" />
+    </Button>
+  ) : (
+    <div />
   )
 
   if (view === "details") {
     return (
-      <div className="relative grid grid-cols-[minmax(0,1fr)_2rem] items-center gap-3 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50 sm:grid-cols-[minmax(0,1fr)_5rem_2rem] lg:grid-cols-[minmax(0,1fr)_7rem_10rem_2rem]">
+      <div className="relative grid grid-cols-[minmax(0,1fr)_2rem] items-center gap-3 border-b px-3 py-2 last:border-b-0 hover:bg-muted/50 sm:grid-cols-[minmax(0,1fr)_5rem_2rem] lg:grid-cols-[minmax(0,1fr)_5rem_10rem_2rem]">
         {/* The overlay is what makes the whole row the target: the name button is
             the only focusable control, but it reaches past its own column to the
             row's edges, so the size and modification columns are not dead. The
-            actions sit above it and keep their own clicks. */}
+            download button sits above it and keeps its own clicks. */}
         <button
           type="button"
           onClick={() => onOpen(file)}
@@ -875,7 +757,7 @@ function FileRow({
         </button>
         <div className="max-sm:hidden text-xs text-muted-foreground">{formatBytes(file.size)}</div>
         <div className="max-lg:hidden text-xs text-muted-foreground">{formatDate(file.mtime)}</div>
-        <div className="relative">{actions}</div>
+        {download}
       </div>
     )
   }
@@ -893,80 +775,12 @@ function FileRow({
         <div className="min-w-0">
           <div className="truncate text-sm font-medium">{file.name}</div>
           <div className="mt-1 text-xs text-muted-foreground">
-            {file.is_dir ? t("files.folderLabel") : formatBytes(file.size)} Â· {formatDate(file.mtime)}
+            {file.is_dir ? t("files.folderLabel") : formatBytes(file.size)} · {formatDate(file.mtime)}
           </div>
         </div>
       </button>
-      {actions}
+      {download}
     </div>
-  )
-}
-
-interface FileManagerActionsProps {
-  /** The entry the menu acts on. */
-  item: FileManagerItem
-  /** Whether the session may change the listing. */
-  canUpload: boolean
-  /** Whether files may be fetched. */
-  allowDownload: boolean
-  /** Translator for the menu labels. */
-  t: (key: string, vars?: Record<string, unknown>) => string
-  /** Called with the entry's path to download it. */
-  onDownload: (path: string) => void
-  /** Called with the entry to rename it. */
-  onRename: (item: FileManagerItem) => void
-  /** Called with the entry to delete it. */
-  onDelete: (item: FileManagerItem) => void
-}
-
-/**
- * The per-row menu beside a pane row's entry: download for a file, and the
- * changes the session is allowed to make.
- *
- * @param props The entry, the permissions, and the three actions.
- */
-function FileManagerActions({
-  item,
-  canUpload,
-  allowDownload,
-  t,
-  onDownload,
-  onRename,
-  onDelete,
-}: FileManagerActionsProps) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger>
-        <Button variant="ghost" size="icon-sm">
-          <MoreHorizontal className="h-4 w-4" />
-          <span className="sr-only">{t("files.openMenu")}</span>
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        {!item.is_dir && allowDownload && (
-          <DropdownMenuItem onClick={() => onDownload(item.path)}>
-            <Download className="h-4 w-4" />
-            {t("files.download")}
-          </DropdownMenuItem>
-        )}
-        {canUpload && (
-          <>
-            <DropdownMenuItem onClick={() => onRename(item)}>
-              <Edit2 className="h-4 w-4" />
-              {t("files.rename")}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              onClick={() => onDelete(item)}
-            >
-              <Trash2 className="h-4 w-4" />
-              {t("files.delete")}
-            </DropdownMenuItem>
-          </>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
   )
 }
 
