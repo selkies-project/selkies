@@ -2035,8 +2035,8 @@ class CentralizedStreamServer:
 
         The Bearer header is what scripts send; the ``?token=`` query is what a
         page opened with one carries on the URLs it navigates to rather than
-        fetches (the file-manager listing it opens), which a page holding its
-        token in the fragment leaves to the cookie; the cookie is the mirror the
+        fetches (a file the manager downloads), which a page holding its token
+        in the fragment leaves to the cookie; the cookie is the mirror the
         client keeps for requests it can put neither on. The cookie value is
         tried as sent and URL-decoded, since the client stores it encoded.
 
@@ -2772,6 +2772,130 @@ class CentralizedStreamServer:
         audit.emit("file.upload.end", filename=name, size_bytes=received)
         return web.json_response({"status": "success", "bytes": received, "complete": True})
 
+    def _resolve_file_path(self, rel: str) -> Optional[str]:
+        """Resolve a root-relative path to a filesystem path at or under the
+        file-manager directory. Returns None when the path escapes the root. An
+        empty path resolves to the root itself, which browse may name and mkdir
+        refuses through `_at_file_root`."""
+        rel = rel.strip("/\\")
+        parts = [c for c in os.path.normpath(rel).split(os.sep) if c and c != "."]
+        if rel and ".." in parts:
+            return None
+        base = str(self.upload_dir)
+        if not parts:
+            return base
+        parent = os.path.realpath(os.path.join(base, *parts[:-1]))
+        full = os.path.join(parent, parts[-1])
+        try:
+            if os.path.commonpath([base, parent]) != base:
+                return None
+        except ValueError:
+            return None
+        # After following in-directory symlinks the entry must still sit at or
+        # under the root; a leaf symlink out of the tree is refused too.
+        try:
+            if os.path.commonpath([base, os.path.realpath(full)]) != base:
+                return None
+        except ValueError:
+            return None
+        return full
+
+    def _at_file_root(self, target: str) -> bool:
+        """Whether `target` is the file-manager directory itself rather than an entry within it.
+
+        An empty request path, and the `.` and `a/..` spellings that normalize to
+        one, all resolve to the root, so the endpoint that writes has to refuse it:
+        a directory is only ever created inside another, and creating the one the
+        manager is rooted at is not an operation a client can mean. Browse may
+        still name the root, which is the one directory the manager lists. The
+        comparison is by path rather than by resolved target, so a symlink inside
+        the tree that points back at the root stays deletable, and deleting it
+        unlinks the link alone.
+        """
+        base = os.path.normcase(os.path.abspath(str(self.upload_dir)))
+        return os.path.normcase(os.path.abspath(target)) == base
+
+    def _viewer_or_disabled_files(self, request: web.Request) -> Optional[str]:
+        """The message for a refused file-modification request, or None when the
+        session is allowed to modify files. Uploads double as the writable
+        toggle: a deployment that disables uploads serves the directory as
+        read-only, and view-only credentials never modify files."""
+        if self._viewer_ceiling(request):
+            return "View-only credentials cannot modify files"
+        if "upload" not in self.settings.file_transfers:
+            return "File modifications disabled"
+        if not str(self.upload_dir):
+            return "File modifications disabled"
+        return None
+
+    async def _json_body(self, request: web.Request) -> Optional[Dict[str, Any]]:
+        try:
+            data = await request.json()
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _browse_entries(target: str, rel: str) -> List[Dict[str, Any]]:
+        """Stat a directory into JSON listing entries. Runs on the executor so a
+        huge directory cannot stall the event loop that is streaming frames."""
+        entries: List[Dict[str, Any]] = []
+        with os.scandir(target) as it:
+            for entry in it:
+                try:
+                    st = entry.stat()
+                    is_dir = entry.is_dir()
+                except OSError:
+                    continue
+                rel_name = f"{rel}/{entry.name}".strip("/") if rel else entry.name
+                entries.append({
+                    "name": entry.name,
+                    "path": rel_name,
+                    "is_dir": is_dir,
+                    "size": None if is_dir else st.st_size,
+                    "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(),
+                })
+        entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+        return entries
+
+    async def handle_files_browse(self, request: web.Request) -> web.Response:
+        """JSON directory listing for the shared file manager. The listing is
+        read-only, so it carries the same gate as the HTML index (the download
+        permission); read-only viewer credentials are allowed to browse."""
+        if "download" not in self.settings.file_transfers:
+            return web.json_response({"status": "error", "message": "downloads disabled"}, status=403)
+        target = self._resolve_file_path(request.query.get("path", ""))
+        if target is None:
+            return web.json_response({"status": "error", "message": "invalid path"}, status=400)
+        if not os.path.isdir(target):
+            return web.json_response({"status": "error", "message": "not a directory"}, status=404)
+        rel = request.query.get("path", "").strip("/\\")
+        try:
+            entries = await asyncio.to_thread(self._browse_entries, target, rel)
+        except PermissionError:
+            return web.json_response({"status": "error", "message": "permission denied"}, status=403)
+        return web.json_response({"status": "ok", "path": rel, "entries": entries})
+
+    async def handle_files_mkdir(self, request: web.Request) -> web.Response:
+        refused = self._viewer_or_disabled_files(request)
+        if refused:
+            return web.json_response({"status": "error", "message": refused}, status=403)
+        data = await self._json_body(request)
+        rel = (data or {}).get("path", "")
+        if not isinstance(rel, str) or not rel.strip("/\\"):
+            return web.json_response({"status": "error", "message": "invalid path"}, status=400)
+        target = self._resolve_file_path(rel)
+        if target is None or self._at_file_root(target):
+            return web.json_response({"status": "error", "message": "invalid path"}, status=400)
+        if os.path.lexists(target):
+            return web.json_response({"status": "error", "message": "already exists"}, status=409)
+        try:
+            await asyncio.to_thread(os.makedirs, target, exist_ok=True)
+        except OSError as e:
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
+        audit.emit("file.mkdir", filename=rel)
+        return web.json_response({"status": "ok"})
+
     async def handle_print_document(self, request: web.Request) -> web.StreamResponse:
         """GET /api/print/<name>: hand a printed document to the page that
         prints it, and take it out of the spool once it went out whole.
@@ -3266,6 +3390,10 @@ class CentralizedStreamServer:
             web.get(f"{api_prefix}/api/health", self.handle_health),
             web.post(f"{api_prefix}/api/switch", self.handle_switch),
             web.post(f"{api_prefix}/api/upload", self.handle_upload),
+            # File manager JSON API endpoints (before the catch-all /api/files/*)
+            web.get(f"{api_prefix}/api/files/_browse", self.handle_files_browse),
+            web.post(f"{api_prefix}/api/files/_mkdir", self.handle_files_mkdir),
+            # Catch-all for file downloads (must be after specific _* routes)
             web.get(f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler),
             web.get(f"{api_prefix}/api/print/{{name}}", self.handle_print_document),
             web.get(f"{api_prefix}/api/apps/metadata.yml", self.handle_apps_catalog),

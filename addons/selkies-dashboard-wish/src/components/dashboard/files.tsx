@@ -5,41 +5,38 @@
  */
 
 import { useState, useEffect } from "react";
-import { Button } from "@/components/ui/button";
-import { Download, Upload, X } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { computeRenderableSettings, getLastServerSettings } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, isViewerUrlMode } from "@/utils";
 import { t } from "@/i18n";
-import { withSessionToken } from "../../../../selkies-web-core/lib/session-token.js";
+import { FileManager } from "@/components/dashboard/file-manager";
 
 /**
- * The files view of the overflow menu (upload and download buttons) and the
- * Download Files dialog.
+ * The file manager dialog, and the overflow menu's entry to it.
  *
- * The dialog is not rendered by the view: the view lives inside the
- * overflow menu's popup and unmounts with it, while the file manager is a
- * window the user keeps open. TopMenu hosts `FilesDialog` beside the
- * toolbar, as it does the Apps modal, and only the request to open it comes
- * from the view. Uploads are requested with the `requestFileUpload` window
- * event; `serverSettings` messages gate which buttons show.
+ * The menu offers one `Files` item beside Apps and Clipboard, not a submenu:
+ * uploading and downloading both happen inside the manager, so a second upload
+ * button in the menu would be a second way to the same place. TopMenu hosts the
+ * dialog beside the toolbar, as it does the Apps modal, because the overflow
+ * menu's popup unmounts with it, and hides the entry when the server allows
+ * neither transfer.
  * @module
  */
 
-interface FilesProps {
-    /** Opens the Download Files dialog hosted by TopMenu. */
-    onOpenDownloads?: () => void;
+interface FilesDialogProps {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
 }
 
 /**
- * Renders the upload and download buttons the server settings allow, or
- * nothing when both are disabled.
+ * The file manager dialog: the file manager over the server's JSON file API,
+ * with downloads served as attachments from the same tree. Hosted by TopMenu
+ * beside the toolbar, as it does the Apps modal, because the overflow menu's
+ * popup unmounts with it.
  */
-export function Files({ onOpenDownloads }: FilesProps) {
-    const [renderableSettings, setRenderableSettings] = useState<any>(() => computeRenderableSettings(getLastServerSettings()));
-
-    const handleUploadClick = () => {
-        window.dispatchEvent(new CustomEvent('requestFileUpload'));
-    };
+export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
+    const [renderableSettings, setRenderableSettings] = useState<any>(() => 
+        computeRenderableSettings(getLastServerSettings())
+    );
 
     useEffect(() => {
         const handleWindowMessage = (event: MessageEvent) => {
@@ -57,104 +54,32 @@ export function Files({ onOpenDownloads }: FilesProps) {
         return () => window.removeEventListener('message', handleWindowMessage);
     }, []);
 
-    const showUpload = renderableSettings.fileUpload ?? true;
-    const showDownload = renderableSettings.fileDownload ?? true;
+    const canUpload = (renderableSettings.fileUpload ?? true) && !isViewerUrlMode;
+    const allowDownload = renderableSettings.fileDownload ?? true;
 
-    if (!showUpload && !showDownload) return null;
-
-    return (
-        <div className="flex w-full flex-col gap-2 p-2">
-            {showUpload && (
-                <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handleUploadClick}
-                >
-                    <Upload className="h-4 w-4" />
-                    {t('sections.files.uploadButton')}
-                </Button>
-            )}
-            {showDownload && (
-                <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={onOpenDownloads}
-                >
-                    <Download className="h-4 w-4" />
-                    {t('sections.files.downloadButtonTitle')}
-                </Button>
-            )}
-        </div>
-    );
-}
-
-interface FilesDialogProps {
-    open: boolean;
-    onOpenChange: (open: boolean) => void;
-}
-
-/**
- * The Download Files dialog: the server's file index in an iframe, whose
- * file links are attachments. Mounted by TopMenu outside the menubar so a
- * click in the iframe, which blurs the window and closes the menus, leaves
- * it open.
- */
-/**
- * The download frame and the spinner standing in for it. Its own component so
- * each opening mounts it afresh, which is what brings the spinner back.
- */
-function FilesFrame() {
-    const [loading, setLoading] = useState(true);
-    return (
-        <div className="relative flex-1 overflow-hidden">
-            {loading && (
-                <div className="absolute inset-0 flex justify-center items-center pointer-events-none">
-                    <div className="flex flex-col items-center gap-4">
-                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-                        <span className="text-muted-foreground">{t('filesModal.loading')}</span>
-                    </div>
-                </div>
-            )}
-            <iframe
-                src={withSessionToken("api/files/")}
-                title={t('filesModal.iframeTitle')}
-                onLoad={() => setLoading(false)}
-                style={{ opacity: loading ? 0 : 1 }}
-                className="w-full h-[calc(90vh-8rem)] border-0 transition-opacity duration-200"
-            />
-        </div>
-    );
-}
-
-export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="allow-native-input max-h-[90vh] sm:max-w-[80vw] p-0">
-                <DialogHeader className="sticky top-0 z-10 bg-background p-6 border-b">
-                    <div className="flex flex-col space-y-6">
-                        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
-                            <div>
-                                <DialogTitle>{t('sections.files.title')}</DialogTitle>
-                                <DialogDescription>
-                                    {t('files.subtitle')}
-                                </DialogDescription>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <Button
-                                    variant="secondary"
-                                    size="icon"
-                                    onClick={() => onOpenChange(false)}
-                                    className="h-10 w-10"
-                                >
-                                    <X className="h-4 w-4" />
-                                    <span className="sr-only">{t('common.close')}</span>
-                                </Button>
-                            </div>
-                        </div>
-                    </div>
+            {/* The manager is a window, not a sheet: it keeps a margin on a phone
+                but stops growing at a size a file list reads well at, so a wide
+                monitor does not stretch it. The `!` are the base dialog's own
+                width and padding, which otherwise outrank these. */}
+            <DialogContent
+                className="allow-native-input flex! flex-col gap-0! overflow-hidden p-0! h-[90vh]! w-[94vw]! sm:h-[min(82vh,40rem)]! sm:max-h-[min(82vh,40rem)]! sm:w-[min(92vw,54rem)]! sm:max-w-[min(92vw,54rem)]!"
+            >
+                <DialogHeader className="px-4 pt-4 pb-3 border-b shrink-0">
+                    <DialogTitle>{t('sections.files.title')}</DialogTitle>
+                    <DialogDescription>
+                        {t('files.subtitle')}
+                    </DialogDescription>
                 </DialogHeader>
-
-                {open && <FilesFrame />}
+                <div className="flex-1 min-h-0 overflow-hidden p-2">
+                    <FileManager
+                        canUpload={canUpload}
+                        allowDownload={allowDownload}
+                        t={t}
+                        className="h-full"
+                    />
+                </div>
             </DialogContent>
         </Dialog>
     );
