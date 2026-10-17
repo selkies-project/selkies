@@ -421,7 +421,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "ui_title",
         "type": "str",
         "default": "Selkies",
-        "help": "Title in top left corner of sidebar.",
+        "help": "Title in the top left corner of the sidebar, and of the browser tab when set.",
     },
     {
         "name": "ui_show_logo",

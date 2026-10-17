@@ -188,7 +188,7 @@ What the shipped web interface shows; the feature behind a hidden control keeps 
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `--ui-title`<br>`SELKIES_UI_TITLE` | `Selkies`<br>str | Title in top left corner of sidebar. |
+| `--ui-title`<br>`SELKIES_UI_TITLE` | `Selkies`<br>str | Title in the top left corner of the sidebar, and of the browser tab when set. |
 | `--ui-show-logo`<br>`SELKIES_UI_SHOW_LOGO` | `true`<br>bool | Show the Selkies logo in the sidebar. |
 | `--ui-show-sidebar`<br>`SELKIES_UI_SHOW_SIDEBAR` | `true`<br>bool | Show the main sidebar UI. |
 | `--ui-show-connection-indicator`<br>`SELKIES_UI_SHOW_CONNECTION_INDICATOR` | `true`<br>bool | Show the mark over the stream while the server finds the client's connection poor, with or without the sidebar. |
