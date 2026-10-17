@@ -92,6 +92,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
+import { titleFromSettings } from './lib/page-title.js';
 import { storageKeyForServerKey, resolveSpec, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeFullColor, canDecodeTenBit, tenBitFormat, canReceiveEncoder, isCaptureRefusal, isMacDesktop, displayLabel, entryPageTag, serverAnswers, rememberCcStart, forgetCcStart } from './lib/util.js';
 import { codecOfEncoder, codecCarriesFullColor, codecCarriesTenBit } from './lib/wire-codecs.js';
@@ -3763,6 +3764,7 @@ export default function webrtc() {
 					window.postMessage({ type: 'setUseCssScaling', value: cssScaling }, window.location.origin);
 				}
 				maybeSendInitialClipboard();
+				titleFromSettings(obj.settings);
 				window.postMessage({ type: 'serverSettings', payload: obj.settings }, window.location.origin);
 				if (Object.keys(changes).length > 0) {
 					console.log('Client settings were sanitized by server rules. Sending updates back to server:', changes);
