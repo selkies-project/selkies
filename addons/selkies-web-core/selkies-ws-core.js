@@ -127,7 +127,7 @@ import { detectKeyboardLayout } from './lib/keyboard-layout.js';
 import { installAuthGuard } from './lib/auth-guard.js';
 import { getSessionToken, installSessionCookie, sessionAuthHeaders, sessionTokenProtocols } from './lib/session-token.js';
 import { urlFragmentKeyword } from './lib/page-url.js';
-import { titleFromManifest, titleFromSettings } from './lib/page-title.js';
+import { titleFromSettings } from './lib/page-title.js';
 import { storageKeyForServerKey, resolveSpec, tenBitStream, HIDPI_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from './lib/conditional-settings.js';
 import { CRASH_SAFE_SETTINGS, holdKeys, holdDisplaySettings, releaseHeldSettings, restoreHeldPicks } from './lib/held-settings.js';
 import { getRoutePrefix, getStorageAppName, canDecodeEncoder, canDecodeFullColor, fullColorDecoded, canDecodeTenBit, tenBitDecoded, DECODER_PROBE_TIMEOUT_MS, h264Framing, h264FramingReady, isCaptureRefusal, isMacDesktop, isSkiaWebKit, displayLabel, entryPageTag, pageTabId, serverAnswers, rememberCcStart, recalledCcStart, forgetCcStart } from './lib/util.js';
@@ -1121,8 +1121,6 @@ function checkVideoOutputWatchdog() {
     initiateFallback(new Error('decoder produced no output while chunks arrived'), 'no_output');
   }
 }
-
-titleFromManifest();
 
 let framerate = 60;
 /** The server's framerate setting (`min`, `max`, `default`, `overridden`), once its settings arrived. */
