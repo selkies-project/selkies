@@ -283,9 +283,14 @@ export PIPEWIRE_LATENCY="${PIPEWIRE_LATENCY:-256/48000}"
 export PIPEWIRE_RUNTIME_DIR="${PIPEWIRE_RUNTIME_DIR:-${XDG_RUNTIME_DIR}}"
 export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-${XDG_RUNTIME_DIR}/pulse}"
 export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
-# The print queue Selkies runs for the session listens here; an operator
-# pointing at another scheduler leaves that queue unused
-export CUPS_SERVER="${CUPS_SERVER:-${XDG_RUNTIME_DIR}/selkies-cups/cups.sock}"
+# The print queue Selkies runs for the session listens here. An operator's own
+# CUPS_SERVER, a network scheduler, is kept and leaves that queue unused, and
+# with printing off nothing listens on the socket, so the variable stays unset
+# and libcups finds a scheduler the way it does anywhere else.
+if [ -z "${CUPS_SERVER-}" ] &&
+   { [ -z "$(setting_value "${SELKIES_PRINTING_ENABLED-}")" ] || is_true "${SELKIES_PRINTING_ENABLED-}"; }; then
+  export CUPS_SERVER="${XDG_RUNTIME_DIR}/selkies-cups/cups.sock"
+fi
 
 # Compute the shared session environment, including embedded coTURN defaults
 ENV_FILE="${XDG_RUNTIME_DIR}/container-env"
