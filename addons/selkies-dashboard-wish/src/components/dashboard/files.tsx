@@ -59,7 +59,13 @@ export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
-            <DialogContent className="allow-native-input max-h-[90vh] h-[90vh] sm:max-w-[90vw] p-0 flex flex-col">
+            {/* The manager is a window, not a sheet: it keeps a margin on a phone
+                but stops growing at a size a file list reads well at, so a wide
+                monitor does not stretch it. The `!` are the base dialog's own
+                width and padding, which otherwise outrank these. */}
+            <DialogContent
+                className="allow-native-input flex! flex-col gap-0! overflow-hidden p-0! h-[90vh]! w-[94vw]! sm:h-[min(82vh,40rem)]! sm:max-h-[min(82vh,40rem)]! sm:w-[min(92vw,54rem)]! sm:max-w-[min(92vw,54rem)]!"
+            >
                 <DialogHeader className="px-4 pt-4 pb-3 border-b shrink-0">
                     <DialogTitle>{t('sections.files.title')}</DialogTitle>
                     <DialogDescription>
