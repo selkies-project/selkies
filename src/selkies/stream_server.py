@@ -2035,8 +2035,8 @@ class CentralizedStreamServer:
 
         The Bearer header is what scripts send; the ``?token=`` query is what a
         page opened with one carries on the URLs it navigates to rather than
-        fetches (the file-manager listing it opens), which a page holding its
-        token in the fragment leaves to the cookie; the cookie is the mirror the
+        fetches (a file the manager downloads), which a page holding its token
+        in the fragment leaves to the cookie; the cookie is the mirror the
         client keeps for requests it can put neither on. The cookie value is
         tried as sent and URL-decoded, since the client stores it encoded.
 
@@ -2774,9 +2774,9 @@ class CentralizedStreamServer:
 
     def _resolve_file_path(self, rel: str) -> Optional[str]:
         """Resolve a root-relative path to a filesystem path at or under the
-        file-manager directory, without following the final component (so
-        rename/delete act on a symlink, not its target). Returns None when the
-        path escapes the root. An empty path resolves to the root itself."""
+        file-manager directory. Returns None when the path escapes the root. An
+        empty path resolves to the root itself, which browse may name and mkdir
+        refuses through `_at_file_root`."""
         rel = rel.strip("/\\")
         parts = [c for c in os.path.normpath(rel).split(os.sep) if c and c != "."]
         if rel and ".." in parts:
@@ -2799,6 +2799,21 @@ class CentralizedStreamServer:
         except ValueError:
             return None
         return full
+
+    def _at_file_root(self, target: str) -> bool:
+        """Whether `target` is the file-manager directory itself rather than an entry within it.
+
+        An empty request path, and the `.` and `a/..` spellings that normalize to
+        one, all resolve to the root, so the endpoint that writes has to refuse it:
+        a directory is only ever created inside another, and creating the one the
+        manager is rooted at is not an operation a client can mean. Browse may
+        still name the root, which is the one directory the manager lists. The
+        comparison is by path rather than by resolved target, so a symlink inside
+        the tree that points back at the root stays deletable, and deleting it
+        unlinks the link alone.
+        """
+        base = os.path.normcase(os.path.abspath(str(self.upload_dir)))
+        return os.path.normcase(os.path.abspath(target)) == base
 
     def _viewer_or_disabled_files(self, request: web.Request) -> Optional[str]:
         """The message for a refused file-modification request, or None when the
@@ -2870,7 +2885,7 @@ class CentralizedStreamServer:
         if not isinstance(rel, str) or not rel.strip("/\\"):
             return web.json_response({"status": "error", "message": "invalid path"}, status=400)
         target = self._resolve_file_path(rel)
-        if target is None:
+        if target is None or self._at_file_root(target):
             return web.json_response({"status": "error", "message": "invalid path"}, status=400)
         if os.path.lexists(target):
             return web.json_response({"status": "error", "message": "already exists"}, status=409)
@@ -2878,65 +2893,7 @@ class CentralizedStreamServer:
             await asyncio.to_thread(os.makedirs, target, exist_ok=True)
         except OSError as e:
             return web.json_response({"status": "error", "message": str(e)}, status=500)
-        return web.json_response({"status": "ok"})
-
-    @staticmethod
-    def _new_basename(raw_name: str):
-        """Sanitize a client-chosen base name for rename: no path separators,
-        dot entries, or control/NUL bytes."""
-        if not isinstance(raw_name, str):
-            return None
-        name = raw_name.strip()
-        if (not name or name in (".", "..")
-                or "/" in name or "\\" in name or "\x00" in name):
-            return None
-        return name
-
-    async def handle_files_rename(self, request: web.Request) -> web.Response:
-        refused = self._viewer_or_disabled_files(request)
-        if refused:
-            return web.json_response({"status": "error", "message": refused}, status=403)
-        data = await self._json_body(request)
-        if not data:
-            return web.json_response({"status": "error", "message": "invalid request"}, status=400)
-        name = self._new_basename(data.get("name"))
-        if name is None:
-            return web.json_response({"status": "error", "message": "invalid name"}, status=400)
-        src = self._resolve_file_path(str(data.get("path", "")))
-        if src is None or not os.path.lexists(src):
-            return web.json_response({"status": "error", "message": "not found"}, status=404)
-        dst = os.path.join(os.path.dirname(src), name)
-        if os.path.lexists(dst):
-            return web.json_response({"status": "error", "message": "already exists"}, status=409)
-        try:
-            await asyncio.to_thread(os.rename, src, dst)
-        except OSError as e:
-            return web.json_response({"status": "error", "message": str(e)}, status=500)
-        return web.json_response({"status": "ok"})
-
-    async def handle_files_delete(self, request: web.Request) -> web.Response:
-        refused = self._viewer_or_disabled_files(request)
-        if refused:
-            return web.json_response({"status": "error", "message": refused}, status=403)
-        data = await self._json_body(request)
-        if not data:
-            return web.json_response({"status": "error", "message": "invalid request"}, status=400)
-        target = self._resolve_file_path(str(data.get("path", "")))
-        if target is None or not os.path.lexists(target):
-            return web.json_response({"status": "error", "message": "not found"}, status=404)
-
-        def _remove():
-            # A symlink is unlinked, not followed, so deletion cannot reach the
-            # symlink's target; a directory is removed recursively.
-            if os.path.islink(target) or os.path.isfile(target):
-                os.remove(target)
-            else:
-                shutil.rmtree(target)
-
-        try:
-            await asyncio.to_thread(_remove)
-        except OSError as e:
-            return web.json_response({"status": "error", "message": str(e)}, status=500)
+        audit.emit("file.mkdir", filename=rel)
         return web.json_response({"status": "ok"})
 
     async def handle_print_document(self, request: web.Request) -> web.StreamResponse:
@@ -3436,8 +3393,6 @@ class CentralizedStreamServer:
             # File manager JSON API endpoints (before the catch-all /api/files/*)
             web.get(f"{api_prefix}/api/files/_browse", self.handle_files_browse),
             web.post(f"{api_prefix}/api/files/_mkdir", self.handle_files_mkdir),
-            web.post(f"{api_prefix}/api/files/_rename", self.handle_files_rename),
-            web.post(f"{api_prefix}/api/files/_delete", self.handle_files_delete),
             # Catch-all for file downloads (must be after specific _* routes)
             web.get(f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler),
             web.get(f"{api_prefix}/api/print/{{name}}", self.handle_print_document),
