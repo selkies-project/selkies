@@ -34,3 +34,5 @@ Other ways to run it:
 - The [Base Container](https://docs.selkies.io/components/base-image) is the whole session without a desktop, the image to build your own `FROM`, and [`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) and [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) are KDE Plasma desktops built on it.
 
 **[Read the Documentation](https://docs.selkies.io/) for the rest.** The [Settings Reference](https://docs.selkies.io/settings) lists every current setting. [Licensing](https://docs.selkies.io/licensing) inventories the third-party components of an installation, with their licenses and where the GPL pieces come from.
+
+Automated reviews are provided by [Pullfrog](https://pullfrog.com). This project is tested with [BrowserStack](https://www.browserstack.com).
