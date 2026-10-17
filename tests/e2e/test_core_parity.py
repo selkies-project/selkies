@@ -19,8 +19,8 @@ posted to the primary's page is neither requested nor applied, and the
 desktop keeps its size.
 Rendering: changing anti-aliasing applies to the visible sink immediately,
 including a static desktop that sends no new video frames.
-Title: an explicit ui_title names the browser tab, and without one the tab
-keeps the manifest's name.
+Title: without ui_title the browser tab takes the web root manifest's name,
+and an explicit ui_title names it instead.
 
 The checks read the wire: r,WxH / js,* / cw,cb messages are tapped at
 WebSocket.send and RTCDataChannel.send inside the page, clipboard reads at
@@ -31,9 +31,12 @@ written against, and the webrtc core must match it.
 
 Usage: python test_core_parity.py [webrtc|websockets|all]
 """
+import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Optional
 
@@ -49,6 +52,8 @@ VIEW_W, VIEW_H = 1000, 700
 DPR = 2
 PRESET_W, PRESET_H = 1280, 720
 UI_TITLE = "Parity Title"
+# Unlike the page's own <title>, so the tab shows whether the manifest was read.
+MANIFEST_NAME = "Parity Manifest"
 # A size X11's modes round up (to 8-pixel cells), which the stream still carries exactly.
 ODD_W, ODD_H = 1278, 712
 RESIZED_W, RESIZED_H = 1100, 680
@@ -648,6 +653,15 @@ def pinned_block(browser: Any, mode: str, res: "H.Results") -> None:
         page.context.close()
 
 
+def manifest_web_root() -> str:
+    """A copy of the core's web client whose manifest names the app MANIFEST_NAME."""
+    root = os.path.join(tempfile.mkdtemp(prefix="selkies-core-parity-"), "web")
+    shutil.copytree(H.CORE_DIST, root)
+    with open(os.path.join(root, "manifest.json"), "w") as f:
+        json.dump({"name": MANIFEST_NAME}, f)
+    return root
+
+
 def title_block(browser: Any, mode: str, res: "H.Results") -> None:
     """ui_title set: the tab takes it over the manifest's name."""
     page = new_page(browser, mode)
@@ -661,7 +675,8 @@ def title_block(browser: Any, mode: str, res: "H.Results") -> None:
 def run(mode: str) -> bool:
     """Drive every block over one transport; True when all checks passed."""
     res = H.Results(f"core-parity-{mode}")
-    H.server_start(mode=mode)
+    web_root = manifest_web_root()
+    H.server_start(mode=mode, web_root=web_root)
     try:
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
@@ -669,8 +684,8 @@ def run(mode: str) -> bool:
                 page = new_page(browser, mode)
                 res.check("video flowing", bool(wait_video(page, mode)))
                 time.sleep(1.0)
-                res.check("without ui_title the tab keeps the manifest's name",
-                          page.title() == "Selkies", page.title())
+                res.check("without ui_title the tab takes the manifest's name",
+                          page.title() == MANIFEST_NAME, page.title())
                 resolution_block(page, mode, res)
                 emulated_density_block(page, mode, res)
                 hidpi_block(page, mode, res)
@@ -681,9 +696,9 @@ def run(mode: str) -> bool:
                 gamepad_block(browser, mode, res)
             finally:
                 browser.close()
-        H.server_start(mode=mode, extra_env={"SELKIES_ENABLE_CLIPBOARD": "false",
-                                             "SELKIES_ENABLE_RESIZE": "false",
-                                             "SELKIES_UI_TITLE": UI_TITLE})
+        H.server_start(mode=mode, web_root=web_root, extra_env={"SELKIES_ENABLE_CLIPBOARD": "false",
+                                                                "SELKIES_ENABLE_RESIZE": "false",
+                                                                "SELKIES_UI_TITLE": UI_TITLE})
         with sync_playwright() as p:
             browser = C.chromium_launch(p)
             try:
