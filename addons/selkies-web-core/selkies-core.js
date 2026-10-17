@@ -5,7 +5,8 @@
  */
 
 /**
- * Entry point of the web client: picks the streaming transport and starts it.
+ * Entry point of the web client: names the tab after the web root's manifest,
+ * picks the streaming transport, and starts it.
  *
  * The transport is `window.__SELKIES_STREAMING_MODE__` when the page injects
  * one, else the `stream_mode` the last session persisted, else WebSockets. A
@@ -26,6 +27,7 @@
  */
 
 import { getStorageAppName } from "./lib/util.js";
+import { titleFromManifest } from "./lib/page-title.js";
 import webrtc from "./selkies-wr-core";
 import websockets from "./selkies-ws-core";
 
@@ -165,6 +167,7 @@ function switchStreamingMode(newMode) {
 if (typeof window !== 'undefined') {
     window.addEventListener("message", handleMessage)
     window.selkiesCoreInitialize = function() {
+        titleFromManifest();
         const streamingMode = determineStreamingMode();
         switchStreamingMode(streamingMode);
     };
