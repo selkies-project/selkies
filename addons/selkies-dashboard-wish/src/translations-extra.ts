@@ -816,7 +816,7 @@ const tr = {
         removeApp: "{name} kaldır",
     },
     files: {
-        subtitle: "Dosyalari indirin ve yönetin",
+        subtitle: "Dosyaları indirin ve yönetin",
         rootLabel: "Dosyalar",
         goBack: "Geri",
         showHidden: "Gizli dosyaları göster",

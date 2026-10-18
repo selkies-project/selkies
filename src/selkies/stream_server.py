@@ -42,6 +42,7 @@ import socket
 import urllib.parse
 import tempfile
 import weakref
+import zipfile
 from collections import deque
 from aiohttp import web
 from aiohttp.abc import AbstractAccessLogger
@@ -2825,13 +2826,11 @@ class CentralizedStreamServer:
         """Whether `target` is the file-manager directory itself rather than an entry within it.
 
         An empty request path, and the `.` and `a/..` spellings that normalize to
-        one, all resolve to the root, so the endpoint that writes has to refuse it:
-        a directory is only ever created inside another, and creating the one the
-        manager is rooted at is not an operation a client can mean. Browse may
-        still name the root, which is the one directory the manager lists. The
-        comparison is by path rather than by resolved target, so a symlink inside
-        the tree that points back at the root stays deletable, and deleting it
-        unlinks the link alone.
+        one, all resolve to the root, so an endpoint that acts rather than lists
+        refuses it: a directory is only ever created inside another, and creating
+        the one the manager is rooted at is not an operation a client can mean.
+        Browse may still name the root, which is the one directory the manager
+        lists.
         """
         base = os.path.normcase(os.path.abspath(str(self.upload_dir)))
         return os.path.normcase(os.path.abspath(target)) == base
@@ -2881,8 +2880,11 @@ class CentralizedStreamServer:
 
     async def handle_files_browse(self, request: web.Request) -> web.Response:
         """JSON directory listing for the shared file manager. The listing is
-        read-only, so it carries the same gate as the HTML index (the download
-        permission); read-only viewer credentials are allowed to browse."""
+        read-only, but it carries both gates of the HTML index: the download
+        permission, and the viewer ceiling, since a viewer watches the desktop
+        and never reaches the files on it."""
+        if self._viewer_ceiling(request):
+            return web.json_response({"status": "error", "message": "View-only credentials cannot list files"}, status=403)
         if "download" not in self.settings.file_transfers:
             return web.json_response({"status": "error", "message": "downloads disabled"}, status=403)
         target = self._resolve_file_path(request.query.get("path", ""))
@@ -3188,6 +3190,194 @@ class CentralizedStreamServer:
             for child in src.iterdir():
                 self._copy_traversable(child, dst / child.name)
 
+    async def _serve_paced_download(
+        self,
+        request: web.Request,
+        path: pathlib.Path,
+        *,
+        audit_name: str,
+        download_name: Optional[str] = None,
+        allow_fallback: bool = True,
+    ) -> web.StreamResponse:
+        """Stream `path` to the page as an attachment with the download pacing,
+        or answer with `_AuditedFileResponse` when nothing is paced and
+        `allow_fallback` allows it.
+
+        `download_name` is the name the attachment is offered under and
+        `audit_name` the one the audit trail records, distinct because a
+        generated archive is built under a temporary name and offered under the
+        folder's. `allow_fallback` is False for a file that exists only for the
+        length of the transfer: FileResponse opens it after the handler returns,
+        by which time the temporary is gone.
+
+        The operator's static cap is the shared `transfer_cap` bucket, and
+        congestion control is `download_pacer` fed one `UplinkGauge` verdict per
+        chunk over the downloader's own session socket, so the transfer takes
+        whatever the downlink has spare and backs off the moment the session's
+        delay inflates. The gauge is end to end, so a reverse proxy or a fat
+        modem buffer absorbing this host's writes still shows as the round trip
+        it costs the session. Chunks are sized to the current rate
+        (`_gauged_chunk_size`): each lands on the link as a burst, and a fixed
+        256 KiB would read as congestion on any link that cannot swallow it
+        inside the gauge's delay budget. A file below
+        `TRANSFER_MIN_GAUGED_BYTES` skips the gauge, as does a request with no
+        gauge-able session socket; with no cap either, nothing is paced.
+
+        Pacing applies to plain GETs only: HEAD must answer instantly
+        (StreamResponse.write is not empty-body-aware, so it would read and
+        pace the whole file), a Range request is a resume or a seek that
+        pacing a partial stream buys nothing for while FileResponse
+        negotiates the 206, and a conditional request exists to be answered
+        with 304/412 from validators only FileResponse computes.
+
+        A client that cancels a download closes its connection mid-stream,
+        which surfaces as a connection error from the write; that is the
+        transfer's normal end, logged as such and never a handler failure.
+        """
+        filename = (download_name or path.name).encode("ascii", "replace").decode().replace('"', "_")
+        quoted = urllib.parse.quote(download_name or path.name)
+        conditional = any(
+            name in request.headers
+            for name in ("If-Modified-Since", "If-None-Match",
+                         "If-Range", "If-Unmodified-Since")
+        )
+        size = (await asyncio.to_thread(path.stat)).st_size
+        cap = self.transfer_cap if self.transfer_cap.active else None
+        gauge = (
+            self._session_gauge(request)
+            if size >= TRANSFER_MIN_GAUGED_BYTES else None)
+        if not ((cap is not None or gauge is not None or not allow_fallback)
+                and request.method == "GET"
+                and "Range" not in request.headers and not conditional):
+            return _AuditedFileResponse(
+                path, audit_name,
+                headers={
+                    "Content-Disposition":
+                        f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quoted}'
+                },
+            )
+        logger.info(
+            f"Download '{filename}' ({size} bytes): "
+            f"{'gauged' if gauge is not None else 'ungauged'}"
+            + (f", capped at {cap.static_bps / 125000:.1f} Mbit/s"
+               if cap is not None else ""))
+        content_type = (
+            mimetypes.guess_type(download_name or path.name)[0]
+            or "application/octet-stream"
+        )
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": content_type,
+                "Content-Length": str(size),
+                "Accept-Ranges": "bytes",
+                "Content-Disposition":
+                    f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quoted}',
+            },
+        )
+        await response.prepare(request)
+        fh = await asyncio.to_thread(open, path, "rb")
+        sent = 0
+        try:
+            while True:
+                chunk_size = (
+                    _gauged_chunk_size(self.download_pacer)
+                    if gauge is not None else 1 << 20)
+                chunk = await asyncio.to_thread(fh.read, chunk_size)
+                if not chunk:
+                    break
+                if cap is not None:
+                    await cap.pace(len(chunk))
+                if gauge is not None:
+                    verdict = await gauge.sample()
+                    if gauge.alive:
+                        await self.download_pacer.pace_verdict(len(chunk), verdict, gauge.inflation_us)
+                    else:
+                        gauge = None
+                await response.write(chunk)
+                sent += len(chunk)
+            await response.write_eof()
+            audit.emit("file.download", filename=audit_name, size_bytes=size, partial=False)
+        except ConnectionError as e:
+            logger.info(
+                f"Download '{filename}' stopped by the client "
+                f"after {sent} of {size} bytes: {e}")
+        finally:
+            await asyncio.to_thread(fh.close)
+        return response
+
+    @staticmethod
+    def _build_directory_archive(root: pathlib.Path) -> Tuple[str, int]:
+        """Write the contents of `root` to a zip archive in the system
+        temporary directory, and return its path and size.
+
+        Symlinks are left out: `zipfile` reads the target a link points at, so
+        a link inside the tree pointing out of it would put content outside the
+        root into an archive the user asked for the tree's contents of.
+        """
+        fd, staged = tempfile.mkstemp(prefix="selkies-files-", suffix=".zip")
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(staged, "w", zipfile.ZIP_DEFLATED) as archive:
+                for current, directories, filenames in os.walk(root, followlinks=False):
+                    directories[:] = [
+                        d for d in directories
+                        if not os.path.islink(os.path.join(current, d))]
+                    relative = os.path.relpath(current, root)
+                    for name in filenames:
+                        entry = os.path.join(current, name)
+                        if os.path.islink(entry):
+                            continue
+                        archive.write(entry, name if relative == "." else os.path.join(relative, name))
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.remove(staged)
+            raise
+        return staged, os.path.getsize(staged)
+
+    async def handle_files_zip(self, request: web.Request) -> web.StreamResponse:
+        """GET /api/files/_zip?path=<dir>: hand a directory to the page as one
+        zip archive.
+
+        A folder has no single file to fetch, so the archive is what a folder's
+        Download button asks for. `zipfile` cannot stream, so the folder is
+        packed to a temporary file first and the response starts once the whole
+        archive exists; the wait before the first byte is that packing, and the
+        temporary is unlinked once the transfer ends however it ends. Symlinks
+        are not followed (`_build_directory_archive`). The root is refused like
+        every endpoint that acts rather than lists, so a folder download is
+        always a folder within the manager and never the whole served tree in
+        one request. View-only credentials are refused the archive like the
+        listing and the bytes (`_viewer_ceiling`): a viewer watches the
+        desktop, it does not take the files on it.
+
+        The archive rides the same pacing the file download does
+        (`_serve_paced_download`), so a folder the size of a video directory
+        still backs off with the session's delay instead of taking whatever the
+        downlink accepts. It is streamed rather than handed to FileResponse,
+        since the temporary does not outlive the handler, and the route is GET
+        alone for the same reason: a HEAD or a Range would want FileResponse
+        to answer from a file that is gone.
+        """
+        if self._viewer_ceiling(request):
+            return web.Response(status=403, text="View-only credentials cannot download files")
+        if "download" not in self.settings.file_transfers:
+            return web.Response(status=403, text="Forbidden: downloads disabled")
+        rel = str(request.query.get("path", ""))
+        target = self._resolve_file_path(rel)
+        if target is None or self._at_file_root(target) or not os.path.isdir(target):
+            return web.json_response({"status": "error", "message": "not found"}, status=404)
+        staged, size = await asyncio.to_thread(
+            self._build_directory_archive, pathlib.Path(target))
+        name = os.path.basename(os.path.normpath(target))
+        try:
+            return await self._serve_paced_download(
+                request, pathlib.Path(staged),
+                audit_name=rel, download_name=f"{name}.zip",
+                allow_fallback=False)
+        finally:
+            await asyncio.to_thread(os.remove, staged)
+
     async def fancy_index_handler(self, request: web.Request) -> web.StreamResponse:
         """GET /api/files/...: serve the file-manager tree for download.
 
@@ -3201,32 +3391,8 @@ class CentralizedStreamServer:
         any traversal before touching the filesystem and re-checks the
         symlink-resolved path against the root.
 
-        A download paces like an upload, mirrored: the operator's static cap
-        is the shared `transfer_cap` bucket, and congestion control is
-        `download_pacer` fed one `UplinkGauge` verdict per chunk over the
-        downloader's own session socket, so the transfer takes whatever the
-        downlink has spare and backs off the moment the session's delay
-        inflates. The gauge is end to end, so a reverse proxy or a fat modem
-        buffer absorbing this host's writes still shows as the round trip it
-        costs the session. Chunks are sized to the current rate
-        (`_gauged_chunk_size`): each lands on the link as a burst, and a
-        fixed 256 KiB would read as congestion on any link that cannot swallow
-        it inside the gauge's delay budget. A file below
-        `TRANSFER_MIN_GAUGED_BYTES` skips the gauge, as does a request with
-        no gauge-able session socket; with no cap either, nothing is paced
-        and FileResponse's sendfile path serves it.
-
-        Pacing applies to plain GETs only: HEAD must answer instantly
-        (StreamResponse.write is not empty-body-aware, so it would read and
-        pace the whole file), a Range request is a resume or a seek that
-        pacing a partial stream buys nothing for while FileResponse
-        negotiates the 206, and a conditional request exists to be answered
-        with 304/412 from validators only FileResponse computes. Those fall
-        through to FileResponse.
-
-        A client that cancels a download closes its connection mid-stream,
-        which surfaces as a connection error from the write; that is the
-        transfer's normal end, logged as such and never a handler failure.
+        A download paces like an upload, mirrored: `_serve_paced_download`
+        carries the mechanism and its conditions.
 
         View-only credentials are refused the listing and the bytes alike: a
         viewer watches the desktop, it does not take the files on it.
@@ -3236,6 +3402,10 @@ class CentralizedStreamServer:
         if "download" not in self.settings.file_transfers:
             return web.Response(status=403, text="Forbidden: downloads disabled")
         rel_path = request.match_info.get("path", "").lstrip("/")
+        if rel_path == "_zip":
+            # The archive route owns this name and answers GET alone, so a HEAD
+            # here is the catch-all speaking for a name that is not a file.
+            return web.Response(status=405, headers={"Allow": "GET"})
         base = str(self.upload_dir)
         parts = [c for c in os.path.normpath(rel_path).split(os.sep) if c and c != "."]
         if ".." in parts:
@@ -3256,78 +3426,8 @@ class CentralizedStreamServer:
             return web.Response(status=404, text="Not Found")
 
         if full_path.is_file():
-            filename = full_path.name.encode("ascii", "replace").decode().replace('"', "_")
-            quoted = urllib.parse.quote(full_path.name)
-            conditional = any(
-                name in request.headers
-                for name in ("If-Modified-Since", "If-None-Match",
-                             "If-Range", "If-Unmodified-Since")
-            )
-            size = (await asyncio.to_thread(full_path.stat)).st_size
-            served = "/".join(parts)
-            cap = self.transfer_cap if self.transfer_cap.active else None
-            gauge = (
-                self._session_gauge(request)
-                if size >= TRANSFER_MIN_GAUGED_BYTES else None)
-            if ((cap is not None or gauge is not None)
-                    and request.method == "GET"
-                    and "Range" not in request.headers and not conditional):
-                logger.info(
-                    f"Download '{full_path.name}' ({size} bytes): "
-                    f"{'gauged' if gauge is not None else 'ungauged'}"
-                    + (f", capped at {cap.static_bps / 125000:.1f} Mbit/s"
-                       if cap is not None else ""))
-                content_type = (
-                    mimetypes.guess_type(full_path.name)[0]
-                    or "application/octet-stream"
-                )
-                response = web.StreamResponse(
-                    status=200,
-                    headers={
-                        "Content-Type": content_type,
-                        "Content-Length": str(size),
-                        "Accept-Ranges": "bytes",
-                        "Content-Disposition":
-                            f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quoted}',
-                    },
-                )
-                await response.prepare(request)
-                fh = await asyncio.to_thread(open, full_path, "rb")
-                sent = 0
-                try:
-                    while True:
-                        chunk_size = (
-                            _gauged_chunk_size(self.download_pacer)
-                            if gauge is not None else 1 << 20)
-                        chunk = await asyncio.to_thread(fh.read, chunk_size)
-                        if not chunk:
-                            break
-                        if cap is not None:
-                            await cap.pace(len(chunk))
-                        if gauge is not None:
-                            verdict = await gauge.sample()
-                            if gauge.alive:
-                                await self.download_pacer.pace_verdict(len(chunk), verdict, gauge.inflation_us)
-                            else:
-                                gauge = None
-                        await response.write(chunk)
-                        sent += len(chunk)
-                    await response.write_eof()
-                    audit.emit("file.download", filename=served, size_bytes=size, partial=False)
-                except ConnectionError as e:
-                    logger.info(
-                        f"Download '{full_path.name}' stopped by the client "
-                        f"after {sent} of {size} bytes: {e}")
-                finally:
-                    await asyncio.to_thread(fh.close)
-                return response
-            return _AuditedFileResponse(
-                full_path, served,
-                headers={
-                    "Content-Disposition":
-                        f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quoted}'
-                },
-            )
+            return await self._serve_paced_download(
+                request, full_path, audit_name="/".join(parts))
 
         if not request.path.endswith("/"):
             # Exactly one leading slash, so the location is never protocol-relative.
@@ -3425,6 +3525,8 @@ class CentralizedStreamServer:
             # File manager JSON API endpoints (before the catch-all /api/files/*)
             web.get(f"{api_prefix}/api/files/_browse", self.handle_files_browse),
             web.post(f"{api_prefix}/api/files/_mkdir", self.handle_files_mkdir),
+            web.get(f"{api_prefix}/api/files/_zip", self.handle_files_zip,
+                    allow_head=False),
             # Catch-all for file downloads (must be after specific _* routes)
             web.get(f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler),
             web.get(f"{api_prefix}/api/print/{{name}}", self.handle_print_document),

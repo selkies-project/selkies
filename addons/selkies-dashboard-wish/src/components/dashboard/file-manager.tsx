@@ -180,7 +180,7 @@ function formatDate(iso: string): string {
 }
 
 interface FileManagerProps {
-  /** Whether the session may change the listing (upload, rename, delete, mkdir). */
+  /** Whether the session may change the listing (upload, mkdir). */
   canUpload?: boolean
   /** Whether files may be fetched. */
   allowDownload?: boolean
@@ -191,8 +191,8 @@ interface FileManagerProps {
 
 /**
  * The file manager over the JSON file API: one directory at a time, in whichever
- * of the three layouts the user picked, with the upload, mkdir, rename and delete
- * actions on the rows they act on. The breadcrumb and the back button move
+ * of the three layouts the user picked, with the upload and mkdir actions in the
+ * header and a download on every row. The breadcrumb and the back button move
  * between directories; `cwd` is the one on screen and the one uploads and new
  * folders land in, and its listing is fetched the first time it is opened.
  *
@@ -304,7 +304,8 @@ export function FileManager({
   )
 
   // A download is a navigation rather than a fetch, so it cannot carry a
-  // header; the query token is what reaches the route in that case.
+  // header; the query token is what reaches the route in that case. A folder
+  // has no single file to fetch, so it goes to the archive route instead.
   const fileUrl = React.useCallback(
     (entryPath: string) => {
       const segments = entryPath.split("/").map((seg) => encodeURIComponent(seg))
@@ -313,6 +314,15 @@ export function FileManager({
       )
     },
     []
+  )
+
+  const archiveUrl = React.useCallback(
+    (entryPath: string) => {
+      const url = new URL(`${apiBase}/_zip`, window.location.href)
+      url.searchParams.set("path", entryPath)
+      return withSessionToken(url.href)
+    },
+    [apiBase]
   )
 
   async function post(action: string, body: unknown) {
@@ -329,22 +339,21 @@ export function FileManager({
     return data
   }
 
+  // A file's name is not its download: the row's Download button is, so a
+  // click on a file does nothing rather than saving it, and a click on a
+  // folder is what opens it.
   const handleOpenItem = React.useCallback(
     (item: FileManagerItem) => {
-      if (item.is_dir) {
-        navigateTo(item.path)
-      } else if (allowDownload) {
-        window.open(fileUrl(item.path), "_self")
-      }
+      if (item.is_dir) navigateTo(item.path)
     },
-    [allowDownload, fileUrl, navigateTo]
+    [navigateTo]
   )
 
   const handleDownload = React.useCallback(
-    (path: string) => {
-      window.open(fileUrl(path), "_self")
+    (item: FileManagerItem) => {
+      window.open(item.is_dir ? archiveUrl(item.path) : fileUrl(item.path), "_self")
     },
-    [fileUrl]
+    [archiveUrl, fileUrl]
   )
 
   const handleCreateFolder = async () => {
@@ -697,10 +706,10 @@ interface FileRowProps {
   allowDownload: boolean
   /** Translator for the row's labels. */
   t: (key: string, vars?: Record<string, unknown>) => string
-  /** Called with the entry: a folder opens it, a file downloads it. */
+  /** Called with the entry: a folder opens it; a file's name is not its download. */
   onOpen: (item: FileManagerItem) => void
-  /** Called with the entry's path to download it. */
-  onDownload: (path: string) => void
+  /** Called with the entry to download it: a file as itself, a folder as an archive. */
+  onDownload: (item: FileManagerItem) => void
 }
 
 /**
@@ -722,17 +731,18 @@ interface FileRowProps {
 function FileRow({ file, view, allowDownload, t, onOpen, onDownload }: FileRowProps) {
   const Icon = file.is_dir ? Folder : FileIcon
 
-  // A folder is opened by clicking its name, so it has nothing to download and
-  // no second control; a file gets an explicit one rather than leaving the
-  // download to be discovered by clicking the row.
-  const download = !file.is_dir && allowDownload ? (
+  // Every row carries the button: a file's downloads that file, a folder's
+  // downloads the folder as an archive. The row's own click is the navigation,
+  // so the button is what keeps the download from depending on knowing a row
+  // is clickable.
+  const download = allowDownload ? (
     <Button
       variant="ghost"
       size="icon-sm"
       aria-label={t("files.download")}
       title={t("files.download")}
       className="relative"
-      onClick={() => onDownload(file.path)}
+      onClick={() => onDownload(file)}
     >
       <Download className="h-4 w-4" />
     </Button>

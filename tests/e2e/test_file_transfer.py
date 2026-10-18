@@ -259,8 +259,8 @@ def api_checks(res: "H.Results", full: bool) -> None:
     for spelling, label in (("", "an empty path"), (".", "a dot"), ("sub dir/..", "a round trip")):
         status, _, _ = json_post("mkdir", {"path": spelling})
         res.check(f"mkdir naming the root as {label} is refused", status == 400, status)
-    status, _, _ = request("GET", "/api/files/_browse")
-    names = {e.get("name") for e in json.loads(body).get("entries", [])} if status == 200 else set()
+    status, _, listing = request("GET", "/api/files/_browse")
+    names = {e.get("name") for e in json.loads(listing).get("entries", [])} if status == 200 else set()
     res.check("the served tree survives a mkdir naming its root",
               status == 200 and {"seed.txt", "sub dir", "json dir"} <= names,
               f"{status} {sorted(names)[:4]}")
@@ -270,6 +270,18 @@ def api_checks(res: "H.Results", full: bool) -> None:
                                headers={"Content-Type": "application/json"},
                                body=json.dumps({"path": "seed.txt", "name": "x"}).encode())
         res.check(f"POST /api/files/_{verb} is no longer served", status == 405, status)
+
+    # A folder comes back as one archive rather than file by file, and the
+    # archive is read back to be sure it is what the directory holds.
+    status, headers, archived = request(
+        "GET", "/api/files/_zip?path=" + urllib.parse.quote("sub dir"))
+    res.check("GET /api/files/_zip returns the folder as a zip",
+              status == 200 and archived[:2] == b"PK" and b"plain.bin" in archived
+              and "zip" in headers.get("content-type", ""), status)
+    status, _, _ = request("GET", "/api/files/_zip")
+    res.check("a _zip naming the root as an empty path is refused", status == 404, status)
+    status, _, _ = request("GET", "/api/files/_zip?path=seed.txt")
+    res.check("a _zip on a file rather than a directory is refused", status == 404, status)
 
 
 def close_menus(page: Any) -> None:
@@ -314,8 +326,8 @@ def files_buttons(page: Any, dashboard: str) -> tuple:
     if not dialog.count():
         return (False, False)
     upload = dialog.locator('button[aria-label="Upload"]')
-    # The manager roots the listing in one directory, so one row's Download
-    # button stands for it: downloads are off when the directory holds no file.
+    # Every row carries the Download button, folders included, so its presence
+    # is what says the session may fetch at all.
     download = dialog.locator('button[aria-label="Download"]')
     return (upload.count() > 0, download.count() > 0)
 
@@ -627,6 +639,12 @@ def policy_block() -> "H.Results":
     res.check("Basic auth: the view-only password cannot download", status == 403 and body != b"controller", status)
     status, _, body = request("GET", "/api/files/", headers=basic(VIEWONLY_PASSWORD))
     res.check("Basic auth: the view-only password cannot list files", status == 403 and b"controller.bin" not in body, status)
+    status, _, body = request("GET", "/api/files/_browse", headers=basic(VIEWONLY_PASSWORD))
+    res.check("Basic auth: the view-only password cannot browse the JSON listing",
+              status == 403 and b"entries" not in body, status)
+    status, _, body = request("GET", "/api/files/_zip", headers=basic(VIEWONLY_PASSWORD))
+    res.check("Basic auth: the view-only password cannot take a folder archive",
+              status == 403 and body[:2] != b"PK", status)
 
     # The client side of the ceiling: the core closes the upload gate on a
     # shared/viewer page, so its file input starts no request at all.
