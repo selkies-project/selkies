@@ -1876,6 +1876,7 @@ class CentralizedStreamServer:
             "Creating TLS context with certificate=%s key=%s", cert_pem, key_pem
         )
         sslctx = ssl.create_default_context(purpose=ssl.Purpose.CLIENT_AUTH)
+        sslctx.minimum_version = ssl.TLSVersion.TLSv1_2
         sslctx.check_hostname = False
         sslctx.verify_mode = ssl.CERT_NONE
         try:

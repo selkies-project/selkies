@@ -4,7 +4,8 @@ websockets transport (flow, audio, input, clipboard, resize, console health),
 plus a reduced WebRTC flow on Firefox (parity with the Chrome reference) and
 WebKit. Over WebSockets, video and audio reach the page and playback on every
 engine, through libopus in WASM where the engine has no WebCodecs audio, and
-play on the output device the page picks. Over WebRTC, a manual resolution
+play on the output device the page picks; a `<video>` sink the browser will
+not start without a user gesture starts on the next press. Over WebRTC, a manual resolution
 shown 1:1 is drawn nearest-sampled in Chromium only, since Firefox's compositor
 draws that slower than a smoothed video."""
 import os
@@ -373,6 +374,88 @@ def sink_block(engine: str) -> "H.Results":
     return res
 
 
+# Safari's default autoplay setting: a media element plays only once a user
+# gesture has started it, muted or not; playback begun any other way is paused.
+# The gesture is a trusted press or key within the last second, since the
+# suite's autoplay switch has Chromium report user activation without one.
+GESTURE_ONLY_PLAY_JS = """(() => {
+  let pressedAt = -Infinity;
+  for (const type of ['pointerdown', 'pointerup', 'touchend', 'keydown', 'click']) {
+    window.addEventListener(type, (e) => { if (e.isTrusted) pressedAt = performance.now(); }, true);
+  }
+  const play = HTMLMediaElement.prototype.play;
+  const started = new WeakSet();
+  const allowed = (el) => {
+    if (performance.now() - pressedAt < 1000) started.add(el);
+    return started.has(el);
+  };
+  HTMLMediaElement.prototype.play = function () {
+    if (allowed(this)) return play.call(this);
+    return Promise.reject(new DOMException('The request is not allowed by the user agent', 'NotAllowedError'));
+  };
+  document.addEventListener('play', (e) => { if (!allowed(e.target)) e.target.pause(); }, true);
+})()"""
+
+VIDEO_SINK_JS = """(() => {
+  const v = document.getElementById('videoStream');
+  if (!v || !v.srcObject || v.style.display === 'none') return null;
+  const q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality().totalVideoFrames : 0;
+  return {paused: v.paused, frames: q, time: v.currentTime};
+})()"""
+
+
+def gesture_block(engine: str) -> "H.Results":
+    """A `<video>` sink the browser will not start without a user gesture
+    starts on the next press over the stream, as Safari asks of a page under
+    its default autoplay setting. Chromium stands in, with playback refused
+    the way Safari refuses it, since its generator sink feeds a `<video>` as
+    Safari's does and Playwright's WebKit has no generator sink at all."""
+    res = H.Results(f"gesture-{engine}")
+    H.server_start(mode="websockets", wayland=False)
+    try:
+        with sync_playwright() as p:
+            browser, ctx = engine_launch(p, engine)
+            try:
+                ctx.add_init_script(GESTURE_ONLY_PLAY_JS)
+                page = ctx.new_page()
+                said = []
+                page.on("console", lambda m: said.append(m.text))
+                page.goto(H.BASE_URL, wait_until="load")
+                res.check(f"[{engine}] frames arrive", bool(C.wait_ws_video(page, timeout=45)), "")
+                sink = None
+                deadline = time.time() + 15
+                while time.time() < deadline and sink is None:
+                    sink = page.evaluate(VIDEO_SINK_JS)
+                    time.sleep(0.5)
+                if sink is None:
+                    res.skip(f"[{engine}] <video> sink", "this browser presents through a canvas here")
+                    return res
+                time.sleep(3)
+                before = page.evaluate(VIDEO_SINK_JS)
+                res.check(f"[{engine}] without a gesture the sink stays paused", before["paused"], before)
+                res.check(f"[{engine}] and the refusal is said",
+                          any("Video playback refused" in t for t in said), "")
+                page.mouse.click(640, 360)
+                time.sleep(3)
+                after = page.evaluate(VIDEO_SINK_JS)
+                res.check(f"[{engine}] a press starts it", after is not None and not after["paused"], after)
+                time.sleep(2)
+                later = page.evaluate(VIDEO_SINK_JS)
+                res.check(f"[{engine}] and frames are shown",
+                          later is not None and later["frames"] > after["frames"], (after, later))
+                res.check(f"[{engine}] the start is said",
+                          any("Video playback started on a user gesture" in t for t in said), "")
+            finally:
+                if browser:
+                    browser.close()
+                else:
+                    ctx.close()
+    finally:
+        H.server_stop()
+    res.summary()
+    return res
+
+
 def wasm_block(engine: str, channels: int = 2) -> "H.Results":
     """An engine without WebCodecs audio plays the stream's sound through
     libopus in WASM: the decode worker says it fell back, and the playback
@@ -507,6 +590,8 @@ def main() -> None:
         if which in ("all", "sink"):
             blocks.append(sink_block("webkit"))
             blocks.append(sink_block("chromium"))
+        if which in ("all", "gesture"):
+            blocks.append(gesture_block("chromium"))
         if which in ("all", "output"):
             blocks.append(output_block("chromium"))
             blocks.append(output_block("firefox"))
