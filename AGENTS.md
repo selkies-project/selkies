@@ -102,6 +102,26 @@ process is never ended by name or pattern; attribute it by `/proc/<pid>/environ`
 `DISPLAY`) and end that pid or its group, since the desktop session's own compositor and sound server share the
 host.
 
+## Threat model, scanner, and fuzzing
+
+`.oss-scanner/` serves Anthropic's OSS Scanner. `threat_model.md` states what Selkies does, its principals from any
+peer up to the master token, its entry points, the components that matter most, how to exercise them, and how
+severity is rated; `Dockerfile` builds the tree and runs the unit tier offline, as an unprivileged user, the way CI
+does. The threat model is the rule the code is held to, not a description of it: where the code lets a principal
+reach what the model keeps from it, the code is the defect even when `docs/` and a test agree with it, and the fix
+corrects all three. Only a maintainer changes the rule itself. Keep the model current in the commit that moves it:
+a new route, WebSocket or data-channel verb, socket, or served directory joins its entry points, a new credential or
+role its principals, and a change to what a role may reach its rules. Carry a change to what the unit tier needs
+(`scripts/ci/unit-deps.py`, a Makefile under `addons/` or `tests/tools`, a web package's lockfile) into `Dockerfile`.
+
+`.clusterfuzzlite/` builds `tests/fuzz` in an OSS-Fuzz builder for ClusterFuzzLite (`.github/workflows/fuzz.yaml`:
+the code a pull request changes for five minutes, every target for an hour a day) and OSS-Fuzz. `build.sh`
+compiles every `tests/fuzz/fuzz_*.py` (atheris) and zips the seed corpora named in it from `tests/fuzz/corpus/`.
+Code that parses bytes a peer, a client, or another local account controls gets a target there, a seed corpus
+zipped by `build.sh` where valid inputs are hard to stumble on, and its source among the workflow's `pull_request`
+paths; a fuzzed module imports neither pixelflux nor pcmflux, which the builder lacks. A crash the fuzzer finds is
+fixed at its cause, and its input joins the corpus.
+
 ## Landing a change
 
 A change is ready when four questions have answers, and the commit or pull request gives them to the reviewer:
