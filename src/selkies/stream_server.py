@@ -3229,12 +3229,15 @@ class CentralizedStreamServer:
 
         rows = ""
         for item in items:
-            escaped_name = html.escape(item["name"])
+            # A name that is not UTF-8 comes back from scandir with surrogates,
+            # which neither quote() nor the response's encoding takes.
+            raw_name = item["name"].encode("utf-8", "surrogateescape")
+            escaped_name = html.escape(raw_name.decode("utf-8", "replace"))
             escaped_mtime = html.escape(item["mtime"])
             escaped_size = html.escape(item["size"])
             rows += f"""
             <tr>
-                <td><a href="{urllib.parse.quote(item["name"])}">{escaped_name}</a></td>
+                <td><a href="{urllib.parse.quote(raw_name)}">{escaped_name}</a></td>
                 <td>{escaped_mtime}</td>
                 <td>{escaped_size}</td>
             </tr>"""
