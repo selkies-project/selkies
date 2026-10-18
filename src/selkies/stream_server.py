@@ -836,15 +836,18 @@ def _carry_destination_mode(staging: str, dest: str) -> None:
     """Give the staged upload the permission bits of the file it is about to
     replace, so re-uploading over an existing file keeps its mode: an executable
     script stays executable and a private file stays private. A new destination,
-    or one that is not a regular file, keeps the staging file's creation mode."""
+    one that is not a regular file, or one another account owns keeps the
+    staging file's creation mode, and the set-ID and sticky bits are never
+    carried: a file another account planted under the name must not leave the
+    upload writable by it, or a set-ID program of this user's that it can run."""
     try:
         st = os.lstat(dest)
     except OSError:
         return
-    if not stat.S_ISREG(st.st_mode):
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
         return
     try:
-        os.chmod(staging, stat.S_IMODE(st.st_mode))
+        os.chmod(staging, stat.S_IMODE(st.st_mode) & 0o777)
     except OSError as e:
         logger.debug(f"Could not carry the mode of {dest} onto the staged upload: {e}")
 
@@ -2665,9 +2668,10 @@ class CentralizedStreamServer:
           onto the destination atomically. Transfers idle past
           UPLOAD_PART_TTL_SECONDS are expired on the next chunked request.
 
-        Both shapes carry the mode of the file they replace onto the replacement
-        and are refused for view-only credentials (the view-only password, a
-        viewer-role session token).
+        Both shapes carry the mode of a file of this user's they replace onto
+        the replacement (`_carry_destination_mode`) and are refused for
+        view-only credentials (the view-only password, a viewer-role session
+        token).
         """
         settings = request.app["settings"]
         rel = urllib.parse.unquote(request.headers.get("X-Upload-Path", "") or "")

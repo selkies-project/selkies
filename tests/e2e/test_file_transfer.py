@@ -27,6 +27,7 @@ import hashlib
 import http.client
 import os
 import shutil
+import stat
 import sys
 import time
 import urllib.parse
@@ -185,6 +186,14 @@ def api_checks(res: "H.Results", full: bool) -> None:
     res.check("the chunked upload is the concatenation of its slices",
               file_sha(on_disk("chunked.bin")) == sha(b"".join(slices)))
     res.check("no staging file is left behind", not staging_leftovers(), staging_leftovers())
+    with open(on_disk("setid.bin"), "wb"):
+        pass
+    os.chmod(on_disk("setid.bin"), 0o4755)
+    planted = stat.S_IMODE(os.lstat(on_disk("setid.bin")).st_mode)
+    status, _ = client_upload("setid.bin", b"replaced")
+    mode = stat.S_IMODE(os.lstat(on_disk("setid.bin")).st_mode)
+    res.check("an upload over a set-ID file keeps its permission bits and drops set-ID",
+              planted == 0o4755 and status == 200 and mode == 0o755, f"{oct(planted)} {status} {oct(mode)}")
     status, _ = client_upload("broken.bin", b"first", {"X-Upload-Id": "e2e-transfer-2", "X-Upload-Offset": "0",
                                                        "X-Upload-Total": "10"})
     status2, body = client_upload("broken.bin", b"later", {"X-Upload-Id": "e2e-transfer-2", "X-Upload-Offset": "9",
