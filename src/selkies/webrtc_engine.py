@@ -2245,7 +2245,8 @@ class RTCApp:
 
         In order: a gzip'd payload is inflated with a bound (the channel's
         negotiated max-message-size caps only the compressed size, websockets
-        0x05 parity); the `_gz,1` handshake marks this channel for gzip'd
+        0x05 parity), and any other binary frame is dropped, said once per
+        peer, since every verb is text; the `_gz,1` handshake marks this channel for gzip'd
         sends and is echoed; a controller's `_stats` verb says whether its page
         has its stats open (`stream_stats` module docstring) and a viewer's is
         dropped; a viewer's SETTINGS snapshot is connection sync
@@ -2277,6 +2278,14 @@ class RTCApp:
             except Exception:
                 logger.warning("Dropping undecodable compressed data channel message")
                 return
+        if not isinstance(msg, str):
+            # Every verb is text, and a frame past here would miss the role gates below. The
+            # websockets transport drops an unknown binary opcode the same way.
+            peer_obj = self.peer_connections.get(peer_id)
+            if peer_obj is not None and not peer_obj.get("binary_dropped"):
+                peer_obj["binary_dropped"] = True
+                logger.warning("Dropping binary data channel messages from peer %s: every verb is text", peer_id)
+            return
         if msg == "_gz,1":
             if channel is not None:
                 channel._selkies_gz_tx = True

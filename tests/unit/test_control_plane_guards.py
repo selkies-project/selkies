@@ -315,8 +315,39 @@ async def settings_verb_cases() -> None:
     check("and applies SETTINGS itself", applied == [{"framerate": 30}], applied)
 
 
+def binary_frame_cases() -> None:
+    """A binary data-channel frame that is not gzip'd reaches no dispatcher and
+    is said once per peer, from a viewer as from a controller."""
+    import logging
+    from selkies import webrtc_engine
+    app = webrtc_engine.RTCApp.__new__(webrtc_engine.RTCApp)
+    app.peer_connections = {"viewer": {}, "controller": {}}
+    dispatched = []
+    app.on_data_message = lambda msg, display_id, conn_id=None: dispatched.append(msg)
+    records = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    keep = _Keep()
+    webrtc_engine.logger.addHandler(keep)
+    try:
+        for peer, role in (("viewer", webrtc_engine.ClientType.VIEWER),
+                           ("controller", webrtc_engine.ClientType.CONTROLLER)):
+            for _ in range(50):
+                app._on_input_channel_message(b"\x00\x01not gzip", client_type=role, peer_id=peer)
+    finally:
+        webrtc_engine.logger.removeHandler(keep)
+    check("a binary frame that is not gzip'd reaches no dispatcher", not dispatched, dispatched[:2])
+    check("and is said once per peer, at most a warning",
+          len(records) == 2 and all(r.levelno <= logging.WARNING for r in records),
+          [(r.levelname, r.getMessage()[:60]) for r in records])
+
+
 def main() -> bool:
     asyncio.run(access_log_cases())
+    binary_frame_cases()
     asyncio.run(settings_verb_cases())
     asyncio.run(switch_origin_cases())
     mk_verdict_cases()
