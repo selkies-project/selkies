@@ -109,10 +109,12 @@ peer up to the master token, its entry points, the components that matter most, 
 severity is rated; `Dockerfile` builds the tree and runs the unit tier offline, as an unprivileged user, the way CI
 does. The threat model is the rule the code is held to, not a description of it: where the code lets a principal
 reach what the model keeps from it, the code is the defect even when `docs/` and a test agree with it, and the fix
-corrects all three. Only a maintainer changes the rule itself. Keep the model current in the commit that moves it:
-a new route, WebSocket or data-channel verb, socket, or served directory joins its entry points, a new credential or
-role its principals, and a change to what a role may reach its rules. Carry a change to what the unit tier needs
-(`scripts/ci/unit-deps.py`, a Makefile under `addons/` or `tests/tools`, a web package's lockfile) into `Dockerfile`.
+corrects all three. Anyone, an agent included, may change the rule to harden it (a principal reaching less, a
+boundary it did not state yet); loosening it is a maintainer's call. Keep the model current in the commit that moves
+it: a new route, WebSocket or data-channel verb, socket, or served directory joins its entry points, a new
+credential or role its principals, and a change to what a role may reach its rules. Carry a change to what the unit
+tier needs (`scripts/ci/unit-deps.py`, a Makefile under `addons/` or `tests/tools`, a web package's lockfile) into
+`Dockerfile`.
 
 `.clusterfuzzlite/` builds `tests/fuzz` in an OSS-Fuzz builder for ClusterFuzzLite (`.github/workflows/fuzz.yaml`:
 the code a pull request changes for five minutes, every target for an hour a day) and OSS-Fuzz. `build.sh`
