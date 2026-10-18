@@ -313,6 +313,8 @@ const SINK_STALL_DROP_LIMIT = 30;
 let mstgRendered = false;
 let videoWorkerRendered = false;
 let sinkRevealGen = 0;
+/** Whether the browser refused to start the `<video>` sink, until a gesture starts it. */
+let sinkPlayRefused = false;
 /**
  * Set by the canvas-style writers (applyManualCanvasStyle, resetCanvasStyle,
  * updateCanvasImageRendering); the present paths re-mirror the canvas box onto
@@ -2566,6 +2568,42 @@ function createVideoTrackGenerator() {
 }
 
 /**
+ * Starts the `<video>` sink. Safari under its default autoplay setting can
+ * leave even this muted element paused without a user gesture, black behind
+ * its own play glyph; `playOnGesture` then starts it on the next press or key.
+ */
+function playSinkVideo() {
+  if (!videoElement || !videoElement.paused || !videoElement.srcObject) return;
+  const p = videoElement.play();
+  if (!p || !p.catch) return;
+  p.catch((e) => {
+    if (!videoElement.paused || sinkPlayRefused) return;
+    sinkPlayRefused = true;
+    console.warn(`Video playback refused (${e && e.name}): the browser waits for a user gesture; the next press or key starts it.`);
+  });
+}
+
+/**
+ * Starts what the browser held back for want of a user gesture: a paused
+ * `<video>` sink and a suspended audio context. Listens in the capture phase
+ * on the window, so the stream overlay's own handlers cannot keep the press
+ * from it.
+ */
+function playOnGesture() {
+  if (videoElement && videoElement.paused && videoElement.srcObject) {
+    const p = videoElement.play();
+    if (p && p.then) {
+      p.then(() => {
+        if (!sinkPlayRefused) return;
+        sinkPlayRefused = false;
+        console.log('Video playback started on a user gesture.');
+      }, () => {});
+    }
+  }
+  if (audioContext && audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+}
+
+/**
  * Lazily wires the `<video>` element to a fresh track generator; a writable
  * that later errors or closes falls back to the canvas so the element never freezes.
  * @returns {boolean} True when the writer is ready.
@@ -2589,7 +2627,7 @@ function ensureMstgWriter() {
     try { videoTrack.stop(); } catch (_) {} videoTrack = null;
     return false;
   }
-  const p = videoElement.play(); if (p && p.catch) p.catch(() => {});
+  playSinkVideo();
   return true;
 }
 
@@ -2628,6 +2666,7 @@ function presentFrameToVideo(frame) {
     if (videoElement) {
       videoElement.style.display = 'block';
       videoElement.style.objectFit = 'fill';
+      playSinkVideo();
       if (typeof videoElement.requestVideoFrameCallback === 'function') {
         const gen = ++sinkRevealGen;
         videoElement.requestVideoFrameCallback(() => {
@@ -2911,7 +2950,7 @@ function ensureVideoWorker() {
           videoWorkerTrack = m.track;
           try {
             videoElement.srcObject = new MediaStream([m.track]);
-            const p = videoElement.play(); if (p && p.catch) p.catch(() => {});
+            playSinkVideo();
           } catch (err) { console.warn('VTG srcObject failed:', err); deactivateVideoWorker(); return; }
           announceSink('VideoTrackGenerator in the video worker.');
           decodeInWorker = true;
@@ -3024,6 +3063,8 @@ function activateWorkerSinkDisplay() {
     }
     target.style.display = 'block'; target.style.objectFit = 'fill';
     if (videoWorkerMode === 'vtg') {
+      // It was started while hidden, which a browser may refuse or pause.
+      playSinkVideo();
       if (typeof target.requestVideoFrameCallback === 'function') {
         const gen = ++sinkRevealGen;
         target.requestVideoFrameCallback(() => {
@@ -4177,6 +4218,10 @@ const initializeUI = () => {
     }
     videoElement.style.display = 'none';
     videoContainer.appendChild(videoElement);
+  }
+  // A module function, so another call adds no second listener.
+  for (const type of ['pointerdown', 'pointerup', 'touchend', 'keydown', 'click']) {
+    window.addEventListener(type, playOnGesture, { capture: true, passive: true });
   }
 
   if (USE_OFFSCREEN_WORKER) {
