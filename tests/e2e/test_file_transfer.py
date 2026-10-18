@@ -192,6 +192,22 @@ def api_checks(res: "H.Results", full: bool) -> None:
     res.check("a slice at the wrong offset is refused with 409 and the transfer discarded",
               status == 200 and status2 == 409 and not os.path.exists(on_disk("broken.bin"))
               and not staging_leftovers(), f"{status} {status2} {body[:60]}")
+    # Where the staging file would be if its name came from the destination
+    # alone, which any account sharing the directory can compute.
+    fifo = on_disk(f".selkies-upload-{hashlib.sha256(on_disk('planted.bin').encode()).hexdigest()[:16]}.part")
+    os.mkfifo(fifo)
+    try:
+        status, body = client_upload("planted.bin", b"landed", {
+            "X-Upload-Id": "e2e-transfer-3", "X-Upload-Offset": "0", "X-Upload-Total": "6", "X-Upload-Final": "1"})
+    except OSError as e:
+        status, body = type(e).__name__, b""
+    finally:
+        # A reader releases a server thread stuck opening the FIFO for writing.
+        reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        os.unlink(fifo)
+        os.close(reader)
+    res.check("a FIFO planted at a staging name computed from the destination is never opened",
+              status == 200 and file_sha(on_disk("planted.bin")) == sha(b"landed"), f"{status} {body[:60]}")
     status, _ = client_upload("x.bin", b"x", {"X-Upload-Id": "lonely"})
     res.check("X-Upload-Id without X-Upload-Offset is a 400", status == 400, status)
     status, _ = client_upload("../escape.bin", b"x")
