@@ -26,10 +26,22 @@ export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig:${PREFIX}/share/pkgconfig${PKG_C
 # every other process a CI job runs.
 export LDFLAGS="-Wl,-rpath,${PREFIX}/lib${LDFLAGS:+ ${LDFLAGS}}"
 
+# The forges refuse a clone now and then (git exits 128); a few tries some
+# seconds apart ride over it.
+fetch() {
+    local url="$1" ref="$2" dir="$3" try
+    for try in 1 2 3 4 5; do
+        git clone --depth 1 --branch "${ref}" "${url}" "${dir}" && return 0
+        rm -rf "${dir}"
+        sleep $((try * 15))
+    done
+    return 1
+}
+
 build() {
     local name="$1" url="$2" ref="$3"
     shift 3
-    git clone --depth 1 --branch "${ref}" "${url}" "${SRC}/${name}"
+    fetch "${url}" "${ref}" "${SRC}/${name}"
     meson setup "${SRC}/${name}/build" "${SRC}/${name}" \
         --prefix="${PREFIX}" --libdir=lib --buildtype=release "$@"
     ninja -C "${SRC}/${name}/build"
@@ -53,8 +65,7 @@ pkg-config --exists 'libdisplay-info >= 0.2.0' || \
 build wlroots https://gitlab.freedesktop.org/wlroots/wlroots.git "${WLROOTS_VERSION}" \
     -Dxwayland=enabled
 
-git clone --depth 1 --branch "${LABWC_VERSION}" \
-    https://github.com/labwc/labwc.git "${SRC}/labwc"
+fetch https://github.com/labwc/labwc.git "${LABWC_VERSION}" "${SRC}/labwc"
 git -C "${SRC}/labwc" apply "${PATCH_DIR}/labwc-ipc.patch" "${PATCH_DIR}/labwc-screens.patch"
 meson setup "${SRC}/labwc/build" "${SRC}/labwc" \
     --prefix="${PREFIX}" --libdir=lib --buildtype=release \
