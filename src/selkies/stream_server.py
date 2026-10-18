@@ -2089,6 +2089,20 @@ class CentralizedStreamServer:
                 return role, source
         return None
 
+    @classmethod
+    def _fetched_cross_site(cls, request: web.Request, settings: Any) -> bool:
+        """Whether a browser sent this request for another site's page.
+
+        A GET from another site's image, link, or form carries no Origin but
+        does carry `Sec-Fetch-Site`, and the browser attaches a cached Basic
+        login to it, so a route whose GET changes something holds it to this:
+        an Origin the operator allows (`_is_origin_allowed`) still passes, and
+        clients that are not browsers send neither header.
+        """
+        if request.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+            return not (request.headers.get("Origin") and cls._is_origin_allowed(request, settings))
+        return not cls._is_origin_allowed(request, settings)
+
     @staticmethod
     def _is_origin_allowed(request: web.Request, settings: Any) -> bool:
         """Return whether a browser request's Origin is permitted.
@@ -2778,9 +2792,15 @@ class CentralizedStreamServer:
     async def handle_print_document(self, request: web.Request) -> web.StreamResponse:
         """GET /api/print/<name>: hand a printed document to the page that
         prints it, and take it out of the spool once it went out whole.
-        Refused to view-only credentials: printing is the session owner's act."""
+        Refused to view-only credentials: printing is the session owner's act.
+        Refused to another site's page too (`_fetched_cross_site`), which would
+        take the document out of the spool with the session's cached login."""
         if not self.settings.printing_enabled[0]:
             return web.Response(status=403, text="Forbidden: printing disabled")
+        if self._fetched_cross_site(request, self.settings):
+            logger.warning("Refused a printed document to another site's page (Origin %r)",
+                           request.headers.get("Origin", ""))
+            return web.Response(status=403, text="Forbidden origin")
         if self._viewer_ceiling(request):
             return web.Response(status=403, text="View-only credentials cannot take printed documents")
         name = printing.document_name(request.match_info.get("name", ""))
