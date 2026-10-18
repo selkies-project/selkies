@@ -68,6 +68,10 @@ CONSENT_TIMEOUT = 30
 # of an ICE-lite agent, its connection to a passive TCP candidate).
 INBOUND_CHECK_TIMEOUT = 30
 
+# Remote candidates a connection takes, resolved or still being resolved: a browser
+# offers a handful, and each costs a pairing and a check list sort.
+MAX_REMOTE_CANDIDATES = 64
+
 connection_id = itertools.count()
 protocol_id = itertools.count()
 
@@ -550,6 +554,10 @@ class Connection:
         self._protocols: list[StunProtocol] = []
         self._remote_candidates: list[Candidate] = []
         self._remote_candidates_end = False
+        self._remote_candidates_ending = False
+        self._remote_candidate_keys: set[tuple] = set()
+        self._mdns_lookups: set[asyncio.Task] = set()
+        self._mdns_unresolved: set[str] = set()
         self._query_consent_task: Optional[asyncio.Task] = None
         # When the peer was last heard from: media, DTLS, SCTP, or its consent checks.
         self.last_received = time.monotonic()
@@ -634,20 +642,53 @@ class Connection:
 
         :param remote_candidate: A :class:`Candidate` instance or `None`.
         """
-        if self._remote_candidates_end:
+        if self._remote_candidates_end or self._remote_candidates_ending:
             raise ValueError("Cannot add remote candidate after end-of-candidates.")
 
-        # end-of-candidates
+        # end-of-candidates, once the mDNS names still being resolved are settled
         if remote_candidate is None:
-            self._prune_components()
-            self._remote_candidates_end = True
+            if self._mdns_lookups:
+                self._remote_candidates_ending = True
+                asyncio.ensure_future(self._end_after_lookups())
+            else:
+                self._end_remote_candidates()
             return
 
-        # resolve mDNS candidate
+        key = (remote_candidate.component, remote_candidate.transport.lower(),
+               remote_candidate.host, remote_candidate.port, remote_candidate.type,
+               remote_candidate.tcptype)
+        if key in self._remote_candidate_keys:
+            return
+        if len(self._remote_candidate_keys) >= MAX_REMOTE_CANDIDATES:
+            self.__log_info(
+                f'Remote candidate "{remote_candidate.host}" dropped: '
+                f"{MAX_REMOTE_CANDIDATES} remote candidates taken"
+            )
+            return
+        self._remote_candidate_keys.add(key)
+
+        # resolve mDNS candidate, off the caller's await: the signaling that hands
+        # candidates over is shared, and an unanswered name holds a lookup a second
         if mdns.is_mdns_hostname(remote_candidate.host):
+            if remote_candidate.host in self._mdns_unresolved:
+                return
+            lookup = asyncio.ensure_future(self._resolve_remote_candidate(remote_candidate))
+            self._mdns_lookups.add(lookup)
+            lookup.add_done_callback(self._mdns_lookups.discard)
+            return
+
+        self._take_remote_candidate(remote_candidate)
+
+    async def _resolve_remote_candidate(self, remote_candidate: Candidate) -> None:
+        """
+        Resolve an mDNS remote candidate and take it, remembering a name that
+        did not resolve so a repeat of it costs no second lookup.
+        """
+        try:
             mdns_protocol = await get_or_create_mdns_protocol(self)
             remote_addr = await mdns_protocol.resolve(remote_candidate.host)
             if remote_addr is None:
+                self._mdns_unresolved.add(remote_candidate.host)
                 self.__log_info(
                     f'Remote candidate "{remote_candidate.host}" could not be resolved'
                 )
@@ -655,13 +696,30 @@ class Connection:
             self.__log_info(
                 f'Remote candidate "{remote_candidate.host}" resolved to {remote_addr}'
             )
+            if not self._closed:
+                copy_candidate = copy.copy(remote_candidate)
+                copy_candidate.host = remote_addr
+                self._take_remote_candidate(copy_candidate)
+        finally:
+            self._mdns_lookups.discard(asyncio.current_task())
+            if not self._mdns_lookups and self._check_list:
+                self._check_exhausted()
 
-            copy_candidate = copy.copy(remote_candidate)
-            copy_candidate.host = remote_addr
-            await self.add_remote_candidate(copy_candidate)
-            return
+    async def _end_after_lookups(self) -> None:
+        """
+        Signal end-of-candidates once every mDNS lookup still out has settled.
+        """
+        await asyncio.gather(*list(self._mdns_lookups), return_exceptions=True)
+        self._end_remote_candidates()
 
-        # validate the remote candidate
+    def _end_remote_candidates(self) -> None:
+        self._prune_components()
+        self._remote_candidates_end = True
+
+    def _take_remote_candidate(self, remote_candidate: Candidate) -> None:
+        """
+        Validate a resolved remote candidate and pair it with every local one.
+        """
         try:
             validate_remote_candidate(remote_candidate)
         except ValueError as e:
@@ -793,7 +851,9 @@ class Connection:
             self._check_list_state.put_nowait(ICE_FAILED)
             self._check_list_done = True
 
-        # unreference mDNS
+        # stop mDNS lookups, then unreference mDNS
+        for lookup in list(self._mdns_lookups):
+            lookup.cancel()
         await unref_mdns_protocol(self)
 
         self._nominated.clear()
@@ -957,6 +1017,14 @@ class Connection:
                 ):
                     self.check_state(p, CandidatePair.State.WAITING)
 
+        self._check_exhausted()
+
+    def _check_exhausted(self) -> None:
+        """
+        Fail the check list once every pair has run out, unless a pair may still
+        come: a remote candidate whose mDNS name is still being resolved, or a
+        path only the peer can open.
+        """
         for p in self._check_list:
             if p.state not in [
                 CandidatePair.State.SUCCEEDED,
@@ -968,6 +1036,9 @@ class Connection:
             for p in self._check_list:
                 if p.state == CandidatePair.State.SUCCEEDED:
                     return
+
+        if self._mdns_lookups:
+            return
 
         # the peer may still open a path of its own; connect() bounds the wait
         if self._awaits_inbound_checks():
