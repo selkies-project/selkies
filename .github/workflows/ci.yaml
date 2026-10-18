@@ -121,6 +121,8 @@ jobs:
     # pull-request path at the suites that need no browser install
     permissions:
       contents: read
+      # A capture-stack build lists the Actions cache's images
+      actions: read
     uses: ./.github/workflows/tests.yaml
     with:
       tiers: unit or integration
@@ -143,6 +145,8 @@ jobs:
     needs: [wheel, pixelflux-pcmflux]
     permissions:
       contents: read
+      # A capture-stack build lists the Actions cache's images
+      actions: read
     uses: ./.github/workflows/smoke-wheel.yaml
     with:
       wheels_ready: true
@@ -155,6 +159,8 @@ jobs:
     # rather than inside each caller keeps it to one resolution per run.
     permissions:
       contents: read
+      # A capture-stack build lists the Actions cache's images
+      actions: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
 
   images:

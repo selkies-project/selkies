@@ -133,6 +133,8 @@ jobs:
     if: ${{ inputs.capture_stack != 'pypi' }}
     permissions:
       contents: read
+      # A capture-stack build lists the Actions cache's images
+      actions: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
     with:
       pinned: true
@@ -145,6 +147,8 @@ jobs:
           && contains(fromJSON('["success", "skipped"]'), needs.capture-stack.result) }}
     permissions:
       contents: read
+      # A capture-stack build lists the Actions cache's images
+      actions: read
     uses: ./.github/workflows/smoke-wheel.yaml
     with:
       # What the smoke test proves installable is what the release ships: the
