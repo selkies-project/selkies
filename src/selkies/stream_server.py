@@ -70,6 +70,12 @@ UPLOAD_PART_TTL_SECONDS: int = 3600
 # ever replaced by a complete file.
 UPLOAD_STAGING_PREFIX: str = ".selkies-upload-"
 
+# A connection that carries no request is closed after this long. AppRunner's
+# own default (3630 s) is set to outlast a reverse proxy's pooled connections,
+# but lets a peer that connects and sends nothing hold a file descriptor for an
+# hour; 75 s is run_app's value and stays above nginx's 60 s upstream timeout.
+IDLE_CONNECTION_TIMEOUT_SECONDS: float = 75.0
+
 
 class PathOnlyAccessLogger(AbstractAccessLogger):
     """aiohttp access log whose request line and Referer carry no query.
@@ -3478,7 +3484,8 @@ class CentralizedStreamServer:
         if getattr(self.settings, "tokens_file", "") and tokens is not None:
             self.tokens_watcher = asyncio.create_task(tokens.watch_tokens_file())
 
-        self.runner = web.AppRunner(self.app, access_log_class=PathOnlyAccessLogger)
+        self.runner = web.AppRunner(self.app, access_log_class=PathOnlyAccessLogger,
+                                    keepalive_timeout=IDLE_CONNECTION_TIMEOUT_SECONDS)
         await self.runner.setup()
 
         try:
