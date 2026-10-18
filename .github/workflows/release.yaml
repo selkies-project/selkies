@@ -190,6 +190,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # The release files' build provenance, attested through the run's OIDC
+      # token and kept by GitHub
+      id-token: write
+      attestations: write
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -213,7 +217,14 @@ jobs:
           # assembled from
           find release-artifacts -type f \( -name '*.dockerbuild' -o -name 'selkies-*-images-*.txt' -o -name '*.conda' \) -delete
           find release-artifacts -type f -exec mv {} release/ \;
+          (cd release && sha256sum -- * > SHA256SUMS)
           ls -la release/
+      # Lets a user check a package against the run that built it
+      # (`gh attestation verify FILE --repo selkies-project/selkies`)
+      - name: Attest the release files
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*
       # The run's latest and PyPI decisions ride ahead of the generated notes
       # as the markers release-published.yaml reads, where they render as
       # nothing

@@ -98,6 +98,9 @@ jobs:
           - name: rpm-el9
             tag: el9
             image: almalinux:9
+            # EL9's own python3 is 3.9, whose aiohttp stops at 3.13 and its
+            # server fixes since; AppStream carries 3.12 beside it
+            python: python3.12
             script: infra/packaging/rpm.sh
             install: dnf install -y -q /out/*.rpm
           - name: apk
@@ -177,6 +180,7 @@ jobs:
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}
           DISTRO_TAG: ${{ matrix.kind.tag }}
+          SELKIES_PYTHON: ${{ matrix.kind.python }}
           IMAGE: ${{ matrix.kind.image }}
           SCRIPT: ${{ matrix.kind.script }}
         run: |
@@ -190,6 +194,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}/out:/out" \
             -e SELKIES_VERSION \
             -e DISTRO_TAG \
+            -e SELKIES_PYTHON \
             "${IMAGE}" \
             sh "/repo/${SCRIPT}"
           ls -la out/
