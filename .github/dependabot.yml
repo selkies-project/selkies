@@ -16,11 +16,6 @@ updates:
     groups:
       actions:
         patterns: ["*"]
-    # pixelflux's and pcmflux's wheel workflows, which the capture-stack build
-    # calls at a main commit their pre-releases are tagged by, not a version:
-    # moved by hand when either changes what a caller passes it
-    ignore:
-      - dependency-name: "selkies-project/*"
 
   # The hooks `.pre-commit-config.yaml` pins by `rev`, which CI's Lint job runs
   - package-ecosystem: pre-commit
