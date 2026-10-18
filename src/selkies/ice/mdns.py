@@ -34,7 +34,6 @@
 import asyncio
 import re
 import socket
-import sys
 import uuid
 from typing import Optional, Union, cast
 
@@ -210,10 +209,7 @@ async def create_mdns_protocol() -> MDnsProtocol:
         socket.IP_ADD_MEMBERSHIP,
         socket.inet_aton(MDNS_ADDRESS) + b"\x00\x00\x00\x00",
     )
-    if sys.platform == "win32":
-        rx_sock.bind(("", MDNS_PORT))
-    else:
-        rx_sock.bind((MDNS_ADDRESS, MDNS_PORT))
+    rx_sock.bind((MDNS_ADDRESS, MDNS_PORT))
 
     _, protocol = await loop.create_datagram_endpoint(
         lambda: MDnsProtocol(tx_transport=tx_transport),

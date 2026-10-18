@@ -142,6 +142,7 @@ def main() -> int:
 
     threading.Thread(target=serve, daemon=True).start()
     client = ssl.create_default_context()
+    client.minimum_version = ssl.TLSVersion.TLSv1_2
     client.check_hostname = False
     client.verify_mode = ssl.CERT_NONE
     with socket.create_connection(("127.0.0.1", listener.getsockname()[1]), timeout=10) as raw:
@@ -166,6 +167,7 @@ def main() -> int:
     # rejected for a name mismatch at 127.0.0.1, not merely distrusted, so
     # verification against the certificate itself is what proves the fix.
     verifier = ssl.create_default_context(cafile=cert)
+    verifier.minimum_version = ssl.TLSVersion.TLSv1_2
     server_socket = socket.socket()
     server_socket.bind(("127.0.0.1", 0))
     server_socket.listen(1)
