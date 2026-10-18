@@ -9611,7 +9611,7 @@ class WebRTCInput:
                 self._spawn_task(self.on_update_crf(crf_value, display_id))
             except Exception as e:
                 logger_webrtc_input.error(f"Error updating CRF value: {e}")
-        elif toks[0].startswith("SETTINGS"):
+        elif toks[0] == "SETTINGS":
             settings_data = ','.join(toks[1:]) if len(toks) > 1 else ""
             logger_webrtc_input.debug(f"Received SETTINGS message: {settings_data}")
             try:

@@ -299,8 +299,25 @@ def secure_gate_cases() -> None:
         webrtc_engine.app_settings.master_token = saved
 
 
+async def settings_verb_cases() -> None:
+    """The dispatcher applies the SETTINGS verb the transports' owner gates
+    match, and no alias that would pass them by."""
+    from selkies.input_handler import WebRTCInput
+    handler = WebRTCInput.__new__(WebRTCInput)
+    applied = []
+    handler.on_update_settings = lambda values, display_id: applied.append(values)
+    for verb in ("SETTINGSX", "SETTINGS_", "SETTINGSfoo"):
+        applied.clear()
+        await handler.on_message(verb + ',{"framerate": 30}')
+        check(f"the dispatcher applies no {verb}, beside the SETTINGS the gates match", not applied, applied)
+    applied.clear()
+    await handler.on_message('SETTINGS,{"framerate": 30}')
+    check("and applies SETTINGS itself", applied == [{"framerate": 30}], applied)
+
+
 def main() -> bool:
     asyncio.run(access_log_cases())
+    asyncio.run(settings_verb_cases())
     asyncio.run(switch_origin_cases())
     mk_verdict_cases()
     gz_bomb_cases()
