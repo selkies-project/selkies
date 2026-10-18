@@ -278,16 +278,77 @@ def secure_gate_cases() -> None:
     WebSockets one does too (it matches whole verbs, WebRTC prefixes)."""
     from selkies import websockets_mode as wm
     from selkies.input_handler import VIEWER_COLLAB_EXTRA_PREFIXES
-    # Exempt on both: the bare clipboard read-back and the pointer echo inject nothing.
-    verbs = {p.rstrip(",") for p in VIEWER_COLLAB_EXTRA_PREFIXES} - {"cr", "_pointer_echo"}
+    # Exempt on both: the pointer echo injects nothing.
+    verbs = {p.rstrip(",") for p in VIEWER_COLLAB_EXTRA_PREFIXES} - {"_pointer_echo"}
     missing = sorted(verbs - wm.SECURE_INPUT_PREFIXES)
     check("the WebSockets secure gate holds every input verb the WebRTC one does", not missing, missing)
     check("a finger scroll and its end are held to input authority on WebSockets",
           {"sf", "sfe"} <= wm.SECURE_INPUT_PREFIXES)
+    check("both clipboard reads are held to input authority on WebSockets",
+          {"cr", "REQUEST_CLIPBOARD"} <= wm.SECURE_INPUT_PREFIXES)
+    from selkies import webrtc_engine
+    app = webrtc_engine.RTCApp.__new__(webrtc_engine.RTCApp)
+    app._mk_input_authorized = lambda token: token == "holder"
+    saved = webrtc_engine.app_settings.master_token
+    webrtc_engine.app_settings.master_token = "unit-master"
+    try:
+        for verb in ("cr", "REQUEST_CLIPBOARD"):
+            check(f"WebRTC drops a {verb} from a peer the mk token outranks", app._secure_input_denied(verb, "other"))
+            check(f"and serves the holder's {verb}", not app._secure_input_denied(verb, "holder"))
+    finally:
+        webrtc_engine.app_settings.master_token = saved
+
+
+async def settings_verb_cases() -> None:
+    """The dispatcher applies the SETTINGS verb the transports' owner gates
+    match, and no alias that would pass them by."""
+    from selkies.input_handler import WebRTCInput
+    handler = WebRTCInput.__new__(WebRTCInput)
+    applied = []
+    handler.on_update_settings = lambda values, display_id: applied.append(values)
+    for verb in ("SETTINGSX", "SETTINGS_", "SETTINGSfoo"):
+        applied.clear()
+        await handler.on_message(verb + ',{"framerate": 30}')
+        check(f"the dispatcher applies no {verb}, beside the SETTINGS the gates match", not applied, applied)
+    applied.clear()
+    await handler.on_message('SETTINGS,{"framerate": 30}')
+    check("and applies SETTINGS itself", applied == [{"framerate": 30}], applied)
+
+
+def binary_frame_cases() -> None:
+    """A binary data-channel frame that is not gzip'd reaches no dispatcher and
+    is said once per peer, from a viewer as from a controller."""
+    import logging
+    from selkies import webrtc_engine
+    app = webrtc_engine.RTCApp.__new__(webrtc_engine.RTCApp)
+    app.peer_connections = {"viewer": {}, "controller": {}}
+    dispatched = []
+    app.on_data_message = lambda msg, display_id, conn_id=None: dispatched.append(msg)
+    records = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    keep = _Keep()
+    webrtc_engine.logger.addHandler(keep)
+    try:
+        for peer, role in (("viewer", webrtc_engine.ClientType.VIEWER),
+                           ("controller", webrtc_engine.ClientType.CONTROLLER)):
+            for _ in range(50):
+                app._on_input_channel_message(b"\x00\x01not gzip", client_type=role, peer_id=peer)
+    finally:
+        webrtc_engine.logger.removeHandler(keep)
+    check("a binary frame that is not gzip'd reaches no dispatcher", not dispatched, dispatched[:2])
+    check("and is said once per peer, at most a warning",
+          len(records) == 2 and all(r.levelno <= logging.WARNING for r in records),
+          [(r.levelname, r.getMessage()[:60]) for r in records])
 
 
 def main() -> bool:
     asyncio.run(access_log_cases())
+    binary_frame_cases()
+    asyncio.run(settings_verb_cases())
     asyncio.run(switch_origin_cases())
     mk_verdict_cases()
     gz_bomb_cases()

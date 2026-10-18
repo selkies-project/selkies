@@ -974,12 +974,16 @@ async def _bind_listen_sockets(addr: str, port: int) -> List[socket.socket]:
 
 
 def _frame_ancestors_directive(value: str) -> str:
-    """The Content-Security-Policy that `frame_ancestors` asks for, "" when it names none.
+    """The Content-Security-Policy that `frame_ancestors` asks for.
 
     Entries are comma- or space-separated; `self` and `none` become the quoted
     keywords, and an entry carrying a quote or a semicolon, which would end the
-    directive, is dropped.
+    directive, is dropped. A value naming nothing is this server's own origin:
+    an image passing the variable through empty must not open the session to
+    every page's frame, which only `*` asks for.
     """
+    if not (value or "").replace(",", " ").split():
+        value = "'self'"
     sources = []
     for item in (value or "").replace(",", " ").split():
         keyword = item.strip("'").lower()
@@ -1565,6 +1569,7 @@ class CentralizedStreamServer:
         self.runner: Optional[web.AppRunner] = None
         self.sites: List[web.BaseSite] = []
         self.cert_watcher: Optional[asyncio.Task] = None
+        self.tokens_watcher: Optional[asyncio.Task] = None
         self.ssl_context: Optional[ssl.SSLContext] = None
         self.static_fs_path: str = ""
         limit_mbps = float(self.settings.file_transfer_limit_mbps or 0.0)
@@ -2088,6 +2093,20 @@ class CentralizedStreamServer:
                 return role, source
         return None
 
+    @classmethod
+    def _fetched_cross_site(cls, request: web.Request, settings: Any) -> bool:
+        """Whether a browser sent this request for another site's page.
+
+        A GET from another site's image, link, or form carries no Origin but
+        does carry `Sec-Fetch-Site`, and the browser attaches a cached Basic
+        login to it, so a route whose GET changes something holds it to this:
+        an Origin the operator allows (`_is_origin_allowed`) still passes, and
+        clients that are not browsers send neither header.
+        """
+        if request.headers.get("Sec-Fetch-Site") in ("cross-site", "same-site"):
+            return not (request.headers.get("Origin") and cls._is_origin_allowed(request, settings))
+        return not cls._is_origin_allowed(request, settings)
+
     @staticmethod
     def _is_origin_allowed(request: web.Request, settings: Any) -> bool:
         """Return whether a browser request's Origin is permitted.
@@ -2435,10 +2454,12 @@ class CentralizedStreamServer:
         at the viewer role (the view-only basic-auth password, or a viewer-role
         session token in secure mode).
 
-        The control-plane endpoints that change host or session state — the
-        streaming-mode switch and file uploads — refuse those requests the way
-        the streaming plane refuses input from a viewer. Read-only endpoints
-        stay available: a viewer is already watching the session.
+        Every endpoint that changes host or session state refuses those
+        requests, the way the streaming plane refuses input from a viewer, and
+        so does every one that hands out more than a viewer watches: the files
+        under the file-manager directory and printed documents. What the
+        session shows anyway (its pages, a screenshot, whether a recording
+        runs) stays available.
         """
         return request.get("auth_role_ceiling") == "viewer"
 
@@ -2899,9 +2920,15 @@ class CentralizedStreamServer:
     async def handle_print_document(self, request: web.Request) -> web.StreamResponse:
         """GET /api/print/<name>: hand a printed document to the page that
         prints it, and take it out of the spool once it went out whole.
-        Refused to view-only credentials: printing is the session owner's act."""
+        Refused to view-only credentials: printing is the session owner's act.
+        Refused to another site's page too (`_fetched_cross_site`), which would
+        take the document out of the spool with the session's cached login."""
         if not self.settings.printing_enabled[0]:
             return web.Response(status=403, text="Forbidden: printing disabled")
+        if self._fetched_cross_site(request, self.settings):
+            logger.warning("Refused a printed document to another site's page (Origin %r)",
+                           request.headers.get("Origin", ""))
+            return web.Response(status=403, text="Forbidden origin")
         if self._viewer_ceiling(request):
             return web.Response(status=403, text="View-only credentials cannot take printed documents")
         name = printing.document_name(request.match_info.get("name", ""))
@@ -3200,7 +3227,12 @@ class CentralizedStreamServer:
         A client that cancels a download closes its connection mid-stream,
         which surfaces as a connection error from the write; that is the
         transfer's normal end, logged as such and never a handler failure.
+
+        View-only credentials are refused the listing and the bytes alike: a
+        viewer watches the desktop, it does not take the files on it.
         """
+        if self._viewer_ceiling(request):
+            return web.Response(status=403, text="View-only credentials cannot list or download files")
         if "download" not in self.settings.file_transfers:
             return web.Response(status=403, text="Forbidden: downloads disabled")
         rel_path = request.match_info.get("path", "").lstrip("/")
@@ -3556,7 +3588,8 @@ class CentralizedStreamServer:
         return f"{self.settings.addr} port {self.settings.port}"
 
     async def start_server(self) -> None:
-        """Start the HTTP/HTTPS server and, under HTTPS, the cert-reload watcher."""
+        """Start the HTTP/HTTPS server, the tokens-file watcher when one is set,
+        and, under HTTPS, the cert-reload watcher."""
         if not self.app:
             await self.initialize_app()
 
@@ -3567,6 +3600,10 @@ class CentralizedStreamServer:
             except Exception as exc:
                 logger.error("Failed to create SSL context at startup: %s", exc)
                 raise
+
+        tokens = self.services.get("websockets")
+        if getattr(self.settings, "tokens_file", "") and tokens is not None:
+            self.tokens_watcher = asyncio.create_task(tokens.watch_tokens_file())
 
         self.runner = web.AppRunner(self.app, access_log_class=PathOnlyAccessLogger)
         await self.runner.setup()
@@ -3594,14 +3631,15 @@ class CentralizedStreamServer:
                 await self.print_queue.start()
 
     async def stop_server(self) -> None:
-        """Stop the server gracefully: cert watcher, active service, listener,
-        extracted web files, and the runner, in that order."""
-        if self.cert_watcher and not self.cert_watcher.done():
-            self.cert_watcher.cancel()
-            try:
-                await self.cert_watcher
-            except asyncio.CancelledError:
-                pass
+        """Stop the server gracefully: the cert and tokens-file watchers, active
+        service, listener, extracted web files, and the runner, in that order."""
+        for watcher in (self.cert_watcher, self.tokens_watcher):
+            if watcher and not watcher.done():
+                watcher.cancel()
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    pass
         if self.print_queue:
             await self.print_queue.stop()
             self.print_queue = None

@@ -96,7 +96,7 @@ SECTIONS = [
         "mode", "enable_dual_mode", "addr", "public", "port", "unix_socket", "subfolder", "web_root",
         "allowed_origins", "frame_ancestors", "enable_https", "https_cert", "https_key", "cert_reload_interval",
         "enable_basic_auth", "basic_auth_user", "basic_auth_password", "basic_auth_viewonly_password",
-        "master_token", "command_enabled", "debug",
+        "master_token", "tokens_file", "command_enabled", "debug",
     ]),
     ("WebRTC and TURN", "The opt-in WebRTC transport's ICE, STUN, and TURN configuration.", [
         "rtc_config_json", "turn_host", "turn_port", "turn_protocol", "turn_tls", "turn_shared_secret",

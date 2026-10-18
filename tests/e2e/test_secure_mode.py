@@ -5,7 +5,8 @@ routes:      with a master token set and Basic auth off, /api/upload,
              /api/files/ (listing and download), /api/turn, and /api/metrics
              refuse a request without a token and take one as a Bearer
              header, as ?token=, or as the client's cookie; a viewer-role
-             token cannot upload; the master token is accepted everywhere;
+             token can neither upload nor list or download files; the master
+             token is accepted everywhere;
              liveness and the static client stay open; the data WebSocket
              still takes its token in the handshake, and a token entry with
              no role connects as a viewer that cannot displace the controller.
@@ -30,9 +31,13 @@ dashboards:  both dashboards open their file manager with the page's token
              included, and it switches transport on that same token, asking
              the user for nothing (the master token is the operator's, not a
              session user's, so a prompt for it would be unanswerable).
+tokens-file: a table in tokens_file is provisioned at start, so the file's
+             token reaches the API and a page streams over each transport
+             with no POST, and a file renamed over it without that token
+             revokes it.
 legacy:      without a master token nothing changes: the routes are open with
-             Basic auth off and Basic-gated, view-only password included,
-             with it on.
+             Basic auth off and Basic-gated with it on, where the view-only
+             password uploads, lists, and downloads nothing.
 """
 import asyncio
 import base64
@@ -246,16 +251,22 @@ def run_routes() -> "H.Results":
     for label, headers, path in (("Bearer controller", bearer(CTRL_TOKEN), "/api/files/"),
                                  ("cookie controller", cookie(CTRL_TOKEN), "/api/files/"),
                                  ("?token= controller", {}, f"/api/files/?token={CTRL_TOKEN}"),
-                                 ("Bearer viewer", bearer(VIEW_TOKEN), "/api/files/"),
                                  ("Bearer master", bearer(MASTER), "/api/files/")):
         status, _, body = request("GET", path, headers=headers)
         res.check(f"{label}: the file listing is served", status == 200 and b"hello.txt" in body, f"{status} {body[:40]}")
+    for label, headers, path in (("Bearer viewer", bearer(VIEW_TOKEN), "/api/files/"),
+                                 ("cookie viewer", cookie(VIEW_TOKEN), "/api/files/"),
+                                 ("?token= viewer", {}, f"/api/files/?token={VIEW_TOKEN}")):
+        status, _, body = request("GET", path, headers=headers)
+        res.check(f"{label}: the file listing is refused", status == 403 and b"hello.txt" not in body, f"{status} {body[:40]}")
     status, hdrs, body = request("GET", "/api/files/hello.txt", headers=cookie(CTRL_TOKEN))
     res.check("cookie controller: a download is served as an attachment",
               status == 200 and body == b"hello from the file manager\n"
               and "attachment" in hdrs.get("content-disposition", ""), f"{status} {hdrs.get('content-disposition')}")
     status, hdrs, body = request("GET", f"/api/files/hello.txt?token={VIEW_TOKEN}")
-    res.check("?token= viewer: a download is served", status == 200 and body.startswith(b"hello"), status)
+    res.check("?token= viewer: a download is refused", status == 403 and b"hello" not in body, status)
+    status, hdrs, body = request("GET", "/api/files/hello.txt", headers=bearer(VIEW_TOKEN))
+    res.check("Bearer viewer: a download is refused", status == 403 and b"hello" not in body, status)
     status, hdrs, _ = request("GET", "/api/files/sub", headers=bearer(CTRL_TOKEN))
     res.check("a directory without its slash redirects (token carried by the header)",
               status in (301, 308) and hdrs.get("location", "").endswith("/api/files/sub/"), f"{status} {hdrs.get('location')}")
@@ -602,6 +613,51 @@ def run_webrtc() -> "H.Results":
     return res
 
 
+def write_tokens_file(path: str, table: dict) -> None:
+    """Put `table` at `path` in one rename, readable by its owner alone."""
+    staged = path + ".new"
+    with open(staged, "w") as f:
+        json.dump(table, f)
+    os.chmod(staged, 0o600)
+    os.replace(staged, path)
+
+
+def wait_status(path: str, headers: dict, want: int, timeout: float = 15) -> int:
+    """Poll `path` until it answers `want`; returns the last status."""
+    deadline = time.time() + timeout
+    while True:
+        status, _, _ = request("GET", path, headers=headers)
+        if status == want or time.time() > deadline:
+            return status
+        time.sleep(0.5)
+
+
+def run_tokens_file() -> "H.Results":
+    from playwright.sync_api import sync_playwright
+    res = H.Results("tokens-file")
+    fresh_files_dir()
+    path = os.path.join(SCRATCH, "tokens.json")
+    for mode, wait_video in (("websockets", C.wait_ws_video), ("webrtc", C.wait_wr_video)):
+        write_tokens_file(path, {CTRL_TOKEN: {"role": "controller", "slot": 1}})
+        H.server_start(mode=mode, wayland=False, extra_env=secure_env(SELKIES_TOKENS_FILE=path))
+        status = wait_status("/api/files/", bearer(CTRL_TOKEN), 200)
+        res.check(f"{mode}: the file's token reaches the API with no POST", status == 200, status)
+        with sync_playwright() as pw:
+            browser, page, _ = launch(pw, f"?token={CTRL_TOKEN}", mode)
+            try:
+                info = wait_video(page, timeout=60)
+                res.check(f"{mode}: a page streams on the file's token", info is not None, info)
+            finally:
+                browser.close()
+        write_tokens_file(path, {VIEW_TOKEN: {"role": "viewer", "slot": None}})
+        status = wait_status("/api/files/", bearer(CTRL_TOKEN), 401)
+        res.check(f"{mode}: a file renamed over it without the token revokes it", status == 401, status)
+        res.check(f"{mode}: the file's tokens never reach the server log",
+                  CTRL_TOKEN not in H.server_log() and VIEW_TOKEN not in H.server_log(), "")
+    res.summary()
+    return res
+
+
 def open_files_modal(page, dashboard: str) -> bool:
     """Click through the dashboard to its Download Files modal."""
     try:
@@ -742,14 +798,16 @@ def run_legacy() -> "H.Results":
     res.check("Basic on: Basic credentials list files", status == 200 and b"hello.txt" in body, status)
     res.check("Basic on: Basic credentials upload", upload("basic.txt", b"b", basic) == 200)
     res.check("Basic on: the view-only password cannot upload", upload("viewonly.txt", b"v", viewonly) == 403)
-    status, _, _ = request("GET", "/api/files/hello.txt", headers=viewonly)
-    res.check("Basic on: the view-only password downloads", status == 200, status)
+    status, _, body = request("GET", "/api/files/", headers=viewonly)
+    res.check("Basic on: the view-only password cannot list files", status == 403 and b"hello.txt" not in body, status)
+    status, _, body = request("GET", "/api/files/hello.txt", headers=viewonly)
+    res.check("Basic on: the view-only password cannot download", status == 403 and b"hello" not in body, status)
     res.summary()
     return res
 
 
 BLOCKS = {"routes": run_routes, "websockets": run_websockets, "fragment": run_fragment, "webrtc": run_webrtc,
-          "dashboards": run_dashboards, "legacy": run_legacy}
+          "tokens-file": run_tokens_file, "dashboards": run_dashboards, "legacy": run_legacy}
 
 
 def main(selectors: list) -> bool:

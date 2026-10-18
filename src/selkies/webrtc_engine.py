@@ -2187,17 +2187,14 @@ class RTCApp:
         provisioned. client_type is self-asserted over signaling, so a peer that
         merely claims 'controller' is still held to the token here. `co`
         (composed-text typing, `co,end,<text>`) is keyboard input like kd/ku.
-        The bare `cr` clipboard read-back is exempt like every clipboard read
-        on the websockets transport: the handler itself direction-gates it
-        (enable_clipboard "out") and it is sent at connect, before the peer
-        can hold input authority.
+        The clipboard reads, the `cr` a page sends at connect among them, are
+        held to the same rule as on the websockets transport: a peer the mk
+        token outranks reads no clipboard, its connect-time snapshot included.
 
         Returns:
             True when the message must be dropped.
         """
         if not app_settings.master_token:
-            return False
-        if msg.split(",", 1)[0] in ("cr",):
             return False
         if msg.split(",", 1)[0] not in ("cmd", "co") and not msg.startswith(VIEWER_COLLAB_EXTRA_PREFIXES):
             return False
@@ -2248,7 +2245,8 @@ class RTCApp:
 
         In order: a gzip'd payload is inflated with a bound (the channel's
         negotiated max-message-size caps only the compressed size, websockets
-        0x05 parity); the `_gz,1` handshake marks this channel for gzip'd
+        0x05 parity), and any other binary frame is dropped, said once per
+        peer, since every verb is text; the `_gz,1` handshake marks this channel for gzip'd
         sends and is echoed; a controller's `_stats` verb says whether its page
         has its stats open (`stream_stats` module docstring) and a viewer's is
         dropped; a viewer's SETTINGS snapshot is connection sync
@@ -2280,6 +2278,14 @@ class RTCApp:
             except Exception:
                 logger.warning("Dropping undecodable compressed data channel message")
                 return
+        if not isinstance(msg, str):
+            # Every verb is text, and a frame past here would miss the role gates below. The
+            # websockets transport drops an unknown binary opcode the same way.
+            peer_obj = self.peer_connections.get(peer_id)
+            if peer_obj is not None and not peer_obj.get("binary_dropped"):
+                peer_obj["binary_dropped"] = True
+                logger.warning("Dropping binary data channel messages from peer %s: every verb is text", peer_id)
+            return
         if msg == "_gz,1":
             if channel is not None:
                 channel._selkies_gz_tx = True

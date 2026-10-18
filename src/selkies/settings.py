@@ -421,7 +421,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "ui_title",
         "type": "str",
         "default": "Selkies",
-        "help": "Title in top left corner of sidebar.",
+        "help": "Title in the top left corner of the sidebar, and of the browser tab when set.",
     },
     {
         "name": "ui_show_logo",
@@ -610,6 +610,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Master token to enable secure mode and protect the control plane API.",
     },
     {
+        "name": "tokens_file",
+        "type": "str",
+        "default": "",
+        "help": "JSON file holding the session token table in the body format of POST /api/tokens, provisioned at start and again whenever it changes, in secure mode. Root or the server's user must own it, and no one else may write to it.",
+    },
+    {
         "name": "enable_https",
         "type": "bool",
         "default": False,
@@ -659,7 +665,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "str",
         "default": "",
         "env_var": "VIEWONLY_PASSWORD",
-        "help": "Optional second basic-auth password that grants view-only access. Clients authenticating with it are capped at the viewer role (no keyboard, mouse, clipboard, gamepad, or command input) regardless of the role they request, while the main password authorizes full control. Empty disables the split. Ignored in secure mode, where the master token governs roles.",
+        "help": "Optional second basic-auth password that grants view-only access. Clients authenticating with it are capped at the viewer role (no keyboard, mouse, clipboard, gamepad, or command input, and no file transfers) regardless of the role they request, while the main password authorizes full control. Empty disables the split. Ignored in secure mode, where the master token governs roles.",
     },
     {
         "name": "subfolder",
@@ -1142,8 +1148,8 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "frame_ancestors",
         "type": "str",
-        "default": "",
-        "help": "Comma-separated pages allowed to show the client in a frame: origins such as https://portal.example.com, 'self' for this server's own pages, or 'none' for no frame at all, sent as the Content-Security-Policy frame-ancestors directive. Empty (default) lets any page frame it, as a platform embedding the desktop in its own UI needs.",
+        "default": "'self'",
+        "help": "Comma-separated pages allowed to show the client in a frame, sent as the Content-Security-Policy frame-ancestors directive: 'self' (the default, also what an empty value means) for this server's own origin, origins such as https://portal.example.com for a platform embedding the desktop from another, * for any page, or 'none' for no frame at all. A page the list does not name gets an empty frame, so it cannot lay the session under clicks meant for itself.",
     },
 ]
 
@@ -2202,7 +2208,7 @@ CLIENT_PAYLOAD_EXCLUDED = [
     'port', 'addr', 'public', 'unix_socket', 'web_root', 'encode_dri', 'render_dri', 'debug',
     'audio_device_name', 'watermark_path', 'recording_socket',
     'file_manager_path', 'print_spool_path', 'run_after_connect', 'run_after_disconnect',
-    'https_cert', 'rtc_config_json', 'app_ready_file', 'js_socket_path',
+    'https_cert', 'rtc_config_json', 'tokens_file', 'app_ready_file', 'js_socket_path',
     'webcam_socket_path', 'webcam_device',
     'uinput_mouse_socket', 'webrtc_statistics_dir', 'computer_use_bind', 'computer_use_token',
     'wayland_host_display', 'app_wayland_display',

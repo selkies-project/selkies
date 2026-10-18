@@ -1148,6 +1148,16 @@ static int connect_socket(wc_handle_t *out, int open_flags) {
         real_close(sockfd);
         return -1;
     }
+    /* The socket directory can be shared with other accounts: only the session's
+     * user, or root, may hand this application its camera frames. */
+    struct ucred cred;
+    socklen_t cred_len = sizeof(cred);
+    if (getsockopt(sockfd, SOL_SOCKET, SO_PEERCRED, &cred, &cred_len) != 0
+        || (cred.uid != geteuid() && cred.uid != 0)) {
+        swc_log_error("Refusing %s: another user serves it.", g_socket_path);
+        real_close(sockfd);
+        return -1;
+    }
 
     webcam_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));

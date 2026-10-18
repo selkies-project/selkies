@@ -10,6 +10,7 @@ Selkies has two authentication modes. Without a master token it is in **legacy m
 The master token is the administrative credential. It is never sent to clients and authenticates two control-plane requests as an `Authorization: Bearer <master token>` header:
 
 - `POST /api/tokens` replaces the session token table. The body is a JSON object keyed by token; each entry carries the client's `role` (`controller` or `viewer`), its gamepad `slot` (`1`-`4`, a list of them such as `[3, 4]` for one client with several controllers, whose pads take them in the browser's order, or `null`), and optionally `mk_control: true` to hand keyboard and mouse authority to that one token (everyone else becomes read-only until the next table drops it). A viewer holding it becomes a read-write collaborator only while `--enable-collab` is on, which is the switch that keeps a deployment view-only whatever the table says; `cmd` and every settings-mutating message stay controller-only either way. No client streams until the first table arrives (the WebSocket transport holds the handshake, WebRTC refuses it). A new table is reconciled against the connected clients at once: a token that disappeared is disconnected, a changed role reconnects the client, a slot change is pushed live, and the input verdict is re-announced on both transports.
+- `--tokens-file` (`SELKIES_TOKENS_FILE`) names a file holding the same table, provisioned at start and again whenever the file changes, so a restart needs no `POST`. Root or the server's user must own it and no one else may write to it, or it is refused; a symlink is followed, as a Kubernetes secret mount is one. A `POST` still replaces the table until the file next changes, and a file that is no table leaves the table as it was.
 - `POST /api/switch` changes the streaming transport (when dual mode is enabled). A controller-role session token is enough — a controller already drives the desktop — and the master token is the operator's way in where a deployment hands out tokens it does not want switching the transport under everyone else. Viewer tokens are refused.
 
 Both control-plane requests also accept the master token in a `Selkies-Authorization: Bearer <master token>` header, tried after `Authorization`. A request carries a single `Authorization` header, so a caller behind a reverse proxy that demands HTTP Basic authentication must spend it on the Basic credentials; the named header lets both travel together:
@@ -37,8 +38,8 @@ The static web client (`/`, its scripts and assets) is served without credential
 | `/api/tokens` | master token only (`Authorization` Bearer, or the `Selkies-Authorization` fallback) |
 | `/api/switch` | session or master token (either header); viewer tokens are refused (403) |
 | `/api/upload` | session or master token; viewer tokens are refused (403) |
-| `/api/files/...` (listing and downloads) | session or master token |
-| `/api/print/<name>` (a printed document) | session or master token; viewer tokens are refused (403) |
+| `/api/files/...` (listing and downloads) | session or master token; viewer tokens are refused (403) |
+| `/api/print/<name>` (a printed document) | session or master token; viewer tokens and another site's page are refused (403) |
 | `/api/sessions` and `/api/screenshot` | session or master token |
 | `DELETE /api/sessions/<id>`, `POST`, and `DELETE /api/recording` | session or master token (either header); viewer tokens are refused (403) |
 | `GET /api/recording` | session or master token |
@@ -72,11 +73,11 @@ Both can be on. Basic authentication then guards the page load and anything that
 
 ## Origin Checks
 
-Independent of the mode: `--allowed-origins` (`SELKIES_ALLOWED_ORIGINS`) is the cross-site WebSocket-hijacking guard on the streaming socket. Empty, the default, admits same-origin browsers and non-browser clients that send no `Origin` at all; a comma-separated list admits exactly those origins, which is what an embedding page on another host needs, and `*` admits any. Which pages may show the client in a frame at all is `--frame-ancestors` (`SELKIES_FRAME_ANCESTORS`): unset, any page may, as a platform embedding the desktop in its own UI needs; set, it is sent as the Content-Security-Policy `frame-ancestors` directive, so `'self'` refuses every other origin's frame and a list of origins admits those pages alone.
+Independent of the mode: `--allowed-origins` (`SELKIES_ALLOWED_ORIGINS`) is the cross-site WebSocket-hijacking guard on the streaming socket. Empty, the default, admits same-origin browsers and non-browser clients that send no `Origin` at all; a comma-separated list admits exactly those origins, which is what an embedding page on another host needs, and `*` admits any. Which pages may show the client in a frame at all is `--frame-ancestors` (`SELKIES_FRAME_ANCESTORS`), sent as the Content-Security-Policy `frame-ancestors` directive: unset or empty it is `'self'`, which refuses every other origin's frame, so another site cannot lay the session under clicks meant for itself; a platform embedding the desktop from another origin lists that origin (a list admits those pages alone), `*` admits any page, and `'none'` refuses every frame.
 
 ## Without a Master Token
 
-Nothing above applies but the origin check. The routes are open, or Basic-gated when `--enable-basic-auth` is on: the main password authenticates a controller and the optional `--basic-auth-viewonly-password` a viewer, which is refused the same uploads and mode switches as a viewer token. Bearer headers and the token cookie are ignored, and the roles a client can take are the [sharing links](usage.md#session-sharing) instead of provisioned tokens.
+Nothing above applies but the origin check. The routes are open, or Basic-gated when `--enable-basic-auth` is on: the main password authenticates a controller and the optional `--basic-auth-viewonly-password` a viewer, which is refused everything a viewer token is: uploads, the file listing and downloads, printed documents, and mode switches. Bearer headers and the token cookie are ignored, and the roles a client can take are the [sharing links](usage.md#session-sharing) instead of provisioned tokens.
 
 ## Reference Implementations
 

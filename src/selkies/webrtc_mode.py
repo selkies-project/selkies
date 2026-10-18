@@ -517,6 +517,8 @@ class WebRTCService(BaseStreamingService):
         # From the registry, not SESSION_START: the signaling server that validated
         # the claim is this process, and the relay's fields are positional.
         peer = self.peer_manager.peers.get(session_peer_id) if self.peer_manager else None
+        if peer is not None:
+            client_token = getattr(peer, "client_token", None)
         client_slot = getattr(peer, "client_slot", None) if peer else None
         tab_id = getattr(peer, "tab_id", None) if peer else None
         self._peer_tabs[session_peer_id] = tab_id
@@ -1982,7 +1984,7 @@ class WebRTCService(BaseStreamingService):
             ctype = peer.get("client_type")
             role_now = "controller" if ctype == ClientType.CONTROLLER else "viewer"
             new_perms = tokens.get(token)
-            if not new_perms or (new_perms.get("role") or "controller") != role_now:
+            if not new_perms or sessions.token_role(new_perms) != role_now:
                 reason = "Token revoked" if not new_perms else "Permissions changed significantly"
                 logger.info(f"Disconnecting WebRTC peer {peer_id}: {reason}")
                 await self._close_peer_signaling_ws(peer_id, 4002, reason.encode())

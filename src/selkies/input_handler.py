@@ -2848,6 +2848,14 @@ LOCAL_ARCH_BITS = 64 if struct.calcsize("P") == 8 else 32
 # struct input_event in this process's own ABI.
 LOCAL_EVDEV_EVENT_FMT = "=qqHHi" if LOCAL_ARCH_BITS == 64 else "=llHHi"
 
+# The kernel send buffer asked for on an interposer pad connection: Linux's stock
+# net.core.wmem_default, which the kernel doubles from this request. How far a
+# handle the application stops reading falls behind before it is shed
+# (SelkiesGamepad._fan_out) is this plus the transport's high-water mark, so it
+# stays the same on a host whose socket defaults run to tens of MiB, where an
+# unread handle would otherwise bank hours of stale input to replay when read.
+INTERPOSER_SNDBUF = 212992 // 2
+
 # A force-feedback record: what an interposer handle writes to its socket and
 # UInputGamepad.service_ff returns (kind, reserved, effect id, strong, weak,
 # length ms, delay ms, repeat count or gain, reserved). The interposer's
@@ -3751,6 +3759,12 @@ class SelkiesGamepad:
         sock_path = self.evdev_sock_path if is_evdev_socket else self.js_sock_path
         log_prefix = f"Gamepad {sock_path} Client {peername} ({socket_type_str}):"
         logger_selkies_gamepad.debug(f"{log_prefix} Handler started.")
+        sock = writer.get_extra_info('socket')
+        if sock is not None:
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, INTERPOSER_SNDBUF)
+            except OSError as e:
+                logger_selkies_gamepad.debug(f"{log_prefix} Send buffer left at the host's default: {e}")
 
         try:
             if not self.config_payload_cache:
@@ -9597,7 +9611,7 @@ class WebRTCInput:
                 self._spawn_task(self.on_update_crf(crf_value, display_id))
             except Exception as e:
                 logger_webrtc_input.error(f"Error updating CRF value: {e}")
-        elif toks[0].startswith("SETTINGS"):
+        elif toks[0] == "SETTINGS":
             settings_data = ','.join(toks[1:]) if len(toks) > 1 else ""
             logger_webrtc_input.debug(f"Received SETTINGS message: {settings_data}")
             try:

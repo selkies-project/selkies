@@ -214,6 +214,14 @@ async def route_cases(spool: str) -> None:
 
         r = await client.get("/api/print/Range.pdf", headers={"X-Test-Viewer": "1"})
         check("view-only credentials are refused", r.status == 403, r.status)
+        for headers in ({"Sec-Fetch-Site": "cross-site"}, {"Sec-Fetch-Site": "same-site"},
+                        {"Sec-Fetch-Site": "cross-site", "Origin": "https://elsewhere.example"},
+                        {"Origin": "https://elsewhere.example"}):
+            r = await client.get("/api/print/Range.pdf", headers=headers)
+            check(f"another site's page is refused the document ({headers})",
+                  r.status == 403 and os.path.exists(os.path.join(spool, "Range.pdf")), r.status)
+        r = await client.head("/api/print/Range.pdf", headers={"Sec-Fetch-Site": "same-origin"})
+        check("the session's own page is not", r.status == 200, r.status)
         for bad in ("..%2FRange.pdf", "notes.txt", ".hidden.pdf", "missing.pdf"):
             r = await client.get(f"/api/print/{bad}")
             check(f"{bad} is not served", r.status == 404, r.status)
