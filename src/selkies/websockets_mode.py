@@ -7555,7 +7555,9 @@ class DataStreamingServer(BaseStreamingService):
     def provision_tokens(self, new_token_data: dict) -> None:
         """Replace the token table with `new_token_data`, as `/api/tokens` and the
         tokens file do: the first table opens the config gate, and every one
-        reconciles live clients against it.
+        reconciles live clients against it. Only the JSON `true` elects an entry's
+        `mk_control`, as only "controller" names a controller: a string such as
+        "false" is no grant.
 
         Args:
             new_token_data: A table `token_table_error` accepts.
@@ -7564,7 +7566,7 @@ class DataStreamingServer(BaseStreamingService):
         for tkn, perms in new_token_data.items():
             if "slot" in perms:
                 perms["slot"] = sessions.stored_slot(perms["slot"])
-            if perms.get("mk_control", False) and new_mk_owner is None:
+            if perms.get("mk_control") is True and new_mk_owner is None:
                 new_mk_owner = tkn
         roleless = sum(perms.get("role") not in ("controller", "viewer") for perms in new_token_data.values())
         if roleless:

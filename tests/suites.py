@@ -94,6 +94,7 @@ SUITES: list = [
     {"path": "unit/test_printing.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_operator_api.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_tokens_file.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_token_table.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_video_declined.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_system_usage.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_app_compositor_socket.py", "tier": "unit", "timeout": 120},

@@ -1982,7 +1982,7 @@ class WebRTCService(BaseStreamingService):
             ctype = peer.get("client_type")
             role_now = "controller" if ctype == ClientType.CONTROLLER else "viewer"
             new_perms = tokens.get(token)
-            if not new_perms or (new_perms.get("role") or "controller") != role_now:
+            if not new_perms or sessions.token_role(new_perms) != role_now:
                 reason = "Token revoked" if not new_perms else "Permissions changed significantly"
                 logger.info(f"Disconnecting WebRTC peer {peer_id}: {reason}")
                 await self._close_peer_signaling_ws(peer_id, 4002, reason.encode())
