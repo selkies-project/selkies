@@ -4,10 +4,15 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DB_URL = 'https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/master/gamecontrollerdb.txt';
+// A release build takes this exact file, never whatever the branch holds now;
+// the commit and the hash move together.
+const DB_COMMIT = 'c1d5289a1f713b30a2c121e9fe6529d39360be0f';
+const DB_SHA256 = 'e606134678e6b3fdbdec9081289a1f0ba3e25d53b59b2aa3cdfe69bf491ad18f';
+const DB_URL = `https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/${DB_COMMIT}/gamecontrollerdb.txt`;
 const OUTPUT_DIR = 'dist/jsdb';
 
 const VALID_MAPPINGS = new Set([
@@ -89,7 +94,14 @@ async function main() {
     if (!response.ok) {
       throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`);
     }
-    fileContent = await response.text();
+    const body = Buffer.from(await response.arrayBuffer());
+    const digest = crypto.createHash('sha256').update(body).digest('hex');
+    if (digest !== DB_SHA256) {
+      console.error(`Controller DB sha256 ${digest} is not the pinned ${DB_SHA256}; refusing it.`);
+      process.exitCode = 1;
+      return;
+    }
+    fileContent = body.toString('utf8');
     console.log('Successfully fetched controller DB.');
   } catch (error) {
     console.error('Error fetching game controller DB:', error);
