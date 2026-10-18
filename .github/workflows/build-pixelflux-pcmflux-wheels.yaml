@@ -7,11 +7,10 @@ name: Capture stack wheels
 # builds ahead of a release carry, or the versions this repository pins, which
 # is what a release ships. Both projects attach the wheels their own CI built to
 # every release they cut, per commit and per version alike, so naming one
-# fetches exactly what shipped and a build here is only needed where no release
-# covers what was asked for. That build mirrors the two projects' own release
-# workflows: a single pypa/cibuildwheel invocation per (arch, libc), with each
-# repository's own pyproject.toml [tool.cibuildwheel] section driving the native
-# dependency setup and its python_requires the interpreters built.
+# fetches exactly what shipped. A main HEAD whose pre-release its project's CI
+# is still building is waited for, which takes less than building it again
+# here; a build here is only for what no release covers nor will, and runs as
+# the project's own wheel workflow does (below, `plan`).
 
 on:
   workflow_dispatch:
@@ -34,81 +33,118 @@ jobs:
   locate:
     name: Capture stack (locate)
     runs-on: ubuntu-latest
+    # Covers the wait for a pre-release in the making
+    timeout-minutes: 90
     outputs:
-      build: ${{ steps.probe.outputs.build }}
+      fetch: ${{ steps.probe.outputs.fetch }}
       pixelflux: ${{ steps.probe.outputs.pixelflux }}
       pcmflux: ${{ steps.probe.outputs.pcmflux }}
       pixelflux_ref: ${{ steps.probe.outputs.pixelflux_ref }}
       pcmflux_ref: ${{ steps.probe.outputs.pcmflux_ref }}
+      pixelflux_version: ${{ steps.probe.outputs.pixelflux_version }}
+      pcmflux_version: ${{ steps.probe.outputs.pcmflux_version }}
     steps:
       # The pins a pinned run reads live in this repository's pyproject.toml
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: probe
         env:
           GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
           PINNED: ${{ inputs.pinned }}
+          # How long a pre-release in the making is waited for, and how long
+          # after a push its run may take to show up
+          WAIT_S: "4500"
+          SHOW_UP_S: "600"
+          POLL_S: "30"
         run: |
-          build=false
+          fetch="[]"
           for project in pixelflux pcmflux; do
-            repo="${{ github.repository_owner }}/${project}"
+            repo="${OWNER}/${project}"
             tag=""
+            version=""
             if [ "${PINNED}" = "true" ]; then
               want="$(sed -n "s/^ *\"${project}[~=<>!]*\([0-9][^\"]*\)\".*/\1/p" pyproject.toml)"
               if [ -z "${want}" ]; then
                 echo "::error::pyproject.toml pins no ${project} version"
                 exit 1
               fi
-              ref="refs/tags/${want}"
+              # Built, where it has to be, as its release is: the tag's commit
+              # with the crate versioned as the tag
+              ref=""
+              version="${want}"
               # The release that version was cut as, taken only when it carries
               # wheels of that version rather than of whatever the tag moved to
               assets="$(gh release view "${want}" --repo "${repo}" --json assets \
                         --jq '.assets[].name' 2>/dev/null || true)"
               case "${assets}" in *"${project}-${want}-"*) tag="${want}" ;; esac
             else
-              ref=main
+              # The commit itself, so a push while this runs changes nothing
               sha="$(gh api "repos/${repo}/commits/main" --jq .sha 2>/dev/null || true)"
-              # Pre-releases are tagged with an abbreviated SHA, so match by prefix
-              tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
-                      --jq '.[].tagName' 2>/dev/null || true)"
-              for candidate in ${tags}; do
-                case "${sha:-none}" in "${candidate}"*) tag="${candidate}"; break ;; esac
+              ref="${sha:-main}"
+              deadline=$((SECONDS + WAIT_S))
+              while [ -n "${sha}" ]; do
+                # Pre-releases are tagged with an abbreviated SHA, so match by prefix
+                tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
+                        --jq '.[].tagName' 2>/dev/null || true)"
+                for candidate in ${tags}; do
+                  case "${sha}" in "${candidate}"*) tag="${candidate}"; break ;; esac
+                done
+                [ -n "${tag}" ] && break
+                # Waited for while its project's pre-release run is in flight,
+                # or the commit is too fresh for that run to have shown up
+                runs="$(gh run list --repo "${repo}" --workflow pre-release.yml --commit "${sha}" \
+                        --json status --jq '[.[].status] | join(" ")' 2>/dev/null || true)"
+                pushed="$(gh api "repos/${repo}/commits/${sha}" --jq .commit.committer.date 2>/dev/null || true)"
+                pushed_s="$(date -d "${pushed:-@0}" +%s 2>/dev/null || echo 0)"
+                age=$(( $(date +%s) - pushed_s ))
+                case " ${runs} " in
+                  *" queued "*|*" in_progress "*|*" waiting "*|*" pending "*|*" requested "*) ;;
+                  *) [ -z "${runs}" ] && [ "${age}" -lt "${SHOW_UP_S}" ] || break ;;
+                esac
+                if [ "${SECONDS}" -ge "${deadline}" ]; then
+                  echo "${project}: its pre-release of ${sha} is still building; building it here"
+                  break
+                fi
+                echo "${project}: waiting for the pre-release of ${sha} (runs: ${runs:-none yet})"
+                sleep "${POLL_S}"
               done
             fi
-            echo "${project}_ref=${ref}" >> "$GITHUB_OUTPUT"
+            {
+              echo "${project}_ref=${ref}"
+              echo "${project}_version=${version}"
+              echo "${project}=${tag}"
+            } >> "$GITHUB_OUTPUT"
             if [ -n "${tag}" ]; then
-              echo "${project}=${tag}" >> "$GITHUB_OUTPUT"
               echo "${project}: release ${tag}"
+              fetch="$(jq -c --arg p "${project}" --arg t "${tag}" \
+                '. + [["manylinux", "musllinux"][] as $l | ["x86_64", "aarch64"][] as $a
+                      | {project: $p, tag: $t, platform: $l, arch: $a}]' <<< "${fetch}")"
             else
-              echo "${project}=" >> "$GITHUB_OUTPUT"
-              echo "${project}: nothing released for ${ref}; building it"
-              build=true
+              echo "${project}: nothing released for ${ref:-${version}}; building it"
             fi
           done
-          echo "build=${build}" >> "$GITHUB_OUTPUT"
+          echo "fetch=${fetch}" >> "$GITHUB_OUTPUT"
 
   fetch:
-    name: ${{ matrix.project }} ${{ needs.locate.outputs[matrix.project] }} (${{ matrix.target.arch }}, ${{ matrix.platform }})
+    name: ${{ matrix.project }} ${{ matrix.tag }} (${{ matrix.arch }}, ${{ matrix.platform }})
     needs: [locate]
-    if: ${{ needs.locate.outputs.build == 'false' }}
+    if: ${{ needs.locate.outputs.fetch != '[]' && needs.locate.outputs.fetch != '' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # One job per artifact the build below would have produced, carrying the
-      # same wheels under the same name, so nothing downstream can tell which
-      # of the two put them there.
+      # One job per platform of each released project, its artifact named as
+      # the build's are, `<project>-wheels-` and then the platform last
       matrix:
-        project: [pixelflux, pcmflux]
-        platform: [manylinux, musllinux]
-        target:
-          - arch: x86_64
-          - arch: aarch64
+        include: ${{ fromJSON(needs.locate.outputs.fetch) }}
     steps:
-      - name: Download the ${{ matrix.platform }}_${{ matrix.target.arch }} wheels
+      - name: Download the ${{ matrix.platform }}_${{ matrix.arch }} wheels
         env:
           GH_TOKEN: ${{ github.token }}
           PROJECT: ${{ matrix.project }}
-          TAG: ${{ needs.locate.outputs[matrix.project] }}
-          SLICE: "*${{ matrix.platform }}*${{ matrix.target.arch }}*.whl"
+          TAG: ${{ matrix.tag }}
+          SLICE: "*${{ matrix.platform }}*${{ matrix.arch }}*.whl"
         run: |
           gh release download "${TAG}" \
             --repo "${{ github.repository_owner }}/${PROJECT}" \
@@ -116,7 +152,7 @@ jobs:
           ls -la wheelhouse
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ matrix.project }}-wheels-${{ matrix.target.arch }}-${{ matrix.platform }}
+          name: ${{ matrix.project }}-wheels-${{ matrix.platform }}_${{ matrix.arch }}
           path: wheelhouse/*.whl
           # An empty one is what the callers cannot recover from, so it fails
           # here rather than in the middle of an image build
@@ -125,43 +161,214 @@ jobs:
           # A wheel is a deflated zip already
           compression-level: 0
 
-  build:
-    name: ${{ matrix.project }} (${{ matrix.target.arch }}, ${{ matrix.platform }})
+  # The build, as each project's own wheel workflow runs it, with that
+  # project's planner, recipe, image name, and job split read off the commit
+  # being built: each platform's native libraries are built once into an image
+  # the Actions cache keeps (a week at most, keyed by recipe, base, and
+  # variables), and its interpreters dealt into parallel jobs on it, the first
+  # rebuilding everything, the rest only the PyO3 layer and the extension.
+  # Only for what no release covers, and for everything when the probe could
+  # not answer, since what ships has to be the capture stack that was asked
+  # for. A pinned run is the exception: without the probe there is no version
+  # to build, and building main would ship a different one. A run cancelled
+  # while the probe waits (a newer push) builds nothing.
+  plan:
+    name: Capture stack (plan)
     needs: [locate]
-    # Only what no release covers, and everything when the probe could not
-    # answer, since what ships has to be the capture stack that was asked for.
-    # A pinned run is the exception: without the probe there is no version to
-    # build, and building main would ship a different one.
     if: >-
-      ${{ always() && needs.locate.outputs.build != 'false'
-                   && (needs.locate.result == 'success' || !inputs.pinned) }}
-    runs-on: ${{ matrix.target.runner }}
+      ${{ !cancelled() && (needs.locate.result == 'success'
+                       && (needs.locate.outputs.pixelflux == '' || needs.locate.outputs.pcmflux == '')
+                       || needs.locate.result != 'success' && !inputs.pinned) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lists the images the Actions cache holds
+      actions: read
+    outputs:
+      groups: ${{ steps.plan.outputs.groups }}
+      images: ${{ steps.plan.outputs.images }}
+    steps:
+      # This workflow's cibuildwheel pin, which the plan has to be made with
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: self
+          sparse-checkout: .github/workflows
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ needs.locate.result != 'success' || needs.locate.outputs.pixelflux == '' }}
+        with:
+          repository: ${{ github.repository_owner }}/pixelflux
+          ref: ${{ needs.locate.outputs.pixelflux_version && format('refs/tags/{0}', needs.locate.outputs.pixelflux_version) || needs.locate.outputs.pixelflux_ref || 'main' }}
+          path: src/pixelflux
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ needs.locate.result != 'success' || needs.locate.outputs.pcmflux == '' }}
+        with:
+          repository: ${{ github.repository_owner }}/pcmflux
+          ref: ${{ needs.locate.outputs.pcmflux_version && format('refs/tags/{0}', needs.locate.outputs.pcmflux_version) || needs.locate.outputs.pcmflux_ref || 'main' }}
+          path: src/pcmflux
+          persist-credentials: false
+      - name: Plan the images and the wheels
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+          PIXELFLUX_VERSION: ${{ needs.locate.outputs.pixelflux_version }}
+          PCMFLUX_VERSION: ${{ needs.locate.outputs.pcmflux_version }}
+        run: |
+          version="$(sed -n 's|.*uses: pypa/cibuildwheel@[0-9a-f]* # v\([0-9.]*\)$|\1|p' \
+                     self/.github/workflows/build-pixelflux-pcmflux-wheels.yaml)"
+          if [ -z "${version}" ]; then
+            echo "::error::this workflow pins no cibuildwheel release"
+            exit 1
+          fi
+          python3 -m venv "${RUNNER_TEMP}/cibuildwheel"
+          "${RUNNER_TEMP}/cibuildwheel/bin/pip" install "cibuildwheel==${version}"
+          groups="[]"
+          images="[]"
+          for project in pixelflux pcmflux; do
+            [ -d "src/${project}" ] || continue
+            # The image and the job split the project's own wheel workflow names
+            own="src/${project}/.github/workflows/wheels.yml"
+            image="$(sed -n 's/^  IMAGE: *//p' "${own}")"
+            jobs="$(sed -n 's/^  JOBS: *//p' "${own}")"
+            if [ -z "${image}" ] || [ -z "${jobs}" ]; then
+              echo "::error::${own} names no IMAGE or JOBS"
+              exit 1
+            fi
+            tag_var="${project^^}_VERSION"
+            plan="$(cd "src/${project}" && "${RUNNER_TEMP}/cibuildwheel/bin/python" scripts/wheel-plan.py matrix "${image}" "${jobs}")"
+            echo "${plan}"
+            commit="$(git -C "src/${project}" rev-parse HEAD)"
+            stamp() {
+              jq -c --arg project "${project}" --arg image "${image}" --arg tag "${!tag_var}" \
+                --arg commit "${commit}" '[.[] | . + {project: $project, image: $image, tag: $tag, commit: $commit}]'
+            }
+            groups="$(jq -c -n --argjson a "${groups}" \
+                      --argjson b "$(sed -n 's/^groups=//p' <<< "${plan}" | stamp)" '$a + $b')"
+            images="$(jq -c -n --argjson a "${images}" \
+                      --argjson b "$(sed -n 's/^images=//p' <<< "${plan}" | stamp)" '$a + $b')"
+          done
+          echo "groups=${groups}" >> "$GITHUB_OUTPUT"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
+
+  image:
+    name: ${{ matrix.image.project }} image (${{ matrix.image.platform }})
+    needs: [plan]
+    if: ${{ needs.plan.outputs.images != '[]' && needs.plan.outputs.images != '' }}
     strategy:
       fail-fast: false
-      # One job per (project, arch, libc): an extra interpreter rebuilds only
-      # the PyO3 layer and the extension, so splitting them would duplicate
-      # before-all for far less than it costs.
       matrix:
-        project: [pixelflux, pcmflux]
-        platform: [manylinux, musllinux]
-        target:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
+        image: ${{ fromJSON(needs.plan.outputs.images) }}
+    runs-on: ${{ matrix.image.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ${{ github.repository_owner }}/${{ matrix.project }}
-          ref: ${{ needs.locate.outputs[format('{0}_ref', matrix.project)] || 'main' }}
-      - name: Build wheels (${{ matrix.platform }}_${{ matrix.target.arch }})
+          repository: ${{ github.repository_owner }}/${{ matrix.image.project }}
+          ref: ${{ matrix.image.commit }}
+          persist-credentials: false
+
+      - name: Build the image
+        env:
+          BASE: ${{ matrix.image.base }}
+          IMAGE: ${{ matrix.image.image }}
+          PLATFORM: ${{ matrix.image.platform }}
+        run: |
+          python3 scripts/wheel-plan.py recipe > "${RUNNER_TEMP}/recipe.sh"
+          # The sources and build trees the recipe leaves are no part of the image
+          docker run --name deps --env PIXELFLUX_ENABLE_GPL --workdir /tmp \
+            --volume "${RUNNER_TEMP}/recipe.sh:/recipe.sh:ro" "${BASE}" \
+            bash -c 'bash /recipe.sh && rm -rf /tmp/* /root/.cache && { ! command -v dnf || dnf clean all; }'
+          docker commit deps "${IMAGE}:${PLATFORM}"
+          docker save "${IMAGE}:${PLATFORM}" | zstd -T0 > "${RUNNER_TEMP}/image.tar.zst"
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/image.tar.zst
+          key: ${{ matrix.image.key }}
+
+  build:
+    name: ${{ matrix.group.project }} ${{ matrix.group.name }}
+    needs: [plan, image]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.image.result != 'failure' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ${{ fromJSON(needs.plan.outputs.groups) }}
+    runs-on: ${{ matrix.group.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/${{ matrix.group.project }}
+          ref: ${{ matrix.group.commit }}
+          persist-credentials: false
+
+      # The platform's compiled dependencies, under its image's key and the
+      # lock as committed (before a tag's version is written into it). The
+      # container builds into them through cibuildwheel's /host mount.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo
+        with:
+          path: ${{ runner.temp }}/cargo-target
+          key: cargo-${{ matrix.group.key }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.group.project)) }}
+
+      - name: Build into the dependency cache
+        run: |
+          mkdir -p .cargo "${RUNNER_TEMP}/cargo-target"
+          printf '[build]\ntarget-dir = "/host%s/cargo-target"\n' "${RUNNER_TEMP}" > .cargo/config.toml
+
+      - name: Version the crate as the tag
+        # As the project's release does: the wheel takes its version from the
+        # crate, whose manifest spells a pre-release the semver way; the lock
+        # names the crate's own version too, and the build runs --locked.
+        if: ${{ matrix.group.tag != '' }}
+        env:
+          PROJECT: ${{ matrix.group.project }}
+          RELEASE_TAG: ${{ matrix.group.tag }}
+        run: |
+          crate="$(echo "${RELEASE_TAG}" | sed -E 's/rc([0-9]+)$/-rc.\1/; s/a([0-9]+)$/-alpha.\1/; s/b([0-9]+)$/-beta.\1/; s/\.post([0-9]+)$/-post.\1/; s/\.dev([0-9]+)$/-dev.\1/')"
+          sed -i "0,/^version = /s|^version = .*|version = \"${crate}\"|" "${PROJECT}/Cargo.toml"
+          sed -i "/^name = \"${PROJECT}\"$/{n;s|^version = .*|version = \"${crate}\"|}" "${PROJECT}/Cargo.lock"
+          grep -q "^version = \"${crate}\"$" "${PROJECT}/Cargo.toml"
+          grep -A1 "^name = \"${PROJECT}\"$" "${PROJECT}/Cargo.lock" | grep -q "^version = \"${crate}\"$"
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: image
+        with:
+          path: ${{ runner.temp }}/image.tar.zst
+          key: ${{ matrix.group.key }}
+
+      - name: Load the image
+        if: steps.image.outputs.cache-hit == 'true'
+        env:
+          IMAGE: ${{ matrix.group.image }}
+          PLATFORM: ${{ matrix.group.platform }}
+        run: |
+          zstd -dc "${RUNNER_TEMP}/image.tar.zst" | docker load
+          # The loaded image has run before-all already
+          {
+            echo "CIBW_BEFORE_ALL="
+            for name in MANYLINUX_X86_64 MANYLINUX_AARCH64 MUSLLINUX_X86_64 MUSLLINUX_AARCH64; do
+              echo "CIBW_${name}_IMAGE=${IMAGE}:${PLATFORM}"
+            done
+          } >> "$GITHUB_ENV"
+
+      - name: Build the wheels
         uses: pypa/cibuildwheel@b3395e271a35f73dad77f21802abe9b986dfe299 # v4.3.1
         env:
-          # Every interpreter cibuildwheel offers, floored by python_requires.
-          CIBW_BUILD: "*-${{ matrix.platform }}_${{ matrix.target.arch }}"
+          CIBW_BUILD: ${{ matrix.group.build }}
+
+      # Once per platform, from main, where the project's planner names a job
+      # that saves: an entry a tag saved would serve no other run.
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: matrix.group.saves && steps.cargo.outputs.cache-hit != 'true' && matrix.group.tag == ''
+        with:
+          path: ${{ runner.temp }}/cargo-target
+          key: ${{ steps.cargo.outputs.cache-primary-key }}
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ matrix.project }}-wheels-${{ matrix.target.arch }}-${{ matrix.platform }}
+          name: ${{ matrix.group.project }}-wheels-${{ matrix.group.name }}
           path: wheelhouse/*.whl
           if-no-files-found: error
           retention-days: 14
