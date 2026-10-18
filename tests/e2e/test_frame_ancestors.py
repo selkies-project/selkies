@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Which pages may show the client in a frame is the operator's to name.
 
-A platform that embeds the desktop in its own UI needs the client framed, so an
-unset `frame_ancestors` leaves framing open, as it always was. Set, it is sent
-as the Content-Security-Policy frame-ancestors directive on every response, and
-the browser refuses a frame the list does not name: `'self'` shuts out a page
-on any other origin, and a listed origin gets its frame.
+`frame_ancestors` is sent as the Content-Security-Policy frame-ancestors
+directive on every response, and the browser refuses a frame the list does not
+name. Unset or empty it is `'self'`, which shuts out a page on any other origin,
+so another site cannot lay the session under its own clicks; a platform that
+embeds the desktop from another origin lists it and gets its frame, and `*`
+lets any page frame it.
 
 A page on a second origin frames the client under each policy, and Chromium's
 own verdict is read from what the frame ends up showing.
@@ -70,9 +71,11 @@ def main() -> int:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     embed_origin = f"http://localhost:{server.server_address[1]}"
     cases = (
-        ("unset", None, "", True),
+        ("unset", None, "frame-ancestors 'self'", False),
+        ("empty", "", "frame-ancestors 'self'", False),
         ("'self'", "'self'", "frame-ancestors 'self'", False),
         ("the embedding origin", f"self, {embed_origin}", f"frame-ancestors 'self' {embed_origin}", True),
+        ("any page", "*", "frame-ancestors *", True),
     )
     try:
         with sync_playwright() as pw:

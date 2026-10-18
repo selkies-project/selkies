@@ -974,12 +974,16 @@ async def _bind_listen_sockets(addr: str, port: int) -> List[socket.socket]:
 
 
 def _frame_ancestors_directive(value: str) -> str:
-    """The Content-Security-Policy that `frame_ancestors` asks for, "" when it names none.
+    """The Content-Security-Policy that `frame_ancestors` asks for.
 
     Entries are comma- or space-separated; `self` and `none` become the quoted
     keywords, and an entry carrying a quote or a semicolon, which would end the
-    directive, is dropped.
+    directive, is dropped. A value naming nothing is this server's own origin:
+    an image passing the variable through empty must not open the session to
+    every page's frame, which only `*` asks for.
     """
+    if not (value or "").replace(",", " ").split():
+        value = "'self'"
     sources = []
     for item in (value or "").replace(",", " ").split():
         keyword = item.strip("'").lower()

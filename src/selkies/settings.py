@@ -1148,8 +1148,8 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "name": "frame_ancestors",
         "type": "str",
-        "default": "",
-        "help": "Comma-separated pages allowed to show the client in a frame: origins such as https://portal.example.com, 'self' for this server's own pages, or 'none' for no frame at all, sent as the Content-Security-Policy frame-ancestors directive. Empty (default) lets any page frame it, as a platform embedding the desktop in its own UI needs.",
+        "default": "'self'",
+        "help": "Comma-separated pages allowed to show the client in a frame, sent as the Content-Security-Policy frame-ancestors directive: 'self' (the default, also what an empty value means) for this server's own origin, origins such as https://portal.example.com for a platform embedding the desktop from another, * for any page, or 'none' for no frame at all. A page the list does not name gets an empty frame, so it cannot lay the session under clicks meant for itself.",
     },
 ]
 
