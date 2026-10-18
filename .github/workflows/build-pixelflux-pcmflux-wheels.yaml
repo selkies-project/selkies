@@ -111,9 +111,11 @@ jobs:
                 sleep "${POLL_S}"
               done
             fi
-            echo "${project}_ref=${ref}" >> "$GITHUB_OUTPUT"
-            echo "${project}_version=${version}" >> "$GITHUB_OUTPUT"
-            echo "${project}=${tag}" >> "$GITHUB_OUTPUT"
+            {
+              echo "${project}_ref=${ref}"
+              echo "${project}_version=${version}"
+              echo "${project}=${tag}"
+            } >> "$GITHUB_OUTPUT"
             if [ -n "${tag}" ]; then
               echo "${project}: release ${tag}"
               fetch="$(jq -c --arg p "${project}" --arg t "${tag}" \
@@ -237,13 +239,15 @@ jobs:
             tag_var="${project^^}_VERSION"
             plan="$(cd "src/${project}" && "${RUNNER_TEMP}/cibuildwheel/bin/python" scripts/wheel-plan.py matrix "${image}" "${jobs}")"
             echo "${plan}"
-            stamp=(jq -c --arg project "${project}" --arg image "${image}" --arg tag "${!tag_var}"
-                   --arg commit "$(git -C "src/${project}" rev-parse HEAD)"
-                   '[.[] | . + {project: $project, image: $image, tag: $tag, commit: $commit}]')
+            commit="$(git -C "src/${project}" rev-parse HEAD)"
+            stamp() {
+              jq -c --arg project "${project}" --arg image "${image}" --arg tag "${!tag_var}" \
+                --arg commit "${commit}" '[.[] | . + {project: $project, image: $image, tag: $tag, commit: $commit}]'
+            }
             groups="$(jq -c -n --argjson a "${groups}" \
-                      --argjson b "$(sed -n 's/^groups=//p' <<< "${plan}" | "${stamp[@]}")" '$a + $b')"
+                      --argjson b "$(sed -n 's/^groups=//p' <<< "${plan}" | stamp)" '$a + $b')"
             images="$(jq -c -n --argjson a "${images}" \
-                      --argjson b "$(sed -n 's/^images=//p' <<< "${plan}" | "${stamp[@]}")" '$a + $b')"
+                      --argjson b "$(sed -n 's/^images=//p' <<< "${plan}" | stamp)" '$a + $b')"
           done
           echo "groups=${groups}" >> "$GITHUB_OUTPUT"
           echo "images=${images}" >> "$GITHUB_OUTPUT"
