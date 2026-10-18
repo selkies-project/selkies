@@ -3209,7 +3209,9 @@ class CentralizedStreamServer:
         generated archive is built under a temporary name and offered under the
         folder's. `allow_fallback` is False for a file that exists only for the
         length of the transfer: FileResponse opens it after the handler returns,
-        by which time the temporary is gone.
+        by which time the temporary is gone. Such a file is never handed to
+        FileResponse, so a request the streaming path cannot answer (a HEAD, a
+        `Range` resume, a conditional revalidation) is refused with 405.
 
         The operator's static cap is the shared `transfer_cap` bucket, and
         congestion control is `download_pacer` fed one `UplinkGauge` verdict per
@@ -3250,6 +3252,8 @@ class CentralizedStreamServer:
         if not ((cap is not None or gauge is not None or not allow_fallback)
                 and request.method == "GET"
                 and "Range" not in request.headers and not conditional):
+            if not allow_fallback:
+                return web.Response(status=405, headers={"Allow": "GET"})
             return _AuditedFileResponse(
                 path, audit_name,
                 headers={
@@ -3358,7 +3362,8 @@ class CentralizedStreamServer:
         downlink accepts. It is streamed rather than handed to FileResponse,
         since the temporary does not outlive the handler, and the route is GET
         alone for the same reason: a HEAD or a Range would want FileResponse
-        to answer from a file that is gone.
+        to answer from a file that is gone, and a Range is refused before the
+        folder is packed rather than after it.
         """
         if self._viewer_ceiling(request):
             return web.Response(status=403, text="View-only credentials cannot download files")
@@ -3368,7 +3373,9 @@ class CentralizedStreamServer:
         target = self._resolve_file_path(rel)
         if target is None or self._at_file_root(target) or not os.path.isdir(target):
             return web.json_response({"status": "error", "message": "not found"}, status=404)
-        staged, size = await asyncio.to_thread(
+        if "Range" in request.headers:
+            return web.Response(status=405, headers={"Allow": "GET"})
+        staged, _ = await asyncio.to_thread(
             self._build_directory_archive, pathlib.Path(target))
         name = os.path.basename(os.path.normpath(target))
         try:

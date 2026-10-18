@@ -282,6 +282,16 @@ def api_checks(res: "H.Results", full: bool) -> None:
     res.check("a _zip naming the root as an empty path is refused", status == 404, status)
     status, _, _ = request("GET", "/api/files/_zip?path=seed.txt")
     res.check("a _zip on a file rather than a directory is refused", status == 404, status)
+    status, headers, _ = request(
+        "GET", "/api/files/_zip?path=" + urllib.parse.quote("sub dir"),
+        headers={"Range": "bytes=3-"})
+    res.check("a Range resuming a _zip is refused",
+              status == 405 and headers.get("allow") == "GET", status)
+    status, _, _ = request(
+        "GET", "/api/files/_zip?path=" + urllib.parse.quote("sub dir"),
+        headers={"If-Modified-Since": "Thu, 01 Jan 2026 00:00:00 GMT"})
+    res.check("a conditional GET revalidating a _zip is refused",
+              status == 405, status)
 
 
 def close_menus(page: Any) -> None:
