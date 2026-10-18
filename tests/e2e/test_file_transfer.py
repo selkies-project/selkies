@@ -211,6 +211,14 @@ def api_checks(res: "H.Results", full: bool) -> None:
     status, _, body = request("GET", "/api/files/sub%20dir/")
     res.check("a subdirectory index lists its files and the parent link",
               status == 200 and b"plain.bin" in body and b"../" in body, status)
+    odd = os.path.join(os.fsencode(FILES_DIR), b"odd-\xff.bin")
+    open(odd, "wb").close()
+    try:
+        status, _, body = request("GET", "/api/files/")
+    finally:
+        os.unlink(odd)
+    res.check("a name that is not UTF-8 is listed with the rest",
+              status == 200 and b"seed.txt" in body and b'href="odd-%FF.bin"' in body, f"{status} {body[:60]}")
     status, _, _ = request("GET", "/api/files/missing.bin")
     res.check("a missing file is a 404", status == 404, status)
     status, _, _ = request("GET", "/api/files/../seed.txt")
