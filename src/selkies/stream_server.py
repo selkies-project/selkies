@@ -2436,10 +2436,12 @@ class CentralizedStreamServer:
         at the viewer role (the view-only basic-auth password, or a viewer-role
         session token in secure mode).
 
-        The control-plane endpoints that change host or session state — the
-        streaming-mode switch and file uploads — refuse those requests the way
-        the streaming plane refuses input from a viewer. Read-only endpoints
-        stay available: a viewer is already watching the session.
+        Every endpoint that changes host or session state refuses those
+        requests, the way the streaming plane refuses input from a viewer, and
+        so does every one that hands out more than a viewer watches: the files
+        under the file-manager directory and printed documents. What the
+        session shows anyway (its pages, a screenshot, whether a recording
+        runs) stays available.
         """
         return request.get("auth_role_ceiling") == "viewer"
 
@@ -3077,7 +3079,12 @@ class CentralizedStreamServer:
         A client that cancels a download closes its connection mid-stream,
         which surfaces as a connection error from the write; that is the
         transfer's normal end, logged as such and never a handler failure.
+
+        View-only credentials are refused the listing and the bytes alike: a
+        viewer watches the desktop, it does not take the files on it.
         """
+        if self._viewer_ceiling(request):
+            return web.Response(status=403, text="View-only credentials cannot list or download files")
         if "download" not in self.settings.file_transfers:
             return web.Response(status=403, text="Forbidden: downloads disabled")
         rel_path = request.match_info.get("path", "").lstrip("/")

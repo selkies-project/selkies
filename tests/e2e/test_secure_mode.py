@@ -5,7 +5,8 @@ routes:      with a master token set and Basic auth off, /api/upload,
              /api/files/ (listing and download), /api/turn, and /api/metrics
              refuse a request without a token and take one as a Bearer
              header, as ?token=, or as the client's cookie; a viewer-role
-             token cannot upload; the master token is accepted everywhere;
+             token can neither upload nor list or download files; the master
+             token is accepted everywhere;
              liveness and the static client stay open; the data WebSocket
              still takes its token in the handshake, and a token entry with
              no role connects as a viewer that cannot displace the controller.
@@ -35,8 +36,8 @@ tokens-file: a table in tokens_file is provisioned at start, so the file's
              with no POST, and a file renamed over it without that token
              revokes it.
 legacy:      without a master token nothing changes: the routes are open with
-             Basic auth off and Basic-gated, view-only password included,
-             with it on.
+             Basic auth off and Basic-gated with it on, where the view-only
+             password uploads, lists, and downloads nothing.
 """
 import asyncio
 import base64
@@ -250,16 +251,22 @@ def run_routes() -> "H.Results":
     for label, headers, path in (("Bearer controller", bearer(CTRL_TOKEN), "/api/files/"),
                                  ("cookie controller", cookie(CTRL_TOKEN), "/api/files/"),
                                  ("?token= controller", {}, f"/api/files/?token={CTRL_TOKEN}"),
-                                 ("Bearer viewer", bearer(VIEW_TOKEN), "/api/files/"),
                                  ("Bearer master", bearer(MASTER), "/api/files/")):
         status, _, body = request("GET", path, headers=headers)
         res.check(f"{label}: the file listing is served", status == 200 and b"hello.txt" in body, f"{status} {body[:40]}")
+    for label, headers, path in (("Bearer viewer", bearer(VIEW_TOKEN), "/api/files/"),
+                                 ("cookie viewer", cookie(VIEW_TOKEN), "/api/files/"),
+                                 ("?token= viewer", {}, f"/api/files/?token={VIEW_TOKEN}")):
+        status, _, body = request("GET", path, headers=headers)
+        res.check(f"{label}: the file listing is refused", status == 403 and b"hello.txt" not in body, f"{status} {body[:40]}")
     status, hdrs, body = request("GET", "/api/files/hello.txt", headers=cookie(CTRL_TOKEN))
     res.check("cookie controller: a download is served as an attachment",
               status == 200 and body == b"hello from the file manager\n"
               and "attachment" in hdrs.get("content-disposition", ""), f"{status} {hdrs.get('content-disposition')}")
     status, hdrs, body = request("GET", f"/api/files/hello.txt?token={VIEW_TOKEN}")
-    res.check("?token= viewer: a download is served", status == 200 and body.startswith(b"hello"), status)
+    res.check("?token= viewer: a download is refused", status == 403 and b"hello" not in body, status)
+    status, hdrs, body = request("GET", "/api/files/hello.txt", headers=bearer(VIEW_TOKEN))
+    res.check("Bearer viewer: a download is refused", status == 403 and b"hello" not in body, status)
     status, hdrs, _ = request("GET", "/api/files/sub", headers=bearer(CTRL_TOKEN))
     res.check("a directory without its slash redirects (token carried by the header)",
               status in (301, 308) and hdrs.get("location", "").endswith("/api/files/sub/"), f"{status} {hdrs.get('location')}")
@@ -791,8 +798,10 @@ def run_legacy() -> "H.Results":
     res.check("Basic on: Basic credentials list files", status == 200 and b"hello.txt" in body, status)
     res.check("Basic on: Basic credentials upload", upload("basic.txt", b"b", basic) == 200)
     res.check("Basic on: the view-only password cannot upload", upload("viewonly.txt", b"v", viewonly) == 403)
-    status, _, _ = request("GET", "/api/files/hello.txt", headers=viewonly)
-    res.check("Basic on: the view-only password downloads", status == 200, status)
+    status, _, body = request("GET", "/api/files/", headers=viewonly)
+    res.check("Basic on: the view-only password cannot list files", status == 403 and b"hello.txt" not in body, status)
+    status, _, body = request("GET", "/api/files/hello.txt", headers=viewonly)
+    res.check("Basic on: the view-only password cannot download", status == 403 and b"hello" not in body, status)
     res.summary()
     return res
 

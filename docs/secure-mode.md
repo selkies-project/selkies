@@ -38,7 +38,7 @@ The static web client (`/`, its scripts and assets) is served without credential
 | `/api/tokens` | master token only (`Authorization` Bearer, or the `Selkies-Authorization` fallback) |
 | `/api/switch` | session or master token (either header); viewer tokens are refused (403) |
 | `/api/upload` | session or master token; viewer tokens are refused (403) |
-| `/api/files/...` (listing and downloads) | session or master token |
+| `/api/files/...` (listing and downloads) | session or master token; viewer tokens are refused (403) |
 | `/api/print/<name>` (a printed document) | session or master token; viewer tokens are refused (403) |
 | `/api/sessions` and `/api/screenshot` | session or master token |
 | `DELETE /api/sessions/<id>`, `POST`, and `DELETE /api/recording` | session or master token (either header); viewer tokens are refused (403) |
@@ -77,7 +77,7 @@ Independent of the mode: `--allowed-origins` (`SELKIES_ALLOWED_ORIGINS`) is the 
 
 ## Without a Master Token
 
-Nothing above applies but the origin check. The routes are open, or Basic-gated when `--enable-basic-auth` is on: the main password authenticates a controller and the optional `--basic-auth-viewonly-password` a viewer, which is refused the same uploads and mode switches as a viewer token. Bearer headers and the token cookie are ignored, and the roles a client can take are the [sharing links](usage.md#session-sharing) instead of provisioned tokens.
+Nothing above applies but the origin check. The routes are open, or Basic-gated when `--enable-basic-auth` is on: the main password authenticates a controller and the optional `--basic-auth-viewonly-password` a viewer, which is refused everything a viewer token is: uploads, the file listing and downloads, printed documents, and mode switches. Bearer headers and the token cookie are ignored, and the roles a client can take are the [sharing links](usage.md#session-sharing) instead of provisioned tokens.
 
 ## Reference Implementations
 

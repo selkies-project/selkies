@@ -665,7 +665,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "str",
         "default": "",
         "env_var": "VIEWONLY_PASSWORD",
-        "help": "Optional second basic-auth password that grants view-only access. Clients authenticating with it are capped at the viewer role (no keyboard, mouse, clipboard, gamepad, or command input) regardless of the role they request, while the main password authorizes full control. Empty disables the split. Ignored in secure mode, where the master token governs roles.",
+        "help": "Optional second basic-auth password that grants view-only access. Clients authenticating with it are capped at the viewer role (no keyboard, mouse, clipboard, gamepad, or command input, and no file transfers) regardless of the role they request, while the main password authorizes full control. Empty disables the split. Ignored in secure mode, where the master token governs roles.",
     },
     {
         "name": "subfolder",

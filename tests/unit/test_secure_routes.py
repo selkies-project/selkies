@@ -94,7 +94,7 @@ class _App:
     """A stub of the server's route set behind the real middleware.
 
     Every handler answers 200 with the role ceiling the middleware tagged;
-    the upload and switch handlers refuse a viewer ceiling through the
+    the upload, switch, and file handlers refuse a viewer ceiling through the
     server's own _viewer_ceiling, the way the real ones do.
     """
 
@@ -110,7 +110,7 @@ class _App:
         app.router.add_post(f"{prefix}/api/tokens", self._ok)
         app.router.add_post(f"{prefix}/api/switch", self._controller_only)
         app.router.add_post(f"{prefix}/api/upload", self._controller_only)
-        app.router.add_get(f"{prefix}/api/files/{{path:.*}}", self._ok)
+        app.router.add_get(f"{prefix}/api/files/{{path:.*}}", self._controller_only)
         app.router.add_get(f"{prefix}/api/turn", self._ok)
         app.router.add_get(f"{prefix}/api/metrics", self._ok)
         app.router.add_get(f"{prefix}/api/websockets", self._ok)
@@ -231,7 +231,9 @@ async def secure_basic_off() -> None:
         check("viewer token: upload refused", status == 403 and body == "viewer", f"{status} {body}")
         status, body, _ = await app.call("POST", "/api/upload", headers=_cookie(VIEW))
         check("viewer token (cookie): upload refused", status == 403, status)
-        for path in ("/api/files/", "/api/turn", "/api/metrics"):
+        status, body, _ = await app.call("GET", "/api/files/", headers=_bearer(VIEW))
+        check("viewer token: the file listing refused", status == 403 and body == "viewer", f"{status} {body}")
+        for path in ("/api/turn", "/api/metrics"):
             status, body, _ = await app.call("GET", path, headers=_bearer(VIEW))
             check(f"viewer token: GET {path} accepted as viewer",
                   status == 200 and body == "viewer", f"{status} {body}")
@@ -356,8 +358,8 @@ async def legacy_modes() -> None:
         check("no master token, Basic on: the view-only password cannot upload",
               status == 403 and body == "viewer", f"{status} {body}")
         status, body, _ = await app.call("GET", "/api/files/", headers={"Authorization": _basic("user", "look")})
-        check("no master token, Basic on: the view-only password lists files",
-              status == 200 and body == "viewer", f"{status} {body}")
+        check("no master token, Basic on: the view-only password cannot list files",
+              status == 403 and body == "viewer", f"{status} {body}")
 
 
 def _token_protocol(token: str) -> str:

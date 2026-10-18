@@ -16,8 +16,9 @@ websockets / webrtc:
 policy:
     `file_transfers=upload`, `download`, and `none` each refuse the other
     direction on the wire and hide its button in both dashboards; with Basic
-    auth the view-only password (the server's viewer ceiling) downloads but
-    cannot upload, and a shared/viewer page never starts an upload at all.
+    auth the view-only password (the server's viewer ceiling) can neither
+    upload nor list or download files, and a shared/viewer page never starts
+    an upload at all.
 
 Usage: python3 tests/e2e/test_file_transfer.py [websockets|webrtc|policy|all]
 """
@@ -488,9 +489,9 @@ def policy_block() -> "H.Results":
     res.check("Basic auth: the view-only password cannot upload",
               status == 403 and not os.path.exists(on_disk("viewer.bin")), status)
     status, _, body = request("GET", "/api/files/controller.bin", headers=basic(VIEWONLY_PASSWORD))
-    res.check("Basic auth: the view-only password downloads", status == 200 and body == b"controller", status)
+    res.check("Basic auth: the view-only password cannot download", status == 403 and body != b"controller", status)
     status, _, body = request("GET", "/api/files/", headers=basic(VIEWONLY_PASSWORD))
-    res.check("Basic auth: the view-only password lists files", status == 200 and b"controller.bin" in body, status)
+    res.check("Basic auth: the view-only password cannot list files", status == 403 and b"controller.bin" not in body, status)
 
     # The client side of the ceiling: the core closes the upload gate on a
     # shared/viewer page, so its file input starts no request at all.
