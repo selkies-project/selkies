@@ -124,12 +124,15 @@ zipped by `build.sh` where valid inputs are hard to stumble on, and its source a
 paths; a fuzzed module imports neither pixelflux nor pcmflux, which the builder lacks. A crash the fuzzer finds is
 fixed at its cause, and its input joins the corpus.
 
-CodeQL's code scanning alerts are at least stylistic recommendations: each is fixed in the code and closed by the
-next scan, never dismissed or closed by hand, a case that is so by design included. Code that is safe through a check
-CodeQL cannot follow (a validator in another function, a lookup in a table the code fills itself) is rewritten so
-the check sits where the query recognizes it (its `*Customizations.qll` in github/codeql lists the forms: for a
-Python path, `os.path.realpath` and then `startswith` on that result; for a value from a fixed set, `==` or `in`
-against literals; for a redirect, a constant prefix the value follows), so the scan keeps watching that path.
+CodeQL's code scanning and the other checkers (ruff, codespell, eslint and tsc through pre-commit; Dependabot's
+alerts; the OSS Scanner's and the fuzzers' findings) are at least stylistic recommendations: a finding is fixed in the
+code and its alert closed by the next scan or update, never dismissed or closed by hand, a case that is so by design
+included, and a lint is not silenced (`noqa`, `eslint-disable`) where the code can be written its way. Code that is
+safe through a check a checker cannot follow (a validator in another function, a lookup in a table the code fills
+itself) is rewritten so the check sits where it is recognized (CodeQL's `*Customizations.qll` in github/codeql lists
+the forms: for a Python path, `os.path.realpath` and then `startswith` on that result; for a value from a fixed set,
+`==` or `in` against literals; for a redirect, a constant prefix the value follows), so the checker keeps watching
+that path.
 
 ## Landing a change
 
