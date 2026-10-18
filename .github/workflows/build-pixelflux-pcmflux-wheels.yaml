@@ -168,12 +168,13 @@ jobs:
   # Only for what no release covers, and for everything when the probe could
   # not answer, since what ships has to be the capture stack that was asked
   # for. A pinned run is the exception: without the probe there is no version
-  # to build, and building main would ship a different one.
+  # to build, and building main would ship a different one. A run cancelled
+  # while the probe waits (a newer push) builds nothing.
   plan:
     name: Capture stack (plan)
     needs: [locate]
     if: >-
-      ${{ always() && (needs.locate.result == 'success'
+      ${{ !cancelled() && (needs.locate.result == 'success'
                        && (needs.locate.outputs.pixelflux == '' || needs.locate.outputs.pcmflux == '')
                        || needs.locate.result != 'success' && !inputs.pinned) }}
     runs-on: ubuntu-latest
