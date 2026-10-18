@@ -126,13 +126,14 @@ fixed at its cause, and its input joins the corpus.
 
 CodeQL's code scanning and the other checkers (ruff, codespell, eslint and tsc through pre-commit; Dependabot's
 alerts; the OSS Scanner's and the fuzzers' findings) are at least stylistic recommendations: a finding is fixed in the
-code and its alert closed by the next scan or update, never dismissed or closed by hand, a case that is so by design
-included, and a lint is not silenced (`noqa`, `eslint-disable`) where the code can be written its way. Code that is
-safe through a check a checker cannot follow (a validator in another function, a lookup in a table the code fills
-itself) is rewritten so the check sits where it is recognized (CodeQL's `*Customizations.qll` in github/codeql lists
-the forms: for a Python path, `os.path.realpath` and then `startswith` on that result; for a value from a fixed set,
-`==` or `in` against literals; for a redirect, a constant prefix the value follows), so the checker keeps watching
-that path.
+code and its alert closed by the next scan or update, never dismissed or closed by hand, and a lint is not silenced
+(`noqa`, `eslint-disable`) where the code can be written its way. Code that is safe through a check a checker cannot
+follow (a validator in another function, a lookup in a table the code fills itself) is rewritten so the check sits
+where it is recognized (CodeQL's `*Customizations.qll` in github/codeql lists the forms: for a Python path,
+`os.path.realpath` and then `startswith` on that result; for a value from a fixed set, `==` or `in` against literals;
+for a redirect, a constant prefix the value follows), so the checker keeps watching that path. A protocol requirement
+alone is dismissed, with the standard that fixes it named (a hash, port or file format the protocol or its tools
+prescribe).
 
 ## Landing a change
 
