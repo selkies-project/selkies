@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""What a WebRTC hello may carry and name.
+"""What a WebRTC hello may name, and what it may take over.
 
 A hello is read before its credential is checked, on the loop every client
 shares, so one past a few pages is refused unread. Its display id is one field
 of the space-separated SESSION_START line and names takeover-storm keys, so it
 must be a short name of letters, digits, `-` and `_`; anything else is refused.
 The storm table forgets an identity once its takeovers leave the window, so
-hellos naming new displays cannot grow it. Runs the peer registry with stand-in sockets; no server, no browser.
+hellos naming new displays cannot grow it. And a view-only page never
+supersedes a live controller, as on the websockets transport: without sharing,
+a controller's newer page takes the display over and a viewer joins beside.
+Runs the peer registry with stand-in sockets; no server, no browser.
 """
 import asyncio
 import json
@@ -66,6 +69,16 @@ async def join(peers: WebRTCPeerManagement, text: str, ceiling: str = None) -> F
 
 
 async def scenario(res: H.Results) -> None:
+    peers = registry(sharing=False)
+    ctl = await join(peers, hello("controller"))
+    for claim in ("controller", "viewer"):
+        viewer = await join(peers, hello(claim), ceiling="viewer")
+        res.check(f"a view-only page claiming {claim} leaves the live controller connected",
+                  not ctl.closed and not viewer.closed, [ctl.close_args, viewer.close_args])
+    newer = await join(peers, hello("controller"))
+    res.check("a newer controller page still takes the display over",
+              ctl.close_args is not None and not newer.closed, ctl.close_args)
+
     peers = registry(sharing=True)
     big = await join(peers, hello("controller", pad="x" * HELLO_MAX_BYTES))
     res.check("a hello past HELLO_MAX_BYTES is refused unread",

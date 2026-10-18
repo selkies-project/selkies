@@ -721,6 +721,17 @@ class WebRTCPeerManagement:
                 and getattr(peer, "client_type", None) == "controller"
                 and bool(tab_id) and bool(getattr(peer, "tab_id", None)) and peer.tab_id != tab_id)
 
+    @staticmethod
+    def _supersedes(client_type: Optional[str], peer: Any) -> bool:
+        """Whether a newcomer of `client_type` may take `peer`'s place: a viewer
+        never supersedes a live controller, as on the websockets transport,
+        where a viewer's connection takes no display over; it still reaps a
+        dead holder and supersedes another viewer."""
+        if client_type == "controller" or getattr(peer, "client_type", None) != "controller":
+            return True
+        peer_ws = getattr(peer, "ws", None)
+        return peer_ws is None or peer_ws.closed
+
     def _eviction_storm(self, key: Any) -> bool:
         """Return True when the identity ``key`` (slot/controller) has been
         taken over LIMIT+ times inside the window: two live auto-reconnecting
@@ -1009,6 +1020,7 @@ class WebRTCPeerManagement:
                             for pid, peer in self.peers.items()
                             if hasattr(peer, "peer_type") and peer.peer_type == "client"
                             and getattr(peer, "display_id", "primary") == display_id
+                            and self._supersedes(client_type, peer)
                         ]
                         if existing_clients and self._eviction_storm(("client", display_id)):
                             await ws.close(
@@ -1055,6 +1067,7 @@ class WebRTCPeerManagement:
                                     else getattr(peer, "client_slot", None) == client_slot)
                                 and getattr(peer, "display_id", "primary") == display_id
                                 and not self._beside(peer, client_type, client_tab_id)
+                                and self._supersedes(client_type, peer)
                             ]
                             if colliding and self._eviction_storm(key):
                                 await ws.close(
