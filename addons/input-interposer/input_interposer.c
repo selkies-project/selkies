@@ -862,6 +862,22 @@ static int udyn_node_live(int num) {
     return live;
 }
 
+/* Whether the session's own user, or root, runs `fd`'s peer or owns the file
+ * it is open on. The socket directory can be shared with other accounts, and
+ * whoever held a name in it would otherwise serve this application a device
+ * and every event it reads. */
+static int peer_is_session_user(int fd) {
+    struct ucred cred;
+    socklen_t len = sizeof(cred);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) return 0;
+    return cred.uid == geteuid() || cred.uid == 0;
+}
+
+static int file_is_session_users(int fd) {
+    struct stat st;
+    return fstat(fd, &st) == 0 && (st.st_uid == geteuid() || st.st_uid == 0);
+}
+
 /* Whether a creator is accepting on dynamic node `num`. A socket file left by a
  * creator that died without unlinking it refuses the connection, so its number
  * can be reclaimed. */
@@ -1667,6 +1683,10 @@ static int connect_interposer_socket(const char *socket_path, js_config_t *confi
         sji_log_error("Failed to connect to socket %s: %s", socket_path, strerror(errno));
         goto connect_fail;
     }
+    if (!peer_is_session_user(sockfd)) {
+        sji_log_error("Refusing socket %s: another user serves it.", socket_path);
+        goto connect_fail;
+    }
     sji_log_info("Connected to socket %s (fd %d).", socket_path, sockfd);
 
     if (read_socket_config(sockfd, config_dest) != 0) {
@@ -2110,6 +2130,11 @@ static int udyn_open_consumer(const char *path, int flags) {
     udyn_desc_path(num, dpath, sizeof(dpath));
     int dfd = real_open(dpath, O_RDONLY | O_CLOEXEC);
     if (dfd < 0) return -2;
+    if (!file_is_session_users(dfd)) {
+        sji_log_error("Refusing virtual uinput device %d: another user wrote its descriptor.", num);
+        real_close(dfd);
+        return -2;
+    }
     char *p = (char *)&desc;
     size_t got = 0;
     while (got < sizeof(desc)) {
@@ -2134,6 +2159,11 @@ static int udyn_open_consumer(const char *path, int flags) {
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, sock, sizeof(addr.sun_path) - 1);
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { real_close(fd); return -2; }
+    if (!peer_is_session_user(fd)) {
+        sji_log_error("Refusing virtual uinput device %d: another user serves it.", num);
+        real_close(fd);
+        return -2;
+    }
     if (flags & O_NONBLOCK) make_socket_nonblocking(fd);
 
     pthread_mutex_lock(&udyn_mutex);
