@@ -26,7 +26,6 @@ import errno
 import json
 import html
 import stat
-import hashlib
 import ipaddress
 import time
 import shutil
@@ -813,23 +812,18 @@ class TransferPacer:
             self.rate_bps = min(self.rate_bps + step, bound)
 
 
-def _upload_staging_path(dest: str, token: str) -> str:
-    """Return the staging file path for an upload to ``dest``.
+def _upload_staging_path(dest: str) -> str:
+    """Return a new staging file path for an upload to ``dest``.
 
     The staging file is a fixed-length hidden sibling living in the
-    destination's own directory. Its name is derived from ``token`` instead of
-    being appended to the destination basename, so a filename that is legal but
-    sits close to the filesystem's NAME_MAX still uploads; staying in the same
-    directory keeps the finalizing ``os.replace`` atomic and intra-filesystem.
+    destination's own directory. Its name is random rather than appended to the
+    destination basename, so a filename that is legal but sits close to the
+    filesystem's NAME_MAX still uploads, and another account sharing the
+    directory cannot put a file or a FIFO where the upload will open it;
+    staying in the same directory keeps the finalizing ``os.replace`` atomic
+    and intra-filesystem.
     """
-    return os.path.join(os.path.dirname(dest), f"{UPLOAD_STAGING_PREFIX}{token}.part")
-
-
-def _upload_staging_token(dest: str) -> str:
-    """Return the staging token every slice of a chunked transfer to ``dest``
-    resolves to, so the .part file is found again across the separate requests
-    that append to it."""
-    return hashlib.sha256(os.fsencode(dest)).hexdigest()[:16]
+    return os.path.join(os.path.dirname(dest), f"{UPLOAD_STAGING_PREFIX}{os.urandom(8).hex()}.part")
 
 
 def _carry_destination_mode(staging: str, dest: str) -> None:
@@ -2541,9 +2535,9 @@ class CentralizedStreamServer:
         """Stream a request body to ``path``, opening, writing, and closing it
         on the executor.
 
-        Creates/truncates the file when ``append`` is False, appends when True;
-        O_NOFOLLOW blocks a planted symlink either way. Enforces the declared
-        Content-Length.
+        Creates the file when ``append`` is False, refusing one that already
+        exists, and appends when True; O_NOFOLLOW blocks a planted symlink
+        either way. Enforces the declared Content-Length.
 
         Reads pace against two allowances: a paused read fills aiohttp's
         flow-control buffer, the TCP window closes, and the client's uplink is
@@ -2573,7 +2567,7 @@ class CentralizedStreamServer:
             self._session_gauge(request)
             if (declared or 0) >= TRANSFER_MIN_GAUGED_BYTES
             else None)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_TRUNC)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_EXCL)
         fh = await loop.run_in_executor(None, lambda: os.fdopen(os.open(path, flags, 0o644), "wb"))
         written = 0
         try:
@@ -2609,9 +2603,9 @@ class CentralizedStreamServer:
         """Drop a chunked transfer's tracking entry and its on-disk .part file.
 
         The entry and the file it names go together with nothing awaited
-        between, so a restart on the same path never has the .part it just
-        created removed under it; the removal blocks the loop the once a
-        discard costs, which a transfer's slices do not.
+        between, so a restart on the same path cannot slip its own entry in
+        between and lose it; the removal blocks the loop the once a discard
+        costs, which a transfer's slices do not.
         """
         self._chunked_uploads.pop(dest, None)
         _remove_quietly(part_path)
@@ -2635,9 +2629,9 @@ class CentralizedStreamServer:
         open, and the plain path's rename onto the destination, since a network
         filesystem takes tens of milliseconds over each and a directory of
         small files pays it once per file, which the event loop would otherwise
-        take from the stream it serves. The chunked path's staging is one file
-        per destination, so its finalize and its discards stay synchronous to
-        keep the rename and the removal atomic against a restart on the same
+        take from the stream it serves. A chunked transfer is tracked by its
+        destination, so its finalize and its discards stay synchronous to keep
+        the rename and the entry's removal atomic against a restart on the same
         path; each is a once-per-transfer cost, not a per-slice one. Path safety
         mirrors the data-channel path: no traversal outside the root, and
         O_NOFOLLOW blocks a planted symlink.
@@ -2655,9 +2649,9 @@ class CentralizedStreamServer:
             X-Upload-Offset: absolute byte offset of this slice
             X-Upload-Total:  final file size in bytes
             X-Upload-Final:  "1" on the last slice
-          Slices accumulate in the staging sibling this destination derives
-          (_upload_staging_path). Offset 0 (re)creates it — which is also how a
-          stale one from an abandoned transfer for the same path gets replaced —
+          Slices accumulate in a staging sibling that offset 0 creates
+          (_upload_staging_path) and the transfer's tracking entry names; offset
+          0 also removes the one an abandoned transfer to the same path left,
           and non-zero offsets must exactly continue the tracked transfer (same
           id, offset equal to the bytes already banked, matching staged size) or
           the transfer is discarded with 409. The final slice validates the
@@ -2710,7 +2704,7 @@ class CentralizedStreamServer:
             return failed("X-Upload-Id and X-Upload-Offset must be sent together")
 
         if upload_id is None:
-            staging = _upload_staging_path(dest, os.urandom(8).hex())
+            staging = _upload_staging_path(dest)
             try:
                 written = await self._stream_upload_body(request, staging, append=False)
             except Exception as e:
@@ -2733,7 +2727,6 @@ class CentralizedStreamServer:
         if offset < 0 or ("X-Upload-Total" in request.headers and total < 0):
             return failed("malformed chunk headers")
         final = request.headers.get("X-Upload-Final") == "1"
-        part_path = _upload_staging_path(dest, _upload_staging_token(dest))
 
         self._expire_stale_chunked_uploads()
 
@@ -2744,8 +2737,10 @@ class CentralizedStreamServer:
                     {"status": "error", "message": "another chunk for this path is in flight"},
                     status=409,
                 )
+            if state is not None:
+                self._discard_chunked_upload(dest, state["part"])
             state = {"id": upload_id, "offset": 0, "ts": time.monotonic(),
-                     "part": part_path, "busy": False}
+                     "part": _upload_staging_path(dest), "busy": False}
             self._chunked_uploads[dest] = state
         else:
             if state is not None and state["busy"]:
@@ -2755,13 +2750,15 @@ class CentralizedStreamServer:
                     status=409,
                 )
             try:
-                part_size = os.path.getsize(part_path)
+                part_size = os.path.getsize(state["part"]) if state is not None else -1
             except OSError:
                 part_size = -1
             if (state is None or state["id"] != upload_id
                     or state["offset"] != offset or part_size != offset):
-                self._discard_chunked_upload(dest, part_path)
+                if state is not None:
+                    self._discard_chunked_upload(dest, state["part"])
                 return failed(f"chunk sequence mismatch at offset {offset}; transfer discarded", 409)
+        part_path = state["part"]
 
         # Claimed before the body's awaits so a slice for this path that arrives
         # meanwhile is refused, not interleaved onto the shared .part.
@@ -2782,8 +2779,8 @@ class CentralizedStreamServer:
         if total >= 0 and received != total:
             self._discard_chunked_upload(dest, part_path)
             return failed(f"size mismatch: received {received}, expected {total}")
-        # Synchronous, like the removal: the staged path is one per destination,
-        # so the rename onto it stays atomic against a restart with no await between.
+        # Synchronous, like the removal: a transfer is tracked by its destination,
+        # so a restart on the same path cannot run between the rename and the entry's removal.
         try:
             _finalize_upload(part_path, dest)
         except OSError as e:

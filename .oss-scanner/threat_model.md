@@ -13,7 +13,8 @@
   `websockets_mode.py` (data plane, binary opcodes, token table), `webrtc_signaling_server.py`, the vendored WebRTC
   stack (`webrtc/`, `ice/`, edited in tree and in scope), `input_handler.py` (`on_message`), `sessions.py` (roles).
 - Local input: other accounts on the same host, through sockets and directories under `/tmp` and
-  `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio).
+  `$XDG_RUNTIME_DIR` (interposers, CUPS, X11, Wayland, PulseAudio), and through a file-manager directory they can
+  write (planted names, FIFOs, set-ID files).
 
 ## Components that matter most / least
 - Most: authentication and role checks (a viewer or slot token must never reach input, files, the clipboard or
