@@ -2187,17 +2187,14 @@ class RTCApp:
         provisioned. client_type is self-asserted over signaling, so a peer that
         merely claims 'controller' is still held to the token here. `co`
         (composed-text typing, `co,end,<text>`) is keyboard input like kd/ku.
-        The bare `cr` clipboard read-back is exempt like every clipboard read
-        on the websockets transport: the handler itself direction-gates it
-        (enable_clipboard "out") and it is sent at connect, before the peer
-        can hold input authority.
+        The clipboard reads, the `cr` a page sends at connect among them, are
+        held to the same rule as on the websockets transport: a peer the mk
+        token outranks reads no clipboard, its connect-time snapshot included.
 
         Returns:
             True when the message must be dropped.
         """
         if not app_settings.master_token:
-            return False
-        if msg.split(",", 1)[0] in ("cr",):
             return False
         if msg.split(",", 1)[0] not in ("cmd", "co") and not msg.startswith(VIEWER_COLLAB_EXTRA_PREFIXES):
             return False

@@ -289,11 +289,11 @@ SENT_FRAME_TIMESTAMP_HISTORY_SIZE = 1000
 # resume forces an IDR, so rapid STOP/START must not be able to spam keyframes.
 VIEWER_RESUME_MIN_INTERVAL_S = 1.0
 TARGET_FRAMERATE = 60
-# Secure mode: the messages only the input-authority holder may send. A set, and
-# built once, because the check runs per client message.
+# Secure mode: the messages only the input-authority holder may send, the clipboard
+# reads among them. A set, and built once, because the check runs per client message.
 SECURE_INPUT_PREFIXES = frozenset((
     "kd", "ku", "kh", "kr", "m", "m2", "co", "cmd", "sf", "sfe",
-    "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb",
+    "cws", "cbs", "cwd", "cbd", "cwe", "cbe", "cw", "cb", "cr",
     "REQUEST_CLIPBOARD",
 ))
 
@@ -5760,8 +5760,6 @@ class DataStreamingServer(BaseStreamingService):
                                 continue
 
                         # maxsplit=1: a full split of an 8 MiB clipboard chunk stalls the loop.
-                        # 'cr' is exempt: every client sends it at connect, before it can hold
-                        # authority, and the handler direction-gates it itself.
                         if self.is_secure_mode and message.split(',', 1)[0] in SECURE_INPUT_PREFIXES:
                             if not self._holds_input_authority(websocket):
                                 continue

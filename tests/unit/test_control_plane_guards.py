@@ -278,12 +278,25 @@ def secure_gate_cases() -> None:
     WebSockets one does too (it matches whole verbs, WebRTC prefixes)."""
     from selkies import websockets_mode as wm
     from selkies.input_handler import VIEWER_COLLAB_EXTRA_PREFIXES
-    # Exempt on both: the bare clipboard read-back and the pointer echo inject nothing.
-    verbs = {p.rstrip(",") for p in VIEWER_COLLAB_EXTRA_PREFIXES} - {"cr", "_pointer_echo"}
+    # Exempt on both: the pointer echo injects nothing.
+    verbs = {p.rstrip(",") for p in VIEWER_COLLAB_EXTRA_PREFIXES} - {"_pointer_echo"}
     missing = sorted(verbs - wm.SECURE_INPUT_PREFIXES)
     check("the WebSockets secure gate holds every input verb the WebRTC one does", not missing, missing)
     check("a finger scroll and its end are held to input authority on WebSockets",
           {"sf", "sfe"} <= wm.SECURE_INPUT_PREFIXES)
+    check("both clipboard reads are held to input authority on WebSockets",
+          {"cr", "REQUEST_CLIPBOARD"} <= wm.SECURE_INPUT_PREFIXES)
+    from selkies import webrtc_engine
+    app = webrtc_engine.RTCApp.__new__(webrtc_engine.RTCApp)
+    app._mk_input_authorized = lambda token: token == "holder"
+    saved = webrtc_engine.app_settings.master_token
+    webrtc_engine.app_settings.master_token = "unit-master"
+    try:
+        for verb in ("cr", "REQUEST_CLIPBOARD"):
+            check(f"WebRTC drops a {verb} from a peer the mk token outranks", app._secure_input_denied(verb, "other"))
+            check(f"and serves the holder's {verb}", not app._secure_input_denied(verb, "holder"))
+    finally:
+        webrtc_engine.app_settings.master_token = saved
 
 
 def main() -> bool:
