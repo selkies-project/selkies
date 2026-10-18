@@ -517,6 +517,8 @@ class WebRTCService(BaseStreamingService):
         # From the registry, not SESSION_START: the signaling server that validated
         # the claim is this process, and the relay's fields are positional.
         peer = self.peer_manager.peers.get(session_peer_id) if self.peer_manager else None
+        if peer is not None:
+            client_token = getattr(peer, "client_token", None)
         client_slot = getattr(peer, "client_slot", None) if peer else None
         tab_id = getattr(peer, "tab_id", None) if peer else None
         self._peer_tabs[session_peer_id] = tab_id

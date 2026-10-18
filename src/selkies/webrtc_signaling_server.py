@@ -45,6 +45,7 @@ control-plane table (`/api/tokens`), read per handshake.
 """
 
 import os
+import re
 import hmac
 import json
 import secrets
@@ -75,6 +76,14 @@ HELD_LINES_MAX = 256
 
 # The largest side a hello's `page_size` may name; the page caps its requests at 4080.
 MAX_PAGE_SIZE = 8192
+
+# The largest hello read before its credential is checked: a page's is a few hundred
+# bytes, and anything past this would be parsed on the loop every client shares.
+HELLO_MAX_BYTES = 16 * 1024
+
+# What a hello's display id may be: `primary` and `displayN` within it. It names
+# storm keys and travels as one field of the space-separated SESSION_START line.
+DISPLAY_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
 
 
 def hello_page_size(value: Any) -> Optional[Tuple[int, int]]:
@@ -721,11 +730,21 @@ class WebRTCPeerManagement:
         never trips this."""
         now = asyncio.get_running_loop().time()
         times = [t for t in self._eviction_times.get(key, ()) if now - t < self._EVICTION_STORM_WINDOW_S]
-        self._eviction_times[key] = times
+        if times:
+            self._eviction_times[key] = times
+        else:
+            self._eviction_times.pop(key, None)
         return len(times) >= self._EVICTION_STORM_LIMIT
 
     def _record_eviction(self, key: Any) -> None:
-        self._eviction_times.setdefault(key, []).append(asyncio.get_running_loop().time())
+        """Note a takeover of identity `key`, forgetting every identity whose last
+        takeover left the window, so the table holds only the identities a storm
+        could still trip on, whatever names the hellos carry."""
+        now = asyncio.get_running_loop().time()
+        recent = {k: [t for t in times if now - t < self._EVICTION_STORM_WINDOW_S]
+                  for k, times in self._eviction_times.items()}
+        self._eviction_times = {k: times for k, times in recent.items() if times}
+        self._eviction_times.setdefault(key, []).append(now)
 
     def _secure_token_rejected(self, client_token: Any) -> bool:
         """Secure mode (master token configured) binds streaming access to a
@@ -859,6 +878,9 @@ class WebRTCPeerManagement:
         if msg_obj.type != WSMsgType.TEXT or not isinstance(msg_obj.data, str):
             await ws.close(code=1002, message=b"invalid protocol")
             raise Exception("Invalid hello message type from {!r}".format(raddr))
+        if len(msg_obj.data) > HELLO_MAX_BYTES:
+            await ws.close(code=1009, message=b"hello too large")
+            raise Exception("Oversized hello ({} bytes) from {!r}".format(len(msg_obj.data), raddr))
 
         hello = msg_obj.data
         toks = hello.split(maxsplit=2)
@@ -907,7 +929,12 @@ class WebRTCPeerManagement:
                         client_strict_viewer = json_metadata.get("client_strict_viewer")
                         client_token = json_metadata.get("client_token")
                         server_token = json_metadata.get("server_token")
-                        display_id = json_metadata.get("display_id") or "primary"
+                        named_display = json_metadata.get("display_id")
+                        if named_display:
+                            if not isinstance(named_display, str) or not DISPLAY_ID_RE.fullmatch(named_display):
+                                await ws.close(code=1002, message=b"invalid protocol")
+                                raise Exception("Invalid display_id from {!r}".format(raddr))
+                            display_id = named_display
                         pos = json_metadata.get("display_position")
                         display_position = pos if pos in ("right", "left", "up", "down") else "right"
                         tab = json_metadata.get("client_tab_id")
