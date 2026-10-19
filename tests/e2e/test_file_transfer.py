@@ -325,6 +325,18 @@ def api_checks(res: "H.Results", full: bool) -> None:
         headers={"If-Modified-Since": "Thu, 01 Jan 2026 00:00:00 GMT"})
     res.check("a conditional GET revalidating a _zip is refused",
               status == 405, status)
+    # A FIFO would wedge zipfile's read of it: the pack skips anything that
+    # is not a regular file, so the archive comes back complete without the
+    # pipe instead of hanging the request.
+    pipe = on_disk(os.path.join("sub dir", "pipe"))
+    os.mkfifo(pipe)
+    try:
+        status, _, archived = request(
+            "GET", "/api/files/_zip?path=" + urllib.parse.quote("sub dir"))
+    finally:
+        os.unlink(pipe)
+    res.check("a _zip skips a FIFO rather than wedging the pack on it",
+              status == 200 and archived[:2] == b"PK" and b"pipe" not in archived, status)
 
 
 def close_menus(page: Any) -> None:

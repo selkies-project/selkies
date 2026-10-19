@@ -33,6 +33,7 @@ import base64
 import inspect
 import pathlib
 import asyncio
+import concurrent.futures
 import contextlib
 import math
 import mimetypes
@@ -69,6 +70,19 @@ UPLOAD_PART_TTL_SECONDS: int = 3600
 # Hidden staging sibling an upload is renamed from, so a destination is only
 # ever replaced by a complete file.
 UPLOAD_STAGING_PREFIX: str = ".selkies-upload-"
+
+# The most a folder archive's source can hold, in bytes and in entries: the
+# pack runs to completion before the first byte is served, so these bound the
+# disk and CPU one request can spend ahead of the pacing that throttles the
+# network side of the transfer.
+ARCHIVE_MAX_SOURCE_BYTES: int = 8 << 30
+ARCHIVE_MAX_ENTRIES: int = 100_000
+
+# Folder packs run at most two at a time: each stages a full copy of the
+# folder on disk, so an unbounded number of concurrent requests would multiply
+# that staging area by however many of them arrive together.
+ARCHIVE_PACK_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="selkies-archive")
 
 # A connection that carries no request is closed after this long. AppRunner's
 # own default (3630 s) is set to outlast a reverse proxy's pooled connections,
@@ -3321,13 +3335,41 @@ class CentralizedStreamServer:
         return response
 
     @staticmethod
+    def _archive_source_bounds(root: pathlib.Path) -> Tuple[int, int]:
+        """Walk `root` without reading file contents and return the total size
+        and count of the regular files an archive of it would carry.
+
+        The walk skips what `_build_directory_archive` skips, so the bound it
+        feeds sees exactly the archive the pack would write: symlinks, and any
+        entry that is not a regular file. A FIFO or a socket would wedge
+        `zipfile`'s read of it, and a device would inflate the archive without
+        carrying the tree's content.
+        """
+        total = 0
+        count = 0
+        for current, directories, filenames in os.walk(root, followlinks=False):
+            directories[:] = [
+                d for d in directories
+                if not os.path.islink(os.path.join(current, d))]
+            for name in filenames:
+                entry = os.path.join(current, name)
+                if os.path.islink(entry) or not os.path.isfile(entry):
+                    continue
+                total += os.stat(entry).st_size
+                count += 1
+        return total, count
+
+    @staticmethod
     def _build_directory_archive(root: pathlib.Path) -> Tuple[str, int]:
         """Write the contents of `root` to a zip archive in the system
         temporary directory, and return its path and size.
 
         Symlinks are left out: `zipfile` reads the target a link points at, so
         a link inside the tree pointing out of it would put content outside the
-        root into an archive the user asked for the tree's contents of.
+        root into an archive the user asked for the tree's contents of. Anything
+        that is not a regular file is left out with them: `zipfile` would read a
+        FIFO like a file and wedge the pack, and a device would inflate the
+        archive without carrying the tree's content.
         """
         fd, staged = tempfile.mkstemp(prefix="selkies-files-", suffix=".zip")
         os.close(fd)
@@ -3340,7 +3382,7 @@ class CentralizedStreamServer:
                     relative = os.path.relpath(current, root)
                     for name in filenames:
                         entry = os.path.join(current, name)
-                        if os.path.islink(entry):
+                        if os.path.islink(entry) or not os.path.isfile(entry):
                             continue
                         archive.write(entry, name if relative == "." else os.path.join(relative, name))
         except BaseException:
@@ -3365,6 +3407,15 @@ class CentralizedStreamServer:
         listing and the bytes (`_viewer_ceiling`): a viewer watches the
         desktop, it does not take the files on it.
 
+        The folder is bounded before anything is staged: one walk sizes and
+        counts what the archive would carry (`_archive_source_bounds`), and a
+        folder past `ARCHIVE_MAX_SOURCE_BYTES` or `ARCHIVE_MAX_ENTRIES` is
+        refused with 413 before a temporary is written, because the pack runs
+        to completion ahead of the first byte and the pacing below only
+        throttles the network side. The pack runs on a pool of two
+        (`ARCHIVE_PACK_POOL`), so concurrent requests queue for it rather
+        than each staging a full copy.
+
         The archive rides the same pacing the file download does
         (`_serve_paced_download`), so a folder the size of a video directory
         still backs off with the session's delay instead of taking whatever the
@@ -3384,8 +3435,15 @@ class CentralizedStreamServer:
             return web.json_response({"status": "error", "message": "not found"}, status=404)
         if "Range" in request.headers:
             return web.Response(status=405, headers={"Allow": "GET"})
-        staged, _ = await asyncio.to_thread(
-            self._build_directory_archive, pathlib.Path(target))
+        total, count = await asyncio.to_thread(
+            self._archive_source_bounds, pathlib.Path(target))
+        if total > ARCHIVE_MAX_SOURCE_BYTES or count > ARCHIVE_MAX_ENTRIES:
+            return web.json_response(
+                {"status": "error",
+                 "message": "the folder holds too much to pack as one archive"},
+                status=413)
+        staged, _ = await asyncio.get_running_loop().run_in_executor(
+            ARCHIVE_PACK_POOL, self._build_directory_archive, pathlib.Path(target))
         name = os.path.basename(os.path.normpath(target))
         try:
             return await self._serve_paced_download(

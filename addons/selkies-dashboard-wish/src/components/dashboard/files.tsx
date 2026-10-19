@@ -55,7 +55,7 @@ export function FilesDialog({ open, onOpenChange }: FilesDialogProps) {
     }, []);
 
     const canUpload = (renderableSettings.fileUpload ?? true) && !isViewerUrlMode;
-    const allowDownload = renderableSettings.fileDownload ?? true;
+    const allowDownload = (renderableSettings.fileDownload ?? true) && !isViewerUrlMode;
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>

@@ -75,7 +75,7 @@ import { GamepadPanel, keyboardWatch, useKeyboardAttached } from "@/components/d
 import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
-import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, hardwareKeyboard, isMobileClient, isSecondaryDisplay } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, hardwareKeyboard, isMobileClient, isSecondaryDisplay, isViewerUrlMode } from "@/utils";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords } from "../../../../selkies-web-core/lib/touch-controls.js";
 import { fragmentWithSessionToken } from "../../../../selkies-web-core/lib/page-url.js";
@@ -779,9 +779,11 @@ export function TopMenu({
 
   // The file manager is one menu entry rather than a submenu, since uploading
   // and downloading both happen inside it. It still hides when the server
-  // allows neither, so a session with transfers off is offered no way in.
+  // allows neither, so a session with transfers off is offered no way in, and
+  // for a viewer URL, which the server refuses the files of outright.
   const filesAllowed =
-    (renderableSettings.fileUpload ?? true) || (renderableSettings.fileDownload ?? true);
+    !isViewerUrlMode &&
+    ((renderableSettings.fileUpload ?? true) || (renderableSettings.fileDownload ?? true));
 
 
 
