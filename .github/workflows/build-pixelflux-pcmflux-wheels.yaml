@@ -210,7 +210,9 @@ jobs:
       # No token, so the planner counts no image as cached: every image is
       # built in this run and handed to its build jobs as an artifact, and
       # nothing built from another repository's commit is written to the
-      # Actions cache a later run on the default branch would restore
+      # Actions cache a later run on the default branch would restore. Each
+      # image carries its project's recipe, so the image jobs run it in their
+      # container and execute nothing of the project on the runner.
       - name: Plan the images and the wheels
         id: plan
         env:
@@ -241,6 +243,7 @@ jobs:
             plan="$(cd "src/${project}" && "${RUNNER_TEMP}/cibuildwheel/bin/python" scripts/wheel-plan.py matrix "${image}" "${jobs}")"
             echo "${plan}"
             commit="$(git -C "src/${project}" rev-parse HEAD)"
+            recipe="$(cd "src/${project}" && "${RUNNER_TEMP}/cibuildwheel/bin/python" scripts/wheel-plan.py recipe)"
             stamp() {
               jq -c --arg project "${project}" --arg image "${image}" --arg tag "${!tag_var}" \
                 --arg commit "${commit}" '[.[] | . + {project: $project, image: $image, tag: $tag, commit: $commit}]'
@@ -248,7 +251,8 @@ jobs:
             groups="$(jq -c -n --argjson a "${groups}" \
                       --argjson b "$(sed -n 's/^groups=//p' <<< "${plan}" | stamp)" '$a + $b')"
             images="$(jq -c -n --argjson a "${images}" \
-                      --argjson b "$(sed -n 's/^images=//p' <<< "${plan}" | stamp)" '$a + $b')"
+                      --argjson b "$(sed -n 's/^images=//p' <<< "${plan}" | stamp)" \
+                      --arg recipe "${recipe}" '$a + [$b[] | . + {recipe: $recipe}]')"
           done
           echo "groups=${groups}" >> "$GITHUB_OUTPUT"
           echo "images=${images}" >> "$GITHUB_OUTPUT"
@@ -263,19 +267,16 @@ jobs:
         image: ${{ fromJSON(needs.plan.outputs.images) }}
     runs-on: ${{ matrix.image.runner }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/${{ matrix.image.project }}
-          ref: ${{ matrix.image.commit }}
-          persist-credentials: false
-
+      # The recipe the plan read from the project's commit; it runs in the
+      # container alone, and the project is not checked out here
       - name: Build the image
         env:
           BASE: ${{ matrix.image.base }}
           IMAGE: ${{ matrix.image.image }}
           PLATFORM: ${{ matrix.image.platform }}
+          RECIPE: ${{ matrix.image.recipe }}
         run: |
-          python3 scripts/wheel-plan.py recipe > "${RUNNER_TEMP}/recipe.sh"
+          printf '%s\n' "${RECIPE}" > "${RUNNER_TEMP}/recipe.sh"
           # The sources and build trees the recipe leaves are no part of the image
           docker run --name deps --env PIXELFLUX_ENABLE_GPL --workdir /tmp \
             --volume "${RUNNER_TEMP}/recipe.sh:/recipe.sh:ro" "${BASE}" \

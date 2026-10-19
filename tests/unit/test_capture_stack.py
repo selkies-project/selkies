@@ -11,7 +11,10 @@ a pin spelled in a way it cannot read, or a release whose assets are of some
 other version, is a build that quietly ships a capture stack the wheel did not
 ask for. Ahead of a release it waits for a pre-release its project's CI is still
 building rather than building the same wheels a second time, and builds what no
-pre-release will cover.
+pre-release will cover. What it builds, the image jobs prepare from the recipe
+the plan read out of each project: they check nothing out and run that recipe
+in their container alone, so no code of another repository's commit runs on a
+runner of the default branch.
 """
 import json
 import os
@@ -188,6 +191,12 @@ check("a HEAD pushed moments ago is waited for until its pre-release shows up",
 _, out = probe(pinned=False, tags="97ef61d a3290fd")
 check("a HEAD the probe could not read is built from main",
       out.get("pixelflux") == "" and out.get("pixelflux_ref") == "main", out.get("pixelflux_ref", "<unset>"))
+
+text = open(WORKFLOW).read()
+image_job = text[text.index("\n  image:\n"):text.index("\n  build:\n")]
+check("the image jobs check nothing out and run the recipe the plan carries",
+      "actions/checkout" not in image_job and "${{ matrix.image.recipe }}" in image_job
+      and "recipe: $recipe" in text)
 
 print(f"[capture-stack] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)
