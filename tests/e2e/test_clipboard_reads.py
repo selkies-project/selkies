@@ -5,7 +5,7 @@ Firefox and WebKit raise a paste prompt on every `navigator.clipboard.read()`
 or `readText()` outside a paste gesture, and Firefox's prompt swallows the
 next clicks and blocks tools that type into the page; the only silent read
 there is the `paste` event's own data. Chromium reads on focus once the
-permission is granted. The async read API is counted on each engine across
+permission is granted, and on a Ctrl+V chord, whose V waits for that send. The async read API is counted on each engine across
 the moments the client syncs the clipboard: load, focus, a Ctrl+V chord with
 nothing on the clipboard, and one with text on it, which is a real paste. With the client-to-session direction turned off by the
 server (`enable_clipboard=out`), nothing reads on any engine. A selector
@@ -125,9 +125,9 @@ def drive(res: "H.Results", mode: str, engine: str, clipboard_in: bool) -> None:
             else:
                 res.check(f"{tag} a focus reads once the permission is granted",
                           counts["focus"] >= 1, counts)
-                res.check(f"{tag} a Ctrl+V chord and a paste event read nothing themselves",
-                          counts["chord"] == 0 and counts["paste"] == 0, counts)
-            if prompts and clipboard_in:
+                res.check(f"{tag} a Ctrl+V chord reads the clipboard itself",
+                          counts["chord"] >= 1 and counts["paste"] >= 1, counts)
+            if clipboard_in:
                 sent = page.evaluate("(window.__wireSent || []).filter(d => typeof d === 'string' "
                                      "&& d.startsWith('cw')).length")
                 policy = page.evaluate("[window.clipboard_enabled, document.activeElement && document.activeElement.id]")
