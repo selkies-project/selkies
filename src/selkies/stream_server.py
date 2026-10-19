@@ -835,56 +835,80 @@ class TransferPacer:
             self.rate_bps = min(self.rate_bps + step, bound)
 
 
+def _staging_leaf_name() -> str:
+    """A staging file name for an upload: fixed length and random rather than
+    appended to the destination basename, so a filename that is legal but sits
+    close to the filesystem's NAME_MAX still uploads, and another account
+    sharing the directory cannot put a file or a FIFO where the upload will
+    open it."""
+    return f"{UPLOAD_STAGING_PREFIX}{os.urandom(8).hex()}.part"
+
+
 def _upload_staging_path(dest: str) -> str:
     """Return a new staging file path for an upload to ``dest``.
 
     The staging file is a fixed-length hidden sibling living in the
-    destination's own directory. Its name is random rather than appended to the
-    destination basename, so a filename that is legal but sits close to the
-    filesystem's NAME_MAX still uploads, and another account sharing the
-    directory cannot put a file or a FIFO where the upload will open it;
-    staying in the same directory keeps the finalizing ``os.replace`` atomic
+    destination's own directory (`_staging_leaf_name` for the name).
+    Staying in the same directory keeps the finalizing ``os.replace`` atomic
     and intra-filesystem.
     """
-    return os.path.join(os.path.dirname(dest), f"{UPLOAD_STAGING_PREFIX}{os.urandom(8).hex()}.part")
+    return os.path.join(os.path.dirname(dest), _staging_leaf_name())
 
 
-def _carry_destination_mode(staging: str, dest: str) -> None:
+def _carry_destination_mode(
+        staging: str, dest: str, dir_fd: Optional[int] = None) -> None:
     """Give the staged upload the permission bits of the file it is about to
     replace, so re-uploading over an existing file keeps its mode: an executable
     script stays executable and a private file stays private. A new destination,
     one that is not a regular file, or one another account owns keeps the
     staging file's creation mode, and the set-ID and sticky bits are never
     carried: a file another account planted under the name must not leave the
-    upload writable by it, or a set-ID program of this user's that it can run."""
+    upload writable by it, or a set-ID program of this user's that it can run.
+    With ``dir_fd`` both names are read relative to the held descriptor of the
+    directory they live in, never by a path that could have been swapped."""
     try:
-        st = os.lstat(dest)
+        st = os.lstat(dest, dir_fd=dir_fd)
     except OSError:
         return
     if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
         return
     try:
-        os.chmod(staging, stat.S_IMODE(st.st_mode) & 0o777)
+        os.chmod(staging, stat.S_IMODE(st.st_mode) & 0o777, dir_fd=dir_fd)
     except OSError as e:
         logger.debug(f"Could not carry the mode of {dest} onto the staged upload: {e}")
 
 
-def _finalize_upload(staging: str, dest: str) -> None:
+def _finalize_upload(staging: str, dest: str, dir_fd: Optional[int] = None) -> None:
     """Rename a complete staged upload onto ``dest``, carrying its mode over.
+
+    With ``dir_fd`` both names are relative to one held descriptor of the
+    directory they live in, so the rename moves the object the confinement
+    opened rather than re-walking a path that could have been swapped.
 
     Raises:
         OSError: The rename failed; the staged file is left for the caller.
     """
-    _carry_destination_mode(staging, dest)
-    os.replace(staging, dest)
+    _carry_destination_mode(staging, dest, dir_fd)
+    os.replace(staging, dest, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
 
 
-def _remove_quietly(path: str) -> None:
+def _remove_quietly(path: str, dir_fd: Optional[int] = None) -> None:
     """Remove ``path``, ignoring a file that is already gone or cannot go."""
     try:
-        os.remove(path)
+        os.remove(path, dir_fd=dir_fd)
     except OSError:
         pass
+
+
+class FileRootEscape(Exception):
+    """A component of a file-manager path resolved outside the root while the
+    descriptor walk was following it.
+
+    The refusal the resolved string path gives statically, raised for the one
+    case that path cannot see: a symlink planted or swapped into the name
+    space between the path's validation and the act on it. The walk verified
+    where each open landed from the descriptor itself and refused to hand the
+    caller an object the confinement never saw."""
 
 
 def _ipv6_loopback_redirect(request: web.Request, path: str) -> Optional[str]:
@@ -2557,13 +2581,17 @@ class CentralizedStreamServer:
             entries.append([ws, state, state["seq"]])
         return UplinkGauge(entries) if entries else None
 
-    async def _stream_upload_body(self, request: web.Request, path: str, append: bool) -> int:
-        """Stream a request body to ``path``, opening, writing, and closing it
-        on the executor.
+    async def _stream_upload_body(
+            self, request: web.Request, leaf: str, dir_fd: int, append: bool) -> int:
+        """Stream a request body into the file `leaf` names in the open
+        directory `dir_fd`, opening, writing, and closing it on the executor.
 
         Creates the file when ``append`` is False, refusing one that already
-        exists, and appends when True; O_NOFOLLOW blocks a planted symlink
-        either way. Enforces the declared Content-Length.
+        exists, and appends when True. `O_NOFOLLOW` blocks a symlink planted
+        over the leaf's name, and no component above it is re-walked by name:
+        the `dir_fd` is the descriptor the path confinement opened, so a
+        symlink swapped in over an intermediate component cannot redirect the
+        write outside the root. Enforces the declared Content-Length.
 
         Reads pace against two allowances: a paused read fills aiohttp's
         flow-control buffer, the TCP window closes, and the client's uplink is
@@ -2578,6 +2606,12 @@ class CentralizedStreamServer:
         session it protected is gone. A gauged transfer's reads are sized to
         the current rate (`_gauged_chunk_size`), since the read size is what
         the client is handed back as receive window and sends at once.
+
+        Args:
+            request: The upload request whose body is streamed.
+            leaf: The staging file's name in the directory `dir_fd` opens.
+            dir_fd: The held descriptor of the destination's directory.
+            append: Append to the file instead of creating it.
 
         Returns:
             The byte count written.
@@ -2594,7 +2628,8 @@ class CentralizedStreamServer:
             if (declared or 0) >= TRANSFER_MIN_GAUGED_BYTES
             else None)
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | (os.O_APPEND if append else os.O_EXCL)
-        fh = await loop.run_in_executor(None, lambda: os.fdopen(os.open(path, flags, 0o644), "wb"))
+        fh = await loop.run_in_executor(
+            None, lambda: os.fdopen(os.open(leaf, flags, 0o644, dir_fd=dir_fd), "wb"))
         written = 0
         try:
             while True:
@@ -2659,8 +2694,9 @@ class CentralizedStreamServer:
         destination, so its finalize and its discards stay synchronous to keep
         the rename and the entry's removal atomic against a restart on the same
         path; each is a once-per-transfer cost, not a per-slice one. Path safety
-        mirrors the data-channel path: no traversal outside the root, and
-        O_NOFOLLOW blocks a planted symlink.
+        mirrors the data-channel path: no traversal outside the root, and the
+        write lands in a directory descriptor the confinement walked and
+        verified, with `O_NOFOLLOW` on the staging leaf itself.
 
         Two request shapes share the endpoint:
 
@@ -2706,145 +2742,270 @@ class CentralizedStreamServer:
         if not root:
             return failed("uploads disabled", 403)
         root = os.path.expanduser(root)
-        sane = os.path.normpath(rel.strip("/\\"))
-        parts = [c for c in sane.split(os.sep) if c and c != "."]
-        if not parts or ".." in parts:
+        parts = self._file_parts(rel)
+        if not parts:
             return failed("invalid upload path")
         dest = os.path.join(root, *parts)
         name = "/".join(parts)
-        real_root, parent = await asyncio.to_thread(
-            lambda: (os.path.realpath(root), os.path.realpath(os.path.dirname(dest))))
-        try:
-            within = os.path.commonpath([real_root, parent]) == real_root
-        except ValueError:
-            within = False
-        if not within:
-            return failed("path escape rejected")
-        try:
-            await asyncio.to_thread(os.makedirs, parent, exist_ok=True)
-        except OSError as e:
-            return failed(f"mkdir failed: {e}", 500)
 
         upload_id = request.headers.get("X-Upload-Id")
         offset_header = request.headers.get("X-Upload-Offset")
         if (upload_id is None) != (offset_header is None):
             return failed("X-Upload-Id and X-Upload-Offset must be sent together")
 
-        if upload_id is None:
-            staging = _upload_staging_path(dest)
+        total = -1
+        if upload_id is not None:
             try:
-                written = await self._stream_upload_body(request, staging, append=False)
-            except Exception as e:
-                await asyncio.to_thread(_remove_quietly, staging)
-                return failed(str(e))
-            try:
-                await asyncio.to_thread(_finalize_upload, staging, dest)
-            except OSError as e:
-                await asyncio.to_thread(_remove_quietly, staging)
-                return failed(f"finalize failed: {e}", 500)
-            logger.info(f"HTTP upload finished: {dest} ({written} bytes)")
-            audit.emit("file.upload.end", filename=name, size_bytes=written)
-            return web.json_response({"status": "success", "bytes": written})
+                offset = int(offset_header or "")
+                total = int(request.headers["X-Upload-Total"]) if "X-Upload-Total" in request.headers else -1
+            except ValueError:
+                return failed("malformed chunk headers")
+            if offset < 0 or ("X-Upload-Total" in request.headers and total < 0):
+                return failed("malformed chunk headers")
 
+        # The write lands in a directory held open by the confinement
+        # (`_open_dir_fd`): every component down to it was opened relative to
+        # the one before and verified from the descriptor it opened to, so a
+        # symlink planted over an intermediate name after the request's path
+        # was validated cannot redirect the body or the final rename outside
+        # the root, and `O_NOFOLLOW` on the staging leaf does the same for the
+        # file itself.
         try:
-            offset = int(offset_header or "")
-            total = int(request.headers["X-Upload-Total"]) if "X-Upload-Total" in request.headers else -1
-        except ValueError:
-            return failed("malformed chunk headers")
-        if offset < 0 or ("X-Upload-Total" in request.headers and total < 0):
-            return failed("malformed chunk headers")
-        final = request.headers.get("X-Upload-Final") == "1"
+            parent_fd = await asyncio.to_thread(self._open_dir_fd, parts[:-1], True)
+        except FileRootEscape:
+            return failed("path escape rejected")
+        except OSError as e:
+            return failed(f"mkdir failed: {e}", 500)
+        try:
+            if upload_id is None:
+                staging = _staging_leaf_name()
+                try:
+                    written = await self._stream_upload_body(
+                        request, staging, parent_fd, append=False)
+                except Exception as e:
+                    await asyncio.to_thread(_remove_quietly, staging, parent_fd)
+                    return failed(str(e))
+                try:
+                    await asyncio.to_thread(_finalize_upload, staging, parts[-1], parent_fd)
+                except OSError as e:
+                    await asyncio.to_thread(_remove_quietly, staging, parent_fd)
+                    return failed(f"finalize failed: {e}", 500)
+                logger.info(f"HTTP upload finished: {dest} ({written} bytes)")
+                audit.emit("file.upload.end", filename=name, size_bytes=written)
+                return web.json_response({"status": "success", "bytes": written})
 
-        self._expire_stale_chunked_uploads()
-
-        state = self._chunked_uploads.get(dest)
-        if offset == 0:
-            if state is not None and state["busy"]:
-                return web.json_response(
-                    {"status": "error", "message": "another chunk for this path is in flight"},
-                    status=409,
-                )
-            if state is not None:
-                self._discard_chunked_upload(dest, state["part"])
-            state = {"id": upload_id, "offset": 0, "ts": time.monotonic(),
-                     "part": _upload_staging_path(dest), "busy": False}
-            self._chunked_uploads[dest] = state
-        else:
-            if state is not None and state["busy"]:
-                # Never discard here: the in-flight writer owns the .part.
-                return web.json_response(
-                    {"status": "error", "message": "another chunk for this path is in flight"},
-                    status=409,
-                )
-            try:
-                part_size = os.path.getsize(state["part"]) if state is not None else -1
-            except OSError:
-                part_size = -1
-            if (state is None or state["id"] != upload_id
-                    or state["offset"] != offset or part_size != offset):
+            self._expire_stale_chunked_uploads()
+            final = request.headers.get("X-Upload-Final") == "1"
+            state = self._chunked_uploads.get(dest)
+            if offset == 0:
+                if state is not None and state["busy"]:
+                    return web.json_response(
+                        {"status": "error", "message": "another chunk for this path is in flight"},
+                        status=409,
+                    )
                 if state is not None:
                     self._discard_chunked_upload(dest, state["part"])
-                return failed(f"chunk sequence mismatch at offset {offset}; transfer discarded", 409)
-        part_path = state["part"]
+                state = {"id": upload_id, "offset": 0, "ts": time.monotonic(),
+                         "part": _upload_staging_path(dest), "busy": False}
+                self._chunked_uploads[dest] = state
+            else:
+                if state is not None and state["busy"]:
+                    # Never discard here: the in-flight writer owns the .part.
+                    return web.json_response(
+                        {"status": "error", "message": "another chunk for this path is in flight"},
+                        status=409,
+                    )
+                try:
+                    part_size = os.path.getsize(state["part"]) if state is not None else -1
+                except OSError:
+                    part_size = -1
+                if (state is None or state["id"] != upload_id
+                        or state["offset"] != offset or part_size != offset):
+                    if state is not None:
+                        self._discard_chunked_upload(dest, state["part"])
+                    return failed(f"chunk sequence mismatch at offset {offset}; transfer discarded", 409)
+            part_path = state["part"]
+            part_leaf = os.path.basename(part_path)
 
-        # Claimed before the body's awaits so a slice for this path that arrives
-        # meanwhile is refused, not interleaved onto the shared .part.
-        state["busy"] = True
-        try:
-            written = await self._stream_upload_body(request, part_path, append=offset > 0)
-        except Exception as e:
-            self._discard_chunked_upload(dest, part_path)
-            return failed(str(e))
-        state["busy"] = False
-        state["offset"] = offset + written
-        state["ts"] = time.monotonic()
+            # Claimed before the body's awaits so a slice for this path that arrives
+            # meanwhile is refused, not interleaved onto the shared .part.
+            state["busy"] = True
+            try:
+                written = await self._stream_upload_body(
+                    request, part_leaf, parent_fd, append=offset > 0)
+            except Exception as e:
+                self._discard_chunked_upload(dest, part_path)
+                return failed(str(e))
+            state["busy"] = False
+            state["offset"] = offset + written
+            state["ts"] = time.monotonic()
 
-        if not final:
-            return web.json_response({"status": "success", "bytes": state["offset"], "complete": False})
+            if not final:
+                return web.json_response({"status": "success", "bytes": state["offset"], "complete": False})
 
-        received = state["offset"]
-        if total >= 0 and received != total:
-            self._discard_chunked_upload(dest, part_path)
-            return failed(f"size mismatch: received {received}, expected {total}")
-        # Synchronous, like the removal: a transfer is tracked by its destination,
-        # so a restart on the same path cannot run between the rename and the entry's removal.
-        try:
-            _finalize_upload(part_path, dest)
-        except OSError as e:
-            self._discard_chunked_upload(dest, part_path)
-            return failed(f"finalize failed: {e}", 500)
-        self._chunked_uploads.pop(dest, None)
-        logger.info(f"HTTP chunked upload finished: {dest} ({received} bytes)")
-        audit.emit("file.upload.end", filename=name, size_bytes=received)
-        return web.json_response({"status": "success", "bytes": received, "complete": True})
+            received = state["offset"]
+            if total >= 0 and received != total:
+                self._discard_chunked_upload(dest, part_path)
+                return failed(f"size mismatch: received {received}, expected {total}")
+            # Synchronous, like the removal: a transfer is tracked by its destination,
+            # so a restart on the same path cannot run between the rename and the entry's removal.
+            try:
+                _finalize_upload(part_leaf, parts[-1], parent_fd)
+            except OSError as e:
+                self._discard_chunked_upload(dest, part_path)
+                return failed(f"finalize failed: {e}", 500)
+            self._chunked_uploads.pop(dest, None)
+            logger.info(f"HTTP chunked upload finished: {dest} ({received} bytes)")
+            audit.emit("file.upload.end", filename=name, size_bytes=received)
+            return web.json_response({"status": "success", "bytes": received, "complete": True})
+        finally:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _file_parts(rel: str) -> Optional[List[str]]:
+        """Split a root-relative path into its name components, or None when
+        it escapes the root. Empty and ``.`` components are dropped, and a
+        ``..`` surviving the normalization is the escape; a path that
+        normalizes to nothing is no components, which is the root itself."""
+        rel = rel.strip("/\\")
+        parts = [c for c in os.path.normpath(rel).split(os.sep) if c and c != "."]
+        if rel and ".." in parts:
+            return None
+        return parts
 
     def _resolve_file_path(self, rel: str) -> Optional[str]:
         """Resolve a root-relative path to a filesystem path at or under the
         file-manager directory. Returns None when the path escapes the root. An
         empty path resolves to the root itself, which browse may name and mkdir
-        refuses through `_at_file_root`."""
-        rel = rel.strip("/\\")
-        parts = [c for c in os.path.normpath(rel).split(os.sep) if c and c != "."]
-        if rel and ".." in parts:
+        refuses through `_at_file_root`.
+
+        The confinement is the `realpath`-then-prefix comparison the static
+        path checker recognizes, the prefix suffixed with the separator and
+        the root itself allowed, so a sibling whose name extends the root's is
+        not read as inside it. The endpoints that act rather than list do not
+        act on the returned string: they open the directory through
+        `_open_dir_fd` and `_open_resolved_fd`, whose descriptor holds the
+        object this check validated."""
+        parts = self._file_parts(rel)
+        if parts is None:
             return None
         base = str(self.upload_dir)
         if not parts:
             return base
         parent = os.path.realpath(os.path.join(base, *parts[:-1]))
         full = os.path.join(parent, parts[-1])
-        try:
-            if os.path.commonpath([base, parent]) != base:
-                return None
-        except ValueError:
-            return None
         # After following in-directory symlinks the entry must still sit at or
         # under the root; a leaf symlink out of the tree is refused too.
-        try:
-            if os.path.commonpath([base, os.path.realpath(full)]) != base:
+        for resolved in (parent, os.path.realpath(full)):
+            if resolved != base and not resolved.startswith(base + os.sep):
                 return None
-        except ValueError:
-            return None
         return full
+
+    def _open_dir_fd(self, parts: List[str], create: bool = False) -> int:
+        """Open the directory `parts` names under the file-manager root as a
+        file descriptor, descending one component per `os.open`, each named
+        relative to the descriptor before it and verified from the descriptor
+        it opened to rather than by the name it went in under.
+
+        A symlinked component is followed the way the resolved string path
+        followed it, and what makes that safe where the string was not is the
+        verification: `/proc/self/fd` names where each open really landed, the
+        kernel's own record of the object, which a name swapped after the open
+        cannot change. A component that resolves outside the root — planted
+        before the walk or in the instant of it — ends the walk with
+        `FileRootEscape` instead of handing the caller an object to act
+        outside with. With `create`, a missing component is made in place
+        first, the way `os.makedirs` made the parents of an upload or a new
+        folder; what the walk itself created is inside the descriptor it came
+        from, so it needs no verification. POSIX only: `dir_fd` does not exist
+        on Windows, and neither does this server.
+
+        Args:
+            parts: Name components under the root; empty names the root.
+            create: Make a missing intermediate directory.
+
+        Returns:
+            A descriptor for the directory, the caller's to close.
+
+        Raises:
+            FileRootEscape: A component resolved outside the root.
+            OSError: A component is missing or is not a directory.
+        """
+        base = str(self.upload_dir)
+        fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in parts:
+                if part in ("", ".", "..") or os.sep in part or (
+                        os.altsep and os.altsep in part):
+                    raise ValueError(f"not a name component: {part!r}")
+                try:
+                    opened = os.open(part, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    os.mkdir(part, dir_fd=fd)
+                    opened = os.open(part, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+                try:
+                    resolved = os.readlink(f"/proc/self/fd/{opened}")
+                except OSError:
+                    resolved = ""
+                if resolved != base and not resolved.startswith(base + os.sep):
+                    os.close(opened)
+                    raise FileRootEscape(part)
+                os.close(fd)
+                fd = opened
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def _open_resolved_fd(self, parts: List[str]) -> Optional[Tuple[int, str]]:
+        """Open the filesystem entry `parts` names under the file-manager root
+        as a file descriptor, and return it with the canonical path it opened
+        to, or None when that sits outside the root.
+
+        The walk to the leaf verifies every intermediate component from the
+        descriptor it opened (`_open_dir_fd`); the leaf itself is opened
+        following symlinks and verified the same way, so an in-tree link to
+        another directory in the tree stays listable the way the resolved
+        string path allowed it while one resolving outside is refused. The
+        verification reads `/proc/self/fd`, the kernel's own record of where
+        the open landed, which a name swapped after the open cannot change:
+        the caller acts on the verified object through the descriptor, never
+        on a name that could have been swapped since.
+
+        Args:
+            parts: Name components under the root; empty names the root.
+
+        Returns:
+            The descriptor, the caller's to close, and its canonical path, or
+            None when the entry resolved outside the root.
+        """
+        try:
+            fd = self._open_dir_fd(parts[:-1])
+        except FileRootEscape:
+            return None
+        try:
+            if parts:
+                opened = os.open(parts[-1], os.O_RDONLY, dir_fd=fd)
+                os.close(fd)
+                fd = opened
+        except BaseException:
+            os.close(fd)
+            raise
+        try:
+            resolved = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            os.close(fd)
+            return None
+        base = str(self.upload_dir)
+        if resolved != base and not resolved.startswith(base + os.sep):
+            os.close(fd)
+            return None
+        return fd, resolved
 
     def _at_file_root(self, target: str) -> bool:
         """Whether `target` is the file-manager directory itself rather than an entry within it.
@@ -2879,26 +3040,51 @@ class CentralizedStreamServer:
             return None
         return data if isinstance(data, dict) else None
 
-    @staticmethod
-    def _browse_entries(target: str, rel: str) -> List[Dict[str, Any]]:
-        """Stat a directory into JSON listing entries. Runs on the executor so a
-        huge directory cannot stall the event loop that is streaming frames."""
-        entries: List[Dict[str, Any]] = []
-        with os.scandir(target) as it:
-            for entry in it:
-                try:
-                    st = entry.stat()
-                    is_dir = entry.is_dir()
-                except OSError:
-                    continue
-                rel_name = f"{rel}/{entry.name}".strip("/") if rel else entry.name
-                entries.append({
-                    "name": entry.name,
-                    "path": rel_name,
-                    "is_dir": is_dir,
-                    "size": None if is_dir else st.st_size,
-                    "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(),
-                })
+    def _browse_dir(self, parts: List[str], rel: str) -> Optional[List[Dict[str, Any]]]:
+        """Open the directory the request names and stat it into JSON entries.
+
+        Returns None when the entry resolved outside the root at open time,
+        the race-only spelling of the refusal `_resolve_file_path` gives
+        statically; a non-directory raises `NotADirectoryError`, which the
+        handler answers like the missing case. The listing reads the pinned
+        directory through its `/proc/self/fd` path — the descriptor the
+        confinement opened, not a name that could have been swapped since the
+        path was validated. Runs on the executor so a huge directory cannot
+        stall the event loop that is streaming frames.
+
+        Args:
+            parts: Name components under the root; empty names the root.
+            rel: The root-relative spelling the request used, for the entries'
+                `path` fields.
+
+        Returns:
+            The entries, or None when the open landed outside the root.
+        """
+        opened = self._open_resolved_fd(parts)
+        if opened is None:
+            return None
+        dir_fd, _ = opened
+        try:
+            if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
+                raise NotADirectoryError(errno.ENOTDIR)
+            entries: List[Dict[str, Any]] = []
+            with os.scandir(f"/proc/self/fd/{dir_fd}") as it:
+                for entry in it:
+                    try:
+                        st = entry.stat()
+                        is_dir = entry.is_dir()
+                    except OSError:
+                        continue
+                    rel_name = f"{rel}/{entry.name}".strip("/") if rel else entry.name
+                    entries.append({
+                        "name": entry.name,
+                        "path": rel_name,
+                        "is_dir": is_dir,
+                        "size": None if is_dir else st.st_size,
+                        "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(),
+                    })
+        finally:
+            os.close(dir_fd)
         entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
         return entries
 
@@ -2906,24 +3092,42 @@ class CentralizedStreamServer:
         """JSON directory listing for the shared file manager. The listing is
         read-only, but it carries both gates of the HTML index: the download
         permission, and the viewer ceiling, since a viewer watches the desktop
-        and never reaches the files on it."""
+        and never reaches the files on it.
+
+        The listing reads the descriptor the confinement opened
+        (`_open_resolved_fd`), never a path re-walked after the check, so a
+        symlink swapped in after the path was validated cannot turn the
+        listing into one of a directory outside the root."""
         if self._viewer_ceiling(request):
             return web.json_response({"status": "error", "message": "View-only credentials cannot list files"}, status=403)
         if "download" not in self.settings.file_transfers:
             return web.json_response({"status": "error", "message": "downloads disabled"}, status=403)
-        target = self._resolve_file_path(request.query.get("path", ""))
-        if target is None:
+        rel_query = request.query.get("path", "")
+        if self._resolve_file_path(rel_query) is None:
             return web.json_response({"status": "error", "message": "invalid path"}, status=400)
-        if not os.path.isdir(target):
-            return web.json_response({"status": "error", "message": "not a directory"}, status=404)
-        rel = request.query.get("path", "").strip("/\\")
+        rel = rel_query.strip("/\\")
         try:
-            entries = await asyncio.to_thread(self._browse_entries, target, rel)
+            entries = await asyncio.to_thread(
+                self._browse_dir, self._file_parts(rel_query) or [], rel)
+        except (FileNotFoundError, NotADirectoryError):
+            return web.json_response({"status": "error", "message": "not a directory"}, status=404)
         except PermissionError:
             return web.json_response({"status": "error", "message": "permission denied"}, status=403)
+        if entries is None:
+            return web.json_response({"status": "error", "message": "invalid path"}, status=400)
         return web.json_response({"status": "ok", "path": rel, "entries": entries})
 
     async def handle_files_mkdir(self, request: web.Request) -> web.Response:
+        """POST /api/files/_mkdir: create a directory in the shared file
+        manager. Refused for view-only credentials and where uploads are
+        disabled, for a path that escapes the root, and for every spelling of
+        the root itself, which nothing the manager offers has a use for: a
+        directory is only ever created inside another.
+
+        The directory is made inside a descriptor of its parent that the
+        confinement walked (`_open_dir_fd`), so a symlink planted over an
+        intermediate name after the path was validated cannot move the
+        creation outside the root."""
         refused = self._viewer_or_disabled_files(request)
         if refused:
             return web.json_response({"status": "error", "message": refused}, status=403)
@@ -2936,8 +3140,21 @@ class CentralizedStreamServer:
             return web.json_response({"status": "error", "message": "invalid path"}, status=400)
         if os.path.lexists(target):
             return web.json_response({"status": "error", "message": "already exists"}, status=409)
+        parts = self._file_parts(rel) or []
+
+        def make() -> None:
+            parent_fd = self._open_dir_fd(parts[:-1], create=True)
+            try:
+                os.mkdir(parts[-1], dir_fd=parent_fd)
+            finally:
+                os.close(parent_fd)
+
         try:
-            await asyncio.to_thread(os.makedirs, target, exist_ok=True)
+            await asyncio.to_thread(make)
+        except FileRootEscape:
+            return web.json_response({"status": "error", "message": "invalid path"}, status=400)
+        except FileExistsError:
+            return web.json_response({"status": "error", "message": "already exists"}, status=409)
         except OSError as e:
             return web.json_response({"status": "error", "message": str(e)}, status=500)
         audit.emit("file.mkdir", filename=rel)
@@ -3063,7 +3280,7 @@ class CentralizedStreamServer:
         if os.path.isabs(name):
             return None
         target = os.path.realpath(os.path.join(base, name))
-        if target == base or os.path.commonpath([base, target]) != base:
+        if not target.startswith(base + os.sep):
             return None
         return target
 
@@ -3416,6 +3633,12 @@ class CentralizedStreamServer:
         (`ARCHIVE_PACK_POOL`), so concurrent requests queue for it rather
         than each staging a full copy.
 
+        The folder is opened through the confinement's descriptor
+        (`_open_resolved_fd`) and both the bounds walk and the pack read it
+        through the descriptor's `/proc/self/fd` path, so they see the object
+        the check opened rather than a name a symlink planted between the two
+        could have swapped.
+
         The archive rides the same pacing the file download does
         (`_serve_paced_download`), so a folder the size of a video directory
         still backs off with the session's delay instead of taking whatever the
@@ -3435,23 +3658,37 @@ class CentralizedStreamServer:
             return web.json_response({"status": "error", "message": "not found"}, status=404)
         if "Range" in request.headers:
             return web.Response(status=405, headers={"Allow": "GET"})
-        total, count = await asyncio.to_thread(
-            self._archive_source_bounds, pathlib.Path(target))
-        if total > ARCHIVE_MAX_SOURCE_BYTES or count > ARCHIVE_MAX_ENTRIES:
-            return web.json_response(
-                {"status": "error",
-                 "message": "the folder holds too much to pack as one archive"},
-                status=413)
-        staged, _ = await asyncio.get_running_loop().run_in_executor(
-            ARCHIVE_PACK_POOL, self._build_directory_archive, pathlib.Path(target))
-        name = os.path.basename(os.path.normpath(target))
+        opened = await asyncio.to_thread(
+            self._open_resolved_fd, self._file_parts(rel) or [])
+        if opened is None:
+            return web.json_response({"status": "error", "message": "not found"}, status=404)
+        dir_fd, _ = opened
+        staged: Optional[str] = None
         try:
+            if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
+                return web.json_response({"status": "error", "message": "not found"}, status=404)
+            # The bounds walk and the pack both see the directory the
+            # descriptor pinned, through its `/proc/self/fd` path: a symlink
+            # swapped over the requested name after the check cannot point
+            # either one at a directory outside the root.
+            pinned = pathlib.Path(f"/proc/self/fd/{dir_fd}")
+            total, count = await asyncio.to_thread(self._archive_source_bounds, pinned)
+            if total > ARCHIVE_MAX_SOURCE_BYTES or count > ARCHIVE_MAX_ENTRIES:
+                return web.json_response(
+                    {"status": "error",
+                     "message": "the folder holds too much to pack as one archive"},
+                    status=413)
+            staged, _ = await asyncio.get_running_loop().run_in_executor(
+                ARCHIVE_PACK_POOL, self._build_directory_archive, pinned)
+            name = os.path.basename(os.path.normpath(rel))
             return await self._serve_paced_download(
                 request, pathlib.Path(staged),
                 audit_name=rel, download_name=f"{name}.zip",
                 allow_fallback=False)
         finally:
-            await asyncio.to_thread(os.remove, staged)
+            if staged is not None:
+                await asyncio.to_thread(os.remove, staged)
+            await asyncio.to_thread(os.close, dir_fd)
 
     async def fancy_index_handler(self, request: web.Request) -> web.StreamResponse:
         """GET /api/files/...: serve the file-manager tree for download.
@@ -3482,20 +3719,17 @@ class CentralizedStreamServer:
             # here is the catch-all speaking for a name that is not a file.
             return web.Response(status=405, headers={"Allow": "GET"})
         base = str(self.upload_dir)
-        parts = [c for c in os.path.normpath(rel_path).split(os.sep) if c and c != "."]
-        if ".." in parts:
+        parts = self._file_parts(rel_path)
+        if parts is None:
             return web.Response(
                 status=403, text="Forbidden: Directory Traversal detected"
             )
-        full_path = pathlib.Path(os.path.realpath(os.path.join(base, *parts)))
-        try:
-            within = os.path.commonpath([base, str(full_path)]) == base
-        except ValueError:
-            within = False
-        if not within:
+        resolved = os.path.realpath(os.path.join(base, *parts))
+        if resolved != base and not resolved.startswith(base + os.sep):
             return web.Response(
                 status=403, text="Forbidden: Directory Traversal detected"
             )
+        full_path = pathlib.Path(resolved)
 
         if not full_path.exists():
             return web.Response(status=404, text="Not Found")
