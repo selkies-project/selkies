@@ -7,12 +7,13 @@ AppImage is assembled from, the capture-stack wheels that belong to their own
 projects' releases, the empty digest files a manifest merge passes between jobs
 -- lands beside the deliverables unless the collect step drops it. This runs
 that step over a tree holding one of each and reads back what a user would see
-on the release page.
+on the release page, with the SHA-256 sums the step lists them under.
 
 Drives the step lifted out of the workflow; no network, no runner.
 
 Usage: python3 tests/unit/test_release_assets.py
 """
+import hashlib
 import os
 import subprocess
 import sys
@@ -67,19 +68,27 @@ def collect_step() -> str:
     return "\n".join(body)
 
 
-def released(names) -> set:
-    """The file names the collect step leaves for the release, given `names`."""
+def released(names):
+    """The file names the collect step leaves for the release, given `names`, each holding
+    its own name, and the SHA-256 sums it lists, by name."""
     with tempfile.TemporaryDirectory() as work:
         arts = os.path.join(work, "release-artifacts", "one-job")
         os.makedirs(arts)
         for name in names:
-            open(os.path.join(arts, name), "w").close()
+            with open(os.path.join(arts, name), "w") as f:
+                f.write(name)
         proc = subprocess.run(["bash", "-c", STEP], cwd=work,
                               capture_output=True, text=True, timeout=60)
         if proc.returncode != 0:
             check("the collect step runs", False, proc.stderr[-200:])
-            return set()
-        return set(os.listdir(os.path.join(work, "release")))
+            return set(), {}
+        release = os.path.join(work, "release")
+        sums = {}
+        if os.path.exists(os.path.join(release, SUMS)):
+            for line in open(os.path.join(release, SUMS)):
+                digest, _, name = line.rstrip("\n").partition("  ")
+                sums[name] = digest
+        return set(os.listdir(release)), sums
 
 
 try:
@@ -91,14 +100,20 @@ if not STEP.strip():
     print(f"[release-assets] {passed}/{passed + failed} passed")
     sys.exit(1)
 
+SUMS = "SHA256SUMS"
 delivered = {name for _, name in DELIVERED}
-on_release = released(delivered | {name for _, name in WITHHELD})
+on_release, sums = released(delivered | {name for _, name in WITHHELD})
 for label, name in DELIVERED:
     check(f"a release carries {label}", name in on_release, name)
 for label, name in WITHHELD:
     check(f"a release withholds {label}", name not in on_release, name)
-check("nothing else reaches the release", on_release == delivered,
-      str(sorted(on_release - delivered)))
+check("a release carries its files' SHA-256 sums", SUMS in on_release)
+check("the sums list every file delivered and nothing else", set(sums) == delivered,
+      str(sorted(set(sums) ^ delivered)))
+check("each sum is its file's", all(
+    sums.get(name) == hashlib.sha256(name.encode()).hexdigest() for name in delivered))
+check("nothing else reaches the release", on_release == delivered | {SUMS},
+      str(sorted(on_release - delivered - {SUMS})))
 
 print(f"[release-assets] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

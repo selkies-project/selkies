@@ -73,6 +73,8 @@ UPLOAD_STAGING_PREFIX: str = ".selkies-upload-"
 # own default (3630 s) is set to outlast a reverse proxy's pooled connections,
 # but lets a peer that connects and sends nothing hold a file descriptor for an
 # hour; 75 s is run_app's value and stays above nginx's 60 s upstream timeout.
+# aiohttp before 3.14 (3.13.5, the floor on Python 3.9) arms the timer only
+# after a response, so there it closes only a connection idle after one.
 IDLE_CONNECTION_TIMEOUT_SECONDS: float = 75.0
 
 
