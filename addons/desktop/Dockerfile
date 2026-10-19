@@ -236,7 +236,9 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
 # restrict ptrace (set below as real root); it is kept apart because a file
 # capability the container's bounding set does not hold stops that binary from
 # execing at all, and the wrapper picks whichever of the two runs.
-RUN --mount=type=secret,id=github_token mkdir -pm755 /opt/proot-apps && \
+# The release is checked against its digest, looked up with the build's token
+# where one is given (mounted for uid 1000, which these layers run as).
+RUN --mount=type=secret,id=github_token,uid=1000 mkdir -pm755 /opt/proot-apps && \
     PAPPS_RELEASE="$(fetch-verified release linuxserver/proot-apps latest \
         "proot-apps-$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/aarch64/').tar.gz" /tmp/proot-apps.tar.gz)" && \
     tar -xzf /tmp/proot-apps.tar.gz -C /opt/proot-apps/ && rm -f /tmp/proot-apps.tar.gz && \
