@@ -5,12 +5,13 @@ Firefox and WebKit raise a paste prompt on every `navigator.clipboard.read()`
 or `readText()` outside a paste gesture, and Firefox's prompt swallows the
 next clicks and blocks tools that type into the page; the only silent read
 there is the `paste` event's own data. Chromium reads on focus once the
-permission is granted. The async read API is counted on each engine across
-the moments the client syncs the clipboard: load, focus, a Ctrl+V chord with
-nothing on the clipboard, and one with text on it, which is a real paste. With the client-to-session direction turned off by the
-server (`enable_clipboard=out`), nothing reads on any engine. A selector
-names one engine, so the registry's per-engine cases each drive a third of
-the matrix.
+permission is granted, and on a Ctrl+V chord, whose V waits for that send.
+The async read API is counted on each engine across the moments the client
+syncs the clipboard: load, focus, a Ctrl+V chord with nothing on the
+clipboard, and one with text on it, which is a real paste. With the
+client-to-session direction turned off by the server
+(`enable_clipboard=out`), nothing reads on any engine. A selector names one
+engine, so the registry's per-engine cases each drive a third of the matrix.
 
 Usage: python3 tests/e2e/test_clipboard_reads.py [firefox|chromium|webkit|all]
 """
@@ -125,16 +126,17 @@ def drive(res: "H.Results", mode: str, engine: str, clipboard_in: bool) -> None:
             else:
                 res.check(f"{tag} a focus reads once the permission is granted",
                           counts["focus"] >= 1, counts)
-                res.check(f"{tag} a Ctrl+V chord and a paste event read nothing themselves",
-                          counts["chord"] == 0 and counts["paste"] == 0, counts)
-            if prompts and clipboard_in:
+                res.check(f"{tag} a Ctrl+V chord reads the clipboard itself",
+                          counts["chord"] >= 1 and counts["paste"] >= 1, counts)
+            if clipboard_in:
                 sent = page.evaluate("(window.__wireSent || []).filter(d => typeof d === 'string' "
                                      "&& d.startsWith('cw')).length")
                 policy = page.evaluate("[window.clipboard_enabled, document.activeElement && document.activeElement.id]")
-                res.check(f"{tag} a paste event still reaches the session", sent > 0,
+                res.check(f"{tag} the pasted text reaches the session", sent > 0,
                           f"sent={sent} policy/active={policy}")
-                # The paste event comes after its chord's keydown, so the session
-                # would paste before the content arrived; and the text the event
+                # The content is read after its chord's keydown (by the paste
+                # event, or by the keydown's own read in Chromium), so an unheld V
+                # would paste before it arrived; and the text a paste event
                 # inserts into the stream's input must not be typed as well.
                 tail = page.evaluate("(window.__wireSent || []).slice(window.__pasteMark || 0)")
                 write_at = next((i for i, d in enumerate(tail) if d.startswith("cw")), None)

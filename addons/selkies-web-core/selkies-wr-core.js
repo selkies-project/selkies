@@ -2810,6 +2810,7 @@ export default function webrtc() {
 		getSendInFlight: () => localClipboardSender.getSendInFlight(),
 		getDeferredWriteLanding: () => deferredClipboardWriter.getLanding(),
 		hasPendingServerWrite: () => deferredClipboardWriter.hasPending(),
+		readLocalClipboard: readLocalClipboardAndSend,
 	});
 
 	/**

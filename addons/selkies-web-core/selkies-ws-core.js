@@ -6286,7 +6286,7 @@ function initWebsockets() {
   const maybeSendInitialClipboard = () => localClipboardSender.maybeInitial();
 
   // Firefox and WebKit raise a paste prompt on every focus read, so only
-  // Chromium reads on focus; the others read on the paste gestures.
+  // Chromium reads on focus; every engine also reads on the paste gestures.
   if (isChromium) {
     window.addEventListener('focus', () => { readLocalClipboardAndSend(); });
   }
@@ -6303,6 +6303,7 @@ function initWebsockets() {
     getSendInFlight: () => localClipboardSender.getSendInFlight(),
     getDeferredWriteLanding: () => deferredClipboardWriter.getLanding(),
     hasPendingServerWrite: () => deferredClipboardWriter.hasPending(),
+    readLocalClipboard: readLocalClipboardAndSend,
   });
   clipboardGestures.wire();
 

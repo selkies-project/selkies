@@ -1439,7 +1439,10 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
  *   clipboard content and paste the previous value on the server. The chord's
  *   key events are swallowed, held until the send flushes (bounded), then
  *   replayed in order for the input stack; outside Chromium every chord is
- *   held for the send its own paste event starts.
+ *   held for the send its own paste event starts. In Chromium the chord
+ *   starts a read of its own and is held for it, since the clipboard can
+ *   change without the window losing focus: a copy in another tab or
+ *   from a tool outside the page leaves the focus read's value stale.
  * - Non-Chromium Ctrl/Cmd+C: Safari and Firefox reject `navigator.clipboard`
  *   from focus and message handlers, which have no transient activation, so
  *   the server clipboard is written inside the copy gesture through a
@@ -1473,6 +1476,8 @@ export function createClipboardSync({ sendRequest, digestBytes, isChromium = tru
  *     deferred writer's write whose data are complete, still landing.
  * @param {(() => boolean)=} hooks.hasPendingServerWrite Whether a session
  *     value has yet to land in the local clipboard.
+ * @param {(() => Promise<void>)=} hooks.readLocalClipboard Chromium's read
+ *     and send of the local clipboard, which a paste chord starts.
  * @returns {{wire: () => void, unwire: () => void}} Listener registration.
  */
 export function createClipboardGestures({
@@ -1486,6 +1491,7 @@ export function createClipboardGestures({
     getSendInFlight,
     getDeferredWriteLanding,
     hasPendingServerWrite,
+    readLocalClipboard,
 }) {
     function inPageFormField() {
         const ae = document.activeElement;
@@ -1500,6 +1506,8 @@ export function createClipboardGestures({
     let pasteSendInFlight = null;
     /** When the last paste event arrived. */
     let pasteSeenAt = -Infinity;
+    /** The read and send the last Chromium paste chord started. */
+    let chordReadInFlight = null;
     // How long a held chord waits for the paste event its keydown triggers,
     // which engines dispatch right after the keydown, in the same task.
     const PASTE_EVENT_WAIT_MS = 100;
@@ -1550,6 +1558,9 @@ export function createClipboardGestures({
      * session ahead of what it pastes, and the first paste of every copy would
      * paste the one before. There the keydown keeps its default action, since
      * that action is the paste.
+     *
+     * In Chromium the chord's keydown starts the read and send itself and is
+     * held for it, the counterpart of the paste event elsewhere.
      * @param {KeyboardEvent} ev
      */
     function holdPasteWhileClipboardInFlight(ev) {
@@ -1558,10 +1569,17 @@ export function createClipboardGestures({
         if (ev.code !== 'KeyV' && !modHold) return;
         const chord = (ev.ctrlKey || ev.metaKey) && !ev.altKey;
         const writeInFlight = getDeferredWriteLanding ? getDeferredWriteLanding() : null;
-        const awaitsPasteEvent = !isChromium && chord && ev.type === 'keydown' && !ev.isComposing
+        const readsClipboard = chord && ev.type === 'keydown' && !ev.isComposing
             && canSync() && canRead() && !inPageFormField();
+        const awaitsPasteEvent = !isChromium && readsClipboard;
+        if (isChromium && readsClipboard && !ev.repeat && readLocalClipboard) {
+            const read = readLocalClipboard().catch(() => {});
+            chordReadInFlight = read;
+            read.then(() => { if (chordReadInFlight === read) chordReadInFlight = null; });
+        }
         const hold = modHold || (ev.code === 'KeyV' &&
-            ((chord && (getSendInFlight() || writeInFlight || awaitsPasteEvent)) || heldPasteReplayPending));
+            ((chord && (getSendInFlight() || writeInFlight || awaitsPasteEvent || chordReadInFlight))
+                || heldPasteReplayPending));
         if (!hold) return;
         if (isChromium) ev.preventDefault();
         ev.stopImmediatePropagation();
@@ -1579,6 +1597,7 @@ export function createClipboardGestures({
                 const send = getSendInFlight();
                 if (send) inflight.push(send);
                 if (pasteSendInFlight) inflight.push(pasteSendInFlight);
+                if (chordReadInFlight) inflight.push(chordReadInFlight);
                 const dw = getDeferredWriteLanding ? getDeferredWriteLanding() : null;
                 if (dw) inflight.push(dw);
                 if (inflight.length === 0) { replayHeldPasteEvents(); return; }
