@@ -20,10 +20,10 @@
     "fumadocs-mdx": "15.4.0",
     "fumadocs-python": "^1.0.4",
     "fumadocs-ui": "npm:@fumadocs/base-ui@16.16.2",
-    "lucide-react": "^1.55.0",
-    "next": "16.4.0",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
+    "lucide-react": "^1.57.0",
+    "next": "16.4.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "rehype-raw": "^7.0.0",
     "shiki": "^4.4.3"
   },
@@ -33,10 +33,10 @@
     "@types/node": "^26.6.5",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
-    "postcss": "^8.5.29",
+    "postcss": "^8.5.30",
     "tailwindcss": "^4.3.3",
     "typedoc": "^0.28.20",
-    "typedoc-plugin-markdown": "^4.13.1",
+    "typedoc-plugin-markdown": "^4.14.0",
     "typescript": "^6.0.3"
   }
 }
