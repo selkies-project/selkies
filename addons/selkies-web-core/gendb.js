@@ -4,10 +4,19 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const DB_URL = 'https://raw.githubusercontent.com/mdqinc/SDL_GameControllerDB/master/gamecontrollerdb.txt';
+// The database is curated continuously, so a build takes its branch's newest
+// commit rather than a pinned one, and checks the file it downloads against
+// the object GitHub's API names for that commit: the git blob hash (SHA-1, the
+// only hash the upstream's history carries), read over a separate request from
+// the bytes it covers.
+const DB_REPO = 'mdqinc/SDL_GameControllerDB';
+const DB_BRANCH = 'master';
+const DB_FILE = 'gamecontrollerdb.txt';
+const API = 'https://api.github.com';
 const OUTPUT_DIR = 'dist/jsdb';
 
 const VALID_MAPPINGS = new Set([
@@ -80,21 +89,45 @@ function parseSdlLine(line) {
   return null;
 }
 
+async function fetchOk(url, headers = {}) {
+  const response = await fetch(url, { headers });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
+  }
+  return response;
+}
+
+// git's object hash of a file: SHA-1 over "blob <size>\0" and the content.
+function gitBlobSha(body) {
+  return crypto.createHash('sha1').update(`blob ${body.length}\0`).update(body).digest('hex');
+}
+
 async function main() {
-  console.log(`Fetching controller DB from ${DB_URL}...`);
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  const headers = { Accept: 'application/vnd.github+json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 
   let fileContent;
+  let commit;
+  let body;
+  let blob;
   try {
-    const response = await fetch(DB_URL);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`);
-    }
-    fileContent = await response.text();
-    console.log('Successfully fetched controller DB.');
+    commit = (await (await fetchOk(`${API}/repos/${DB_REPO}/commits/${DB_BRANCH}`, headers)).json()).sha;
+    blob = (await (await fetchOk(`${API}/repos/${DB_REPO}/contents/${DB_FILE}?ref=${commit}`, headers)).json()).sha;
+    const url = `https://raw.githubusercontent.com/${DB_REPO}/${commit}/${DB_FILE}`;
+    console.log(`Fetching controller DB from ${url}...`);
+    body = Buffer.from(await (await fetchOk(url)).arrayBuffer());
   } catch (error) {
     console.error('Error fetching game controller DB:', error);
     return;
   }
+  const digest = gitBlobSha(body);
+  if (!/^[0-9a-f]{40}$/.test(String(commit)) || digest !== blob) {
+    console.error(`Controller DB at ${commit} hashes to blob ${digest}, not the ${blob} GitHub names; refusing it.`);
+    process.exitCode = 1;
+    return;
+  }
+  fileContent = body.toString('utf8');
+  console.log(`Fetched controller DB at ${commit} (blob ${blob}).`);
   
   console.log('Starting conversion...');
 
