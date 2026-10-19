@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+"""Download a file and check it against the hash its source publishes for it.
+
+The version a build takes can float (the newest release, a branch's head)
+while what arrives is still checked: against the SHA-256 GitHub records for a
+release asset, the blob hash GitHub's API names for a file at a commit, or the
+fingerprint of an OpenPGP key. A file that does not match is removed and the
+command fails.
+
+    fetch-verified release OWNER/REPO TAG ASSET OUT
+        The release asset ASSET of TAG ("latest" for the newest release), its
+        "{tag}" and "{version}" (the tag without a leading v) filled in,
+        checked against the asset's digest. Prints the tag.
+    fetch-verified file OWNER/REPO REF PATH OUT [PATH OUT ...]
+        Each PATH at REF (a branch, tag or commit, resolved to one commit for
+        every path), checked against the blob hash the API names for it.
+        Prints the commit.
+    fetch-verified key URL FINGERPRINT[,FINGERPRINT...] OUT
+        An OpenPGP public key file, armored or not, whose every primary key
+        has to be one of the fingerprints listed.
+
+A token in /run/secrets/github_token, GITHUB_TOKEN or GH_TOKEN is sent to
+GitHub's API where present, whose anonymous rate is 60 requests an hour.
+"""
+import base64
+import hashlib
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+API = "https://api.github.com"
+TRIES = 5
+
+
+def token():
+    try:
+        with open("/run/secrets/github_token") as f:
+            value = f.read().strip()
+            if value:
+                return value
+    except OSError:
+        pass
+    return os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+
+
+def get(url, api=False):
+    headers = {"User-Agent": "fetch-verified"}
+    if api:
+        headers["Accept"] = "application/vnd.github+json"
+        if token():
+            headers["Authorization"] = f"Bearer {token()}"
+    for attempt in range(1, TRIES + 1):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code < 500 and e.code not in (403, 429) or attempt == TRIES:
+                raise SystemExit(f"fetch-verified: {url}: HTTP {e.code}") from None
+            # GitHub's secondary rate limit is a 403 or 429 that may name its
+            # delay; a widening wait where it names none
+            wait = e.headers.get("Retry-After", "")
+            delay = int(wait) if wait.isdigit() else 15 * attempt if e.code in (403, 429) else 3 * attempt
+            print(f"fetch-verified: {url}: HTTP {e.code}, waiting {delay}s", file=sys.stderr)
+            time.sleep(delay)
+            continue
+        except (urllib.error.URLError, OSError) as e:
+            if attempt == TRIES:
+                raise SystemExit(f"fetch-verified: {url}: {e}") from None
+        time.sleep(3 * attempt)
+
+
+def write(out, body):
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    with open(out, "wb") as f:
+        f.write(body)
+
+
+def fail(out, message):
+    try:
+        os.remove(out)
+    except OSError:
+        pass
+    raise SystemExit(f"fetch-verified: {message}")
+
+
+def release(repo, tag, asset, out):
+    path = "latest" if tag == "latest" else f"tags/{tag}"
+    info = json.loads(get(f"{API}/repos/{repo}/releases/{path}", api=True))
+    name = asset.replace("{tag}", info["tag_name"]).replace("{version}", info["tag_name"].removeprefix("v"))
+    match = [a for a in info.get("assets", []) if a["name"] == name]
+    if not match:
+        raise SystemExit(f"fetch-verified: {repo} {info['tag_name']} has no asset {name}")
+    digest = match[0].get("digest") or ""
+    if not digest.startswith("sha256:"):
+        raise SystemExit(f"fetch-verified: {repo} {info['tag_name']} records no SHA-256 for {name}")
+    body = get(match[0]["browser_download_url"])
+    actual = hashlib.sha256(body).hexdigest()
+    if actual != digest.removeprefix("sha256:"):
+        fail(out, f"{name} of {repo} {info['tag_name']} hashes to {actual}, not the recorded {digest}")
+    write(out, body)
+    print(info["tag_name"])
+
+
+def files(repo, ref, pairs):
+    commit = json.loads(get(f"{API}/repos/{repo}/commits/{ref}", api=True))["sha"]
+    for path, out in pairs:
+        blob = json.loads(get(f"{API}/repos/{repo}/contents/{path}?ref={commit}", api=True))["sha"]
+        body = get(f"https://raw.githubusercontent.com/{repo}/{commit}/{path}")
+        actual = hashlib.sha1(b"blob %d\0" % len(body) + body).hexdigest()
+        if actual != blob:
+            fail(out, f"{path} of {repo} at {commit} hashes to blob {actual}, not the {blob} the API names")
+        write(out, body)
+    print(commit)
+
+
+def packets(data):
+    """The OpenPGP packets of `data`: (tag, body) each."""
+    i = 0
+    while i < len(data):
+        head = data[i]
+        if not head & 0x80:
+            raise ValueError("not an OpenPGP packet")
+        if head & 0x40:
+            tag, i = head & 0x3F, i + 1
+            first = data[i]
+            if first < 192:
+                length, i = first, i + 1
+            elif first < 224:
+                length, i = ((first - 192) << 8) + data[i + 1] + 192, i + 2
+            elif first == 255:
+                length, i = int.from_bytes(data[i + 1:i + 5], "big"), i + 5
+            else:
+                raise ValueError("partial lengths in a key packet")
+        else:
+            tag, kind, i = (head >> 2) & 0x0F, head & 3, i + 1
+            size = {0: 1, 1: 2, 2: 4}.get(kind)
+            if size is None:
+                raise ValueError("indeterminate length in a key packet")
+            length, i = int.from_bytes(data[i:i + size], "big"), i + size
+        yield tag, data[i:i + length]
+        i += length
+
+
+def fingerprints(data):
+    """The fingerprints of every primary key in an OpenPGP key file."""
+    if b"-----BEGIN PGP" in data:
+        lines = data.decode("ascii", "replace").splitlines()
+        start = next(n for n, line in enumerate(lines) if line.startswith("-----BEGIN PGP"))
+        body, in_headers = [], True
+        for line in lines[start + 1:]:
+            if line.startswith("-----END PGP"):
+                break
+            if in_headers:
+                in_headers = bool(line.strip())
+                continue
+            if not line.startswith("="):
+                body.append(line.strip())
+        data = base64.b64decode("".join(body))
+    found = []
+    for tag, body in packets(data):
+        if tag != 6:
+            continue
+        if body[0] == 4:
+            found.append(hashlib.sha1(b"\x99" + len(body).to_bytes(2, "big") + body).hexdigest().upper())
+        elif body[0] == 6:
+            found.append(hashlib.sha256(b"\x9b" + len(body).to_bytes(4, "big") + body).hexdigest().upper())
+        else:
+            raise ValueError(f"a version {body[0]} key")
+    return found
+
+
+def key(url, expected, out):
+    body = get(url)
+    allowed = {f.replace(" ", "").upper() for f in expected.split(",") if f.strip()}
+    try:
+        found = fingerprints(body)
+    except (ValueError, IndexError, StopIteration) as e:
+        fail(out, f"{url} is no readable OpenPGP key: {e}")
+    if not found or not set(found) <= allowed:
+        fail(out, f"{url} holds keys {', '.join(found) or 'none'}, not only {', '.join(sorted(allowed))}")
+    write(out, body)
+
+
+def main(argv):
+    if len(argv) == 6 and argv[1] == "release":
+        release(*argv[2:])
+    elif len(argv) >= 6 and argv[1] == "file" and len(argv) % 2 == 0:
+        files(argv[2], argv[3], list(zip(argv[4::2], argv[5::2])))
+    elif len(argv) == 5 and argv[1] == "key":
+        key(*argv[2:])
+    else:
+        raise SystemExit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

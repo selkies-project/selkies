@@ -178,6 +178,7 @@ jobs:
           outputs: type=image,"name=${{ env.BASE_IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: base-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push the desktop image by digest
         id: build
         uses: ./.github/actions/build-push
@@ -190,6 +191,7 @@ jobs:
           outputs: type=image,"name=${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: desktop-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Export digests
         env:
           BASE_DIGEST: ${{ steps.base.outputs.digest }}

@@ -5,7 +5,8 @@
 # pcmflux releases for this interpreter and machine. A project whose wheel is
 # already in the directory is left alone. The GitHub releases are where every
 # release is cut, so they are looked in first; a wheel they do not carry is
-# reported, for the caller to resolve from the index as its fallback.
+# reported, for the caller to resolve from the index as its fallback. A wheel
+# that does not hash to the SHA-256 its release records fails the fetch.
 # GITHUB_TOKEN, when set, authenticates the lookups.
 #
 #   fetch-release-wheels.sh <directory> [selkies release tag | latest | none]
@@ -17,10 +18,10 @@ ABI="cp$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_in
 AUTH=()
 [ -z "${GITHUB_TOKEN:-}" ] || AUTH=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
 
-release_asset() {  # <project> <tag, or latest> <asset name pattern>: the asset's URL
+release_asset() {  # <project> <tag, or latest> <asset name pattern>: the asset's URL and digest
     local api="https://api.github.com/repos/selkies-project/$1/releases"
     # shellcheck disable=SC2016  # $p is jq's, bound by --arg
-    local query='.assets[] | select(.name | test($p)) | .browser_download_url'
+    local query='.assets[] | select(.name | test($p)) | "\(.browser_download_url) \(.digest // "")"'
     if [ "$2" = "latest" ]; then
         api="${api}?per_page=5"
         query=".[] | select(.draft | not) | ${query}"
@@ -32,10 +33,16 @@ release_asset() {  # <project> <tag, or latest> <asset name pattern>: the asset'
 }
 
 fetch_wheel() {  # <project> <tag, or latest> <asset name pattern>
-    local url
+    local asset url digest
     ls "${DEST}/$1-"*.whl > /dev/null 2>&1 && return 0
-    url="$(release_asset "$@")" || return 1
+    asset="$(release_asset "$@")" || return 1
+    url="${asset% *}" digest="${asset##* }"
     curl -fsSL --retry 5 --connect-timeout 30 -o "${DEST}/${url##*/}" "${url}"
+    if [ "sha256:$(sha256sum "${DEST}/${url##*/}" | cut -d' ' -f1)" != "${digest}" ]; then
+        rm -f "${DEST}/${url##*/}"
+        echo "error: ${url##*/} does not match the SHA-256 its release records (${digest:-none})" >&2
+        exit 1
+    fi
 }
 
 mkdir -p "${DEST}"

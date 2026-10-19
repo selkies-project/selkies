@@ -282,6 +282,8 @@ jobs:
       - name: Build the AppImage (rattler-build + linuxdeploy-plugin-conda)
         env:
           SELKIES_VERSION: ${{ inputs.package_version }}
+          # For the release lookups behind the downloads' checks
+          GH_TOKEN: ${{ github.token }}
           # Left unset where the run resolves the capture stack from PyPI:
           # appimage.sh then names the projects rather than wheel paths.
           PIXELFLUX_PCMFLUX_WHEELS_DIR: ${{ inputs.capture_stack_published && '' || format('{0}/pixelflux-pcmflux-wheels', github.workspace) }}

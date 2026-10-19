@@ -294,6 +294,10 @@ RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https:
 COPY addons/base/selkies-privileged-files /usr/local/bin/selkies-privileged-files
 # ucf and ucfr for the rootless layers and sudo in the session (`ucf-fakeroot`)
 COPY addons/base/ucf-fakeroot /usr/local/bin/ucf-fakeroot
+# Downloads checked against the hash their source publishes for whatever
+# version is taken (`fetch-verified`), for this image's layers and the images
+# built on it
+COPY addons/base/fetch-verified /usr/local/bin/fetch-verified
 
 ARG DEBIAN_FRONTEND="noninteractive"
 # Configure rootless user environment for constrained conditions without escalated root privileges inside containers

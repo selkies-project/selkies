@@ -58,8 +58,21 @@ if [ -n "$need_selkies$need_xvfb" ]; then
       version=$${version##*/}
     fi
     work=$(mktemp -d)
-    curl -fsSL -o "$work/selkies-$version-$pkg" \
-      "https://github.com/selkies-project/selkies/releases/download/$version/selkies-$version-$pkg"
+    url=https://github.com/selkies-project/selkies/releases/download/$version
+    curl -fsSL -o "$work/selkies-$version-$pkg" "$url/selkies-$version-$pkg"
+    # Checked against the release's SHA256SUMS, or the digest GitHub records for
+    # the asset where the release predates that file
+    if curl -fsL -o "$work/SHA256SUMS" "$url/SHA256SUMS"; then
+      sum=$(awk -v f="selkies-$version-$pkg" '$2 == f { print $1 }' "$work/SHA256SUMS")
+    else
+      sum=$(curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/tags/$version" | tr -d ' \n' | tr ',{}' '\n\n\n' \
+        | awk -v f="\"name\":\"selkies-$version-$pkg\"" '$0 == f { hit = 1 } hit && !found && sub(/^"digest":"sha256:/, "") { sub(/"$/, ""); print; found = 1 }')
+    fi
+    if [ -z "$sum" ] || [ "$(sha256sum "$work/selkies-$version-$pkg" | cut -d' ' -f1)" != "$sum" ]; then
+      echo "selkies-$version-$pkg does not match the SHA-256 its release records ($${sum:-none})" >&2
+      rm -rf "$work"
+      exit 1
+    fi
     "$${file[@]}" "$work/selkies-$version-$pkg"
     rm -rf "$work"
   fi

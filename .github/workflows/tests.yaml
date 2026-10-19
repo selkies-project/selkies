@@ -293,14 +293,22 @@ jobs:
       - name: Install Chromium
         run: python -m playwright install --with-deps chromium
       # Release Chrome alongside it: its media stack differs from Chromium's,
-      # and E2E_CHROME is what points the suites at a system browser.
+      # and E2E_CHROME is what points the suites at a system browser. From
+      # Google's apt repository, its key checked against the fingerprint Google
+      # publishes. The entry a preinstalled Chrome added names the key its
+      # package carries, which apt refuses beside one naming another; the
+      # defaults file keeps the package from writing it back.
       - name: Install Google Chrome
         run: |
-          cd /tmp
-          curl -o google-chrome-stable.deb -fsSL "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb"
+          addons/base/fetch-verified key "https://dl.google.com/linux/linux_signing_key.pub" \
+              EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796 /tmp/google-chrome.asc
+          sudo install -Dm644 /tmp/google-chrome.asc /etc/apt/keyrings/google-chrome.asc
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          printf 'Types: deb\nURIs: https://dl.google.com/linux/chrome/deb/\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/google-chrome.asc\n' \
+              | sudo tee /etc/apt/sources.list.d/google-linux.sources > /dev/null
+          printf 'repo_add_once="false"\nrepo_reenable_on_distupgrade="false"\n' | sudo tee /etc/default/google-chrome > /dev/null
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ./google-chrome-stable.deb
-          rm -f google-chrome-stable.deb
+          sudo apt-get install --no-install-recommends -y google-chrome-stable
       - name: Install the remaining browser engines
         if: contains(inputs.tiers || 'integration or e2e', 'e2e')
         run: python -m playwright install --with-deps firefox webkit

@@ -36,6 +36,8 @@ env:
   # cannot turn a green branch red without a deliberate bump here
   PRE_COMMIT_VERSION: "4.6.*"
   ACTIONLINT_VERSION: "1.7.12"
+  # Its linux_amd64 tarball's line of the release's checksums file
+  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 
 jobs:
   lint:
@@ -67,7 +69,7 @@ jobs:
         # actionlint validates the expression syntax and shellchecks every
         # `run:` block
         run: |
-          scripts/ci/fetch.sh "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint.tar.gz
+          scripts/ci/fetch.sh "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" actionlint.tar.gz "${ACTIONLINT_SHA256}"
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -color
 

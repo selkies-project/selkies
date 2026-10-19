@@ -56,17 +56,26 @@ export PIP_RETRIES="5" PIP_TIMEOUT="60"
 mkdir -p "${DOWNLOAD_DIR}" "${APPDIR}"
 # Miniforge names its installers after `uname -m`
 INSTALLER="Miniforge3-Linux-${ARCH}.sh"
-# GitHub rate-limits release downloads. fetch.sh waits out the Retry-After it
-# sends; it sits beside this plugin when scripts/ci/appimage.sh placed it there,
-# and a direct run of the plugin falls back to a plain download.
+# The latest release, checked against the SHA-256 recorded for it.
+# fetch-verified reads that off GitHub's API and waits out the rate limit it
+# answers with; it sits beside this plugin when scripts/ci/appimage.sh placed it
+# there, and a direct run of the plugin takes the latest release's versioned
+# installer and the `.sha256` Miniforge publishes beside that one.
 HERE="$(dirname "$(readlink -f "$0")")"
-if [ -x "${HERE}/fetch.sh" ]; then
-    "${HERE}/fetch.sh" \
-        "https://github.com/conda-forge/miniforge/releases/latest/download/${INSTALLER}" \
-        "${DOWNLOAD_DIR}/${INSTALLER}"
+if [ -x "${HERE}/fetch-verified" ]; then
+    "${HERE}/fetch-verified" release conda-forge/miniforge latest "${INSTALLER}" "${DOWNLOAD_DIR}/${INSTALLER}"
 else
-    curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 -o "${DOWNLOAD_DIR}/${INSTALLER}" \
-        "https://github.com/conda-forge/miniforge/releases/latest/download/${INSTALLER}"
+    CURL=(curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180)
+    TAG="$("${CURL[@]}" -I -o /dev/null -w '%{url_effective}' https://github.com/conda-forge/miniforge/releases/latest)"
+    TAG="${TAG##*/}"
+    URL="https://github.com/conda-forge/miniforge/releases/download/${TAG}/Miniforge3-${TAG}-Linux-${ARCH}.sh"
+    "${CURL[@]}" -o "${DOWNLOAD_DIR}/${INSTALLER}" "${URL}"
+    SUM="$("${CURL[@]}" "${URL}.sha256" | cut -d' ' -f1)"
+    if [ "$(sha256sum "${DOWNLOAD_DIR}/${INSTALLER}" | cut -d' ' -f1)" != "${SUM}" ]; then
+        echo "Miniforge ${TAG}: ${INSTALLER} does not match its published SHA-256 ${SUM}" >&2
+        rm -f "${DOWNLOAD_DIR}/${INSTALLER}"
+        exit 1
+    fi
 fi
 
 # usr/conda rather than usr/ so these libraries cannot collide with what
