@@ -6698,20 +6698,31 @@ class DataStreamingServer(BaseStreamingService):
                 data_logger.debug("Displays laid out as outputs of their own.")
             else:
                 data_logger.debug("Swapping logical monitors to the new layout...")
-                # Monitors go in before the framebuffer change, at their final
-                # rectangles and under a server grab: window managers re-tile on
-                # every root ConfigureNotify and must never see a monitor-less
-                # or partial set.
+                # Monitors go in before the framebuffer change (a lone display's
+                # after it, below), at their final rectangles and under a server
+                # grab: window managers re-tile on every root ConfigureNotify and
+                # must never see a monitor-less or partial set.
                 snapshot = await window_snapshot()
-                await replace_selkies_monitors(layouts, screen_name=screen_name)
-                # A mode change is the dominant cost of a reconfigure (CRTC reprogram,
-                # every client repaints), so a same-size reload skips it. A live
-                # re-target that grew the framebuffer above still shrinks here.
-                curr_norm = (curr_res or "").lower().replace(" ", "")
                 # One display is shown whole by the output: Qt announces a monitor's
                 # new geometry only where the monitor is exactly its CRTC.
                 output_size = ((layouts['primary']['w'], layouts['primary']['h'])
                                if len(layouts) == 1 and 'primary' in layouts else None)
+                # A mode change is the dominant cost of a reconfigure (CRTC reprogram,
+                # every client repaints), so a same-size reload skips it. A live
+                # re-target that grew the framebuffer above still shrinks here.
+                curr_norm = (curr_res or "").lower().replace(" ", "")
+                # A lone display's monitor is its CRTC, and a desktop that reads
+                # the CRTC when told the monitors changed (MATE's panel) lays out
+                # for whatever mode it finds: one re-reading between a swap and
+                # the mode set finds the new monitor over the old mode, and the
+                # mode set then changes no monitor, so it is never told again.
+                # Its mode goes in first and the monitor after, so every change
+                # it can see is one whose mode is final. Swapped first, the panel
+                # stayed laid out for the root the session started on, its
+                # bottom half off screen.
+                resizes = output_size is not None and curr_norm != total_mode_str
+                if not resizes:
+                    await replace_selkies_monitors(layouts, screen_name=screen_name)
                 if curr_norm == total_mode_str:
                     data_logger.debug(f"Screen already at {total_mode_str}; skipping redundant framebuffer/mode-set.")
                 elif not await resize_display(total_mode_str, stream_fps, output_size):
@@ -6721,6 +6732,8 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.info(f"Mode-set for {total_mode_str} failed; grew the framebuffer instead.")
                     else:
                         data_logger.error(f"Applying mode {total_mode_str} failed; clamping to the realized size below.")
+                if resizes:
+                    await replace_selkies_monitors(layouts, screen_name=screen_name)
                 await follow_display_moves(snapshot, layouts)
             # The X server is the authority: a driver can refuse the size and leave
             # the root as it was, and a region outside the root grabs garbage.
