@@ -48,6 +48,7 @@ import re
 import zlib
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from .commands import help_epilog
 from .logs import configure_logging
 
 logger = logging.getLogger("settings")
@@ -1499,7 +1500,9 @@ class AppSettings:
         one left at its default.
         """
         parser = argparse.ArgumentParser(
-            description="Selkies WebSocket Streaming Server"
+            description="Selkies WebSocket Streaming Server",
+            epilog=help_epilog(),
+            formatter_class=argparse.RawDescriptionHelpFormatter,
         )
         self._setting_definitions = setting
         self._add_arguments(parser)

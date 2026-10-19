@@ -8,18 +8,23 @@ Builds the centralized stream server, registers the WebRTC and WebSockets
 services, switches to the configured mode, and runs the asyncio loop until a
 signal or fatal error unwinds it. Signal handling routes SIGTERM/SIGHUP
 through main-task cancellation so a service-manager stop tears down the same
-way Ctrl-C does. `selkies --version` prints the package version and exits.
+way Ctrl-C does. `selkies --version` prints the package version and exits,
+and `selkies <command>` runs one of the tools `commands` lists instead.
 """
 
 import sys
 
 from . import __version__
+from .commands import run as run_command
 
 # Before the settings import parses argv: --version needs neither a
-# configuration nor the native extensions.
+# configuration nor the native extensions, and `selkies <command>` runs a tool
+# whose arguments are not the server's.
 if "--version" in sys.argv[1:]:
     print(f"selkies {__version__}")
     sys.exit(0)
+elif len(sys.argv) > 1:
+    run_command(sys.argv)
 
 import os
 import signal

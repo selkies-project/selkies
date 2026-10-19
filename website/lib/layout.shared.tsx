@@ -17,5 +17,8 @@ export function baseOptions(): BaseLayoutProps {
     },
     links: [{ text: 'selkies.io', url: projectUrl, external: true }],
     githubUrl: repoUrl,
+    // Light, dark, or the system's: the provider follows the system until a
+    // reader picks one, and the switch offers that choice back.
+    themeSwitch: { mode: 'light-dark-system' },
   };
 }
