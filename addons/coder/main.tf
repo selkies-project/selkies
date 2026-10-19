@@ -36,7 +36,7 @@ variable "wayland" {
 
 variable "selkies_version" {
   type        = string
-  description = "The Selkies release to install where the workspace has none; empty takes the latest."
+  description = "The Selkies release, 2.1.0 or later, to install where the workspace has none; empty takes the latest."
   default     = ""
 }
 

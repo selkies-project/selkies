@@ -23,8 +23,9 @@ module "selkies" {
 
 `desktop_environment` names an installed session by file, desktop, or program
 name, or a command; empty takes the workspace's default desktop. Where the
-workspace lacks `selkies-session` or Xvfb, the module installs the release's
-native package (`selkies_version`, else the latest) and the distribution's Xvfb,
-which takes `sudo` without a password. `wayland = true` streams Selkies' Wayland
-backend instead of an Xvfb, and `port`, `subdomain`, `share`, `order`, and
-`group` mean what they mean for any app. The log is `/tmp/selkies-session.log`.
+workspace lacks `selkies session` (Selkies 2.1.0 or later) or Xvfb, the module
+installs the release's native package (`selkies_version`, else the latest) and
+the distribution's Xvfb, which takes `sudo` without a password. `wayland = true`
+streams Selkies' Wayland backend instead of an Xvfb, and `port`, `subdomain`,
+`share`, `order`, and `group` mean what they mean for any app. The log is
+`/tmp/selkies-session.log`.

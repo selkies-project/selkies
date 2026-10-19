@@ -93,7 +93,7 @@ module "selkies" {
 }
 ```
 
-Where the workspace has no `selkies-session` or no Xvfb, the module installs
+Where the workspace has no `selkies session` or no Xvfb, the module installs
 the release's native package and the distribution's Xvfb, which takes `sudo`
 without a password, as the KasmVNC module does; `selkies_version` picks the
 release. Selkies listens on the workspace's loopback addresses without a login
@@ -106,7 +106,7 @@ clipboard, gamepads, and the microphone.
 ## Open OnDemand
 
 A [batch connect app](https://github.com/selkies-project/selkies/tree/main/addons/ondemand)
-on the basic template runs `selkies-session` on the compute node, on the port
+on the basic template runs `selkies session` on the compute node, on the port
 the portal chose, and connects the browser through the portal's reverse proxy
 at `/rnode/<host>/<port>/`, behind the portal's login:
 
@@ -120,9 +120,9 @@ session token once Selkies answers, and only then reports the session running,
 and the view's link carries that token in its fragment, so no one else on the
 cluster network reaches the session and the portal's access log never records
 the token. `form.yml` offers the desktop and the backend, and holds
-in `selkies_command` how the node finds Selkies: `selkies-session` from a native
-package or a module, `<AppImage> selkies-session`, or
-`apptainer exec --nv <image> selkies-session` with the flags
+in `selkies_command` how the node finds Selkies: `selkies session` from a native
+package or a module, `<AppImage> session`, or
+`apptainer exec --nv <image> selkies session` with the flags
 [Getting Started](start.md#apptainer) gives an image, a home of its own
 among them, so the image's Python does not import the user's packages from the
 host's home.

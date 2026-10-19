@@ -14,9 +14,15 @@ if curl -fsS -o /dev/null "http://localhost:$port/api/health" 2> /dev/null; then
   exit 0
 fi
 
+# The desktop runs as `selkies session`, which Selkies has from 2.1.0: an older
+# selkies takes the word for a stray argument and starts a bare server
+has_session() {
+  command -v selkies > /dev/null && selkies session --help 2> /dev/null | grep -q '^usage: selkies session'
+}
+
 need_selkies=
 need_xvfb=
-command -v selkies-session > /dev/null || need_selkies=1
+has_session || need_selkies=1
 [ "$SELKIES_WAYLAND" = true ] || command -v Xvfb > /dev/null || need_xvfb=1
 if [ -n "$need_selkies$need_xvfb" ]; then
   if ! sudo -n true 2> /dev/null; then
@@ -75,13 +81,17 @@ if [ -n "$need_selkies$need_xvfb" ]; then
     fi
     "$${file[@]}" "$work/selkies-$version-$pkg"
     rm -rf "$work"
+    if ! has_session; then
+      echo "Selkies $version has no \`selkies session\`, which came in 2.1.0: set selkies_version to 2.1.0 or later" >&2
+      exit 1
+    fi
   fi
   [ -z "$need_xvfb" ] || "$${repo[@]}" "$xvfb"
-  # The package depends on the PulseAudio client alone, and selkies-session starts only a server the workspace has
+  # The package depends on the PulseAudio client alone, and selkies session starts only a server the workspace has
   command -v pulseaudio > /dev/null || command -v pipewire-pulse > /dev/null || "$${repo[@]}" pulseaudio
 fi
 
 args=(--port="$port" --enable-basic-auth=false --enable-https=false)
 [ -z "$session" ] || args+=(--session="$session")
-nohup selkies-session "$${args[@]}" > /tmp/selkies-session.log 2>&1 &
+nohup selkies session "$${args[@]}" > /tmp/selkies-session.log 2>&1 &
 echo "Selkies starts on port $port; its log is /tmp/selkies-session.log"

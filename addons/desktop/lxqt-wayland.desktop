@@ -3,7 +3,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #
 # The image's LXQt on labwc as a Wayland session, for what starts a desktop
-# from its session file, selkies-session among them. The environment is what
+# from its session file, selkies session among them. The environment is what
 # startlxqt exports on X11; the desktop names pick the panel's wlroots backend.
 [Desktop Entry]
 Type=Application
