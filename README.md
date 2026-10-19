@@ -29,7 +29,7 @@ Open <https://localhost:8080>, accept the container's self-signed certificate, a
 
 Other ways to run it:
 
-- `pip install selkies` (Python 3.9 or newer) brings the server, its web client, and the capture extensions, and `selkies-session` then runs the desktop the host has installed, bringing up what it lacks for a session (a display and a sound server), which is how [Jupyter, Coder, and Open OnDemand](https://docs.selkies.io/platforms) start it.
+- `pip install selkies` (Python 3.9 or newer) brings the server, its web client, and the capture extensions, and `selkies session` then runs the desktop the host has installed, bringing up what it lacks for a session (a display and a sound server), which is how [Jupyter, Coder, and Open OnDemand](https://docs.selkies.io/platforms) start it.
 - [Native Install](https://docs.selkies.io/native) has the `.deb`, `.rpm`, `.apk`, and Arch packages, which attach Selkies to a display and sound server you run, and the AppImage, which installs nothing and starts a display and a sound server where none is running.
 - The [Base Container](https://docs.selkies.io/components/base-image) is the whole session without a desktop, the image to build your own `FROM`, and [`docker-selkies-egl-desktop`](https://github.com/selkies-project/docker-selkies-egl-desktop) and [`docker-selkies-glx-desktop`](https://github.com/selkies-project/docker-selkies-glx-desktop) are KDE Plasma desktops built on it.
 

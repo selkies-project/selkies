@@ -428,7 +428,7 @@ def follow_parent() -> None:
 
 def parse(argv: List[str]) -> Tuple[argparse.Namespace, List[str]]:
     parser = argparse.ArgumentParser(
-        prog="selkies-session", allow_abbrev=False,
+        prog="selkies session", allow_abbrev=False,
         description="Start a desktop session and Selkies streaming it; every other argument goes to selkies.")
     parser.add_argument("--session", help="a session by file, desktop, or program name (plasma, KDE, xfce, "
                                           "startlxqt), else a command to run; unset, the desktop "

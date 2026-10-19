@@ -125,6 +125,7 @@ SUITES: list = [
     {"path": "unit/test_fetch_verified.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_docs_tables.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_session_launcher.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_commands.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_https_selfsigned.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_encoder_cpu_policy.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_rate_control_defaults.py", "tier": "unit", "timeout": 180},

@@ -9,11 +9,12 @@ default WebSocket transport carries the whole session on that one port, and the
 client derives its path prefix from the URL it was loaded from. None of this
 involves WebRTC, STUN, or TURN.
 
-## selkies-session
+## selkies session
 
-What the platform starts is `selkies-session`, which the `selkies` package puts
-on `PATH` and the AppImage runs as its first argument, on a host where nothing
-can be installed ([Native Install](native.md)). It brings up what the host lacks and
+What the platform starts is `selkies session`, a command of the `selkies`
+executable, which the AppImage runs given `session` as its first argument, on a
+host where nothing can be installed ([Native Install](native.md)); `selkies-session`,
+its name before 2.1.0, still runs it. It brings up what the host lacks and
 then Selkies, passing it every argument it does not take itself, so the port,
 the socket, the login, and every other [setting](settings.md) are Selkies' own,
 from the command line or `SELKIES_*` variables alike:
@@ -42,8 +43,8 @@ from the command line or `SELKIES_*` variables alike:
   nested in Selkies' own.
 
 ```bash
-selkies-session --session=xfce --enable-basic-auth=false            # http://localhost:8080
-SELKIES_WAYLAND=true selkies-session --session=labwc --port=8081 --enable-basic-auth=false
+selkies session --session=xfce --enable-basic-auth=false            # http://localhost:8080
+SELKIES_WAYLAND=true selkies session --session=labwc --port=8081 --enable-basic-auth=false
 ```
 
 Everything runs in a runtime directory of the session's own. SIGTERM, SIGINT, or
@@ -63,7 +64,7 @@ pip install 'selkies[jupyter]'
 Every Jupyter server in that environment then shows a **Selkies** item in the
 launcher and serves the desktop at `<server>/selkies/`, in a tab of its own
 since a notebook panel cannot hold the pointer or the keyboard. The proxy
-starts `selkies-session` on a Unix socket in a directory only the user reaches
+starts `selkies session` on a Unix socket in a directory only the user reaches
 and authenticates the route with Jupyter's token or login, so Selkies runs
 without a login of its own; the session ends with the server, a killed one
 included. The same holds under JupyterHub, where each user's server offers
