@@ -8,7 +8,7 @@
 # shebangs and pyvenv.cfg point where the package actually lands.
 set -eux
 rm -rf /opt/selkies /pkg-root
-python3 -m venv /opt/selkies
+"${SELKIES_PYTHON:-python3}" -m venv /opt/selkies
 /opt/selkies/bin/pip install --no-cache-dir --retries 5 --timeout 60 --upgrade pip
 WHEELS="$(ls /dist/selkies-*-py3-none-any.whl)"
 # CI drops the pixelflux/pcmflux wheels this run pinned into /dist; pick the

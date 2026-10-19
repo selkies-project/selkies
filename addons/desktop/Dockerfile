@@ -206,16 +206,23 @@ RUN set -eu; \
 # keeps the sandbox wherever they are granted, as under an unconfined seccomp
 # profile. And the basic password store, because the container runs no keyring
 # daemon to unlock and Chrome otherwise blocks on a prompt nobody can answer.
-# The downloads retry every failure and the Chrome one is held to HTTP/1.1,
-# since its server resets HTTP/2 streams mid-transfer often enough to fail a
-# build.
+# Both come from their vendors' apt repositories, whose packages apt checks
+# against the signing key each names; the keys are checked against the
+# fingerprints Mozilla and Google publish (`fetch-verified`). Chrome's package
+# rewrites google-chrome.sources to trust a key it carries itself, and writes
+# one on a first install; the entry here is named apart from it and the
+# package's defaults file keeps it from writing its own.
 RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.d && \
-    curl -o /etc/apt/keyrings/packages.mozilla.org.asc -fsSL --retry 5 --retry-all-errors --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://packages.mozilla.org/apt/repo-signing-key.gpg" && \
+    fetch-verified key "https://packages.mozilla.org/apt/repo-signing-key.gpg" \
+        35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 /etc/apt/keyrings/packages.mozilla.org.asc && \
     printf 'Types: deb\nURIs: https://packages.mozilla.org/apt\nSuites: mozilla\nComponents: main\nSigned-By: /etc/apt/keyrings/packages.mozilla.org.asc\n' > /etc/apt/sources.list.d/mozilla.sources && \
     printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' > /etc/apt/preferences.d/mozilla && \
-    curl -o /tmp/google-chrome-stable.deb -fsSL --http1.1 --retry 5 --retry-all-errors --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://dl.google.com/linux/direct/google-chrome-stable_current_$(dpkg --print-architecture).deb" && \
+    fetch-verified key "https://dl.google.com/linux/linux_signing_key.pub" \
+        EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796 /etc/apt/keyrings/google-chrome.asc && \
+    printf 'Types: deb\nURIs: https://dl.google.com/linux/chrome/deb/\nSuites: stable\nComponents: main\nSigned-By: /etc/apt/keyrings/google-chrome.asc\n' > /etc/apt/sources.list.d/google-linux.sources && \
+    printf 'repo_add_once="false"\nrepo_reenable_on_distupgrade="false"\n' > /etc/default/google-chrome && \
     apt-get clean && apt-get update && \
-    apt-get install --no-install-recommends -y firefox /tmp/google-chrome-stable.deb && \
+    apt-get install --no-install-recommends -y firefox google-chrome-stable && \
     sed -i 's#^exec -a "$0" "$HERE/chrome" "$@"$#exec -a "$0" "$HERE/chrome" $(unshare --user --map-root-user --pid --net --fork true 2> /dev/null || echo --no-sandbox) --password-store=basic "$@"#' /opt/google/chrome/google-chrome && \
     grep -q -- '|| echo --no-sandbox) --password-store=basic "$@"' /opt/google/chrome/google-chrome && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/debconf/* /var/log/* /tmp/* /var/tmp/*
@@ -229,10 +236,12 @@ RUN mkdir -pm755 /etc/apt/keyrings /etc/apt/sources.list.d /etc/apt/preferences.
 # restrict ptrace (set below as real root); it is kept apart because a file
 # capability the container's bounding set does not hold stops that binary from
 # execing at all, and the wrapper picks whichever of the two runs.
-RUN mkdir -pm755 /opt/proot-apps && \
-    PAPPS_RELEASE="$(curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 -o /dev/null -w '%{url_effective}' "https://github.com/linuxserver/proot-apps/releases/latest" | sed 's|.*/||')" && \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused --retry-max-time 180 "https://github.com/linuxserver/proot-apps/releases/download/${PAPPS_RELEASE}/proot-apps-$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/aarch64/').tar.gz" \
-        | tar -xzf - -C /opt/proot-apps/ && \
+# The release is checked against its digest, looked up with the build's token
+# where one is given (mounted for uid 1000, which these layers run as).
+RUN --mount=type=secret,id=github_token,uid=1000 mkdir -pm755 /opt/proot-apps && \
+    PAPPS_RELEASE="$(fetch-verified release linuxserver/proot-apps latest \
+        "proot-apps-$(dpkg --print-architecture | sed 's/amd64/x86_64/;s/arm64/aarch64/').tar.gz" /tmp/proot-apps.tar.gz)" && \
+    tar -xzf /tmp/proot-apps.tar.gz -C /opt/proot-apps/ && rm -f /tmp/proot-apps.tar.gz && \
     printf '%s\n' "${PAPPS_RELEASE}" > /opt/proot-apps/pversion && \
     if ! command -v setcap > /dev/null; then \
         apt-get update && apt-get install --no-install-recommends -y libcap2-bin && \

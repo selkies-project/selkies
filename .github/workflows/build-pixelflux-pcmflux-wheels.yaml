@@ -164,9 +164,10 @@ jobs:
   # The build, as each project's own wheel workflow runs it, with that
   # project's planner, recipe, image name, and job split read off the commit
   # being built: each platform's native libraries are built once into an image
-  # the Actions cache keeps (a week at most, keyed by recipe, base, and
-  # variables), and its interpreters dealt into parallel jobs on it, the first
-  # rebuilding everything, the rest only the PyO3 layer and the extension.
+  # its build jobs take as an artifact of the run, and its interpreters dealt
+  # into parallel jobs on it. Nothing here writes the Actions cache: what it
+  # builds comes from another repository's commit, which a cache entry would
+  # carry into later runs on the default branch.
   # Only for what no release covers, and for everything when the probe could
   # not answer, since what ships has to be the capture stack that was asked
   # for. A pinned run is the exception: without the probe there is no version
@@ -182,8 +183,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Lists the images the Actions cache holds
-      actions: read
     outputs:
       groups: ${{ steps.plan.outputs.groups }}
       images: ${{ steps.plan.outputs.images }}
@@ -208,11 +207,15 @@ jobs:
           ref: ${{ needs.locate.outputs.pcmflux_version && format('refs/tags/{0}', needs.locate.outputs.pcmflux_version) || needs.locate.outputs.pcmflux_ref || 'main' }}
           path: src/pcmflux
           persist-credentials: false
+      # No token, so the planner counts no image as cached: every image is
+      # built in this run and handed to its build jobs as an artifact, and
+      # nothing built from another repository's commit is written to the
+      # Actions cache a later run on the default branch would restore. Each
+      # image carries its project's recipe, so the image jobs run it in their
+      # container and execute nothing of the project on the runner.
       - name: Plan the images and the wheels
         id: plan
         env:
-          GH_TOKEN: ${{ github.token }}
-          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
           PIXELFLUX_VERSION: ${{ needs.locate.outputs.pixelflux_version }}
           PCMFLUX_VERSION: ${{ needs.locate.outputs.pcmflux_version }}
         run: |
@@ -240,6 +243,7 @@ jobs:
             plan="$(cd "src/${project}" && "${RUNNER_TEMP}/cibuildwheel/bin/python" scripts/wheel-plan.py matrix "${image}" "${jobs}")"
             echo "${plan}"
             commit="$(git -C "src/${project}" rev-parse HEAD)"
+            recipe="$(cd "src/${project}" && "${RUNNER_TEMP}/cibuildwheel/bin/python" scripts/wheel-plan.py recipe)"
             stamp() {
               jq -c --arg project "${project}" --arg image "${image}" --arg tag "${!tag_var}" \
                 --arg commit "${commit}" '[.[] | . + {project: $project, image: $image, tag: $tag, commit: $commit}]'
@@ -247,7 +251,8 @@ jobs:
             groups="$(jq -c -n --argjson a "${groups}" \
                       --argjson b "$(sed -n 's/^groups=//p' <<< "${plan}" | stamp)" '$a + $b')"
             images="$(jq -c -n --argjson a "${images}" \
-                      --argjson b "$(sed -n 's/^images=//p' <<< "${plan}" | stamp)" '$a + $b')"
+                      --argjson b "$(sed -n 's/^images=//p' <<< "${plan}" | stamp)" \
+                      --arg recipe "${recipe}" '$a + [$b[] | . + {recipe: $recipe}]')"
           done
           echo "groups=${groups}" >> "$GITHUB_OUTPUT"
           echo "images=${images}" >> "$GITHUB_OUTPUT"
@@ -262,19 +267,16 @@ jobs:
         image: ${{ fromJSON(needs.plan.outputs.images) }}
     runs-on: ${{ matrix.image.runner }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.repository_owner }}/${{ matrix.image.project }}
-          ref: ${{ matrix.image.commit }}
-          persist-credentials: false
-
+      # The recipe the plan read from the project's commit; it runs in the
+      # container alone, and the project is not checked out here
       - name: Build the image
         env:
           BASE: ${{ matrix.image.base }}
           IMAGE: ${{ matrix.image.image }}
           PLATFORM: ${{ matrix.image.platform }}
+          RECIPE: ${{ matrix.image.recipe }}
         run: |
-          python3 scripts/wheel-plan.py recipe > "${RUNNER_TEMP}/recipe.sh"
+          printf '%s\n' "${RECIPE}" > "${RUNNER_TEMP}/recipe.sh"
           # The sources and build trees the recipe leaves are no part of the image
           docker run --name deps --env PIXELFLUX_ENABLE_GPL --workdir /tmp \
             --volume "${RUNNER_TEMP}/recipe.sh:/recipe.sh:ro" "${BASE}" \
@@ -282,10 +284,14 @@ jobs:
           docker commit deps "${IMAGE}:${PLATFORM}"
           docker save "${IMAGE}:${PLATFORM}" | zstd -T0 > "${RUNNER_TEMP}/image.tar.zst"
 
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          name: ${{ matrix.image.project }}-deps-${{ matrix.image.platform }}
           path: ${{ runner.temp }}/image.tar.zst
-          key: ${{ matrix.image.key }}
+          if-no-files-found: error
+          retention-days: 1
+          # zstd already
+          compression-level: 0
 
   build:
     name: ${{ matrix.group.project }} ${{ matrix.group.name }}
@@ -303,20 +309,6 @@ jobs:
           ref: ${{ matrix.group.commit }}
           persist-credentials: false
 
-      # The platform's compiled dependencies, under its image's key and the
-      # lock as committed (before a tag's version is written into it). The
-      # container builds into them through cibuildwheel's /host mount.
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cargo
-        with:
-          path: ${{ runner.temp }}/cargo-target
-          key: cargo-${{ matrix.group.key }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.group.project)) }}
-
-      - name: Build into the dependency cache
-        run: |
-          mkdir -p .cargo "${RUNNER_TEMP}/cargo-target"
-          printf '[build]\ntarget-dir = "/host%s/cargo-target"\n' "${RUNNER_TEMP}" > .cargo/config.toml
-
       - name: Version the crate as the tag
         # As the project's release does: the wheel takes its version from the
         # crate, whose manifest spells a pre-release the semver way; the lock
@@ -332,14 +324,12 @@ jobs:
           grep -q "^version = \"${crate}\"$" "${PROJECT}/Cargo.toml"
           grep -A1 "^name = \"${PROJECT}\"$" "${PROJECT}/Cargo.lock" | grep -q "^version = \"${crate}\"$"
 
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: image
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          path: ${{ runner.temp }}/image.tar.zst
-          key: ${{ matrix.group.key }}
+          name: ${{ matrix.group.project }}-deps-${{ matrix.group.platform }}
+          path: ${{ runner.temp }}
 
       - name: Load the image
-        if: steps.image.outputs.cache-hit == 'true'
         env:
           IMAGE: ${{ matrix.group.image }}
           PLATFORM: ${{ matrix.group.platform }}
@@ -357,14 +347,6 @@ jobs:
         uses: pypa/cibuildwheel@b3395e271a35f73dad77f21802abe9b986dfe299 # v4.3.1
         env:
           CIBW_BUILD: ${{ matrix.group.build }}
-
-      # Once per platform, from main, where the project's planner names a job
-      # that saves: an entry a tag saved would serve no other run.
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        if: matrix.group.saves && steps.cargo.outputs.cache-hit != 'true' && matrix.group.tag == ''
-        with:
-          path: ${{ runner.temp }}/cargo-target
-          key: ${{ steps.cargo.outputs.cache-primary-key }}
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

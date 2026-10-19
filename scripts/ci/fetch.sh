@@ -10,12 +10,16 @@
 # This loop reads Retry-After off that response and sleeps for it, falling back
 # to a widening delay when the header is absent.
 #
-# Usage: fetch.sh <url> <output-path>
+# A SHA-256, where given, is what the download has to hash to: a file that does
+# not is removed and the fetch fails.
+#
+# Usage: fetch.sh <url> <output-path> [sha256]
 
 set -eu
 
-URL="${1:?usage: fetch.sh <url> <output-path>}"
-OUT="${2:?usage: fetch.sh <url> <output-path>}"
+URL="${1:?usage: fetch.sh <url> <output-path> [sha256]}"
+OUT="${2:?usage: fetch.sh <url> <output-path> [sha256]}"
+SHA256="${3:-}"
 ATTEMPTS="${FETCH_ATTEMPTS:-5}"
 BACKOFF="${FETCH_BACKOFF:-30}"
 
@@ -24,7 +28,12 @@ while :; do
     headers="$(mktemp)"
     if curl -fsSL --retry 3 --retry-max-time 120 -D "${headers}" -o "${OUT}" "${URL}"; then
         rm -f "${headers}"
-        exit 0
+        [ -z "${SHA256}" ] && exit 0
+        actual="$(sha256sum "${OUT}" | cut -d' ' -f1)"
+        [ "${actual}" = "${SHA256}" ] && exit 0
+        rm -f "${OUT}"
+        echo "fetch: ${URL} hashes to ${actual}, not ${SHA256}" >&2
+        exit 1
     fi
     # The last status line and Retry-After win: -L means redirects add their own
     status="$(awk 'tolower($0) ~ /^http\// { s = $2 } END { print s }' "${headers}")"

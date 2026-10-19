@@ -37,12 +37,10 @@ export MAMBA_REMOTE_MAX_RETRIES="5" MAMBA_REMOTE_BACKOFF_FACTOR="3" \
 export CONDA_REMOTE_MAX_RETRIES="5" CONDA_REMOTE_BACKOFF_FACTOR="3" \
     CONDA_REMOTE_CONNECT_TIMEOUT_SECS="30" CONDA_REMOTE_READ_TIMEOUT_SECS="120"
 if ! command -v pixi >/dev/null; then
-  # The release asset through fetch.sh rather than pixi's installer, whose own
-  # download makes one attempt: this is the same rate limit the linuxdeploy
-  # download below waits out.
-  scripts/ci/fetch.sh \
-      "https://github.com/prefix-dev/pixi/releases/latest/download/pixi-${ARCH}-unknown-linux-musl.tar.gz" \
-      "${WORK}/pixi.tar.gz"
+  # The latest release asset, checked against the digest GitHub records for it,
+  # rather than pixi's installer, whose own download makes one attempt
+  addons/base/fetch-verified release prefix-dev/pixi latest \
+      "pixi-${ARCH}-unknown-linux-musl.tar.gz" "${WORK}/pixi.tar.gz"
   mkdir -p "${HOME}/.pixi/bin"
   tar -xzf "${WORK}/pixi.tar.gz" -C "${HOME}/.pixi/bin"
 fi
@@ -58,17 +56,17 @@ test -f "${PKG}"
 # 2) linuxdeploy (latest published build) and the conda plugin from
 #    infra/appimage: upstream publishes no release artifacts, and this one
 #    installs Miniforge, keeping the AppImage on conda-forge alone.
-scripts/ci/fetch.sh \
-    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${ARCH}.AppImage" \
-    "${WORK}/linuxdeploy.AppImage"
+addons/base/fetch-verified release linuxdeploy/linuxdeploy continuous \
+    "linuxdeploy-${ARCH}.AppImage" "${WORK}/linuxdeploy.AppImage"
 cp infra/appimage/linuxdeploy-plugin-conda.sh "${WORK}/linuxdeploy-plugin-conda.sh"
 # The plugin reads both of these from beside itself: Miniforge comes from the
-# same rate-limited host as linuxdeploy, and the prefix it installs needs its
-# entry points pointed at the interpreter before an AppImage can carry them.
-cp scripts/ci/fetch.sh "${WORK}/fetch.sh"
+# same rate-limited host as linuxdeploy, checked the same way, and the prefix
+# it installs needs its entry points pointed at the interpreter before an
+# AppImage can carry them.
+cp addons/base/fetch-verified "${WORK}/fetch-verified"
 cp infra/appimage/relocate-shebangs.sh "${WORK}/relocate-shebangs.sh"
 chmod +x "${WORK}/linuxdeploy.AppImage" "${WORK}/linuxdeploy-plugin-conda.sh" \
-    "${WORK}/fetch.sh" "${WORK}/relocate-shebangs.sh"
+    "${WORK}/fetch-verified" "${WORK}/relocate-shebangs.sh"
 # linuxdeploy resolves `--plugin conda` by searching PATH
 export PATH="${WORK}:${PATH}"
 

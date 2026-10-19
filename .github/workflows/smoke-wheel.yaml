@@ -60,8 +60,6 @@ jobs:
     if: ${{ !inputs.wheels_ready && !inputs.capture_stack_published }}
     permissions:
       contents: read
-      # A capture-stack build lists the Actions cache's images
-      actions: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
 
   smoke:

@@ -17,21 +17,25 @@
 set -eu
 
 VERSION="0.11.0"
+# The release's SHA-256 per architecture, from its assets' recorded digests;
+# a version bump takes both
+SHA256_X86_64="8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+SHA256_AARCH64="12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588"
 
 DEST="${1:-/usr/local/bin}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
 
 case "$(uname -m)" in
-    x86_64 | amd64) ARCH=x86_64 ;;
-    aarch64 | arm64) ARCH=aarch64 ;;
+    x86_64 | amd64) ARCH=x86_64 SHA256="${SHA256_X86_64}" ;;
+    aarch64 | arm64) ARCH=aarch64 SHA256="${SHA256_AARCH64}" ;;
     *) echo "shellcheck: no release build for $(uname -m)" >&2; exit 1 ;;
 esac
 
 TARBALL="shellcheck-v${VERSION}.linux.${ARCH}.tar.xz"
 "$(dirname "$0")/fetch.sh" \
     "https://github.com/koalaman/shellcheck/releases/download/v${VERSION}/${TARBALL}" \
-    "${WORK}/${TARBALL}"
+    "${WORK}/${TARBALL}" "${SHA256}"
 tar -xJf "${WORK}/${TARBALL}" -C "${WORK}"
 # install(1) needs root for a system directory and must not ask for it when the
 # destination is already writable, which is how a developer runs this.

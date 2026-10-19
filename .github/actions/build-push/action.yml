@@ -31,6 +31,11 @@ inputs:
   retry-delay:
     description: Seconds to wait before the second attempt.
     default: "60"
+  github-token:
+    description: >
+      Token mounted as the build secret github_token, for the GitHub API calls
+      behind the images' download checks (`fetch-verified`).
+    default: ""
 
 outputs:
   digest:
@@ -49,6 +54,7 @@ runs:
         platforms: ${{ inputs.platforms }}
         build-args: ${{ inputs.build-args }}
         outputs: ${{ inputs.outputs }}
+        secrets: github_token=${{ inputs.github-token }}
         cache-from: type=gha,scope=${{ inputs.cache-scope }}
         cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}
     - if: steps.first.outcome == 'failure'
@@ -67,5 +73,6 @@ runs:
         platforms: ${{ inputs.platforms }}
         build-args: ${{ inputs.build-args }}
         outputs: ${{ inputs.outputs }}
+        secrets: github_token=${{ inputs.github-token }}
         cache-from: type=gha,scope=${{ inputs.cache-scope }}
         cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope }}

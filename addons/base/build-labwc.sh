@@ -26,12 +26,31 @@ export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig:${PREFIX}/share/pkgconfig${PKG_C
 # every other process a CI job runs.
 export LDFLAGS="-Wl,-rpath,${PREFIX}/lib${LDFLAGS:+ ${LDFLAGS}}"
 
+# The commit each tag has to resolve to: the tag is for the reader, the commit
+# is what gets built, and a version with none recorded here is refused.
+declare -A COMMITS=(
+    [wayland@1.23.1]=a9fec8dd65977c57f4039ced34327204d9b9d779
+    [wayland-protocols@1.41]=71da8bd7f9fd3ea7c5d87ad19ca087eeca137673
+    [pixman@pixman-0.43.4]=54cad71674ec485cbbbf49876feaa8a69b97c828
+    [libliftoff@v0.5.0]=8b08dc1c14fd019cc90ddabe34ad16596b0691f4
+    [libdisplay-info@0.2.0]=66b802d05b374cd8f388dc6ad1e7ae4f08cb3300
+    [wlroots@0.19.3]=88a869855742281c98c22cab9641b317b8d065ef
+    [labwc@0.9.7]=f0dbad27fcf6e388cad1aa32448a1d548da68990
+)
+
 # The forges refuse a clone now and then (git exits 128); a few tries some
 # seconds apart ride over it.
 fetch() {
-    local url="$1" ref="$2" dir="$3" try
+    local url="$1" ref="$2" dir="$3" try commit
+    local expected="${COMMITS[${dir##*/}@${ref}]:-}"
+    [ -n "${expected}" ] || { echo "no commit recorded for ${dir##*/} ${ref}" >&2; return 1; }
     for try in 1 2 3 4 5; do
-        git clone --depth 1 --branch "${ref}" "${url}" "${dir}" && return 0
+        if git clone --depth 1 --branch "${ref}" "${url}" "${dir}"; then
+            commit="$(git -C "${dir}" rev-parse HEAD)"
+            [ "${commit}" = "${expected}" ] && return 0
+            echo "${dir##*/} ${ref} is at ${commit}, not ${expected}" >&2
+            return 1
+        fi
         rm -rf "${dir}"
         sleep $((try * 15))
     done

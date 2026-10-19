@@ -96,7 +96,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free disk space
         # The tool cache is kept: setup-python and setup-node resolve from it
-        uses: endersonmenezes/free-disk-space@2a22f8c59cae9cddae7194b33e6b92d023b2b4b8 # v4
+        uses: endersonmenezes/free-disk-space@8b8cd4e2277836962939a8f3b4ea0ee4bc006156 # v4
         with:
           remove_android: true
           remove_dotnet: true
@@ -178,6 +178,7 @@ jobs:
           outputs: type=image,"name=${{ env.BASE_IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: base-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push the desktop image by digest
         id: build
         uses: ./.github/actions/build-push
@@ -190,6 +191,7 @@ jobs:
           outputs: type=image,"name=${{ env.IMAGE_NAME }}",push-by-digest=true,name-canonical=true,push=true
           cache-scope: desktop-${{ matrix.flavor.name }}-${{ matrix.arch.name }}
           retry-delay: ${{ env.PUSH_RETRY_DELAY }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Export digests
         env:
           BASE_DIGEST: ${{ steps.base.outputs.digest }}
