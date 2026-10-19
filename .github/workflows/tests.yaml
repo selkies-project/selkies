@@ -103,8 +103,6 @@ jobs:
     if: ${{ !inputs.wheels_ready }}
     permissions:
       contents: read
-      # A capture-stack build lists the Actions cache's images
-      actions: read
     uses: ./.github/workflows/build-pixelflux-pcmflux-wheels.yaml
 
   # Three shards, each the third of the selected cases tests/conftest.py deals
