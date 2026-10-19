@@ -37,7 +37,7 @@ def check(label: str, ok, detail="") -> None:
 
 def facts(present: bool = True, accelerated: bool = True,
           node: str = "/dev/dri/renderD128", driver: str = "nvidia") -> str:
-    """What selkies-gpu-probe prints about the session's GPU."""
+    """What selkies gpu-probe prints about the session's GPU."""
     return "\n".join((
         f"SELKIES_GPU_RENDER_NODE={node}",
         f"SELKIES_GPU_DRIVER={driver}",
@@ -60,7 +60,7 @@ def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
     """Run the entrypoint's environment phase against a stubbed probe.
 
     Args:
-        probe_stdout: What the stubbed selkies-gpu-probe prints.
+        probe_stdout: What the stubbed selkies gpu-probe prints.
         probe_rc: Its exit code.
         env: Extra environment for the entrypoint.
 
@@ -73,9 +73,9 @@ def run(probe_stdout: str, probe_rc: int = 0, env=None) -> tuple:
         stub_dir = os.path.join(tmp, "bin")
         os.mkdir(stub_dir)
         emit = "printf '%%s\\n' %s\n" % _sh_quote(probe_stdout) if probe_stdout else ""
-        probe = os.path.join(stub_dir, "selkies-gpu-probe")
+        probe = os.path.join(stub_dir, "selkies")
         with open(probe, "w") as f:
-            f.write(f'#!/bin/sh\necho "$@" >> {tmp}/probe-calls\n'
+            f.write(f'#!/bin/sh\n[ "$1" = gpu-probe ] || exit 99\nshift\necho "$@" >> {tmp}/probe-calls\n'
                     f''
                     f"{emit}exit {probe_rc}\n")
         os.chmod(probe, 0o755)

@@ -31,7 +31,7 @@ import helpers as H  # noqa: E402
 
 from selkies import gpu_probe as GP  # noqa: E402
 
-FACTS_BLOCK = 'gpu_status=0\ngpu_facts="$(timeout 60 selkies-gpu-probe)"'
+FACTS_BLOCK = 'gpu_status=0\ngpu_facts="$(timeout 60 selkies gpu-probe)"'
 GL_BLOCK = 'dri3_server="false"'
 BACKEND_BLOCK = 'if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ]'
 STATE = ('echo "WAYLAND=${SELKIES_WAYLAND:-unset} GL=${GALLIUM_DRIVER:-unset}'
@@ -82,7 +82,7 @@ def run(stub: str = "exit 1", env: Optional[dict] = None,
     """Run the entrypoint's GPU blocks with `stub` standing in for the probe.
 
     Args:
-        stub: Shell body of the stand-in `selkies-gpu-probe`.
+        stub: Shell body of the stand-in `selkies gpu-probe`.
         env: Environment the blocks start from.
         blocks: Which blocks to run, in order.
         tail: What to print once the blocks have settled.
@@ -91,9 +91,9 @@ def run(stub: str = "exit 1", env: Optional[dict] = None,
         `state` (the settled variables), `said` (everything printed), and `rc`.
     """
     with tempfile.TemporaryDirectory() as tmp:
-        probe = os.path.join(tmp, "selkies-gpu-probe")
+        probe = os.path.join(tmp, "selkies")
         with open(probe, "w") as fh:
-            fh.write("#!/bin/bash\n" + stub + "\n")
+            fh.write('#!/bin/bash\n[ "$1" = gpu-probe ] || exit 99\nshift\n' + stub + "\n")
         os.chmod(probe, 0o755)
         script = os.path.join(tmp, "blocks.sh")
         with open(script, "w") as fh:

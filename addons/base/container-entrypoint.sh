@@ -115,12 +115,12 @@ if [ -n "${SELKIES_MODE}" ]; then
   export SELKIES_MODE
 fi
 
-# What GPU this session has. selkies-gpu-probe resolves the render node from
+# What GPU this session has. `selkies gpu-probe` resolves the render node from
 # --render-dri and the --auto-gpu token exactly as the capture will, and carries
 # the compositor's own renderer bring-up through on it, so the GL stack and the
 # backend below follow one answer rather than each guessing from device paths.
 gpu_status=0
-gpu_facts="$(timeout 60 selkies-gpu-probe)" || gpu_status=$?
+gpu_facts="$(timeout 60 selkies gpu-probe)" || gpu_status=$?
 while IFS= read -r assignment; do
   # Assignments with a clean name only, so a tool that answers something else
   # cannot be exported into this environment or abort it under set -e.
@@ -147,7 +147,7 @@ if [ -z "${SELKIES_GPU_DRIVER-}" ] && ls /dev/nvidia* >/dev/null 2>&1 && nvidia-
 fi
 
 # Hardware OpenGL for the session's applications, from what the probe measured
-# of the client paths (selkies-gpu-probe). The framebuffer server brings glamor
+# of the client paths (`selkies gpu-probe`). The framebuffer server brings glamor
 # and DRI3 up on the render node where the compositor's renderer came up
 # (services/xvfb/run), and GLX then goes to the vendor library that drives that
 # node: for Mesa's vendors what glvnd would pick anyway, for a vendor with a

@@ -82,7 +82,7 @@ EOF
 )" || size=""
   size="${size:-${DISPLAY_SIZEW:-1920}x${DISPLAY_SIZEH:-1080}}"
   if [ "$(xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2; exit}')" != "${size}" ]; then
-    selkies-resize "${size}"
+    selkies resize "${size}"
   fi
 fi
 
