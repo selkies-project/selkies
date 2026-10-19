@@ -22,7 +22,9 @@ COPY addons/selkies-dashboard-wish ./addons/selkies-dashboard-wish
 COPY addons/universal-touch-gamepad ./addons/universal-touch-gamepad
 COPY docs/assets/logo ./docs/assets/logo
 
-RUN mkdir -p src/selkies && sh scripts/ci/build-web.sh
+# The controller database's GitHub lookups use the build secret github_token
+# where one is given (`--secret id=github_token,env=GITHUB_TOKEN`)
+RUN --mount=type=secret,id=github_token mkdir -p src/selkies && sh scripts/ci/build-web.sh
 
 # 2) Build the Python wheel with the web client bundled
 FROM python:3-slim AS py-build

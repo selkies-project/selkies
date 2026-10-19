@@ -281,6 +281,9 @@ jobs:
           done
           python -c 'import pixelflux, pcmflux; print("capture stack:", pixelflux.__file__)'
       - name: Build the web client
+        env:
+          # For the controller database's lookups (gendb.js)
+          GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci/build-web.sh
       - name: Build the test tools
         run: make -C tests/tools

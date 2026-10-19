@@ -57,6 +57,9 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Build the web client bundle
+        env:
+          # For the controller database's lookups (gendb.js)
+          GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci/build-web.sh
       - name: Build the wheel
         env:

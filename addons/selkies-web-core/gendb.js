@@ -102,8 +102,21 @@ function gitBlobSha(body) {
   return crypto.createHash('sha1').update(`blob ${body.length}\0`).update(body).digest('hex');
 }
 
+// A token for the two API requests where the build has one: the build secret
+// github_token (a container build), else GITHUB_TOKEN or GH_TOKEN. Without one
+// they share the API's 60 requests an hour per address.
+function githubToken() {
+  try {
+    const secret = fs.readFileSync('/run/secrets/github_token', 'utf8').trim();
+    if (secret) return secret;
+  } catch {
+    // no secret mounted
+  }
+  return process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+}
+
 async function main() {
-  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  const token = githubToken();
   const headers = { Accept: 'application/vnd.github+json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
 
   let fileContent;
