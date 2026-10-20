@@ -68,7 +68,7 @@ import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
-  tenBitStream, CPU_ENCODE_THREADING_SPEC, encodesInSoftware,
+  tenBitStream, CPU_ENCODE_THREADING_SPEC, cpuEncodeThreadingApplies,
   RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import PlayerGamepadButton from "./PlayerGamepadButton.jsx";
@@ -3628,7 +3628,7 @@ function Sidebar() {
                     </button>
                   </div>
                 )}
-                {encodesInSoftware(activeEncoder, conditionalCtx.encoderBackends, use_cpu, videoFullColor, video10Bit)
+                {cpuEncodeThreadingApplies(activeEncoder, conditionalCtx.encoderBackends, use_cpu, videoFullColor, video10Bit)
                   && (renderableSettings.cpuEncodeThreading ?? true) && (
                   <div className="dev-setting-item toggle-item">
                     <label htmlFor="cpuEncodeThreadingToggle">

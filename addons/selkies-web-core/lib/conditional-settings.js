@@ -47,11 +47,13 @@ import { codecOfEncoder } from "./wire-codecs.js";
  */
 
 /**
- * Whether a session on an encoder codes in software, where the CPU encoding
- * threads apply: a CPU-only encoder, software forced on a codec that has a
- * software encoder, a codec this host encodes in software alone, or a full
- * color or 10-bit stream the hardware engine hands to its software encoder.
- * Without a backend table it cannot be told, and reads as software.
+ * Whether the CPU encode threading switch does anything for a session on an
+ * encoder: the session codes in software, on a CPU-only encoder (whose
+ * stripes it codes one after another), where software is forced on a codec
+ * that has a software encoder, where the host encodes the codec in software
+ * alone, or where the hardware engine hands a full color or 10-bit stream to
+ * its software encoder. A hardware engine has no such threads. Without a
+ * backend table it cannot be told, and reads as applying.
  * @param {string} encoder Encoder wire value.
  * @param {Object<string, {hardware: (string|null), software: (string|null)}>|undefined} encoderBackends
  *     The server's `encoder_backends` payload entry, keyed by codec name.
@@ -60,7 +62,7 @@ import { codecOfEncoder } from "./wire-codecs.js";
  * @param {boolean} tenBit Whether 10-bit is asked for.
  * @returns {boolean}
  */
-export function encodesInSoftware(encoder, encoderBackends, useCpu, fullColor, tenBit) {
+export function cpuEncodeThreadingApplies(encoder, encoderBackends, useCpu, fullColor, tenBit) {
     if (encoder === "jpeg" || encoder === "h264enc-striped" || !encoderBackends) return true;
     const backends = encoderBackends[codecOfEncoder(encoder)];
     if (!backends || !backends.hardware || (useCpu && backends.software)) return true;

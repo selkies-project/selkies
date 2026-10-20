@@ -5,9 +5,10 @@ The setting defaults on and parses from SELKIES_CPU_ENCODE_THREADING, where
 "false|locked" pins it off. The capture builder both transports share sets
 pixelflux's CaptureSettings.cpu_encode_threading from it, a change rebuilds
 the capture (it is structural on WebSockets, a restart on WebRTC), and the
-dashboards' gate (`encodesInSoftware`) reads a session as software where it
-is: a CPU-only encoder, software forced on a codec that has it, a codec the
-host encodes in software alone, or a full-color stream the engine hands over.
+dashboards' gate (`cpuEncodeThreadingApplies`) offers it where the session
+codes in software: a CPU-only encoder, software forced on a codec that has it,
+a codec the host encodes in software alone, or a full-color stream the engine
+hands over; never on a hardware engine, which has no such threads.
 """
 import json
 import os
@@ -88,11 +89,12 @@ check("WebRTC applies it per display, restarting the capture",
       and "async def set_cpu_encode_threading" in pipe and "cpu_encode_threading=self.cpu_encode_threading" in pipe)
 
 if not shutil.which("node"):
-    check("node available for encodesInSoftware", False, "node not found")
+    check("node available for cpuEncodeThreadingApplies", False, "node not found")
 else:
     cases = [
         ("jpeg", None, False, False, False, True),
         ("h264enc-striped", None, False, False, False, True),
+        ("jpeg", "gpu", False, False, False, True),
         ("h264enc", "gpu", False, False, False, False),
         ("h264enc", "gpu", True, False, False, True),
         ("av1enc", "gpu", False, False, False, True),
@@ -107,17 +109,17 @@ else:
         "none": None,
     }
     driver = (
-        f"import {{ encodesInSoftware }} from {json.dumps(CONDITIONAL)};\n"
+        f"import {{ cpuEncodeThreadingApplies }} from {json.dumps(CONDITIONAL)};\n"
         "import { readFileSync } from 'node:fs';\n"
         "const io = JSON.parse(readFileSync(0, 'utf8'));\n"
         "process.stdout.write(JSON.stringify(io.cases.map(([e, t, cpu, fc, tb]) =>"
-        " encodesInSoftware(e, t === null ? undefined : io.tables[t] ?? undefined, cpu, fc, tb))));")
+        " cpuEncodeThreadingApplies(e, t === null ? undefined : io.tables[t] ?? undefined, cpu, fc, tb))));")
     r = subprocess.run(["node", "--input-type=module", "-e", driver], capture_output=True, timeout=60,
                        input=json.dumps({"cases": [c[:5] for c in cases], "tables": tables}).encode())
     got = json.loads(r.stdout or b"[]") if r.returncode == 0 else r.stderr.decode()[-300:]
     for case, answer in zip(cases, got if isinstance(got, list) else [None] * len(cases)):
         encoder, table, cpu, fullcolor, _ten, want = case
-        check(f"encodesInSoftware({encoder}, {table}, use_cpu={cpu}, fullcolor={fullcolor}) is {want}",
+        check(f"cpuEncodeThreadingApplies({encoder}, {table}, use_cpu={cpu}, fullcolor={fullcolor}) is {want}",
               answer is want, answer)
 
 print(f"[cpu-threading] {passed}/{passed + failed} passed", flush=True)

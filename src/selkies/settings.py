@@ -729,7 +729,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "cpu_encode_threading",
         "type": "bool",
         "default": True,
-        "help": "Spread each frame a software encoder codes across threads: x264 and OpenH264 code a full frame in slices on several threads, libvpx, x265, kvazaar, and SVT-AV1 run their worker threads, and h264enc-striped and jpeg code their stripes in parallel. Turn it off on hosts that pack many sessions onto their cores, so each session's encode keeps to one thread; a large frame then takes longer to code. Hardware encoders are unaffected, and the dashboards show it only while the session encodes in software. Clients may override per user unless the value is locked.",
+        "help": "Spread each frame a software encoder codes across threads: x264 and OpenH264 code a full frame in slices on several threads, libvpx, x265, kvazaar, and SVT-AV1 run their worker threads, and h264enc-striped and jpeg code their stripes in parallel. Turn it off on low-end hosts that pack many sessions onto their cores, so each session's encode keeps to one thread, the stripes one after another; a frame then takes longer to code, which a high frame rate notices. Hardware encoders have no such threads, so the dashboards show it only while the session encodes in software. Clients may override per user unless the value is locked.",
     },
     {
         "name": "use_paint_over_quality",

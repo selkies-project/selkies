@@ -48,7 +48,7 @@ import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from 
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
-    tenBitStream, CPU_ENCODE_THREADING_SPEC, encodesInSoftware,
+    tenBitStream, CPU_ENCODE_THREADING_SPEC, cpuEncodeThreadingApplies,
     RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
@@ -1078,7 +1078,7 @@ export function Settings() {
     const showPaintoverBurst = isH264 && (usePaintOverQuality || cbrVideo) && (renderableSettings.videoPaintoverBurstFrames ?? true);
     const showPaintOverJpeg = showJpegOptions && usePaintOverQuality && (renderableSettings.paintOverJpegQuality ?? true);
     const showCpuSwitch = softwareChoiceAvailable(activeEncoder, conditionalCtx.encoderBackends) && (renderableSettings.useCpu ?? true);
-    const showCpuThreadingSwitch = encodesInSoftware(activeEncoder, conditionalCtx.encoderBackends, useCpu, videoFullColor, video10Bit)
+    const showCpuThreadingSwitch = cpuEncodeThreadingApplies(activeEncoder, conditionalCtx.encoderBackends, useCpu, videoFullColor, video10Bit)
         && (renderableSettings.cpuEncodeThreading ?? true);
     const showAudioBitrate = renderableSettings.audioBitrate ?? true;
     const showHidpi = !isSecondaryDisplay && (renderableSettings.hidpi ?? true);

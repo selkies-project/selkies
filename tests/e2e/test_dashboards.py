@@ -1619,13 +1619,17 @@ def cpu_threading_block(dashboard: str, dist: str) -> "H.Results":
     A session with software encoding forced shows the switch, on as the server
     defaults it; turning it off stores the choice, the server rebuilds the
     capture on the encoder reopened with one thread, and video keeps coming.
-    An operator's locked value hides it.
+    An operator's locked value hides it, and a JPEG session, whose stripes it
+    codes one after another, shows it too.
     """
     res = H.Results(f"cpu-threading-{dashboard}")
-    for locked in (False, True):
+    for case in ("unset", "locked", "jpeg"):
+        locked = case == "locked"
         env = {"SELKIES_ENCODER": "h264enc", "SELKIES_USE_CPU": "true"}
         if locked:
             env["SELKIES_CPU_ENCODE_THREADING"] = "false|locked"
+        if case == "jpeg":
+            env = {"SELKIES_ENCODER": "jpeg"}
         H.server_start(mode="websockets", wayland=False, web_root=dist, extra_env=env)
         try:
             with sync_playwright() as p:
@@ -1634,13 +1638,20 @@ def cpu_threading_block(dashboard: str, dist: str) -> "H.Results":
                 ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
                 page = ctx.new_page()
                 page.goto(H.BASE_URL, wait_until="load")
-                res.check(f"{'locked' if locked else 'unset'}: video starts",
-                          C.wait_ws_video(page, timeout=45) is not None, "")
-                time.sleep(2.0)
+                if case == "jpeg":
+                    # JPEG stripes are not counted as video chunks; the page is given time to settle.
+                    time.sleep(8.0)
+                else:
+                    res.check(f"{case}: video starts", C.wait_ws_video(page, timeout=45) is not None, "")
+                    time.sleep(2.0)
                 switch = cpu_threading_switch(page, dashboard)
                 time.sleep(1.0)
                 if locked:
                     res.check("locked by the operator: the switch is hidden", switch.count() == 0, "")
+                    C.close_browser(browser)
+                    continue
+                if case == "jpeg":
+                    res.check("a JPEG session shows it too", switch.count() == 1, "")
                     C.close_browser(browser)
                     continue
                 res.check("a software session shows the switch", switch.count() == 1, "")
