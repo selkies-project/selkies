@@ -57,7 +57,7 @@ The services under `/etc/service` are, each a `run` script and a `finish` script
 | `/etc/container-entrypoint.sh`, `/etc/selkies-entrypoint.sh` | The two scripts above |
 | `/etc/service/<name>/` | One directory per s6 service, with its `run` and `finish` scripts |
 | `/tmp/runtime-ubuntu` (`XDG_RUNTIME_DIR`) | The session's sockets, the environment file, the print queue's socket, the logs the services write |
-| `selkies`, `selkies gpu-probe`, `selkies resize` | The wheel's executable and two of its commands: the server, the GPU report, and the resize helper for a session with `--enable-resize=false` (`selkies-gpu-probe` and `selkies-resize` run the same two) |
+| `selkies`, `selkies gpu-probe`, `selkies resize` | The wheel's executable and two of its commands: the server, the GPU report, and the resize helper for a session with `--enable-resize=false` |
 | `/usr/local/bin/selkies-privileged-files` | The setuid bracket for package layers, and the `sudo-root ... run` path for in-session package management |
 | `/usr/$LIB/selkies_input_interposer.so`, `selkies_v4l2_interposer.so`, `libudev.so.1.0.0-fake` | The preloads the session's applications get, exported as `SELKIES_INTERPOSER`, `SELKIES_WEBCAM_INTERPOSER`, and `FAKE_UDEV_LIB` |
 | `/home/ubuntu` | The session user's home, uid 1000; mount a volume there to keep settings, downloads, and installed applications |
