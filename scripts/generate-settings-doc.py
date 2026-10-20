@@ -47,7 +47,7 @@ SECTIONS = [
         "encoder", "video_fullcolor", "video_10bit", "framerate", "video_bitrate", "video_crf", "rate_control_mode",
         "enable_rate_control", "congestion_control", "keyframe_interval", "video_min_qp", "video_max_qp",
         "jpeg_quality", "video_streaming_mode", "use_paint_over_quality", "paint_over_jpeg_quality",
-        "video_paintover_crf", "video_paintover_burst_frames", "use_cpu", "gpu_id", "encode_dri",
+        "video_paintover_crf", "video_paintover_burst_frames", "use_cpu", "cpu_encode_threading", "gpu_id", "encode_dri",
         "webrtc_pacer", "backpressure_queue_size",
     ]),
     ("Audio", "Server-to-client audio and the microphone uplink.", [

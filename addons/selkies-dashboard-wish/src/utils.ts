@@ -43,7 +43,7 @@ export { getRoutePrefix, getStorageAppName };
  */
 const PER_DISPLAY_SETTINGS = [
   'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
-  'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
+  'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'cpu_encode_threading',
   'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
   'manual_resolution', 'manual_width', 'manual_height',
   'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
@@ -195,6 +195,7 @@ export function computeRenderableSettings(serverSettings: any): Record<string, a
   newRenderable.videoFullColor = isSettingRenderable(s.video_fullcolor);
   newRenderable.video10Bit = isSettingRenderable(s.video_10bit);
   newRenderable.useCpu = isSettingRenderable(s.use_cpu);
+  newRenderable.cpuEncodeThreading = isSettingRenderable(s.cpu_encode_threading);
   newRenderable.uiScaling = isSettingRenderable(s.scaling_dpi);
   newRenderable.binaryClipboard = isSettingRenderable(s.enable_binary_clipboard)
     && (s.clipboard_enabled?.value ?? true);

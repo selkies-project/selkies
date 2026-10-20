@@ -1601,6 +1601,73 @@ def paint_over_switches(page, dashboard: str):
     return row("Turbo"), row("Use Paint-Overs")
 
 
+def cpu_threading_switch(page, dashboard: str):
+    """Either dashboard's CPU encoding threads switch, opening its video settings first."""
+    label = "Multithreaded CPU Encoding"
+    if dashboard == "classic":
+        if not page.locator('#encoderSelect').count():
+            classic_open_video(page)
+        return page.locator('#cpuEncodeThreadingToggle')
+    if not page.locator(f"label:text-is('{label}')").count():
+        open_wish_settings_tab(page, "Video", "Performance")
+    return page.locator(f"div.justify-between:has(> label:text-is('{label}')) > [role='switch']")
+
+
+def cpu_threading_block(dashboard: str, dist: str) -> "H.Results":
+    """The CPU encoding threads switch shows while the session encodes in software.
+
+    A session with software encoding forced shows the switch, on as the server
+    defaults it; turning it off stores the choice, the server rebuilds the
+    capture on the encoder reopened with one thread, and video keeps coming.
+    An operator's locked value hides it.
+    """
+    res = H.Results(f"cpu-threading-{dashboard}")
+    for locked in (False, True):
+        env = {"SELKIES_ENCODER": "h264enc", "SELKIES_USE_CPU": "true"}
+        if locked:
+            env["SELKIES_CPU_ENCODE_THREADING"] = "false|locked"
+        H.server_start(mode="websockets", wayland=False, web_root=dist, extra_env=env)
+        try:
+            with sync_playwright() as p:
+                browser = C.launch_browser(p, "chromium")
+                ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+                ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+                page = ctx.new_page()
+                page.goto(H.BASE_URL, wait_until="load")
+                res.check(f"{'locked' if locked else 'unset'}: video starts",
+                          C.wait_ws_video(page, timeout=45) is not None, "")
+                time.sleep(2.0)
+                switch = cpu_threading_switch(page, dashboard)
+                time.sleep(1.0)
+                if locked:
+                    res.check("locked by the operator: the switch is hidden", switch.count() == 0, "")
+                    C.close_browser(browser)
+                    continue
+                res.check("a software session shows the switch", switch.count() == 1, "")
+                if not switch.count():
+                    C.close_browser(browser)
+                    continue
+                res.check("on, as the server defaults it", switch_on(switch.first), "")
+                restarts = open(H.LOG, errors="replace").read().count("Video parameters changed for 'primary'")
+                switch.first.click(timeout=5000)
+                time.sleep(3.0)
+                res.check("turning it off reads off and is stored off", not switch_on(switch.first)
+                          and page.evaluate("Object.entries(localStorage).some(([k, v]) =>"
+                                            " k.endsWith('_cpu_encode_threading') && v === 'false')"), "")
+                log = open(H.LOG, errors="replace").read()
+                res.check("the server rebuilds the capture for it",
+                          log.count("Video parameters changed for 'primary'") > restarts, H.tail(H.LOG, 6))
+                before = page.evaluate("window.videoChunksReceived || 0")
+                time.sleep(3.0)
+                after = page.evaluate("window.videoChunksReceived || 0")
+                res.check("and video keeps coming on the reopened encoder", after > before, (before, after))
+                C.close_browser(browser)
+        finally:
+            H.server_stop()
+    res.summary()
+    return res
+
+
 def switch_on(switch) -> bool:
     """Whether a dashboard switch reads on (the classic toggle's aria-pressed, the wish Switch's aria-checked)."""
     return (switch.get_attribute("aria-pressed") or switch.get_attribute("aria-checked")) == "true"
@@ -1852,6 +1919,9 @@ def main() -> None:
     if which in ("all", "hidpi-webrtc"):
         blocks.append(hidpi_default_block("classic", H.CLASSIC_DIST, "webrtc"))
         blocks.append(hidpi_default_block("wish", H.WISH_DIST, "webrtc"))
+    if which in ("all", "cpu-threading"):
+        blocks.append(cpu_threading_block("classic", H.CLASSIC_DIST))
+        blocks.append(cpu_threading_block("wish", H.WISH_DIST))
     if which in ("all", "raw-motion"):
         blocks.append(raw_pointer_motion_block("classic", H.CLASSIC_DIST))
         blocks.append(raw_pointer_motion_block("wish", H.WISH_DIST))

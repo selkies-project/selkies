@@ -2642,6 +2642,7 @@ def apply_common_capture_settings(
     use_paint_over_quality: bool,
     capture_cursor: bool,
     cursor_size_cap_hint: int = 0,
+    cpu_encode_threading: bool = True,
 ) -> Any:
     """Assign every CaptureSettings field the WebSocket and WebRTC paths share.
 
@@ -2695,6 +2696,7 @@ def apply_common_capture_settings(
     cs.video_min_qp = int(getattr(server, "video_min_qp", 0) or 0)
     cs.video_max_qp = int(getattr(server, "video_max_qp", 0) or 0)
     cs.use_cpu = bool(use_cpu)
+    cs.cpu_encode_threading = bool(cpu_encode_threading)
     if cs.use_cpu and encoder != "jpeg":
         from .settings import CODEC_LABELS, codec_for_encoder, software_encoders
         codec = codec_for_encoder(encoder)

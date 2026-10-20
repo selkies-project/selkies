@@ -20,7 +20,7 @@
 export const DISPLAY_SETTINGS = ['encoder', 'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
   'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_paint_over_quality',
   'video_paintover_crf', 'video_paintover_burst_frames', 'video_bitrate', 'rate_control_mode', 'use_cpu',
-  'audio_bitrate'];
+  'cpu_encode_threading', 'audio_bitrate'];
 /**
  * The settings the WebSockets core's crash ladder resets, with their safe
  * values (null clears the setting). A setting the user picks again in the

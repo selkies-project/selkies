@@ -201,7 +201,8 @@ STALLED_CLIENT_TIMEOUT_SECONDS = 4.0
 # with it -- the comparison is guarded, so a stale name reads as "rebuild" and
 # says nothing, which is how `output_mode` outlived the field for a release.
 STRUCTURAL_CAPTURE_SETTINGS = (
-    "codec", "use_cpu", "video_fullframe", "video_fullcolor", "video_bit_depth", "video_cbr_mode",
+    "codec", "use_cpu", "cpu_encode_threading", "video_fullframe", "video_fullcolor", "video_bit_depth",
+    "video_cbr_mode",
 )
 # How long a gate stays shut with the client's acks standing still before it
 # reopens on an IDR to probe the client: a gated client is sent nothing, so one
@@ -1876,6 +1877,8 @@ class DataStreamingServer(BaseStreamingService):
         self.video_paintover_burst_frames = self._initial_video_paintover_burst_frames
         self._initial_use_cpu = get_initial_value('use_cpu')
         self.use_cpu = self._initial_use_cpu
+        self._initial_cpu_encode_threading = get_initial_value('cpu_encode_threading')
+        self.cpu_encode_threading = self._initial_cpu_encode_threading
         self._initial_use_paint_over_quality = get_initial_value('use_paint_over_quality')
         self.use_paint_over_quality = self._initial_use_paint_over_quality
         self._initial_video_bitrate = get_initial_value('video_bitrate')
@@ -4292,6 +4295,7 @@ class DataStreamingServer(BaseStreamingService):
             "paint_over_jpeg_quality"
         )
         parsed["use_cpu"] = get_bool("use_cpu")
+        parsed["cpu_encode_threading"] = get_bool("cpu_encode_threading")
         parsed["video_paintover_crf"] = get_int("video_paintover_crf")
         parsed["video_paintover_burst_frames"] = get_int("video_paintover_burst_frames")
         parsed["use_paint_over_quality"] = get_bool("use_paint_over_quality")
@@ -4473,7 +4477,7 @@ class DataStreamingServer(BaseStreamingService):
                 for key in ("encoder", "framerate", "video_crf", "video_fullcolor", "video_10bit",
                             "video_streaming_mode", "jpeg_quality", "paint_over_jpeg_quality",
                             "use_paint_over_quality", "video_paintover_crf",
-                            "video_paintover_burst_frames", "video_bitrate"):
+                            "video_paintover_burst_frames", "video_bitrate", "cpu_encode_threading"):
                     if settings.get(key) is not None:
                         display_state[key] = sanitize_value(key, settings.get(key))
                 if settings.get("encoder") is not None:
@@ -4512,6 +4516,7 @@ class DataStreamingServer(BaseStreamingService):
                         'jpeg_quality': ('jpeg_quality', '_initial_jpeg_quality'),
                         'paint_over_jpeg_quality': ('paint_over_jpeg_quality', '_initial_paint_over_jpeg_quality'),
                         'use_cpu': ('use_cpu', '_initial_use_cpu'),
+                        'cpu_encode_threading': ('cpu_encode_threading', '_initial_cpu_encode_threading'),
                         'use_paint_over_quality': ('use_paint_over_quality', '_initial_use_paint_over_quality'),
                         'video_paintover_crf': ('video_paintover_crf', '_initial_video_paintover_crf'),
                         'video_paintover_burst_frames': ('video_paintover_burst_frames', '_initial_video_paintover_burst_frames'),
@@ -4598,7 +4603,8 @@ class DataStreamingServer(BaseStreamingService):
                 video_params_list = [
                     'encoder', 'framerate', 'video_crf', 'video_fullcolor', 'video_10bit', 'video_streaming_mode',
                     'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'video_paintover_crf',
-                    'video_paintover_burst_frames', 'use_paint_over_quality', 'rate_control_mode', 'video_bitrate'
+                    'video_paintover_burst_frames', 'use_paint_over_quality', 'rate_control_mode', 'video_bitrate',
+                    'cpu_encode_threading',
                 ]
                 if IS_WAYLAND:
                     video_params_list.append('scale')
@@ -4621,7 +4627,8 @@ class DataStreamingServer(BaseStreamingService):
                                 await self._start_pcmflux_pipeline()
                 needs_fallback_reconfigure = False
                 if not (is_initial_settings or dimensional_change) and video_params_changed:
-                    restart_video_params = ['encoder', 'use_cpu', 'video_fullcolor', 'video_10bit', 'rate_control_mode']
+                    restart_video_params = ['encoder', 'use_cpu', 'cpu_encode_threading', 'video_fullcolor', 'video_10bit',
+                                            'rate_control_mode']
                     if IS_WAYLAND:
                         # A capture scale change reconfigures the output, which the
                         # live-tunables path cannot apply.
@@ -5303,6 +5310,7 @@ class DataStreamingServer(BaseStreamingService):
                                     'paint_over_jpeg_quality': self._initial_paint_over_jpeg_quality,
                                     'use_cpu': effective_use_cpu(
                                         self.app.encoder, None, self._initial_use_cpu),
+                                    'cpu_encode_threading': self._initial_cpu_encode_threading,
                                     'video_paintover_crf': self._initial_video_paintover_crf,
                                     'video_paintover_burst_frames': self._initial_video_paintover_burst_frames,
                                     'use_paint_over_quality': self._initial_use_paint_over_quality,
@@ -7372,6 +7380,7 @@ class DataStreamingServer(BaseStreamingService):
             use_paint_over_quality=display_state.get('use_paint_over_quality', self._initial_use_paint_over_quality),
             capture_cursor=self.capture_cursor,
             cursor_size_cap_hint=int(getattr(ih, 'cursor_size_cap', 0) or 0),
+            cpu_encode_threading=display_state.get('cpu_encode_threading', self._initial_cpu_encode_threading),
         )
         return cs
     

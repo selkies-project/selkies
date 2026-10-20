@@ -47,6 +47,31 @@ import { codecOfEncoder } from "./wire-codecs.js";
  */
 
 /**
+ * Whether a session on an encoder codes in software, where the CPU encoding
+ * threads apply: a CPU-only encoder, software forced on a codec that has a
+ * software encoder, a codec this host encodes in software alone, or a full
+ * color or 10-bit stream the hardware engine hands to its software encoder.
+ * Without a backend table it cannot be told, and reads as software.
+ * @param {string} encoder Encoder wire value.
+ * @param {Object<string, {hardware: (string|null), software: (string|null)}>|undefined} encoderBackends
+ *     The server's `encoder_backends` payload entry, keyed by codec name.
+ * @param {boolean} useCpu Whether software encoding is forced.
+ * @param {boolean} fullColor Whether full color is asked for.
+ * @param {boolean} tenBit Whether 10-bit is asked for.
+ * @returns {boolean}
+ */
+export function encodesInSoftware(encoder, encoderBackends, useCpu, fullColor, tenBit) {
+    if (encoder === "jpeg" || encoder === "h264enc-striped" || !encoderBackends) return true;
+    const backends = encoderBackends[codecOfEncoder(encoder)];
+    if (!backends || !backends.hardware || (useCpu && backends.software)) return true;
+    if (fullColor && backends.fullcolor && backends.fullcolor.hardware === false && backends.fullcolor.software) {
+        return true;
+    }
+    const stream = tenBit ? tenBitStream(encoder, encoderBackends, useCpu, fullColor) : null;
+    return !!(stream && stream.software);
+}
+
+/**
  * Whether the software-encoding switch changes anything for an encoder: its
  * codec has both a hardware backend on the server's encode node and a
  * software encoder in its pixelflux build, so the switch moves the session
@@ -228,6 +253,8 @@ export const USE_PAINT_OVER_QUALITY_SPEC = {
 };
 export const USE_CPU_SPEC = boolSpec("use_cpu", false,
     (value, _ctx, io) => io.postSetting({ use_cpu: value }));
+export const CPU_ENCODE_THREADING_SPEC = boolSpec("cpu_encode_threading", true,
+    (value, _ctx, io) => io.postSetting({ cpu_encode_threading: value }));
 export const FORCE_ALIGNED_RESOLUTION_SPEC = boolSpec("force_aligned_resolution", false,
     (value, _ctx, io) => io.postSetting({ force_aligned_resolution: value }));
 /**
@@ -255,7 +282,7 @@ export const MAC_CMD_AS_CTRL_SPEC = boolSpec("mac_cmd_as_ctrl", true,
 
 const SETTING_SPECS = [
     HIDPI_SPEC, RATE_CONTROL_SPEC, USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC,
-    VIDEO_STREAMING_MODE_SPEC, USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC,
+    VIDEO_STREAMING_MODE_SPEC, USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, CPU_ENCODE_THREADING_SPEC,
     FORCE_ALIGNED_RESOLUTION_SPEC, RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC,
 ];
 

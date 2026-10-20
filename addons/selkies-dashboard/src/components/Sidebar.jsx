@@ -68,7 +68,7 @@ import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
   USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
   USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
-  tenBitStream,
+  tenBitStream, CPU_ENCODE_THREADING_SPEC, encodesInSoftware,
   RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../selkies-web-core/lib/conditional-settings.js";
 import GamepadVisualizer from "./GamepadVisualizer";
 import PlayerGamepadButton from "./PlayerGamepadButton.jsx";
@@ -103,7 +103,7 @@ const displayId = urlHash.startsWith('#display2') ? 'display2' : 'primary';
  */
 const PER_DISPLAY_SETTINGS = [
     'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
-    'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
+    'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'cpu_encode_threading',
     'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
     'manual_resolution', 'manual_width', 'manual_height', 'encoder',
     'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
@@ -1054,6 +1054,7 @@ function Sidebar() {
     newRenderable.videoFullColor = isRenderable('video_fullcolor');
     newRenderable.video10Bit = isRenderable('video_10bit');
     newRenderable.use_cpu = isRenderable('use_cpu');
+    newRenderable.cpuEncodeThreading = isRenderable('cpu_encode_threading');
     newRenderable.uiScaling = isRenderable('scaling_dpi');
     newRenderable.binaryClipboard = isRenderable('enable_binary_clipboard')
       && (s.clipboard_enabled?.value ?? true);
@@ -1449,6 +1450,8 @@ function Sidebar() {
   }, [fullColorCodec]);
   const [use_cpu, setUseCpu] = useConditionalSetting(
     USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  const [cpuEncodeThreading, setCpuEncodeThreading] = useConditionalSetting(
+    CPU_ENCODE_THREADING_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   const [video10Bit, setVideo10Bit] = useConditionalSetting(
     VIDEO_10BIT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   /** 10-bit is offered only where this engine shows a 10-bit picture of the stream's format. */
@@ -2249,6 +2252,9 @@ function Sidebar() {
   };
   const handleUseCpuToggle = () => {
     writeConditional(USE_CPU_SPEC, !use_cpu, setUseCpu, { persist: true });
+  };
+  const handleCpuEncodeThreadingToggle = () => {
+    writeConditional(CPU_ENCODE_THREADING_SPEC, !cpuEncodeThreading, setCpuEncodeThreading, { persist: true });
   };
   const handleH264StreamingModeToggle = () => {
     writeConditional(VIDEO_STREAMING_MODE_SPEC, !videoStreamingMode, setVideoStreamingMode, { persist: true });
@@ -3617,6 +3623,25 @@ function Sidebar() {
                       aria-pressed={use_cpu}
                       disabled={!serverSettings || serverSettings.use_cpu?.locked}
                       title={t(use_cpu ? "buttons.useCpuDisableTitle" : "buttons.useCpuEnableTitle")}
+                    >
+                      <span className="toggle-button-sidebar-knob"></span>
+                    </button>
+                  </div>
+                )}
+                {encodesInSoftware(activeEncoder, conditionalCtx.encoderBackends, use_cpu, videoFullColor, video10Bit)
+                  && (renderableSettings.cpuEncodeThreading ?? true) && (
+                  <div className="dev-setting-item toggle-item">
+                    <label htmlFor="cpuEncodeThreadingToggle">
+                      {t("sections.video.cpuEncodeThreadingLabel", "Multithreaded CPU Encoding")}
+                    </label>
+                    <button
+                      id="cpuEncodeThreadingToggle"
+                      className={`toggle-button-sidebar ${cpuEncodeThreading ? "active" : ""}`}
+                      onClick={handleCpuEncodeThreadingToggle}
+                      aria-pressed={cpuEncodeThreading}
+                      disabled={!serverSettings || serverSettings.cpu_encode_threading?.locked}
+                      title={t(cpuEncodeThreading
+                        ? "buttons.cpuEncodeThreadingDisableTitle" : "buttons.cpuEncodeThreadingEnableTitle")}
                     >
                       <span className="toggle-button-sidebar-knob"></span>
                     </button>

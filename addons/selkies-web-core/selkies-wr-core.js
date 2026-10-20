@@ -644,7 +644,7 @@ export default function webrtc() {
 	}
 	const PER_DISPLAY_SETTINGS = [
 		'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
-		'video_streaming_mode', 'use_cpu',
+		'video_streaming_mode', 'use_cpu', 'cpu_encode_threading',
 		'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
 		'manual_resolution', 'manual_width', 'manual_height',
 		'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
@@ -1366,12 +1366,12 @@ export default function webrtc() {
 		const knownSettings = [
 			'encoder', 'manual_resolution',
 			'audio_bitrate', 'video_bitrate', 'scaling_dpi', 'enable_binary_clipboard',
-			'rate_control_mode', 'video_crf', 'use_cpu', 'force_aligned_resolution',
+			'rate_control_mode', 'video_crf', 'use_cpu', 'cpu_encode_threading', 'force_aligned_resolution',
 			'video_fullcolor', 'video_10bit', 'video_streaming_mode', 'use_paint_over_quality',
 			'video_paintover_crf', 'video_paintover_burst_frames'
 		];
 		const booleanSettingKeys = [
-			'manual_resolution', 'enable_binary_clipboard', 'use_cpu',
+			'manual_resolution', 'enable_binary_clipboard', 'use_cpu', 'cpu_encode_threading',
 			'video_fullcolor', 'video_10bit', 'video_streaming_mode', 'use_paint_over_quality',
 			'force_aligned_resolution'
 		];
@@ -2313,6 +2313,7 @@ export default function webrtc() {
 		if (settings.video_paintover_burst_frames !== undefined) passthrough.video_paintover_burst_frames = parseInt(settings.video_paintover_burst_frames, 10);
 		if (settings.force_aligned_resolution !== undefined) passthrough.force_aligned_resolution = !!settings.force_aligned_resolution;
 		if (settings.use_cpu !== undefined) passthrough.use_cpu = !!settings.use_cpu;
+		if (settings.cpu_encode_threading !== undefined) passthrough.cpu_encode_threading = !!settings.cpu_encode_threading;
 		if (settings.encoder !== undefined) passthrough.encoder = settings.encoder;
 	if (settings.displayPosition !== undefined) passthrough.displayPosition = settings.displayPosition;
 		if (settings.video_bitrate !== undefined) {

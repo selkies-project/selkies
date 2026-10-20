@@ -726,6 +726,12 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "help": "Force CPU-based encoding for pixelflux.",
     },
     {
+        "name": "cpu_encode_threading",
+        "type": "bool",
+        "default": True,
+        "help": "Spread each frame a software encoder codes across threads: x264 and OpenH264 code a full frame in slices on several threads, libvpx, x265, kvazaar, and SVT-AV1 run their worker threads, and h264enc-striped and jpeg code their stripes in parallel. Turn it off on hosts that pack many sessions onto their cores, so each session's encode keeps to one thread; a large frame then takes longer to code. Hardware encoders are unaffected, and the dashboards show it only while the session encodes in software. Clients may override per user unless the value is locked.",
+    },
+    {
         "name": "use_paint_over_quality",
         "type": "bool",
         "default": True,
@@ -1244,7 +1250,8 @@ CPU_ONLY_ENCODERS = ("jpeg", "h264enc-striped")
 STREAM_SETTINGS = (
     "encoder", "framerate", "video_crf", "video_fullcolor", "video_10bit", "video_streaming_mode",
     "jpeg_quality", "paint_over_jpeg_quality", "use_paint_over_quality", "video_paintover_crf",
-    "video_paintover_burst_frames", "video_bitrate", "rate_control_mode", "use_cpu", "audio_bitrate",
+    "video_paintover_burst_frames", "video_bitrate", "rate_control_mode", "use_cpu", "cpu_encode_threading",
+    "audio_bitrate",
 )
 
 # The fallback ladder, one order on both transports: the full-frame codecs by the measured

@@ -48,7 +48,7 @@ import { FRAMERATE_DISPLAY, followsDisplay, framerateLabel, matchDisplay } from 
 import { resolveSpec, isSettingPinned, HIDPI_SPEC, RATE_CONTROL_SPEC,
     USE_BROWSER_CURSORS_SPEC, VIDEO_FULLCOLOR_SPEC, VIDEO_10BIT_SPEC, VIDEO_STREAMING_MODE_SPEC,
     USE_PAINT_OVER_QUALITY_SPEC, USE_CPU_SPEC, FORCE_ALIGNED_RESOLUTION_SPEC, softwareChoiceAvailable,
-    tenBitStream,
+    tenBitStream, CPU_ENCODE_THREADING_SPEC, encodesInSoftware,
     RAW_POINTER_MOTION_SPEC, MAC_CMD_AS_CTRL_SPEC } from "../../../../selkies-web-core/lib/conditional-settings.js";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
@@ -497,6 +497,8 @@ export function Settings() {
     }, [encoder, videoStreamingMode]);
     const [useCpu, setUseCpu] = useConditionalSetting(
         USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    const [cpuEncodeThreading, setCpuEncodeThreading] = useConditionalSetting(
+        CPU_ENCODE_THREADING_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     const [video10Bit, setVideo10Bit] = useConditionalSetting(
         VIDEO_10BIT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
     /** 10-bit is offered only where this engine shows a 10-bit picture of the stream's format. */
@@ -882,6 +884,10 @@ export function Settings() {
         writeConditional(USE_CPU_SPEC, !useCpu, setUseCpu, { persist: true });
     };
 
+    const handleCpuEncodeThreadingToggle = () => {
+        writeConditional(CPU_ENCODE_THREADING_SPEC, !cpuEncodeThreading, setCpuEncodeThreading, { persist: true });
+    };
+
     /** Anti-aliasing is client-only; the core persists antiAliasingEnabled itself. */
     const handleAntiAliasingToggle = () => {
         const newState = !antiAliasing;
@@ -1072,6 +1078,8 @@ export function Settings() {
     const showPaintoverBurst = isH264 && (usePaintOverQuality || cbrVideo) && (renderableSettings.videoPaintoverBurstFrames ?? true);
     const showPaintOverJpeg = showJpegOptions && usePaintOverQuality && (renderableSettings.paintOverJpegQuality ?? true);
     const showCpuSwitch = softwareChoiceAvailable(activeEncoder, conditionalCtx.encoderBackends) && (renderableSettings.useCpu ?? true);
+    const showCpuThreadingSwitch = encodesInSoftware(activeEncoder, conditionalCtx.encoderBackends, useCpu, videoFullColor, video10Bit)
+        && (renderableSettings.cpuEncodeThreading ?? true);
     const showAudioBitrate = renderableSettings.audioBitrate ?? true;
     const showHidpi = !isSecondaryDisplay && (renderableSettings.hidpi ?? true);
     const showForceAligned = !isSecondaryDisplay && (renderableSettings.forceAlignedResolution ?? true);
@@ -1083,7 +1091,7 @@ export function Settings() {
         || showFullColorSwitch || showTenBitSwitch;
     const showPerformanceCard = showFramerate || showRateControlSelect || showBitrateSlider || showCrfSlider
         || showTurbo || showJpegQualitySlider || showPaintOverSwitch || showPaintoverCrf
-        || showPaintoverBurst || showPaintOverJpeg || showCpuSwitch;
+        || showPaintoverBurst || showPaintOverJpeg || showCpuSwitch || showCpuThreadingSwitch;
     const showQualityCard = showAudioBitrate;
 
     const showVideoTab = renderableSettings.videoSettings !== false;
@@ -1612,6 +1620,17 @@ export function Settings() {
                                             checked={useCpu}
                                             onCheckedChange={handleUseCpuToggle}
                                             disabled={!serverSettings || serverSettings.use_cpu?.locked}
+                                        />
+                                    </div>
+                                )}
+
+                                {showCpuThreadingSwitch && (
+                                    <div className="flex items-center justify-between">
+                                        <Label>{t('sections.video.cpuEncodeThreadingLabel')}</Label>
+                                        <Switch size="sm"
+                                            checked={cpuEncodeThreading}
+                                            onCheckedChange={handleCpuEncodeThreadingToggle}
+                                            disabled={!serverSettings || serverSettings.cpu_encode_threading?.locked}
                                         />
                                     </div>
                                 )}

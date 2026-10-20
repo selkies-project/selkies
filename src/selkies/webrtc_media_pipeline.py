@@ -160,6 +160,8 @@ class MediaPipelinePixel(MediaPipeline):
             (0, 0) with auto size, the single-display behavior.
         use_cpu: Force the software H.264 encoder (x264, or OpenH264 in a
             GPL-free pixelflux build); structural, so a change restarts capture.
+        cpu_encode_threading: Spread a software encoder's frame across threads;
+            structural, so a change restarts capture.
         video_streaming_mode: Turbo (stream every frame vs damage-gated). It
             and the paint-over knobs apply live; only `video_fullcolor` is
             structural.
@@ -209,6 +211,7 @@ class MediaPipelinePixel(MediaPipeline):
         video_fullcolor: bool = False,
         video_10bit: bool = False,
         use_cpu: bool = False,
+        cpu_encode_threading: bool = True,
         video_streaming_mode: bool = True,
         use_paint_over_quality: bool = True,
         video_paintover_crf: int = 18,
@@ -228,6 +231,7 @@ class MediaPipelinePixel(MediaPipeline):
         self.video_fullcolor = video_fullcolor
         self.video_10bit = video_10bit
         self.use_cpu = use_cpu
+        self.cpu_encode_threading = cpu_encode_threading
         self.video_streaming_mode = video_streaming_mode
         self.use_paint_over_quality = use_paint_over_quality
         self.video_paintover_crf = video_paintover_crf
@@ -367,6 +371,17 @@ class MediaPipelinePixel(MediaPipeline):
         if not self._is_screen_capturing or self.capture_module is None:
             return
         logger.info(f"use_cpu -> {use_cpu}; restarting screen capture")
+        await self.restart_screen_capture()
+
+    async def set_cpu_encode_threading(self, threading: bool) -> None:
+        """Toggle a software encoder's threads. Structural (the encoder is reopened), so restart
+        capture (WS parity)."""
+        if self.cpu_encode_threading == threading:
+            return
+        self.cpu_encode_threading = threading
+        if not self._is_screen_capturing or self.capture_module is None:
+            return
+        logger.info(f"cpu_encode_threading -> {threading}; restarting screen capture")
         await self.restart_screen_capture()
 
     async def _apply_tunables_live(self, what: str) -> None:
@@ -582,6 +597,7 @@ class MediaPipelinePixel(MediaPipeline):
             use_paint_over_quality=self.use_paint_over_quality,
             capture_cursor=self.capture_cursor,
             cursor_size_cap_hint=int(self.get_cursor_size_cap() or 0),
+            cpu_encode_threading=self.cpu_encode_threading,
         )
         return cs
 

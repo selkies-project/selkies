@@ -399,7 +399,7 @@ const postedExplicitOnly = new Set();
 
 const PER_DISPLAY_SETTINGS = [
     'framerate', 'video_crf', 'video_fullcolor', 'video_10bit',
-    'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu',
+    'video_streaming_mode', 'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'cpu_encode_threading',
     'video_paintover_crf', 'video_paintover_burst_frames', 'use_paint_over_quality',
     'manual_resolution', 'manual_width', 'manual_height',
     'encoder', 'scaleLocallyManual', 'use_browser_cursors', 'rate_control_mode',
@@ -1165,6 +1165,7 @@ let video_streaming_mode = false;
 let jpeg_quality = 60;
 let paint_over_jpeg_quality = 90;
 let use_cpu = false;
+let cpu_encode_threading = true;
 let video_paintover_crf = 18;
 let video_paintover_burst_frames = 5;
 let use_paint_over_quality = true;
@@ -1723,6 +1724,7 @@ video_streaming_mode = getBoolParam('video_streaming_mode', video_streaming_mode
 jpeg_quality = getIntParam('jpeg_quality', jpeg_quality);
 paint_over_jpeg_quality = getIntParam('paint_over_jpeg_quality', paint_over_jpeg_quality);
 use_cpu = getBoolParam('use_cpu', use_cpu);
+cpu_encode_threading = getBoolParam('cpu_encode_threading', cpu_encode_threading);
 video_paintover_crf = getIntParam('video_paintover_crf', video_paintover_crf);
 video_paintover_burst_frames = getIntParam('video_paintover_burst_frames', video_paintover_burst_frames);
 use_paint_over_quality = getBoolParam('use_paint_over_quality', use_paint_over_quality);
@@ -3768,6 +3770,7 @@ function getCurrentSettingsPayload() {
         ['jpeg_quality', () => getIntParam('jpeg_quality', 60)],
         ['paint_over_jpeg_quality', () => getIntParam('paint_over_jpeg_quality', 90)],
         ['use_cpu', () => getBoolParam('use_cpu', false)],
+        ['cpu_encode_threading', () => getBoolParam('cpu_encode_threading', true)],
         ['video_paintover_crf', () => getIntParam('video_paintover_crf', 18)],
         ['video_paintover_burst_frames', () => getIntParam('video_paintover_burst_frames', 5)],
         ['use_paint_over_quality', () => getBoolParam('use_paint_over_quality', true)],
@@ -6080,6 +6083,11 @@ function handleSettingsMessage(settings, fromServer, send = true) {
     settingsChanged = true;
     clearAllVncStripeDecoders();
   }
+  if (settings.cpu_encode_threading !== undefined) {
+    cpu_encode_threading = !!settings.cpu_encode_threading;
+    storeBool('cpu_encode_threading', cpu_encode_threading);
+    settingsChanged = true;
+  }
   if (settings.video_paintover_crf !== undefined) {
     video_paintover_crf = parseInt(settings.video_paintover_crf, 10);
     storeInt('video_paintover_crf', video_paintover_crf);
@@ -7879,14 +7887,14 @@ class WorkerWebSocket {
       const knownSettings = [
         'video_crf', 'encoder', 'manual_resolution',
         'audio_bitrate', 'video_fullcolor', 'video_10bit', 'video_streaming_mode',
-        'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'video_paintover_crf',
+        'jpeg_quality', 'paint_over_jpeg_quality', 'use_cpu', 'cpu_encode_threading', 'video_paintover_crf',
         'video_paintover_burst_frames', 'use_paint_over_quality', 'scaling_dpi',
         'enable_binary_clipboard', 'rate_control_mode', 'video_bitrate',
         'force_aligned_resolution'
       ];
       const booleanSettingKeys = [
         'manual_resolution', 'video_fullcolor', 'video_10bit', 'video_streaming_mode',
-        'use_cpu', 'use_paint_over_quality', 'enable_binary_clipboard',
+        'use_cpu', 'cpu_encode_threading', 'use_paint_over_quality', 'enable_binary_clipboard',
         'force_aligned_resolution'
       ];
       const integerSettingKeys = [
