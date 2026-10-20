@@ -9,21 +9,30 @@ display says so once a minute.
 """
 import os
 import sys
-import time
 import unittest
 from collections import OrderedDict
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 from selkies.websockets_mode import _note_ack  # noqa: E402
 
 
+# The clock the server reads stands still here, so a round trip is what the send's stamp says
+# however long the runner takes between the stamp and the ack.
+NOW = 1000.0
+
+
 def state(**sent_ms_ago) -> dict:
-    now = time.monotonic()
-    return {"sent_timestamps": OrderedDict((int(k[1:]), (now - ms / 1000.0, 1000)) for k, ms in sent_ms_ago.items()),
+    return {"sent_timestamps": OrderedDict((int(k[1:]), (NOW - ms / 1000.0, 1000)) for k, ms in sent_ms_ago.items()),
             "rtt_samples": []}
 
 
 class AckRoundTripTests(unittest.TestCase):
+    def setUp(self) -> None:
+        clock = mock.patch("selkies.websockets_mode.time.monotonic", return_value=NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
+
     def test_an_ack_yields_the_round_trip_less_its_hold(self) -> None:
         ds = state(f7=80.0)
         _note_ack(ds, 7, 10.0)
