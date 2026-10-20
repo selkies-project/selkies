@@ -71,7 +71,7 @@ from . import resource_stats
 from . import stream_stats
 from .settings import (settings, AppSettings, SETTING_DEFINITIONS, STREAM_SETTINGS, RateControlMode, SCALING_DPI_MIN,
                        SCALING_DPI_MAX, build_client_settings_payload, sanitize_client_setting, socket_dir,
-                       with_live_stream_settings)
+                       with_live_stream_settings, effective_cpu_encode_threading)
 from types import SimpleNamespace
 from .webrtc_ice_config import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
 from .stream_server import (BaseStreamingService, CentralizedStreamServer, CongestionSteer, LinkAllowance, RateHold,
@@ -380,7 +380,7 @@ class WebRTCService(BaseStreamingService):
             video_fullcolor=bool(self.args.video_fullcolor),
             video_10bit=bool(self.args.video_10bit),
             use_cpu=bool(self.args.use_cpu),
-            cpu_encode_threading=bool(self.args.cpu_encode_threading),
+            cpu_encode_threading=self._cpu_encode_threading_for("primary"),
             video_streaming_mode=bool(self.args.video_streaming_mode),
             use_paint_over_quality=bool(self.args.use_paint_over_quality),
             video_paintover_crf=int(self.args.video_paintover_crf),
@@ -803,8 +803,9 @@ class WebRTCService(BaseStreamingService):
         opened somewhere else — absent until the runner has answered, because a
         client told nothing is installed clears its own record."""
         payload = get_server_settings()
-        with_live_stream_settings(payload["settings"],
-                                  {key: self._display_setting(display_id, key) for key in STREAM_SETTINGS})
+        live = {key: self._display_setting(display_id, key) for key in STREAM_SETTINGS}
+        live["cpu_encode_threading"] = self._cpu_encode_threading_for(display_id)
+        with_live_stream_settings(payload["settings"], live)
         available, _ = self._second_screen_availability()
         entry = payload.get("settings", {}).get("second_screen")
         if isinstance(entry, dict) and entry.get("value") and not available:
@@ -2298,7 +2299,7 @@ class WebRTCService(BaseStreamingService):
                     video_fullcolor=bool(setting("video_fullcolor")),
                     video_10bit=bool(setting("video_10bit")),
                     use_cpu=bool(setting("use_cpu")),
-                    cpu_encode_threading=bool(setting("cpu_encode_threading")),
+                    cpu_encode_threading=self._cpu_encode_threading_for(did),
                     video_streaming_mode=bool(setting("video_streaming_mode")),
                     use_paint_over_quality=bool(setting("use_paint_over_quality")),
                     video_paintover_crf=int(setting("video_paintover_crf")),
@@ -2731,6 +2732,19 @@ class WebRTCService(BaseStreamingService):
                 return entry[key]
         return getattr(self.args, key, None)
 
+    def _cpu_encode_threading_for(self, display_id: str) -> bool:
+        """Whether a display's software encoder threads: its client's request, the operator's
+        value, or what its encoder defaults to (`effective_cpu_encode_threading`). The request
+        is the display's own, never seeded from another display's."""
+        if display_id == "primary":
+            requested = getattr(self.args, "cpu_encode_threading_requested", None)
+        else:
+            requested = (self.display_clients.get(display_id) or {}).get("cpu_encode_threading_requested")
+        return effective_cpu_encode_threading(
+            self._encoder_for_display(display_id), requested,
+            bool(getattr(self.args, "cpu_encode_threading", True)),
+            settings.was_provided("cpu_encode_threading"))
+
     def _store_display_setting(self, display_id: str, key: str, value: Any) -> None:
         """Record a setting as the display's current value (args for the
         primary, the display's own entry for a secondary)."""
@@ -2758,11 +2772,18 @@ class WebRTCService(BaseStreamingService):
         if applier is None:
             return
         self._store_display_setting(display_id, key, value)
+        pipeline = self.display_pipelines.get(display_id)
+        if key == "encoder":
+            # Where nothing chose them, the threads follow the encoder, set ahead of the
+            # capture restart the new encoder takes.
+            threading = self._cpu_encode_threading_for(display_id)
+            self._store_display_setting(display_id, "cpu_encode_threading", threading)
+            if pipeline is not None:
+                pipeline.cpu_encode_threading = threading
         # The senders take the new codec ahead of the capture restart that
         # produces it, so no frame of one codec goes out packed as another.
         if key == "encoder" and self.rtc_app:
             self.rtc_app.switch_display_codec(display_id, str(value))
-        pipeline = self.display_pipelines.get(display_id)
         if pipeline is not None:
             await applier(pipeline, value)
         if key == "framerate" and display_id == "primary" and self.media_pipeline and not IS_WAYLAND:
@@ -2951,9 +2972,17 @@ class WebRTCService(BaseStreamingService):
                     entry["position"] = new_position
                     await self.reconfigure_displays()
 
+        threading_before = self._cpu_encode_threading_for(display_id)
         for key in settings_allowed_to_update:
             client_value = settings_json.get(key)
             if client_value is None:
+                continue
+            if key == "cpu_encode_threading":
+                # A request, kept apart from what the display runs with (`_cpu_encode_threading_for`).
+                requested = sanitize_value(key, client_value)
+                if requested is not None:
+                    self._store_display_setting(display_id, "cpu_encode_threading_requested", bool(requested))
+                    await self._apply_display_setting(display_id, key, self._cpu_encode_threading_for(display_id))
                 continue
             if key == "rate_control_mode" and self.args.enable_rate_control is False:
                 logger.debug(
@@ -2985,6 +3014,11 @@ class WebRTCService(BaseStreamingService):
             logger.debug(
                 f"Updated setting '{key}' for display '{display_id}' from {current_value} to {sanitized_value}"
             )
+        if (display_id == "primary" and self.rtc_app
+                and self._cpu_encode_threading_for(display_id) != threading_before):
+            # The page shows what the display runs with, and an encoder change can move it.
+            # Every peer takes this payload, so it is the primary's, as the other re-sends are.
+            self.rtc_app.send_media_data_over_channel("server_settings", self._server_settings_payload())
         if display_id == "primary":
             self._primary_sized.set()
 

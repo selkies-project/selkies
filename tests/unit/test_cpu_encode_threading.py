@@ -51,6 +51,23 @@ got = probe("print(s.settings.cpu_encode_threading)", SELKIES_CPU_ENCODE_THREADI
 check("SELKIES_CPU_ENCODE_THREADING=false turns it off", got == "(False, False)", got)
 got = probe("print(s.settings.cpu_encode_threading)", SELKIES_CPU_ENCODE_THREADING="false|locked")
 check("false|locked pins it off", got == "(False, True)", got)
+got = probe("print(s.settings.cpu_encode_threading)", SELKIES_ENCODER="vp8enc")
+check("unset, a vp8enc session defaults to one thread", got == "(False, False)", got)
+got = probe("print(s.settings.cpu_encode_threading)", SELKIES_ENCODER="vp8enc", SELKIES_CPU_ENCODE_THREADING="true")
+check("an operator's true keeps vp8enc threaded", got == "(True, False)", got)
+got = probe("print(s.settings.cpu_encode_threading)", SELKIES_ENCODER="vp8enc,h264enc")
+check("the session's first encoder decides the default", got == "(False, False)", got)
+got = probe("print(s.settings.cpu_encode_threading)", SELKIES_ENCODER="h264enc,vp8enc")
+check("and h264enc first leaves it on", got == "(True, False)", got)
+table = [("vp8enc", None, True, False, False), ("vp9enc", None, True, False, True),
+         ("h264enc-striped", None, True, False, True), ("vp8enc", True, True, False, True),
+         ("h264enc", False, True, False, False), ("vp8enc", None, True, True, True),
+         ("h264enc", None, False, True, False), ("vp8enc", False, True, True, False)]
+got = probe("print([s.effective_cpu_encode_threading(e, r, d, p) for e, r, d, p in "
+            + repr([t[:4] for t in table]) + "])")
+want = repr([t[4] for t in table])
+check("effective_cpu_encode_threading: a request, then the operator, then the encoder (off for VP8)", got == want,
+      got)
 got = probe("print('cpu_encode_threading' in s.STREAM_SETTINGS)")
 check("it is a stream setting a display carries", got == "True", got)
 

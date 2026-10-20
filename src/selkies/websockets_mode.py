@@ -119,7 +119,7 @@ from .input_handler import (
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
 )
-from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, STREAM_SETTINGS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, with_live_stream_settings, codec_for_encoder, effective_use_cpu, encoder_for_codec, fps_label, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting, socket_dir
+from .settings import settings, CODEC_LABELS, SETTING_DEFINITIONS, STREAM_SETTINGS, RateControlMode, SCALING_DPI_MIN, SCALING_DPI_MAX, WS_MAX_MESSAGE_BYTES, WS_MESSAGE_SIZE_HARD_CAP, build_client_settings_payload, with_live_stream_settings, codec_for_encoder, effective_cpu_encode_threading, effective_use_cpu, encoder_for_codec, fps_label, inflate_gz_bounded, pipeline_starts_on, sanitize_client_setting, socket_dir
 from .settings import settings as app_settings
 from . import sessions
 from . import audit
@@ -1879,6 +1879,8 @@ class DataStreamingServer(BaseStreamingService):
         self.use_cpu = self._initial_use_cpu
         self._initial_cpu_encode_threading = get_initial_value('cpu_encode_threading')
         self.cpu_encode_threading = self._initial_cpu_encode_threading
+        # Unset, a display's threads follow its encoder (`effective_cpu_encode_threading`).
+        self._cpu_encode_threading_provided = bool(app_settings.was_provided('cpu_encode_threading'))
         self._initial_use_paint_over_quality = get_initial_value('use_paint_over_quality')
         self.use_paint_over_quality = self._initial_use_paint_over_quality
         self._initial_video_bitrate = get_initial_value('video_bitrate')
@@ -2190,6 +2192,12 @@ class DataStreamingServer(BaseStreamingService):
         gamepad player."""
         perms = client_permissions.get(websocket) if websocket is not None else None
         return bool(perms) and perms.get("role") == "controller" and self._holds_input_authority(websocket)
+
+    def _cpu_encode_threading_for(self, encoder: str, requested: Optional[bool]) -> bool:
+        """Whether a display on `encoder` threads its software encode: the client's request,
+        the operator's value, or what the encoder defaults to (`effective_cpu_encode_threading`)."""
+        return effective_cpu_encode_threading(encoder, requested, bool(self._initial_cpu_encode_threading),
+                                              self._cpu_encode_threading_provided)
 
     def _display_settings(self, display_id: str) -> Dict[str, Any]:
         """What a display streams with, keyed as SETTINGS carries it: the
@@ -4477,7 +4485,7 @@ class DataStreamingServer(BaseStreamingService):
                 for key in ("encoder", "framerate", "video_crf", "video_fullcolor", "video_10bit",
                             "video_streaming_mode", "jpeg_quality", "paint_over_jpeg_quality",
                             "use_paint_over_quality", "video_paintover_crf",
-                            "video_paintover_burst_frames", "video_bitrate", "cpu_encode_threading"):
+                            "video_paintover_burst_frames", "video_bitrate"):
                     if settings.get(key) is not None:
                         display_state[key] = sanitize_value(key, settings.get(key))
                 if settings.get("encoder") is not None:
@@ -4497,6 +4505,14 @@ class DataStreamingServer(BaseStreamingService):
                         data_logger.info(
                             f"Software encoding {'enabled' if display_state['use_cpu'] else 'disabled'} "
                             f"for encoder '{display_state['encoder']}'")
+                if settings.get("cpu_encode_threading") is not None or settings.get("encoder") is not None:
+                    # As for use_cpu, the request is kept apart from what the encoder runs with,
+                    # which follows the encoder where neither the client nor the operator chose.
+                    if settings.get("cpu_encode_threading") is not None:
+                        display_state["cpu_encode_threading_requested"] = sanitize_value(
+                            "cpu_encode_threading", settings.get("cpu_encode_threading"))
+                    display_state["cpu_encode_threading"] = self._cpu_encode_threading_for(
+                        display_state["encoder"], display_state.get("cpu_encode_threading_requested"))
                 if settings.get("audio_bitrate") is not None:
                     self.app.audio_bitrate = sanitize_value("audio_bitrate", settings.get("audio_bitrate"))
                     display_state["audio_bitrate"] = self.app.audio_bitrate
@@ -4523,7 +4539,8 @@ class DataStreamingServer(BaseStreamingService):
                     }
                     # The use_cpu seed is the client's request: seeding the effective flag
                     # would pin every later display to software after one CPU-only encoder.
-                    seed_sources = {'use_cpu': 'use_cpu_requested'}
+                    seed_sources = {'use_cpu': 'use_cpu_requested',
+                                    'cpu_encode_threading': 'cpu_encode_threading_requested'}
                     for key, targets in session_seeds.items():
                         if settings.get(key) is None:
                             continue
@@ -5310,7 +5327,7 @@ class DataStreamingServer(BaseStreamingService):
                                     'paint_over_jpeg_quality': self._initial_paint_over_jpeg_quality,
                                     'use_cpu': effective_use_cpu(
                                         self.app.encoder, None, self._initial_use_cpu),
-                                    'cpu_encode_threading': self._initial_cpu_encode_threading,
+                                    'cpu_encode_threading': self._cpu_encode_threading_for(self.app.encoder, None),
                                     'video_paintover_crf': self._initial_video_paintover_crf,
                                     'video_paintover_burst_frames': self._initial_video_paintover_burst_frames,
                                     'use_paint_over_quality': self._initial_use_paint_over_quality,
@@ -7380,7 +7397,8 @@ class DataStreamingServer(BaseStreamingService):
             use_paint_over_quality=display_state.get('use_paint_over_quality', self._initial_use_paint_over_quality),
             capture_cursor=self.capture_cursor,
             cursor_size_cap_hint=int(getattr(ih, 'cursor_size_cap', 0) or 0),
-            cpu_encode_threading=display_state.get('cpu_encode_threading', self._initial_cpu_encode_threading),
+            cpu_encode_threading=display_state.get(
+                'cpu_encode_threading', self._cpu_encode_threading_for(encoder, None)),
         )
         return cs
     

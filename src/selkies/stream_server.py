@@ -2388,6 +2388,7 @@ class CentralizedStreamServer:
             self.settings.mode = mode_name
             self.settings.apply_webrtc_encoder_filter()
             self.settings.resolve_paint_over_default()
+            self.settings.resolve_cpu_encode_threading_default()
             service = self.services[mode_name]
             task = asyncio.create_task(service.start())
             self.active_task = task

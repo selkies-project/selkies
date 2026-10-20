@@ -389,11 +389,13 @@ let displayPosition = 'right';
  * dashboard writes when the user picks them. The core stores every value it
  * applies, so an unmarked one may be the echo of a default an older dashboard
  * derived under rules it no longer runs, which sent at connect would set the
- * server's cleanup against what the dashboard shows. One this page's dashboard
+ * server's cleanup against what the dashboard shows, or of the threads the
+ * server defaulted for the encoder the display ran, which sent would pin them
+ * through a later encoder change. One this page's dashboard
  * posted is its own, derived under the rules it runs now, and goes whatever
  * the marker (`postedExplicitOnly`).
  */
-const EXPLICIT_ONLY_SETTINGS = ['use_paint_over_quality'];
+const EXPLICIT_ONLY_SETTINGS = ['use_paint_over_quality', 'cpu_encode_threading'];
 /** The explicit-only settings this page's dashboard has posted. */
 const postedExplicitOnly = new Set();
 
@@ -6086,6 +6088,7 @@ function handleSettingsMessage(settings, fromServer, send = true) {
   if (settings.cpu_encode_threading !== undefined) {
     cpu_encode_threading = !!settings.cpu_encode_threading;
     storeBool('cpu_encode_threading', cpu_encode_threading);
+    if (!fromServer) postedExplicitOnly.add('cpu_encode_threading');
     settingsChanged = true;
   }
   if (settings.video_paintover_crf !== undefined) {

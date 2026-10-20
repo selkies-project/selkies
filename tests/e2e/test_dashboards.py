@@ -1613,32 +1613,53 @@ def cpu_threading_switch(page, dashboard: str):
     return page.locator(f"div.justify-between:has(> label:text-is('{label}')) > [role='switch']")
 
 
+def encoder_threads_logged() -> int:
+    """The threads pixelflux's last `Encoder: software` line names, 0 without one."""
+    lines = [ln for ln in open(H.LOG, errors="replace") if "Encoder: software" in ln]
+    found = re.search(r"(\d+) threads?\.", lines[-1]) if lines else None
+    return int(found.group(1)) if found else 0
+
+
 def cpu_threading_block(dashboard: str, dist: str) -> "H.Results":
-    """The CPU encoding threads switch shows while the session encodes in software.
+    """The CPU encoding threads switch shows the server's value while the session encodes in software.
 
     A session with software encoding forced shows the switch, on as the server
     defaults it; turning it off stores the choice, the server rebuilds the
     capture on the encoder reopened with one thread, and video keeps coming.
-    An operator's locked value hides it, and a JPEG session, whose stripes it
-    codes one after another, shows it too.
+    A VP8 session shows it off, the server's default for VP8, and pixelflux
+    codes on one thread; turned on it runs threaded, and a reload keeps the
+    pick. An operator's true keeps VP8 threaded, a locked value hides the
+    switch, and a JPEG session, whose stripes it codes one after another,
+    shows it. On the classic dashboard a page that moves from x264 to VP8 sees
+    it go off, the server's value for the new encoder.
     """
     res = H.Results(f"cpu-threading-{dashboard}")
-    for case in ("unset", "locked", "jpeg"):
-        locked = case == "locked"
+    cases = ["unset", "locked", "jpeg", "vp8", "vp8-operator"] + (["to-vp8", "vp8-webrtc"] if dashboard == "classic" else [])
+    for case in cases:
         env = {"SELKIES_ENCODER": "h264enc", "SELKIES_USE_CPU": "true"}
-        if locked:
+        if case == "locked":
             env["SELKIES_CPU_ENCODE_THREADING"] = "false|locked"
-        if case == "jpeg":
+        elif case == "jpeg":
             env = {"SELKIES_ENCODER": "jpeg"}
-        H.server_start(mode="websockets", wayland=False, web_root=dist, extra_env=env)
+        elif case in ("vp8", "vp8-operator", "vp8-webrtc"):
+            env["SELKIES_ENCODER"] = "vp8enc"
+            if case == "vp8-operator":
+                env["SELKIES_CPU_ENCODE_THREADING"] = "true"
+        elif case == "to-vp8":
+            env["SELKIES_ENCODER"] = "h264enc,vp8enc"
+        mode = "webrtc" if case == "vp8-webrtc" else "websockets"
+        H.server_start(mode=mode, wayland=False, web_root=dist, extra_env=env)
         try:
             with sync_playwright() as p:
                 browser = C.launch_browser(p, "chromium")
                 ctx = browser.new_context(viewport={"width": 1440, "height": 900})
-                ctx.add_init_script("window.__SELKIES_STREAMING_MODE__ = 'websockets';")
+                ctx.add_init_script(f"window.__SELKIES_STREAMING_MODE__ = '{mode}';")
                 page = ctx.new_page()
                 page.goto(H.BASE_URL, wait_until="load")
-                if case == "jpeg":
+                if case == "vp8-webrtc":
+                    res.check(f"{case}: video starts", bool(C.wait_wr_video(page, timeout=60)), "")
+                    time.sleep(2.0)
+                elif case == "jpeg":
                     # JPEG stripes are not counted as video chunks; the page is given time to settle.
                     time.sleep(8.0)
                 else:
@@ -1646,32 +1667,74 @@ def cpu_threading_block(dashboard: str, dist: str) -> "H.Results":
                     time.sleep(2.0)
                 switch = cpu_threading_switch(page, dashboard)
                 time.sleep(1.0)
-                if locked:
+                if case == "locked":
                     res.check("locked by the operator: the switch is hidden", switch.count() == 0, "")
-                    C.close_browser(browser)
-                    continue
-                if case == "jpeg":
-                    res.check("a JPEG session shows it too", switch.count() == 1, "")
-                    C.close_browser(browser)
-                    continue
-                res.check("a software session shows the switch", switch.count() == 1, "")
-                if not switch.count():
-                    C.close_browser(browser)
-                    continue
-                res.check("on, as the server defaults it", switch_on(switch.first), "")
-                restarts = open(H.LOG, errors="replace").read().count("Video parameters changed for 'primary'")
-                switch.first.click(timeout=5000)
-                time.sleep(3.0)
-                res.check("turning it off reads off and is stored off", not switch_on(switch.first)
-                          and page.evaluate("Object.entries(localStorage).some(([k, v]) =>"
-                                            " k.endsWith('_cpu_encode_threading') && v === 'false')"), "")
-                log = open(H.LOG, errors="replace").read()
-                res.check("the server rebuilds the capture for it",
-                          log.count("Video parameters changed for 'primary'") > restarts, H.tail(H.LOG, 6))
-                before = page.evaluate("window.videoChunksReceived || 0")
-                time.sleep(3.0)
-                after = page.evaluate("window.videoChunksReceived || 0")
-                res.check("and video keeps coming on the reopened encoder", after > before, (before, after))
+                elif case == "jpeg":
+                    res.check("a JPEG session shows it", switch.count() == 1, "")
+                elif case == "vp8-webrtc":
+                    res.check("over WebRTC a VP8 session shows it off too, the server's default",
+                              switch.count() == 1 and not switch_on(switch.first), "")
+                    res.check("and pixelflux codes it on one thread", encoder_threads_logged() == 1,
+                              encoder_threads_logged())
+                elif case == "vp8-operator":
+                    res.check("an operator's true keeps VP8 threaded: shown on",
+                              switch.count() == 1 and switch_on(switch.first), "")
+                    res.check("and pixelflux codes it threaded", encoder_threads_logged() > 1,
+                              encoder_threads_logged())
+                elif case == "vp8":
+                    res.check("a VP8 session shows the switch off, the server's default",
+                              switch.count() == 1 and not switch_on(switch.first), "")
+                    res.check("and pixelflux codes it on one thread", encoder_threads_logged() == 1,
+                              encoder_threads_logged())
+                    if switch.count():
+                        switch.first.click(timeout=5000)
+                        time.sleep(4.0)
+                        res.check("turned on, VP8 runs threaded", encoder_threads_logged() > 1, encoder_threads_logged())
+                        page.reload(wait_until="load")
+                        C.wait_ws_video(page, timeout=45)
+                        time.sleep(3.0)
+                        again = cpu_threading_switch(page, dashboard)
+                        time.sleep(1.0)
+                        res.check("a reload keeps the pick", again.count() == 1 and switch_on(again.first), "")
+                        res.check("and the server runs it", encoder_threads_logged() > 1, encoder_threads_logged())
+                elif case == "to-vp8":
+                    res.check("x264 first: shown on", switch.count() == 1 and switch_on(switch.first), "")
+                    page.select_option('#encoderSelect', 'vp8enc')
+                    time.sleep(6.0)
+                    switch = cpu_threading_switch(page, dashboard)
+                    res.check("moved to VP8, it reads off, the server's value for VP8",
+                              switch.count() == 1 and not switch_on(switch.first), "")
+                    res.check("and pixelflux codes VP8 on one thread", encoder_threads_logged() == 1,
+                              encoder_threads_logged())
+                    # The page stored the server's off unmarked; sent back after a reload it
+                    # would pin x264 to one thread too.
+                    page.reload(wait_until="load")
+                    C.wait_ws_video(page, timeout=45)
+                    time.sleep(3.0)
+                    cpu_threading_switch(page, dashboard)
+                    page.select_option('#encoderSelect', 'h264enc')
+                    time.sleep(6.0)
+                    switch = cpu_threading_switch(page, dashboard)
+                    res.check("after a reload, back on x264 it reads on: the echo was no request",
+                              switch.count() == 1 and switch_on(switch.first), "")
+                    res.check("and x264 runs threaded", encoder_threads_logged() > 1, encoder_threads_logged())
+                else:
+                    res.check("a software session shows the switch", switch.count() == 1, "")
+                    if switch.count():
+                        res.check("on, as the server defaults it", switch_on(switch.first), "")
+                        restarts = open(H.LOG, errors="replace").read().count("Video parameters changed for 'primary'")
+                        switch.first.click(timeout=5000)
+                        time.sleep(3.0)
+                        res.check("turning it off reads off and is stored off", not switch_on(switch.first)
+                                  and page.evaluate("Object.entries(localStorage).some(([k, v]) =>"
+                                                    " k.endsWith('_cpu_encode_threading') && v === 'false')"), "")
+                        log = open(H.LOG, errors="replace").read()
+                        res.check("the server rebuilds the capture for it",
+                                  log.count("Video parameters changed for 'primary'") > restarts, H.tail(H.LOG, 6))
+                        before = page.evaluate("window.videoChunksReceived || 0")
+                        time.sleep(3.0)
+                        after = page.evaluate("window.videoChunksReceived || 0")
+                        res.check("and video keeps coming on the reopened encoder", after > before, (before, after))
                 C.close_browser(browser)
         finally:
             H.server_stop()

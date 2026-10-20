@@ -1393,8 +1393,9 @@ export default function webrtc() {
 				if (knownSettings.includes(baseKey)) {
 					// Sent only beside the explicit-choice marker: the core stores every
 					// value it applies, so an unmarked paint-over may be the echo of the
-					// off an older dashboard derived under Turbo.
-					if (baseKey === 'use_paint_over_quality'
+					// off an older dashboard derived under Turbo, and an unmarked
+					// cpu_encode_threading the server's default for the encoder it ran.
+					if ((baseKey === 'use_paint_over_quality' || baseKey === 'cpu_encode_threading')
 						&& localStorage.getItem(`${key}_explicit_choice`) !== 'true') {
 						continue;
 					}

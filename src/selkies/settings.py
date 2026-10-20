@@ -729,7 +729,7 @@ SETTING_DEFINITIONS: List[Dict[str, Any]] = [
         "name": "cpu_encode_threading",
         "type": "bool",
         "default": True,
-        "help": "Spread each frame a software encoder codes across threads: x264 and OpenH264 code a full frame in slices on several threads, libvpx, x265, kvazaar, and SVT-AV1 run their worker threads, and h264enc-striped and jpeg code their stripes in parallel. Turn it off on low-end hosts that pack many sessions onto their cores, so each session's encode keeps to one thread, the stripes one after another; a frame then takes longer to code, which a high frame rate notices. Hardware encoders have no such threads, so the dashboards show it only while the session encodes in software. Clients may override per user unless the value is locked.",
+        "help": "Spread each frame a software encoder codes across threads: x264 and OpenH264 code a full frame in slices on several threads, libvpx, x265, kvazaar, and SVT-AV1 run their worker threads, and h264enc-striped and jpeg code their stripes in parallel. Turn it off on low-end hosts that pack many sessions onto their cores, so each session's encode keeps to one thread, the stripes one after another; a frame then takes longer to code, which a high frame rate notices. Unless set, a vp8enc session runs on one thread and every other encoder threaded: libvpx's VP8 row threads cost screen content up to four times the bits at the same quality, and 6 dB under a constant rate, while spinning on the rows they wait for. Hardware encoders have no such threads, so the dashboards show it only while the session encodes in software. Clients may override per user unless the value is locked.",
     },
     {
         "name": "use_paint_over_quality",
@@ -1436,6 +1436,27 @@ def software_video_path(encoder: str, use_cpu: bool) -> bool:
     return encoder == "h264enc-striped" or bool(use_cpu)
 
 
+def effective_cpu_encode_threading(encoder: str, requested: Optional[bool], default: bool, provided: bool) -> bool:
+    """Derive whether a display's software encoder threads within a frame.
+
+    A client's own request wins, then an operator's value; unset, a VP8 session runs on one
+    thread and any other threaded. libvpx's VP8 row threads cost screen content up to four
+    times the bits at the same quantizer (one thread against seven, libvpx 1.15 at pixelflux's
+    settings on scrolling 1080p text), 41.7 against 35.9 dB at 8 Mbit/s, while the rows that
+    wait spin on the CPU.
+
+    Args:
+        encoder: The encoder name the display runs.
+        requested: The client's own request, or None when it never made one.
+        default: The server's configured value.
+        provided: Whether an operator set that value.
+    """
+    if requested is not None:
+        return bool(requested)
+    if provided:
+        return bool(default)
+    return canonical_encoder(encoder) != "vp8enc"
+
 
 class AppSettings:
     """Parses and stores application settings from CLI arguments and
@@ -2068,6 +2089,21 @@ class AppSettings:
             self.use_paint_over_quality[1],
         )
 
+    def resolve_cpu_encode_threading_default(self) -> None:
+        """Default the software encode threads off for a VP8 session and on for any other
+        (`effective_cpu_encode_threading`), so the payload a page first takes already says what
+        the session encoder runs with.
+
+        An operator's cpu_encode_threading wins; a client's choice lives in its display's
+        state. Called again on a transport switch, which can change the encoder.
+        """
+        if self.was_provided("cpu_encode_threading"):
+            return
+        self.cpu_encode_threading = (
+            effective_cpu_encode_threading(self.encoder, None, True, False),
+            self.cpu_encode_threading[1],
+        )
+
     def _post_process_settings(self) -> None:
         """Normalize and cross-check settings whose meaning spans several
         entries.
@@ -2126,6 +2162,7 @@ class AppSettings:
             if rc_definition is not None:
                 rc_definition["meta"]["allowed"] = ["crf"]
         self.resolve_paint_over_default()
+        self.resolve_cpu_encode_threading_default()
 
         audio_enabled = self.audio_enabled[0]
         if not audio_enabled and self.microphone_enabled[0]:
@@ -2210,6 +2247,7 @@ def effective_use_cpu(encoder: str, requested: Optional[bool], default: bool) ->
     if encoder in CPU_ONLY_ENCODERS:
         return True
     return bool(default) if requested is None else bool(requested)
+
 
 
 # Never broadcast to clients: listener, filesystem, and lifecycle-hook settings

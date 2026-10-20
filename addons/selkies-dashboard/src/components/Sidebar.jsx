@@ -866,6 +866,7 @@ const readExplicitStored = (spec) => (key) => (isExplicitChoice(spec) ? readStor
 const readHidpiStored = readExplicitStored(HIDPI_SPEC);
 const readRateControlStored = readExplicitStored(RATE_CONTROL_SPEC);
 const readPaintOverStored = readExplicitStored(USE_PAINT_OVER_QUALITY_SPEC);
+const readCpuThreadingStored = readExplicitStored(CPU_ENCODE_THREADING_SPEC);
 
 /**
  * Drives a conditional setting: lazy init, then a re-resolve whenever the
@@ -1450,8 +1451,10 @@ function Sidebar() {
   }, [fullColorCodec]);
   const [use_cpu, setUseCpu] = useConditionalSetting(
     USE_CPU_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+  // The server's value is what the display's encoder runs with unless the user chose
+  // (single-threaded for VP8): only an explicit pick read back from storage outranks it.
   const [cpuEncodeThreading, setCpuEncodeThreading] = useConditionalSetting(
-    CPU_ENCODE_THREADING_SPEC, serverSettings, conditionalCtx, [serverSettings]);
+    CPU_ENCODE_THREADING_SPEC, serverSettings, conditionalCtx, [serverSettings], readCpuThreadingStored);
   const [video10Bit, setVideo10Bit] = useConditionalSetting(
     VIDEO_10BIT_SPEC, serverSettings, conditionalCtx, [serverSettings]);
   /** 10-bit is offered only where this engine shows a 10-bit picture of the stream's format. */
