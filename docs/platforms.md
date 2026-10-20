@@ -13,11 +13,11 @@ involves WebRTC, STUN, or TURN.
 
 What the platform starts is `selkies session`, a command of the `selkies`
 executable, which the AppImage runs given `session` as its first argument, on a
-host where nothing can be installed ([Native Install](native.md)); `selkies-session`,
-its name before 2.1.0, still runs it. It brings up what the host lacks and
-then Selkies, passing it every argument it does not take itself, so the port,
-the socket, the login, and every other [setting](settings.md) are Selkies' own,
-from the command line or `SELKIES_*` variables alike:
+host where nothing can be installed ([Native Install](native.md)). It brings up
+what the host lacks and then Selkies, passing it every argument it does not take
+itself, so the port, the socket, the login, and every other
+[setting](settings.md) are Selkies' own, from the command line or `SELKIES_*`
+variables alike:
 
 - **Audio**: the sound server the environment names or runs, else PipeWire, else
   PulseAudio, of the session's own.

@@ -78,7 +78,7 @@ fi
 "${SCRIPT_DIR}/start-turnserver.sh" &
 
 # Preset the resolution (X11 backend only)
-[ "${SELKIES_WAYLAND:-false}" != "true" ] && selkies-resize 1920x1080
+[ "${SELKIES_WAYLAND:-false}" != "true" ] && selkies resize 1920x1080
 
 # Start Selkies
 exec selkies \

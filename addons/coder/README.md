@@ -28,4 +28,4 @@ installs the release's native package (`selkies_version`, else the latest) and
 the distribution's Xvfb, which takes `sudo` without a password. `wayland = true`
 streams Selkies' Wayland backend instead of an Xvfb, and `port`, `subdomain`,
 `share`, `order`, and `group` mean what they mean for any app. The log is
-`/tmp/selkies-session.log`.
+`/tmp/selkies.log`.

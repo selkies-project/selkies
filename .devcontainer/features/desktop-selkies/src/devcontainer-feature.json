@@ -1,13 +1,13 @@
 {
     "name": "Selkies",
     "id": "selkies",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Low-latency HTML5 remote desktop streaming for Linux (WebSocket and WebRTC)",
     "options": {
         "release": {
             "type": "string",
             "default": "latest",
-            "description": "The selkies GitHub release to install; latest is the newest one."
+            "description": "The selkies GitHub release to install, v2.1.0 or later; latest is the newest one."
         },
         "xserver": {
             "type": "string",

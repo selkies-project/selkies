@@ -90,6 +90,13 @@ done
 SELKIES="$(ls "${WHEELS}"/selkies-*.whl 2> /dev/null || echo "selkies${RELEASE:+==${RELEASE#v}}")"
 PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --retries 5 --timeout 60 --find-links "${WHEELS}" "${SELKIES}"
 rm -rf "${WHEELS}"
+# The startup script runs `selkies resize`, which came with `selkies session` in
+# 2.1.0; an older selkies takes either word for a stray argument and starts a
+# server instead.
+if ! selkies session --help 2> /dev/null | grep -q '^usage: selkies session'; then
+    echo "ERROR: $(selkies --version 2> /dev/null || echo selkies) has no \`selkies resize\`, which came in 2.1.0: set release to v2.1.0 or later" >&2
+    exit 1
+fi
 
 mkdir -p /etc/OpenCL/vendors && echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
 

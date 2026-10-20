@@ -93,5 +93,5 @@ fi
 
 args=(--port="$port" --enable-basic-auth=false --enable-https=false)
 [ -z "$session" ] || args+=(--session="$session")
-nohup selkies session "$${args[@]}" > /tmp/selkies-session.log 2>&1 &
-echo "Selkies starts on port $port; its log is /tmp/selkies-session.log"
+nohup selkies session "$${args[@]}" > /tmp/selkies.log 2>&1 &
+echo "Selkies starts on port $port; its log is /tmp/selkies.log"
