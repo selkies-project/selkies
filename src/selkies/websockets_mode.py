@@ -4132,7 +4132,7 @@ class DataStreamingServer(BaseStreamingService):
         primary's rectangle of an extended layout while a secondary display is
         connected (the X root then spans every display), else the root window
         (RandR) on X11 or the primary's screen on Wayland — read live, so a
-        desktop resized between connections (selkies-resize) is streamed at
+        desktop resized between connections (selkies resize) is streamed at
         its new size rather than the last connection's.
 
         Returns:

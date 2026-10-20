@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What the container makes of the GPU its probe reports.
 
-`selkies-gpu-probe` reports one thing: the GPU this session has, and whether the
+`selkies gpu-probe` reports one thing: the GPU this session has, and whether the
 compositor's renderer came up on it. Every decision downstream is the image's
 own, made here in the entrypoint, and each has a way to be wrong: a GL stack
 chosen from the devices lying around rather than from the GPU the session

@@ -241,13 +241,12 @@ first_present_if() {
 system_xcb="$(first_present_if /etc/nv_tegra_release \
     /usr/lib/aarch64-linux-gnu/libxcb.so.1 /usr/lib/libxcb.so.1)" || system_xcb=""
 
-# `session` (selkies-session before it) brings up its own display, sound
-# server, and desktop in a runtime directory of its own, so it starts before the
-# defaults and servers below; the interposers above are preloaded into its
-# desktop, and the libxcb below into Selkies alone. Those are the host's, with
-# the bundled PulseAudio and tools after them: a bundled session bus names its
-# build machine's paths. `resize` and `gpu-probe` act on a display already up,
-# so they start nothing either.
+# `session` brings up its own display, sound server, and desktop in a runtime
+# directory of its own, so it starts before the defaults and servers below; the
+# interposers above are preloaded into its desktop, and the libxcb below into
+# Selkies alone. Those are the host's, with the bundled PulseAudio and tools
+# after them: a bundled session bus names its build machine's paths. `resize`
+# and `gpu-probe` act on a display already up, so they start nothing either.
 case "${1:-}" in
     session|selkies-session)
         shift

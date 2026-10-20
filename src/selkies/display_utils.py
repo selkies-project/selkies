@@ -63,6 +63,7 @@ whatever bus Selkies inherited, since another display's session may share
 the home and would apply the change live.
 """
 
+import argparse
 import base64
 import io
 import re
@@ -70,7 +71,6 @@ import os
 import signal
 import stat
 import struct
-import sys
 import tempfile
 import time
 import zlib
@@ -2280,7 +2280,7 @@ async def _run_mate_gsettings(dpi_value: int, logger: logging.Logger) -> bool:
 
 def _is_wayland() -> bool:
     """True when selkies runs its Wayland compositor (no X display tools apply).
-    Lazy so the selkies-resize CLI works without full settings initialization."""
+    Lazy so `selkies resize` works without full settings initialization."""
     try:
         from .settings import settings as _s
         return bool(_s.wayland[0])
@@ -2563,14 +2563,13 @@ async def set_cursor_size(size: int) -> bool:
     return False
 
 async def main() -> None:
-    """CLI entry: resize the display to sys.argv[1] ("WxH") and print the result."""
+    """CLI entry: resize the display to the WxH given and print the result."""
+    parser = argparse.ArgumentParser(prog="selkies resize", allow_abbrev=False,
+                                     description="Resize the X display.")
+    parser.add_argument("size", metavar="WxH", help="the size to set, such as 1920x1080")
+    opts = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-
-    if len(sys.argv) < 2:
-        print("USAGE: %s WxH" % sys.argv[0])
-        sys.exit(1)
-    res = sys.argv[1]
-    print(await resize_display(res))
+    print(await resize_display(opts.size))
 
 def entrypoint() -> None:
     """Console-script entry point for the resize CLI."""
