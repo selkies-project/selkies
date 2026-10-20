@@ -295,6 +295,7 @@ SUITES: list = [
     {"path": "integration/test_output_layout.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_monitor_change_announced.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_lone_display_crtc_follows.py", "tier": "integration", "timeout": 300},
+    {"path": "integration/test_xvfb_vidmode.py", "tier": "integration", "timeout": 120},
     {"path": "integration/test_retype_case.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_x_connection_leak.py", "tier": "integration", "timeout": 300},
     {"path": "integration/test_keymap_parity.py", "tier": "integration", "timeout": 300},

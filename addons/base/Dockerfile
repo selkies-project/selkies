@@ -49,7 +49,9 @@ ARG DISTRIB_RELEASE="26.04"
 # addons/base/patches/xvfb-syncobj-present.patch, which lets a DRI3 client
 # synchronize its presents explicitly, as the NVIDIA driver's must, and
 # addons/base/patches/xvfb-vblank-rate.patch, which runs the vblank the server
-# fakes at the rate the session is captured at, to the millihertz, and
+# fakes at the rate the session is captured at, to the millihertz,
+# addons/base/patches/xvfb-vidmode.patch, which tells a GLX client that rate
+# through XFree86-VidModeExtension, which Mesa's glXGetMscRateOML reads, and
 # addons/base/patches/xvfb-zero-copy-semaphore.patch, which signals a GPU
 # semaphore the capture shares with glamor after its blit, so the encoder waits
 # for it on the GPU rather than on the CPU.

@@ -1,0 +1,422 @@
+xvfb: answer XFree86-VidModeExtension with each screen's size at its vblank rate
+
+Mesa answers glXGetMscRateOML from the VidMode mode line, and Xvfb has no
+VidMode, so the call fails on it every time. Chromium's GPU process asks
+ANGLE's GL backend for the rate twice a second when idle and every frame
+when drawing, and Xlib and ANGLE log a line each time it fails.
+
+- Xvfb builds the server's VidMode extension, and each screen reports one
+  mode: its size, at the rate its fake vblank runs at (-fakescreenfps, or
+  what _FAKE_SCREEN_MILLIHZ or _FAKE_SCREEN_FPS on the root window sets). A
+  GLX client then reads the rate Present paces it at.
+- The rate is exact: a dot clock in kHz over totals that make up what 10^6
+  the rate in millihertz lacks, so 60 Hz reads as 60/1 and 59.94 Hz as
+  2997/50. The horizontal total is whole thousands of pixels and the
+  vertical one the fewest lines that then complete the product, which keeps
+  the clock under what Mesa's 32-bit arithmetic holds as far as it can.
+- Other modes cannot be added or switched to. Gamma is accepted and not
+  applied, as on Xwayland, since a client that sets it at startup would die
+  of the error.
+
+diff --git a/Xext/present/present_fake.c b/Xext/present/present_fake.c
+index c7e5799..ab75542 100644
+--- a/Xext/present/present_fake.c
++++ b/Xext/present/present_fake.c
+@@ -123,6 +123,19 @@ present_fake_priv(ScreenPtr screen)
+     return screen_priv;
+ }
+ 
++/*
++ * The rate a screen's fake vblank runs at now, in millihertz; 0 for a screen
++ * Present is not up on.
++ */
++uint32_t
++present_fake_millihz(ScreenPtr screen)
++{
++    if (!dixPrivateKeyRegistered(&present_screen_private_key) ||
++        !present_screen_priv(screen))
++        return 0;
++    return present_fake_priv(screen)->fake_millihz;
++}
++
+ int
+ present_fake_get_ust_msc(ScreenPtr screen, uint64_t *ust, uint64_t *msc)
+ {
+diff --git a/Xext/present/present_priv.h b/Xext/present/present_priv.h
+index eb97c43..2394529 100644
+--- a/Xext/present/present_priv.h
++++ b/Xext/present/present_priv.h
+@@ -376,6 +376,9 @@ present_execute_post(present_vblank_ptr vblank, uint64_t ust, uint64_t crtc_msc)
+ int
+ present_fake_get_ust_msc(ScreenPtr screen, uint64_t *ust, uint64_t *msc);
+ 
++uint32_t
++present_fake_millihz(ScreenPtr screen);
++
+ int
+ present_fake_queue_vblank(ScreenPtr screen, uint64_t event_id, uint64_t msc);
+ 
+diff --git a/hw/vfb/InitOutput.c b/hw/vfb/InitOutput.c
+index 779be96..51e94aa 100644
+--- a/hw/vfb/InitOutput.c
++++ b/hw/vfb/InitOutput.c
+@@ -76,6 +76,7 @@ from The Open Group.
+ #include "miline.h"
+ #include "glx_extinit.h"
+ #include "randrstr.h"
++#include "vfbvidmode.h"
+ #include <X11/Xatom.h>
+ 
+ #ifdef GLAMOR
+@@ -1472,6 +1473,7 @@ InitOutput(int argc, char **argv)
+     }
+ 
+     xorgGlxCreateVendor();
++    vfbVidModeLoadExtension();
+ 
+     for (i = 1; i <= 32; i++) {
+         if (vfbPixmapDepths[i]) {
+diff --git a/hw/vfb/meson.build b/hw/vfb/meson.build
+index 65f6ccc..659786b 100644
+--- a/hw/vfb/meson.build
++++ b/hw/vfb/meson.build
+@@ -3,6 +3,8 @@ srcs = [
+     'InitOutput.c',
+     '../../mi/miinitext.c',
+     '../../mi/miinitext.h',
++    '../xfree86/xext/vidmode.c',
++    'vfbvidmode.c',
+     '../stubs/ddxBeforeReset.c',
+ ]
+ 
+diff --git a/hw/vfb/vfbvidmode.c b/hw/vfb/vfbvidmode.c
+new file mode 100644
+index 0000000..1544873
+--- /dev/null
++++ b/hw/vfb/vfbvidmode.c
+@@ -0,0 +1,312 @@
++/*
++ * XFree86-VidModeExtension for Xvfb: each screen reports one mode, its size at
++ * the rate its fake vblank runs at, so a GLX client's glXGetMscRateOML, which
++ * Mesa answers from the mode line, gets the rate Present paces it at. Modes
++ * other than the screen's own cannot be added or switched to.
++ */
++#include <dix-config.h>
++
++#include <stdint.h>
++#include <string.h>
++#include <X11/extensions/xf86vmproto.h>
++
++#include "extension.h"
++#include "scrnintstr.h"
++#include "vidmodestr.h"
++#include "Xext/present/present_priv.h"
++
++#include "vfbvidmode.h"
++
++static DevPrivateKeyRec vfbVidModePrivateKeyRec;
++#define vfbVidModePrivateKey (&vfbVidModePrivateKeyRec)
++
++static uint64_t
++vfbVidModeGcd(uint64_t a, uint64_t b)
++{
++    while (b) {
++        uint64_t t = a % b;
++
++        a = b;
++        b = t;
++    }
++    return a;
++}
++
++/*
++ * The screen's mode, filled in its private. The rate is in millihertz and the
++ * dot clock in kHz, so the totals' product has to make up what 10^6 the rate
++ * lacks: the horizontal total is whole thousands of pixels, which leaves at
++ * most a factor of 1000 to the vertical one, past three lines of blanking.
++ * That keeps the clock as low as an exact one goes: Mesa multiplies it by
++ * 1000 in 32 bits.
++ */
++static DisplayModePtr
++vfbVidModeCurrent(ScreenPtr pScreen)
++{
++    DisplayModePtr mode = dixLookupPrivate(&pScreen->devPrivates,
++                                           vfbVidModePrivateKey);
++    uint64_t millihz = present_fake_millihz(pScreen);
++    uint64_t step;
++
++    if (!millihz)
++        millihz = 60000;
++    memset(mode, 0, sizeof(*mode));
++    mode->next = mode->prev = mode;
++    mode->name = "";
++    mode->VScan = 1;
++    mode->HDisplay = pScreen->width;
++    mode->HTotal = (pScreen->width / 1000 + 1) * 1000;
++    mode->HSyncStart = mode->HDisplay + (mode->HTotal - mode->HDisplay) / 3;
++    mode->HSyncEnd = mode->HDisplay + (mode->HTotal - mode->HDisplay) * 2 / 3;
++    step = 1000000 / vfbVidModeGcd(millihz, 1000000);
++    step /= vfbVidModeGcd(step, mode->HTotal);
++    mode->VDisplay = pScreen->height;
++    mode->VTotal = (pScreen->height + 3 + step - 1) / step * step;
++    mode->VSyncStart = mode->VDisplay + (mode->VTotal - mode->VDisplay) / 3;
++    mode->VSyncEnd = mode->VDisplay + (mode->VTotal - mode->VDisplay) * 2 / 3;
++    mode->Clock = millihz * mode->HTotal * mode->VTotal / 1000000;
++    mode->HSync = (float) mode->Clock / mode->HTotal;
++    mode->VRefresh = millihz / 1000.0f;
++    return mode;
++}
++
++static Bool
++vfbVidModeIsCurrent(ScreenPtr pScreen, DisplayModePtr mode)
++{
++    return mode->HDisplay == pScreen->width && mode->VDisplay == pScreen->height;
++}
++
++static Bool
++vfbVidModeGetCurrentModeline(ScreenPtr pScreen, DisplayModePtr *mode, int *dotClock)
++{
++    *mode = vfbVidModeCurrent(pScreen);
++    if (dotClock)
++        *dotClock = (*mode)->Clock;
++    return TRUE;
++}
++
++/* The one mode is the first, and there is no next. */
++static Bool
++vfbVidModeGetNextModeline(ScreenPtr pScreen, DisplayModePtr *mode, int *dotClock)
++{
++    return FALSE;
++}
++
++/* The protocol carries the ranges in hundredths, 16 bits each. */
++static float
++vfbVidModeRange(float value)
++{
++    return value * 100.0f < 65535.0f ? value * 100.0f : 65535.0f;
++}
++
++static vidMonitorValue
++vfbVidModeGetMonitorValue(ScreenPtr pScreen, int valtyp, int range)
++{
++    vidMonitorValue ret = { NULL, };
++    DisplayModePtr mode = vfbVidModeCurrent(pScreen);
++
++    switch (valtyp) {
++    case VIDMODE_MON_VENDOR:
++        ret.ptr = "XLibre";
++        break;
++    case VIDMODE_MON_MODEL:
++        ret.ptr = "Xvfb";
++        break;
++    case VIDMODE_MON_NHSYNC:
++    case VIDMODE_MON_NVREFRESH:
++        ret.i = 1;
++        break;
++    case VIDMODE_MON_HSYNC_LO:
++    case VIDMODE_MON_HSYNC_HI:
++        ret.f = vfbVidModeRange(mode->HSync);
++        break;
++    case VIDMODE_MON_VREFRESH_LO:
++    case VIDMODE_MON_VREFRESH_HI:
++        ret.f = vfbVidModeRange(mode->VRefresh);
++        break;
++    }
++    return ret;
++}
++
++static Bool
++vfbVidModeDeleteModeline(ScreenPtr pScreen, DisplayModePtr mode)
++{
++    return FALSE;
++}
++
++static Bool
++vfbVidModeZoomViewport(ScreenPtr pScreen, int zoom)
++{
++    return zoom == 1;
++}
++
++static Bool
++vfbVidModeGetViewPort(ScreenPtr pScreen, int *x, int *y)
++{
++    *x = *y = 0;
++    return TRUE;
++}
++
++static Bool
++vfbVidModeSetViewPort(ScreenPtr pScreen, int x, int y)
++{
++    return x == 0 && y == 0;
++}
++
++static Bool
++vfbVidModeSwitchMode(ScreenPtr pScreen, DisplayModePtr mode)
++{
++    return vfbVidModeIsCurrent(pScreen, mode);
++}
++
++static Bool
++vfbVidModeLockZoom(ScreenPtr pScreen, Bool lock)
++{
++    return TRUE;
++}
++
++/* A programmable clock, so no list of clocks. */
++static int
++vfbVidModeGetNumOfClocks(ScreenPtr pScreen, Bool *progClock)
++{
++    *progClock = TRUE;
++    return 0;
++}
++
++static Bool
++vfbVidModeGetClocks(ScreenPtr pScreen, int *Clocks)
++{
++    return FALSE;
++}
++
++static ModeStatus
++vfbVidModeCheckModeForMonitor(ScreenPtr pScreen, DisplayModePtr mode)
++{
++    return vfbVidModeIsCurrent(pScreen, mode) ? MODE_OK : MODE_ONE_SIZE;
++}
++
++static ModeStatus
++vfbVidModeCheckModeForDriver(ScreenPtr pScreen, DisplayModePtr mode)
++{
++    return vfbVidModeIsCurrent(pScreen, mode) ? MODE_OK : MODE_ERROR;
++}
++
++static void
++vfbVidModeSetCrtcForMode(ScreenPtr pScreen, DisplayModePtr mode)
++{
++}
++
++static Bool
++vfbVidModeAddModeline(ScreenPtr pScreen, DisplayModePtr mode)
++{
++    return FALSE;
++}
++
++static int
++vfbVidModeGetDotClock(ScreenPtr pScreen, int Clock)
++{
++    return Clock;
++}
++
++static int
++vfbVidModeGetNumOfModes(ScreenPtr pScreen)
++{
++    return 1;
++}
++
++/*
++ * Gamma is not applied, but setting it succeeds, as on Xwayland: a client
++ * that sets it at startup would otherwise die of the error.
++ */
++static Bool
++vfbVidModeSetGamma(ScreenPtr pScreen, float red, float green, float blue)
++{
++    return TRUE;
++}
++
++static Bool
++vfbVidModeGetGamma(ScreenPtr pScreen, float *red, float *green, float *blue)
++{
++    *red = *green = *blue = 1.0f;
++    return TRUE;
++}
++
++static Bool
++vfbVidModeSetGammaRamp(ScreenPtr pScreen, int size, CARD16 *r, CARD16 *g, CARD16 *b)
++{
++    return FALSE;
++}
++
++static Bool
++vfbVidModeGetGammaRamp(ScreenPtr pScreen, int size, CARD16 *r, CARD16 *g, CARD16 *b)
++{
++    return FALSE;
++}
++
++static int
++vfbVidModeGetGammaRampSize(ScreenPtr pScreen)
++{
++    return 0;
++}
++
++static Bool
++vfbVidModeInit(ScreenPtr pScreen)
++{
++    VidModePtr pVidMode = VidModeInit(pScreen);
++
++    if (!pVidMode)
++        return FALSE;
++
++    pVidMode->Flags = 0;
++    pVidMode->Next = NULL;
++    pVidMode->GetMonitorValue = vfbVidModeGetMonitorValue;
++    pVidMode->GetCurrentModeline = vfbVidModeGetCurrentModeline;
++    pVidMode->GetFirstModeline = vfbVidModeGetCurrentModeline;
++    pVidMode->GetNextModeline = vfbVidModeGetNextModeline;
++    pVidMode->DeleteModeline = vfbVidModeDeleteModeline;
++    pVidMode->ZoomViewport = vfbVidModeZoomViewport;
++    pVidMode->GetViewPort = vfbVidModeGetViewPort;
++    pVidMode->SetViewPort = vfbVidModeSetViewPort;
++    pVidMode->SwitchMode = vfbVidModeSwitchMode;
++    pVidMode->LockZoom = vfbVidModeLockZoom;
++    pVidMode->GetNumOfClocks = vfbVidModeGetNumOfClocks;
++    pVidMode->GetClocks = vfbVidModeGetClocks;
++    pVidMode->CheckModeForMonitor = vfbVidModeCheckModeForMonitor;
++    pVidMode->CheckModeForDriver = vfbVidModeCheckModeForDriver;
++    pVidMode->SetCrtcForMode = vfbVidModeSetCrtcForMode;
++    pVidMode->AddModeline = vfbVidModeAddModeline;
++    pVidMode->GetDotClock = vfbVidModeGetDotClock;
++    pVidMode->GetNumOfModes = vfbVidModeGetNumOfModes;
++    pVidMode->SetGamma = vfbVidModeSetGamma;
++    pVidMode->GetGamma = vfbVidModeGetGamma;
++    pVidMode->SetGammaRamp = vfbVidModeSetGammaRamp;
++    pVidMode->GetGammaRamp = vfbVidModeGetGammaRamp;
++    pVidMode->GetGammaRampSize = vfbVidModeGetGammaRampSize;
++    return TRUE;
++}
++
++static void
++vfbVidModeExtensionInit(void)
++{
++    int i;
++
++    if (!dixRegisterPrivateKey(vfbVidModePrivateKey, PRIVATE_SCREEN,
++                               sizeof(DisplayModeRec)))
++        return;
++    for (i = 0; i < screenInfo.numScreens; i++)
++        if (!vfbVidModeInit(screenInfo.screens[i]))
++            return;
++    VidModeAddExtension(FALSE);
++}
++
++/* Once: the list of extensions to initialize outlives a server reset. */
++void
++vfbVidModeLoadExtension(void)
++{
++    static const ExtensionModule vfbVidModeExtension[] = {
++        { vfbVidModeExtensionInit, XF86VIDMODENAME, NULL },
++    };
++
++    if (serverGeneration == 1)
++        LoadExtensionList(vfbVidModeExtension, ARRAY_SIZE(vfbVidModeExtension), TRUE);
++}
+diff --git a/hw/vfb/vfbvidmode.h b/hw/vfb/vfbvidmode.h
+new file mode 100644
+index 0000000..17ad5f0
+--- /dev/null
++++ b/hw/vfb/vfbvidmode.h
+@@ -0,0 +1,7 @@
++#ifndef VFBVIDMODE_H
++#define VFBVIDMODE_H
++
++/* Registers XFree86-VidModeExtension, which comes up with the screens. */
++void vfbVidModeLoadExtension(void);
++
++#endif
