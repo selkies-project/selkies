@@ -10,7 +10,7 @@ stays read-only with collab disabled. The session token never reaches the
 server log.
 
 no-resize: with dynamic resizing disabled nothing a SETTINGS carries resizes
-the desktop an operator sized with `selkies-resize`: not the page's window in
+the desktop an operator sized with `selkies resize`: not the page's window in
 the first one, not 16-pixel alignment, and not a manual resolution in the
 first or a later one. The server keeps the desktop's current size and tells
 the client the realized geometry to fit. With it enabled the same SETTINGS
@@ -213,7 +213,7 @@ async def send_settings(*payloads: dict, seconds: float = 8.0) -> tuple:
 
 def resize_desktop(width: int, height: int) -> tuple:
     """Size the test display as an operator sizes a desktop Selkies may not
-    resize (`selkies-resize`, docs/native.md).
+    resize (`selkies resize`, docs/native.md).
 
     Returns:
         The root size realized.

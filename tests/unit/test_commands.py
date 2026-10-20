@@ -49,7 +49,10 @@ def main() -> bool:
           run.returncode == 0 and run.stdout.startswith("usage: selkies session "), (run.returncode, run.stdout[:60]))
     run = selkies("resize")
     check("selkies resize sees the arguments after its name, none here",
-          run.returncode == 1 and run.stdout.strip() == "USAGE: selkies resize WxH", (run.returncode, run.stdout))
+          run.returncode == 2 and run.stderr.startswith("usage: selkies resize "), (run.returncode, run.stderr[:60]))
+    run = selkies("resize", "--help")
+    check("selkies resize answers --help rather than taking it for a size",
+          run.returncode == 0 and run.stdout.startswith("usage: selkies resize "), (run.returncode, run.stdout[:60]))
     run = selkies("session", "--version")
     check("--version answers before any command parses it",
           run.returncode == 0 and run.stdout.startswith("selkies "), (run.returncode, run.stdout))

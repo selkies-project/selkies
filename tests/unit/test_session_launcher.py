@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""selkies-session finds the host's desktops and reads the backend as Selkies does.
+"""`selkies session` finds the host's desktops and reads the backend as Selkies does.
 
 The launcher runs on hosts it knows nothing about, so it adapts to them: the
 desktop comes from the session files a display manager would list, for the

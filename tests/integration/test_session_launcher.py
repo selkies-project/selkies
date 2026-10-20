@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""selkies-session starts a whole session from one command and ends it whole.
+"""`selkies session` starts a whole session from one command and ends it whole.
 
 A platform starts the launcher with a port and expects a desktop behind it.
 The desktop is the host's own: a session file under the XDG data directories,

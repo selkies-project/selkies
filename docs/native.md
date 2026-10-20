@@ -66,7 +66,7 @@ chmod +x "./${APP}"
 
 `--public` accepts connections on every interface, IPv4 and IPv6; without it, Selkies listens on the loopback addresses only (`127.0.0.1,::1`), for a session reached through SSH port forwarding or a reverse proxy on the same machine. `--addr=` names particular addresses to listen on instead, and is not given together with `--public`.
 
-Given `session` as its first argument (or `selkies-session`, as before 2.1.0), it runs a whole session instead, with its own display and sound server and the host's desktop, as [Jupyter, Coder, and Open OnDemand](platforms.md) describes: `"./${APP}" session --port=8080 --enable-basic-auth=false`. Given `resize` or `gpu-probe`, it runs that command on the display already up.
+Given `session` as its first argument, it runs a whole session instead, with its own display and sound server and the host's desktop, as [Jupyter, Coder, and Open OnDemand](platforms.md) describes: `"./${APP}" session --port=8080 --enable-basic-auth=false`. Given `resize` or `gpu-probe`, it runs that command on the display already up.
 
 What it takes from the host is the graphics stack and the display server: `libgbm`, `libEGL`, and the GPU's own driver have to be the host's for the GPU to be reachable at all, an X11 session needs the host's X server (or `Xvfb`), and the headless Wayland backend needs the host's `libwayland-server`. Everything above them travels with the AppImage.
 
