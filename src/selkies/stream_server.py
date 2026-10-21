@@ -48,7 +48,7 @@ from aiohttp import web
 from aiohttp.abc import AbstractAccessLogger
 from datetime import datetime, timedelta, timezone
 from prometheus_client import generate_latest
-from typing import Any, Awaitable, Callable, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Deque, Dict, Iterator, List, Optional, Set, Tuple
 try:
     # pyrefly: ignore[missing-import]
     import importlib_resources as importlib_resources  # pyright: ignore[reportMissingImports]
@@ -83,6 +83,11 @@ ARCHIVE_MAX_ENTRIES: int = 100_000
 # that staging area by however many of them arrive together.
 ARCHIVE_PACK_POOL = concurrent.futures.ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="selkies-archive")
+
+# A file at least this large is packed as a zip64 entry, so one that grows
+# past the 2 GiB `zipfile` writes into a plain entry while it is read still
+# packs; smaller ones stay plain entries, which every unzipper reads.
+ARCHIVE_ZIP64_FROM: int = 1 << 30
 
 # A connection that carries no request is closed after this long. AppRunner's
 # own default (3630 s) is set to outlast a reverse proxy's pooled connections,
@@ -898,6 +903,21 @@ def _remove_quietly(path: str, dir_fd: Optional[int] = None) -> None:
         os.remove(path, dir_fd=dir_fd)
     except OSError:
         pass
+
+
+class ArchiveTooLarge(Exception):
+    """A folder holds more than one archive may carry
+    (`ARCHIVE_MAX_SOURCE_BYTES`, `ARCHIVE_MAX_ENTRIES`)."""
+
+
+def _zip_date_time(mtime: float) -> Tuple[int, int, int, int, int, int]:
+    """A modification time as a zip entry's local date and time, clamped to
+    the years 1980 to 2107 that the entry can hold."""
+    try:
+        stamp = tuple(time.localtime(mtime)[:6])
+    except (OverflowError, OSError, ValueError):
+        stamp = (1980, 1, 1, 0, 0, 0)
+    return min(max(stamp, (1980, 1, 1, 0, 0, 0)), (2107, 12, 31, 23, 59, 59))  # type: ignore[return-value]
 
 
 class FileRootEscape(Exception):
@@ -2742,11 +2762,16 @@ class CentralizedStreamServer:
         root = getattr(settings, "file_manager_path", "") or ""
         if not root:
             return failed("uploads disabled", 403)
-        root = os.path.expanduser(root)
+        root = os.path.normpath(os.path.expanduser(root))
         parts = self._file_parts(rel)
         if not parts:
             return failed("invalid upload path")
-        dest = os.path.join(root, *parts)
+        dest = os.path.normpath(os.path.join(root, *parts))
+        if not dest.startswith(os.path.join(root, "")):
+            return failed("invalid upload path")
+        # The destination's name in its directory, which the rename below acts
+        # on through the directory's held descriptor.
+        leaf = os.path.basename(dest)
         name = "/".join(parts)
 
         upload_id = request.headers.get("X-Upload-Id")
@@ -2787,7 +2812,7 @@ class CentralizedStreamServer:
                     await asyncio.to_thread(_remove_quietly, staging, parent_fd)
                     return failed(str(e))
                 try:
-                    await asyncio.to_thread(_finalize_upload, staging, parts[-1], parent_fd)
+                    await asyncio.to_thread(_finalize_upload, staging, leaf, parent_fd)
                 except OSError as e:
                     await asyncio.to_thread(_remove_quietly, staging, parent_fd)
                     return failed(f"finalize failed: {e}", 500)
@@ -2851,7 +2876,7 @@ class CentralizedStreamServer:
             # Synchronous, like the removal: a transfer is tracked by its destination,
             # so a restart on the same path cannot run between the rename and the entry's removal.
             try:
-                _finalize_upload(part_leaf, parts[-1], parent_fd)
+                _finalize_upload(part_leaf, leaf, parent_fd)
             except OSError as e:
                 self._discard_chunked_upload(dest, part_path)
                 return failed(f"finalize failed: {e}", 500)
@@ -2870,7 +2895,11 @@ class CentralizedStreamServer:
         """Split a root-relative path into its name components, or None when
         it escapes the root. Empty and ``.`` components are dropped, and a
         ``..`` surviving the normalization is the escape; a path that
-        normalizes to nothing is no components, which is the root itself."""
+        normalizes to nothing is no components, which is the root itself. A
+        NUL byte names nothing on the filesystem and is refused with the
+        escapes, rather than raising out of the calls that would see it."""
+        if "\x00" in rel:
+            return None
         rel = rel.strip("/\\")
         parts = [c for c in os.path.normpath(rel).split(os.sep) if c and c != "."]
         if rel and ".." in parts:
@@ -2900,8 +2929,9 @@ class CentralizedStreamServer:
         full = os.path.join(parent, parts[-1])
         # After following in-directory symlinks the entry must still sit at or
         # under the root; a leaf symlink out of the tree is refused too.
+        root = os.path.join(base, "")
         for resolved in (parent, os.path.realpath(full)):
-            if resolved != base and not resolved.startswith(base + os.sep):
+            if resolved != base and not resolved.startswith(root):
                 return None
         return full
 
@@ -2936,6 +2966,7 @@ class CentralizedStreamServer:
             OSError: A component is missing or is not a directory.
         """
         base = str(self.upload_dir)
+        root = os.path.join(base, "")
         fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
         try:
             for part in parts:
@@ -2947,13 +2978,15 @@ class CentralizedStreamServer:
                 except FileNotFoundError:
                     if not create:
                         raise
-                    os.mkdir(part, dir_fd=fd)
+                    # A concurrent request may make it first; either way it is there now.
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(part, dir_fd=fd)
                     opened = os.open(part, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
                 try:
                     resolved = os.readlink(f"/proc/self/fd/{opened}")
                 except OSError:
                     resolved = ""
-                if resolved != base and not resolved.startswith(base + os.sep):
+                if resolved != base and not resolved.startswith(root):
                     os.close(opened)
                     raise FileRootEscape(part)
                 os.close(fd)
@@ -2964,9 +2997,9 @@ class CentralizedStreamServer:
             raise
 
     def _open_resolved_fd(self, parts: List[str]) -> Optional[Tuple[int, str]]:
-        """Open the filesystem entry `parts` names under the file-manager root
-        as a file descriptor, and return it with the canonical path it opened
-        to, or None when that sits outside the root.
+        """Open the directory `parts` names under the file-manager root as a
+        file descriptor, and return it with the canonical path it opened to,
+        or None when that sits outside the root.
 
         The walk to the leaf verifies every intermediate component from the
         descriptor it opened (`_open_dir_fd`); the leaf itself is opened
@@ -2984,6 +3017,12 @@ class CentralizedStreamServer:
         Returns:
             The descriptor, the caller's to close, and its canonical path, or
             None when the entry resolved outside the root.
+
+        Raises:
+            NotADirectoryError: The leaf is not a directory. `O_DIRECTORY`
+                refuses it before anything is read, so a FIFO cannot hold the
+                open (and the worker thread making it) waiting for a writer.
+            OSError: The leaf is missing or cannot be opened.
         """
         try:
             fd = self._open_dir_fd(parts[:-1])
@@ -2991,7 +3030,7 @@ class CentralizedStreamServer:
             return None
         try:
             if parts:
-                opened = os.open(parts[-1], os.O_RDONLY, dir_fd=fd)
+                opened = os.open(parts[-1], os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
                 os.close(fd)
                 fd = opened
         except BaseException:
@@ -3003,7 +3042,7 @@ class CentralizedStreamServer:
             os.close(fd)
             return None
         base = str(self.upload_dir)
-        if resolved != base and not resolved.startswith(base + os.sep):
+        if resolved != base and not resolved.startswith(os.path.join(base, "")):
             os.close(fd)
             return None
         return fd, resolved
@@ -3104,12 +3143,12 @@ class CentralizedStreamServer:
         if "download" not in self.settings.file_transfers:
             return web.json_response({"status": "error", "message": "downloads disabled"}, status=403)
         rel_query = request.query.get("path", "")
-        if self._resolve_file_path(rel_query) is None:
+        parts = self._file_parts(rel_query)
+        if parts is None or self._resolve_file_path(rel_query) is None:
             return web.json_response({"status": "error", "message": "invalid path"}, status=400)
-        rel = rel_query.strip("/\\")
+        rel = "/".join(parts)
         try:
-            entries = await asyncio.to_thread(
-                self._browse_dir, self._file_parts(rel_query) or [], rel)
+            entries = await asyncio.to_thread(self._browse_dir, parts, rel)
         except (FileNotFoundError, NotADirectoryError):
             return web.json_response({"status": "error", "message": "not a directory"}, status=404)
         except PermissionError:
@@ -3119,19 +3158,28 @@ class CentralizedStreamServer:
         return web.json_response({"status": "ok", "path": rel, "entries": entries})
 
     async def handle_files_mkdir(self, request: web.Request) -> web.Response:
-        """POST /api/files/_mkdir: create a directory in the shared file
+        """POST /api/file-manager/mkdir: create a directory in the shared file
         manager. Refused for view-only credentials and where uploads are
         disabled, for a path that escapes the root, and for every spelling of
         the root itself, which nothing the manager offers has a use for: a
-        directory is only ever created inside another.
+        directory is only ever created inside another. Refused to another
+        site's page too (`_fetched_cross_site`): a form posting `text/plain`
+        needs no preflight, `request.json` reads its body all the same, and the
+        browser attaches a cached Basic login to it.
 
         The directory is made inside a descriptor of its parent that the
         confinement walked (`_open_dir_fd`), so a symlink planted over an
         intermediate name after the path was validated cannot move the
-        creation outside the root."""
+        creation outside the root. A name already taken is the `mkdir`'s own
+        `FileExistsError`, not a check ahead of it that a concurrent request
+        could invalidate."""
         refused = self._viewer_or_disabled_files(request)
         if refused:
             return web.json_response({"status": "error", "message": refused}, status=403)
+        if self._fetched_cross_site(request, request.app["settings"]):
+            logger.warning("Refused a new folder to another site's page (Origin %r)",
+                           request.headers.get("Origin", ""))
+            return web.json_response({"status": "error", "message": "Forbidden origin"}, status=403)
         data = await self._json_body(request)
         rel = (data or {}).get("path", "")
         if not isinstance(rel, str) or not rel.strip("/\\"):
@@ -3139,8 +3187,6 @@ class CentralizedStreamServer:
         target = self._resolve_file_path(rel)
         if target is None or self._at_file_root(target):
             return web.json_response({"status": "error", "message": "invalid path"}, status=400)
-        if os.path.lexists(target):
-            return web.json_response({"status": "error", "message": "already exists"}, status=409)
         parts = self._file_parts(rel) or []
 
         def make() -> None:
@@ -3156,6 +3202,8 @@ class CentralizedStreamServer:
             return web.json_response({"status": "error", "message": "invalid path"}, status=400)
         except FileExistsError:
             return web.json_response({"status": "error", "message": "already exists"}, status=409)
+        except NotADirectoryError:
+            return web.json_response({"status": "error", "message": "a file is in the way"}, status=409)
         except OSError as e:
             return web.json_response({"status": "error", "message": str(e)}, status=500)
         audit.emit("file.mkdir", filename=rel)
@@ -3553,134 +3601,206 @@ class CentralizedStreamServer:
         return response
 
     @staticmethod
-    def _archive_source_bounds(root: pathlib.Path) -> Tuple[int, int]:
-        """Walk `root` without reading file contents and return the total size
-        and count of the regular files an archive of it would carry.
+    def _archive_source_bounds(dir_fd: int) -> Tuple[int, int]:
+        """Walk the directory `dir_fd` holds without reading file contents and
+        return the total size and count of the regular files an archive of it
+        would carry, stopping as soon as either is past its bound.
 
-        The walk skips what `_build_directory_archive` skips, so the bound it
-        feeds sees exactly the archive the pack would write: symlinks, and any
-        entry that is not a regular file. A FIFO or a socket would wedge
-        `zipfile`'s read of it, and a device would inflate the archive without
-        carrying the tree's content.
+        The walk is the one `_archive_files` makes (`os.fwalk`: a symlinked
+        directory is never descended, and only regular files count), by
+        `lstat` rather than an open; an entry that vanishes or turns
+        unreadable mid-walk is skipped rather than failing the request.
         """
         total = 0
         count = 0
-        for current, directories, filenames in os.walk(root, followlinks=False):
-            directories[:] = [
-                d for d in directories
-                if not os.path.islink(os.path.join(current, d))]
+        for _current, _directories, filenames, current_fd in os.fwalk(".", dir_fd=dir_fd):
             for name in filenames:
-                entry = os.path.join(current, name)
-                if os.path.islink(entry) or not os.path.isfile(entry):
+                try:
+                    st = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+                except OSError:
                     continue
-                total += os.stat(entry).st_size
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                total += st.st_size
                 count += 1
+                if total > ARCHIVE_MAX_SOURCE_BYTES or count > ARCHIVE_MAX_ENTRIES:
+                    return total, count
         return total, count
 
     @staticmethod
-    def _build_directory_archive(root: pathlib.Path) -> Tuple[str, int]:
-        """Write the contents of `root` to a zip archive in the system
-        temporary directory, and return its path and size.
+    def _archive_files(dir_fd: int) -> Iterator[Tuple[str, int, os.stat_result]]:
+        """Yield each regular file under the directory `dir_fd` holds: its
+        name relative to that directory, an open descriptor of it (the
+        caller's to close), and its status.
 
-        Symlinks are left out: `zipfile` reads the target a link points at, so
-        a link inside the tree pointing out of it would put content outside the
-        root into an archive the user asked for the tree's contents of. Anything
-        that is not a regular file is left out with them: `zipfile` would read a
-        FIFO like a file and wedge the pack, and a device would inflate the
-        archive without carrying the tree's content.
+        `os.fwalk` never descends a symlinked directory, and each file is
+        opened by name relative to its own directory's descriptor with
+        `O_NOFOLLOW`, so no symlink, planted before the walk or swapped in
+        during it, is followed out of the tree. `O_NONBLOCK` keeps a FIFO from
+        holding the open, and anything the descriptor does not show to be a
+        regular file is left out: a FIFO or a socket would wedge the read, and
+        a device would inflate the archive without carrying the tree's
+        content. An entry that vanishes or cannot be read is skipped.
+        """
+        for current, _directories, filenames, current_fd in os.fwalk(".", dir_fd=dir_fd):
+            for name in filenames:
+                try:
+                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current_fd)
+                except OSError:
+                    continue
+                try:
+                    st = os.fstat(fd)
+                except OSError:
+                    os.close(fd)
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    os.close(fd)
+                    continue
+                yield os.path.normpath(os.path.join(current, name)), fd, st
+
+    @classmethod
+    def _build_directory_archive(cls, dir_fd: int) -> str:
+        """Write the regular files under the directory `dir_fd` holds to a zip
+        archive in the system temporary directory, and return its path.
+
+        Every file is read through the descriptor `_archive_files` opened, so
+        a link inside the tree pointing out of it cannot put content outside
+        the root into an archive the user asked for the tree's contents of,
+        and neither can one swapped in while the pack runs. The pack holds to
+        the bounds `_archive_source_bounds` checked as it reads, so a file that
+        grows between the two cannot carry the archive past them. A
+        modification time a zip entry cannot hold (before 1980 or after 2107)
+        is clamped rather than failing the pack.
+
+        Raises:
+            ArchiveTooLarge: The files read past `ARCHIVE_MAX_SOURCE_BYTES` or
+                `ARCHIVE_MAX_ENTRIES`.
         """
         fd, staged = tempfile.mkstemp(prefix="selkies-files-", suffix=".zip")
         os.close(fd)
+        carried = 0
+        entries = 0
         try:
             with zipfile.ZipFile(staged, "w", zipfile.ZIP_DEFLATED) as archive:
-                for current, directories, filenames in os.walk(root, followlinks=False):
-                    directories[:] = [
-                        d for d in directories
-                        if not os.path.islink(os.path.join(current, d))]
-                    relative = os.path.relpath(current, root)
-                    for name in filenames:
-                        entry = os.path.join(current, name)
-                        if os.path.islink(entry) or not os.path.isfile(entry):
-                            continue
-                        archive.write(entry, name if relative == "." else os.path.join(relative, name))
+                for name, file_fd, st in cls._archive_files(dir_fd):
+                    with os.fdopen(file_fd, "rb") as source:
+                        entries += 1
+                        if entries > ARCHIVE_MAX_ENTRIES:
+                            raise ArchiveTooLarge(name)
+                        info = zipfile.ZipInfo(name, _zip_date_time(st.st_mtime))
+                        info.compress_type = zipfile.ZIP_DEFLATED
+                        info.external_attr = (stat.S_IFREG | stat.S_IMODE(st.st_mode)) << 16
+                        info.file_size = st.st_size
+                        with archive.open(info, "w", force_zip64=st.st_size >= ARCHIVE_ZIP64_FROM) as sink:
+                            while True:
+                                chunk = source.read(1 << 20)
+                                if not chunk:
+                                    break
+                                carried += len(chunk)
+                                if carried > ARCHIVE_MAX_SOURCE_BYTES:
+                                    raise ArchiveTooLarge(name)
+                                sink.write(chunk)
         except BaseException:
             with contextlib.suppress(OSError):
                 os.remove(staged)
             raise
-        return staged, os.path.getsize(staged)
+        return staged
+
+    def _pack_directory(self, parts: List[str]) -> Optional[str]:
+        """Open the directory `parts` names under the file-manager root, bound
+        it, and pack it (`_build_directory_archive`); return the archive's
+        path, or None when the directory resolved outside the root.
+
+        Runs whole on one `ARCHIVE_PACK_POOL` worker with the directory's
+        descriptor: the descriptor is opened, walked, and closed by the same
+        call, so a request abandoned while the pack runs cannot close it, or
+        have its number reused, under the walk. The bound comes first, so a
+        folder past `ARCHIVE_MAX_SOURCE_BYTES` or `ARCHIVE_MAX_ENTRIES` is
+        refused before a byte is staged.
+
+        Raises:
+            ArchiveTooLarge: The folder holds more than one archive may carry.
+            OSError: The directory is missing, is not one, or cannot be opened.
+        """
+        opened = self._open_resolved_fd(parts)
+        if opened is None:
+            return None
+        dir_fd, _ = opened
+        try:
+            total, count = self._archive_source_bounds(dir_fd)
+            if total > ARCHIVE_MAX_SOURCE_BYTES or count > ARCHIVE_MAX_ENTRIES:
+                raise ArchiveTooLarge("/".join(parts))
+            return self._build_directory_archive(dir_fd)
+        finally:
+            os.close(dir_fd)
 
     async def handle_files_zip(self, request: web.Request) -> web.StreamResponse:
-        """GET /api/files/_zip?path=<dir>: hand a directory to the page as one
-        zip archive.
+        """GET /api/file-manager/zip?path=<dir>: hand a directory to the page
+        as one zip archive.
 
         A folder has no single file to fetch, so the archive is what a folder's
         Download button asks for. `zipfile` cannot stream, so the folder is
         packed to a temporary file first and the response starts once the whole
         archive exists; the wait before the first byte is that packing, and the
         temporary is unlinked once the transfer ends however it ends. Symlinks
-        are not followed (`_build_directory_archive`). The root is refused like
-        every endpoint that acts rather than lists, so a folder download is
-        always a folder within the manager and never the whole served tree in
-        one request. View-only credentials are refused the archive like the
-        listing and the bytes (`_viewer_ceiling`): a viewer watches the
-        desktop, it does not take the files on it.
+        are not followed (`_archive_files`). The root is refused like every
+        endpoint that acts rather than lists, so a folder download is always a
+        folder within the manager and never the whole served tree in one
+        request. View-only credentials are refused the archive like the listing
+        and the bytes (`_viewer_ceiling`): a viewer watches the desktop, it
+        does not take the files on it. Another site's page is refused too
+        (`_fetched_cross_site`): an image or a link there would spend the pack
+        on the session's cached login, and the page's own Download button is
+        a same-origin navigation.
 
-        The folder is bounded before anything is staged: one walk sizes and
-        counts what the archive would carry (`_archive_source_bounds`), and a
-        folder past `ARCHIVE_MAX_SOURCE_BYTES` or `ARCHIVE_MAX_ENTRIES` is
-        refused with 413 before a temporary is written, because the pack runs
-        to completion ahead of the first byte and the pacing below only
-        throttles the network side. The pack runs on a pool of two
-        (`ARCHIVE_PACK_POOL`), so concurrent requests queue for it rather
-        than each staging a full copy.
-
-        The folder is opened through the confinement's descriptor
-        (`_open_resolved_fd`) and both the bounds walk and the pack read it
-        through the descriptor's `/proc/self/fd` path, so they see the object
-        the check opened rather than a name a symlink planted between the two
-        could have swapped.
+        The folder is bounded before anything is staged, and a folder past
+        `ARCHIVE_MAX_SOURCE_BYTES` or `ARCHIVE_MAX_ENTRIES` is refused with
+        413, because the pack runs to completion ahead of the first byte and
+        the pacing below only throttles the network side. The pack runs on a
+        pool of two (`ARCHIVE_PACK_POOL`), so concurrent requests queue for it
+        rather than each staging a full copy. The folder is opened through the
+        confinement's descriptor and walked from it (`_pack_directory`), so
+        the pack reads the object the check opened rather than a name a
+        symlink planted between the two could have swapped.
 
         The archive rides the same pacing the file download does
         (`_serve_paced_download`), so a folder the size of a video directory
         still backs off with the session's delay instead of taking whatever the
         downlink accepts. It is streamed rather than handed to FileResponse,
         since the temporary does not outlive the handler, and the route is GET
-        alone for the same reason: a HEAD or a Range would want FileResponse
-        to answer from a file that is gone, and a Range is refused before the
-        folder is packed rather than after it.
+        alone for the same reason: a HEAD, a Range, or a conditional request
+        would want FileResponse to answer from a file that is gone, and each is
+        refused before the folder is packed rather than after it.
         """
         if self._viewer_ceiling(request):
             return web.Response(status=403, text="View-only credentials cannot download files")
         if "download" not in self.settings.file_transfers:
             return web.Response(status=403, text="Forbidden: downloads disabled")
+        if self._fetched_cross_site(request, request.app["settings"]):
+            logger.warning("Refused a folder archive to another site's page (Origin %r)",
+                           request.headers.get("Origin", ""))
+            return web.Response(status=403, text="Forbidden origin")
         rel = str(request.query.get("path", ""))
         target = self._resolve_file_path(rel)
-        if target is None or self._at_file_root(target) or not os.path.isdir(target):
+        if target is None or self._at_file_root(target):
             return web.json_response({"status": "error", "message": "not found"}, status=404)
-        if "Range" in request.headers:
+        if any(name in request.headers for name in (
+                "Range", "If-Modified-Since", "If-None-Match", "If-Range", "If-Unmodified-Since")):
             return web.Response(status=405, headers={"Allow": "GET"})
-        opened = await asyncio.to_thread(
-            self._open_resolved_fd, self._file_parts(rel) or [])
-        if opened is None:
-            return web.json_response({"status": "error", "message": "not found"}, status=404)
-        dir_fd, _ = opened
         staged: Optional[str] = None
         try:
-            if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
-                return web.json_response({"status": "error", "message": "not found"}, status=404)
-            # The bounds walk and the pack both see the directory the
-            # descriptor pinned, through its `/proc/self/fd` path: a symlink
-            # swapped over the requested name after the check cannot point
-            # either one at a directory outside the root.
-            pinned = pathlib.Path(f"/proc/self/fd/{dir_fd}")
-            total, count = await asyncio.to_thread(self._archive_source_bounds, pinned)
-            if total > ARCHIVE_MAX_SOURCE_BYTES or count > ARCHIVE_MAX_ENTRIES:
+            try:
+                staged = await asyncio.get_running_loop().run_in_executor(
+                    ARCHIVE_PACK_POOL, self._pack_directory, self._file_parts(rel) or [])
+            except ArchiveTooLarge:
                 return web.json_response(
                     {"status": "error",
                      "message": "the folder holds too much to pack as one archive"},
                     status=413)
-            staged, _ = await asyncio.get_running_loop().run_in_executor(
-                ARCHIVE_PACK_POOL, self._build_directory_archive, pinned)
+            except OSError:
+                staged = None
+            if staged is None:
+                return web.json_response({"status": "error", "message": "not found"}, status=404)
             name = os.path.basename(os.path.normpath(rel))
             return await self._serve_paced_download(
                 request, pathlib.Path(staged),
@@ -3689,7 +3809,6 @@ class CentralizedStreamServer:
         finally:
             if staged is not None:
                 await asyncio.to_thread(os.remove, staged)
-            await asyncio.to_thread(os.close, dir_fd)
 
     async def fancy_index_handler(self, request: web.Request) -> web.StreamResponse:
         """GET /api/files/...: serve the file-manager tree for download.
@@ -3715,10 +3834,6 @@ class CentralizedStreamServer:
         if "download" not in self.settings.file_transfers:
             return web.Response(status=403, text="Forbidden: downloads disabled")
         rel_path = request.match_info.get("path", "").lstrip("/")
-        if rel_path == "_zip":
-            # The archive route owns this name and answers GET alone, so a HEAD
-            # here is the catch-all speaking for a name that is not a file.
-            return web.Response(status=405, headers={"Allow": "GET"})
         base = str(self.upload_dir)
         parts = self._file_parts(rel_path)
         if parts is None:
@@ -3726,7 +3841,7 @@ class CentralizedStreamServer:
                 status=403, text="Forbidden: Directory Traversal detected"
             )
         resolved = os.path.realpath(os.path.join(base, *parts))
-        if resolved != base and not resolved.startswith(base + os.sep):
+        if resolved != base and not resolved.startswith(os.path.join(base, "")):
             return web.Response(
                 status=403, text="Forbidden: Directory Traversal detected"
             )
@@ -3835,12 +3950,12 @@ class CentralizedStreamServer:
             web.get(f"{api_prefix}/api/health", self.handle_health),
             web.post(f"{api_prefix}/api/switch", self.handle_switch),
             web.post(f"{api_prefix}/api/upload", self.handle_upload),
-            # File manager JSON API endpoints (before the catch-all /api/files/*)
-            web.get(f"{api_prefix}/api/files/_browse", self.handle_files_browse),
-            web.post(f"{api_prefix}/api/files/_mkdir", self.handle_files_mkdir),
-            web.get(f"{api_prefix}/api/files/_zip", self.handle_files_zip,
+            # The file manager's JSON API, apart from /api/files/ so that none
+            # of its names shadows a file or folder of the same name there.
+            web.get(f"{api_prefix}/api/file-manager/browse", self.handle_files_browse),
+            web.post(f"{api_prefix}/api/file-manager/mkdir", self.handle_files_mkdir),
+            web.get(f"{api_prefix}/api/file-manager/zip", self.handle_files_zip,
                     allow_head=False),
-            # Catch-all for file downloads (must be after specific _* routes)
             web.get(f"{api_prefix}/api/files/{{path:.*}}", self.fancy_index_handler),
             web.get(f"{api_prefix}/api/print/{{name}}", self.handle_print_document),
             web.get(f"{api_prefix}/api/apps/metadata.yml", self.handle_apps_catalog),

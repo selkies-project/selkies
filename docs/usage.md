@@ -66,6 +66,8 @@ The side menu's files section uploads files into the session and browses the sam
 
 `--file-manager-path` (`FILE_MANAGER_PATH`, default `~/Desktop`) is the directory both directions use, created at startup when missing. Transfers in either direction are paced against the video stream so a large one does not stall the session, measured end to end so a reverse proxy in front changes nothing; `--file-transfer-limit-mbps` adds a fixed cap on top for operators who want one.
 
+The Wish dashboard's file manager lists the directory one folder at a time, makes new folders where uploads are allowed, and downloads a whole folder as one zip archive. The archive is packed in full before it is sent and carries the folder's regular files only (links, pipes, and devices are left out); a folder over 8 GiB or 100,000 files is refused rather than packed.
+
 ## Printing
 
 The session has a printer named **Selkies**, and a document printed to it opens in the browser's own print dialog, ready for whatever printer the browser can reach. Each printed document also appears in the side menu's printing section, which opens with the first one, where it can be printed again or saved as a PDF; its **Print automatically** switch is what opens the dialog on arrival, and off it leaves the documents in the list. A browser that does not show a PDF in a frame leaves every document in the list too, where **Save** hands over the file. No mobile browser prints a PDF from a frame, so on a phone or tablet each document also raises a notice with its name and an **Open** link that hands it to a new tab, where the browser's own viewer prints or saves it; the notice stays until the link is tapped or it is closed, the section there offers **Save** alone, and since a tab opens only from a tap, nothing prints automatically.
@@ -84,7 +86,8 @@ Selkies runs the queue itself, as the session user, from a CUPS scheduler instal
 | `clipboard.receive` | `mime_type`, `size_bytes`, `multipart` | a client's clipboard is written into the session |
 | `file.upload.end` | `filename`, `size_bytes` | an upload lands in the file-manager directory |
 | `file.upload.error` | `filename`, `error` | an upload is refused or fails, `filename` as the client asked for it |
-| `file.download` | `filename`, `size_bytes`, `partial` | a file went out of the file-manager directory whole, or the range of it a client asked for (`partial`), with the bytes served; a download the client stopped early is not recorded |
+| `file.download` | `filename`, `size_bytes`, `partial` | a file went out of the file-manager directory whole, or the range of it a client asked for (`partial`), with the bytes served; a download the client stopped early is not recorded; a folder's archive is recorded under the folder's path |
+| `file.mkdir` | `filename` | a folder is made in the file-manager directory |
 | `print.document` | `filename`, `size_bytes`, `partial` | a printed document went out of the print spool to a page, on the same terms as `file.download` |
 | `session.connect` | `transport`, `role`, `slot` | a page's connection is accepted on either transport |
 | `session.disconnect` | `transport`, `role`, `slot`, `duration_s` | that connection ends, however it ends |

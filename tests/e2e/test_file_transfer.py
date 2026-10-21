@@ -254,32 +254,32 @@ def api_checks(res: "H.Results", full: bool) -> None:
 
     # The file manager's JSON API, which the Wish dashboard speaks instead of the
     # index: one directory at a time, and the changes as their own verbs.
-    status, _, body = request("GET", "/api/files/_browse")
+    status, _, body = request("GET", "/api/file-manager/browse")
     names = {e.get("name") for e in json.loads(body).get("entries", [])} if status == 200 else set()
-    res.check("GET /api/files/_browse lists the root as JSON",
+    res.check("GET /api/file-manager/browse lists the root as JSON",
               status == 200 and {"seed.txt", "sub dir"} <= names, f"{status} {sorted(names)[:4]}")
-    status, _, body = request("GET", "/api/files/_browse?path=" + urllib.parse.quote("sub dir"))
+    status, _, body = request("GET", "/api/file-manager/browse?path=" + urllib.parse.quote("sub dir"))
     entries = json.loads(body).get("entries", []) if status == 200 else []
-    res.check("GET /api/files/_browse?path=<dir> lists that directory",
+    res.check("GET /api/file-manager/browse?path=<dir> lists that directory",
               status == 200 and [e.get("name") for e in entries] == ["plain.bin"]
               and entries[0].get("is_dir") is False and entries[0].get("size") == len(payload),
               f"{status} {entries[:1]}")
-    status, _, body = request("GET", "/api/files/_browse?path=" + urllib.parse.quote("sub dir/plain.bin"))
-    res.check("_browse on a file rather than a directory is a 404", status == 404, status)
-    status, _, _ = request("GET", "/api/files/_browse?path=" + urllib.parse.quote("../.."))
-    res.check("_browse refuses a path that escapes the root", status == 400, status)
+    status, _, body = request("GET", "/api/file-manager/browse?path=" + urllib.parse.quote("sub dir/plain.bin"))
+    res.check("browse on a file rather than a directory is a 404", status == 404, status)
+    status, _, _ = request("GET", "/api/file-manager/browse?path=" + urllib.parse.quote("../.."))
+    res.check("browse refuses a path that escapes the root", status == 400, status)
     os.symlink(os.path.dirname(FILES_DIR), on_disk("_escape"))
-    status, _, _ = request("GET", "/api/files/_browse?path=_escape")
-    res.check("_browse refuses a symlink leaving the root", status == 400, status)
+    status, _, _ = request("GET", "/api/file-manager/browse?path=_escape")
+    res.check("browse refuses a symlink leaving the root", status == 400, status)
     os.remove(on_disk("_escape"))
 
     def json_post(verb: str, payload: dict) -> tuple:
-        return request("POST", f"/api/files/_{verb}",
+        return request("POST", f"/api/file-manager/{verb}",
                        headers={"Content-Type": "application/json"},
                        body=json.dumps(payload).encode())
 
     status, _, _ = json_post("mkdir", {"path": "json dir"})
-    res.check("POST /api/files/_mkdir creates a directory",
+    res.check("POST /api/file-manager/mkdir creates a directory",
               status == 200 and os.path.isdir(on_disk("json dir")), status)
     status, _, _ = json_post("mkdir", {"path": "json dir"})
     res.check("creating a directory that exists is a 409", status == 409, status)
@@ -292,38 +292,38 @@ def api_checks(res: "H.Results", full: bool) -> None:
     for spelling, label in (("", "an empty path"), (".", "a dot"), ("sub dir/..", "a round trip")):
         status, _, _ = json_post("mkdir", {"path": spelling})
         res.check(f"mkdir naming the root as {label} is refused", status == 400, status)
-    status, _, listing = request("GET", "/api/files/_browse")
+    status, _, listing = request("GET", "/api/file-manager/browse")
     names = {e.get("name") for e in json.loads(listing).get("entries", [])} if status == 200 else set()
     res.check("the served tree survives a mkdir naming its root",
               status == 200 and {"seed.txt", "sub dir", "json dir"} <= names,
               f"{status} {sorted(names)[:4]}")
 
     for verb in ("rename", "delete"):
-        status, _, _ = request("POST", f"/api/files/_{verb}",
+        status, _, _ = request("POST", f"/api/file-manager/{verb}",
                                headers={"Content-Type": "application/json"},
                                body=json.dumps({"path": "seed.txt", "name": "x"}).encode())
-        res.check(f"POST /api/files/_{verb} is no longer served", status == 405, status)
+        res.check(f"POST /api/file-manager/{verb} is not served", status == 404, status)
 
     # A folder comes back as one archive rather than file by file, and the
     # archive is read back to be sure it is what the directory holds.
     status, headers, archived = request(
-        "GET", "/api/files/_zip?path=" + urllib.parse.quote("sub dir"))
-    res.check("GET /api/files/_zip returns the folder as a zip",
+        "GET", "/api/file-manager/zip?path=" + urllib.parse.quote("sub dir"))
+    res.check("GET /api/file-manager/zip returns the folder as a zip",
               status == 200 and archived[:2] == b"PK" and b"plain.bin" in archived
               and "zip" in headers.get("content-type", ""), status)
-    status, _, _ = request("GET", "/api/files/_zip")
-    res.check("a _zip naming the root as an empty path is refused", status == 404, status)
-    status, _, _ = request("GET", "/api/files/_zip?path=seed.txt")
-    res.check("a _zip on a file rather than a directory is refused", status == 404, status)
+    status, _, _ = request("GET", "/api/file-manager/zip")
+    res.check("a zip naming the root as an empty path is refused", status == 404, status)
+    status, _, _ = request("GET", "/api/file-manager/zip?path=seed.txt")
+    res.check("a zip on a file rather than a directory is refused", status == 404, status)
     status, headers, _ = request(
-        "GET", "/api/files/_zip?path=" + urllib.parse.quote("sub dir"),
+        "GET", "/api/file-manager/zip?path=" + urllib.parse.quote("sub dir"),
         headers={"Range": "bytes=3-"})
-    res.check("a Range resuming a _zip is refused",
+    res.check("a Range resuming a zip is refused",
               status == 405 and headers.get("allow") == "GET", status)
     status, _, _ = request(
-        "GET", "/api/files/_zip?path=" + urllib.parse.quote("sub dir"),
+        "GET", "/api/file-manager/zip?path=" + urllib.parse.quote("sub dir"),
         headers={"If-Modified-Since": "Thu, 01 Jan 2026 00:00:00 GMT"})
-    res.check("a conditional GET revalidating a _zip is refused",
+    res.check("a conditional GET revalidating a zip is refused",
               status == 405, status)
     # A FIFO would wedge zipfile's read of it: the pack skips anything that
     # is not a regular file, so the archive comes back complete without the
@@ -332,10 +332,10 @@ def api_checks(res: "H.Results", full: bool) -> None:
     os.mkfifo(pipe)
     try:
         status, _, archived = request(
-            "GET", "/api/files/_zip?path=" + urllib.parse.quote("sub dir"))
+            "GET", "/api/file-manager/zip?path=" + urllib.parse.quote("sub dir"))
     finally:
         os.unlink(pipe)
-    res.check("a _zip skips a FIFO rather than wedging the pack on it",
+    res.check("a zip skips a FIFO rather than wedging the pack on it",
               status == 200 and archived[:2] == b"PK" and b"pipe" not in archived, status)
 
 
@@ -648,12 +648,12 @@ def policy_block() -> "H.Results":
                 # The file manager's own routes, which only Wish speaks: its
                 # listing is gated like the index, and its folder creation like
                 # an upload.
-                status, _, body = request("GET", "/api/files/_browse")
+                status, _, body = request("GET", "/api/file-manager/browse")
                 res.check(f"file_transfers={value}: the JSON listing follows the download permission",
                           (status == 200 and b'"status": "ok"' in body or b'"status":"ok"' in body)
                           if download_ok else status == 403, f"{status} {body[:60]}")
                 json_body = json.dumps({"path": f"mkdir-{value}"}).encode()
-                status, _, body = request("POST", "/api/files/_mkdir",
+                status, _, body = request("POST", "/api/file-manager/mkdir",
                                           headers={"Content-Type": "application/json"}, body=json_body)
                 landed = os.path.exists(on_disk(f"mkdir-{value}"))
                 res.check(f"file_transfers={value}: creating a folder {'works' if upload_ok else 'is refused'}",
@@ -694,10 +694,10 @@ def policy_block() -> "H.Results":
     res.check("Basic auth: the view-only password cannot download", status == 403 and body != b"controller", status)
     status, _, body = request("GET", "/api/files/", headers=basic(VIEWONLY_PASSWORD))
     res.check("Basic auth: the view-only password cannot list files", status == 403 and b"controller.bin" not in body, status)
-    status, _, body = request("GET", "/api/files/_browse", headers=basic(VIEWONLY_PASSWORD))
+    status, _, body = request("GET", "/api/file-manager/browse", headers=basic(VIEWONLY_PASSWORD))
     res.check("Basic auth: the view-only password cannot browse the JSON listing",
               status == 403 and b"entries" not in body, status)
-    status, _, body = request("GET", "/api/files/_zip", headers=basic(VIEWONLY_PASSWORD))
+    status, _, body = request("GET", "/api/file-manager/zip", headers=basic(VIEWONLY_PASSWORD))
     res.check("Basic auth: the view-only password cannot take a folder archive",
               status == 403 and body[:2] != b"PK", status)
 

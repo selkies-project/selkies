@@ -122,7 +122,7 @@ async function uploadFile(file: File, pathToSend: string, onProgress?: (progress
   }
 }
 
-/** One entry of a directory listing, as the server's `_browse` returns it. */
+/** One entry of a directory listing, as the server's file-manager listing returns it. */
 type FileManagerItem = {
   /** Entry name, the segment on its own. */
   name: string
@@ -233,11 +233,11 @@ export function FileManager({
   const [uploading, setUploading] = React.useState(false)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
 
-  const apiBase = React.useMemo(() => new URL("api/files", window.location.href).href, [])
+  const apiBase = React.useMemo(() => new URL("api/file-manager", window.location.href).href, [])
 
   const browse = React.useCallback(
     async (dir: string): Promise<FileManagerItem[]> => {
-      const url = new URL(`${apiBase}/_browse`)
+      const url = new URL(`${apiBase}/browse`)
       if (dir) url.searchParams.set("path", dir)
       const resp = await fetch(url.href, {
         credentials: "same-origin",
@@ -318,7 +318,7 @@ export function FileManager({
 
   const archiveUrl = React.useCallback(
     (entryPath: string) => {
-      const url = new URL(`${apiBase}/_zip`, window.location.href)
+      const url = new URL(`${apiBase}/zip`, window.location.href)
       url.searchParams.set("path", entryPath)
       return withSessionToken(url.href)
     },
@@ -362,7 +362,7 @@ export function FileManager({
 
     const target = cwd ? `${cwd}/${name}` : name
     try {
-      await post("_mkdir", { path: target })
+      await post("mkdir", { path: target })
       setNewFolderOpen(false)
       setNewFolderName("")
       await refresh()
