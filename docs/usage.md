@@ -66,7 +66,7 @@ The side menu's files section uploads files into the session and browses the sam
 
 `--file-manager-path` (`FILE_MANAGER_PATH`, default `~/Desktop`) is the directory both directions use, created at startup when missing. Transfers in either direction are paced against the video stream so a large one does not stall the session, measured end to end so a reverse proxy in front changes nothing; `--file-transfer-limit-mbps` adds a fixed cap on top for operators who want one.
 
-The Wish dashboard's file manager lists the directory one folder at a time, makes new folders where uploads are allowed, and downloads a whole folder as one zip archive. The archive is packed in full before it is sent and carries the folder's regular files only (links, pipes, and devices are left out); a folder over 8 GiB or 100,000 files is refused rather than packed.
+The Wish dashboard's file manager lists the directory one folder at a time, makes new folders where uploads are allowed, and downloads a whole folder as one zip archive. The archive is packed in full before it is sent and carries the folder's regular files only (links, pipes, and devices are left out); a folder over 8 GiB or 100,000 files is refused rather than packed, and one of more than 50,000 entries is not listed. A symbolic link leading out of the directory is listed as the link itself, and neither listed through nor served.
 
 ## Printing
 

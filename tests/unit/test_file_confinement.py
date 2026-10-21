@@ -16,6 +16,7 @@ import asyncio
 import concurrent.futures
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -337,6 +338,52 @@ async def route_cases(server: CentralizedStreamServer, root: str) -> None:
             os.unlink(on_disk(server, name))
         os.unlink(outside)
 
+        # Audit, 2026-10-22: what a listing and an archive may give away.
+        secret = os.path.join(os.path.dirname(root), "listing-outside.bin")
+        with open(secret, "wb") as f:
+            f.write(b"x" * 12345)
+        os.symlink(secret, on_disk(server, "out-file"))
+        os.symlink(os.path.dirname(root), on_disk(server, "out-dir"))
+        r = await client.get("/api/file-manager/browse", headers=bearer(CTRL))
+        listed = {e["name"]: e for e in (await r.json()).get("entries", [])}
+        check("browse: a link out of the tree is listed as itself, not as what it points at",
+              r.status == 200 and listed.get("out-file", {}).get("size") not in (None, 12345)
+              and listed.get("out-dir", {}).get("is_dir") is False and listed.get("docs", {}).get("is_dir") is True,
+              {k: listed.get(k) for k in ("out-file", "out-dir", "docs")})
+        os.unlink(on_disk(server, "out-file"))
+        os.unlink(on_disk(server, "out-dir"))
+        os.unlink(secret)
+
+        limit = stream_server.FILE_LISTING_MAX_ENTRIES
+        stream_server.FILE_LISTING_MAX_ENTRIES = 1
+        try:
+            r = await client.get("/api/file-manager/browse", headers=bearer(CTRL))
+        finally:
+            stream_server.FILE_LISTING_MAX_ENTRIES = limit
+        check("browse: a folder past the listing bound is refused with 413", r.status == 413, r.status)
+
+        os.makedirs(on_disk(server, "line\nbreak"))
+        setuid = on_disk(server, "line\nbreak/tool")
+        with open(setuid, "wb") as f:
+            f.write(b"#!/bin/sh\n")
+        os.chmod(setuid, 0o4755)
+        with open(os.fsencode(on_disk(server, "line\nbreak")) + b"/odd-\xff.bin", "wb") as f:
+            f.write(b"odd")
+        r = await client.get("/api/file-manager/zip?path=line%0Abreak", headers=bearer(CTRL))
+        archived = await r.read()
+        modes = zip_modes(archived)
+        check("zip: no set-ID bit rides into the archive, and a name that is not UTF-8 is packed",
+              r.status == 200 and modes.get("tool") == 0o755 and "odd-\ufffd.bin" in modes, (r.status, modes))
+        disposition = r.headers.get("Content-Disposition", "")
+        check("zip: a control character in the folder's name stays out of the header's quoted name",
+              'filename="line_break.zip"' in disposition and "\n" not in disposition, disposition)
+        shutil.rmtree(on_disk(server, "line\nbreak"))
+
+        r = await client.post("/api/file-manager/mkdir", headers=bearer(CTRL), json={"path": "n" * 300})
+        message = (await r.json()).get("message", "")
+        check("mkdir: an error names the failure, not the server's paths",
+              r.status == 500 and root not in message and message, (r.status, message))
+
         limit = stream_server.ARCHIVE_MAX_ENTRIES
         stream_server.ARCHIVE_MAX_ENTRIES = 0
         try:
@@ -349,6 +396,17 @@ async def route_cases(server: CentralizedStreamServer, root: str) -> None:
         recorder.close()
         await client.close()
         sessions.user_tokens.clear()
+
+
+def zip_modes(archived: bytes) -> dict:
+    """Each archived file's permission bits, by name."""
+    import io
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(archived)) as archive:
+            return {i.filename: (i.external_attr >> 16) & 0o7777 for i in archive.infolist()}
+    except zipfile.BadZipFile:
+        return {}
 
 
 def zip_names(archived: bytes) -> list:

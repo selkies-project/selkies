@@ -274,6 +274,53 @@ def run_routes() -> "H.Results":
     res.check("the redirect keeps the ?token= query", status in (301, 308) and f"token={CTRL_TOKEN}" in hdrs.get("location", ""),
               f"{status} {hdrs.get('location')}")
 
+    # The file manager's JSON API: bound like the index, a viewer refused every
+    # route of it, and the folder it creates or archives refused to another site.
+    for method, path in (("GET", "/api/file-manager/browse"), ("POST", "/api/file-manager/mkdir"),
+                         ("GET", "/api/file-manager/zip?path=sub")):
+        status, headers, _ = request(method, path, headers={"Content-Type": "application/json"},
+                                     body=b'{"path": "anon-dir"}' if method == "POST" else None)
+        res.check(f"no token: {method} {path} refused with the Bearer challenge",
+                  status == 401 and headers.get("www-authenticate") == BEARER_CHALLENGE,
+                  f"{status} {headers.get('www-authenticate')!r}")
+    for label, headers, path in (("Bearer controller", bearer(CTRL_TOKEN), "/api/file-manager/browse"),
+                                 ("cookie controller", cookie(CTRL_TOKEN), "/api/file-manager/browse"),
+                                 ("?token= controller", {}, f"/api/file-manager/browse?token={CTRL_TOKEN}"),
+                                 ("Bearer master", bearer(MASTER), "/api/file-manager/browse")):
+        status, _, body = request("GET", path, headers=headers)
+        res.check(f"{label}: the JSON listing is served", status == 200 and b"hello.txt" in body,
+                  f"{status} {body[:40]}")
+    for label, headers, query in (("Bearer viewer", bearer(VIEW_TOKEN), ""),
+                                  ("cookie viewer", cookie(VIEW_TOKEN), ""),
+                                  ("?token= viewer", {}, f"?token={VIEW_TOKEN}"),
+                                  ("Bearer roleless", bearer(ROLELESS_TOKEN), "")):
+        status, _, body = request("GET", f"/api/file-manager/browse{query}", headers=headers)
+        res.check(f"{label}: the JSON listing is refused", status == 403 and b"hello.txt" not in body,
+                  f"{status} {body[:40]}")
+        status, _, _ = request("POST", f"/api/file-manager/mkdir{query}",
+                               headers=dict(headers, **{"Content-Type": "application/json"}),
+                               body=b'{"path": "viewer-dir"}')
+        res.check(f"{label}: creating a folder is refused",
+                  status == 403 and not os.path.exists(os.path.join(FILES_DIR, "viewer-dir")), status)
+        status, _, body = request("GET", f"/api/file-manager/zip{query}{'&' if query else '?'}path=sub",
+                                  headers=headers)
+        res.check(f"{label}: a folder archive is refused", status == 403 and body[:2] != b"PK", status)
+    status, _, _ = request("POST", "/api/file-manager/mkdir",
+                           headers=dict(cookie(CTRL_TOKEN), Origin="https://evil.example",
+                                        **{"Content-Type": "text/plain"}),
+                           body=b'{"path": "csrf-dir"}')
+    res.check("cookie controller: a cross-site folder creation is refused",
+              status == 403 and not os.path.exists(os.path.join(FILES_DIR, "csrf-dir")), status)
+    status, _, body = request("GET", "/api/file-manager/zip?path=sub",
+                              headers=dict(cookie(CTRL_TOKEN), **{"Sec-Fetch-Site": "cross-site"}))
+    res.check("cookie controller: a cross-site folder archive is refused", status == 403 and body[:2] != b"PK",
+              status)
+    status, _, _ = request("POST", "/api/file-manager/mkdir",
+                           headers=dict(bearer(CTRL_TOKEN), **{"Content-Type": "application/json"}),
+                           body=b'{"path": "made-by-controller"}')
+    res.check("Bearer controller: a folder is created",
+              status == 200 and os.path.isdir(os.path.join(FILES_DIR, "made-by-controller")), status)
+
     for label, headers in (("Bearer controller", bearer(CTRL_TOKEN)), ("cookie viewer", cookie(VIEW_TOKEN)),
                            ("Bearer master", bearer(MASTER))):
         status, _, body = request("GET", "/api/metrics", headers=headers)
@@ -659,21 +706,59 @@ def run_tokens_file() -> "H.Results":
 
 
 def open_files_modal(page, dashboard: str) -> bool:
-    """Click through the dashboard to its Download Files modal."""
+    """Click through the dashboard to its files: classic's Download Files
+    modal, or the file manager Wish's Files menu item opens."""
     try:
         if dashboard == "classic":
             page.locator('.toggle-handle').first.click()
             time.sleep(0.5)
             page.locator('.sidebar-section-header:has-text("Files")').first.click()
             time.sleep(0.5)
+            page.locator('button:has-text("Download Files")').first.click()
         elif not wish_open_menu_item(page, "Files"):
             return False
-        page.locator('button:has-text("Download Files")').first.click()
         time.sleep(1.0)
         return True
     except Exception as e:
         print(f"      (files modal: {e!r})")
         return False
+
+
+def check_index_frame(res: "H.Results", page, label: str, token_in_links: bool) -> None:
+    """Classic's Download Files modal: the server's index in an iframe, which
+    carries the page's query token on its own URL and links, or none."""
+    src = page.evaluate("() => { const f = document.querySelector('iframe'); return f ? f.getAttribute('src') : null; }")
+    carried = src is not None and "/api/files/" in src and (
+        f"token={CTRL_TOKEN}" in src if token_in_links else "token" not in src)
+    res.check(f"classic: the file-manager iframe {'carries the' if token_in_links else 'carries no'} token "
+              f"on the {label} page", carried, src)
+    listing = find_listing(page)
+    res.check(f"classic: the listing rendered on the {label} page", listing is not None,
+              [f.url for f in page.frames])
+    if listing is not None:
+        hrefs = listing.evaluate("() => [...document.querySelectorAll('table#list td a')].map(a => a.getAttribute('href'))")
+        res.check(f"classic: the listing's links {'keep the' if token_in_links else 'carry no'} token "
+                  f"on the {label} page",
+                  hrefs and all((f"token={CTRL_TOKEN}" in h) if token_in_links else ("token" not in h)
+                                for h in hrefs), hrefs)
+
+
+def check_wish_manager(res: "H.Results", page, requests: list, label: str) -> None:
+    """Wish's file manager lists the directory over the JSON API, whose
+    requests carry the session token as a Bearer header and never in the URL,
+    however the page itself was handed it."""
+    dialog = '[role="dialog"]:has-text("hello.txt")'
+    deadline = time.time() + 15
+    while time.time() < deadline and not page.locator(dialog).count():
+        time.sleep(0.5)
+    res.check(f"wish: the file manager lists the directory on the {label} page",
+              page.locator(dialog).count() > 0)
+    browses = [r for r in requests if "/api/file-manager/browse" in r[1]]
+    res.check(f"wish: the listing's requests carry the Bearer token on the {label} page",
+              browses and all(r[2].get("authorization") == f"Bearer {CTRL_TOKEN}" for r in browses),
+              [r[2].get("authorization") for r in browses])
+    res.check(f"wish: no listing request carries the token in its URL on the {label} page",
+              browses and all("token" not in r[1] for r in browses), [r[1] for r in browses])
 
 
 def run_dashboards() -> "H.Results":
@@ -688,21 +773,15 @@ def run_dashboards() -> "H.Results":
                        extra_env=secure_env(SELKIES_ENABLE_DUAL_MODE="true"))
         provision(res)
         with sync_playwright() as pw:
-            browser, page, _ = launch(pw, "", "websockets", f"#token={CTRL_TOKEN}")
+            browser, page, requests = launch(pw, "", "websockets", f"#token={CTRL_TOKEN}")
             try:
                 info = C.wait_ws_video(page, timeout=30)
                 res.check(f"{dashboard}: the dashboard page streams with #token=", info is not None, info)
                 res.check(f"{dashboard}: the files modal opens on the #token= page", open_files_modal(page, dashboard))
-                src = page.evaluate("() => { const f = document.querySelector('iframe'); return f ? f.getAttribute('src') : null; }")
-                res.check(f"{dashboard}: the file-manager iframe carries no token",
-                          src is not None and "api/files/" in src and "token" not in src, src)
-                listing = find_listing(page)
-                res.check(f"{dashboard}: the listing rendered on the cookie alone", listing is not None,
-                          [f.url for f in page.frames])
-                if listing is not None:
-                    hrefs = listing.evaluate("() => [...document.querySelectorAll('table#list td a')].map(a => a.getAttribute('href'))")
-                    res.check(f"{dashboard}: the listing's links carry no token",
-                              hrefs and all("token" not in h for h in hrefs), hrefs)
+                if dashboard == "classic":
+                    check_index_frame(res, page, "#token=", token_in_links=False)
+                else:
+                    check_wish_manager(res, page, requests, "#token=")
             finally:
                 browser.close()
             browser, page, requests = launch(pw, f"?token={CTRL_TOKEN}", "websockets")
@@ -723,16 +802,10 @@ def run_dashboards() -> "H.Results":
                 info = C.wait_ws_video(page, timeout=30)
                 res.check(f"{dashboard}: the dashboard page streams with ?token=", info is not None, info)
                 res.check(f"{dashboard}: the files modal opens", open_files_modal(page, dashboard))
-                src = page.evaluate("() => { const f = document.querySelector('iframe'); return f ? f.getAttribute('src') : null; }")
-                res.check(f"{dashboard}: the file-manager iframe carries the token",
-                          src is not None and "/api/files/" in src and f"token={CTRL_TOKEN}" in src, src)
-                listing = find_listing(page)
-                res.check(f"{dashboard}: the listing rendered inside the modal", listing is not None,
-                          [f.url for f in page.frames])
-                if listing is not None:
-                    hrefs = listing.evaluate("() => [...document.querySelectorAll('table#list td a')].map(a => a.getAttribute('href'))")
-                    res.check(f"{dashboard}: the listing's links keep the token",
-                              hrefs and all(f"token={CTRL_TOKEN}" in h for h in hrefs), hrefs)
+                if dashboard == "classic":
+                    check_index_frame(res, page, "?token=", token_in_links=True)
+                else:
+                    check_wish_manager(res, page, requests, "?token=")
                 if dashboard == "classic":
                     # A controller switches on the token its own page was opened
                     # with. Nobody is asked to paste the master token: it is an

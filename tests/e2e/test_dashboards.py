@@ -653,16 +653,11 @@ def touch_gamepad_layer_check(page, res: "H.Results", dashboard: str) -> None:
         # Wish portals its panels to the body rather than into the dashboard
         # root, so they are the half of its chrome that has to clear the pad on
         # its own footing. Its menus sit at the top out of the pad's way; the
-        # download modal is the one drawn over it.
+        # file manager the Files item opens is the one drawn over it.
         panel = '[data-slot="dialog-overlay"]'
         opened = wish_open_menu_item(page, "Files")
         if opened:
-            try:
-                page.locator('button:has-text("Download Files")').first.click()
-                time.sleep(1.5)
-            except Exception as e:
-                print(f"      (wish download modal: {e!r})")
-                opened = False
+            time.sleep(1.5)
         if not opened or page.locator(panel).count() == 0:
             res.skip(f"{dashboard}: a panel over the touch gamepad", "no panel opened")
             page.evaluate("""() => window.postMessage({

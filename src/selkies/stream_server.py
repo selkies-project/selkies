@@ -84,6 +84,11 @@ ARCHIVE_MAX_ENTRIES: int = 100_000
 ARCHIVE_PACK_POOL = concurrent.futures.ThreadPoolExecutor(
     max_workers=2, thread_name_prefix="selkies-archive")
 
+# The most entries the file manager's JSON listing returns for one folder: a
+# folder past it is refused (413) rather than listed in part, and no request
+# can make the server stat and serialize an unbounded directory.
+FILE_LISTING_MAX_ENTRIES: int = 50_000
+
 # A file at least this large is packed as a zip64 entry, so one that grows
 # past the 2 GiB `zipfile` writes into a plain entry while it is read still
 # packs; smaller ones stay plain entries, which every unzipper reads.
@@ -134,8 +139,26 @@ class PathOnlyAccessLogger(AbstractAccessLogger):
             self.logger.exception("Error in logging")
 
 
-def _scan_directory(path: str, include_parent: bool) -> List[Dict[str, Any]]:
-    """One directory's entries, as the file index renders them.
+def _listing_status(entry: os.DirEntry, root: str) -> Tuple[os.stat_result, bool]:
+    """The status a file listing shows for `entry`, and whether it is a
+    directory. A symbolic link is followed where it resolves at or under the
+    file-manager root `root`; one that leads out of it is shown as the link
+    itself, so no listing reports the kind, size or date of a file outside
+    the root, which no route would serve either.
+
+    Raises:
+        OSError: The entry vanished or cannot be read.
+    """
+    if entry.is_symlink():
+        target = os.path.realpath(entry.path)
+        if target != root and not target.startswith(os.path.join(root, "")):
+            return entry.stat(follow_symlinks=False), False
+    return entry.stat(), entry.is_dir()
+
+
+def _scan_directory(path: str, include_parent: bool, root: str) -> List[Dict[str, Any]]:
+    """One directory's entries, as the file index renders them; `root` is the
+    file-manager root, which a listed link is followed within (`_listing_status`).
 
     Raises:
         PermissionError: The directory cannot be read.
@@ -146,11 +169,10 @@ def _scan_directory(path: str, include_parent: bool) -> List[Dict[str, Any]]:
     with os.scandir(path) as it:
         for entry in it:
             try:
-                stats = entry.stat()
+                stats, is_dir = _listing_status(entry, root)
                 mtime = datetime.fromtimestamp(stats.st_mtime).strftime(
                     "%Y-%m-%d %H:%M:%S"
                 )
-                is_dir = entry.is_dir()
             except OSError as e:
                 logger.warning(f"Skipping unreadable directory entry {entry.name!r}: {e}")
                 continue
@@ -903,6 +925,11 @@ def _remove_quietly(path: str, dir_fd: Optional[int] = None) -> None:
         os.remove(path, dir_fd=dir_fd)
     except OSError:
         pass
+
+
+class ListingTooLarge(Exception):
+    """A folder holds more entries than the JSON listing returns
+    (`FILE_LISTING_MAX_ENTRIES`)."""
 
 
 class ArchiveTooLarge(Exception):
@@ -2801,7 +2828,7 @@ class CentralizedStreamServer:
         except FileRootEscape:
             return failed("path escape rejected")
         except OSError as e:
-            return failed(f"mkdir failed: {e}", 500)
+            return failed(f"mkdir failed: {e.strerror}", 500)
         try:
             if upload_id is None:
                 staging = _staging_leaf_name()
@@ -2815,7 +2842,7 @@ class CentralizedStreamServer:
                     await asyncio.to_thread(_finalize_upload, staging, leaf, parent_fd)
                 except OSError as e:
                     await asyncio.to_thread(_remove_quietly, staging, parent_fd)
-                    return failed(f"finalize failed: {e}", 500)
+                    return failed(f"finalize failed: {e.strerror}", 500)
                 logger.info(f"HTTP upload finished: {dest} ({written} bytes)")
                 audit.emit("file.upload.end", filename=name, size_bytes=written)
                 return web.json_response({"status": "success", "bytes": written})
@@ -2879,7 +2906,7 @@ class CentralizedStreamServer:
                 _finalize_upload(part_leaf, leaf, parent_fd)
             except OSError as e:
                 self._discard_chunked_upload(dest, part_path)
-                return failed(f"finalize failed: {e}", 500)
+                return failed(f"finalize failed: {e.strerror}", 500)
             self._chunked_uploads.pop(dest, None)
             logger.info(f"HTTP chunked upload finished: {dest} ({received} bytes)")
             audit.emit("file.upload.end", filename=name, size_bytes=received)
@@ -3108,11 +3135,13 @@ class CentralizedStreamServer:
             if not stat.S_ISDIR(os.fstat(dir_fd).st_mode):
                 raise NotADirectoryError(errno.ENOTDIR)
             entries: List[Dict[str, Any]] = []
+            root = str(self.upload_dir)
             with os.scandir(f"/proc/self/fd/{dir_fd}") as it:
                 for entry in it:
+                    if len(entries) >= FILE_LISTING_MAX_ENTRIES:
+                        raise ListingTooLarge(rel)
                     try:
-                        st = entry.stat()
-                        is_dir = entry.is_dir()
+                        st, is_dir = _listing_status(entry, root)
                     except OSError:
                         continue
                     rel_name = f"{rel}/{entry.name}".strip("/") if rel else entry.name
@@ -3153,6 +3182,9 @@ class CentralizedStreamServer:
             return web.json_response({"status": "error", "message": "not a directory"}, status=404)
         except PermissionError:
             return web.json_response({"status": "error", "message": "permission denied"}, status=403)
+        except ListingTooLarge:
+            return web.json_response(
+                {"status": "error", "message": "the folder holds too many entries to list"}, status=413)
         if entries is None:
             return web.json_response({"status": "error", "message": "invalid path"}, status=400)
         return web.json_response({"status": "ok", "path": rel, "entries": entries})
@@ -3205,7 +3237,7 @@ class CentralizedStreamServer:
         except NotADirectoryError:
             return web.json_response({"status": "error", "message": "a file is in the way"}, status=409)
         except OSError as e:
-            return web.json_response({"status": "error", "message": str(e)}, status=500)
+            return web.json_response({"status": "error", "message": e.strerror or "failed"}, status=500)
         audit.emit("file.mkdir", filename=rel)
         return web.json_response({"status": "ok"})
 
@@ -3526,8 +3558,12 @@ class CentralizedStreamServer:
         which surfaces as a connection error from the write; that is the
         transfer's normal end, logged as such and never a handler failure.
         """
-        filename = (download_name or path.name).encode("ascii", "replace").decode().replace('"', "_")
-        quoted = urllib.parse.quote(download_name or path.name)
+        name = download_name or path.name
+        # The quoted-string fallback takes printable ASCII alone: a control
+        # character (a newline is a legal Linux filename byte) would break the
+        # header, and a quote or backslash would end or escape the string.
+        filename = "".join(c if " " <= c <= "~" and c not in '"\\' else "_" for c in name)
+        quoted = urllib.parse.quote(name.encode("utf-8", "surrogateescape"))
         conditional = any(
             name in request.headers
             for name in ("If-Modified-Since", "If-None-Match",
@@ -3687,9 +3723,14 @@ class CentralizedStreamServer:
                         entries += 1
                         if entries > ARCHIVE_MAX_ENTRIES:
                             raise ArchiveTooLarge(name)
-                        info = zipfile.ZipInfo(name, _zip_date_time(st.st_mtime))
+                        # A name that is not UTF-8 is carried with its stray
+                        # bytes replaced, which zipfile could not encode at all.
+                        info = zipfile.ZipInfo(os.fsencode(name).decode("utf-8", "replace"),
+                                               _zip_date_time(st.st_mtime))
                         info.compress_type = zipfile.ZIP_DEFLATED
-                        info.external_attr = (stat.S_IFREG | stat.S_IMODE(st.st_mode)) << 16
+                        # Permission bits only: no set-ID or sticky bit rides
+                        # into an archive that another machine may extract.
+                        info.external_attr = (stat.S_IFREG | (stat.S_IMODE(st.st_mode) & 0o777)) << 16
                         info.file_size = st.st_size
                         with archive.open(info, "w", force_zip64=st.st_size >= ARCHIVE_ZIP64_FROM) as sink:
                             while True:
@@ -3863,7 +3904,7 @@ class CentralizedStreamServer:
 
         try:
             items = await asyncio.to_thread(
-                _scan_directory, full_path, full_path != self.upload_dir)
+                _scan_directory, full_path, full_path != self.upload_dir, str(self.upload_dir))
         except PermissionError:
             return web.Response(status=403, text="Permission Denied")
 
