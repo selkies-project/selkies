@@ -16,6 +16,9 @@ session of short commits follows, as pinyin input types them, each read back:
 the keys an overlay recycles over hundreds of characters have to stay good too.
 Firefox reads a key for its keysym alone, and on pixelflux's output with no
 capture running it takes no keys at all, so the seat half runs Chrome only.
+Each browser first has to show that a key reaches its page; one whose window
+never took the keyboard is launched again, and the windows the compositor held
+then are reported, rather than every case failing empty.
 """
 import os
 import random
@@ -127,6 +130,20 @@ def typed_back(page, type_text, text: str, seconds: float = 6.0) -> str:
     return "<navigated>"
 
 
+def takes_keys(page, type_text, seconds: float = 8.0) -> bool:
+    """Whether a key typed now reaches the page's textarea: its window has the
+    compositor's keyboard focus."""
+    page.evaluate("document.getElementById('t').value = ''")
+    type_text("x")
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if page.evaluate("document.getElementById('t').value") == "x":
+            page.evaluate("document.getElementById('t').value = ''")
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def session(seed: int = 7) -> list:
     """The long session's commits, the same on every run."""
     rng = random.Random(seed)
@@ -135,16 +152,31 @@ def session(seed: int = 7) -> list:
 
 
 def run(res: "H.Results", pw, where: str, socket: str, runtime: str, type_text,
-        engines: tuple = ("chromium", "firefox")) -> None:
-    """Every case into each of `engines` on the compositor at `socket`."""
+        engines: tuple = ("chromium", "firefox"), windows=None) -> None:
+    """Every case into each of `engines` on the compositor at `socket`, once a
+    key reaches the page. A browser whose window never takes the keyboard is
+    launched again, at most twice, with the compositor's windows (`windows`)
+    reported for each launch that did not: on pixelflux's seat a window mapped
+    while another holds the one output waits there with no focus."""
     env = dict(os.environ, WAYLAND_DISPLAY=socket, XDG_RUNTIME_DIR=runtime)
     env.pop("DISPLAY", None)
     for engine in engines:
-        browser = launch(pw, engine, env)
-        try:
+        missed = []
+        for _ in range(3):
+            browser = launch(pw, engine, env)
             page = browser.new_page()
             reset(page)
             time.sleep(1.0)
+            if takes_keys(page, type_text):
+                break
+            missed.append(windows() if windows else "no key arrived")
+            browser.close()
+            browser = None
+        res.check(f"{where}, {engine}: a key reaches the page", browser is not None,
+                  f"launches without the keyboard: {missed}" if missed else "")
+        if browser is None:
+            continue
+        try:
             for label, text in CASES:
                 got = typed_back(page, type_text, text)
                 res.check(f"{where}, {engine}: {label} arrives whole", got == text, repr(got[:80]))
@@ -172,7 +204,8 @@ def main() -> int:
         capture = ScreenCapture()
         seat_runtime = os.environ["XDG_RUNTIME_DIR"]
         owner = IH._WaylandKeymapOwner(capture, capture.get_xkb_keymap_string())
-        run(res, pw, "seat", seat_socket or wayland_socket(seat_runtime), seat_runtime, owner.type_text, ("chromium",))
+        run(res, pw, "seat", seat_socket or wayland_socket(seat_runtime), seat_runtime, owner.type_text, ("chromium",),
+            windows=capture.list_windows)
 
         if shutil.which("labwc") is None:
             print("SKIP  [wayland-typed-text] the nested checks need labwc", flush=True)
