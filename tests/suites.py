@@ -96,6 +96,7 @@ SUITES: list = [
     {"path": "unit/test_audit_webhook.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_printing.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_operator_api.py", "tier": "unit", "timeout": 120},
+    {"path": "unit/test_file_confinement.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_tokens_file.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_token_table.py", "tier": "unit", "timeout": 120},
     {"path": "unit/test_webrtc_hello_bounds.py", "tier": "unit", "timeout": 120},

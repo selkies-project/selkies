@@ -66,7 +66,7 @@ import {
 } from "lucide-react";
 
 import { Clipboard } from "@/components/dashboard/clipboard";
-import { Files, FilesDialog } from "@/components/dashboard/files";
+import { FilesDialog } from "@/components/dashboard/files";
 import { Printing } from "@/components/dashboard/printing";
 import { Apps } from "@/components/dashboard/apps";
 import { Settings } from "@/components/dashboard/settings";
@@ -75,7 +75,7 @@ import { GamepadPanel, keyboardWatch, useKeyboardAttached } from "@/components/d
 import { Sharing } from "@/components/dashboard/sharing";
 import { ShortcutsMenu } from "@/components/dashboard/shortcuts-menu";
 import { SelkiesLogo } from "@/components/logo";
-import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, hardwareKeyboard, isMobileClient, isSecondaryDisplay } from "@/utils";
+import { computeRenderableSettings, getLastServerSettings, getPrefixedKey, getPrintJobs, hardwareKeyboard, isMobileClient, isSecondaryDisplay, isViewerUrlMode } from "@/utils";
 import { PALETTE_CHORDS, PALETTE_KEYS, TRACKPAD_SPEEDS, TRACKPAD_SPEED_KEY, USER_CHORDS_KEY, chordEvents,
   formatChord, parseChord, readUserChords, writeUserChords } from "../../../../selkies-web-core/lib/touch-controls.js";
 import { fragmentWithSessionToken } from "../../../../selkies-web-core/lib/page-url.js";
@@ -771,11 +771,19 @@ export function TopMenu({
     window.postMessage({ type: 'setTrackpadSpeed', value }, window.location.origin);
   };
 
-  /** Opens the Download Files dialog and folds the overflow menu behind it. */
-  const openDownloadsModal = () => {
+  /** Opens the file manager and folds the overflow menu behind it. */
+  const openFilesModal = () => {
     setOverflowOpen(false);
     setShowFilesModal(true);
   };
+
+  // The file manager is one menu entry rather than a submenu, since uploading
+  // and downloading both happen inside it. It still hides when the server
+  // allows neither, so a session with transfers off is offered no way in, and
+  // for a viewer URL, which the server refuses the files of outright.
+  const filesAllowed =
+    !isViewerUrlMode &&
+    ((renderableSettings.fileUpload ?? true) || (renderableSettings.fileDownload ?? true));
 
 
 
@@ -943,16 +951,11 @@ export function TopMenu({
                     </MenuSubPopup>
                   </MenuSub>
                 )}
-                {!isSecondaryDisplay && (renderableSettings.files ?? true) && (
-                  <MenuSub>
-                    <MenuSubTrigger>
-                      <FileText />
-                      {t('sections.files.title')}
-                    </MenuSubTrigger>
-                    <MenuSubPopup>
-                      <Files onOpenDownloads={openDownloadsModal} />
-                    </MenuSubPopup>
-                  </MenuSub>
+                {!isSecondaryDisplay && (renderableSettings.files ?? true) && filesAllowed && (
+                  <MenuItem onClick={openFilesModal}>
+                    <FileText />
+                    {t('sections.files.title')}
+                  </MenuItem>
                 )}
                 {!isSecondaryDisplay && printJobCount > 0 && (
                   <MenuSub>
@@ -1545,9 +1548,9 @@ export function TopMenu({
         <Apps isOpen={showAppsModal} onClose={() => setShowAppsModal(false)} />
       )}
 
-      {/* Files dialog, beside the toolbar like the Apps modal: a click in its
-          iframe lands outside the panel, which closes on it, so the dialog
-          cannot live inside the Files panel. */}
+      {/* Files dialog, beside the toolbar like the Apps modal: the overflow
+          panel's popup unmounts with it, so a dialog kept open cannot live
+          inside the Files panel. */}
       {showFilesModal && (
         <FilesDialog open={showFilesModal} onOpenChange={setShowFilesModal} />
       )}
