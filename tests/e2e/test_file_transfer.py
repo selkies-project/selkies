@@ -302,7 +302,8 @@ def api_checks(res: "H.Results", full: bool) -> None:
         status, _, _ = request("POST", f"/api/file-manager/{verb}",
                                headers={"Content-Type": "application/json"},
                                body=json.dumps({"path": "seed.txt", "name": "x"}).encode())
-        res.check(f"POST /api/file-manager/{verb} is not served", status == 404, status)
+        # The web root's GET catch-all answers any other method with 405.
+        res.check(f"POST /api/file-manager/{verb} is not served", status == 405, status)
 
     # A folder comes back as one archive rather than file by file, and the
     # archive is read back to be sure it is what the directory holds.
@@ -477,11 +478,19 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
     """Upload through the dashboard's button and download through its modal."""
     name = f"{dashboard}-{mode}.bin"
     payload = os.urandom(256 * 1024)
+    folder = f"into {mode}"
+    if dashboard == "wish":
+        # Listed when the manager opens, for the upload into a folder below.
+        os.makedirs(on_disk(folder), exist_ok=True)
     res.check(f"{dashboard}: the Files UI opens", open_files_ui(page, dashboard))
     chosen = False
     try:
+        # Wish's file manager has its own Upload button, which asks the core's
+        # uploader for its picker as classic's Upload Files does.
+        upload = ((wish_manager_dialog(page) or page).locator('button[aria-label="Upload"]')
+                  if dashboard == "wish" else page.locator('button:has-text("Upload Files")'))
         with page.expect_file_chooser(timeout=8000) as chooser:
-            page.locator('button:has-text("Upload Files")').first.click()
+            upload.first.click()
         chooser.value.set_files({"name": name, "mimeType": "application/octet-stream", "buffer": payload})
         chosen = True
     except Exception as e:
@@ -505,6 +514,23 @@ def ui_round_trip(res: "H.Results", page: Any, dashboard: str, mode: str) -> Non
         res.check(f"{dashboard}: the file manager lists the upload", found)
         res.check(f"{dashboard}: the row's Download action hands over the same bytes",
                   downloaded == sha(payload), f"{name} -> {downloaded}")
+        # The folder the manager shows is where its Upload sends the picked
+        # files: the request names it to the core's uploader.
+        inner = f"{dashboard}-{mode}-in-folder.bin"
+        inner_payload = os.urandom(4096)
+        try:
+            dialog.locator(f'button:has-text("{folder}")').first.click()
+            dialog.locator(f'nav button:has-text("{folder}")').first.wait_for(timeout=10000)
+            with page.expect_file_chooser(timeout=8000) as chooser:
+                dialog.locator('button[aria-label="Upload"]').first.click()
+            chooser.value.set_files({"name": inner, "mimeType": "application/octet-stream",
+                                     "buffer": inner_payload})
+        except Exception as e:
+            print(f"      (upload into a folder: {e!r})")
+        target = on_disk(os.path.join(folder, inner))
+        res.check(f"{dashboard}: Upload in an open folder lands in that folder",
+                  wait_file(target, 15) and file_sha(target) == sha(inner_payload)
+                  and not os.path.exists(on_disk(inner)))
         return
 
     def listing_frame(seconds: float):

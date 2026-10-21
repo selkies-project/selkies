@@ -41,87 +41,6 @@ import {
   withSessionToken,
 } from "../../../../selkies-web-core/lib/session-token.js"
 
-/** Bytes above which an upload is posted in slices rather than in one request. */
-const UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024
-
-/**
- * Posts one file to `api/upload`, sliced when it is over `UPLOAD_CHUNK_BYTES`.
- * The slices carry the transfer id and byte offset the server reassembles from,
- * and the browser's cached Basic credentials ride the request like any other.
- *
- * @param file The file to send.
- * @param pathToSend Its path relative to the file-manager root.
- * @param onProgress Called with a percentage as the transfer advances.
- */
-async function uploadFile(file: File, pathToSend: string, onProgress?: (progress: number) => void) {
-  const url = new URL('api/upload', window.location.href).href
-
-  async function postChunk(body: Blob, headers: Record<string, string> = {}) {
-    return new Promise<void>((resolve, reject) => {
-      const xhr = new XMLHttpRequest()
-      xhr.open('POST', url, true)
-      xhr.withCredentials = true
-      xhr.setRequestHeader('Content-Type', 'application/octet-stream')
-      xhr.setRequestHeader('X-Upload-Path', encodeURIComponent(pathToSend))
-
-      // Secure mode accepts the session token as a Bearer header, so an upload
-      // does not depend on the session cookie having been written.
-      for (const [name, value] of Object.entries(sessionAuthHeaders(headers))) {
-        xhr.setRequestHeader(name, value)
-      }
-
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable && onProgress) {
-          onProgress(Math.round((e.loaded / e.total) * 100))
-        }
-      }
-
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve()
-        } else {
-          reject(new Error(`Upload failed (${xhr.status})`))
-        }
-      }
-
-      xhr.onerror = () => reject(new Error(`Network error uploading ${pathToSend}`))
-      xhr.send(body)
-    })
-  }
-
-  if (file.size <= UPLOAD_CHUNK_BYTES) {
-    await postChunk(file)
-    onProgress?.(100)
-  } else {
-    // randomUUID is only exposed in a secure context, and a session reached
-    // over plain HTTP on a LAN address has none, so the id falls back the way
-    // the core uploader does rather than throwing out of the whole loop.
-    const transferId = (window.crypto && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`
-
-    for (let offset = 0; offset < file.size; offset += UPLOAD_CHUNK_BYTES) {
-      const end = Math.min(offset + UPLOAD_CHUNK_BYTES, file.size)
-      const chunk = file.slice(offset, end)
-
-      const headers: Record<string, string> = {
-        'X-Upload-Id': transferId,
-        'X-Upload-Offset': String(offset),
-        'X-Upload-Total': String(file.size),
-      }
-
-      if (end >= file.size) {
-        headers['X-Upload-Final'] = '1'
-      }
-
-      await postChunk(chunk, headers)
-
-      onProgress?.(Math.min(100, Math.round((end / file.size) * 100)))
-    }
-    onProgress?.(100)
-  }
-}
-
 /** One entry of a directory listing, as the server's file-manager listing returns it. */
 type FileManagerItem = {
   /** Entry name, the segment on its own. */
@@ -223,15 +142,8 @@ export function FileManager({
   const [showHidden, setShowHidden] = React.useState(false)
   const [error, setError] = React.useState("")
 
-  // Dialogs
-  const [uploadOpen, setUploadOpen] = React.useState(false)
   const [newFolderOpen, setNewFolderOpen] = React.useState(false)
-
-  // Form states
   const [newFolderName, setNewFolderName] = React.useState("")
-  const [uploadFiles, setUploadFiles] = React.useState<File[]>([])
-  const [uploading, setUploading] = React.useState(false)
-  const fileInputRef = React.useRef<HTMLInputElement>(null)
 
   const apiBase = React.useMemo(() => new URL("api/file-manager", window.location.href).href, [])
 
@@ -293,6 +205,19 @@ export function FileManager({
     setError("")
     await Promise.all(["", cwd].map((dir) => load(dir)))
   }, [cwd, load])
+
+  // An upload that ends shows in the listing without a manual refresh.
+  React.useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return
+      const message = event.data
+      if (message?.type === "fileUpload" && message.payload?.status === "end") {
+        refresh().catch((e: any) => setError(e?.message || String(e)))
+      }
+    }
+    window.addEventListener("message", onMessage)
+    return () => window.removeEventListener("message", onMessage)
+  }, [refresh])
 
   /** Shows the directory at `path`, fetching its listing the first time. */
   const navigateTo = React.useCallback(
@@ -372,34 +297,11 @@ export function FileManager({
     }
   }
 
-  const handleUpload = async () => {
-    if (uploadFiles.length === 0 || uploading) return
-
-    setUploading(true)
-    let successCount = 0
-
-    for (const file of uploadFiles) {
-      const dest = cwd ? `${cwd}/${file.name}` : file.name
-      try {
-        await uploadFile(file, dest)
-        successCount++
-      } catch (e: any) {
-        toast.error(t("files.uploadFailed", { file: file.name, error: e?.message || String(e) }))
-      }
-    }
-
-    if (successCount > 0) {
-      toast.success(
-        t(successCount === 1 ? "files.uploadedCountOne" : "files.uploadedCount", {
-          count: successCount,
-        }),
-      )
-    }
-
-    setUploading(false)
-    setUploadOpen(false)
-    setUploadFiles([])
-    await refresh()
+  // The core's uploader runs the transfer, so its progress shows in the
+  // dashboard's upload notifications like any other; the request names the
+  // folder on screen, which is where the picked files go.
+  const handleUpload = () => {
+    window.dispatchEvent(new CustomEvent("requestFileUpload", { detail: { directory: cwd } }))
   }
 
   /**
@@ -473,7 +375,7 @@ export function FileManager({
                 <Button
                   size="sm"
                   aria-label={t("files.upload")}
-                  onClick={() => setUploadOpen(true)}
+                  onClick={handleUpload}
                 >
                   <UploadCloud className="h-4 w-4" />
                   <span className="max-sm:hidden">{t("files.upload")}</span>
@@ -586,73 +488,6 @@ export function FileManager({
         )}
         </div>
       </ScrollArea>
-
-      {/* Upload Dialog */}
-      <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
-        <DialogContent className="allow-native-input sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{t("files.uploadTitle")}</DialogTitle>
-            <DialogDescription>
-              {t("files.uploadDescription", { path: cwd || t("files.rootLabel") })}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-4">
-            <div
-              className={cn(
-                "rounded-md border-2 border-dashed p-8 text-center transition-colors",
-                uploadFiles.length > 0 ? "border-primary bg-primary/5" : "border-muted"
-              )}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files) {
-                    setUploadFiles(Array.from(e.target.files))
-                  }
-                }}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <UploadCloud className="h-4 w-4" />
-                {t("files.chooseFiles")}
-              </Button>
-              <p className="mt-2 text-sm text-muted-foreground">
-                {uploadFiles.length > 0
-                  ? t("files.filesSelected", { count: uploadFiles.length })
-                  : t("files.selectFiles")}
-              </p>
-            </div>
-            {uploadFiles.length > 0 && (
-              <div className="max-h-40 flex flex-col gap-1 overflow-auto">
-                {uploadFiles.map((file, i) => (
-                  <div key={i} className="flex items-center justify-between gap-2 rounded-md bg-muted px-3 py-2 text-sm">
-                    <span className="truncate">{file.name}</span>
-                    <span className="shrink-0 text-xs text-muted-foreground">{formatBytes(file.size)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setUploadOpen(false)}>
-              {t("files.cancel")}
-            </Button>
-            <Button
-              type="button"
-              onClick={handleUpload}
-              disabled={uploadFiles.length === 0 || uploading}
-            >
-              {uploading ? t("files.uploading") : t("files.upload")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* New Folder Dialog */}
       <Dialog open={newFolderOpen} onOpenChange={setNewFolderOpen}>

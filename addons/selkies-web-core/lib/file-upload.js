@@ -42,7 +42,10 @@ const UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
  * @typedef {object} FileUploader
  * @property {(file: File, pathToSend: string) => Promise<void>} uploadFileObject
  *     Uploads one file to the given destination path, reporting progress.
- * @property {() => void} handleRequestFileUpload Opens the hidden file picker.
+ * @property {(event?: CustomEvent) => void} handleRequestFileUpload Opens the
+ *     hidden file picker; a `requestFileUpload` event whose `detail.directory`
+ *     names a directory under the file-manager root sends the picked files
+ *     there rather than to the root.
  * @property {(event: Event) => Promise<void>} handleFileInputChange Uploads
  *     the picker's files sequentially.
  * @property {(ev: DragEvent) => void} handleDragOver Sets the drop effect.
@@ -59,6 +62,11 @@ const UPLOAD_CHUNK_BYTES = 64 * 1024 * 1024;
  */
 export function createFileUploader({ canUpload = () => true } = {}) {
     let operationInFlight = false;
+    // Where the picker's files go, relative to the file-manager root: set by
+    // the request that opened the picker, so a dashboard browsing a folder can
+    // upload into it, and taken by the one change it opened the picker for, so
+    // no later upload inherits it. The server confines the path either way.
+    let pickerDirectory = '';
 
     function post(payload) {
         window.postMessage({ type: 'fileUpload', payload }, window.location.origin);
@@ -204,11 +212,13 @@ export function createFileUploader({ canUpload = () => true } = {}) {
         }
     }
 
-    function handleRequestFileUpload() {
+    function handleRequestFileUpload(event) {
         if (!canUpload()) {
             console.log("File upload blocked (shared/viewer session).");
             return;
         }
+        const directory = event?.detail?.directory;
+        pickerDirectory = typeof directory === 'string' ? directory.replace(/^\/+|\/+$/g, '') : '';
         const hiddenInput = document.getElementById('globalFileInput');
         if (!hiddenInput) {
             console.error("Global file input not found!");
@@ -219,6 +229,8 @@ export function createFileUploader({ canUpload = () => true } = {}) {
 
     async function handleFileInputChange(event) {
         const files = event.target.files;
+        const directory = pickerDirectory;
+        pickerDirectory = '';
         if (!canUpload() || !files || files.length === 0) {
             event.target.value = null;
             return;
@@ -231,7 +243,7 @@ export function createFileUploader({ canUpload = () => true } = {}) {
         try {
             for (let i = 0; i < files.length; i++) {
                 const file = files[i];
-                await uploadFileObject(file, file.name);
+                await uploadFileObject(file, directory ? `${directory}/${file.name}` : file.name);
             }
         } catch (error) {
             const errorMsg = `An error occurred during the file input upload process: ${error.message || error}`;

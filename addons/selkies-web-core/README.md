@@ -196,7 +196,7 @@ An external dashboard needs to implement the following to fully control the ifra
     *   Display text received via the `clipboardContentUpdate` message.
     *   Allow editing and send changes back using the `clipboardUpdateFromUI` message.
 7.  **File Upload:**
-    *   Implement a file input button. When clicked, dispatch a `CustomEvent('requestFileUpload')` on the client's `window` object (`window.dispatchEvent(new CustomEvent('requestFileUpload'))`). This triggers the client's hidden file input.
+    *   Implement a file input button. When clicked, dispatch a `CustomEvent('requestFileUpload')` on the client's `window` object (`window.dispatchEvent(new CustomEvent('requestFileUpload'))`). This triggers the client's hidden file input. A dashboard browsing a folder names it in the event's detail (`new CustomEvent('requestFileUpload', { detail: { directory: 'Documents/reports' } })`), and the picked files go there instead of the file-manager root.
     *   Listen for `fileUpload` messages to display upload progress bars.
 8.  **Audio Device Selection:**
     *   Query `navigator.mediaDevices.enumerateDevices()` in the dashboard.
