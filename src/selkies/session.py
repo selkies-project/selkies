@@ -6,8 +6,9 @@
 
 For platforms that start one process behind a port or a Unix socket: Jupyter's
 server proxy, an Open OnDemand job, a Coder workspace. It starts what the host
-lacks, a sound server unless one answers and an Xvfb on the X11 backend, then
-the desktop and Selkies with every argument it was given. The backend is
+lacks, a sound server unless one answers and an Xvfb on the X11 backend, its
+screen started at the images' size inside a framebuffer resizes can grow it to,
+then the desktop and Selkies with every argument it was given. The backend is
 Selkies' own `SELKIES_WAYLAND` or `--wayland`, read by Selkies' parser.
 
 The desktop is found as a display manager finds one, among the session files
@@ -20,6 +21,7 @@ import argparse
 import ctypes
 import glob
 import os
+import re
 import select
 import shlex
 import shutil
@@ -35,6 +37,9 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # The framebuffer bounds the sizes Selkies can resize the screen to; -s 0 -dpms
 # keeps the server from blanking what is streamed.
 XVFB_ARGS = ("-screen", "0", "8192x4096x24", "-nolisten", "tcp", "-noreset", "-s", "0", "-dpms")
+# The screen inside it until a client sizes it, as the images start theirs (DISPLAY_SIZEW,
+# DISPLAY_SIZEH): a desktop laid out or a capture started first would take all of the framebuffer.
+START_SIZE = (1920, 1080)
 # Where every X server puts its socket; a host's boot creates it.
 X11_SOCKET_DIR = "/tmp/.X11-unix"
 # What a host session leaves in the environment that must not reach this one.
@@ -307,6 +312,24 @@ class Session:
             proc.kill()
         raise RuntimeError("Xvfb did not come up")
 
+    def size_screen(self, settings: Any) -> None:
+        """Start the screen at the manual resolution where one is set, else at
+        `START_SIZE`, through `selkies resize`. A server that cannot be resized
+        keeps its whole framebuffer, as before."""
+        size = START_SIZE
+        if settings.manual_resolution[0] and settings.manual_width and settings.manual_height:
+            size = (int(settings.manual_width), int(settings.manual_height))
+        try:
+            done = subprocess.run([sys.executable, "-m", "selkies", "resize", "%dx%d" % size],
+                                  env=self.env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+            realized = re.fullmatch(r"\((\d+), (\d+)\)", done.stdout.strip())
+        except subprocess.TimeoutExpired:
+            realized = None
+        if realized:
+            log(f"the screen starts at {realized[1]}x{realized[2]}")
+        else:
+            log("the screen could not be sized; it starts at the whole framebuffer")
+
     def capture_socket(self) -> str:
         """The socket of Selkies' compositor, the first in the runtime directory."""
         def found() -> str:
@@ -466,6 +489,7 @@ def main(argv: Optional[List[str]] = None, follow: bool = False) -> int:
                    *selkies_args]
         if not wayland:
             session.x11(str(settings.render_dri or ""))
+            session.size_screen(settings)
         sid, entry = pick_session(opts.session, wayland)
         if wayland:
             session.selkies = session.spawn(command, env=for_selkies(session.env))

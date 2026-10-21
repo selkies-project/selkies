@@ -10,7 +10,8 @@ only the other backend's sessions carry stands for their desktop, and one no
 file carries runs as a command. The backend is Selkies' own setting, read by Selkies' parser,
 so SELKIES_WAYLAND, its legacy name, and --wayland mean what they mean to the
 server. The X authority file holds one wildcard cookie, which the vendored
-Xlib must match on any display as libXau does. The package registers the
+Xlib must match on any display as libXau does. Xvfb's screen starts at the
+images' size, or the manual resolution, through `selkies resize`. The package registers the
 console script and the Jupyter server-proxy entry.
 """
 import os
@@ -163,6 +164,39 @@ def main() -> bool:
     check("the launcher's Xvfb flags stay within what every Xvfb takes",
           set(a for a in session.XVFB_ARGS if a.startswith(("-", "+")))
           <= {"-screen", "-nolisten", "-noreset", "-s", "-dpms", "+extension"}, session.XVFB_ARGS)
+
+    class Done:
+        def __init__(self, stdout: str) -> None:
+            self.stdout, self.returncode = stdout, 0
+
+    calls, logged, answer = [], [], ["(1920, 1080)\n"]
+    run, log = session.subprocess.run, session.log
+    session.subprocess.run = lambda argv, **kw: calls.append((argv, kw.get("env"))) or Done(answer[0])
+    session.log = logged.append
+    sizer = session.Session.__new__(session.Session)
+    sizer.env = {"DISPLAY": ":7"}
+    try:
+        sizer.size_screen(session.selkies_settings([]))
+        default = list(calls)
+        answer[0] = "(1368, 1036)\n"
+        calls.clear()
+        sizer.size_screen(session.selkies_settings(["--manual_resolution=true", "--manual_width=1362",
+                                                    "--manual_height=1036"]))
+        manual = list(calls)
+        answer[0] = "None\n"
+        sizer.size_screen(session.selkies_settings([]))
+    finally:
+        session.subprocess.run, session.log = run, log
+    framebuffer = session.XVFB_ARGS[session.XVFB_ARGS.index("-screen") + 2]
+    check("the Xvfb screen starts at the images' size, inside a framebuffer that leaves room to grow",
+          default and default[0][0][1:] == ["-m", "selkies", "resize", "1920x1080"]
+          and default[0][1] == {"DISPLAY": ":7"} and framebuffer == "8192x4096x24"
+          and logged[0].endswith("starts at 1920x1080"), (default, logged[:1]))
+    check("a manual resolution is the size it starts at, as realized",
+          manual and manual[0][0][-1] == "1362x1036" and logged[1].endswith("starts at 1368x1036"),
+          (manual, logged[1:2]))
+    check("a server that cannot be resized is reported and keeps going",
+          len(logged) == 3 and "whole framebuffer" in logged[2], logged)
 
     saved = with_env(SELKIES_PRELOAD="/usr/lib/libxcb.so.1")
     try:

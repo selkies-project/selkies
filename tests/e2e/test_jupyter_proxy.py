@@ -4,7 +4,8 @@
 The package registers a server process with jupyter-server-proxy, so a
 Jupyter server lists a Selkies item and serves the desktop at /selkies/: it
 starts the launcher on a Unix socket of the proxy's own and carries the page,
-the API, and the data WebSocket behind Jupyter's token. Proved in a browser,
+the API, and the data WebSocket behind Jupyter's token, its Xvfb screen
+started at the images' size rather than the whole framebuffer. Proved in a browser,
 where the client loads under the /selkies/ prefix and video flows through
 the proxy. The desktop is a stand-in the server's data directories hold, so the
 host's own never starts beside the one it runs. A Jupyter server killed
@@ -156,6 +157,10 @@ def block(res: H.Results, wayland: bool) -> None:
         desktop = [line for line in open(LOG, errors="replace") if "[selkies-session] desktop " in line]
         res.check(f"{tag} the session the server's data directories hold runs",
                   desktop and "desktop standin on " in desktop[0], desktop[:1])
+        if not wayland:
+            sized = [line for line in open(LOG, errors="replace") if "[selkies-session] the screen " in line]
+            res.check(f"{tag} the Xvfb screen starts at the images' size, not the whole framebuffer",
+                      sized and sized[0].rstrip().endswith("starts at 1920x1080"), sized[:1])
         started = [line for line in open(LOG, errors="replace") if " starting: " in line]
         res.check(f"{tag} Selkies streams the backend SELKIES_WAYLAND names",
                   started and (" transport, Wayland capture" in started[0]) == wayland, started[:1])

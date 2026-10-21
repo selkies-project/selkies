@@ -199,6 +199,9 @@ sudo mkdir -pm1777 /dev/input
 # Wait for X server to start
 # echo 'Waiting for X Socket' && until [ -S "/tmp/.X11-unix/X${DISPLAY#*:}" ]; do sleep 0.5; done && echo 'X Server is ready'
 
+# Start its screen at the size it streams until a client resizes it, as the desktop container does (8192x4096 above is only the largest a resize can reach; a desktop or a capture started at it would take all of it)
+# selkies resize 1920x1080
+
 # Choose one between PulseAudio and PipeWire if not already running, either one must be installed
 
 # Initialize PulseAudio (set PULSE_SERVER to unix:/run/pulse/native if your user is in the pulse-access group and pulseaudio is triggered with sudo/root), omit the below lines if a PulseAudio server is already running
