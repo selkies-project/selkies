@@ -3406,9 +3406,11 @@ class CentralizedStreamServer:
             await asyncio.to_thread(capture.stop_capture)
 
     async def handle_screenshot(self, request: web.Request) -> web.Response:
-        """GET /api/screenshot?display=<name>: a PNG of that display with the
-        cursor drawn in, by pixelflux. On X11 the root, which holds every
-        display."""
+        """GET /api/screenshot?display=<name>: a PNG of that display, by
+        pixelflux. On X11 the root, which holds every display, with the cursor
+        drawn in; on Wayland the output, with the cursor where the stream draws
+        it into the picture. A display pixelflux does not know is not found; a
+        screenshot it is too busy for or that timed out is a 503 to retry."""
         try:
             import pixelflux
             screenshot = pixelflux.screenshot_png
@@ -3423,7 +3425,12 @@ class CentralizedStreamServer:
             png = await asyncio.to_thread(screenshot, output)
         except RuntimeError as exc:
             logger.warning(f"Screenshot of display {display!r} refused: {exc}")
-            return web.Response(status=404, text="No such display")
+            reason = str(exc)
+            if reason.startswith("Unknown display") or reason == "Screenshot output was removed":
+                return web.Response(status=404, text="No such display")
+            if reason.startswith("Screenshot busy") or reason == "Screenshot timed out":
+                return web.Response(status=503, text="Screenshot busy", headers={"Retry-After": "1"})
+            return web.Response(status=500, text="Screenshot failed")
         return web.Response(body=png, content_type="image/png")
 
     def pending_print_documents(self) -> List[Tuple[str, int]]:

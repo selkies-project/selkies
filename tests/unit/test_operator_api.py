@@ -74,6 +74,10 @@ class FakePixelflux:
 
     def screenshot_png(self, display=0):
         self.shots.append(display)
+        refusals = {5: "Screenshot busy", 6: "Screenshot timed out", 7: "Screenshot output was removed",
+                    8: "Screenshot render failed"}
+        if display in refusals:
+            raise RuntimeError(refusals[display])
         if display > 2:
             raise RuntimeError(f"Unknown display: {display}")
         return b"\x89PNG\r\n\x1a\n" + bytes([display])
@@ -307,6 +311,14 @@ async def route_cases(fake: FakePixelflux, pcm: FakePcmflux, root: str) -> None:
         check("on Wayland a display name is its output", fake.shots[-2:] == [2, 0], fake.shots[-2:])
         r = await client.get("/api/screenshot?display=display3", headers=bearer(CTRL))
         check("an output pixelflux does not know is not found", r.status == 404, r.status)
+        r = await client.get("/api/screenshot?display=display7", headers=bearer(CTRL))
+        check("an output removed while its screenshot waited is not found", r.status == 404, r.status)
+        for name in ("display5", "display6"):
+            r = await client.get(f"/api/screenshot?display={name}", headers=bearer(CTRL))
+            check(f"a busy or timed-out screenshot is a 503 to retry ({name})",
+                  r.status == 503 and r.headers.get("Retry-After") == "1", (r.status, r.headers.get("Retry-After")))
+        r = await client.get("/api/screenshot?display=display8", headers=bearer(CTRL))
+        check("a failed screenshot is a server error, not a missing display", r.status == 500, r.status)
         delattr(FakePixelflux, "screenshot_png")
         r = await client.get("/api/screenshot", headers=bearer(CTRL))
         check("a pixelflux without screenshots says so", r.status == 501, r.status)
