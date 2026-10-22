@@ -11,7 +11,8 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Keyboard, X } from "lucide-react";
 import { t } from "@/i18n";
-import { getPrefixedKey, hardwareKeyboard, isMobileClient } from "@/utils";
+import { getPrefixedKey, isMobileClient } from "@/utils";
+import { useKeyboardAttached } from "@/components/dashboard/keyboard-attached";
 
 /**
  * The floating Gamepads panel with its switches and the gamepad preview, one
@@ -177,14 +178,6 @@ export function GamepadPanel({
             </div>
         </div>
     );
-}
-
-/** The page's attached-keyboard verdict, listening from load. */
-export const keyboardWatch = hardwareKeyboard();
-
-/** Whether a hardware keyboard is attached, which keeps the system's on-screen one down. */
-export function useKeyboardAttached(): boolean {
-    return React.useSyncExternalStore(keyboardWatch.subscribe, keyboardWatch.attached);
 }
 
 /** The primary pointer, which a convertible turns coarse when its keyboard is detached. */
