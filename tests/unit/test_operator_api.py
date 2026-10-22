@@ -303,12 +303,19 @@ async def route_cases(fake: FakePixelflux, pcm: FakePcmflux, root: str) -> None:
         check("a screenshot is the primary display's PNG",
               r.status == 200 and r.headers["Content-Type"] == "image/png" and png.startswith(b"\x89PNG")
               and fake.shots[-1] == 0, (r.status, fake.shots[-1:]))
+        check("the screenshot is on the audit trail with the viewer's role",
+              recorder.events[-1] == ("screenshot", {"display": "primary", "size_bytes": len(png), "role": "viewer"}),
+              recorder.events[-1:])
         await client.get("/api/screenshot?display=display2", headers=bearer(CTRL))
         check("on X11 every display name is the one root", fake.shots[-1] == 0, fake.shots[-1:])
+        check("a controller's screenshot is recorded as the controller's, under the name it asked for",
+              recorder.events[-1] == ("screenshot", {"display": "display2", "size_bytes": 9, "role": "controller"}),
+              recorder.events[-1:])
         server.settings.wayland = (True, False)
         await client.get("/api/screenshot?display=display2", headers=bearer(CTRL))
         await client.get("/api/screenshot?display=primary", headers=bearer(CTRL))
         check("on Wayland a display name is its output", fake.shots[-2:] == [2, 0], fake.shots[-2:])
+        shots_recorded = sum(1 for event, _ in recorder.events if event == "screenshot")
         r = await client.get("/api/screenshot?display=display3", headers=bearer(CTRL))
         check("an output pixelflux does not know is not found", r.status == 404, r.status)
         r = await client.get("/api/screenshot?display=display7", headers=bearer(CTRL))
@@ -319,6 +326,8 @@ async def route_cases(fake: FakePixelflux, pcm: FakePcmflux, root: str) -> None:
                   r.status == 503 and r.headers.get("Retry-After") == "1", (r.status, r.headers.get("Retry-After")))
         r = await client.get("/api/screenshot?display=display8", headers=bearer(CTRL))
         check("a failed screenshot is a server error, not a missing display", r.status == 500, r.status)
+        check("refused screenshots leave nothing on the audit trail",
+              sum(1 for event, _ in recorder.events if event == "screenshot") == shots_recorded, recorder.events[-1:])
         delattr(FakePixelflux, "screenshot_png")
         r = await client.get("/api/screenshot", headers=bearer(CTRL))
         check("a pixelflux without screenshots says so", r.status == 501, r.status)

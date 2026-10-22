@@ -10,7 +10,7 @@ websockets / webrtc:
     started with no body lands in the file-manager directory as a fragmented
     MP4 that grows while the desktop is captured, its stop reports the frames
     and bytes written, and both are on the audit trail; a screenshot is a PNG
-    the size of the display. Over websockets the block also runs the
+    the size of the display, on the trail too with the role that took it. Over websockets the block also runs the
     view-only credential against every endpoint.
 wayland:
     The same screenshot and recording against the Wayland backend.
@@ -273,6 +273,10 @@ def recording_round(res: "H.Results", label: str, collector: Collector, expect_s
     size = png_size(png)
     res.check(f"{label}: a screenshot is a PNG of the display",
               status == 200 and size is not None and (expect_size is None or size == expect_size), (status, size, expect_size))
+    shots = wait_events(collector, "screenshot", 1)
+    res.check(f"{label}: the audit carries the screenshot with its display, size, and role",
+              shots and shots[-1]["display"] == "primary" and shots[-1]["size_bytes"] == len(png)
+              and shots[-1]["role"] == "controller", shots[-1:])
 
 
 def transport_block(mode: str) -> "H.Results":

@@ -3410,7 +3410,8 @@ class CentralizedStreamServer:
         pixelflux. On X11 the root, which holds every display, with the cursor
         drawn in; on Wayland the output, with the cursor where the stream draws
         it into the picture. A display pixelflux does not know is not found; a
-        screenshot it is too busy for or that timed out is a 503 to retry."""
+        screenshot it is too busy for or that timed out is a 503 to retry. A
+        screenshot handed out is on the audit trail with the role that took it."""
         try:
             import pixelflux
             screenshot = pixelflux.screenshot_png
@@ -3431,6 +3432,8 @@ class CentralizedStreamServer:
             if reason.startswith("Screenshot busy") or reason == "Screenshot timed out":
                 return web.Response(status=503, text="Screenshot busy", headers={"Retry-After": "1"})
             return web.Response(status=500, text="Screenshot failed")
+        audit.emit("screenshot", display=display, size_bytes=len(png),
+                   role="viewer" if self._viewer_ceiling(request) else "controller")
         return web.Response(body=png, content_type="image/png")
 
     def pending_print_documents(self) -> List[Tuple[str, int]]:

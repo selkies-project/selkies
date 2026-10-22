@@ -78,7 +78,7 @@ Selkies runs the queue itself, as the session user, from a CUPS scheduler instal
 
 ## Audit Trail
 
-`--audit-webhook-url` (`SELKIES_AUDIT_WEBHOOK_URL`) POSTs one JSON object to a collector for every clipboard transfer, file upload, file download, and printed document handed over, every page that connects and leaves, and every recording, for deployments that have to produce a record of what moved. Metadata only: the content is never sent, and neither is anything identifying the client, since Selkies has no first-class user of its own. Nothing is sent without a URL. `--audit-webhook-token` adds an `Authorization: Bearer` header a proxy in front of the collector can check, and `--audit-webhook-timeout` bounds one POST; the URL is used as given, so a collector anywhere but this host wants `https://`.
+`--audit-webhook-url` (`SELKIES_AUDIT_WEBHOOK_URL`) POSTs one JSON object to a collector for every clipboard transfer, file upload, file download, and printed document handed over, every page that connects and leaves, every recording, and every screenshot, for deployments that have to produce a record of what moved. Metadata only: the content is never sent, and neither is anything identifying the client, since Selkies has no first-class user of its own. Nothing is sent without a URL. `--audit-webhook-token` adds an `Authorization: Bearer` header a proxy in front of the collector can check, and `--audit-webhook-timeout` bounds one POST; the URL is used as given, so a collector anywhere but this host wants `https://`.
 
 | `event` | Fields | Recorded when |
 | --- | --- | --- |
@@ -93,6 +93,7 @@ Selkies runs the queue itself, as the session user, from a CUPS scheduler instal
 | `session.disconnect` | `transport`, `role`, `slot`, `duration_s` | that connection ends, however it ends |
 | `recording.start` | `filename` | a recording starts through the operator API |
 | `recording.stop` | `filename`, `size_bytes`, `duration_s`, `frames` | it is stopped and the file is whole |
+| `screenshot` | `display`, `size_bytes`, `role` | a screenshot went out through `/api/screenshot`, `display` as the request named it (`primary` when it named none) and `role` the credential's, `viewer` or `controller`; a refused one is not recorded |
 | `capture.demand` | `subject`, `action`, `reader` | under a `demand` webcam or microphone policy, a page is asked for (`ask`) or released from (`release`) its `webcam` or `microphone`, with what the sink named as reading the device |
 
 Every object also carries `ts`, an RFC 3339 UTC timestamp with milliseconds taken when the transfer happened, and both transports emit the same objects. An event costs the session an enqueue and nothing else: one task delivers the queue in order over a single keep-alive connection, so a collector that is slow or down never paces the stream. The queue holds 1024 events and drops what overflows, a POST that fails drops its event with no retry, and each outage is logged once.
