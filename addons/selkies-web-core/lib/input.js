@@ -1669,6 +1669,11 @@ export class Input {
          * momentarily, and the role has to outlive the send.
          */
         this._altKeysymByCode = new Map();
+        /**
+         * The macOS Command (`MetaLeft` or `MetaRight`) pressed on its own and
+         * not sent yet; see `_handleKeyDown`.
+         */
+        this._pendingCommand = null;
         this.isComposing = false;
         this.compositionString = "";
         /** Shortcut chord that arrived mid-composition, held until the commit lands so it applies after the text. */
@@ -2053,13 +2058,17 @@ export class Input {
      * code, or the Control_L it stands for in a chord. Asking only one of them
      * releases a modifier mid-chord, which the server then sees as the chord
      * ending. A macOS Command found up this way lost its keyup, which the keys
-     * held under it follow (`_releaseLostKey`).
+     * held under it follow (`_releaseLostKey`), held back or not.
      */
     _releaseDesyncedModifiers(event) {
         if (typeof event.getModifierState !== 'function' || this._isSynth) return;
         if (this.isComposing || event.isComposing || event.keyCode === 229 ||
             event.key === 'Process') return;
         if (!_altPositionHeld(event)) this._altKeysymByCode.clear();
+        if (this._pendingCommand && !event.getModifierState('Meta')) {
+            this._pendingCommand = null;
+            this._releaseUnderCommand();
+        }
         for (const code in this._keyDownList) {
             const keysym = this._keyDownList[code];
             const byCode = MODIFIER_STATE_BY_CODE[code];
@@ -2108,6 +2117,7 @@ export class Input {
         }
         this._keyDownList = {};
         this._altKeysymByCode.clear();
+        this._pendingCommand = null;
     }
 
     /** Releases held keys when the page is hidden: throttled heartbeats in a background tab can exceed the server's stale-key window. */
@@ -2166,6 +2176,16 @@ export class Input {
      * Outside Chromium, Ctrl/Cmd+V keeps its default action because clipboard
      * sync rides the trusted `paste` event (lib/clipboard-sync.js); the key
      * still streams to the remote desktop.
+     *
+     * With Command as Control, a macOS Command pressed on its own sends
+     * nothing until something uses it: a key chorded with it alone (Shift
+     * aside) makes it the Control it stands for, a chord with Option or
+     * Control or a pointer button the Alt (`_promotePendingCommand`), and a
+     * release before any of them sends nothing.
+     * Sent at once as Alt, a Command tapped on its own -- every Cmd+Tab back
+     * to the Mac's own applications -- reached the server as a lone Alt
+     * press and release, which opens or toggles the menu bar of an X
+     * application that reveals one on Alt (Electron, Firefox, LibreOffice).
      */
     _handleKeyDown(event) {
         if (this._escapeHatch(event)) {
@@ -2190,6 +2210,10 @@ export class Input {
         this._chordKeySent = false;
         this._releaseDesyncedModifiers(event);
         const keycode = KeyboardUtil.getKeyCode(event);
+        if (this._pendingCommand && keycode !== "MetaLeft" && keycode !== "MetaRight" &&
+            !(event.metaKey && !event.ctrlKey && !event.altKey)) {
+            this._promotePendingCommand();
+        }
         if (keycode === 'CapsLock' && KeyboardUtil.getKey(event) === 'CapsLock') {
             _stopEvent(event);
             return;
@@ -2280,12 +2304,20 @@ export class Input {
                 // Held on Command's code, whose state _releaseDesyncedModifiers reads for it.
                 this._sendKeyEvent(KeyTable.XK_Control_L, command, true);
             } else {
-                // Command went down before the page had the keyboard (held through
-                // Cmd+Tab back to it): it stands for Control from this chord on, held
-                // on the left Command's code for its keyup, or the next event showing
-                // it up, to release.
-                this._sendKeyEvent(KeyTable.XK_Control_L, "MetaLeft", true);
+                // Command was held back, or went down before the page had the
+                // keyboard (held through Cmd+Tab back to it): it stands for Control
+                // from this chord on, held on its code (the left one's when unknown)
+                // for its keyup, or the next event showing it up, to release.
+                this._sendKeyEvent(KeyTable.XK_Control_L, this._pendingCommand || "MetaLeft", true);
             }
+            this._pendingCommand = null;
+        }
+
+        if (browser.isMac() && Input.macCmdAsCtrl && _isPhysicalKey(event) &&
+            (code === "MetaLeft" || code === "MetaRight") && !this._commandIsControl()) {
+            this._pendingCommand = code;
+            _stopEvent(event);
+            return;
         }
 
         if ((browser.isMac() || browser.isIOS()) && _isPhysicalKey(event)) {
@@ -2414,6 +2446,7 @@ export class Input {
 
         if (browser.isMac() && (code === 'MetaLeft' || code === 'MetaRight')) {
             console.log(`macOS: Command key ('${code}') released. Cleaning up potentially stuck keys.`);
+            if (this._pendingCommand === code) this._pendingCommand = null;
             this._releaseUnderCommand();
         }
 
@@ -2853,6 +2886,18 @@ export class Input {
     }
 
     /**
+     * Sends a held-back macOS Command as the Alt it stands for outside its
+     * own Control chords, held on its code until its keyup: Cmd+Option and
+     * Ctrl+Cmd chords, Cmd+click and Cmd+drag reach the server as they did
+     * when Command went down as Alt at once.
+     */
+    _promotePendingCommand() {
+        if (!this._pendingCommand) return;
+        this._sendKeyEvent(KeyTable.XK_Alt_L, this._pendingCommand, true);
+        this._pendingCommand = null;
+    }
+
+    /**
      * Mouse and pen handler: moves the page-drawn cursor (to the predicted
      * position where the engine offers one), maps the position through the
      * sink or the window math, keeps the button mask, and sends motion
@@ -2904,6 +2949,7 @@ export class Input {
         const down = (event.type === 'mousedown' || event.type === 'pointerdown' ? 1 : 0);
         if (down) {
             this._releaseDesyncedModifiers(event);
+            this._promotePendingCommand();
         }
         if (down && event.target === this.element && document.activeElement !== this.element) {
             this._focusCompositionHost();
@@ -4165,6 +4211,7 @@ export class Input {
         const want = !!enabled;
         if (Input.macCmdAsCtrl === want) return;
         Input.macCmdAsCtrl = want;
+        this._pendingCommand = null;
         console.log(`Input: macOS Command sent as ${want ? 'Control' : 'Super'}.`);
         for (const command of ['MetaLeft', 'MetaRight']) {
             if (this._keyDownList[command] === KeyTable.XK_Control_L) {
