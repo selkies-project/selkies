@@ -61,9 +61,9 @@ These people make structural decisions for this project and press the `Merge Pul
 
 [Dan Isla](https://github.com/danisla): Project Founder, Co-Owner, Industry Representative (ex-Google, ex-NASA, ex-itopia)
 
-[PMohanJ](https://github.com/PMohanJ): Contributed new features for the X11 input protocol as well as providing various fixes for the project overall and providing various means of analysis, **currently available for paid consulting tasks in tandem with senior maintainers**
-
 ### Code Contributors
+
+[PMohanJ](https://github.com/PMohanJ): Contributed new features for the X11 input protocol as well as providing various fixes for the project overall and providing various means of analysis, **currently available for paid consulting tasks in tandem with senior maintainers**
 
 [Sam Williams](https://github.com/ayunami2000): Provided various fixes for the WebRTC HTML5 web interface, as well as providing various means of analysis, **currently available for paid consulting tasks in tandem with senior maintainers**
 
