@@ -35,4 +35,4 @@ Other ways to run it:
 
 **[Read the Documentation](https://docs.selkies.io/) for the rest.** The [Settings Reference](https://docs.selkies.io/settings) lists every current setting. [Licensing](https://docs.selkies.io/licensing) inventories the third-party components of an installation, with their licenses and where the GPL pieces come from.
 
-Automated reviews are provided by [Pullfrog](https://pullfrog.com). This project is tested with BrowserStack. This project is fuzz-tested by Google's [OSS-Fuzz](https://github.com/google/oss-fuzz). Security scanning is provided by [Snyk](https://snyk.io).
+Automated reviews are provided by [Pullfrog](https://pullfrog.com). This project is tested with BrowserStack. This project is fuzz-tested by Google's [OSS-Fuzz](https://github.com/google/oss-fuzz). Security scanning is provided by [Snyk](https://snyk.io/?utm_source=open-source&utm_medium=pg-ptr&utm_campaign=ref-2501-osp&utm_content=pg-cta).
