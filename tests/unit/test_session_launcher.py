@@ -235,7 +235,7 @@ def main() -> bool:
               mode == 0o1777, oct(mode))
 
     text = open(os.path.join(REPO, "pyproject.toml"), encoding="utf-8").read()
-    check("the console script is registered", re.search(r'^selkies-session = "selkies\.session:main"$', text, re.M))
+    check("the selkies console script is registered", re.search(r'^selkies = "selkies\.__main__:main"$', text, re.M))
     check("the Jupyter server-proxy group names the entry",
           re.search(r'^\[project\.entry-points\.jupyter_serverproxy_servers\]\nselkies = "selkies\.session:jupyter"$',
                     text, re.M))

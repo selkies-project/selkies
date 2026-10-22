@@ -635,7 +635,7 @@ def _print_vulkan_window(node: str) -> int:
             raise OSError(f"{name} is not available")
         return c.CFUNCTYPE(restype, *argtypes)(address)
 
-    app = _VkApplicationInfo(VK_STRUCTURE_TYPE_APPLICATION_INFO, None, b"selkies-gpu-probe", 1, b"selkies-gpu-probe", 1, (1 << 22) | (1 << 12))
+    app = _VkApplicationInfo(VK_STRUCTURE_TYPE_APPLICATION_INFO, None, b"selkies gpu-probe", 1, b"selkies", 1, (1 << 22) | (1 << 12))
     extensions = _names("VK_KHR_surface", "VK_KHR_xcb_surface")
     info = _VkInstanceCreateInfo(VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, None, 0, c.pointer(app), 0, None, 2, extensions)
     instance = c.c_void_p()

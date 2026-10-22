@@ -32,7 +32,6 @@ PREFIX="${APP}/usr/conda"
 "${APP}/AppRun" --help > /dev/null
 echo "AppRun runs from an extracted copy"
 "${APP}/AppRun" session --help > /dev/null
-"${APP}/AppRun" selkies-session --help > /dev/null
 "${APP}/usr/libexec/selkies-session/pulseaudio" --version > /dev/null
 echo "AppRun runs the session launcher, and its sound server wrapper finds the daemon"
 
@@ -175,7 +174,6 @@ if [ -e /dev/fuse ]; then
     fi
     "${point}/AppRun" --help > /dev/null
     "${point}/AppRun" session --help > /dev/null
-    "${point}/AppRun" selkies-session --help > /dev/null
     "${point}/usr/conda/bin/selkies" --help > /dev/null
     kill "${mounted}" 2>/dev/null || true
     wait "${mounted}" 2>/dev/null || true
