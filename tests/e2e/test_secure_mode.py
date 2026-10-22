@@ -6,7 +6,9 @@ routes:      with a master token set and Basic auth off, /api/upload,
              refuse a request without a token and take one as a Bearer
              header, as ?token=, or as the client's cookie; a viewer-role
              token can neither upload nor list or download files; the master
-             token is accepted everywhere;
+             token is accepted everywhere; /api/screenshot serves any session
+             token, a viewer's included, and challenges a request without one
+             even for a display that does not exist;
              liveness and the static client stay open; the data WebSocket
              still takes its token in the handshake, and a token entry with
              no role connects as a viewer that cannot displace the controller.
@@ -228,6 +230,28 @@ def run_routes() -> "H.Results":
         res.check(f"no token: GET {path} stays open", status == 200, status)
     status, _, body = request("GET", "/")
     res.check("the static client is served without a token", b"<html" in body.lower() or b"<!doctype" in body.lower(), body[:60])
+
+    # The screenshot: any session token sees the screen, a viewer's included, as
+    # the view-only password does; without one, even a display that does not
+    # exist is a challenge, never a 404 that tells which displays do.
+    for path in ("/api/screenshot", "/api/screenshot?display=display9"):
+        status, headers, body = request("GET", path)
+        res.check(f"no token: GET {path} refused with the Bearer challenge",
+                  status == 401 and headers.get("www-authenticate") == BEARER_CHALLENGE
+                  and not body.startswith(b"\x89PNG"), f"{status} {headers.get('www-authenticate')!r}")
+    for label, headers, query in (("Bearer controller", bearer(CTRL_TOKEN), ""),
+                                  ("cookie controller", cookie(CTRL_TOKEN), ""),
+                                  ("?token= controller", {}, f"?token={CTRL_TOKEN}"),
+                                  ("Bearer master", bearer(MASTER), ""),
+                                  ("Bearer viewer", bearer(VIEW_TOKEN), ""),
+                                  ("cookie viewer", cookie(VIEW_TOKEN), ""),
+                                  ("?token= viewer", {}, f"?token={VIEW_TOKEN}"),
+                                  ("Bearer roleless", bearer(ROLELESS_TOKEN), "")):
+        status, hdrs, body = request("GET", f"/api/screenshot{query}", headers=headers)
+        res.check(f"{label}: the screenshot is served", status == 200 and body.startswith(b"\x89PNG")
+                  and hdrs.get("content-type") == "image/png", f"{status} {hdrs.get('content-type')}")
+    status, _, body = request("GET", "/api/screenshot", headers=bearer(CTRL_TOKEN[:-1]))
+    res.check("Bearer prefix of a token: the screenshot is refused", status == 401 and not body.startswith(b"\x89PNG"), status)
 
     res.check("Bearer controller: upload accepted", upload("up-bearer.txt", b"bearer", bearer(CTRL_TOKEN)) == 200)
     res.check("Bearer controller: the upload landed",
