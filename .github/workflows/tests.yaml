@@ -48,8 +48,9 @@ env:
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "26"
   E2E_DISPLAY: ":99"
-  # Drive the release Chrome build rather than Playwright's bundled Chromium
+  # Drive the release Chrome and Firefox builds rather than Playwright's own
   E2E_CHROME: /usr/bin/google-chrome
+  E2E_FIREFOX: /usr/bin/firefox
 
 jobs:
   unit:
@@ -312,9 +313,27 @@ jobs:
           printf 'repo_add_once="false"\nrepo_reenable_on_distupgrade="false"\n' | sudo tee /etc/default/google-chrome > /dev/null
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y google-chrome-stable
-      - name: Install the remaining browser engines
+      - name: Install WebKit
         if: contains(inputs.tiers || 'integration or e2e', 'e2e')
-        run: python -m playwright install --with-deps firefox webkit
+        run: python -m playwright install --with-deps webkit
+      # Release Firefox, which the suites drive over WebDriver BiDi as they do
+      # locally: Playwright's own Firefox build holds a large WebSocket send in
+      # its automation layer when the cores are busy, and a camera on the JPEG
+      # rung stops. From Mozilla's apt repository, its key checked against the
+      # fingerprint Mozilla publishes, pinned above Ubuntu's snap package.
+      - name: Install Firefox
+        if: contains(inputs.tiers || 'integration or e2e', 'e2e')
+        run: |
+          addons/base/fetch-verified key "https://packages.mozilla.org/apt/repo-signing-key.gpg" \
+              35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3 /tmp/packages.mozilla.org.asc
+          sudo install -Dm644 /tmp/packages.mozilla.org.asc /etc/apt/keyrings/packages.mozilla.org.asc
+          printf 'Types: deb\nURIs: https://packages.mozilla.org/apt\nSuites: mozilla\nComponents: main\nSigned-By: /etc/apt/keyrings/packages.mozilla.org.asc\n' \
+              | sudo tee /etc/apt/sources.list.d/mozilla.sources > /dev/null
+          printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
+              | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y firefox
+          "$E2E_FIREFOX" --version
       # WebKit paints every <video> through its GL sink, which needs GStreamer's
       # opengl plugin; without it a silent software fallback is what the suites
       # would measure, so the plugin is named and checked here rather than left
@@ -329,7 +348,7 @@ jobs:
       - name: Install gdb for the stall reports
         if: contains(inputs.tiers || 'integration or e2e', 'e2e')
         run: sudo apt-get install --no-install-recommends -y gdb
-      # Firefox negotiates H.264 only with the OpenH264 GMP, which its bundled
+      # Firefox negotiates H.264 only with the OpenH264 GMP, which a fresh
       # profile never carries; without this the whole firefox-wr block skips.
       - name: Install the OpenH264 plugin for Firefox
         if: contains(inputs.tiers || 'integration or e2e', 'e2e')
