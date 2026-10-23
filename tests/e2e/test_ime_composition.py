@@ -35,11 +35,15 @@ import functools
 import http.server
 import os
 import socketserver
+import sys
 import threading
 import time
 from typing import Any, Optional
 
 from playwright.sync_api import sync_playwright
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import core_lib as C  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROOT = os.path.join(REPO, "addons", "selkies-web-core")
@@ -228,7 +232,8 @@ MAC_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
 
 def run_branch(pw: Any, tag: str, platform: Optional[str], ua: Optional[str],
                replay_groupss: list, engine: str = "chromium") -> bool:
-    browser = getattr(pw, engine).launch()
+    browser = (pw.firefox.launch(**C.installed_firefox({})) if engine == "firefox"
+               else getattr(pw, engine).launch())
     try:
         context = browser.new_context(user_agent=ua) if ua else browser.new_context()
         page = context.new_page()
