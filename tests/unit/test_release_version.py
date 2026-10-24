@@ -88,7 +88,8 @@ def native(function: str, version: str) -> str:
 # tag -> whether the workflow takes it, and whether it is a pre-release
 TAGS = {
     "1.2.3": (True, False),
-    "v1.2.3": (True, False),
+    # The tag is the version itself, as in every selkies-project repository
+    "v1.2.3": (False, False),
     "2.0.0rc0": (True, True),
     "2.0.0a1": (True, True),
     "2.0.0b2": (True, True),
@@ -105,10 +106,13 @@ TAGS = {
     "2.0.0.0": (False, False),
     "": (False, False),
 }
-# A release is cut from main alone, whatever the tag
-for ref in ("refs/heads/ffmpeg-free", "refs/tags/1.2.3"):
-    ok, _ = validate("1.2.3", ref=ref)
-    check(f"a run started from {ref} is refused", not ok)
+# A release is cut from main alone: a new tag only from a run started there, and
+# any tag only on a commit of main, which the steps after this one check
+WORKFLOW_TEXT = open(WORKFLOW).read()
+check("a new tag is cut from main alone",
+      '[ "${GITHUB_REF}" = refs/heads/main ]' in WORKFLOW_TEXT)
+check("a tag off main is refused",
+      "compare/main...${GITHUB_SHA}" in WORKFLOW_TEXT)
 
 for tag, (want_ok, want_pre) in TAGS.items():
     ok, out = validate(tag)
@@ -119,7 +123,7 @@ for tag, (want_ok, want_pre) in TAGS.items():
         check(f"{tag} is {'a pre-release' if want_pre else 'a full release'}",
               out.get("prerelease") == want, out.get("prerelease", "<unset>"))
         check(f"{tag} is released as {tag}",
-              out.get("version") == tag.lstrip("v"), out.get("version", "<unset>"))
+              out.get("version") == tag, out.get("version", "<unset>"))
 
 # A release takes the floating `latest` image tags and the "Latest" badge and a
 # pre-release takes neither, unless the run forces it; GitHub gives no pre-release
@@ -160,9 +164,9 @@ for version, (want_tilde, want_alpine) in NATIVE.items():
     got = native("alpine_version", version)
     check(f"apk builds {version} as {want_alpine}", got == want_alpine, got)
 
-# The draft's tag is created when a maintainer publishes it, at the commit the
-# draft names; left to GitHub, that is the default branch's head by then
-check("the draft release tags the commit the run built",
+# The draft names the commit the run built, which the tag is on; left to
+# GitHub, a draft names the default branch's head by the time it is published
+check("the draft release names the commit the run built",
       "target_commitish: ${{ github.sha }}" in open(WORKFLOW).read())
 
 # The point of the translation, on the one comparator a runner always has

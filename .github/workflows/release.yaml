@@ -1,9 +1,18 @@
 name: Release
 
-# Maintainer-triggered release: builds the wheel ONCE at the release version,
-# then builds multi-arch images, native packages, and AppImages around it, and
-# assembles a DRAFT GitHub release with every build artifact attached. The
-# draft is finalized and published manually.
+# A release is cut by running this workflow from the Actions tab with the tag,
+# or by pushing the tag. A run releases the commit it started from: a manual
+# run creates a new tag on it, cut from main, once the checks pass, and a tag
+# that already exists has to be on it, so an earlier commit's tag is released
+# by a run started from that tag. The latest input decides the "Latest" badge:
+# auto gives it to a release and not to a pre-release, never holds it back for
+# a fix to an older series, and always gives it to a pre-release too, which is
+# then released as a release since GitHub gives the badge to no pre-release.
+#
+# The run builds the wheel ONCE at the release version, then builds multi-arch
+# images, native packages, and AppImages around it, and assembles a DRAFT
+# GitHub release with every build artifact attached. The draft is finalized and
+# published manually.
 #
 # The `latest` input decides whether the release is designated as the latest
 # everywhere at once: the floating `latest` image tags and the "Latest" badge of
@@ -30,34 +39,29 @@ name: Release
 # the two were published there; nothing takes that road on its own.
 
 on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag (e.g. 1.2.3 or 2.0.0rc0)
+        description: Release tag, created on this run's commit when it is new (e.g. 1.2.3 or 2.0.0rc0)
         type: string
         required: true
       latest:
         description: Designate this release as the latest (floating `latest` image tags and the release badge); auto does so for a release and not for a pre-release
         type: choice
-        options:
-          - auto
-          - always
-          - never
+        options: [auto, always, never]
         default: auto
       pypi:
         description: Publish the wheel to PyPI once the draft is published; auto does so for a release designated as the latest and not for a pre-release
         type: choice
-        options:
-          - auto
-          - always
-          - never
+        options: [auto, always, never]
         default: auto
       capture_stack:
         description: Where the pinned pixelflux and pcmflux come from; pypi only once they are published there
         type: choice
-        options:
-          - releases
-          - pypi
+        options: [releases, pypi]
         default: releases
 
 concurrency:
@@ -67,10 +71,16 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # The tag this run releases: the pushed one, or the one a manual run names
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
-  validate:
-    name: Validate release inputs
+  check:
+    name: Check the tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.ver.outputs.version }}
       prerelease: ${{ steps.ver.outputs.prerelease }}
@@ -78,18 +88,20 @@ jobs:
       pypi: ${{ steps.ver.outputs.pypi }}
     steps:
       - id: ver
+        name: Check the tag is a version
+        # The tag becomes the wheel version, the image tags, and the version of
+        # every native package, so it is a PEP 440 version spelled the way pip
+        # normalizes it. The run's latest and PyPI decisions are made here too,
+        # since the images take the first.
         env:
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ env.RELEASE_TAG }}
           LATEST: ${{ inputs.latest }}
           PYPI: ${{ inputs.pypi }}
         run: |
           set -e
-          [ "${GITHUB_REF}" = refs/heads/main ] || { echo "a release is cut from main; this run started from ${GITHUB_REF_NAME}" >&2; exit 1; }
-          ver="${TAG#v}"
-          # The tag becomes the wheel version, so it is PEP 440: X.Y.Z with an
-          # optional pre-release, post-release, or dev suffix
+          ver="${TAG}"
           echo "${ver}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+|\.post[0-9]+|\.dev[0-9]+)?$' \
-            || { echo "tag must be a PEP 440 version (e.g. 1.2.3 or 2.0.0rc0)" >&2; exit 1; }
+            || { echo "::error::${ver} is not a version (1.2.3, 2.0.0rc0)"; exit 1; }
           is_prerelease() { echo "$1" | grep -qE '((a|b|rc)|\.dev)[0-9]+$'; }
           # A release is designated as the latest and a pre-release is not,
           # unless the run says otherwise; the floating `latest` image tags
@@ -116,18 +128,50 @@ jobs:
             echo "pypi=${pypi}"
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Check the tag is on main
+        # A release is cut from main and its tags alone: a commit that is not on
+        # main is refused before anything is tagged, built, or released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GITHUB_SHA}" --jq .status)"
+          case "${status}" in
+            identical|behind) ;;
+            *) echo "::error::${RELEASE_TAG} is on a commit that is not on main (${status:-unknown})"; exit 1 ;;
+          esac
+
+      - name: Tag the commit this run started from
+        # The checks above have passed, so a refused run leaves no tag behind. A
+        # new tag is cut from main; one that already exists, a pushed one
+        # included, has to be on this run's commit, which is what is built
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" > /dev/null 2>&1; then
+            status="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...${RELEASE_TAG}" --jq .status)"
+            [ "${status}" = identical ] \
+              || { echo "::error::${RELEASE_TAG} tags another commit than this run's; start the run from the tag (Use workflow from)"; exit 1; }
+            echo "${RELEASE_TAG} tags ${GITHUB_SHA}"
+          else
+            [ "${GITHUB_REF}" = refs/heads/main ] \
+              || { echo "::error::a new tag is cut from main; this run started from ${GITHUB_REF_NAME}"; exit 1; }
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${RELEASE_TAG}" -f sha="${GITHUB_SHA}" > /dev/null
+            echo "${RELEASE_TAG} now tags ${GITHUB_SHA}"
+          fi
+
   wheel:
     name: Build wheel
-    needs: validate
+    needs: check
     permissions:
       contents: read
     uses: ./.github/workflows/build-wheel.yaml
     with:
-      package_version: ${{ needs.validate.outputs.version }}
+      package_version: ${{ needs.check.outputs.version }}
 
   capture-stack:
     name: Capture stack (pinned releases)
-    needs: validate
+    needs: check
     # The wheels pixelflux and pcmflux released for the pinned versions, which
     # everything below installs. A run resolving them from PyPI skips this.
     if: ${{ inputs.capture_stack != 'pypi' }}
@@ -139,7 +183,7 @@ jobs:
 
   wheel-smoke:
     name: Smoke test the wheel
-    needs: [validate, wheel, capture-stack]
+    needs: [check, wheel, capture-stack]
     if: >-
       ${{ !cancelled() && needs.wheel.result == 'success'
           && contains(fromJSON('["success", "skipped"]'), needs.capture-stack.result) }}
@@ -156,7 +200,7 @@ jobs:
 
   images:
     name: Build and publish multi-arch images
-    needs: [validate, wheel, wheel-smoke]
+    needs: [check, wheel, wheel-smoke]
     # A called workflow can only narrow the caller's token, so the GHCR push
     # scope has to be granted here
     permissions:
@@ -164,25 +208,25 @@ jobs:
       packages: write
     uses: ./.github/workflows/images.yaml
     with:
-      tag_prefix: ${{ needs.validate.outputs.version }}
-      floating_tags: ${{ needs.validate.outputs.latest == 'true' }}
+      tag_prefix: ${{ needs.check.outputs.version }}
+      floating_tags: ${{ needs.check.outputs.latest == 'true' }}
       wheel_artifact: selkies-wheel
       capture_stack_published: ${{ inputs.capture_stack == 'pypi' }}
 
   packages:
     name: Build native packages
-    needs: [validate, wheel, wheel-smoke]
+    needs: [check, wheel, wheel-smoke]
     permissions:
       contents: read
     uses: ./.github/workflows/packages.yaml
     with:
-      package_version: ${{ needs.validate.outputs.version }}
+      package_version: ${{ needs.check.outputs.version }}
       wheel_artifact: selkies-wheel
       capture_stack_published: ${{ inputs.capture_stack == 'pypi' }}
 
   draft-release:
     name: Assemble draft release
-    needs: [validate, wheel, wheel-smoke, images, packages]
+    needs: [check, wheel, wheel-smoke, images, packages]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -227,13 +271,12 @@ jobs:
       - name: Create draft release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
-          tag_name: ${{ needs.validate.outputs.version }}
-          name: ${{ needs.validate.outputs.version }}
-          # The tag is created when the draft is published, at this commit
-          # rather than at the default branch's head by then
+          tag_name: ${{ needs.check.outputs.version }}
+          name: ${{ needs.check.outputs.version }}
+          # The run's commit, which the check job tagged or found tagged
           target_commitish: ${{ github.sha }}
           draft: true
-          prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
-          body: "<!-- selkies-release: latest=${{ needs.validate.outputs.latest }} --><!-- selkies-release: pypi=${{ needs.validate.outputs.pypi }} -->"
+          prerelease: ${{ needs.check.outputs.prerelease == 'true' }}
+          body: "<!-- selkies-release: latest=${{ needs.check.outputs.latest }} --><!-- selkies-release: pypi=${{ needs.check.outputs.pypi }} -->"
           generate_release_notes: true
           files: release/*
