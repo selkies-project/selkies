@@ -3,7 +3,13 @@ title: Selkies
 description: Open-Source Low-Latency Accelerated Linux WebSocket and WebRTC HTML5 Remote Desktop Streaming Platform for Self-Hosting, Containers, Kubernetes, or Cloud/HPC
 ---
 
-![Selkies](assets/logo/horizontal.svg)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/selkies-project/selkies/main/docs/assets/logo/horizontal.svg" alt="Selkies" width="308" height="89">
+</p>
+
+<h1 align="center">Selkies</h1>
+
+<p align="center">Part of <a href="https://www.linuxserver.io"><img src="https://raw.githubusercontent.com/selkies-project/selkies/main/docs/assets/linuxserver.svg" alt="LinuxServer.io" title="LinuxServer.io" width="32" height="32" align="middle"></a></p>
 
 [![Build](https://github.com/selkies-project/selkies/actions/workflows/ci.yaml/badge.svg)](https://github.com/selkies-project/selkies/actions/workflows/ci.yaml) [![Release](https://img.shields.io/github/v/release/selkies-project/selkies?display_name=tag)](https://github.com/selkies-project/selkies/releases/latest) [![PyPI](https://img.shields.io/pypi/v/selkies)](https://pypi.org/project/selkies/) [![License: MPL 2.0](https://img.shields.io/badge/License-MPL%202.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0) [![Docs](https://img.shields.io/badge/docs-docs.selkies.io-blue)](https://docs.selkies.io/) [![Discord](https://img.shields.io/badge/dynamic/json?logo=discord&label=Discord%20Members&query=approximate_member_count&url=https%3A%2F%2Fdiscordapp.com%2Fapi%2Finvites%2FwDNGDeSW5F%3Fwith_counts%3Dtrue)](https://discord.gg/wDNGDeSW5F) [![Ask DeepWiki](https://img.shields.io/badge/Ask-DeepWiki-blue)](https://deepwiki.com/selkies-project/selkies)
 
