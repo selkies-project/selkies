@@ -14,8 +14,6 @@
 
 ![Selkies streaming Blender, with its sidebar of settings and live statistics](https://raw.githubusercontent.com/selkies-project/selkies/main/docs/assets/screenshot.jpg)
 
-<sub>Blender with the [Ellie Pose Library](https://www.blender.org/download/demo-files/) by Blender Studio (CC BY).</sub>
-
 Selkies is an open-source low-latency high-performance Linux-native GPU/CPU-accelerated HTML5 remote desktop streaming platform, for self-hosting, containers, Kubernetes, or Cloud/HPC platforms, [started out first by Google engineers](https://web.archive.org/web/20210310083658/https://cloud.google.com/solutions/gpu-accelerated-streaming-using-webrtc), then open-sourced and developed by academic researchers, [LinuxServer.io](https://www.linuxserver.io), and community contributors. It streams over plain WebSockets by default, with WebRTC available as an opt-in transport.
 
 Selkies is designed for researchers studying Agentic AI, Graphical AI, Robotics, Autonomous Driving, Drug Discovery technologies, SLURM supercomputer or HPC system administrators, Jupyter, Kubernetes, Docker®, Coder infrastructure administrators, and Linux cloud gaming enthusiasts.
