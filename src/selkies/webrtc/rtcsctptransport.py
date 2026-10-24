@@ -690,7 +690,8 @@ class InboundStream:
         pos = -1
         size = 0
         for i, chunk in enumerate(self.reassembly):
-            if uint32_gte(tsn, chunk.tsn):
+            # Not ahead is old, as in is_obsolete: exactly 2^31 away is neither.
+            if not uint32_gt(chunk.tsn, tsn):
                 pos = i
                 size += len(chunk.user_data)
                 if chunk.flags & SCTP_DATA_FIRST_FRAG:
@@ -1084,8 +1085,8 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         """
         Mark an incoming data TSN as received.
         """
-        # it's a duplicate
-        if uint32_gte(self._last_received_tsn, tsn) or tsn in self._sack_misordered:
+        # it's a duplicate unless ahead, as in is_obsolete: exactly 2^31 away is neither
+        if not uint32_gt(tsn, self._last_received_tsn) or tsn in self._sack_misordered:
             self._sack_duplicates.append(tsn)
             return True
 
@@ -1326,8 +1327,8 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         """
         self._sack_needed = True
 
-        # it's a duplicate
-        if uint32_gte(self._last_received_tsn, chunk.cumulative_tsn):
+        # it's a duplicate unless ahead: exactly 2^31 away is neither
+        if not uint32_gt(chunk.cumulative_tsn, self._last_received_tsn):
             return
 
         def is_obsolete(x: int) -> bool:
@@ -1336,7 +1337,8 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         # advance cumulative TSN
         self._last_received_tsn = chunk.cumulative_tsn
         self._sack_misordered = set(filter(is_obsolete, self._sack_misordered))
-        for tsn in sorted(self._sack_misordered):
+        base = self._last_received_tsn
+        for tsn in sorted(self._sack_misordered, key=lambda t: (t - base) % SCTP_TSN_MODULO):
             if tsn == tsn_plus_one(self._last_received_tsn):
                 self._last_received_tsn = tsn
             else:
@@ -1624,7 +1626,9 @@ class RTCSctpTransport(AsyncIOEventEmitter):
         """
         gaps: list[list[int]] = []
         gap_next = None
-        for tsn in sorted(self._sack_misordered):
+        # In modular order, so the blocks stay ascending and merged across the wrap.
+        base = self._last_received_tsn
+        for tsn in sorted(self._sack_misordered, key=lambda t: (t - base) % SCTP_TSN_MODULO):
             pos = (tsn - self._last_received_tsn) % SCTP_TSN_MODULO
             if tsn == gap_next:
                 gaps[-1][1] = pos

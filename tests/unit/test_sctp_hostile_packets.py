@@ -199,6 +199,37 @@ def main() -> bool:
     aborted, streams, acked = fragments(range(100, 140), 1000, 64 * 1024)
     res.check("DATA on streams the peer never opened is acknowledged, not buffered",
               aborted is False and streams == [] and acked, (aborted, streams, acked))
+    # A middle fragment (data()) stays in reassembly; a TSN exactly 2^31 away is neither ahead nor behind.
+    forward = lambda cum: chunk(192, struct.pack("!L", cum % sctp.SCTP_TSN_MODULO))  # noqa: E731
+    sacks = lambda sent: [c for p in sent for c in sctp.parse_packet(p)[3] if isinstance(c, sctp.SackChunk)]  # noqa: E731
+    ok, detail, sent = deliver(True, tag(data(1000) + forward(1000 + 2**31) + data(1000)))
+    last = sacks(sent)[-1] if ok and sacks(sent) else None
+    res.check("a FORWARD TSN exactly 2^31 past the cumulative TSN is ignored and a held TSN stays a duplicate",
+              ok and last is not None and last.cumulative_tsn == 1000 and 1000 in last.duplicates,
+              (last.cumulative_tsn, last.duplicates) if last else detail)
+    ok, detail, sent = deliver(True, tag(data(1000) + data(1001) + forward(1000 + 2**31) + data(1000)))
+    last = sacks(sent)[-1] if ok and sacks(sent) else None
+    res.check("a FORWARD TSN 2^31 past a held chunk prunes it, and its TSN again is a duplicate",
+              ok and last is not None and last.cumulative_tsn == 1000 + 2**31 and 1000 in last.duplicates,
+              (last.cumulative_tsn, last.duplicates) if last else detail)
+    unordered = chunk(0, struct.pack("!LHHL", 1024, 0, 4, 51) + b"x")
+    unordered = unordered[:1] + b"\x04" + unordered[2:]
+    ok, detail, sent = deliver(True, tag(forward(1024) + forward(1024 + 2**31) + unordered + unordered))
+    last = sacks(sent)[-1] if ok and sacks(sent) else None
+    res.check("a TSN 2^31 from a FORWARD TSN's cumulative TSN, sent twice, is not received twice",
+              ok and last is not None and last.cumulative_tsn == 1024 and last.duplicates == [1024, 1024],
+              (last.cumulative_tsn, last.duplicates) if last else detail)
+    wrap = forward(999 + 2**31 - 1) + forward(0xFFFFFFFD)
+    ok, detail, sent = deliver(True, tag(wrap + data(0xFFFFFFFF) + data(0) + data(1)))
+    last = sacks(sent)[-1] if ok and sacks(sent) else None
+    res.check("gap blocks across the TSN wrap are ascending and merged",
+              ok and last is not None and last.cumulative_tsn == 0xFFFFFFFD and last.gaps == [(2, 4)],
+              (last.cumulative_tsn, last.gaps) if last else detail)
+    ok, detail, sent = deliver(True, tag(wrap + data(0xFFFFFFFF) + data(0) + forward(0xFFFFFFFE)))
+    last = sacks(sent)[-1] if ok and sacks(sent) else None
+    res.check("a FORWARD TSN before the wrap takes the TSNs received past it",
+              ok and last is not None and last.cumulative_tsn == 0 and not last.gaps,
+              (last.cumulative_tsn, last.gaps) if last else detail)
     ok, detail, sent = deliver(True, tag(data(1000)))
     acked = [c.cumulative_tsn for p in sent for c in sctp.parse_packet(p)[3] if isinstance(c, sctp.SackChunk)]
     res.check("in-window DATA is still received and acknowledged", ok and 1000 in acked, f"SACK cumulative TSNs {acked}")
