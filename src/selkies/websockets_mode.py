@@ -3852,7 +3852,8 @@ class DataStreamingServer(BaseStreamingService):
         losing capacity, which the next window then shows. Both go to the
         transports' shared `CongestionSteer`, which backs off on the first such
         window, with what the display sent over the tick, so a still screen's
-        trickle is not taken for what the path carries; a tick the gate held
+        trickle is neither taken for what the path carries nor raises the rate
+        past it; a tick the gate held
         any of goes without, since the path, not the stream, set what it sent.
         A display the backpressure gate holds is judged by the frames
         still acked from before the gate shut, like any window, since a

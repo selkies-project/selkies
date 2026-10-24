@@ -3134,7 +3134,9 @@ class WebRTCService(BaseStreamingService):
         merely what was sent (an idle screen reads ~0), not link capacity: it
         may lift the target when it shows real headroom but never drags it
         down; otherwise the target recovers multiplicatively toward the
-        ceiling after a loss backoff. The pacer rides the same tick but is
+        ceiling after a backoff, while the display sends near its target: a
+        still screen's trickle raises it no further than the capacity the path
+        last showed. The pacer rides the same tick but is
         configured for every peer before the feedback gate, since it must run
         on links that never send transport-cc; this is its only configuration
         path, so one bad peer must never kill the loop.

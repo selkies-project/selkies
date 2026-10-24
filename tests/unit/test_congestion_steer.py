@@ -12,7 +12,9 @@ to drain; no second cut follows while that drain runs, and the target then
 settles at the headroom. A raise is slow while the path delivers near the
 capacity it showed and fast far from it, and a path that delivers clear past
 it forgets it. A queue under a stream sending a trickle of its target, which
-says nothing of the path, cuts nothing.
+says nothing of the path, cuts nothing, and a clean tick of that trickle raises
+the target no further than the capacity the path showed, or not at all while
+the steer knows none.
 """
 import os
 import sys
@@ -126,6 +128,34 @@ steer = CongestionSteer()
 got = steer.target(8000, CEILING, FLOOR, 733_000.0, 0.25, 0.0, queue_s=0.48, offered_bps=1_083_000.0)
 check("a queue under a stream offering the path more than it delivers backs off, though the stream offers under half its target",
       got < 733, got)
+
+# A still screen's trickle after a backoff on a 5000 kbps path under a 16000 kbps ceiling.
+TOP, BOTTOM, TRICKLE = 16000.0, 1000.0, 300_000.0
+steer = CongestionSteer()
+cur = steer.target(TOP, TOP, BOTTOM, DELIVERED, 0.0, 0.0, queue_s=0.3, offered_bps=9_000_000.0)
+for t in range(1, 41):
+    cur = steer.target(cur, TOP, BOTTOM, TRICKLE, 0.0, float(t), queue_s=0.0, offered_bps=TRICKLE)
+check("a still screen's trickle raises the target no further than the capacity the path showed",
+      round(cur) == 5000, cur)
+got = steer.target(cur, TOP, BOTTOM, 4_800_000.0, 0.0, 41.0, queue_s=0.0, offered_bps=5_000_000.0)
+check("motion that fills the path probes past it by the near step", round(got) == round(5000 * 1.05), got)
+got = steer.target(got, TOP, BOTTOM, TRICKLE, 0.0, 42.0, queue_s=0.0, offered_bps=TRICKLE)
+check("a trickle keeps a target motion took past the capacity", round(got) == round(5000 * 1.05), got)
+got = steer.target(got, TOP, BOTTOM, 6_000_000.0, 0.0, 43.0, queue_s=0.0, offered_bps=6_000_000.0)
+check("motion the path delivers clear past it forgets it for the full step",
+      steer.capacity_kbps is None and round(got) == round(5000 * 1.05 * 1.15), (got, steer.capacity_kbps))
+
+steer = CongestionSteer()
+got = steer.target(5000, TOP, BOTTOM, TRICKLE, 0.0, 0.0, queue_s=0.0, offered_bps=TRICKLE)
+check("with no capacity known, a trickle keeps the target where it is", got == 5000, got)
+got = steer.target(5000, TOP, BOTTOM, 4_800_000.0, 0.0, 1.0, queue_s=0.0, offered_bps=4_900_000.0)
+check("and a stream sending its target raises it by the full step", round(got) == 5750, got)
+steer = CongestionSteer()
+steer.target(TOP, TOP, BOTTOM, 4_000_000.0, 0.2, 0.0, offered_bps=4_000_000.0)
+cur = steer.target(TOP, TOP, BOTTOM, 4_000_000.0, 0.2, 1.0, offered_bps=4_000_000.0)
+for t in range(2, 20):
+    cur = steer.target(cur, TOP, BOTTOM, TRICKLE, 0.0, float(t), offered_bps=TRICKLE)
+check("after a loss backoff a trickle keeps the backed-off target", round(cur) == 11200, cur)
 
 print(f"[congestion-steer] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)

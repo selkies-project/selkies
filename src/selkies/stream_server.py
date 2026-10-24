@@ -367,9 +367,14 @@ class CongestionSteer:
     targets are compared, since an encoder need not emit what it is asked for
     (a CBR encoder with a small buffer runs under its target, and content it
     cannot compress that far runs over). A path that delivers clear past the
-    old capacity with no queue forgets it, since it now carries more. A raise
-    also follows HEADROOM of the measured goodput where that is higher, never
-    past the ceiling.
+    old capacity with no queue forgets it, since it now carries more. A tick
+    whose stream offered under APP_LIMITED of the target tests nothing of the
+    path, so its step stops at the capacity the path last showed, or where the
+    target is when the steer knows none: stepping on a still screen's trickle
+    would climb to the ceiling and put the next motion there, past a slow
+    path's capacity, for a queue and a backoff every time the screen moves. A
+    raise also follows HEADROOM of the measured goodput where that is higher,
+    never past the ceiling.
     """
 
     LOSS = 0.10
@@ -451,7 +456,10 @@ class CongestionSteer:
                 self.capacity_kbps = None
             elif delivered >= capacity * self.NEAR:
                 step = self.STEP_NEAR
-        return max(floor, min(ceiling, max(current * step ** dt, delivered * self.HEADROOM)))
+        raised = current * step ** dt
+        if offered_bps is not None and offered_bps < current * 1_000 * self.APP_LIMITED:
+            raised = min(raised, max(current, self.capacity_kbps or current))
+        return max(floor, min(ceiling, max(raised, delivered * self.HEADROOM)))
 
     def _queue_backoff(self, current: float, delivered_kbps: float, queue_s: float, now: float) -> float:
         """The target a standing queue of `queue_s` backs off to, with the drain it plans."""
