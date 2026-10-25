@@ -373,8 +373,11 @@ class CongestionSteer:
     target is when the steer knows none: stepping on a still screen's trickle
     would climb to the ceiling and put the next motion there, past a slow
     path's capacity, for a queue and a backoff every time the screen moves. A
-    raise also follows HEADROOM of the measured goodput where that is higher,
-    never past the ceiling.
+    tick that measured no offer is taken the same way, as a queue under one
+    backs off: over WebSockets the backpressure gate held it, which says the
+    page fell behind rather than that the target fits. A raise also follows
+    HEADROOM of the measured goodput where that is higher, never past the
+    ceiling.
     """
 
     LOSS = 0.10
@@ -457,7 +460,7 @@ class CongestionSteer:
             elif delivered >= capacity * self.NEAR:
                 step = self.STEP_NEAR
         raised = current * step ** dt
-        if offered_bps is not None and offered_bps < current * 1_000 * self.APP_LIMITED:
+        if offered_bps is None or offered_bps < current * 1_000 * self.APP_LIMITED:
             raised = min(raised, max(current, self.capacity_kbps or current))
         return max(floor, min(ceiling, max(raised, delivered * self.HEADROOM)))
 

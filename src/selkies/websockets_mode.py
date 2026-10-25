@@ -3853,8 +3853,8 @@ class DataStreamingServer(BaseStreamingService):
         transports' shared `CongestionSteer`, which backs off on the first such
         window, with what the display sent over the tick, so a still screen's
         trickle is neither taken for what the path carries nor raises the rate
-        past it; a tick the gate held
-        any of goes without, since the path, not the stream, set what it sent.
+        past it; a tick the gate held any of goes without, since the path, not
+        the stream, set what it sent, and raises the rate no further either.
         A display the backpressure gate holds is judged by the frames
         still acked from before the gate shut, like any window, since a
         moment's delay trips the gate without a queue behind it; over a path

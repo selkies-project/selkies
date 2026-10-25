@@ -14,7 +14,7 @@ capacity it showed and fast far from it, and a path that delivers clear past
 it forgets it. A queue under a stream sending a trickle of its target, which
 says nothing of the path, cuts nothing, and a clean tick of that trickle raises
 the target no further than the capacity the path showed, or not at all while
-the steer knows none.
+the steer knows none; nor does a tick that measured no offer.
 """
 import os
 import sys
@@ -42,7 +42,7 @@ got = steer.target(8000, CEILING, FLOOR, GOODPUT, 0.2, 1.0)
 check("the second lossy tick in a row backs off by 30%", got == 5600, got)
 check("a clean tick inside the hold keeps the backed-off target",
       steer.target(5600, CEILING, FLOOR, GOODPUT, 0.0, 2.0) == 5600)
-got = steer.target(5600, CEILING, FLOOR, 5_000_000.0, 0.0, 3.0)
+got = steer.target(5600, CEILING, FLOOR, 5_000_000.0, 0.0, 3.0, offered_bps=5_600_000.0)
 check("a clean tick past the hold raises by the step", round(got) == 6440, got)
 
 steer = CongestionSteer()
@@ -54,7 +54,7 @@ check("a clean tick between two lossy ones clears the strike", got == 8000, got)
 steer = CongestionSteer()
 got = steer.target(4000, CEILING, FLOOR, 10_000_000.0, 0.0, 0.0)
 check("measured goodput lifts the target above the step", got == 8000, got)
-got = steer.target(1000, CEILING, FLOOR, 500_000.0, 0.0, 1.0)
+got = steer.target(1000, CEILING, FLOOR, 500_000.0, 0.0, 1.0, offered_bps=1_000_000.0)
 check("low goodput never drags the target below the step", got == 1150, got)
 got = steer.target(7500, CEILING, FLOOR, GOODPUT, 0.0, 2.0)
 check("a raise stops at the ceiling", got == 8000, got)
@@ -79,9 +79,9 @@ check("a clean tick inside the settle keeps it", round(got) == 4250, got)
 got = steer.target(4250, CEILING, FLOOR, 3_600_000.0, 0.0, 2.2, queue_s=0.0)
 check("delivering below the near band of the capacity, a clean second raises by the full step",
       round(got) == round(4250 * 1.15), got)
-got = steer.target(4900, CEILING, FLOOR, 4_600_000.0, 0.0, 3.2, queue_s=0.0)
+got = steer.target(4900, CEILING, FLOOR, 4_600_000.0, 0.0, 3.2, queue_s=0.0, offered_bps=4_900_000.0)
 check("delivering within it, by the near step", round(got) == round(4900 * 1.05), got)
-got = steer.target(6000, CEILING, FLOOR, 4_600_000.0, 0.0, 4.2, queue_s=0.0)
+got = steer.target(6000, CEILING, FLOOR, 4_600_000.0, 0.0, 4.2, queue_s=0.0, offered_bps=6_000_000.0)
 check("the band follows what the path delivers, not the target the encoder runs under",
       round(got) == round(6000 * 1.05), got)
 
@@ -108,7 +108,7 @@ check("far below the capacity a clean second raises by the full step", round(got
 got = steer.target(1900, CEILING, FLOOR, 1_900_000.0, 0.0, 2.5, queue_s=0.0)
 check("half a second near it raises by half a second's near step",
       round(got) == round(1900 * 1.05 ** 0.5), got)
-got = steer.target(2300, CEILING, FLOOR, 2_300_000.0, 0.0, 3.5, queue_s=0.0)
+got = steer.target(2300, CEILING, FLOOR, 2_300_000.0, 0.0, 3.5, queue_s=0.0, offered_bps=2_300_000.0)
 check("delivering clear past the capacity with the path clean, the capacity is forgotten for the full step",
       steer.capacity_kbps is None and round(got) == round(2300 * 1.15), (got, steer.capacity_kbps))
 
@@ -156,6 +156,15 @@ cur = steer.target(TOP, TOP, BOTTOM, 4_000_000.0, 0.2, 1.0, offered_bps=4_000_00
 for t in range(2, 20):
     cur = steer.target(cur, TOP, BOTTOM, TRICKLE, 0.0, float(t), offered_bps=TRICKLE)
 check("after a loss backoff a trickle keeps the backed-off target", round(cur) == 11200, cur)
+
+steer = CongestionSteer()
+cur = steer.target(8000, TOP, BOTTOM, 3_000_000.0, 0.0, 0.0, queue_s=0.3, offered_bps=6_000_000.0)
+for t in range(1, 12):
+    cur = steer.target(cur, TOP, BOTTOM, TRICKLE, 0.0, float(t), queue_s=0.0)
+check("clean ticks that measured no offer raise the target no further than the capacity", round(cur) == 3000, cur)
+steer = CongestionSteer()
+got = steer.target(5000, TOP, BOTTOM, TRICKLE, 0.0, 0.0, queue_s=0.0)
+check("nor at all with none known", got == 5000, got)
 
 print(f"[congestion-steer] {passed}/{passed + failed} passed")
 sys.exit(1 if failed else 0)
