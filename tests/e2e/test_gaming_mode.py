@@ -15,8 +15,10 @@ pointer; every relative move on the browser's display goes out as exactly that
 delta and reaches the game as exactly that delta, one event per message; a key
 reaches the game; a tap of Escape reaches it as Escape and leaves the mode
 standing, since the keyboard lock holds the key, and so do the browser's own
-Ctrl+T and Ctrl+W, which reach the game while the browser keeps its one tab; a
-held Escape ends the mode.
+Ctrl+T and Ctrl+W, which reach the game while the browser keeps its one tab, and,
+where the Keyboard Lock API holds the system's keys too, Alt+Tab, which goes to
+the session rather than switching windows on the browser's desktop; a held
+Escape ends the mode.
 A second page withholds the Keyboard Lock API the way Brave's Shields do, and
 there the client has to say so once and a single Escape has to end the mode,
 which is what a user of that browser gets.
@@ -24,7 +26,7 @@ which is what a user of that browser gets.
 Firefox has no Keyboard Lock API; it holds its keys for a fullscreen asked for
 with `keyboardLock: "browser"`. The installed Firefox, where there is one, is
 driven through the same block, and must hold Escape, Ctrl+T, and Ctrl+W for the
-game without a notice.
+game without a notice; Alt+Tab stays the desktop's there.
 
 The `-two` selectors lay a second display beside the locked one and walk the
 remote pointer onto it, since a lock is one page's and the pointer is the whole
@@ -235,6 +237,24 @@ def played(res: "H.Results", desk: Desk, page: Any, probe: Any, tag: str, shortc
                           "and gaming mode",
                           (True, ord(letter)) in keys and len(page.context.pages) == 1
                           and mode["fullscreen"] and mode["gaming"], f"{keys} {len(page.context.pages)} {mode}")
+            # The browser's desktop switches windows on Alt+Tab (openbox binds it): under the lock
+            # the chord goes to the session, whose own window manager it is meant for. A fullscreen
+            # `keyboardLock` holds the browser's shortcuts, not the desktop's, and pressing it there
+            # would hand the window manager the focus the checks after it need.
+            if page.evaluate("!!(navigator.keyboard && navigator.keyboard.lock)"):
+                wire_mark = len(page.evaluate("window.__wireSent"))
+                desk.chord("Alt_L", "Tab")
+                time.sleep(0.8)
+                sent = [d for d in page.evaluate("window.__wireSent")[wire_mark:] if d.startswith(("kd,", "ku,"))]
+                mode = page.evaluate(MODE_JS)
+                res.check(f"{tag}: Alt+Tab goes to the session, not the browser's desktop, and gaming mode stands",
+                          "kd,65513" in sent and "kd,65289" in sent
+                          and sent.index("kd,65513") < sent.index("kd,65289")
+                          and mode["fullscreen"] and mode["gaming"], f"{sent} {mode}")
+            else:
+                res.skip(f"{tag}: Alt+Tab goes to the session, not the browser's desktop",
+                         "no Keyboard Lock API: a fullscreen keyboardLock holds the browser's shortcuts, "
+                         "not the desktop's window switching")
     finally:
         probe.stop()
 
