@@ -8,11 +8,11 @@ seat's input goes through the portal by keysym and stream coordinates. This suit
 KDE stack on a private bus — `kwin_wayland --virtual`, PipeWire, xdg-desktop-portal, and its KDE
 backend — starts the server against it over either transport, and checks the rung was taken,
 the stream negotiated, and that a browser's pointer moves, clicks, scrolls, and keys land on a
-client window inside KWin. Plasma 6.6's virtual backend streams its frames as GPU dmabufs; a KWin
-whose virtual backend emits no output damage streams none, and the frame check reports skipped
-there. The pointer lands where the page points: the browser sends the stream's pixels, which the
-injector takes into the compositor's logical space. The `scaled` block runs KWin's output at scale
-2, where the stream's pixels are twice the logical size and an injector that skipped that step, or
+client window inside KWin. Plasma 6.6's virtual backend streams its frames as GPU dmabufs; KWin
+5's emits no output damage and streams none, and the frame check reports skipped there. The
+pointer lands where the page points: the browser sends the stream's pixels, which the injector
+takes into the compositor's logical space. The `scaled` block runs KWin's output at scale 2,
+where the stream's pixels are twice the logical size and an injector that skipped that step, or
 took it twice, lands twice or half as far.
 
 Usage: python3 tests/e2e/test_wayland_host_portal.py [websockets|webrtc|scaled]
@@ -31,17 +31,17 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 SIZE = (1280, 720)
-# The box of the stream element the page draws, once it has drawn a frame.
+# The box the page maps the pointer through, with the stream's size in pixels: the stream element
+# once that has a size, else the input overlay (a WebRTC `<video>` has none before a frame).
 SINK_JS = """() => {
   const canvas = document.getElementById('videoCanvas');
   const video = document.getElementById('stream');
   const px = (canvas && canvas.width > 0) ? [canvas.width, canvas.height]
              : (video && video.videoWidth > 0) ? [video.videoWidth, video.videoHeight] : null;
-  if (!px) return null;
-  for (const id of ['videoCanvas', 'videoWorkerCanvas', 'videoStream', 'stream']) {
+  for (const id of px ? ['videoCanvas', 'videoWorkerCanvas', 'videoStream', 'stream'] : ['overlayInput']) {
     const el = document.getElementById(id);
     const r = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-    if (r && r.width > 0) return {x: r.left, y: r.top, cssW: r.width, cssH: r.height};
+    if (r && r.width > 0) return {x: r.left, y: r.top, cssW: r.width, cssH: r.height, px};
   }
   return null;
 }"""
@@ -75,10 +75,10 @@ class KdeRig:
     starts unless the permission store's `kde-authorized` table grants the app `remote-desktop`,
     so the rig grants it to a host app, whose id is empty, as a deployment does ahead of time.
 
-    KWin takes its output's scale from the `kwinoutputconfig.json` it keeps: the rig writes one
-    into a configuration directory of its own, the virtual output's mode `scale` times SIZE at
-    that scale, so the logical output stays SIZE. (`--scale` sizes a windowed backend's window
-    instead, at scale 1.)"""
+    The virtual output's mode is `--width` and `--height` times `--scale`, so its logical size
+    stays SIZE at the rig's scale. KWin 5 takes the output's scale from `--scale` as well; KWin 6
+    takes it from the `kwinoutputconfig.json` it keeps, else picks its own (1 here), so the rig
+    also writes one into a configuration directory of its own."""
 
     def __init__(self, scale: int = 1) -> None:
         # A short path: the compositor's, PipeWire's, and the bus's sockets all live under it.
@@ -97,6 +97,7 @@ class KdeRig:
             "XDG_CURRENT_DESKTOP": "KDE", "XDG_SESSION_TYPE": "wayland", "QT_QPA_PLATFORM": "wayland",
             "XDG_CONFIG_HOME": os.path.join(self.root, "config"),
         }
+        self.scale = scale
         self.mode = (SIZE[0] * scale, SIZE[1] * scale)
         os.makedirs(self.env["XDG_CONFIG_HOME"])
         with open(os.path.join(self.env["XDG_CONFIG_HOME"], "kwinoutputconfig.json"), "w") as f:
@@ -131,8 +132,8 @@ class KdeRig:
         self._spawn(["pipewire"], "pipewire")
         time.sleep(0.5)
         self._spawn(["wireplumber"], "wireplumber")
-        self._spawn(["kwin_wayland", "--virtual", "--width", str(self.mode[0]), "--height", str(self.mode[1]),
-                     "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities",
+        self._spawn(["kwin_wayland", "--virtual", "--width", str(SIZE[0]), "--height", str(SIZE[1]),
+                     "--scale", str(self.scale), "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities",
                      "--socket", self.socket_name], "kwin", KWIN_WAYLAND_NO_PERMISSION_CHECKS="1")
         deadline = time.time() + 20
         while not os.path.exists(self.socket_path):
@@ -182,10 +183,15 @@ def wait_video(page, mode: str, timeout: float):
     return C.wait_ws_video(page, timeout=timeout) if mode == "websockets" else C.wait_wr_video(page, timeout=timeout)
 
 
-def landing(page, obs, x: float, y: float, logical: tuple) -> tuple:
+def landing(page, obs, x: float, y: float, logical: tuple, mode: tuple) -> tuple:
     """Move the page's pointer to (x, y); where the KDE client saw it last and where it should
-    have: the stream pixel the page point shows, in the output's `logical` size."""
+    have: the stream pixel the page point shows, in the output's `logical` size. The page maps
+    by the stream's size once it has one, so that has to be the host's `mode` first."""
+    deadline = time.time() + 10
     sink = page.evaluate(SINK_JS)
+    while sink and sink["px"] and tuple(sink["px"]) != mode and time.time() < deadline:
+        time.sleep(0.2)
+        sink = page.evaluate(SINK_JS)
     mark = len(obs.lines)
     page.mouse.move(x, y)
     time.sleep(0.6)
@@ -232,13 +238,10 @@ def run(mode: str, scale: int = 1) -> "H.Results":
                 res.check("the stream reaches the streaming state", C.wait_log("portal stream streaming", 30), H.server_log(tail=8))
                 res.check("no host connect failure", "connect failed" not in H.server_log(), "")
 
-                if C.wait_log("first portal frame", 8):
-                    res.check("video reaches the browser", bool(wait_video(page, mode, 30)), "")
-                else:
-                    res.skip("video reaches the browser", "the compositor emitted no screencast frame")
-
                 # Input from the browser: pointer motion, a click, a wheel notch, and a key,
-                # each of which the KDE client inside KWin must report.
+                # each of which the KDE client inside KWin must report. It goes before the wait
+                # for frames: a WebRTC page that shows none reconnects 12 s after connecting,
+                # and input sent meanwhile is lost.
                 page.mouse.move(640, 360)
                 page.mouse.click(640, 360)
                 time.sleep(0.3)
@@ -253,7 +256,8 @@ def run(mode: str, scale: int = 1) -> "H.Results":
                           [l for l in obs.lines if l.get("kind") == "ptr_enter"][:2])
                 path = "libei" if "input via libei" in H.server_log() else "portal notify"
                 for x, y in ((900, 500), (200, 120)):
-                    got, want = landing(page, obs, x, y, (mapped.get("w") or SIZE[0], mapped.get("h") or SIZE[1]))
+                    got, want = landing(page, obs, x, y, (mapped.get("w") or SIZE[0], mapped.get("h") or SIZE[1]),
+                                        rig.mode)
                     res.check(f"the pointer lands where the page points ({x}, {y}), over {path}",
                               got is not None and want is not None
                               and abs(got[0] - want[0]) <= 2 and abs(got[1] - want[1]) <= 2,
@@ -290,6 +294,10 @@ def run(mode: str, scale: int = 1) -> "H.Results":
                 else:
                     res.check("and stops once the stroke pauses",
                               any(l["kind"] == "ptr_axis_stop" for l in seen[last_axis + 1:]), seen[-3:])
+                if C.wait_log("first portal frame", 8):
+                    res.check("video reaches the browser", bool(wait_video(page, mode, 30)), "")
+                else:
+                    res.skip("video reaches the browser", "the compositor emitted no screencast frame")
                 res.check("the portal cursor sprite is delivered when the client draws the cursor",
                           C.wait_log("portal cursor sprites arrive", 10), H.server_log(tail=4))
                 real_errors, bad404 = C.benign_console(console_errors, not_found)
