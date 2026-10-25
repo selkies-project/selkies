@@ -120,6 +120,12 @@ const TRACKPAD_TAP_HOLD_MS = 180;
 const TRACKPAD_HANDOFF_MS = 200;
 
 /**
+ * How long a finger rests without moving before it is a long press, in
+ * milliseconds: a right click in either touch mode.
+ */
+const LONG_PRESS_MS = 750;
+
+/**
  * Trackpad pointer acceleration, on the finger's speed in CSS pixels per
  * millisecond, which does not depend on how often the digitizer reports:
  * travel at up to TRACKPAD_ACCEL_SLOW goes out as it is, for aiming, and the
@@ -3169,8 +3175,10 @@ export class Input {
     /**
      * Trackpad emulation: one finger moves the pointer relatively, a tap
      * clicks, a tap then a touch that moves drags, two fingers scroll or
-     * pinch (`_twoFingerMove`), and a two-finger tap right-clicks. Every
-     * payload is relative motion.
+     * pinch (`_twoFingerMove`), and a two-finger tap right-clicks, as does a
+     * finger that rests `LONG_PRESS_MS` without moving and lifts: the click
+     * waits for the lift, so a finger that rests and then moves only moves
+     * the pointer. Every payload is relative motion.
      *
      * A tap presses the button as the finger lifts and releases it
      * `TRACKPAD_TAP_HOLD_MS` later, so only the release waits on the window in
@@ -3196,6 +3204,7 @@ export class Input {
             for (const touch of changedTouches) {
                 this._trackpadTouches.set(touch.identifier, {
                     id: touch.identifier,
+                    startT: event.timeStamp,
                     startX: touch.clientX, startY: touch.clientY,
                     lastX: touch.clientX, lastY: touch.clientY,
                     lastT: event.timeStamp, speed: null,
@@ -3263,8 +3272,11 @@ export class Input {
                 !Array.from(this._trackpadTouches.values()).some(t => t.moved);
             const mode = this._trackpadGestureMode;
 
-            if ((touchCountBeforeEnd === 2 || touchCountBeforeEnd === 3) && wasTap && mode !== 'completed') {
-                const bit = touchCountBeforeEnd === 2 ? (1 << 2) : (1 << 1);
+            const longPress = touchCountBeforeEnd === 1 && mode === 'moving' && wasTap &&
+                event.timeStamp - this._trackpadTouches.values().next().value.startT >= LONG_PRESS_MS;
+            if (((touchCountBeforeEnd === 2 || touchCountBeforeEnd === 3) && wasTap && mode !== 'completed') ||
+                longPress) {
+                const bit = touchCountBeforeEnd === 3 ? (1 << 1) : (1 << 2);
                 this.buttonMask |= bit; this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false);
                 setTimeout(() => { this.buttonMask &= ~bit; this._sendPointer([ "m2", 0, 0, this.buttonMask, 0 ], false); }, 50);
                 this._trackpadGestureMode = 'completed';
@@ -4224,7 +4236,6 @@ export class Input {
         const type = event.type;
         const now = Date.now();
         let preventDefault = false;
-        const LONG_PRESS_DURATION = 750;
         let activeTouchMoved = false;
         const LONG_PRESS_MAX_MOVEMENT_SQ = 15 * 15;
         const TAP_THRESHOLD_DISTANCE_SQ_LOGICAL = this._TAP_THRESHOLD_DISTANCE_SQ;
@@ -4283,7 +4294,7 @@ export class Input {
                             }
                         }
                         this._longPressTimer = null;
-                    }, LONG_PRESS_DURATION);
+                    }, LONG_PRESS_MS);
                 }
             } else {
                 if (this._longPressTimer) { clearTimeout(this._longPressTimer); this._longPressTimer = null; }
@@ -4425,7 +4436,7 @@ export class Input {
                                     }
                                 }
                                 this._longPressTimer = null;
-                            }, LONG_PRESS_DURATION);
+                            }, LONG_PRESS_MS);
                         }
                     }
                 } else if (remainingTouchCount !== 1) {

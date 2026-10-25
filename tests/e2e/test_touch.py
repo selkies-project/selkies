@@ -5,8 +5,9 @@ and what the session receives is read back from the X server or the Wayland seat
 Trackpad mode has to click as a tap lifts rather than when the double-tap window
 closes, keep a quick double tap two clicks, scroll by the distance two fingers
 travel whatever rate the digitizer reports at, hand a two-finger gesture down to
-the finger left on the glass, middle-click on three fingers, and send a pinch as
-Ctrl+wheel; direct touch scrolls and pinches the same way. Chromium is driven
+the finger left on the glass, right-click on a two-finger tap and on a finger held
+still and lifted, middle-click on three fingers, and send a pinch as Ctrl+wheel;
+direct touch scrolls and pinches the same way. Chromium is driven
 through CDP multi-touch, which enters the engine's own touch pipeline. Firefox
 and WebKit take synthetic TouchEvents dispatched on the stream overlay, which
 exercise the client's handlers in those engines but not their touch pipelines.
@@ -309,6 +310,27 @@ def x11_block(res: "H.Results", engine: str, mode: str) -> None:
             time.sleep(0.5)
             middle = watcher.since(t0, "ButtonPress", 2)
             res.check(f"{tag}: a three-finger tap is a middle click", len(middle) == 1, f"{len(middle)} presses")
+
+            t0 = time.monotonic()
+            f.down((1, 500, 400))
+            f.down((2, 560, 400))
+            time.sleep(0.06)
+            f.up(1, 2)
+            time.sleep(0.5)
+            right, left = watcher.since(t0, "ButtonPress", 3), watcher.since(t0, "ButtonPress", 1)
+            res.check(f"{tag}: a two-finger tap is a right click", len(right) == 1 and not left,
+                      f"{len(right)} right, {len(left)} left presses")
+
+            t0 = time.monotonic()
+            f.down((1, 500, 400))
+            time.sleep(1.0)
+            held = watcher.since(t0, "ButtonPress")
+            f.up(1)
+            time.sleep(0.5)
+            right, left = watcher.since(t0, "ButtonPress", 3), watcher.since(t0, "ButtonPress", 1)
+            res.check(f"{tag}: a finger held still and lifted is a right click, as it lifts",
+                      not held and len(right) == 1 and not left,
+                      f"{len(held)} presses while held, then {len(right)} right, {len(left)} left")
 
             t0 = time.monotonic()
             pinch(f, 100, 200)
