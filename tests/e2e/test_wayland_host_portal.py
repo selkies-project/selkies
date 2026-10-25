@@ -10,10 +10,14 @@ backend — starts the server against it over either transport, and checks the r
 the stream negotiated, and that a browser's pointer moves, clicks, scrolls, and keys land on a
 client window inside KWin. Plasma 6.6's virtual backend streams its frames as GPU dmabufs; a KWin
 whose virtual backend emits no output damage streams none, and the frame check reports skipped
-there.
+there. The pointer lands where the page points: the browser sends the stream's pixels, which the
+injector takes into the compositor's logical space. The `scaled` block runs KWin's output at scale
+2, where the stream's pixels are twice the logical size and an injector that skipped that step, or
+took it twice, lands twice or half as far.
 
-Usage: python3 tests/e2e/test_wayland_host_portal.py [websockets|webrtc]
+Usage: python3 tests/e2e/test_wayland_host_portal.py [websockets|webrtc|scaled]
 """
+import json
 import os
 import shutil
 import subprocess
@@ -27,6 +31,20 @@ import core_lib as C
 from playwright.sync_api import sync_playwright
 
 SIZE = (1280, 720)
+# The box of the stream element the page draws, once it has drawn a frame.
+SINK_JS = """() => {
+  const canvas = document.getElementById('videoCanvas');
+  const video = document.getElementById('stream');
+  const px = (canvas && canvas.width > 0) ? [canvas.width, canvas.height]
+             : (video && video.videoWidth > 0) ? [video.videoWidth, video.videoHeight] : null;
+  if (!px) return null;
+  for (const id of ['videoCanvas', 'videoWorkerCanvas', 'videoStream', 'stream']) {
+    const el = document.getElementById(id);
+    const r = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    if (r && r.width > 0) return {x: r.left, y: r.top, cssW: r.width, cssH: r.height};
+  }
+  return null;
+}"""
 
 
 def service_exec(name: str) -> str:
@@ -55,9 +73,14 @@ class KdeRig:
     listing `zkde_screencast_unstable_v1`, which the backend's desktop file does), and the backend
     then refuses every session request. KDE 6's backend also asks before a remote-desktop session
     starts unless the permission store's `kde-authorized` table grants the app `remote-desktop`,
-    so the rig grants it to a host app, whose id is empty, as a deployment does ahead of time."""
+    so the rig grants it to a host app, whose id is empty, as a deployment does ahead of time.
 
-    def __init__(self) -> None:
+    KWin takes its output's scale from the `kwinoutputconfig.json` it keeps: the rig writes one
+    into a configuration directory of its own, the virtual output's mode `scale` times SIZE at
+    that scale, so the logical output stays SIZE. (`--scale` sizes a windowed backend's window
+    instead, at scale 1.)"""
+
+    def __init__(self, scale: int = 1) -> None:
         # A short path: the compositor's, PipeWire's, and the bus's sockets all live under it.
         self.root = tempfile.mkdtemp(prefix="pf-portal-")
         self.runtime = os.path.join(self.root, "rt")
@@ -72,7 +95,17 @@ class KdeRig:
             "PATH": os.environ.get("PATH", ""), "HOME": os.path.expanduser("~"),
             "XDG_RUNTIME_DIR": self.runtime, "WAYLAND_DISPLAY": self.socket_name,
             "XDG_CURRENT_DESKTOP": "KDE", "XDG_SESSION_TYPE": "wayland", "QT_QPA_PLATFORM": "wayland",
+            "XDG_CONFIG_HOME": os.path.join(self.root, "config"),
         }
+        self.mode = (SIZE[0] * scale, SIZE[1] * scale)
+        os.makedirs(self.env["XDG_CONFIG_HOME"])
+        with open(os.path.join(self.env["XDG_CONFIG_HOME"], "kwinoutputconfig.json"), "w") as f:
+            json.dump([
+                {"name": "outputs", "data": [{"connectorName": "Virtual-0", "scale": scale, "mode": {
+                    "width": self.mode[0], "height": self.mode[1], "refreshRate": 60000}}]},
+                {"name": "setups", "data": [{"lidClosed": False, "outputs": [
+                    {"enabled": True, "outputIndex": 0, "position": {"x": 0, "y": 0}, "priority": 0}]}]},
+            ], f)
 
     def _spawn(self, cmd: list, name: str, **extra: str) -> subprocess.Popen:
         log = open(os.path.join(self.root, f"{name}.log"), "w")
@@ -98,7 +131,7 @@ class KdeRig:
         self._spawn(["pipewire"], "pipewire")
         time.sleep(0.5)
         self._spawn(["wireplumber"], "wireplumber")
-        self._spawn(["kwin_wayland", "--virtual", "--width", str(SIZE[0]), "--height", str(SIZE[1]),
+        self._spawn(["kwin_wayland", "--virtual", "--width", str(self.mode[0]), "--height", str(self.mode[1]),
                      "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities",
                      "--socket", self.socket_name], "kwin", KWIN_WAYLAND_NO_PERMISSION_CHECKS="1")
         deadline = time.time() + 20
@@ -149,9 +182,24 @@ def wait_video(page, mode: str, timeout: float):
     return C.wait_ws_video(page, timeout=timeout) if mode == "websockets" else C.wait_wr_video(page, timeout=timeout)
 
 
-def run(mode: str) -> "H.Results":
-    res = H.Results(f"wl-host-portal-{mode}")
-    rig = KdeRig()
+def landing(page, obs, x: float, y: float, logical: tuple) -> tuple:
+    """Move the page's pointer to (x, y); where the KDE client saw it last and where it should
+    have: the stream pixel the page point shows, in the output's `logical` size."""
+    sink = page.evaluate(SINK_JS)
+    mark = len(obs.lines)
+    page.mouse.move(x, y)
+    time.sleep(0.6)
+    seen = [l for l in obs.lines[mark:] if l.get("kind") in ("ptr_motion", "ptr_enter")]
+    got = (round(seen[-1]["x"]), round(seen[-1]["y"])) if seen else None
+    if not sink:
+        return got, None
+    want = ((x - sink["x"]) / sink["cssW"] * logical[0], (y - sink["y"]) / sink["cssH"] * logical[1])
+    return got, (round(want[0]), round(want[1]))
+
+
+def run(mode: str, scale: int = 1) -> "H.Results":
+    res = H.Results(f"wl-host-portal-{mode}" + (f"-scale{scale}" if scale != 1 else ""))
+    rig = KdeRig(scale)
     why = rig.start()
     if why:
         rig.stop()
@@ -161,6 +209,9 @@ def run(mode: str) -> "H.Results":
         # event lands on it, and it reports the seat events it receives.
         obs = H.WlObs(rig.socket_name, XDG_RUNTIME_DIR=rig.runtime, WLOBS_FILL="ff2878dc")
         res.check("observer client maps inside KWin", obs.ready(15), H.tail(rig.log("kwin"), 3))
+        mapped = next((l for l in obs.lines if l.get("kind") == "mapped"), {})
+        res.check("KWin's output is SIZE in logical pixels at the rig's scale",
+                  (mapped.get("w"), mapped.get("h")) == SIZE, mapped)
         H.server_start(mode=mode, wayland=True, extra_env={
             "SELKIES_WAYLAND_HOST_DISPLAY": rig.socket_path,
             "DBUS_SESSION_BUS_ADDRESS": rig.bus,
@@ -177,7 +228,7 @@ def run(mode: str) -> "H.Results":
                 res.check("the portal session opens with the monitor stream and both devices",
                           C.wait_log("portal session open: 1 stream(s), devices keyboard pointer", 60), H.server_log(tail=8))
                 res.check("the stream negotiates the host's mode",
-                          C.wait_log(f"portal stream: {SIZE[0]}x{SIZE[1]}", 30), H.server_log(tail=8))
+                          C.wait_log(f"portal stream: {rig.mode[0]}x{rig.mode[1]}", 30), H.server_log(tail=8))
                 res.check("the stream reaches the streaming state", C.wait_log("portal stream streaming", 30), H.server_log(tail=8))
                 res.check("no host connect failure", "connect failed" not in H.server_log(), "")
 
@@ -200,6 +251,13 @@ def run(mode: str) -> "H.Results":
                 page.keyboard.press("Shift+B")
                 res.check("pointer motion reaches the KDE client", obs.wait_for("ptr_motion", timeout=8) is not None,
                           [l for l in obs.lines if l.get("kind") == "ptr_enter"][:2])
+                path = "libei" if "input via libei" in H.server_log() else "portal notify"
+                for x, y in ((900, 500), (200, 120)):
+                    got, want = landing(page, obs, x, y, (mapped.get("w") or SIZE[0], mapped.get("h") or SIZE[1]))
+                    res.check(f"the pointer lands where the page points ({x}, {y}), over {path}",
+                              got is not None and want is not None
+                              and abs(got[0] - want[0]) <= 2 and abs(got[1] - want[1]) <= 2,
+                              f"at {got}, the page points at {want}")
                 res.check("a click reaches the KDE client", obs.wait_for("ptr_button", timeout=8, state=1) is not None
                           and obs.wait_for("ptr_button", timeout=8, state=0) is not None, "")
                 res.check("a wheel notch reaches the KDE client", obs.wait_for("ptr_axis", timeout=8) is not None, "")
@@ -248,10 +306,11 @@ def run(mode: str) -> "H.Results":
 
 
 def main() -> bool:
-    modes = [a for a in sys.argv[1:] if a in ("websockets", "webrtc")] or ["websockets"]
+    modes = [a for a in sys.argv[1:] if a in ("websockets", "webrtc", "scaled")] or ["websockets"]
     ok = True
     for mode in modes:
-        ok = not run(mode).failed() and ok
+        result = run("websockets", scale=2) if mode == "scaled" else run(mode)
+        ok = not result.failed() and ok
     return ok
 
 
