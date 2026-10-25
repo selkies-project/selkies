@@ -176,7 +176,10 @@ jobs:
               sudo apt-get install --no-install-recommends -y "linux-modules-extra-$(uname -r)"
               sudo modprobe vgem
             }
+            # udev sets the new nodes' modes once it gets to them
+            sudo udevadm settle
             sudo chmod a+rw /dev/dri/*
+            ls -l /dev/dri
           fi
       # The compositor the Wayland suites drive is the one the images ship:
       # the pinned wlroots and the patched labwc, built by the same script as
