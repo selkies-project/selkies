@@ -58,6 +58,10 @@ PAGE = '<textarea id="t" style="width:600px;height:300px" autofocus></textarea>'
 # from many, so characters repeat and new ones keep arriving, as running text does.
 SESSION_COMMITS = 300
 _COMMON = [chr(0x4E00 + i) for i in range(0, 20992, 7)][:2400]
+# Kept with the run's record (any .log the suite writes in the work directory is):
+# labwc's own, and each Chromium launch's, whose keyboard and keymap errors say why
+# keys went missing.
+LABWC_LOG = os.path.join(H.WORKDIR, "wayland-typed-text-labwc.log")
 
 
 def boot_labwc(runtime: str) -> tuple:
@@ -71,7 +75,7 @@ def boot_labwc(runtime: str) -> tuple:
     mesa = "/usr/share/glvnd/egl_vendor.d/50_mesa.json"
     if os.path.exists(mesa):
         env["__EGL_VENDOR_LIBRARY_FILENAMES"] = mesa
-    log = open(os.path.join(runtime, "labwc.log"), "w")
+    log = open(LABWC_LOG, "w")
     proc = H.spawn(["labwc"], env=env, stdout=log, stderr=subprocess.STDOUT)
     return proc, wayland_socket(runtime)
 
@@ -88,13 +92,13 @@ def wayland_socket(runtime: str, seconds: float = 30.0) -> str:
     return ""
 
 
-def launch(pw, engine: str, env: dict):
-    """A headed browser of `engine` on the compositor `env` names."""
+def launch(pw, engine: str, env: dict, log: str):
+    """A headed browser of `engine` on the compositor `env` names, Chromium logging to `log`."""
     if engine == "firefox":
         return pw.firefox.launch(**C.installed_firefox(
             {"headless": False, "env": dict(env, MOZ_ENABLE_WAYLAND="1")}))
-    kwargs = {"headless": False, "env": env,
-              "args": C.BROWSER_ARGS + ["--ozone-platform=wayland", "--disable-gpu"]}
+    kwargs = {"headless": False, "env": dict(env, CHROME_LOG_FILE=log),
+              "args": C.BROWSER_ARGS + ["--ozone-platform=wayland", "--disable-gpu", "--enable-logging", "--v=0"]}
     if C.CHROME_PATH:
         kwargs["executable_path"] = C.CHROME_PATH
     return pw.chromium.launch(**kwargs)
@@ -162,8 +166,9 @@ def run(res: "H.Results", pw, where: str, socket: str, runtime: str, type_text,
     env.pop("DISPLAY", None)
     for engine in engines:
         missed = []
-        for _ in range(3):
-            browser = launch(pw, engine, env)
+        for attempt in range(1, 4):
+            browser = launch(pw, engine, env,
+                             os.path.join(H.WORKDIR, f"wayland-typed-text-{where}-{engine}-{attempt}.log"))
             page = browser.new_page()
             reset(page)
             time.sleep(1.0)
@@ -217,8 +222,7 @@ def main() -> int:
         os.environ["XDG_RUNTIME_DIR"] = runtime
         proc, socket = boot_labwc(runtime)
         try:
-            res.check("the nested compositor comes up", bool(socket),
-                      H.tail(os.path.join(runtime, "labwc.log")))
+            res.check("the nested compositor comes up", bool(socket), H.tail(LABWC_LOG))
             if socket:
                 # A seat gains its keyboard with the virtual one; a window mapped
                 # before that would never take keyboard focus.
