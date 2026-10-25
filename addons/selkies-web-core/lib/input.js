@@ -5635,12 +5635,19 @@ export class Input {
      * Keyboard Lock API where it exists, else by the fullscreen request's own
      * `keyboardLock` where the engine took it (`_gamingFullscreenOptions`),
      * which holds the same keys. Only where neither holds the keys does the
-     * user hear that one Escape leaves the mode.
+     * user hear that one Escape leaves the mode. A lock the engine refuses
+     * leaves the keys to the browser and the system, and only the console
+     * says so.
      */
     requestKeyboardLock() {
         if (!this.gamingMode || !document.fullscreenElement) return;
         if (navigator.keyboard && 'lock' in navigator.keyboard) {
-            navigator.keyboard.lock().catch(() => {});
+            navigator.keyboard.lock().catch((err) => {
+                // A later request superseding this one refuses nothing.
+                if (err && err.name === 'AbortError') return;
+                console.warn("Input: the keyboard lock was refused, so Alt+Tab and the browser's "
+                    + 'shortcuts stay outside the session:', err);
+            });
             return;
         }
         if (this._fullscreenKeyboardLock) return;

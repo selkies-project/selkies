@@ -586,6 +586,26 @@ function stage(ids, locked = null) {
     check('an engine that locks the keyboard hears no notice',
           keyboard.calls.join(',') === 'lock' && notices.length === 0,
           `${keyboard.calls.join(',')} / ${notices.join(',')}`);
+
+    // A refused lock leaves the system its keys with nothing on screen to say
+    // so; the console does, unless a later request superseded it.
+    const warned = [];
+    const warn = console.warn;
+    console.warn = (...args) => warned.push(args.join(' '));
+    try {
+        for (const name of ['InvalidStateError', 'AbortError']) {
+            const refusing = { lock: () => Promise.reject(Object.assign(new Error(name), { name })),
+                               unlock: () => {} };
+            Object.defineProperty(globalThis, 'navigator', { value: { keyboard: refusing }, configurable: true });
+            input.requestKeyboardLock();
+            await sleep(10);
+        }
+    } finally {
+        console.warn = warn;
+    }
+    check('a refused keyboard lock is logged, a superseded one is not',
+          warned.length === 1 && warned[0].includes('InvalidStateError') && notices.length === 0,
+          `${warned.join(' | ')} / ${notices.join(',')}`);
 }
 
 // --- a fullscreen the page holds already -----------------------------------
