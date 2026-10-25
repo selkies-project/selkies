@@ -149,6 +149,9 @@ jobs:
       - name: Install the display server, audio, and GPU userspace
         run: |
           sudo apt-get update
+          # Ubuntu 26.04 names libxml2's package by its soname
+          libxml2=libxml2
+          if apt-cache show libxml2-16 > /dev/null 2>&1; then libxml2="libxml2-16"; fi
           sudo apt-get install --no-install-recommends -y \
             xvfb x11-xserver-utils x11-utils xauth xcvt wmctrl \
             wl-clipboard libsdl2-2.0-0 openbox kwin-x11 kwin-wayland kwin-common \
@@ -158,7 +161,7 @@ jobs:
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
             libgl1 libegl1 libegl-mesa0 libgl1-mesa-dri libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
             coturn cups-daemon cups-client cups-filters \
-            xwayland libinput10 libseat1 librsvg2-2 liblcms2-2 libxml2 libvulkan1 \
+            xwayland libinput10 libseat1 librsvg2-2 liblcms2-2 "$libxml2" libvulkan1 \
             libpixman-1-0 libwayland-server0 libwayland-cursor0 libwayland-egl1 \
             libgles2 libxcb-composite0 libxcb-ewmh2 libxcb-icccm4 \
             libxcb-render-util0 libxcb-res0 libxcb-xinput0
