@@ -19,18 +19,21 @@ import sys
 import time
 from types import SimpleNamespace
 
+for key in [k for k in os.environ if k.startswith("SELKIES_")]:
+    del os.environ[key]
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))), "src"))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import helpers as H
+import helpers as H  # noqa: E402
 
-from selkies.settings import (
+from selkies.settings import (  # noqa: E402
     START_STATE_PIPELINES, SETTING_DEFINITIONS, AppSettings, build_client_settings_payload,
     pipeline_starts_on, settings,
 )
-from selkies.webrtc_media_pipeline import MediaPipelinePixel
-from selkies.webrtc_engine import ClientType, RTCApp
-from selkies import webrtc_mode
+from selkies.webrtc_media_pipeline import MediaPipelinePixel  # noqa: E402
+from selkies.webrtc_engine import ClientType, RTCApp  # noqa: E402
+from selkies import webrtc_mode  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CORES = {
