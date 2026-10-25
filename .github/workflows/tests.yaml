@@ -17,6 +17,10 @@ on:
         description: 'Suite name expression (pytest -k), e.g. "portal or codecs"; empty runs every suite of the tiers'
         type: string
         default: ''
+      runner:
+        description: 'Runner image of the suites, e.g. "ubuntu-26.04" ahead of ubuntu-latest'
+        type: string
+        default: ubuntu-latest
   workflow_call:
     inputs:
       tiers:
@@ -36,9 +40,9 @@ on:
 # every run that calls this one. The literal name keeps standalone runs
 # deduplicated, the event keeps the nightly browser matrix from being
 # canceled by a push to the same ref, and the selection keeps a dispatch of
-# some tiers or suites from canceling one of others.
+# some tiers, suites, or runner from canceling one of others.
 concurrency:
-  group: tests-${{ github.ref }}-${{ github.event_name }}-${{ inputs.tiers }}-${{ inputs.suites }}
+  group: tests-${{ github.ref }}-${{ github.event_name }}-${{ inputs.tiers }}-${{ inputs.suites }}-${{ inputs.runner }}
   cancel-in-progress: true
 
 permissions:
@@ -112,7 +116,7 @@ jobs:
     name: Suites (${{ inputs.tiers || 'integration or e2e' }}, ${{ matrix.shard }}/3)
     needs: [wheels]
     if: ${{ always() && (needs.wheels.result == 'success' || needs.wheels.result == 'skipped') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -147,17 +151,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             xvfb x11-xserver-utils x11-utils xauth xcvt wmctrl \
-            wl-clipboard libsdl2-2.0-0 openbox kwin-x11 kwin-wayland \
+            wl-clipboard libsdl2-2.0-0 openbox kwin-x11 kwin-wayland kwin-common \
             pulseaudio pulseaudio-utils \
             dbus pipewire wireplumber xdg-desktop-portal xdg-desktop-portal-kde qtwayland5 \
             libxcb-shm0 libxcb-xfixes0 libxcb-randr0 libxcb-dri3-0 \
             libxkbcommon0 libxdamage1 libxfixes3 libxtst6 \
-            libgl1 libegl1 libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
+            libgl1 libegl1 libegl-mesa0 libgl1-mesa-dri libgbm1 libdrm2 libva2 libva-drm2 mesa-va-drivers \
             coturn cups-daemon cups-client cups-filters \
             xwayland libinput10 libseat1 librsvg2-2 liblcms2-2 libxml2 libvulkan1 \
             libpixman-1-0 libwayland-server0 libwayland-cursor0 libwayland-egl1 \
             libgles2 libxcb-composite0 libxcb-ewmh2 libxcb-icccm4 \
             libxcb-render-util0 libxcb-res0 libxcb-xinput0
+      # KWin 6 casts the screen only while it composites with OpenGL, which its
+      # virtual backend does on a render node alone: vgem gives the runner a
+      # software one, which Mesa's llvmpipe draws on. KWin 5 composites on
+      # Mesa's surfaceless platform and needs none.
+      - name: Give KWin 6 a render node
+        run: |
+          if dpkg --compare-versions "$(dpkg-query -W -f='${Version}' kwin-wayland)" ge 4:6; then
+            sudo modprobe vgem || {
+              sudo apt-get install --no-install-recommends -y "linux-modules-extra-$(uname -r)"
+              sudo modprobe vgem
+            }
+            sudo chmod a+rw /dev/dri/*
+          fi
       # The compositor the Wayland suites drive is the one the images ship:
       # the pinned wlroots and the patched labwc, built by the same script as
       # the base image's labwc stage (the distribution's labwc has neither the
@@ -168,14 +185,17 @@ jobs:
         id: labwc
         run: |
           eval "$(grep -E '^ARG (WLROOTS|LABWC)_VERSION=' addons/base/Dockerfile | sed 's/^ARG //')"
-          echo "wlroots=${WLROOTS_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "labwc=${LABWC_VERSION}" >> "$GITHUB_OUTPUT"
+          {
+            echo "wlroots=${WLROOTS_VERSION}"
+            echo "labwc=${LABWC_VERSION}"
+            echo "image=$(. /etc/os-release && echo "${ID}${VERSION_ID}")"
+          } >> "$GITHUB_OUTPUT"
       - name: Cache the patched labwc
         id: labwc-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.local/labwc
-          key: labwc-${{ steps.labwc.outputs.wlroots }}-${{ steps.labwc.outputs.labwc }}-${{ hashFiles('addons/base/patches/labwc-*.patch', 'addons/base/build-labwc.sh') }}
+          key: labwc-${{ steps.labwc.outputs.image }}-${{ steps.labwc.outputs.wlroots }}-${{ steps.labwc.outputs.labwc }}-${{ hashFiles('addons/base/patches/labwc-*.patch', 'addons/base/build-labwc.sh') }}
       - name: Build the patched labwc
         if: steps.labwc-cache.outputs.cache-hit != 'true'
         run: |

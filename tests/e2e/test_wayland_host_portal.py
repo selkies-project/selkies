@@ -89,6 +89,7 @@ class KdeRig:
         self.socket_path = os.path.join(self.runtime, self.socket_name)
         self.procs: list = []
         self.bus = ""
+        self.bus_pid = 0
         self.portal = service_exec("org.freedesktop.portal.Desktop")
         self.portal_kde = service_exec("org.freedesktop.impl.portal.desktop.kde")
         self.env = {
@@ -122,25 +123,53 @@ class KdeRig:
         for name, path in (("xdg-desktop-portal", self.portal), ("xdg-desktop-portal-kde", self.portal_kde)):
             if not path or not os.path.exists(path):
                 return f"{name} not installed"
-        bus_proc = subprocess.Popen(["dbus-daemon", "--session", "--print-address=1", "--fork",
+        bus_proc = subprocess.Popen(["dbus-daemon", "--session", "--print-address=1", "--print-pid=1", "--fork",
                                      "--address", f"unix:path={self.root}/bus"],
                                     stdout=subprocess.PIPE, text=True, env=self.env)
-        self.bus = (bus_proc.stdout.read() or "").strip()
+        printed = (bus_proc.stdout.read() or "").split()
+        self.bus = next((w for w in printed if "=" in w), "")
+        self.bus_pid = next((int(w) for w in printed if w.isdigit()), 0)
         if not self.bus:
             return "dbus-daemon printed no address"
         self.env["DBUS_SESSION_BUS_ADDRESS"] = self.bus
         self._spawn(["pipewire"], "pipewire")
         time.sleep(0.5)
         self._spawn(["wireplumber"], "wireplumber")
-        self._spawn(["kwin_wayland", "--virtual", "--width", str(SIZE[0]), "--height", str(SIZE[1]),
+        # KWin runs from a copy: distributions give kwin_wayland CAP_SYS_NICE as a file capability,
+        # which a container whose bounding set lacks it cannot exec, and the rig needs none
+        # (shutil.copy leaves the capability's attribute behind). The copy keeps the name, which
+        # KWin's platform plugin requires of the executable.
+        kwin = os.path.join(self.root, "kwin_wayland")
+        shutil.copy(shutil.which("kwin_wayland"), kwin)
+        self._spawn([kwin, "--virtual", "--width", str(SIZE[0]), "--height", str(SIZE[1]),
                      "--scale", str(self.scale), "--no-lockscreen", "--no-global-shortcuts", "--no-kactivities",
-                     "--socket", self.socket_name], "kwin", KWIN_WAYLAND_NO_PERMISSION_CHECKS="1")
+                     "--socket", self.socket_name], "kwin", KWIN_WAYLAND_NO_PERMISSION_CHECKS="1",
+                    # KWin 6's Qt would register with the host portal as it starts, which has the
+                    # bus start the portal and a KDE backend before KWin is up: that backend holds
+                    # the name the rig's own needs and refuses every session.
+                    QT_NO_XDG_DESKTOP_PORTAL="1")
         deadline = time.time() + 20
         while not os.path.exists(self.socket_path):
             if time.time() > deadline:
                 return f"kwin_wayland never opened its socket: {H.tail(self.log('kwin'), 3)}"
             time.sleep(0.2)
         time.sleep(1.0)
+        # KWin casts the screen through its screencast plugin, and only while it composites with
+        # OpenGL: KWin 5 does on Mesa's surfaceless platform, KWin 6 on a render node alone, which
+        # a host without a GPU gets from the vgem module.
+        deadline = time.time() + 10
+        while True:
+            plugins = self.kwin_property("/Plugins", "org.kde.KWin.Plugins", "LoadedPlugins")
+            compositing = self.kwin_property("/Compositor", "org.kde.kwin.Compositing", "compositingType")
+            if (plugins and compositing and "'none'" not in compositing) or time.time() > deadline:
+                break
+            time.sleep(0.5)
+        if "screencast'" not in plugins:  # 'screencast', KWin 5's 'kwin5_plugin_screencast'
+            return "KWin loaded no screencast plugin (Debian and Ubuntu ship KWin 6's in kwin-common)"
+        if "gl" not in compositing:
+            kind = compositing.strip("(<>,)'") or "nothing"
+            return (f"KWin composites with {kind} and casts the screen only with OpenGL, which needs a "
+                    "render node (the vgem module gives one)")
         self._spawn([self.portal_kde], "portal-kde", KDE_FULL_SESSION="true")
         self._spawn([self.portal, "-r"], "portal")
         time.sleep(2.0)
@@ -153,6 +182,13 @@ class KdeRig:
         if grant.returncode != 0:
             return f"the permission store took no remote-desktop grant: {grant.stderr.strip()}"
         return ""
+
+    def kwin_property(self, path: str, interface: str, name: str) -> str:
+        """A property KWin publishes on the rig's bus, as gdbus prints it; empty when none answers."""
+        q = subprocess.run(["gdbus", "call", "--session", "--dest", "org.kde.KWin", "--object-path", path,
+                            "--method", "org.freedesktop.DBus.Properties.Get", interface, name],
+                           env=self.env, capture_output=True, text=True, timeout=10)
+        return q.stdout.strip() if q.returncode == 0 else ""
 
     def log(self, name: str) -> str:
         return os.path.join(self.root, f"{name}.log")
@@ -169,7 +205,11 @@ class KdeRig:
                 os.killpg(proc.pid, 9)
             except OSError:
                 pass
-        subprocess.run(["pkill", "-f", f"dbus-daemon.*{self.root}/bus"], capture_output=True)
+        if self.bus_pid:
+            try:
+                os.kill(self.bus_pid, 15)
+            except OSError:
+                pass
         # The stack's logs go where the suite runner keeps a suite's record.
         for name in ("kwin", "pipewire", "wireplumber", "portal-kde", "portal"):
             try:
