@@ -277,6 +277,7 @@ class GnomeRig(PortalRig):
         super().__init__("wayland-gnome", scale, XDG_CURRENT_DESKTOP="GNOME", GSETTINGS_BACKEND="keyfile")
         self.eis = eis
         self.mutter = os.environ.get("E2E_MUTTER") or shutil.which("mutter") or ""
+        self.version = (0, 0)
         # The portal takes its backends, and with this set its portals.conf too, from this
         # directory alone.
         self.env["XDG_DESKTOP_PORTAL_DIR"] = os.path.join(self.root, "portals")
@@ -297,6 +298,9 @@ class GnomeRig(PortalRig):
         """Bring the stack up; returns why it could not, or an empty string."""
         if not self.mutter:
             return "mutter not installed"
+        printed = subprocess.run([self.mutter, "--version"], capture_output=True, text=True).stdout
+        found = re.search(r"(\d+)\.(\d+)", printed)
+        self.version = (int(found.group(1)), int(found.group(2))) if found else (0, 0)
         gi = subprocess.run(["/usr/bin/python3", "-I", "-c", "from gi.repository import Gio"],
                             capture_output=True, text=True)
         if gi.returncode != 0:
@@ -471,6 +475,10 @@ def run(mode: str, scale: int = 1, desktop: str = "kde", eis: bool = True) -> "H
                         # Without EIS the stroke goes through NotifyPointerAxis, whose finish KDE's
                         # backend drops (5.27 through master): the client is never told it stopped.
                         res.skip(stroke_checks[1], "KDE's portal takes no finish without EIS")
+                    elif gnome and rig.version < (48, 0):
+                        # Mutter 46 and 47 drop a virtual pointer's scroll finish on the way to the
+                        # seat; 48 forwards it (mutter f76b5932).
+                        res.skip(stroke_checks[1], f"Mutter {rig.version[0]} drops a scroll's finish")
                     else:
                         tail = [(l["kind"][4:], l.get("axis", l.get("source")), l.get("value"))
                                 for l in seen[max(last_axis, 0):]]
