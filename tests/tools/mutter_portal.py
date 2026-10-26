@@ -10,8 +10,9 @@ unchanged, which lands them at 1/scale on a scaled monitor; converting them here
 backend would, leaves the suite checking the client.
 `--no-eis` refuses `ConnectToEIS`, as a backend without EIS does, so a client falls back to the
 Notify methods. `--scale N` first sets the primary monitor's scale through Mutter's DisplayConfig
-(Mutter 46 has no `gdctl`). Runs on the system Python with PyGObject; the portal frontend finds
-it through a `.portal` file naming BUS_NAME.
+(Mutter 46 has no `gdctl`). Each Notify call it forwards goes to stdout with the time, as Mutter
+stamps its own log. Runs on the system Python with PyGObject; the portal frontend finds it through
+a `.portal` file naming BUS_NAME.
 
 Usage: mutter_portal.py [--no-eis] [--scale N]
 """
@@ -265,6 +266,9 @@ class Backend:
                 "NotifyTouchUp": ("NotifyTouchUp", "(u)", lambda a: (a[2],)),
             }[method]
             self.call(RD_NAME, s.rd_path, RD_SESSION, forward[0], (forward[1], forward[2](args)))
+            # Stamped as Mutter stamps its log, which says what became of the event.
+            print(f"mutter_portal: {GLib.DateTime.new_now_local().format('%T.%f')[:12]} {method} {args[2:]}",
+                  flush=True)
             invocation.return_value(None)
         except (GLib.Error, KeyError) as e:
             print(f"mutter_portal: {method} failed: {e}", file=sys.stderr, flush=True)
