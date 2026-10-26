@@ -313,7 +313,8 @@ class GnomeRig(PortalRig):
         if self.scale != 1:
             backend += ["--scale", str(self.scale)]
         self._spawn(["/usr/bin/python3", "-I", *backend], "portal-gnome")
-        deadline = time.time() + 15
+        # Up to the backend's own wait for Mutter's bus names, and some.
+        deadline = time.time() + 40
         while "ready" not in open(self.log("portal-gnome")).read():
             if time.time() > deadline:
                 return f"the Mutter portal backend never came up: {H.tail(self.log('portal-gnome'), 3)}"

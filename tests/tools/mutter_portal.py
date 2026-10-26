@@ -16,6 +16,7 @@ it through a `.portal` file naming BUS_NAME.
 Usage: mutter_portal.py [--no-eis] [--scale N]
 """
 import sys
+import time
 
 from gi.repository import Gio, GLib
 
@@ -270,6 +271,19 @@ class Backend:
             invocation.return_dbus_error("org.freedesktop.portal.Error.Failed", str(e))
 
 
+def wait_for_names(conn: Gio.DBusConnection, names: tuple, timeout: float = 30.0) -> None:
+    """Wait until Mutter owns each of `names`: it opens its Wayland socket before it takes them
+    on the bus, by seconds where a session service it asks first times out."""
+    deadline = time.monotonic() + timeout
+    for name in names:
+        while not conn.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                 "NameHasOwner", GLib.Variant("(s)", (name,)), GLib.VariantType("(b)"),
+                                 Gio.DBusCallFlags.NONE, -1, None).unpack()[0]:
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"{name} never appeared on the bus")
+            time.sleep(0.1)
+
+
 def set_scale(conn: Gio.DBusConnection, scale: float) -> None:
     """Put the primary monitor alone at `scale` in its current mode, until Mutter exits."""
     state = conn.call_sync("org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig",
@@ -289,6 +303,7 @@ def set_scale(conn: Gio.DBusConnection, scale: float) -> None:
 def main() -> None:
     conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     argv = sys.argv[1:]
+    wait_for_names(conn, (RD_NAME, SC_NAME, "org.gnome.Mutter.DisplayConfig"))
     if "--scale" in argv:
         set_scale(conn, float(argv[argv.index("--scale") + 1]))
     backend = Backend(conn, eis="--no-eis" not in argv)
