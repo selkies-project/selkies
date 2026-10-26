@@ -1090,11 +1090,13 @@ class WebRTCPeerManagement:
                                     storm_key=key,
                                 )
                                 logger.info(
-                                    "Evicting peer {!r} of the same token for reconnect from {!r}".format(pid, raddr)
-                                    if by_token else
-                                    "Evicting peer {!r} holding slot {!r} for reconnect from {!r}".format(
-                                        pid, client_slot, raddr
-                                    )
+                                    ("Evicting peer {!r} of the same token for reconnect from {!r}".format(pid, raddr)
+                                     if by_token else
+                                     "Evicting peer {!r} holding slot {!r} for reconnect from {!r}".format(
+                                         pid, client_slot, raddr
+                                     ))
+                                    + " (tab {}, the new page's {})".format(
+                                        (getattr(peer, "tab_id", None) or "none")[:8], (client_tab_id or "none")[:8])
                                 )
 
                     if not self.enable_shared and client_strict_viewer:
@@ -1136,8 +1138,9 @@ class WebRTCPeerManagement:
                             controller_entry = rival_entry
                             peer_controller = rival_entry[1]
                         elif peer_controller is not None:
-                            logger.info("Controller from {!r} joins display {!r} beside {!r}".format(
-                                raddr, display_id, controller_entry[0]))
+                            logger.info("Controller from {!r} joins display {!r} beside {!r} (tab {}, beside tab {})".format(
+                                raddr, display_id, controller_entry[0], (client_tab_id or "none")[:8],
+                                (getattr(controller_entry[1], "tab_id", None) or "none")[:8]))
                             peer_controller = None
                         if peer_controller is not None:
                             if self._eviction_storm(("controller", display_id)):
@@ -1157,8 +1160,9 @@ class WebRTCPeerManagement:
                             )
                             peer_controller = None
                             logger.info(
-                                "Evicting controller {!r} for reconnect from {!r}".format(
-                                    ctrl_pid, raddr
+                                "Evicting controller {!r} for reconnect from {!r} (tab {}, the new page's {})".format(
+                                    ctrl_pid, raddr, (getattr(ctrl_peer, "tab_id", None) or "none")[:8],
+                                    (client_tab_id or "none")[:8]
                                 )
                             )
                     if client_type == "viewer":

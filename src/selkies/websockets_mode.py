@@ -5233,8 +5233,10 @@ class DataStreamingServer(BaseStreamingService):
                                 joiners = self.co_controllers.setdefault('primary', OrderedDict())
                                 if websocket not in joiners:
                                     joiners[websocket] = tab_id
+                                    owner_tab = (self.display_clients.get('primary') or {}).get('tab_id')
                                     data_logger.info(
-                                        f"Controller {remote_address} joins 'primary' beside its owner.")
+                                        f"Controller {remote_address} joins 'primary' beside its owner "
+                                        f"(tab {(tab_id or 'none')[:8]}, the owner's {(owner_tab or 'none')[:8]}).")
                                     await self.broadcast_stream_resolution()
                                     try:
                                         await websocket.send_str("PIPELINE_RESETTING primary")
@@ -5252,8 +5254,10 @@ class DataStreamingServer(BaseStreamingService):
                                     if old_ws and old_ws is not websocket and not old_ws.closed:
                                         kill_reason = f"a new {display_id} client connected connection killed"
                                         old_ws_raddr = client_permissions.get(old_ws, {}).get("remote_address", "unknown")
+                                        old_tab = existing_client_info.get('tab_id')
                                         data_logger.warning(
-                                            f"Killing old client for '{display_id}' at {old_ws_raddr}. Reason: {kill_reason}"
+                                            f"Killing old client for '{display_id}' at {old_ws_raddr}. Reason: {kill_reason} "
+                                            f"(tab {(old_tab or 'none')[:8]}, the new page's {(tab_id or 'none')[:8]})"
                                         )
                                         # Handed over before the close yields: the superseded
                                         # handler only tears down an entry its socket still owns,
