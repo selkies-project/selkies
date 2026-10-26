@@ -225,7 +225,7 @@ The `integration` tier drives the server over a raw WebSocket or the kernel game
 
 ## Agentic Development
 
-Much of this tree is written and reviewed with coding agents, and the repository is laid out so an agent validates its own work rather than describes it. [`AGENTS.md`](https://github.com/selkies-project/selkies/tree/main/AGENTS.md) (`CLAUDE.md` links to it) is the instruction file every agent reads first: the comment and documentation conventions, the engineering priorities, and the cross-cutting invariants no single module reveals. It is the one file an agent cannot derive from the code, so keep it current as you change what it describes.
+Much of this tree is written and reviewed with coding agents, and the repository is laid out so an agent validates its own work rather than describes it. [`AGENTS.md`](https://github.com/selkies-project/selkies/tree/main/AGENTS.md) (`CLAUDE.md` imports it) is the instruction file every agent reads first: the comment and documentation conventions, the engineering priorities, and the cross-cutting invariants no single module reveals. It is the one file an agent cannot derive from the code, so keep it current as you change what it describes.
 
 The three core repositories each carry one, and they are written to be read together:
 
