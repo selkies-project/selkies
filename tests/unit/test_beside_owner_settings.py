@@ -9,12 +9,15 @@ what would size the display waits for it to own it, without the stream settings.
 does not own its display repairs the shared stream at most once a second, and over WebSockets
 starts and stops audio for itself alone; over WebRTC the owner's link alone steers the display's
 rate while it reports. Once the owner is gone, the oldest page beside it that holds full
-permissions takes the display over. The servers run on the tables these read, with
-the apply and the sends recorded.
+permissions takes the display over. So does the page beside it that showed last once the
+owner's page has been hidden a moment, where both report their visibility, and the owner
+stays beside it. The servers run on the tables these read, with the apply and the sends
+recorded.
 """
 import asyncio
 import os
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "src"))
@@ -334,6 +337,145 @@ async def run_webrtc_stream_checks() -> None:
           and not service._peer_owns_display("a"))
 
 
+async def run_visibility_checks() -> None:
+    from collections import OrderedDict, deque
+    owner, joiner = Socket(), Socket()
+    server, _, _ = server_with(owner, joiner)
+    entry = server.display_clients["primary"]
+    entry.update(tab_id="tab-a", sent_timestamps=OrderedDict(), rtt_samples=deque([4.0]), smoothed_rtt=4.0,
+                 acknowledged_frame_id=7, rtt_floor_ms=3.0)
+    server.co_controllers = {"primary": OrderedDict([(joiner, "tab-b")])}
+    server.capture_instances = {}
+    server.video_paused_clients = set()
+    server._beside_audio = {joiner: True}
+    server._session_audio = False
+    server._page_hidden_at, server._page_shown_at = {}, {}
+    server._owner_settle_task = None
+    server.HIDDEN_OWNER_HANDOFF_S = 0.05
+    wm.client_permissions.clear()
+    wm.client_permissions[owner] = {"role": "controller", "token": "a"}
+    wm.client_permissions[joiner] = {"role": "controller", "token": "b"}
+    saved = sessions.active_mk_token
+    try:
+        server._page_hidden_at[owner] = time.monotonic() - 1.0
+        await server._settle_display_owner()
+        check("websockets: a hidden owner keeps the display beside a page that never said it shows",
+              entry["ws"] is owner and not joiner.sent, joiner.sent)
+        server._page_hidden_at[joiner] = None
+        server._page_shown_at[joiner] = time.monotonic()
+        sessions.active_mk_token = "a"
+        await server._settle_display_owner()
+        check("websockets: nor to one whose keyboard and mouse another token holds",
+              entry["ws"] is owner and not joiner.sent, joiner.sent)
+        sessions.active_mk_token = None
+        owner.closed = True
+        await server._settle_display_owner()
+        check("websockets: nor once its socket closed, a reload's to answer", entry["ws"] is owner and not joiner.sent)
+        owner.closed = False
+        server._page_hidden_at[owner] = time.monotonic()
+        await server._settle_display_owner()
+        check("websockets: an owner just hidden keeps it a moment", entry["ws"] is owner and not joiner.sent)
+        await asyncio.sleep(0.15)
+        check("websockets: then the page beside it that shows owns the display",
+              entry["ws"] is joiner and entry["tab_id"] == "tab-b" and joiner.sent == ["DISPLAY_OWNER primary"],
+              joiner.sent)
+        check("websockets: the owner stays beside it, paused while hidden",
+              dict(server.co_controllers["primary"]) == {owner: "tab-a"} and owner in server.video_paused_clients
+              and not owner.sent, owner.sent)
+        check("websockets: each keeps the audio it asked for",
+              server._session_audio is True and server._beside_audio == {owner: False}, server._beside_audio)
+        check("websockets: and the display's link state starts over for the new page",
+              entry["acknowledged_frame_id"] == -1 and entry["smoothed_rtt"] == 0.0 and not entry["rtt_samples"]
+              and "rtt_floor_ms" not in entry, entry)
+
+        server._page_hidden_at[owner] = None
+        server._page_shown_at[owner] = time.monotonic()
+        await server._settle_display_owner()
+        check("websockets: the old owner shown again stays beside a visible owner", entry["ws"] is joiner
+              and not owner.sent)
+        server._page_hidden_at[joiner] = time.monotonic() - 1.0
+        await server._settle_display_owner()
+        check("websockets: and owns the display again once that one hides",
+              entry["ws"] is owner and entry["tab_id"] == "tab-a" and owner.sent == ["DISPLAY_OWNER primary"]
+              and dict(server.co_controllers["primary"]) == {joiner: "tab-b"}, owner.sent)
+    finally:
+        sessions.active_mk_token = saved
+        wm.client_permissions.clear()
+
+
+async def run_webrtc_visibility_checks() -> None:
+    import json
+    from selkies import webrtc_mode as rm
+    from selkies.webrtc_engine import ClientType
+
+    owner = {"name": "owner", "client_type": ClientType.CONTROLLER, "display_id": "primary", "data_channel": Channel()}
+    joiner = {"name": "joiner", "client_type": ClientType.CONTROLLER, "display_id": "primary",
+              "data_channel": Channel()}
+    service = object.__new__(rm.WebRTCService)
+    service.rtc_app = RTCApp({"o": owner, "j": joiner})
+    service._peer_tabs = {"o": "tab-a", "j": "tab-b"}
+    service._display_owner_tabs = {"primary": "tab-a"}
+    service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
+    service.display_clients = {}
+    service.HIDDEN_OWNER_HANDOFF_S = 0.05
+    service._owner_settle_tasks = {}
+    service.tasks = []
+    handled = []
+
+    class Handler:
+        def on_message(self, msg, display_id, conn_id=None):
+            handled.append((msg, conn_id))
+    service.input_handler = Handler()
+
+    async def send(msg: str, conn_id: str) -> None:
+        result = service._on_peer_data_message(msg, "primary", conn_id)
+        if asyncio.iscoroutine(result):
+            await result
+
+    owner_settings = "SETTINGS," + json.dumps({"encoder": "h264enc", "scaling_dpi": 96})
+    await send("r,800x600", "o")
+    await send(owner_settings, "o")
+    held = owner.get("held_owner_messages", {})
+    check("webrtc: the owner's sizing applies, and is kept for later without the stream settings",
+          [m for m, _ in handled] == ["r,800x600", owner_settings] and held.get("r") == "r,800x600"
+          and held.get("SETTINGS") == 'SETTINGS,{"scaling_dpi": 96}', (handled, held))
+    await send("r,1024x640", "j")
+    handled.clear(), service.rtc_app.sent.clear()
+
+    await send("PAGE_HIDDEN", "o")
+    owner["page_hidden_at"] -= 1.0
+    await service._settle_display_owner("primary")
+    check("webrtc: a hidden owner keeps the display beside a page that never said it shows",
+          service._display_owner_tabs["primary"] == "tab-a" and not handled, handled)
+    service.rtc_app.denied = {"joiner"}
+    await send("PAGE_SHOWN", "j")
+    check("webrtc: nor to one whose keyboard and mouse another token holds",
+          service._display_owner_tabs["primary"] == "tab-a" and not handled, handled)
+    service.rtc_app.denied = set()
+    owner["page_hidden_at"] = time.monotonic()
+    await service._settle_display_owner("primary")
+    check("webrtc: an owner just hidden keeps it a moment", service._display_owner_tabs["primary"] == "tab-a")
+    await asyncio.sleep(0.15)
+    check("webrtc: then the page beside it that shows owns the display, at its size",
+          service._display_owner_tabs["primary"] == "tab-b" and handled == [("r,1024x640", "j")], handled)
+    check("webrtc: the old owner is told what the display streams with",
+          [ch for ch, kind, _ in service.rtc_app.sent if kind == "display_settings"] == [owner["data_channel"]],
+          service.rtc_app.sent)
+
+    handled.clear()
+    await send("r,390x844", "o")
+    check("webrtc: the old owner's resize waits beside it", not handled and owner["held_owner_messages"]["r"]
+          == "r,390x844", handled)
+    await send("PAGE_SHOWN", "o")
+    check("webrtc: shown again, it stays beside a visible owner", service._display_owner_tabs["primary"] == "tab-b")
+    await send("PAGE_HIDDEN", "j")
+    joiner["page_hidden_at"] -= 1.0
+    await service._settle_display_owner("primary")
+    check("webrtc: and owns the display again once that one hides, at its latest size",
+          service._display_owner_tabs["primary"] == "tab-a"
+          and [m for m, _ in handled] == ['SETTINGS,{"scaling_dpi": 96}', "r,390x844"], handled)
+
+
 async def run_webrtc_congestion_checks() -> None:
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, patch
@@ -394,7 +536,8 @@ async def run_webrtc_congestion_checks() -> None:
 
 def main() -> int:
     for block in (run_pick_checks, run_repeat_checks, run_display_checks, run_webrtc_checks,
-                  run_stream_checks, run_webrtc_stream_checks, run_webrtc_congestion_checks):
+                  run_stream_checks, run_webrtc_stream_checks, run_visibility_checks,
+                  run_webrtc_visibility_checks, run_webrtc_congestion_checks):
         asyncio.run(block())
     print(f"\n{failures} failure(s)")
     return 1 if failures else 0

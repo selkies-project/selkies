@@ -6328,6 +6328,17 @@ function initWebsockets() {
     }
   };
   let hiddenVideoStopTimer = null;
+  /** Whether the server asked this socket's page for its tab's visibility (`PAGE_VISIBILITY`). */
+  let pageVisibilityWanted = false;
+  /**
+   * Tells the server whether this page's tab shows, once it asked: when the
+   * primary's owner stays hidden, a visible page beside it owns the display.
+   * The hide goes at once too; the server waits out a reloading page's.
+   */
+  const reportPageVisibility = () => {
+    if (!pageVisibilityWanted || !websocket || websocket.readyState !== WebSocket.OPEN) return;
+    try { websocket.send(document.hidden ? 'PAGE_HIDDEN' : 'PAGE_SHOWN'); } catch (_) {}
+  };
   /** Whether the tab-hide handler paused the video; only its own pause is resumed, a dashboard stop stays stopped. */
   let videoPausedForHiddenTab = false;
   /**
@@ -6389,6 +6400,7 @@ function initWebsockets() {
       }
       return;
     }
+    reportPageVisibility();
     if (document.hidden) {
       if (hiddenVideoStopTimer === null) {
         hiddenVideoStopTimer = setTimeout(() => {
@@ -8394,11 +8406,19 @@ class WorkerWebSocket {
         streamStats.setConnection(event.data.substring(11) === 'poor');
         return;
       }
+      if (event.data === 'PAGE_VISIBILITY') {
+        pageVisibilityWanted = true;
+        reportPageVisibility();
+        return;
+      }
       if (event.data.startsWith('DISPLAY_OWNER ')) {
-        // The owner beside which this page controlled the display is gone:
-        // its settings, the window size among them, lay the display out now.
+        // The owner beside which this page controlled the display is gone or
+        // hid its tab: its settings and its window size lay the display out
+        // now. A page that owned the display before sends no first SETTINGS
+        // again, which alone carries the window size, so the size goes too.
         console.log('[websockets] This page owns the display now.');
         sendFullSettingsUpdateToServer('display owner');
+        if (typeof handleResizeUI_globalRef === 'function') handleResizeUI_globalRef();
         return;
       }
       if (event.data.startsWith('KILL ')) {
@@ -9172,6 +9192,7 @@ class WorkerWebSocket {
    */
   const onSocketClose = (event) => {
     console.log('[websockets] Connection closed', event);
+    pageVisibilityWanted = false;
     streamStats.disconnected();
     // No renewal will come; a rumble playing stops now rather than at its lease.
     if (window.webrtcInput && typeof window.webrtcInput.stopRumble === 'function') window.webrtcInput.stopRumble();

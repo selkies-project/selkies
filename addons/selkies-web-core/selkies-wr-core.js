@@ -873,6 +873,17 @@ export default function webrtc() {
 
 	let hiddenVideoPauseTimer = null;
 	let videoPausedForHiddenTab = false;
+	/** Whether the server asked this connection's page for its tab's visibility (`page_visibility`). */
+	let pageVisibilityWanted = false;
+	/**
+	 * Tells the server whether this page's tab shows, once it asked: when its
+	 * display's owner stays hidden, a visible page beside it owns the display.
+	 * The hide goes at once too; the server waits out a reloading page's.
+	 */
+	const reportPageVisibility = () => {
+		if (!pageVisibilityWanted || !webrtc) return;
+		try { webrtc.sendDataChannelMessage(document.hidden ? 'PAGE_HIDDEN' : 'PAGE_SHOWN'); } catch (_) {}
+	};
 	let resumeWatchdogTimer = null;
 	let resumeWatchdogAttempts = 0;
 	const RESUME_WATCHDOG_MS = 3000;
@@ -955,6 +966,7 @@ export default function webrtc() {
 	 * requests, and the resume watchdog verifies frames follow.
 	 */
 	async function handleVisibilityChange() {
+		reportPageVisibility();
 		if (document.hidden) {
 			clearResumeWatchdog();
 			if (hiddenVideoPauseTimer === null) {
@@ -3164,6 +3176,7 @@ export default function webrtc() {
 				location.reload();
 			};
 			webrtc = new WebRTCClient(signaling, videoElement, 1);
+			pageVisibilityWanted = false;
 			activeWebrtcClient = webrtc;
 			/** Strict viewers send nothing until collaboration is granted. */
 			const send = (data) => {
@@ -3710,6 +3723,10 @@ export default function webrtc() {
 			 * defaults would move the stream off both.
 			 */
 			webrtc.ondisplaysettings = (obj) => followDisplaySettings((obj && obj.settings) || {});
+			webrtc.onpagevisibility = () => {
+				pageVisibilityWanted = true;
+				reportPageVisibility();
+			};
 			webrtc.onserversettings = (obj) => {
 				if (obj.settings === undefined || obj.settings === null) {
 					console.warn("Received invalid server settings paylod");

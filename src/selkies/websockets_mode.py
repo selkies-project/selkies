@@ -1788,6 +1788,10 @@ class DataStreamingServer(BaseStreamingService):
             host compositor exposes; None until a query answers.
         RECONNECT_GRACE_S: How long a disconnected display's entry (and its
             running capture) waits for the page to come back before teardown.
+        HIDDEN_OWNER_HANDOFF_S: How long the primary's owner stays hidden
+            before a visible page beside it owns the display
+            (`_settle_display_owner`); a reloading page closes its socket
+            sooner.
         BACKPRESSURE_QUEUE_SIZE: Audio queue depth (chunks dropped past it);
             video is bounded per client by the relay byte budget instead.
         audio_redundancy_by_ws: Per-socket Opus+RED capability from the
@@ -1829,6 +1833,7 @@ class DataStreamingServer(BaseStreamingService):
         self._tasks_to_run = []
         self.RECONNECT_DEBOUNCE_MS = 500
         self.RECONNECT_GRACE_S = 3.0
+        self.HIDDEN_OWNER_HANDOFF_S = 1.0
         self._display_teardown_tasks = set()
         self.MAX_RECENT_CLIENTS = 1000
         self.last_connection_times = OrderedDict()
@@ -1915,6 +1920,12 @@ class DataStreamingServer(BaseStreamingService):
         # says, which leaves it to the start policy (`_hears_audio`).
         self._beside_audio: Dict[Any, bool] = {}
         self._session_audio: Optional[bool] = None
+        # When each controller page that reports its visibility (`PAGE_VISIBILITY`)
+        # last hid, None while it shows, and when it last showed: a page that
+        # never reported is in neither (`_settle_display_owner`).
+        self._page_hidden_at: Dict[Any, Optional[float]] = {}
+        self._page_shown_at: Dict[Any, float] = {}
+        self._owner_settle_task: Optional[asyncio.Task] = None
         self._deferred_viewer_rejoins = {}
         self.allowed_desync_ms = BACKPRESSURE_ALLOWED_DESYNC_MS
         self.backpressure_check_interval_s = BACKPRESSURE_CHECK_INTERVAL_S
@@ -1928,7 +1939,8 @@ class DataStreamingServer(BaseStreamingService):
         # Controllers of a display beside its owner, oldest first: a page of
         # another tab takes the stream and input with it, where the owner keeps
         # the display's size and encoding, and the oldest owns it once the owner
-        # is gone for good (`_promote_co_controller`).
+        # is gone for good (`_promote_co_controller`), the one that showed last
+        # once the owner's tab is hidden (`_settle_display_owner`).
         self.co_controllers: Dict[str, "OrderedDict[Any, Optional[str]]"] = {}
         # Each controller page's last SETTINGS: a later one applies the stream
         # settings it changed, not the ones it repeats (`_settings_changed_by`).
@@ -2155,6 +2167,72 @@ class DataStreamingServer(BaseStreamingService):
             data_logger.info(f"The controller beside '{display_id}' owns it now.")
             return True
         return False
+
+    def _seat_display_page(self, display_id: str, display_state: dict, websocket: Any,
+                           tab_id: Optional[str]) -> None:
+        """Point a display's entry at the page that owns it now: its decode pace,
+        frame acknowledgements and round trips start over, and its stream waits
+        for a key frame."""
+        display_state['ws'] = websocket
+        display_state['tab_id'] = tab_id
+        self._apply_decode_pace(display_id, display_state, None)
+        display_state['acknowledged_frame_id'] = -1
+        display_state['acked_sent_at'] = None
+        display_state['unacked_since'] = None
+        display_state['stall_gated_at'] = None
+        _expect_key_frame(display_state)
+        display_state['sent_timestamps'].clear()
+        display_state['rtt_samples'].clear()
+        display_state['smoothed_rtt'] = 0.0
+
+    async def _settle_display_owner(self) -> None:
+        """Hand the primary to the controller beside its owner that showed last,
+        once the owner's page has been hidden for HIDDEN_OWNER_HANDOFF_S (a
+        phone put away, the display left to another device): told
+        `DISPLAY_OWNER primary`, that page sends its settings, which lay the
+        display out, and the owner stays beside it, paused while hidden. Only
+        pages that report their visibility and hold full permissions take it;
+        a hidden owner with none beside it keeps the display, as does one
+        whose socket closed, which the reconnect grace answers instead."""
+        entry = self.display_clients.get('primary')
+        owner = entry.get('ws') if entry else None
+        hidden_at = self._page_hidden_at.get(owner) if owner is not None else None
+        if owner is None or owner.closed or hidden_at is None:
+            return
+        joiners = self.co_controllers.get('primary') or {}
+        visible = [ws for ws in joiners if not ws.closed and ws in self._page_hidden_at
+                   and self._page_hidden_at[ws] is None and self._holds_full_control(ws)]
+        if not visible:
+            return
+        wait = hidden_at + self.HIDDEN_OWNER_HANDOFF_S - time.monotonic()
+        if wait > 0:
+            if self._owner_settle_task is None or self._owner_settle_task.done():
+                async def _settle_later() -> None:
+                    await asyncio.sleep(wait)
+                    self._owner_settle_task = None
+                    await self._settle_display_owner()
+                self._owner_settle_task = asyncio.create_task(_settle_later())
+            return
+        heir = max(visible, key=lambda ws: self._page_shown_at.get(ws, 0.0))
+        heir_tab = joiners.pop(heir)
+        owner_tab = entry.get('tab_id')
+        joiners[owner] = owner_tab
+        self._seat_display_page('primary', entry, heir, heir_tab)
+        _forget_path(entry)
+        # Each page keeps the audio it asked for: the new owner's is the session's now.
+        heir_audio = self._beside_audio.pop(heir, None)
+        self._beside_audio[owner] = (self._session_audio if self._session_audio is not None
+                                     else pipeline_starts_on('audio', 'primary'))
+        if heir_audio is not None:
+            self._session_audio = heir_audio
+        self.video_paused_clients.add(owner)
+        data_logger.info(
+            f"The owner of 'primary' hid its page: the visible controller beside it owns the display now "
+            f"(tab {(heir_tab or 'none')[:8]}, the old owner's {(owner_tab or 'none')[:8]}).")
+        try:
+            await asyncio.wait_for(heir.send_str("DISPLAY_OWNER primary"), timeout=2.0)
+        except (asyncio.TimeoutError, ConnectionResetError, OSError, RuntimeError):
+            pass
 
     def _owns_display(self, websocket: Any, display_id: Optional[str]) -> bool:
         """Whether `websocket` is the page that owns `display_id`, the primary for none."""
@@ -4866,6 +4944,7 @@ class DataStreamingServer(BaseStreamingService):
         )
         self.capture_loop = self.capture_loop or asyncio.get_running_loop()
         initial_settings_processed = False
+        visibility_asked = False
 
         client_display_id = None
 
@@ -5226,6 +5305,14 @@ class DataStreamingServer(BaseStreamingService):
                                     return
                             client_display_id = display_id
                             tab_id = parsed_settings.get("tabId")
+                            if display_id == 'primary' and not visibility_asked:
+                                # Its tab hidden may hand the display to a page beside it
+                                # (`_settle_display_owner`); an older page ignores the ask.
+                                visibility_asked = True
+                                try:
+                                    await websocket.send_str("PAGE_VISIBILITY")
+                                except (ConnectionResetError, OSError, RuntimeError):
+                                    pass
                             if display_id == 'primary' and self._joins_beside_owner(websocket, tab_id):
                                 # Streamed as a viewer is, with its input taken as a
                                 # controller's; the owner keeps the display, and the page
@@ -5371,22 +5458,12 @@ class DataStreamingServer(BaseStreamingService):
                             else:
                                 data_logger.debug(f"Client is taking over existing display '{display_id}'. Updating state for new connection.")
                                 display_state = self.display_clients[display_id]
-                                display_state['ws'] = websocket
-                                display_state['tab_id'] = tab_id
-                                self._apply_decode_pace(display_id, display_state, None)
+                                self._seat_display_page(display_id, display_state, websocket, tab_id)
                                 # Only a page's first SETTINGS reactivates video; a later one
                                 # must not resurrect a stream stopped with STOP_VIDEO.
                                 if not initial_settings_processed:
                                     display_state['video_active'] = self._video_start_state(websocket, display_id)
                                     _forget_path(display_state)
-                                display_state['acknowledged_frame_id'] = -1
-                                display_state['acked_sent_at'] = None
-                                display_state['unacked_since'] = None
-                                display_state['stall_gated_at'] = None
-                                _expect_key_frame(display_state)
-                                display_state['sent_timestamps'].clear()
-                                display_state['rtt_samples'].clear()
-                                display_state['smoothed_rtt'] = 0.0
                                 # A warm takeover keeps the capture; no reconfigure runs when
                                 # the dimensions are unchanged, so the reset and IDR go here.
                                 try:
@@ -5592,6 +5669,15 @@ class DataStreamingServer(BaseStreamingService):
                                 else:
                                     # A no-op with zero display clients.
                                     await self.reconfigure_displays()
+
+                    elif message in ("PAGE_HIDDEN", "PAGE_SHOWN"):
+                        # A controller page's tab, as PAGE_VISIBILITY asked of it.
+                        if message == "PAGE_SHOWN":
+                            self._page_hidden_at[websocket] = None
+                            self._page_shown_at[websocket] = time.monotonic()
+                        elif self._page_hidden_at.get(websocket) is None:
+                            self._page_hidden_at[websocket] = time.monotonic()
+                        await self._settle_display_owner()
 
                     elif message == "STOP_VIDEO":
                         beside = websocket in self.co_controllers.get(client_display_id or 'primary', ())
@@ -5862,6 +5948,8 @@ class DataStreamingServer(BaseStreamingService):
             for joiners in self.co_controllers.values():
                 joiners.pop(websocket, None)
             self._page_settings.pop(websocket, None)
+            self._page_hidden_at.pop(websocket, None)
+            self._page_shown_at.pop(websocket, None)
             had_own_audio = self._beside_audio.pop(websocket, False)
             if self.data_ws is websocket:
                 self.data_ws = None

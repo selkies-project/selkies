@@ -18,7 +18,14 @@ pauses its own feed, while the owner's audio and video go on as the owner set
 them. Once the owner is gone for good, that page owns the display with full
 control: hidden, it stops the stream nobody else watches.
 
-Usage: python3 tests/e2e/test_multi_controller.py [websockets|webrtc|settings|settings-wr|nodisrupt|all]
+The ``visible`` and ``visible-wr`` blocks hand the display to the page the user
+looks at, over WebSockets and over WebRTC: a page opened beside an owner whose
+tab is hidden owns the display at its own size, the owner shown again stays
+beside it, and owns the display again once that page hides. A reload of the
+owner's page, which reports its tab hidden as it unloads, keeps the display.
+
+Usage: python3 tests/e2e/test_multi_controller.py
+    [websockets|webrtc|settings|settings-wr|nodisrupt|visible|visible-wr|all]
 """
 import json
 import os
@@ -338,6 +345,55 @@ def hide(page, hidden: bool) -> None:
     }""", hidden)
 
 
+def near(size: tuple, want: tuple, slack: int = 16) -> bool:
+    """Whether a root size is within `slack` pixels of `want`."""
+    return all(abs(g - w) <= slack for g, w in zip(size, want))
+
+
+def run_visible(res: "H.Results", mode: str) -> None:
+    tag = f"visible-{mode}"
+    H.server_start(mode=mode)
+    try:
+        with sync_playwright() as pw:
+            owner_browser, owner, _, _ = C.launch_chrome(pw, mode=mode)
+            owner.set_viewport_size({"width": 800, "height": 600})
+            res.check(f"{tag}: the owner streams", video(owner, mode))
+            res.check(f"{tag}: at its size", near(wait_root((800, 600)), (800, 600)), H.x_root_size())
+            hide(owner, True)
+            time.sleep(2.0)
+
+            other_browser, other, _, _ = C.launch_chrome(pw, mode=mode)
+            res.check(f"{tag}: a page opened beside the hidden owner streams", video(other, mode))
+            size = wait_root((1280, 720))
+            res.check(f"{tag}: and owns the display at its own size", near(size, (1280, 720)), size)
+            res.check(f"{tag}: the hidden owner is not terminated", not terminated(owner))
+
+            hide(owner, False)
+            time.sleep(3.0)
+            res.check(f"{tag}: shown again, the owner leaves the display with the page in view",
+                      near(H.x_root_size(), (1280, 720)), H.x_root_size())
+            res.check(f"{tag}: and streams beside it", streaming(owner, mode))
+
+            hide(other, True)
+            size = wait_root((800, 600))
+            res.check(f"{tag}: that page hidden, the owner owns the display again at its size",
+                      near(size, (800, 600)), size)
+            res.check(f"{tag}: neither page is terminated", not terminated(owner) and not terminated(other))
+
+            hide(other, False)
+            time.sleep(2.0)
+            owner.reload(wait_until="load")
+            res.check(f"{tag}: the owner's reload streams again", video(owner, mode))
+            time.sleep(3.0)
+            res.check(f"{tag}: and keeps the display, the page beside it in view",
+                      near(H.x_root_size(), (800, 600)), H.x_root_size())
+            res.check(f"{tag}: which goes on streaming", not terminated(other) and streaming(other, mode))
+            owner_browser.close()
+            other_browser.close()
+    finally:
+        H.server_stop()
+
+
 def run_nodisrupt(res: "H.Results") -> None:
     H.server_start(mode="websockets")
     tone = H.pulse_sine()
@@ -412,6 +468,10 @@ def main() -> int:
         run_settings_wr(res)
     if which in ("all", "nodisrupt"):
         run_nodisrupt(res)
+    if which in ("all", "visible"):
+        run_visible(res, "websockets")
+    if which in ("all", "visible-wr"):
+        run_visible(res, "webrtc")
     return 0 if res.summary() else 1
 
 

@@ -99,8 +99,9 @@ export function takeMultiopus(offer, answer) {
  * `onclipboardcontent`, `oncursorchange`, `onsystemaction`, `onstreaminfo`,
  * `onstreamstats`, `onlatencymeasurement`, `onserversettings`,
  * `ondisplaysettings`, `ondisplayconfig`, and `onccrate` receive the payload of the data channel
- * message of the same kind, and `onconnection` the server's verdict on this
- * page's connection, true while it is poor.
+ * message of the same kind, `onconnection` the server's verdict on this
+ * page's connection, true while it is poor, and `onpagevisibility` the
+ * server's ask for this page's visibility (`page_visibility`).
  */
 export class WebRTCClient {
 	/**
@@ -222,6 +223,9 @@ export class WebRTCClient {
 
 		/** @type {?function(Object): void} */
 		this.ondisplaysettings = null;
+
+		/** @type {?function(): void} */
+		this.onpagevisibility = null;
 
 		/** @type {?function(Object): void} */
 		this.ondisplayconfig = null;
@@ -786,6 +790,10 @@ export class WebRTCClient {
 		} else if (msg.type === 'display_settings') {
 			if (this.ondisplaysettings !== null) {
 				this.ondisplaysettings(msg.data);
+			}
+		} else if (msg.type === 'page_visibility') {
+			if (this.onpagevisibility !== null) {
+				this.onpagevisibility();
 			}
 		} else if (msg.type === 'display_config_update') {
 			if (this.ondisplayconfig !== null) {
