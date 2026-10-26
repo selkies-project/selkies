@@ -18,7 +18,7 @@ took it twice, lands twice or half as far.
 The `gnome` blocks run the same checks against headless Mutter, with a stand-in for GNOME's
 portal backend that forwards to Mutter's own API as GNOME's does (tests/tools/mutter_portal.py):
 `gnome` at scale 1, `gnome-scaled` at scale 2 over libei, and `gnome-notify` at scale 2 with
-the backend refusing EIS, where Mutter's `NotifyPointerMotionAbsolute` takes the stream's pixels.
+the backend refusing EIS, where the client's logical point reaches Mutter as the stream's pixels.
 Mutter offers the cursor metadata at a fixed size, which the stream must accept for any sprite to
 arrive.
 
@@ -261,9 +261,10 @@ class KdeRig(PortalRig):
 class GnomeRig(PortalRig):
     """Headless Mutter, with tests/tools/mutter_portal.py as the portal's RemoteDesktop and
     ScreenCast backend. GNOME's own backend asks through a dialog that nothing answers headless;
-    the stand-in grants every session and forwards it to Mutter's D-Bus API as GNOME's does,
-    `NotifyPointerMotionAbsolute` in the stream's pixels included. `eis=False` has it refuse
-    `ConnectToEIS`, which leaves the client on the Notify methods.
+    the stand-in grants every session and forwards it to Mutter's D-Bus API as GNOME's does, but
+    converts an absolute position from the stream's logical size to the pixels Mutter reads it
+    in, which GNOME's does not. `eis=False` has it refuse `ConnectToEIS`, which leaves the client
+    on the Notify methods.
 
     Mutter's virtual monitor takes the mode; the stand-in then sets the scale, under
     `scale-monitor-framebuffer`, the layout GNOME sessions run scaled with. `E2E_MUTTER` names
@@ -450,7 +451,14 @@ def run(mode: str, scale: int = 1, desktop: str = "kde", eis: bool = True) -> "H
                     for d in stroke:
                         page.mouse.wheel(0, d)
                         time.sleep(0.016)
+                    # The finish follows the stroke's pause; give it a few seconds to cross the
+                    # portal on a loaded host, and the rest of its frame.
                     time.sleep(1.0)
+                    deadline = time.time() + 3.0
+                    while time.time() < deadline and not any(l.get("kind") == "ptr_axis_stop"
+                                                             for l in obs.lines[mark:]):
+                        time.sleep(0.1)
+                    time.sleep(0.2)
                     seen = [l for l in obs.lines[mark:]
                             if l.get("kind") in ("ptr_axis", "ptr_axis_source", "ptr_axis_stop")]
                     values = [l["value"] for l in seen if l["kind"] == "ptr_axis" and l.get("axis") == 0]
@@ -463,8 +471,10 @@ def run(mode: str, scale: int = 1, desktop: str = "kde", eis: bool = True) -> "H
                         # backend drops (5.27 through master): the client is never told it stopped.
                         res.skip(stroke_checks[1], "KDE's portal takes no finish without EIS")
                     else:
+                        tail = [(l["kind"][4:], l.get("axis", l.get("source")), l.get("value"))
+                                for l in seen[max(last_axis, 0):]]
                         res.check(stroke_checks[1],
-                                  any(l["kind"] == "ptr_axis_stop" for l in seen[last_axis + 1:]), seen[-3:])
+                                  any(l["kind"] == "ptr_axis_stop" for l in seen[last_axis + 1:]), tail)
                 if C.wait_log("first portal frame", 8):
                     res.check("video reaches the browser", bool(wait_video(page, mode, 30)), "")
                 else:
