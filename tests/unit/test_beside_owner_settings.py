@@ -474,6 +474,13 @@ async def run_webrtc_visibility_checks() -> None:
     check("webrtc: and owns the display again once that one hides, at its latest size",
           service._display_owner_tabs["primary"] == "tab-a"
           and [m for m, _ in handled] == ['SETTINGS,{"scaling_dpi": 96}', "r,390x844"], handled)
+    handled.clear()
+    await send("PAGE_SHOWN", "j")
+    await send("PAGE_HIDDEN", "o")
+    owner["page_hidden_at"] -= 1.0
+    await service._settle_display_owner("primary")
+    check("webrtc: a page owning the display a second time takes its size again",
+          service._display_owner_tabs["primary"] == "tab-b" and handled == [("r,1024x640", "j")], handled)
 
 
 async def run_webrtc_congestion_checks() -> None:

@@ -1845,8 +1845,9 @@ class WebRTCService(BaseStreamingService):
 
     async def _replay_held(self, peer_id: str, display_id: str) -> None:
         """Apply what a controller that owns its display now held back: its
-        settings, density, and size, the latest of each."""
-        held = self.rtc_app.peer_connections[peer_id].pop("held_owner_messages", {})
+        settings, density, and size, the latest of each, which it keeps for the
+        next time it owns the display."""
+        held = dict(self.rtc_app.peer_connections[peer_id].get("held_owner_messages", {}))
         for kind in ("SETTINGS", "s", "r"):
             if kind in held:
                 result = self.input_handler.on_message(held[kind], display_id, conn_id=peer_id)

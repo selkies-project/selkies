@@ -21,8 +21,9 @@ control: hidden, it stops the stream nobody else watches.
 The ``visible`` and ``visible-wr`` blocks hand the display to the page the user
 looks at, over WebSockets and over WebRTC: a page opened beside an owner whose
 tab is hidden owns the display at its own size, the owner shown again stays
-beside it, and owns the display again once that page hides. A reload of the
-owner's page, which reports its tab hidden as it unloads, keeps the display.
+beside it, and owns the display again once that page hides. With both hidden,
+the page shown first owns the display. A reload of the owner's page keeps the
+display.
 
 Usage: python3 tests/e2e/test_multi_controller.py
     [websockets|webrtc|settings|settings-wr|nodisrupt|visible|visible-wr|all]
@@ -380,6 +381,19 @@ def run_visible(res: "H.Results", mode: str) -> None:
                       near(size, (800, 600)), size)
             res.check(f"{tag}: neither page is terminated", not terminated(owner) and not terminated(other))
 
+            # Both hidden, the capture stops; the page shown first owns the display and starts it.
+            hide(owner, True)
+            time.sleep(2.0)
+            hide(other, False)
+            size = wait_root((1280, 720))
+            res.check(f"{tag}: both pages hidden, the one shown first owns the display", near(size, (1280, 720)), size)
+            res.check(f"{tag}: and streams", streaming(other, mode))
+
+            hide(owner, False)
+            time.sleep(1.0)
+            hide(other, True)
+            size = wait_root((800, 600))
+            res.check(f"{tag}: and the owner owns it again once that page hides", near(size, (800, 600)), size)
             hide(other, False)
             time.sleep(2.0)
             owner.reload(wait_until="load")
