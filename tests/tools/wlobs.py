@@ -38,6 +38,10 @@ BLINK_MS = int(os.environ.get("WLOBS_BLINK_MS", "0"))
 # A rectangle painted over the fill, "x,y,w,h,argb" (e.g. 500,100,300,200,ffff0000), so the
 # picture carries a second known color.
 BLOCK = os.environ.get("WLOBS_BLOCK", "")
+# A cursor the observer sets on pointer enter, "SIZE" or "SIZExSCALE": a black SIZE-pixel square
+# drawn from a buffer SCALE times as large, so the compositor shows this client's cursor rather
+# than its own (Mutter shows none over a surface that sets none). Unset sets no cursor.
+CURSOR = os.environ.get("WLOBS_CURSOR", "")
 # Keymap files handed to the driver; removed when this observer ends, so a
 # suite that never reads them leaves nothing behind.
 KEYMAP_FILES = []
@@ -103,6 +107,22 @@ if handles["seat_iface"] is None:
     sys.exit(1)
 name, ver = handles["seat_iface"]
 seat = registry.bind(name, WlSeat, ver)
+cursor = None
+if CURSOR:
+    edge, _, cscale = CURSOR.partition("x")
+    cscale = int(cscale or 1)
+    px = int(edge) * cscale
+    cursor_file = tempfile.TemporaryFile(prefix="wlshm-cursor")
+    os.ftruncate(cursor_file.fileno(), px * px * 4)
+    with mmap.mmap(cursor_file.fileno(), px * px * 4) as m:
+        m.write(struct.pack("<I", 0xff000000) * (px * px))
+    pool = handles["shm"].create_pool(cursor_file.fileno(), px * px * 4)
+    cursor_buffer = pool.create_buffer(0, px, px, px * 4, WlShm.format.argb8888.value)
+    pool.destroy()
+    cursor = handles["comp"].create_surface()
+    cursor.set_buffer_scale(cscale)
+    cursor.attach(cursor_buffer, 0, 0)
+    cursor.commit()
 
 
 def kbd_keymap(kbd, fmt, fd, size):
@@ -139,6 +159,8 @@ def kbd_mods(kbd, serial, dep, lat, lock, group):
 
 
 def ptr_enter(ptr, serial, surface, sx, sy):
+    if cursor is not None:
+        ptr.set_cursor(serial, cursor, 0, 0)
     emit("ptr_enter", x=sx, y=sy)
 
 
