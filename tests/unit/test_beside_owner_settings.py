@@ -11,8 +11,10 @@ starts and stops audio for itself alone; over WebRTC the owner's link alone stee
 rate while it reports. Once the owner is gone, the oldest page beside it that holds full
 permissions takes the display over. So does the page beside it that showed last once the
 owner's page has been hidden a moment, where both report their visibility, and the owner
-stays beside it. The servers run on the tables these read, with the apply and the sends
-recorded.
+stays beside it; and the page beside it of the same credential whose user acts through it
+once the owner's user has sat idle a moment, its input taken first, while a page of another
+token, a key's release, a gamepad's axis or a page's stats never take it. The servers run on the tables these
+read, with the apply and the sends recorded.
 """
 import asyncio
 import os
@@ -48,6 +50,7 @@ def server_with(owner: object, joiner: object) -> tuple:
                                           "use_cpu": True, "use_cpu_requested": None}}
     server.co_controllers = {"primary": {joiner: "tab-b"}}
     server._page_settings = {}
+    server._tab_used_at = {}
     server.app = App()
     server._initial_use_cpu = False
     applied, told = [], []
@@ -184,6 +187,7 @@ async def run_webrtc_checks() -> None:
     service.rtc_app = RTCApp({"o": owner, "j": joiner})
     service._peer_tabs = {"o": "tab-a", "j": "tab-b"}
     service._display_owner_tabs = {"primary": "tab-a"}
+    service._tab_used_at = {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
     handled, updated = [], []
@@ -321,6 +325,7 @@ async def run_webrtc_stream_checks() -> None:
     service.rtc_app.denied = {"older"}
     service._peer_tabs = {"a": "tab-b", "b": "tab-c"}
     service._display_owner_tabs = {"primary": "tab-a"}
+    service._tab_used_at = {}
     service.RECONNECT_GRACE_S = 0
     replayed = []
 
@@ -415,6 +420,7 @@ async def run_webrtc_visibility_checks() -> None:
     service.rtc_app = RTCApp({"o": owner, "j": joiner})
     service._peer_tabs = {"o": "tab-a", "j": "tab-b"}
     service._display_owner_tabs = {"primary": "tab-a"}
+    service._tab_used_at = {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
     service.HIDDEN_OWNER_HANDOFF_S = 0.05
@@ -483,6 +489,145 @@ async def run_webrtc_visibility_checks() -> None:
           service._display_owner_tabs["primary"] == "tab-b" and handled == [("r,1024x640", "j")], handled)
 
 
+async def run_use_checks() -> None:
+    from collections import OrderedDict, deque
+    owner, joiner = Socket(), Socket()
+    server, _, _ = server_with(owner, joiner)
+    entry = server.display_clients["primary"]
+    entry.update(tab_id="tab-a", sent_timestamps=OrderedDict(), rtt_samples=deque(), smoothed_rtt=0.0)
+    server.co_controllers = {"primary": OrderedDict([(joiner, "tab-b")])}
+    server.capture_instances = {}
+    server.video_paused_clients = set()
+    server._beside_audio = {}
+    server._session_audio = None
+    server._page_hidden_at, server._page_shown_at = {joiner: None}, {}
+    server.IDLE_OWNER_HANDOFF_S = 3.0
+    wm.client_permissions.clear()
+    wm.client_permissions[owner] = {"role": "controller", "token": "a"}
+    wm.client_permissions[joiner] = {"role": "controller", "token": "a"}
+    saved = sessions.active_mk_token
+    try:
+        server._tab_used_at["tab-a"] = time.monotonic() - 10.0
+        await server._take_display_in_use(joiner)
+        check("websockets: an idle owner that never said it shows keeps the display",
+              entry["ws"] is owner and not joiner.sent, joiner.sent)
+        server._page_hidden_at[owner] = None
+        server._tab_used_at["tab-a"] = time.monotonic() - 1.0
+        await server._take_display_in_use(joiner)
+        check("websockets: an owner in use keeps the display beside a page its user acts through",
+              entry["ws"] is owner and not joiner.sent, joiner.sent)
+        server._tab_used_at["tab-a"] = time.monotonic() - 10.0
+        wm.client_permissions[joiner]["token"] = "b"
+        await server._take_display_in_use(joiner)
+        check("websockets: nor does an idle owner hand it to a page of another token",
+              entry["ws"] is owner and not joiner.sent, joiner.sent)
+        wm.client_permissions[joiner]["token"] = "a"
+        sessions.active_mk_token = "z"
+        await server._take_display_in_use(joiner)
+        check("websockets: nor to a page whose keyboard and mouse another token holds",
+              entry["ws"] is owner and not joiner.sent, joiner.sent)
+        sessions.active_mk_token = None
+        server._page_hidden_at[joiner] = time.monotonic()
+        await server._take_display_in_use(joiner)
+        check("websockets: nor to a hidden page", entry["ws"] is owner and not joiner.sent, joiner.sent)
+        server._page_hidden_at[joiner] = None
+        await server._take_display_in_use(joiner)
+        check("websockets: an owner gone unused hands the display to the page of its credential in use",
+              entry["ws"] is joiner and entry["tab_id"] == "tab-b" and joiner.sent == ["DISPLAY_OWNER primary"],
+              joiner.sent)
+        check("websockets: the owner, in view, stays beside it and streams",
+              dict(server.co_controllers["primary"]) == {owner: "tab-a"}
+              and owner not in server.video_paused_clients and not owner.sent, owner.sent)
+        server._tab_used_at["tab-a"] = time.monotonic()
+        await server._take_display_in_use(owner)
+        check("websockets: the old owner's user acting at once does not take it back",
+              entry["ws"] is joiner and not owner.sent, owner.sent)
+        server._tab_used_at["tab-b"] = time.monotonic() - 10.0
+        await server._take_display_in_use(owner)
+        check("websockets: but once the new owner sat unused",
+              entry["ws"] is owner and owner.sent == ["DISPLAY_OWNER primary"]
+              and dict(server.co_controllers["primary"]) == {joiner: "tab-b"}, owner.sent)
+        wm.client_permissions[owner]["token"] = wm.client_permissions[joiner]["token"] = None
+        server._tab_used_at["tab-a"] = time.monotonic() - 10.0
+        await server._take_display_in_use(joiner)
+        check("websockets: pages without tokens share one credential",
+              entry["ws"] is joiner and joiner.sent[-1:] == ["DISPLAY_OWNER primary"], joiner.sent)
+    finally:
+        sessions.active_mk_token = saved
+        wm.client_permissions.clear()
+
+
+async def run_webrtc_use_checks() -> None:
+    from selkies import webrtc_mode as rm
+    from selkies.webrtc_engine import ClientType
+
+    owner = {"name": "owner", "client_type": ClientType.CONTROLLER, "display_id": "primary", "data_channel": Channel(),
+             "client_token": "t", "page_hidden_at": None}
+    joiner = {"name": "joiner", "client_type": ClientType.CONTROLLER, "display_id": "primary",
+              "data_channel": Channel(), "client_token": "t", "page_hidden_at": None}
+    service = object.__new__(rm.WebRTCService)
+    service.rtc_app = RTCApp({"o": owner, "j": joiner})
+    service._peer_tabs = {"o": "tab-a", "j": "tab-b"}
+    service._display_owner_tabs = {"primary": "tab-a"}
+    service._tab_used_at = {}
+    service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
+    service.display_clients = {}
+    service.IDLE_OWNER_HANDOFF_S = 3.0
+    handled = []
+
+    class Handler:
+        def on_message(self, msg, display_id, conn_id=None):
+            handled.append((msg, conn_id))
+    service.input_handler = Handler()
+
+    async def send(msg: str, conn_id: str) -> None:
+        result = service._on_peer_data_message(msg, "primary", conn_id)
+        if asyncio.iscoroutine(result):
+            await result
+
+    service._tab_used_at["tab-a"] = time.monotonic()
+    await send("r,800x600", "o")
+    await send("r,1024x640", "j")
+    handled.clear()
+    await send("m,10,10,0,0,1", "j")
+    check("webrtc: an owner in use keeps the display beside a page its user acts through, whose input goes in",
+          service._display_owner_tabs["primary"] == "tab-a" and handled == [("m,10,10,0,0,1", "j")], handled)
+    service._tab_used_at["tab-a"] = time.monotonic() - 10.0
+    joiner["client_token"] = "u"
+    handled.clear()
+    await send("kd,97", "j")
+    check("webrtc: nor does an idle owner hand it to a page of another token",
+          service._display_owner_tabs["primary"] == "tab-a" and handled == [("kd,97", "j")], handled)
+    joiner["client_token"] = "t"
+    await send("ku,97", "j")
+    await send("js,a,0,1,0.2", "j")
+    await send("_stats_video,{}", "j")
+    check("webrtc: a key's release, a gamepad's axis or a page's stats is no use of it",
+          service._display_owner_tabs["primary"] == "tab-a")
+    service.rtc_app.denied = {"joiner"}
+    await send("kd,97", "j")
+    check("webrtc: nor to a page whose keyboard and mouse another token holds",
+          service._display_owner_tabs["primary"] == "tab-a")
+    service.rtc_app.denied = set()
+    service._tab_used_at["tab-a"] = time.monotonic() - 10.0
+    handled.clear()
+    await send("m,10,10,1,0,2", "j")
+    check("webrtc: an owner gone unused hands the display to the page of its credential in use, "
+          "its input taken first, then its size",
+          service._display_owner_tabs["primary"] == "tab-b"
+          and handled == [("m,10,10,1,0,2", "j"), ("r,1024x640", "j")], handled)
+    handled.clear()
+    await send("m,20,20,0,0,3", "o")
+    check("webrtc: the old owner's user acting at once does not take it back, its input still going in",
+          service._display_owner_tabs["primary"] == "tab-b" and handled == [("m,20,20,0,0,3", "o")], handled)
+    service._tab_used_at["tab-b"] = time.monotonic() - 10.0
+    handled.clear()
+    await send("js,b,0,1,1", "o")
+    check("webrtc: but once the new owner sat unused, at its own size",
+          service._display_owner_tabs["primary"] == "tab-a"
+          and handled == [("js,b,0,1,1", "o"), ("r,800x600", "o")], handled)
+
+
 async def run_webrtc_congestion_checks() -> None:
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, patch
@@ -516,6 +661,7 @@ async def run_webrtc_congestion_checks() -> None:
         service._display_setting = lambda did, key: 6000
         service.display_pipelines = {"primary": pipeline}
         service._display_owner_tabs = {"primary": owner} if owner else {}
+        service._tab_used_at = {}
         service._peer_tabs = {pid: pid for pid in windows}
         service.rtc_app = SimpleNamespace(peer_connections={pid: peer(w) for pid, w in windows.items()},
                                           send_cc_rate=lambda did, kbps: None,
@@ -544,7 +690,8 @@ async def run_webrtc_congestion_checks() -> None:
 def main() -> int:
     for block in (run_pick_checks, run_repeat_checks, run_display_checks, run_webrtc_checks,
                   run_stream_checks, run_webrtc_stream_checks, run_visibility_checks,
-                  run_webrtc_visibility_checks, run_webrtc_congestion_checks):
+                  run_webrtc_visibility_checks, run_use_checks, run_webrtc_use_checks,
+                  run_webrtc_congestion_checks):
         asyncio.run(block())
     print(f"\n{failures} failure(s)")
     return 1 if failures else 0

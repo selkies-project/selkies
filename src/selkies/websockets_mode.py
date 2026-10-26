@@ -115,6 +115,7 @@ from .input_handler import (
     WebRTCInput as InputHandler,
     CLIPBOARD_CHUNK_SIZE,
     gamepad_slot_denied,
+    page_put_to_use,
     VIEWER_ALLOWED_PREFIXES,
     VIEWER_COLLAB_EXTRA_PREFIXES,
     VIEWER_SILENT_DROP_PREFIXES,
@@ -1792,6 +1793,9 @@ class DataStreamingServer(BaseStreamingService):
             before a visible page beside it owns the display
             (`_settle_display_owner`); a reloading page closes its socket
             sooner.
+        IDLE_OWNER_HANDOFF_S: How long the primary's owner goes without its
+            user's input before a page beside it of the same credential that
+            its user acts through owns the display (`_take_display_in_use`).
         BACKPRESSURE_QUEUE_SIZE: Audio queue depth (chunks dropped past it);
             video is bounded per client by the relay byte budget instead.
         audio_redundancy_by_ws: Per-socket Opus+RED capability from the
@@ -1834,6 +1838,7 @@ class DataStreamingServer(BaseStreamingService):
         self.RECONNECT_DEBOUNCE_MS = 500
         self.RECONNECT_GRACE_S = 3.0
         self.HIDDEN_OWNER_HANDOFF_S = 1.0
+        self.IDLE_OWNER_HANDOFF_S = 3.0
         self._display_teardown_tasks = set()
         self.MAX_RECENT_CLIENTS = 1000
         self.last_connection_times = OrderedDict()
@@ -1925,6 +1930,9 @@ class DataStreamingServer(BaseStreamingService):
         # never reported is in neither (`_settle_display_owner`).
         self._page_hidden_at: Dict[Any, Optional[float]] = {}
         self._page_shown_at: Dict[Any, float] = {}
+        # When each controller tab's user last acted through it (`page_put_to_use`),
+        # or it took the primary; by tab, so a reconnect keeps it.
+        self._tab_used_at: Dict[str, float] = {}
         self._owner_settle_task: Optional[asyncio.Task] = None
         self._deferred_viewer_rejoins = {}
         self.allowed_desync_ms = BACKPRESSURE_ALLOWED_DESYNC_MS
@@ -2186,14 +2194,13 @@ class DataStreamingServer(BaseStreamingService):
         display_state['smoothed_rtt'] = 0.0
 
     async def _settle_display_owner(self) -> None:
-        """Hand the primary to the controller beside its owner that showed last,
-        once the owner's page has been hidden for HIDDEN_OWNER_HANDOFF_S (a
-        phone put away, the display left to another device): told
-        `DISPLAY_OWNER primary`, that page sends its settings, which lay the
-        display out, and the owner stays beside it, paused while hidden. Only
-        pages that report their visibility and hold full permissions take it;
-        a hidden owner with none beside it keeps the display, as does one
-        whose socket closed, which the reconnect grace answers instead."""
+        """Hand the primary to the controller beside its owner that showed or was
+        used last (`_hand_display_to`), once the owner's page has been hidden
+        for HIDDEN_OWNER_HANDOFF_S: a phone put away, the display left to
+        another device. Only pages that report their visibility and hold full
+        permissions take it; a hidden owner with none beside it keeps the
+        display, as does one whose socket closed, which the reconnect grace
+        answers instead."""
         entry = self.display_clients.get('primary')
         owner = entry.get('ws') if entry else None
         hidden_at = self._page_hidden_at.get(owner) if owner is not None else None
@@ -2213,21 +2220,56 @@ class DataStreamingServer(BaseStreamingService):
                     await self._settle_display_owner()
                 self._owner_settle_task = asyncio.create_task(_settle_later())
             return
-        heir = max(visible, key=lambda ws: self._page_shown_at.get(ws, 0.0))
+        heir = max(visible, key=lambda ws: max(self._page_shown_at.get(ws, 0.0),
+                                               self._tab_used_at.get(joiners[ws] or '', 0.0)))
+        await self._hand_display_to(heir, "hid its page: the visible controller beside it")
+
+    async def _take_display_in_use(self, websocket: Any) -> None:
+        """Hand the primary to the controller beside its owner whose user just
+        acted through it, once the owner has gone IDLE_OWNER_HANDOFF_S without
+        its own user's: one person moving between devices takes the display
+        along, and nobody is disconnected. Only between pages of the same
+        credential (the same token, or none), so a page of another token, a
+        collaborator's, stays beside the owner; and only between pages that
+        report their visibility, the one acting shown and holding full
+        permissions."""
+        entry = self.display_clients.get('primary')
+        owner = entry.get('ws') if entry else None
+        if (owner is None or owner.closed or websocket not in self.co_controllers.get('primary', ())
+                or owner not in self._page_hidden_at or websocket not in self._page_hidden_at
+                or self._page_hidden_at[websocket] is not None
+                or time.monotonic() - self._tab_used_at.get(entry.get('tab_id') or '', 0.0)
+                < self.IDLE_OWNER_HANDOFF_S
+                or (client_permissions.get(websocket) or {}).get('token')
+                != (client_permissions.get(owner) or {}).get('token')
+                or not self._holds_full_control(websocket)):
+            return
+        await self._hand_display_to(websocket, "went unused: the controller beside it in use")
+
+    async def _hand_display_to(self, heir: Any, why: str) -> None:
+        """Make `heir`, a controller beside the primary's owner, its owner: told
+        `DISPLAY_OWNER primary`, it sends its settings and its size, which lay
+        the display out, and the owner stays beside it, paused while hidden."""
+        entry = self.display_clients['primary']
+        owner = entry['ws']
+        joiners = self.co_controllers['primary']
         heir_tab = joiners.pop(heir)
         owner_tab = entry.get('tab_id')
         joiners[owner] = owner_tab
         self._seat_display_page('primary', entry, heir, heir_tab)
         _forget_path(entry)
+        if heir_tab:
+            self._tab_used_at[heir_tab] = time.monotonic()
         # Each page keeps the audio it asked for: the new owner's is the session's now.
         heir_audio = self._beside_audio.pop(heir, None)
         self._beside_audio[owner] = (self._session_audio if self._session_audio is not None
                                      else pipeline_starts_on('audio', 'primary'))
         if heir_audio is not None:
             self._session_audio = heir_audio
-        self.video_paused_clients.add(owner)
+        if self._page_hidden_at.get(owner) is not None:
+            self.video_paused_clients.add(owner)
         data_logger.info(
-            f"The owner of 'primary' hid its page: the visible controller beside it owns the display now "
+            f"The owner of 'primary' {why} owns the display now "
             f"(tab {(heir_tab or 'none')[:8]}, the old owner's {(owner_tab or 'none')[:8]}).")
         try:
             await asyncio.wait_for(heir.send_str("DISPLAY_OWNER primary"), timeout=2.0)
@@ -4947,6 +4989,7 @@ class DataStreamingServer(BaseStreamingService):
         visibility_asked = False
 
         client_display_id = None
+        tab_id = None
 
         try:
             await websocket.send_str(f"MODE {self.mode}")
@@ -5334,6 +5377,10 @@ class DataStreamingServer(BaseStreamingService):
                                 else:
                                     await self._take_pick_beside_owner(websocket, parsed_settings, client_role)
                                 continue
+                            if (display_id == 'primary' and tab_id
+                                    and (self.display_clients.get('primary') or {}).get('ws') is not websocket):
+                                # The page that takes the primary is in use (`_take_display_in_use`).
+                                self._tab_used_at[tab_id] = time.monotonic()
                             if display_id in ['primary', 'display2']:
                                 existing_client_info = self.display_clients.get(display_id)
                                 if existing_client_info:
@@ -5891,6 +5938,13 @@ class DataStreamingServer(BaseStreamingService):
                             # conn_id keeps the clipboard debounce per connection, not per display.
                             await self.input_handler.on_message(message, client_display_id, conn_id=id(websocket))
 
+                        if client_display_id == 'primary' and page_put_to_use(message):
+                            # After the input, which lands on the layout its page shows.
+                            if tab_id:
+                                self._tab_used_at[tab_id] = time.monotonic()
+                            if websocket in self.co_controllers.get('primary', ()):
+                                await self._take_display_in_use(websocket)
+
         except (ConnectionResetError, OSError, RuntimeError) as e:
             data_logger.info(f"Client {raddr} disconnected: {e}")
         except Exception as e_main_loop:
@@ -5950,6 +6004,9 @@ class DataStreamingServer(BaseStreamingService):
             self._page_settings.pop(websocket, None)
             self._page_hidden_at.pop(websocket, None)
             self._page_shown_at.pop(websocket, None)
+            stale = time.monotonic() - 3600
+            for gone_tab in [t for t, at in self._tab_used_at.items() if at < stale]:
+                del self._tab_used_at[gone_tab]
             had_own_audio = self._beside_audio.pop(websocket, False)
             if self.data_ws is websocket:
                 self.data_ws = None

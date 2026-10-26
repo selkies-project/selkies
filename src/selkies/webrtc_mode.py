@@ -57,7 +57,7 @@ from .webrtc.codecs import configure_multiopus
 from .webrtc.rtcdtlstransport import TWCC_QUEUE_MS
 from .webrtc_signaling_client import WebRTCSignalingClient
 from .webrtc_signaling_server import SERVER_PEER_SECRET, WebRTCPeerManagement
-from .input_handler import WebRTCInput
+from .input_handler import WebRTCInput, page_put_to_use
 from .display_utils import (resize_display, refresh_output_mode, applied_dpi, set_dpi, set_cursor_size, parse_gpu_id,
                             compute_dual_layout, apply_extended_layout, get_new_res,
                             retire_displays, clamp_primary_feedback,
@@ -195,6 +195,9 @@ class WebRTCService(BaseStreamingService):
         HIDDEN_OWNER_HANDOFF_S: How long a display's owner stays hidden
             before a visible controller beside it owns the display
             (`_settle_display_owner`); a reloading page leaves sooner.
+        IDLE_OWNER_HANDOFF_S: How long a display's owner goes without its
+            user's input before a controller beside it of the same credential
+            that its user acts through owns the display (`_note_page_use`).
         _VIDEO_SETTING_APPLIERS: Setting name to live per-pipeline setter;
             each display's pipeline owns its running values.
         _manual_dims: Even-aligned startup geometry from a configured manual
@@ -281,11 +284,14 @@ class WebRTCService(BaseStreamingService):
         # tab whose controller owns it: a controller of another tab streams and
         # drives input beside it, and what would size or configure the display
         # waits until it owns it (`_on_peer_data_message`, `_succeed_display_owner`,
-        # `_settle_display_owner`).
+        # `_settle_display_owner`, `_note_page_use`); when each tab's user last
+        # acted through it, or it took its display.
         self._peer_tabs: Dict[str, Optional[str]] = {}
         self._display_owner_tabs: Dict[str, str] = {}
+        self._tab_used_at: Dict[str, float] = {}
         self.RECONNECT_GRACE_S = 3.0
         self.HIDDEN_OWNER_HANDOFF_S = 1.0
+        self.IDLE_OWNER_HANDOFF_S = 3.0
         self._owner_settle_tasks: Dict[str, asyncio.Task] = {}
         self._primary_stop_grace_task: Optional[asyncio.Task] = None
 
@@ -532,6 +538,7 @@ class WebRTCService(BaseStreamingService):
         if client_type == "controller" and tab_id and self._display_owner_tabs.get(display_id) not in (
                 self._display_tabs(display_id, but=session_peer_id)):
             self._display_owner_tabs[display_id] = tab_id
+            self._tab_used_at[tab_id] = time.monotonic()
         logger.debug(
             f"starting session for client peer id: {session_peer_id} of type: {client_type} (display '{display_id}')"
         )
@@ -1721,13 +1728,16 @@ class WebRTCService(BaseStreamingService):
         the display (`_succeed_display_owner`); its SETTINGS changes the stream
         by its user's picks alone (`_settings_beside_owner`), and its stream
         verbs, its page's own changes, are dropped. The owner's changes to the
-        stream reach the pages beside it. A keyframe request from a peer that
+        stream reach the pages beside it. Its user's input may hand it the
+        display (`_note_page_use`). A keyframe request from a peer that
         does not own the display is taken once a second (`peer_recovery_taken`)."""
         if msg == "REQUEST_KEYFRAME" and self.rtc_app is not None \
                 and not self.rtc_app.peer_recovery_taken(conn_id, "keyframe"):
             return None
         if msg in ("PAGE_HIDDEN", "PAGE_SHOWN"):
             return self._take_page_visibility(msg == "PAGE_SHOWN", display_id or "primary", conn_id)
+        if page_put_to_use(msg) and self._note_page_use(display_id or "primary", conn_id):
+            return self._input_then_lay_out(msg, display_id or "primary", conn_id)
         if not isinstance(msg, str) or not msg.startswith(self.OWNER_ONLY_PREFIXES + self.STREAM_VERB_PREFIXES):
             return self.input_handler.on_message(msg, display_id, conn_id=conn_id)
         display_id = display_id or "primary"
@@ -1867,11 +1877,11 @@ class WebRTCService(BaseStreamingService):
         await self._settle_display_owner(display_id)
 
     async def _settle_display_owner(self, display_id: str) -> None:
-        """Hand a display to the controller beside its owner that showed last,
-        once the owner's page has been hidden for HIDDEN_OWNER_HANDOFF_S (a
-        phone put away, the display left to another device): what that
-        controller held back applies, its size among it, and the owner stays
-        beside it, its own sizing held until it owns the display again. Only
+        """Hand a display to the controller beside its owner that showed or was
+        used last, once the owner's page has been hidden for
+        HIDDEN_OWNER_HANDOFF_S (a phone put away, the display left to another
+        device): what that controller held back applies, its size among it,
+        and the owner stays beside it (`_seat_owner`). Only
         pages that report their visibility and hold full permissions take it;
         a hidden owner with none beside it keeps the display, as does one whose
         peer is gone, which the reconnect grace answers instead."""
@@ -1900,10 +1910,66 @@ class WebRTCService(BaseStreamingService):
                 self.tasks.append(task)
                 task.add_done_callback(lambda t: self.tasks.remove(t) if t in self.tasks else None)
             return
-        heir = max(heirs, key=lambda pid: peers[pid].get("page_shown_at", 0.0))
-        self._display_owner_tabs[display_id] = self._peer_tabs[heir]
-        logger.info(f"The owner of '{display_id}' hid its page: controller {heir} beside it owns the display now "
-                    f"(tab {self._peer_tabs[heir][:8]}, the old owner's {owner[:8]}).")
+        heir = max(heirs, key=lambda pid: max(peers[pid].get("page_shown_at", 0.0),
+                                              self._tab_used_at.get(self._peer_tabs[pid], 0.0)))
+        self._seat_owner(heir, display_id, f"hid its page: controller {heir} beside it")
+        await self._lay_out_for_owner(heir, display_id)
+
+    def _note_page_use(self, display_id: str, conn_id: Optional[str]) -> bool:
+        """Note that a controller page's user acted through it, by its tab, and
+        hand it the display where the owner has gone IDLE_OWNER_HANDOFF_S
+        without its own user's: one person moving between devices takes the
+        display along, and nobody is disconnected. Only between pages of the
+        same credential (the same token, or none), so a page of another token,
+        a collaborator's, stays beside the owner; and only between pages that
+        report their visibility, the one acting shown and holding full
+        permissions. True when the display is its now, what it held back yet
+        to apply (`_lay_out_for_owner`)."""
+        tab = self._peer_tabs.get(conn_id)
+        if not tab:
+            return False
+        now = time.monotonic()
+        self._tab_used_at[tab] = now
+        owner = self._display_owner_tabs.get(display_id)
+        if not owner or owner == tab or now - self._tab_used_at.get(owner, 0.0) < self.IDLE_OWNER_HANDOFF_S:
+            return False
+        peers = self.rtc_app.peer_connections if self.rtc_app else {}
+        peer = peers.get(conn_id)
+        mine = [p for pid, p in peers.items() if self._peer_tabs.get(pid) == owner
+                and (p.get("display_id") or "primary") == display_id]
+        if (peer is None or (peer.get("display_id") or "primary") != display_id
+                or peer.get("client_type") != ClientType.CONTROLLER
+                or "page_hidden_at" not in peer or peer["page_hidden_at"] is not None
+                or not mine or any("page_hidden_at" not in p or p.get("client_token") != peer.get("client_token")
+                                   for p in mine)
+                or not self._holds_full_control(peer)):
+            return False
+        self._seat_owner(conn_id, display_id, f"went unused: controller {conn_id} beside it in use")
+        return True
+
+    async def _input_then_lay_out(self, msg: str, display_id: str, conn_id: str) -> None:
+        """Take the input that handed its page the display, on the layout that
+        page shows, then lay the display out for it."""
+        result = self.input_handler.on_message(msg, display_id, conn_id=conn_id)
+        if asyncio.iscoroutine(result):
+            await result
+        await self._lay_out_for_owner(conn_id, display_id)
+
+    def _seat_owner(self, heir: str, display_id: str, why: str) -> None:
+        """Make the tab of `heir`, a controller beside a display's owner, the
+        display's owner, the old owner beside it, its own sizing held until it
+        owns the display again; what `heir` held back applies next
+        (`_lay_out_for_owner`)."""
+        owner = self._display_owner_tabs.get(display_id)
+        tab = self._peer_tabs[heir]
+        self._display_owner_tabs[display_id] = tab
+        self._tab_used_at[tab] = time.monotonic()
+        logger.info(f"The owner of '{display_id}' {why} owns the display now "
+                    f"(tab {tab[:8]}, the old owner's {(owner or 'none')[:8]}).")
+
+    async def _lay_out_for_owner(self, heir: str, display_id: str) -> None:
+        """Apply what the controller that owns a display now held back, its size
+        among it, and tell the pages beside it what the display streams with."""
         await self._replay_held(heir, display_id)
         self._tell_display_settings(display_id, self._peers_beside_owner(display_id))
 
@@ -1925,6 +1991,7 @@ class WebRTCService(BaseStreamingService):
             self._display_owner_tabs.pop(display_id, None)
             return
         self._display_owner_tabs[display_id] = self._peer_tabs[heir]
+        self._tab_used_at[self._peer_tabs[heir]] = time.monotonic()
         logger.info(f"Controller {heir} owns display '{display_id}' now.")
         await self._replay_held(heir, display_id)
 
@@ -1942,6 +2009,9 @@ class WebRTCService(BaseStreamingService):
         passes to the controller beside it unless its tab comes back within the
         reconnect grace."""
         tab = self._peer_tabs.pop(peer_id, None)
+        stale = time.monotonic() - 3600
+        for gone_tab in [t for t, at in self._tab_used_at.items() if at < stale]:
+            del self._tab_used_at[gone_tab]
         gone_from = ((peer or {}).get("display_id") or "primary")
         if tab and self._display_owner_tabs.get(gone_from) == tab and self.input_handler is not None:
             task = asyncio.create_task(self._succeed_display_owner(gone_from, tab))

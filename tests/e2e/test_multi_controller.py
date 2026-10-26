@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Two controllers on one display: a page of another tab joins the display's
 stream beside its owner instead of taking it over, on both transports. Both
-stream and both drive input; the owner keeps sizing the display, a reload of
-the owner's own page takes its connection back without touching the other, and
-once the owner is gone for good the page beside it owns the display and sets
-its size.
+stream and both drive input; the owner keeps sizing the display while its user
+is at work, a reload of the owner's own page takes its connection back without
+touching the other, and once the owner is gone for good the page beside it
+owns the display and sets its size.
 
 The ``settings`` and ``settings-wr`` blocks follow the display's stream
 settings between the two, over WebSockets and over WebRTC: the page beside the
@@ -25,8 +25,15 @@ beside it, and owns the display again once that page hides. With both hidden,
 the page shown first owns the display. A reload of the owner's page keeps the
 display.
 
+The ``inuse`` and ``inuse-wr`` blocks hand the display to the page its user
+acts through, over WebSockets and over WebRTC: a page opened beside an owner in
+view leaves the display be until its user acts, then owns it at its own size
+once the owner has sat unused a moment; the owner's user acting while that page
+is in use leaves it be, and takes it back once that page sat unused. Nobody is
+disconnected.
+
 Usage: python3 tests/e2e/test_multi_controller.py
-    [websockets|webrtc|settings|settings-wr|nodisrupt|visible|visible-wr|all]
+    [websockets|webrtc|settings|settings-wr|nodisrupt|visible|visible-wr|inuse|inuse-wr|all]
 """
 import json
 import os
@@ -86,6 +93,8 @@ def run(res: "H.Results", mode: str) -> None:
                       not terminated(owner) and streaming(owner, mode))
             res.check(f"{mode}: nor is the page beside it", not terminated(other) and streaming(other, mode))
 
+            # The owner's user at work keeps the display from following the page beside it.
+            owner.mouse.move(640, 360)
             other.mouse.move(200, 150)
             time.sleep(0.5)
             first = C.x11_mouse_pos()
@@ -408,6 +417,47 @@ def run_visible(res: "H.Results", mode: str) -> None:
         H.server_stop()
 
 
+def run_inuse(res: "H.Results", mode: str) -> None:
+    tag = f"inuse-{mode}"
+    H.server_start(mode=mode)
+    try:
+        with sync_playwright() as pw:
+            owner_browser, owner, _, _ = C.launch_chrome(pw, mode=mode)
+            owner.set_viewport_size({"width": 800, "height": 600})
+            res.check(f"{tag}: the owner streams", video(owner, mode))
+            res.check(f"{tag}: at its size", near(wait_root((800, 600)), (800, 600)), H.x_root_size())
+
+            other_browser, other, _, _ = C.launch_chrome(pw, mode=mode)
+            res.check(f"{tag}: a page opened beside it streams", video(other, mode))
+            time.sleep(2.0)
+            res.check(f"{tag}: and leaves the display be until its user acts",
+                      near(H.x_root_size(), (800, 600)), H.x_root_size())
+            other.mouse.move(640, 360)
+            size = wait_root((1280, 720))
+            res.check(f"{tag}: its user acting, with the owner's idle, the display follows to its size",
+                      near(size, (1280, 720)), size)
+            res.check(f"{tag}: the old owner, in view, is not terminated and streams beside it",
+                      not terminated(owner) and streaming(owner, mode))
+
+            other.mouse.move(600, 300)
+            owner.mouse.move(400, 300)
+            time.sleep(2.0)
+            res.check(f"{tag}: the old owner's user acting while that page is in use leaves it be",
+                      near(H.x_root_size(), (1280, 720)), H.x_root_size())
+            time.sleep(2.0)
+            owner.mouse.move(300, 200)
+            size = wait_root((800, 600))
+            res.check(f"{tag}: once that page sat unused, the old owner's user takes the display back",
+                      near(size, (800, 600)), size)
+            res.check(f"{tag}: neither page is terminated, both streaming",
+                      not terminated(owner) and not terminated(other)
+                      and streaming(owner, mode) and streaming(other, mode))
+            owner_browser.close()
+            other_browser.close()
+    finally:
+        H.server_stop()
+
+
 def run_nodisrupt(res: "H.Results") -> None:
     H.server_start(mode="websockets")
     tone = H.pulse_sine()
@@ -423,6 +473,7 @@ def run_nodisrupt(res: "H.Results") -> None:
             told = len(states(owner))
             other_browser, other, _ = open_page(pw, {})
             res.check("nodisrupt: a page of another tab streams too", video(other, "websockets"))
+            owner.mouse.move(600, 300)
             other.mouse.click(640, 360)
             res.check("nodisrupt: and hears the session by its own start", hears(other))
             res.check("nodisrupt: while the owner's audio stays off", silent(owner, settle=0)
@@ -486,6 +537,10 @@ def main() -> int:
         run_visible(res, "websockets")
     if which in ("all", "visible-wr"):
         run_visible(res, "webrtc")
+    if which in ("all", "inuse"):
+        run_inuse(res, "websockets")
+    if which in ("all", "inuse-wr"):
+        run_inuse(res, "webrtc")
     return 0 if res.summary() else 1
 
 

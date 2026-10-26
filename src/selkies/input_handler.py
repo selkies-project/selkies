@@ -212,6 +212,19 @@ def gamepad_slot_denied(msg: str, role: Optional[str], slot: Union[int, List[int
     return index + 1 not in token_slots(slot)
 
 
+# A person at work through a page: a key pressed, the pointer moved or pressed,
+# a gamepad's button, an IME's text. Key releases, a blur's resets, a gamepad's
+# axes, which a drifting stick or trigger moves on its own, and what a page
+# sends by itself (acks, stats, sizes) are none of it.
+PAGE_USE_PREFIXES = ("kd,", "m,", "m2,", "js,b,", "co,")
+
+
+def page_put_to_use(msg: Any) -> bool:
+    """Whether a page's message is its user acting through it (`PAGE_USE_PREFIXES`),
+    which hands a display to the page in use."""
+    return isinstance(msg, str) and msg.startswith(PAGE_USE_PREFIXES)
+
+
 class _WaylandKeymapOwner:
     """Keysym policy owner for the Wayland compositor seat.
 
