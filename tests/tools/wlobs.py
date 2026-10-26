@@ -252,6 +252,9 @@ if handles["ddm"] is not None:
         dd.dispatcher["selection"] = dd_selection
 
 surf = handles["comp"].create_surface()
+# Answer the compositor's liveness pings: Mutter takes an unanswered one as a hung client
+# after its check-alive timeout (5 s) and stops sending it pointer input.
+handles["xdg"].dispatcher["ping"] = lambda wm, serial: wm.pong(serial)
 xdg_surf = handles["xdg"].get_xdg_surface(surf)
 toplevel = xdg_surf.get_toplevel()
 toplevel.set_title("selkies-wl-observer")

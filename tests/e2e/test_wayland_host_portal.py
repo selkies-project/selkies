@@ -397,6 +397,11 @@ def run(mode: str, scale: int = 1, desktop: str = "kde", eis: bool = True) -> "H
                 # for frames: a WebRTC page that shows none reconnects 12 s after connecting,
                 # and input sent meanwhile is lost.
                 page.mouse.move(640, 360)
+                # A click in the same instant as the session's first pointer motion reaches no
+                # client under GNOME Shell (and under Mutter over Notify, where that motion
+                # creates the pointer): the client gets the pointer only once the motion is
+                # handled.
+                time.sleep(0.3)
                 page.mouse.click(640, 360)
                 time.sleep(0.3)
                 page.mouse.move(300, 200)
@@ -446,11 +451,6 @@ def run(mode: str, scale: int = 1, desktop: str = "kde", eis: bool = True) -> "H
                         res.skip(name, "Mutter takes libei's scroll deltas as a wheel's")
                 else:
                     time.sleep(1.3)
-                    if gnome:
-                        # Mutter takes the pointer's focus off the client after about five
-                        # seconds without motion, so the stroke follows one.
-                        page.mouse.move(640, 360)
-                        time.sleep(0.3)
                     mark = len(obs.lines)
                     stroke = [3.5, 6.25, 9.0, 4.75, 2.5]
                     for d in stroke:
