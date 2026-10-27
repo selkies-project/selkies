@@ -34,7 +34,7 @@ On Kubernetes, `securityContext.supplementalGroups` does what `--group-add` does
 
 ### NVIDIA
 
-The [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit), v1.20.1 or higher, passes the driver, its Vulkan ICD, the DRM nodes, and the modeset node in, so the runtime flags are all it takes:
+The [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit), v1.20.1 or higher, passes the driver, its Vulkan ICD, the DRM nodes, and the modeset node in, so the runtime flags are all it takes. Hardware OpenGL in the desktop requires NVIDIA driver 495 or newer.
 
 ```bash
 docker run --name selkies -it -d --rm --shm-size=2g -p 8080:8080 \
