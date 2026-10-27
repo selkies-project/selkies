@@ -161,18 +161,21 @@ def run(cell: Any) -> None:
     TD.pick_rate_control(page, "classic", "cbr")
     described(page, {"codec": "h264"})
 
-    # Turbo and paint-over at a low rate on a detailed still picture: with Turbo
-    # off the screen gets frames after it stops only while paint-over cleans it
-    # up, and ends cleaner than without; with Turbo on every frame goes out.
+    # Turbo off on a detailed still picture: under CBR at a low rate the screen gets
+    # frames after it stops only while the cleanup refines it to the paint-over
+    # quality, whatever the paint-over switch says, so the dashboards hide it there;
+    # under CRF it does so only with paint-over on, ending no worse than without.
+    # With Turbo on every frame goes out.
     rate = slider(page, "videoBitrateSlider")
     toggle(page, "#videoStreamingModeToggle", False)
     low = slider_to(page, "videoBitrateSlider", LOW_RATE)
     # Each arm starts from a settled rate and a texture of its own, not from a
-    # picture the other arm refined.
+    # picture another arm refined.
     cell.go("/texture.html?motion=1&seed=3")
     time.sleep(3)
     errors: dict = {}
-    for paint, seed in ((True, 1), (False, 2)):
+    for mode, paint, seed in (("cbr", True, 1), ("crf", False, 2), ("crf", True, 4)):
+        TD.pick_rate_control(page, "classic", mode)
         t = TD.switch_on(page.locator("#videoStreamingModeToggle").first)
         p = toggle(page, "#usePaintOverQualityToggle", paint)
         cell.go(f"/texture.html?motion=1&seed={seed}")
@@ -185,18 +188,22 @@ def run(cell: Any) -> None:
             after += n
             quiet = quiet + 1 if n <= 1 else 0
         settled = round(time.time() - stopped - quiet, 1) if quiet >= 2 else None
-        errors[paint] = cell.texture_error(page, seed)
-        cell.shot(page, f"paint-over-{'on' if paint else 'off'}")
-        how = f"{after} frames after the stop, quiet after {settled} s; error {errors[paint]} levels"
-        if paint:
-            R.check(f"Turbo off, paint-over on at {low and low[2]}: a still screen is cleaned up, then "
-                    "sends nothing", t is False and p and after >= 1 and settled is not None, how)
+        errors[mode, paint] = cell.texture_error(page, seed)
+        cell.shot(page, f"{mode}-paint-over-{'on' if paint else 'off'}")
+        how = f"{after} frames after the stop, quiet after {settled} s; error {errors[mode, paint]} levels"
+        if mode == "cbr":
+            R.check(f"Turbo off, CBR at {low and low[2]}: a still screen is cleaned up, then sends nothing",
+                    t is False and p is not False and after >= 1 and settled is not None, how)
+        elif paint:
+            R.check("Turbo off, CRF, paint-over on: a still screen is cleaned up, then sends nothing",
+                    t is False and p and after >= 1 and settled is not None, how)
         else:
-            R.check(f"Turbo off, paint-over off at {low and low[2]}: a still screen sends nothing",
+            R.check("Turbo off, CRF, paint-over off: a still screen sends nothing",
                     t is False and p is False and settled is not None and settled <= 3, how)
+    on, off = errors["crf", True], errors["crf", False]
     R.check("paint-over leaves the still screen no worse than without it",
-            None not in errors.values() and errors[True] <= errors[False] + 1,
-            f"error {errors[True]} levels with it, {errors[False]} without")
+            None not in (on, off) and on <= off + 1, f"error {on} levels with it, {off} without")
+    TD.pick_rate_control(page, "classic", "cbr")
     slider(page, "videoBitrateSlider", rate[0] if rate else None)
     t = toggle(page, "#videoStreamingModeToggle", True)
     still = frames_while(cell, page, 3.0)
