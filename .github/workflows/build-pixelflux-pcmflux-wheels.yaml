@@ -88,12 +88,13 @@ jobs:
                 # Pre-releases are tagged with an abbreviated SHA, so match by prefix
                 tags="$(gh release list --repo "${repo}" --limit 30 --json tagName \
                         --jq '.[].tagName' 2>/dev/null || true)"
+                tag=""
                 for candidate in ${tags}; do
                   case "${sha}" in "${candidate}"*) tag="${candidate}"; break ;; esac
                 done
-                [ -n "${tag}" ] && break
-                # Waited for while its project's pre-release run is in flight,
-                # or the commit is too fresh for that run to have shown up
+                # Waited for while its project's pre-release run is in flight, which
+                # tags the release before its wheels finish uploading, or while the
+                # commit is too fresh for that run to have shown up
                 runs="$(gh run list --repo "${repo}" --workflow pre-release.yml --commit "${sha}" \
                         --json status --jq '[.[].status] | join(" ")' 2>/dev/null || true)"
                 pushed="$(gh api "repos/${repo}/commits/${sha}" --jq .commit.committer.date 2>/dev/null || true)"
@@ -101,10 +102,11 @@ jobs:
                 age=$(( $(date +%s) - pushed_s ))
                 case " ${runs} " in
                   *" queued "*|*" in_progress "*|*" waiting "*|*" pending "*|*" requested "*) ;;
-                  *) [ -z "${runs}" ] && [ "${age}" -lt "${SHOW_UP_S}" ] || break ;;
+                  *) [ -z "${tag}" ] && [ -z "${runs}" ] && [ "${age}" -lt "${SHOW_UP_S}" ] || break ;;
                 esac
                 if [ "${SECONDS}" -ge "${deadline}" ]; then
                   echo "${project}: its pre-release of ${sha} is still building; building it here"
+                  tag=""
                   break
                 fi
                 echo "${project}: waiting for the pre-release of ${sha} (runs: ${runs:-none yet})"
