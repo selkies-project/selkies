@@ -539,6 +539,7 @@ class WebRTCService(BaseStreamingService):
                 self._display_tabs(display_id, but=session_peer_id)):
             self._display_owner_tabs[display_id] = tab_id
             self._tab_used_at[tab_id] = time.monotonic()
+            self._forget_path(display_id)
         logger.debug(
             f"starting session for client peer id: {session_peer_id} of type: {client_type} (display '{display_id}')"
         )
@@ -1964,8 +1965,19 @@ class WebRTCService(BaseStreamingService):
         tab = self._peer_tabs[heir]
         self._display_owner_tabs[display_id] = tab
         self._tab_used_at[tab] = time.monotonic()
+        self._forget_path(display_id)
         logger.info(f"The owner of '{display_id}' {why} owns the display now "
                     f"(tab {tab[:8]}, the old owner's {(owner or 'none')[:8]}).")
+
+    def _forget_path(self, display_id: str) -> None:
+        """Drop what a display's congestion control learned about the path of the
+        page that owned it, for a page taking it over, as the WebSockets service
+        does: the steer's backoff and hold, and the cleanup's link allowance, which
+        is told afresh to the pipeline the new page streams from, where an unchanged
+        allowance would never be told again. The steered rate stays as the starting
+        point."""
+        self._congestion_steer.pop(display_id, None)
+        self._link_allowances.pop(display_id, None)
 
     async def _lay_out_for_owner(self, heir: str, display_id: str) -> None:
         """Apply what the controller that owns a display now held back, its size

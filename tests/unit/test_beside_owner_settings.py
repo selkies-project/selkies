@@ -188,6 +188,7 @@ async def run_webrtc_checks() -> None:
     service._peer_tabs = {"o": "tab-a", "j": "tab-b"}
     service._display_owner_tabs = {"primary": "tab-a"}
     service._tab_used_at = {}
+    service._congestion_steer, service._link_allowances = {}, {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
     handled, updated = [], []
@@ -326,6 +327,7 @@ async def run_webrtc_stream_checks() -> None:
     service._peer_tabs = {"a": "tab-b", "b": "tab-c"}
     service._display_owner_tabs = {"primary": "tab-a"}
     service._tab_used_at = {}
+    service._congestion_steer, service._link_allowances = {}, {}
     service.RECONNECT_GRACE_S = 0
     replayed = []
 
@@ -421,6 +423,7 @@ async def run_webrtc_visibility_checks() -> None:
     service._peer_tabs = {"o": "tab-a", "j": "tab-b"}
     service._display_owner_tabs = {"primary": "tab-a"}
     service._tab_used_at = {}
+    service._congestion_steer, service._link_allowances = {}, {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
     service.HIDDEN_OWNER_HANDOFF_S = 0.05
@@ -570,6 +573,7 @@ async def run_webrtc_use_checks() -> None:
     service._peer_tabs = {"o": "tab-a", "j": "tab-b"}
     service._display_owner_tabs = {"primary": "tab-a"}
     service._tab_used_at = {}
+    service._congestion_steer, service._link_allowances = {}, {}
     service.args = type("Args", (), {"encoder": "vp8enc", "framerate": 60, "video_crf": 25})()
     service.display_clients = {}
     service.IDLE_OWNER_HANDOFF_S = 3.0
@@ -610,12 +614,15 @@ async def run_webrtc_use_checks() -> None:
           service._display_owner_tabs["primary"] == "tab-a")
     service.rtc_app.denied = set()
     service._tab_used_at["tab-a"] = time.monotonic() - 10.0
+    service._congestion_steer["primary"], service._link_allowances["primary"] = object(), object()
     handled.clear()
     await send("m,10,10,1,0,2", "j")
     check("webrtc: an owner gone unused hands the display to the page of its credential in use, "
           "its input taken first, then its size",
           service._display_owner_tabs["primary"] == "tab-b"
           and handled == [("m,10,10,1,0,2", "j"), ("r,1024x640", "j")], handled)
+    check("webrtc: and the display's congestion control forgets the old owner's path",
+          "primary" not in service._congestion_steer and "primary" not in service._link_allowances)
     handled.clear()
     await send("m,20,20,0,0,3", "o")
     check("webrtc: the old owner's user acting at once does not take it back, its input still going in",
