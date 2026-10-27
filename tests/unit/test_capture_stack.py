@@ -67,7 +67,9 @@ if not STEP.strip() or "${{" in STEP:
 
 # `release list` answers STUB_TAGS from its STUB_TAGS_AFTER-th call on (the
 # pre-release showing up while the step waits), `run list` the statuses of the
-# commit's pre-release runs, and the commit's date is STUB_PUSHED.
+# commit's pre-release runs until that call reaches STUB_DONE_AFTER and
+# `completed` from then on (the run ending once its wheels are attached), and the
+# commit's date is STUB_PUSHED.
 STUB_GH = """#!/bin/sh
 case "$1" in
   api)
@@ -82,7 +84,12 @@ case "$1" in
         [ "$n" -ge "${STUB_TAGS_AFTER:-1}" ] && printf '%s\\n' ${STUB_TAGS} ;;
       view) printf '%s\\n' ${STUB_ASSETS} ;;
     esac ;;
-  run) printf '%s\\n' "${STUB_RUNS}" ;;
+  run)
+    if [ "$(cat "${STUB_COUNT}" 2>/dev/null || echo 0)" -ge "${STUB_DONE_AFTER:-999999}" ]; then
+      echo completed
+    else
+      printf '%s\\n' "${STUB_RUNS}"
+    fi ;;
 esac
 """
 
@@ -113,7 +120,8 @@ def probe(pinned: bool, pins=None, **stub) -> tuple:
                    WAIT_S=str(stub.get("wait", 0)), SHOW_UP_S="600", POLL_S="0",
                    STUB_SHA=stub.get("sha", ""), STUB_TAGS=stub.get("tags", ""),
                    STUB_TAGS_AFTER=str(stub.get("tags_after", 1)), STUB_COUNT=os.path.join(tmp, "count"),
-                   STUB_RUNS=stub.get("runs", ""), STUB_PUSHED=stub.get("pushed", "2026-01-01T00:00:00Z"),
+                   STUB_RUNS=stub.get("runs", ""), STUB_DONE_AFTER=str(stub.get("done_after", 999999)),
+                   STUB_PUSHED=stub.get("pushed", "2026-01-01T00:00:00Z"),
                    STUB_ASSETS=stub.get("assets", ""))
         proc = subprocess.run(["bash", "-e", "-c", STEP], cwd=cwd, capture_output=True,
                               text=True, timeout=120, env=env)
@@ -172,9 +180,18 @@ check("a HEAD run takes the pre-release of the commit main is on",
       out.get("pixelflux") == "a3290fd" and fetched(out, "pixelflux") == 4, out.get("pixelflux", "<unset>"))
 check("a HEAD run would build that commit, not whatever main is by then", out.get("pixelflux_ref") == SHA,
       out.get("pixelflux_ref", "<unset>"))
-_, out = probe(pinned=False, sha=SHA, tags="97ef61d a3290fd", tags_after=3, runs="in_progress", wait=60)
+_, out = probe(pinned=False, sha=SHA, tags="97ef61d a3290fd", tags_after=3, runs="in_progress", done_after=5,
+               wait=60)
 check("a pre-release still building is waited for and taken",
       out.get("pixelflux") == "a3290fd", out.get("pixelflux", "<unset>"))
+# The run tags the release before its wheels finish uploading, and one still
+# uploading cannot be downloaded
+_, out = probe(pinned=False, sha=SHA, tags="a3290fd", runs="in_progress", done_after=3, wait=60)
+check("a pre-release tagged while its run still attaches the wheels is taken once the run ends",
+      out.get("pixelflux") == "a3290fd", out.get("pixelflux", "<unset>"))
+_, out = probe(pinned=False, sha=SHA, tags="a3290fd", runs="in_progress", wait=0)
+check("nor taken while the run is in flight: the wait running out builds it here",
+      out.get("pixelflux") == "", out.get("pixelflux", "<unset>"))
 _, out = probe(pinned=False, sha=SHA, tags="a3290fd", tags_after=99, runs="queued", wait=0)
 check("a pre-release that outlasts the wait is built here", out.get("pixelflux") == "",
       out.get("pixelflux", "<unset>"))
