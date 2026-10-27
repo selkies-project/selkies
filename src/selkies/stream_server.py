@@ -484,7 +484,8 @@ class LinkAllowance:
     congestion ticks that measured it, `ceiling` (the most video_bitrate allows) over a path too
     fast to tell, and 0 before a measurement or while one of no room stands among them. A frame
     the size of the one that measured the path reads as crossing it at once now and then, several
-    times what the path carries."""
+    times what the path carries. Where pacers drain the display, the rate they take a cleanup at
+    now bounds it, since a reading taken at a faster pace no longer holds once the pace drops."""
 
     SHARE = 0.9
     TICKS = 20
@@ -493,12 +494,14 @@ class LinkAllowance:
         self.rates: Deque[float] = deque(maxlen=self.TICKS)
         self.kbps: Optional[int] = None
 
-    def note(self, bps: Optional[float], ceiling: float) -> Optional[int]:
-        """Fold in a tick's reading of the path (None where the tick measured none); the
-        allowance where it changed, for the encoder, else None."""
+    def note(self, bps: Optional[float], ceiling: float, pace: Optional[float] = None) -> Optional[int]:
+        """Fold in a tick's reading of the path (None where the tick measured none), within
+        `pace` where pacers drain it; the allowance where it changed, for the encoder, else None."""
         if bps is not None:
             self.rates.append(bps)
         path = min(self.rates, default=None)
+        if path and pace is not None:
+            path = min(path, pace)
         kbps = (0 if not path else int(ceiling) if path == float('inf')
                 else max(1, round(path * self.SHARE / 1000)))
         if kbps == self.kbps:

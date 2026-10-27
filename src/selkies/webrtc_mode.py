@@ -74,6 +74,7 @@ from .settings import (settings, AppSettings, SETTING_DEFINITIONS, STREAM_SETTIN
                        with_live_stream_settings, effective_cpu_encode_threading)
 from types import SimpleNamespace
 from .webrtc_ice_config import HMACRTCMonitor, RESTRTCMonitor, RTCConfigFileMonitor, CloudflareRTCMonitor
+from .webrtc.pacer import CLEANUP_PACE_SHARE
 from .stream_server import (BaseStreamingService, CentralizedStreamServer, CongestionSteer, LinkAllowance, RateHold,
                             start_kbps)
 from .audio_control import AudioControl
@@ -3352,12 +3353,15 @@ class WebRTCService(BaseStreamingService):
                 for buckets in ((per_display, by_owner) if self._peer_owns_display(peer_id) else (per_display,)):
                     bucket = buckets.setdefault(
                         did, {"goodputs": [], "worst_loss": 0.0, "queue_ms": None, "depth_ms": 0.0, "sent_bps": 0,
-                              "rooms": [], "transports": []})
+                              "rooms": [], "paces": [], "transports": []})
                     if window["goodput_bps"]:
                         bucket["goodputs"].append(window["goodput_bps"])
                     room = getattr(transport, "pacer_room_bps", lambda: None)()
                     if room is not None:
                         bucket["rooms"].append(room)
+                    pacer = getattr(transport, "pacer_snapshot", lambda: None)()
+                    if pacer:
+                        bucket["paces"].append(CLEANUP_PACE_SHARE * pacer["pace_bps"])
                     bucket["transports"].append(transport)
                     bucket["sent_bps"] = max(bucket["sent_bps"], window["sent_bps"])
                     bucket["worst_loss"] = max(bucket["worst_loss"], window["loss_fraction"])
@@ -3399,11 +3403,15 @@ class WebRTCService(BaseStreamingService):
                 room = min(bucket["rooms"], default=None)
                 if target < round(ceiling):
                     room = 0.0
-                told = self._link_allowances.setdefault(did, LinkAllowance()).note(room, hi_kbps)
+                told = self._link_allowances.setdefault(did, LinkAllowance()).note(
+                    room, hi_kbps, min(bucket["paces"], default=None))
                 if told is not None and hasattr(pipeline, "set_link_rate"):
                     pipeline.set_link_rate(told)
                 allowance = self._link_allowances[did].kbps or 0
-                rtc_app.set_video_budget(did, max(target, allowance) * 1000)
+                # The budget runs to the room the allowance keeps its margin under: held to the
+                # allowance itself, a cleanup's frames, a few percent past their rate, kept it
+                # full, and each one it dropped started the cleanup over.
+                rtc_app.set_video_budget(did, max(target, allowance / LinkAllowance.SHARE) * 1000)
                 for transport in bucket["transports"]:
                     floor = getattr(transport, "set_pacer_frame_floor", None)
                     if floor is not None:

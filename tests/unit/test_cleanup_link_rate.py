@@ -5,8 +5,9 @@
 ceiling for a path too fast to tell and 0 before a reading, and says so only when it moves.
 Each WebRTC peer's pacer reads its path from transport-cc (what frames' leading bursts
 arrived at, typically) within 0.8 of its pace; the congestion tick tells the encoder the
-lowest of a display's peers, lets the display's video budget run to it, and has every
-peer's pacer take a cleanup frame at it into its video queue whole.
+lowest of a display's peers within the pace its pacers drain at, lets the display's video
+budget run to the path that is 0.9 of, and has every peer's pacer take a cleanup frame at it
+into its video queue whole.
 """
 import asyncio
 import os
@@ -74,7 +75,7 @@ class PacerRoomTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
-    async def tick(self, rc_mode, rooms, steer=None, before=None):
+    async def tick(self, rc_mode, rooms, steer=None, before=None, pace=None):
         links, budgets, floors = [], [], []
         pipeline = SimpleNamespace(rc_mode=rc_mode, video_bitrate=500, set_video_bitrate=AsyncMock(),
                                    set_link_rate=links.append)
@@ -95,7 +96,8 @@ class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
 
         def transport(room):
             return SimpleNamespace(take_twcc_window=lambda: dict(window), pacer_room_bps=lambda: room,
-                                   set_pacer_frame_floor=floors.append)
+                                   set_pacer_frame_floor=floors.append,
+                                   pacer_snapshot=lambda: pace and {"pace_bps": pace})
 
         service.rtc_app = SimpleNamespace(
             peer_connections={f"peer{i}": dict(peer_conn=SimpleNamespace(sctp=SimpleNamespace(transport=transport(r))),
@@ -115,7 +117,8 @@ class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_tick_tells_the_encoder_and_makes_room(self) -> None:
         links, budgets, floors = await self.tick(webrtc_mode.RateControlMode.CBR, (2_000_000, 1_200_000))
         self.assertEqual(links, [1080], "0.9 of the slower peer's path")
-        self.assertEqual(budgets, [1080 * 1000], "the video budget runs to it")
+        self.assertEqual(budgets, [1080 / LinkAllowance.SHARE * 1000],
+                         "the video budget runs to the path, the margin the cleanup keeps under it left free")
         frame = int(1080 * 1000 / 8 * webrtc_mode.CLEANUP_FRAME_S * webrtc_mode.CLEANUP_FRAME_OVERHEAD)
         self.assertEqual(floors, [frame, frame], "every peer's pacer takes a cleanup frame whole")
 
@@ -136,6 +139,15 @@ class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
         steer = SimpleNamespace(target=lambda *a, **k: 300.0)
         links, budgets, floors = await self.tick(webrtc_mode.RateControlMode.CBR, (None,), steer, before)
         self.assertEqual((links, budgets, floors), ([0], [300 * 1000], [0]))
+
+    async def test_a_slower_pace_bounds_an_allowance_with_no_reading(self) -> None:
+        before = LinkAllowance()
+        before.note(16_000_000, 12000)
+        steer = SimpleNamespace(target=lambda *a, **k: 500.0)
+        links, budgets, _ = await self.tick(webrtc_mode.RateControlMode.CBR, (None,), steer, before, 1_250_000)
+        bound = round(CLEANUP_PACE_SHARE * 1_250_000 * LinkAllowance.SHARE / 1000)
+        self.assertEqual((links, budgets), ([bound], [bound / LinkAllowance.SHARE * 1000]),
+                         "the pace drains no faster")
 
     async def test_a_constant_quality_leaves_it_alone(self) -> None:
         links, budgets, floors = await self.tick(webrtc_mode.RateControlMode.CRF, (2_000_000,))
