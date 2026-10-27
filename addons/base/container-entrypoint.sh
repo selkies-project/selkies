@@ -207,6 +207,9 @@ if [ "${SELKIES_WAYLAND}" = "true" ] && [ "${SELKIES_GPU_PRESENT-}" = "true" ] \
   else
     echo 'GPU: the compositor cannot reach it; compositing in software'
     unset GALLIUM_DRIVER MESA_LOADER_DRIVER_OVERRIDE LIBGL_KOPPER_DRI2 __GLX_VENDOR_LIBRARY_NAME
+    # The session compositor too, as with no GPU at all: its own renderer would
+    # allocate on the node that refused and leave its output empty.
+    export SELKIES_WAYLAND_RENDERER="${SELKIES_WAYLAND_RENDERER:-pixman}" KWIN_COMPOSE="${KWIN_COMPOSE:-Q}"
   fi
 fi
 

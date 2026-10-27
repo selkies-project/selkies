@@ -161,6 +161,17 @@ check("a software verdict keeps Wayland", env.get("SELKIES_WAYLAND") == "true",
 check("a software Wayland session gets software GL",
       "GALLIUM_DRIVER" not in env and "MESA_LOADER_DRIVER_OVERRIDE" not in env,
       f"GALLIUM_DRIVER={env.get('GALLIUM_DRIVER', '(unset)')}")
+# The session compositor would otherwise render on the node the probe found
+# refusing allocations, and stream an empty output.
+check("and its session compositor renders in software",
+      env.get("SELKIES_WAYLAND_RENDERER") == "pixman" and env.get("KWIN_COMPOSE") == "Q",
+      f"SELKIES_WAYLAND_RENDERER={env.get('SELKIES_WAYLAND_RENDERER', '(unset)')} "
+      f"KWIN_COMPOSE={env.get('KWIN_COMPOSE', '(unset)')}")
+env, _ = run(facts(accelerated=False, node=""),
+             env={"SELKIES_WAYLAND": "true", "SELKIES_WAYLAND_X11_FALLBACK": "false",
+                  "SELKIES_WAYLAND_RENDERER": "vulkan"})
+check("an operator's own renderer stands", env.get("SELKIES_WAYLAND_RENDERER") == "vulkan",
+      env.get("SELKIES_WAYLAND_RENDERER", "(unset)"))
 
 # A probe that cannot answer must not silently change the operator's backend.
 env, _ = run("", probe_rc=1, env={"SELKIES_WAYLAND": "true"})
