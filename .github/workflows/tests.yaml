@@ -373,7 +373,7 @@ jobs:
           printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
               | sudo tee /etc/apt/preferences.d/mozilla > /dev/null
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y firefox
+          sudo apt-get install --no-install-recommends -y --allow-downgrades firefox
           "$E2E_FIREFOX" --version
       # WebKit paints every <video> through its GL sink, which needs GStreamer's
       # opengl plugin; without it a silent software fallback is what the suites
