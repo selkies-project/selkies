@@ -165,7 +165,8 @@ def run(cell: Any) -> None:
     # frames after it stops only while the cleanup refines it to the paint-over
     # quality, whatever the paint-over switch says, so the dashboards hide it there;
     # under CRF it does so only with paint-over on, ending no worse than without.
-    # With Turbo on every frame goes out.
+    # The CRF arms run at the session's own rate, which still paces WebRTC's sender
+    # where the dashboard hides it. With Turbo on every frame goes out.
     rate = slider(page, "videoBitrateSlider")
     toggle(page, "#videoStreamingModeToggle", False)
     low = slider_to(page, "videoBitrateSlider", LOW_RATE)
@@ -175,6 +176,9 @@ def run(cell: Any) -> None:
     time.sleep(3)
     errors: dict = {}
     for mode, paint, seed in (("cbr", True, 1), ("crf", False, 2), ("crf", True, 4)):
+        if mode == "crf" and low:
+            slider(page, "videoBitrateSlider", rate[0] if rate else None)
+            low = None
         TD.pick_rate_control(page, "classic", mode)
         t = TD.switch_on(page.locator("#videoStreamingModeToggle").first)
         p = toggle(page, "#usePaintOverQualityToggle", paint)
