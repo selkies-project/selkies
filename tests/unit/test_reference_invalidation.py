@@ -272,6 +272,18 @@ RTCApp.on_lost_frame(app, "unknown-peer", 78)
 res.check("a peer's lost frame reaches its own display's encoder, an unknown peer's the primary",
           routed == [("display2", 77), ("primary", 78)], routed)
 
+# --- a frame the bridge dropped reaches the encoder as withheld -------------------
+from selkies import webrtc_mode  # noqa: E402
+
+told = []
+service = webrtc_mode.WebRTCService.__new__(webrtc_mode.WebRTCService)
+service.display_pipelines = {"primary": SimpleNamespace(
+    invalidate_reference=lambda frame_id, withheld=False: told.append((frame_id, withheld)))}
+service._invalidation_log = {}
+service.invalidate_reference_for_display("primary", 90, dropped=True)
+service.invalidate_reference_for_display("primary", 91)
+res.check("the bridge's own drop is withheld, a peer's loss lost", told == [(90, True), (91, False)], told)
+
 # --- the pipeline names what each frame predicts from -----------------------------
 class Frame(bytes):
     """A pixelflux StripeFrame stand-in: the wire header, a slice, and the stamps."""

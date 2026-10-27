@@ -3441,7 +3441,7 @@ class DataStreamingServer(BaseStreamingService):
         on its next held frame."""
         if not reach and not self._repair_taken(websocket, display_id, "keyframe"):
             return False
-        self._schedule_invalidation(display_id, frame_id)
+        self._schedule_invalidation(display_id, frame_id, withheld=True)
         return True
 
     def common_frames_for(self, display_id: str, held: bool = True) -> CommonFrames:
@@ -3464,15 +3464,20 @@ class DataStreamingServer(BaseStreamingService):
         except Exception:
             return
 
-    def _schedule_invalidation(self, display_id: str, frame_id: int) -> None:
-        """Tell the display's encoder a client lost `frame_id`, so the frames after it stop
-        predicting from it. Non-blocking in pixelflux, like the keyframe request; logged
-        once per display per five seconds with the count of the rest."""
+    def _schedule_invalidation(self, display_id: str, frame_id: int, withheld: bool = False) -> None:
+        """Tell the display's encoder a client lost `frame_id`, or a relay withheld it
+        (`withheld`), so the frames after it stop predicting from it. Non-blocking in
+        pixelflux, like the keyframe request; logged once per display per five seconds
+        with the count of the rest."""
         module = self._opcode_display_module(display_id)
         if not module:
             return
         try:
-            module.invalidate_reference(frame_id & 0xFFFF)
+            try:
+                module.invalidate_reference(frame_id & 0xFFFF, withheld=withheld)
+            except TypeError:
+                # A pixelflux that has no withheld report takes it as a loss.
+                module.invalidate_reference(frame_id & 0xFFFF)
         except Exception:
             return
         now = time.monotonic()

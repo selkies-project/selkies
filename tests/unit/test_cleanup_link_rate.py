@@ -7,7 +7,7 @@ Each WebRTC peer's pacer reads its path from transport-cc (what frames' leading 
 arrived at, typically) within 0.8 of its pace; the congestion tick tells the encoder the
 lowest of a display's peers within the pace its pacers drain at, lets the display's video
 budget run to the path that is 0.9 of, and has every peer's pacer take a cleanup frame at it
-into its video queue whole.
+into its video queue whole. A lowered video bitrate does all that at once, not at the tick.
 """
 import asyncio
 import os
@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
 from selkies import webrtc_mode  # noqa: E402
 from selkies.stream_server import LinkAllowance  # noqa: E402
-from selkies.webrtc.pacer import CLEANUP_PACE_SHARE, LINK_MAX_AGE_S, LINK_SAMPLES, RtpPacer  # noqa: E402
+from selkies.webrtc.pacer import CLEANUP_PACE_SHARE, LINK_MAX_AGE_S, LINK_SAMPLES, PACE_FACTOR, RtpPacer  # noqa: E402
 
 
 class LinkAllowanceTests(unittest.TestCase):
@@ -152,6 +152,45 @@ class CongestionTickTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_constant_quality_leaves_it_alone(self) -> None:
         links, budgets, floors = await self.tick(webrtc_mode.RateControlMode.CRF, (2_000_000,))
         self.assertEqual((links, budgets, floors), ([], [None], []))
+
+
+class LoweredCeilingTests(unittest.IsolatedAsyncioTestCase):
+    async def lower(self, rc_mode, kbps, before=16000):
+        links, budgets, floors, paced = [], [], [], []
+        pipeline = SimpleNamespace(rc_mode=rc_mode, set_video_bitrate=AsyncMock(), set_link_rate=links.append)
+        service = webrtc_mode.WebRTCService.__new__(webrtc_mode.WebRTCService)
+        service.args = SimpleNamespace(congestion_control=True, video_bitrate=before)
+        service.display_pipelines = {"primary": pipeline}
+        service._display_owner_tabs, service._peer_tabs = {}, {}
+        allowance = LinkAllowance()
+        allowance.note(20_000_000, 12000)
+        service._link_allowances = {"primary": allowance}
+        transport = SimpleNamespace(pacer_enabled=lambda: True, set_pacer_encoder_bps=paced.append,
+                                    pacer_snapshot=lambda: {"pace_bps": int(PACE_FACTOR * paced[-1])},
+                                    set_pacer_frame_floor=floors.append)
+        service.rtc_app = SimpleNamespace(
+            peer_connections={"peer0": dict(peer_conn=SimpleNamespace(sctp=SimpleNamespace(transport=transport)),
+                                            display_id="primary")},
+            set_video_budget=lambda did, bps: budgets.append(bps))
+        with patch.object(webrtc_mode, "settings", SimpleNamespace(video_bitrate=(100, 16000), webrtc_pacer=(True,))):
+            await service._apply_display_setting("primary", "video_bitrate", kbps)
+        pipeline.set_video_bitrate.assert_awaited_once_with(kbps)
+        return links, budgets, floors, paced
+
+    async def test_a_lowered_ceiling_holds_the_stream_at_once(self) -> None:
+        links, budgets, floors, paced = await self.lower(webrtc_mode.RateControlMode.CBR, 100)
+        allowance = round(CLEANUP_PACE_SHARE * PACE_FACTOR * 100_000 * LinkAllowance.SHARE / 1000)
+        self.assertEqual(paced, [100_000], "the pacer sized for the setting")
+        self.assertEqual(links, [allowance], "the cleanup within the pacer's new pace")
+        self.assertEqual(budgets, [allowance / LinkAllowance.SHARE * 1000])
+        self.assertEqual(floors, [int(allowance * 1000 / 8 * webrtc_mode.CLEANUP_FRAME_S
+                                      * webrtc_mode.CLEANUP_FRAME_OVERHEAD)])
+
+    async def test_a_raised_ceiling_waits_for_the_tick(self) -> None:
+        self.assertEqual(await self.lower(webrtc_mode.RateControlMode.CBR, 16000, before=100), ([], [], [], []))
+
+    async def test_a_constant_quality_only_paces_it(self) -> None:
+        self.assertEqual(await self.lower(webrtc_mode.RateControlMode.CRF, 100), ([], [], [], [100_000]))
 
 
 if __name__ == "__main__":

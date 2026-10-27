@@ -1200,13 +1200,15 @@ class WebRTCService(BaseStreamingService):
                                          dropped: bool = False) -> None:
         """Tell the display's encoder a peer lost `frame_id`, or its video bridge dropped
         it (`dropped`), so the frames after it stop predicting from it (websockets
-        LOST_FRAME parity). Logged once per display and cause per five seconds with the
-        count of the rest, since both come in bursts."""
+        LOST_FRAME parity). A drop is told as withheld, which a still screen's cleanup
+        running through the rate control codes past rather than starting over at, as
+        the websockets relay's are. Logged once per display and cause per five seconds
+        with the count of the rest, since both come in bursts."""
         display_id = display_id or "primary"
         pipeline = self.display_pipelines.get(display_id)
         if pipeline is None:
             return
-        pipeline.invalidate_reference(frame_id)
+        pipeline.invalidate_reference(frame_id, withheld=dropped)
         now = time.monotonic()
         key = (display_id, dropped)
         last, more = self._invalidation_log.get(key, (0.0, 0))
@@ -2947,6 +2949,7 @@ class WebRTCService(BaseStreamingService):
         applier = self._VIDEO_SETTING_APPLIERS.get(key)
         if applier is None:
             return
+        before = self._display_setting(display_id, key)
         self._store_display_setting(display_id, key, value)
         pipeline = self.display_pipelines.get(display_id)
         if key == "encoder":
@@ -2962,6 +2965,8 @@ class WebRTCService(BaseStreamingService):
             self.rtc_app.switch_display_codec(display_id, str(value))
         if pipeline is not None:
             await applier(pipeline, value)
+        if key == "video_bitrate" and before is not None and float(value) < float(before):
+            self._hold_to_ceiling(display_id, pipeline)
         if key == "framerate" and display_id == "primary" and self.media_pipeline and not IS_WAYLAND:
             # The display's modes follow the primary's rate (`resize_display`).
             await refresh_output_mode(self.media_pipeline.framerate)
@@ -2970,6 +2975,44 @@ class WebRTCService(BaseStreamingService):
             self.settings._encoder_client_set = True
             if self.rtc_app:
                 self.rtc_app.encoder = str(value)
+
+    def _hold_to_ceiling(self, display_id: str, pipeline: Any) -> None:
+        """Bring a display's stream down to a lowered bitrate setting at once, as its next
+        congestion tick would: its pacers sized for the setting, the cleanup's link allowance
+        held within their new pace, and the video budget and cleanup frame floor to both. Left
+        to the tick, a ceiling lowered under motion let up to a second of the old rate's overshoot
+        into pacers, budget and floor still sized for it."""
+        rtc_app = self.rtc_app
+        if rtc_app is None or pipeline is None:
+            return
+        peers = [pid for pid, peer in rtc_app.peer_connections.items()
+                 if (peer.get("display_id") or "primary") == display_id]
+        owners = [pid for pid in peers if self._peer_owns_display(pid)] or peers
+        transports = []
+        if settings.webrtc_pacer[0]:
+            for pid in peers:
+                peer = rtc_app.peer_connections[pid]
+                try:
+                    transport = self._ensure_pacer(peer.get("peer_conn"), peer, display_id, pid)
+                except Exception:
+                    logger.exception("_ensure_pacer failed (display %s)", display_id)
+                    continue
+                if transport is not None and pid in owners:
+                    transports.append(transport)
+        if not self.args.congestion_control or getattr(pipeline, "rc_mode", None) != RateControlMode.CBR:
+            return
+        lo_kbps, hi_kbps = settings.video_bitrate
+        ceiling = max(lo_kbps, min(hi_kbps, float(self._display_setting(display_id, "video_bitrate") or hi_kbps)))
+        allowance = self._link_allowances.get(display_id)
+        if allowance is not None:
+            paces = [CLEANUP_PACE_SHARE * snap["pace_bps"] for snap in (t.pacer_snapshot() for t in transports) if snap]
+            told = allowance.note(None, hi_kbps, min(paces, default=None))
+            if told is not None and hasattr(pipeline, "set_link_rate"):
+                pipeline.set_link_rate(told)
+        kbps = (allowance.kbps if allowance is not None else None) or 0
+        rtc_app.set_video_budget(display_id, max(ceiling, kbps / LinkAllowance.SHARE) * 1000)
+        for transport in transports:
+            transport.set_pacer_frame_floor(int(kbps * 1000 / 8 * CLEANUP_FRAME_S * CLEANUP_FRAME_OVERHEAD))
 
     def _encoder_for_display(self, display_id: str) -> str:
         return str(self._display_setting(display_id, "encoder") or self.args.encoder)

@@ -533,10 +533,15 @@ class MediaPipelinePixel(MediaPipeline):
         except Exception as e:
             logger.error(f"Error requesting IDR frame: {e}", exc_info=True)
 
-    def invalidate_reference(self, frame_id: int) -> None:
-        """A consumer lost `frame_id`: the frames after it stop predicting from it."""
+    def invalidate_reference(self, frame_id: int, withheld: bool = False) -> None:
+        """A consumer lost `frame_id`, or its sender withheld it (`withheld`): the frames after
+        it stop predicting from it."""
         if self._is_screen_capturing and self.capture_module is not None:
-            self.capture_module.invalidate_reference(frame_id & 0xFFFF)
+            try:
+                self.capture_module.invalidate_reference(frame_id & 0xFFFF, withheld=withheld)
+            except TypeError:
+                # A pixelflux that has no withheld report takes it as a loss.
+                self.capture_module.invalidate_reference(frame_id & 0xFFFF)
 
     def set_link_rate(self, kbps: int) -> None:
         """Tell the encoder what the path carries for a still screen's cleanup (pixelflux's

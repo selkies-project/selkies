@@ -46,8 +46,8 @@ class Capture:
             Capture.entered.set()
             Capture.release.wait(10)
 
-    def invalidate_reference(self, frame_id: int) -> None:
-        self.calls.append(("invalidate_reference", frame_id))
+    def invalidate_reference(self, frame_id: int, withheld: bool = False) -> None:
+        self.calls.append(("invalidate_reference", frame_id, withheld))
 
     def request_idr_frame(self) -> None:
         self.calls.append(("request_idr_frame",))
@@ -71,12 +71,18 @@ async def scenario(res: H.Results) -> None:
     res.check("the capture is starting", capture is not None and not start.done())
 
     pipeline.invalidate_reference(1)
+    pipeline.invalidate_reference(2, withheld=True)
     await pipeline.dynamic_idr_frame()
     await pipeline.set_video_bitrate(4000)
     turbo = not pipeline.video_streaming_mode
     await pipeline.set_video_streaming_mode(turbo)
     res.check("a lost frame the bridge names while the capture starts reaches it",
-              ("invalidate_reference", 1) in capture.calls, capture.calls)
+              ("invalidate_reference", 1, False) in capture.calls, capture.calls)
+    res.check("and one it withheld, as withheld", ("invalidate_reference", 2, True) in capture.calls, capture.calls)
+    lost = []
+    capture.invalidate_reference = lambda frame_id: lost.append(frame_id)
+    pipeline.invalidate_reference(3, withheld=True)
+    res.check("a capture that has no withheld report takes it as a loss", lost == [3], lost)
     res.check("so does a keyframe request", ("request_idr_frame",) in capture.calls, capture.calls)
     res.check("and a live rate and tunable",
               ("update_video_bitrate", 4000) in capture.calls and ("update_tunables", turbo) in capture.calls,

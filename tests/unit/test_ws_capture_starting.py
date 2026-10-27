@@ -43,8 +43,8 @@ class FakeCapture:
     def request_idr_frame(self) -> None:
         self.calls.append(("idr",))
 
-    def invalidate_reference(self, frame_id: int) -> None:
-        self.calls.append(("invalidate", frame_id))
+    def invalidate_reference(self, frame_id: int, withheld: bool = False) -> None:
+        self.calls.append(("invalidate", frame_id, withheld))
 
 
 def make_server():
@@ -77,7 +77,16 @@ def main() -> int:
     srv._schedule_idr_for_display("primary")
     srv._schedule_invalidation("primary", 70000)
     res.check("a key-frame request and a lost frame reach it too",
-              ("idr",) in module.calls and ("invalidate", 70000 & 0xFFFF) in module.calls, module.calls)
+              ("idr",) in module.calls and ("invalidate", 70000 & 0xFFFF, False) in module.calls, module.calls)
+    srv._repair_taken = lambda ws, display_id, kind: True
+    srv._relay_lost(None, "primary", 71, True)
+    res.check("a frame a relay left out reaches it as withheld", ("invalidate", 71, True) in module.calls,
+              module.calls)
+    lost = []
+    module.invalidate_reference = lambda frame_id: lost.append(frame_id)
+    srv._relay_lost(None, "primary", 72, True)
+    srv._schedule_invalidation("primary", 73)
+    res.check("a capture that has no withheld report takes it, and a loss, as a loss", lost == [72, 73], lost)
     srv._starting_captures = {}
     before = len(module.calls)
     asyncio.run(srv._handle_opcode_video_bitrate(3000, "primary"))
