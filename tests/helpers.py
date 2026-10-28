@@ -6,6 +6,7 @@ import contextlib
 import ctypes
 import faulthandler
 import functools
+import glob
 import json
 import os
 import re
@@ -570,6 +571,11 @@ def inherited_env() -> dict:
     return {name: os.environ[name] for name in names if name in os.environ}
 
 
+# The servers this process has started: each one's log is kept beside the next's
+# (selkies-server.1.log, ...), so a suite's record carries every server it ran.
+_server_starts = 0
+
+
 def server_start(mode: str = "websockets", wayland: bool = False,
                  web_root: str = CORE_DIST,
                  extra_env: Optional[dict] = None,
@@ -619,6 +625,14 @@ def server_start(mode: str = "websockets", wayland: bool = False,
         env["PULSE_SERVER"] = pulse
     if extra_env:
         env.update(extra_env)
+    global _server_starts
+    stem = os.path.splitext(log)[0]
+    if _server_starts and os.path.exists(log):
+        os.replace(log, f"{stem}.{_server_starts}.log")
+    elif not _server_starts:
+        for name in glob.glob(f"{glob.escape(stem)}.[0-9]*.log"):
+            os.unlink(name)
+    _server_starts += 1
     with open(log, "w") as lf:
         lf.write("")
     proc = spawn(

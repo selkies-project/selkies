@@ -191,6 +191,13 @@ def press(page) -> None:
     time.sleep(0.5)
 
 
+# What the page's pad manager holds that gates a rumble: polling, the toggle, and what plays.
+PAD_STATE = """(() => {
+  const m = window.webrtcInput && window.webrtcInput.gamepadManager;
+  return m ? {active: m._active, enabled: m.rumbleEnabled, rumbling: m._rumbling} : null;
+})()"""
+
+
 def plays_and_stops(calls: list) -> tuple:
     plays = [c for c in calls if c[1] == "play" or (c[1] == "pulse" and c[2] > 0)]
     stops = [c for c in calls if c[1] == "reset" or (c[1] == "pulse" and c[2] == 0)]
@@ -400,11 +407,22 @@ def dashboards(pw, mode: str, preload: str, res: "H.Results") -> None:
             time.sleep(1.0)
             press(page)
             res.check(f"{tag}: rumble starts on", page.evaluate(state) is True, page.evaluate(state))
+            offset = page_offset(page)
             app = subprocess.Popen([sys.executable, "-c", ENDLESS_APP], env=app_env(preload), text=True,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
-                app.stdout.readline()
-                time.sleep(0.4)
+                played = json.loads(app.stdout.readline())["played"]
+                # The toggle has to find the effect playing: wait for it, up to well past its bound.
+                deadline = time.monotonic() + 3.0
+                plays, _ = plays_and_stops(page.evaluate("window.__rumble"))
+                while not plays and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                    plays, _ = plays_and_stops(page.evaluate("window.__rumble"))
+                lag = (plays[0][0] / 1000.0 + offset - played) * 1000 if plays else None
+                res.check(f"{tag}: the page plays the application's endless effect",
+                          lag is not None and lag < 400,
+                          f"{round(lag, 1)} ms after the write" if plays
+                          else f"nothing in 3 s; pads {page.evaluate(PAD_STATE)}")
                 clicked = click_rumble_toggle(page, dashboard)
                 res.check(f"{tag}: the dashboard offers a Rumble toggle", clicked, clicked)
                 time.sleep(0.6)
