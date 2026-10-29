@@ -189,6 +189,19 @@ LINK_ACK_HISTORY = 64
 # that does not jitter; one more per LINK_RISE_JITTER_MS of jitter.
 LINK_RISE_ACKS = 4
 LINK_RISE_JITTER_MS = 3.0
+# What tells a longer path, or a queue other traffic keeps standing, from a
+# queue of the display's own once its round trip has stood past the floor:
+# windows in a row that sent under this share of the most the path delivered
+# while it stood, the least round trip of each within the queue allowance of
+# the others. A queue the stream filled empties by half a second every second
+# at such a rate; one that holds is not its own. Half, not WebRTC's 0.9: a
+# stream the steer holds at its share of a path another flow keeps a queue on
+# sends 0.78 of what it delivers or more there, its own queue near nothing,
+# which a floor moved onto the other flow's queue would let grow to the
+# allowance; a stream the cuts are starving falls under half within three, and
+# so does one whose encoder cannot follow them down.
+LINK_PATH_WINDOWS = 3
+LINK_PATH_SENT = 0.5
 MAX_UINT16_FRAME_ID = 65535
 FRAME_ID_SUSPICIOUS_GAP_THRESHOLD = (
     MAX_UINT16_FRAME_ID // 2
@@ -776,6 +789,54 @@ def _round_trip_jitter(round_trips: List[float]) -> float:
     return sum(abs(c - trend) for c in changes) / len(changes)
 
 
+def _settle_path_floor(display_state: dict, least_ms: float, raw_least_ms: float, allowed_ms: float,
+                       delivered_bps: float, offered_bps: Optional[float], measured: bool, now: float) -> float:
+    """The floor a display's link steer reads a queue from, after a window
+    whose least round trip was `least_ms` (`raw_least_ms` before the frames'
+    own crossing times come off it, which are read against the old floor).
+
+    The least round trip of the last ten minutes alone takes a longer path, or
+    a queue other traffic keeps standing on a shared link, for a queue of the
+    display's own for those ten minutes: the steer cuts the rate on every
+    window, the queue does not move, and the stream starves at the least rate
+    allowed. What the stream does tells them apart, as WebRTC's loop does
+    (`RTCDtlsTransport._twcc_path_delay`): over `LINK_PATH_WINDOWS` windows in a
+    row that sent under `LINK_PATH_SENT` of the most the path delivered while
+    the round trip stood past the floor, a queue the stream filled drains, so a
+    least round trip that held within the queue allowance through them is the
+    path's and becomes the floor, as measured: its crossing times, taken off
+    against a floor under it, would leave the new one under it too. The cuts answering the reading provide those
+    windows once they have taken the rate under that share. A lower round trip
+    lowers the floor again, as before. A window of too few acks to read a queue
+    from (`measured` unset) counts for nothing; one the gate held, whose offer
+    is unknown, starts the row again. A queue other traffic keeps 350 ms or
+    more deep holds the stream's drain at half (`CongestionSteer.DRAIN_FLOOR`)
+    and becomes the floor at once; under one that deep the steer starves
+    whatever the stream's rate.
+    """
+    floor_ms = display_state.get('rtt_floor_ms') or 0.0
+    if least_ms - floor_ms <= allowed_ms:
+        display_state.pop('link_path_stand', None)
+        return floor_ms
+    if not measured:
+        return floor_ms
+    stand = display_state.setdefault('link_path_stand', {'delivered': 0.0, 'quiet': deque(maxlen=LINK_PATH_WINDOWS)})
+    stand['delivered'] = max(stand['delivered'], delivered_bps)
+    if offered_bps is not None and offered_bps <= stand['delivered'] * LINK_PATH_SENT:
+        stand['quiet'].append(raw_least_ms)
+    else:
+        stand['quiet'].clear()
+    quiet = stand['quiet']
+    if len(quiet) < LINK_PATH_WINDOWS or max(quiet) - min(quiet) > allowed_ms:
+        return floor_ms
+    del display_state['link_path_stand']
+    floor_ms = display_state['rtt_floor_ms'] = min(quiet)
+    buckets = display_state['rtt_floors']['buckets']
+    buckets.clear()
+    buckets.append([int(now // UplinkGauge.FLOOR_BUCKET_SECONDS), floor_ms])
+    return floor_ms
+
+
 def _forget_path(display_state: dict) -> None:
     """Drop what a display's link state learned about the path of the page it
     served, for a new connection taking the display over.
@@ -786,7 +847,7 @@ def _forget_path(display_state: dict) -> None:
     off on every tick. The steered rate stays as the starting point.
     """
     for key in ('rtt_floors', 'rtt_floor_ms', 'link_acks', 'link_steer', 'link_delivered_bps', 'link_carried',
-                'link_jitter_ms', 'link_allowance'):
+                'link_jitter_ms', 'link_allowance', 'link_path_stand'):
         display_state.pop(key, None)
 
 
@@ -3938,7 +3999,10 @@ class DataStreamingServer(BaseStreamingService):
         (`_queued_round_trips`). A queue on the path shows as the least round
         trip among them standing `LINK_QUEUE_MS` past the floor, the least round trip of the last ten
         minutes (`_note_round_trip`), so a queue that stands a while is not
-        taken for the path itself. The least rather than the mean: a key
+        taken for the path itself, unless the rate cuts it answers leave it
+        standing: delay that holds through windows sent well under what the
+        path delivered is a longer path's, or other traffic's, and becomes the
+        floor (`_settle_path_floor`). The least rather than the mean: a key
         frame's burst delays the frames behind it for a moment on any link,
         while a queue the rate has outgrown delays every one of them. A queue
         still building shows sooner, as the last `LINK_RISE_ACKS` round trips
@@ -4016,23 +4080,38 @@ class DataStreamingServer(BaseStreamingService):
         queued_ms = _queued_round_trips(display_state.get('link_acks', ()), path_now)
         stand = queued_ms[-max(len(window), 2 * LINK_RISE_ACKS):]
         least_ms = min(stand, default=0.0) if window else 0.0
+        held = gated or display_state.get('gate_moved_at', 0.0) > last_tick
+        offered_bps = (sent - sent_then) * 8 / (now - last_tick) if last_tick and not held else None
         if not window:
             delivered_bps, queue_s = 0.0, LINK_QUEUE_MS / 1000.0
         else:
             span = window[-1][0] - window[0][0]
             delivered_bps = (window[-1][2] - window[0][2]) * 8 / span if span > 0 else 0.0
             measured_bps = delivered_bps if span > 0 else None
-            newest_ms = queued_ms[-1] - floor_ms
             jitter_ms = display_state.get('link_jitter_ms')
             if jitter_ms is None and len(stand) >= LINK_RISE_ACKS:
                 jitter_ms = display_state['link_jitter_ms'] = _round_trip_jitter(stand)
             allowed_ms = LINK_QUEUE_MS + (jitter_ms or 0.0) / 2
+            catching_up = (delivered_bps > self._video_bitrate_kbps(display_state) * 1000
+                           and window[-1][1] < window[0][1])
+            raw_least_ms = min(a[1] for a in list(display_state['link_acks'])[-len(stand):])
+            settled_ms = _settle_path_floor(display_state, least_ms, raw_least_ms, allowed_ms, delivered_bps,
+                                            offered_bps, len(window) >= 2 * LINK_RISE_ACKS and not catching_up,
+                                            now)
+            if settled_ms != floor_ms:
+                data_logger.info(
+                    f"Congestion control[{display_id}]: round trip floor {floor_ms:.0f} -> {settled_ms:.0f} ms "
+                    f"(the rate cuts left it standing)")
+                floor_ms = settled_ms
+                path_now = _path_rate(display_state['link_acks'], floor_ms)
+                queued_ms = _queued_round_trips(display_state['link_acks'], path_now)
+                stand = queued_ms[-max(len(window), 2 * LINK_RISE_ACKS):]
+                least_ms = min(stand)
+            newest_ms = queued_ms[-1] - floor_ms
             run = LINK_RISE_ACKS + round((jitter_ms or 0.0) / LINK_RISE_JITTER_MS)
             row = queued_ms[-run:]
             rising = (len(row) >= LINK_RISE_ACKS and all(b > a for a, b in zip(row, row[1:]))
                       and row[-1] - floor_ms > allowed_ms)
-            catching_up = (delivered_bps > self._video_bitrate_kbps(display_state) * 1000
-                           and window[-1][1] < window[0][1])
             queued = (least_ms - floor_ms > allowed_ms or rising) and not catching_up
             if not queued and not catching_up and jitter_ms is not None:
                 display_state['link_jitter_ms'] = jitter_ms + LINK_JITTER_GAIN * (
@@ -4044,8 +4123,6 @@ class DataStreamingServer(BaseStreamingService):
                 delivered_bps = max(delivered_bps, previous_bps)
         lo_kbps, _ = app_settings.video_bitrate
         current = self._video_bitrate_kbps(display_state)
-        held = gated or display_state.get('gate_moved_at', 0.0) > last_tick
-        offered_bps = (sent - sent_then) * 8 / (now - last_tick) if last_tick and not held else None
         if offered_bps is not None and window and measured_bps is not None:
             display_state['link_carried'] = measured_bps >= LINK_CARRIED_SHARE * offered_bps
         steer = display_state.setdefault('link_steer', CongestionSteer())

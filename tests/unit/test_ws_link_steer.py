@@ -17,7 +17,10 @@ on a path that carried less than was sent, nor does a queue under a still
 screen's trickle unless the gate held some of it, a page taking the display over
 is measured against its own path, whatever else applies a bitrate applies the
 steered one, and the capture's tracked settings carry it, so the target the
-stats report is the rate the encoder runs at.
+stats report is the rate the encoder runs at. A queue that outlasts the cuts it
+answers, a longer path's or other traffic's, becomes the floor, so the stream
+runs at its share rather than at the least rate; one the stream filled itself
+never does, nor does one a stream already held at its share sits behind.
 """
 import os
 import random
@@ -281,6 +284,60 @@ t = run(20.0, 0.0, 5, sent_kbps=40.0)
 frames_at(8, 3200, t, 5)
 check("while over a path slower than the rate their queue still backs the rate off",
       bool(module.rates) and module.rates[0] < 3200, module.rates)
+
+shared = {"queue_kbit": 0.0}
+
+
+def shared_path(start, seconds, share_kbps, content_kbps, cross_ms=0.0):
+    """A path giving the stream `share_kbps` through a queue of its own, behind
+    `cross_ms` of queue other traffic keeps standing; the stream sends what its
+    content needs, or its target where that is less. Acks every 50 ms, the
+    steer every half second; returns the end time and the floor each second."""
+    t, floors = start, []
+    while t < start + seconds - 1e-9:
+        offered = min(content_kbps, server._video_bitrate_kbps(state))
+        before = shared["queue_kbit"]
+        shared["queue_kbit"] = max(0.0, before + (offered - share_kbps) * 0.05)
+        delivered = offered + (before - shared["queue_kbit"]) / 0.05
+        rtt = 20.0 + cross_ms + shared["queue_kbit"] / share_kbps * 1000
+        t = run(rtt, t, 0.05, delivered_kbps=delivered, sent_kbps=offered)
+        if abs(t - round(t)) < 1e-6:
+            floors.append(state["rtt_floor_ms"])
+    return t, floors
+
+
+state = fresh_state()
+module.rates.clear()
+shared["queue_kbit"] = 0.0
+t, _ = shared_path(0.0, 30, 1000, 1500)
+cuts = len(module.rates)
+t, floors = shared_path(t, 60, 1000, 1500, cross_ms=65.0)
+settled = next((i for i, f in enumerate(floors) if f > 80.0), None)
+check("a queue other traffic keeps standing becomes the floor within seconds of the cut it outlasts",
+      settled is not None and settled <= 10 and 85.0 <= floors[-1] <= 90.0, (settled, floors[-1]))
+late = module.rates[cuts:][-10:]
+check("and the stream then runs at its share of the path rather than at the least rate allowed",
+      late and min(late) > 500 and server._video_bitrate_kbps(state) > 700,
+      (late, server._video_bitrate_kbps(state)))
+t, floors = shared_path(t, 2, 1000, 1500)
+check("a lower round trip once that traffic is gone lowers the floor again at once", floors[0] < 25.0, floors)
+
+for busy_kbps in (3000, 12000):
+    state = fresh_state()
+    module.rates.clear()
+    shared["queue_kbit"] = 0.0
+    t, _ = shared_path(0.0, 10, 1000, 500)
+    t, floors = shared_path(t, 120, 1000, busy_kbps)
+    check(f"a stream of {busy_kbps} kbps filling a slow path by itself backs off on its queue and never moves the floor",
+          bool(module.rates) and max(floors) < 25.0, (len(module.rates), max(floors)))
+
+state = fresh_state()
+module.rates.clear()
+shared["queue_kbit"] = 0.0
+t, _ = shared_path(0.0, 30, 3000, 12000)
+t, floors = shared_path(t, 120, 3000, 12000, cross_ms=65.0)
+check("a stream the steer holds at its share under another flow's queue never moves the floor",
+      max(floors) < 25.0 and server._video_bitrate_kbps(state) > 1500, (max(floors), server._video_bitrate_kbps(state)))
 
 state = fresh_state()
 module.rates.clear()
