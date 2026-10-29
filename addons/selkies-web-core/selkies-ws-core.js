@@ -7880,6 +7880,11 @@ class WorkerWebSocket {
     socketOpenedAt = performance.now();
     reconnectUnopened = 0;
     initialSettingsSent = false;
+    // Before the probes below: the server's MODE, and what follows it, can land while they
+    // run, and the status they leave must stand.
+    status = 'connected_waiting_mode';
+    loadingText = 'Connection established. Waiting for server mode...';
+    updateStatusDisplay();
     await settleFullColorSupport();
     await settleTenBitSupport();
     if (await h264FramingReady === 'avcc') console.info('[Selkies] H.264 decodes here with an avcC description; frames are reframed for it.');
@@ -7887,9 +7892,6 @@ class WorkerWebSocket {
     entryPageChanged().then((changed) => { if (changed) location.reload(); });
     wsEverOpened = true;
     try { sessionStorage.removeItem('selkies_mode_flip'); } catch (e) { /* ignore */ }
-    status = 'connected_waiting_mode';
-    loadingText = 'Connection established. Waiting for server mode...';
-    updateStatusDisplay();
     if (typeof DecompressionStream !== 'undefined') {
       try { websocket.send('_gz,1'); } catch (e) { /* handshake is best-effort */ }
     }
