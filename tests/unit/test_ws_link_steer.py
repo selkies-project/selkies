@@ -2,25 +2,26 @@
 """Congestion control over WebSockets: a CBR display whose acked frames all stand a
 queue above the round-trip floor through one half-second window is backed off at
 once by the transports' shared steer, to the headroom of what the path delivered
-through that window less the queue's drain; it is held while that queue drains,
-then stepped back up while the round trip stays at its floor. A queue still
-building is read before it stands a whole window, and a gated display is
-measured by the frames still acked from before the gate shut. A window a stall
-acked late backs off from what the path delivered just before. A round trip at
-its floor never moves the rate, nor does the time a low frame rate's frames take
-to cross a path not much faster than the stream, one key frame's burst does not
-either, round trips a jittering path spreads or a lossy one holds back never do,
-a gate shut on a moment's delay or frames held back a moment and delivered
-together do not either, while a queue behind an encoder running over its target
-still does; a window with nothing acked moves nothing unless the gate holds it
-on a path that carried less than was sent, nor does a queue under a still
-screen's trickle unless the gate held some of it, a page taking the display over
-is measured against its own path, whatever else applies a bitrate applies the
-steered one, and the capture's tracked settings carry it, so the target the
-stats report is the rate the encoder runs at. A queue that outlasts the cuts it
-answers, a longer path's or other traffic's, becomes the floor, so the stream
-runs at its share rather than at the least rate; one the stream filled itself
-never does, nor does one a stream already held at its share sits behind.
+through that window less the queue's drain; it is held while that queue drains, then
+stepped back up while the round trip stays at its floor. A queue still building is
+read before it stands a whole window, and a gated display is measured by the frames
+still acked from before the gate shut. A window a stall acked late backs off from
+what the path delivered just before. A round trip at its floor never moves the rate,
+nor does the time a low frame rate's frames take to cross a path not much faster
+than the stream, one key frame's burst does not either, round trips a jittering path
+spreads or a lossy one holds back never do, a gate shut on a moment's delay or
+frames held back a moment and delivered together do not either, nor does a key frame
+closing a window behind acks jitter happens to order, while a queue behind an
+encoder running over its target still does; a stream restarted after a hidden tab is
+measured from its restart; a window with nothing acked moves nothing unless the gate
+holds it on a path that carried less than was sent, nor does a queue under a still
+screen's trickle unless the gate held some of it, a page taking the display over is
+measured against its own path, whatever else applies a bitrate applies the steered
+one, and the capture's tracked settings carry it, so the target the stats report is
+the rate the encoder runs at. A queue that outlasts the cuts it answers, a longer
+path's or other traffic's, becomes the floor, so the stream runs at its share rather
+than at the least rate; one the stream filled itself never does, nor does one a
+stream already held at its share sits behind.
 """
 import os
 import random
@@ -29,7 +30,8 @@ from collections import deque
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "src"))
-from selkies.websockets_mode import DataStreamingServer, _forget_path, _note_round_trip, app_settings  # noqa: E402
+from selkies.websockets_mode import (DataStreamingServer, _forget_path, _note_round_trip, _start_link_window,  # noqa: E402
+                                     app_settings)
 
 passed = failed = 0
 
@@ -206,6 +208,62 @@ start = t
 run(lambda at: 20.0 if at < start + 0.25 else max(20.0, 190.0 - (at - start - 0.25) * 800.0), t, 0.5)
 check("the frames behind a key frame's burst arrive ever sooner, so they never read that way",
       module.rates == [], module.rates)
+
+state = fresh_state()
+state["video_bitrate"] = 8000
+module.rates.clear()
+t, sent = 0.0, 0
+for i in range(200):
+    t = round(t + 0.05, 3)
+    big = i % 100 == 50
+    sent += 1250 + (100_000 if big else 0)
+    state["sent_bytes"] = sent
+    _note_round_trip(state, 20.0 + i % 3 + (16.0 if big else 0.0), sent, t)
+    if i % 10 == 9:
+        server._steer_bitrate_to_link("display2", state, t)
+for rtt in (20.0, 21.0, 22.0):
+    t = round(t + 0.05, 3)
+    sent += 1250
+    state["sent_bytes"] = sent
+    _note_round_trip(state, rtt, sent, t)
+sent += 350_000
+state["sent_bytes"] = sent
+t = round(t + 0.3, 3)
+_note_round_trip(state, 177.0, sent, t)
+server._steer_bitrate_to_link("display2", state, t)
+check("nor does a restart's key frame acked last in a window, crossing slower than the frames before it showed "
+      "the path to, behind acks a millisecond's jitter happens to order", module.rates == [], module.rates)
+
+state = fresh_state()
+state["video_bitrate"] = 8000
+module.rates.clear()
+t, sent = 0.0, 0
+for i in range(200):
+    t = round(t + 0.05, 3)
+    sent += 1250
+    state["sent_bytes"] = sent
+    _note_round_trip(state, 20.0 + i % 3, sent, t)
+    if i % 10 == 9:
+        server._steer_bitrate_to_link("display2", state, t)
+for rtt in (20.0, 21.0, 22.0):
+    t = round(t + 0.05, 3)
+    sent += 1250
+    state["sent_bytes"] = sent
+    _note_round_trip(state, rtt, sent, t)
+t = round(t + 6.0, 3)
+_start_link_window(state, t)
+sent += 80_000
+key = sent
+sent += 250_000
+state["sent_bytes"] = sent
+t = round(t + 0.3, 3)
+_note_round_trip(state, 177.0, key, t)
+t = round(t + 0.14, 3)
+_note_round_trip(state, 317.0, key + 89_000, t)
+server._steer_bitrate_to_link("display2", state, t)
+check("a stream restarted after a hidden tab's six seconds is measured from its restart, so a queue its key frame and "
+      "cleanup read cuts it to a share of what they delivered, not of those seconds", all(r > 2000 for r in module.rates),
+      module.rates)
 
 state = fresh_state()
 module.rates.clear()

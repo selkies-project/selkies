@@ -189,6 +189,14 @@ LINK_ACK_HISTORY = 64
 # that does not jitter; one more per LINK_RISE_JITTER_MS of jitter.
 LINK_RISE_ACKS = 4
 LINK_RISE_JITTER_MS = 3.0
+# An ack carrying this many times the bytes of any before it in such a row (a
+# key frame, a window switch's frame) ends none: its round trip is its own
+# crossing, which a stream's restart after a hidden tab takes far slower than
+# the frames before it showed the path to (300 ms over a 145 ms path).
+LINK_RISE_LONE = 4
+# Seconds without a link-steer tick after which the next window starts afresh
+# (`_start_link_window`): two backpressure checks.
+LINK_GAP_S = 2 * BACKPRESSURE_CHECK_INTERVAL_S
 # What tells a longer path, or a queue other traffic keeps standing, from a
 # queue of the display's own once its round trip has stood past the floor:
 # windows in a row that sent under this share of the most the path delivered
@@ -835,6 +843,20 @@ def _settle_path_floor(display_state: dict, least_ms: float, raw_least_ms: float
     buckets.clear()
     buckets.append([int(now // UplinkGauge.FLOOR_BUCKET_SECONDS), floor_ms])
     return floor_ms
+
+
+def _start_link_window(display_state: dict, now: float) -> None:
+    """Start a display's next link-steer window at `now` where the steer has
+    not run for LINK_GAP_S (its stream stopped: a hidden tab's STOP_VIDEO),
+    for its backpressure task's start and a restarted stream's first checks.
+    A window reaching back past the stop takes what the restart sends and
+    delivers over the whole time it was stopped, a hidden tab's seconds: a
+    queue read then cut the rate to a fraction of a key frame spread over
+    them. A display the steer never measured keeps its first window whole."""
+    last = display_state.get('link_tick_at')
+    if last and now - last > LINK_GAP_S:
+        display_state['link_tick_at'] = now
+        display_state['link_tick_sent'] = display_state.get('sent_bytes', 0)
 
 
 def _forget_path(display_state: dict) -> None:
@@ -3813,6 +3835,9 @@ class DataStreamingServer(BaseStreamingService):
             if self.client_settings_received:
                 await self.client_settings_received.wait()
             data_logger.debug(f"Client settings received, proceeding with backpressure loop for '{display_id}'.")
+            started = self.display_clients.get(display_id)
+            if started is not None:
+                _start_link_window(started, time.monotonic())
 
             while True:
                 await asyncio.sleep(self.backpressure_check_interval_s)
@@ -3837,6 +3862,7 @@ class DataStreamingServer(BaseStreamingService):
                     self._set_backpressure_enabled(display_id, display_state, True)
                     display_state['unacked_since'] = None
                     display_state['stall_gated_at'] = None
+                    _start_link_window(display_state, time.monotonic())
                     continue
 
                 configured_fps = self._capture_fps(display_state)
@@ -4008,22 +4034,24 @@ class DataStreamingServer(BaseStreamingService):
         still building shows sooner, as the last `LINK_RISE_ACKS` round trips
         each longer than the one before and past `LINK_QUEUE_MS`; the frames
         behind a key frame's burst arrive ever sooner, so it never reads that
-        way. A path that jitters asks for more: a Wi-Fi hop, or a lossy one
-        whose retransmissions hold a stream back, spreads round trips over
-        tens of milliseconds with no queue at all, which puts four acks in a
-        rising row once in 24 windows and now and then lifts even the least of
-        a window's ten. Its jitter is the mean change between successive round
-        trips less the change they share, which a queue building or draining
-        adds to every one (`_round_trip_jitter`), taken from the first acks and
-        then averaged over the windows that read no queue. Both verdicts then
-        stand half that jitter higher, and a building queue rises through one
-        more ack per `LINK_RISE_JITTER_MS` of it: four jittered acks rise in a
-        row once in 24 windows and ten once in 3.6 million, while a path that
-        does not jitter keeps the four and reads a queue as soon as it can.
-        Before a session has that many acks, the row it has counts; the late
-        round trips a lossy path's stalls leave count toward its jitter, so
-        they lengthen the row rather than end one. A window of fewer than
-        eight acks, a caret blinking on a still screen, is judged with the acks
+        way, and one closing the row ends none (`LINK_RISE_LONE`): the acks
+        before it must rise themselves. A path that jitters asks for more: a
+        Wi-Fi hop, or a lossy one whose retransmissions hold a stream back,
+        spreads round trips over tens of milliseconds with no queue at all,
+        which puts four acks in a rising row once in 24 windows and now and
+        then lifts even the least of a window's ten. Its jitter is the mean
+        change between successive round trips less the change they share,
+        which a queue building or draining adds to every one
+        (`_round_trip_jitter`), taken from the first acks and then averaged
+        over the windows that read no queue. Both verdicts then stand half
+        that jitter higher, and a building queue rises through one more ack
+        per `LINK_RISE_JITTER_MS` of it: four jittered acks rise in a row once
+        in 24 windows and ten once in 3.6 million, while a path that does not
+        jitter keeps the four and reads a queue as soon as it can. Before a
+        session has that many acks, the row it has counts; the late round
+        trips a lossy path's stalls leave count toward its jitter, so they
+        lengthen the row rather than end one. A window of fewer than eight
+        acks, a caret blinking on a still screen, is judged with the acks
         before it, since the least of two round trips says little. Nor is a
         window whose round trips fell while it delivered more than the rate in
         force: its frames were held back a moment (a lost segment's
@@ -4109,7 +4137,11 @@ class DataStreamingServer(BaseStreamingService):
                 least_ms = min(stand)
             newest_ms = queued_ms[-1] - floor_ms
             run = LINK_RISE_ACKS + round((jitter_ms or 0.0) / LINK_RISE_JITTER_MS)
-            row = queued_ms[-run:]
+            tail = list(display_state['link_acks'])[-run - 1:]
+            sizes = [max(a[2] - b[2], 0) for b, a in zip(tail, tail[1:])]
+            lone = (len(sizes) >= 2 and sizes[-1] >= LINK_MEASURE_BYTES
+                    and sizes[-1] >= LINK_RISE_LONE * max(sizes[:-1]))
+            row = queued_ms[-run - 1:-1] if lone else queued_ms[-run:]
             rising = (len(row) >= LINK_RISE_ACKS and all(b > a for a, b in zip(row, row[1:]))
                       and row[-1] - floor_ms > allowed_ms)
             queued = (least_ms - floor_ms > allowed_ms or rising) and not catching_up
