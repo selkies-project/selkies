@@ -35,7 +35,7 @@ braces inside backticks.
 - TypeScript (`.ts`/`.tsx`): JSDoc blocks with `@param name description`, `@returns`, `@throws`, and no types in
   the tags — the signature is the type. Props are an `interface` or `type` with a line per field.
 - JavaScript (`.js`/`.jsx`): the same JSDoc blocks, but the tags carry the types (`@param {Type} name`,
-  `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks). The wish dashboard's `tsc` compiles
+  `@returns {Type}`, `@typedef`/`@callback` for option bags and callbacks). The dashboard's `tsc` compiles
   `selkies-web-core/lib` through `allowJs`, so these types are checked contracts: a `@type` on an exported
   constant replaces its inferred type for every TypeScript consumer.
 - Both: a `/** ... @module */` block after the license header is the module docstring; `_`-prefixed members are
@@ -45,7 +45,7 @@ braces inside backticks.
 
 Vendored code keeps upstream documentation style and is excluded from the reference: the Python forks
 `src/selkies/Xlib`, `src/selkies/webrtc`, and `src/selkies/ice`, and the shadcn/ui primitives under
-`addons/selkies-dashboard-wish/src/components/ui`; only Selkies-added comments there follow these rules. The three
+`addons/selkies-dashboard/src/components/ui`; only Selkies-added comments there follow these rules. The three
 Python forks are vendored so that they can be changed here rather than worked around, so editing them is the
 expected way to fix what they do -- a change belongs upstream as well where upstream would take it. The
 translation tables and the build helpers (`copy-*.js`, `gendb.js`, the vite and eslint configs) are excluded too.
@@ -164,7 +164,7 @@ what runs where.
   consistency, and slightly more GPU or CPU usage is also acceptable if it has no latency impact and brings a
   substantial quality improvement) >> Overall Bandwidth Efficiency (since encoded frames are only used once, unlike
   .mp4/.mkv)
-- Parity between X11 and Wayland, WebSockets and WebRTC, the default and wish dashboards, and across encoders and
+- Parity between X11 and Wayland, WebSockets and WebRTC, the dashboard's layouts, and across encoders and
   codecs (the hardware encoders, NVENC, VA-API, V4L2 M2M and Tegra, and the software ones, x264, OpenH264, x265,
   kvazaar, libvpx, SVT-AV1 and libjpeg-turbo; H.264, H.265, AV1, VP8, VP9 and JPEG): anything wired up on one side
   but not the other is a bug, and a fix or a feature made for one encoder or codec is checked against every other

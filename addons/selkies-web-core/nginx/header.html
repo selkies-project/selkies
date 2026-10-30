@@ -5,14 +5,13 @@
     <title>Desktop Files</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>
-        /* Mirror the dashboard's stored theme (both front ends are same
-           origin, classic under "theme", wish under "vite-ui-theme"); wish's
+        /* Mirror the dashboard's stored theme (same origin, under "theme");
            "system" and denied storage leave the pick to the media query. */
         (function () {
             var apply = function () {
                 var v = null;
                 try {
-                    v = localStorage.getItem('theme') || localStorage.getItem('vite-ui-theme');
+                    v = localStorage.getItem('theme');
                 } catch (e) { return; }
                 if (v === 'system') { delete document.documentElement.dataset.theme; }
                 else { document.documentElement.dataset.theme = v || 'dark'; }
@@ -22,10 +21,10 @@
         })();
     </script>
     <style>
-        /* The dashboards' palette and type scale, so the file browser reads as
+        /* The dashboard's palette and type scale, so the file browser reads as
            part of the same session rather than a page from somewhere else.
            The script above stamps the dashboard's stored theme choice; with
-           nothing stored it stamps the dark both dashboards default to. */
+           nothing stored it stamps the dark the dashboard defaults to. */
         :root {
             --accent: #a82a69;
             --accent-text: #a82a69;

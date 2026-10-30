@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""The dashboards on the transport/backend cells test_dashboards.py does not
-reach: Wish on WebRTC and on Wayland, and both dashboards' admin UI gates on
-WebRTC and Wayland.
+"""The dashboard on the transport/backend cells test_dashboards.py does not
+reach: the toolbar layout on WebRTC and on Wayland, and both layouts' admin
+UI gates on WebRTC and Wayland.
 
 wish-webrtc-x11 / wish-ws-wl / wish-webrtc-wl:
-    Wish renders its chrome and streams; the gamepad card is shown by default;
-    a server clipboard change that arrives while the Clipboard panel is closed
-    seeds the panel, and text typed into the panel reaches the server's
-    selection (X CLIPBOARD or the compositor's); the Settings panel's framerate
-    slider and encoder menu each produce a change the server acknowledges in
-    its log, with video still arriving after the encoder restart; the Apps
-    panel opens and, with remote commands off, says so.
+    The toolbar renders its chrome and streams; the gamepads panel is shown
+    by default; a server clipboard change that arrives while the Clipboard
+    panel is closed seeds the panel, and text typed into the panel reaches the
+    server's selection (X CLIPBOARD or the compositor's); the settings card's
+    framerate slider and encoder menu each produce a change the server
+    acknowledges in its log, with video still arriving after the encoder
+    restart; the Apps panel opens and, with remote commands off, says so.
 gates-webrtc-x11 / gates-ws-wl / gates-webrtc-wl:
-    ui_show_sidebar=false hides the chrome of both dashboards;
+    ui_show_sidebar=false hides the chrome of both layouts;
     ui_sidebar_show_shortcuts / _webcam / _gamepads=false hide the Shortcuts
-    section, the webcam toggle, and the gamepads section (the visualizer card in
-    Wish) while the microphone and gamepad-input toggles stay.
+    section, the webcam toggle, and the gamepads section (the pads part of
+    the toolbar's panel) while the microphone and gamepad-input toggles stay.
 
 Usage: python3 tests/e2e/test_dashboard_matrix.py [<cell>|all]
 """
@@ -34,12 +34,9 @@ from playwright.sync_api import sync_playwright
 WL_SOCKET = "wayland-1"
 CELLS = ("wish-webrtc-x11", "wish-ws-wl", "wish-webrtc-wl",
          "gates-webrtc-x11", "gates-ws-wl", "gates-webrtc-wl")
-# Encoders as the settings panel labels them (lib/util.js DISPLAY_LABELS), in
-# the order a switch away from the default prefers them: the striped H.264
-# mode keeps the WebCodecs path, JPEG needs no decoder at all.
-ENCODER_BY_LABEL = {"H.264 (Striped)": "h264enc-striped", "JPEG (Striped)": "jpeg",
-                    "H.264": "h264enc", "H.265": "h265enc",
-                    "VP8": "vp8enc", "VP9": "vp9enc", "AV1": "av1enc"}
+# Encoders in the order a switch away from the default prefers them: the
+# striped H.264 mode keeps the WebCodecs path, JPEG needs no decoder at all.
+ENCODER_PREFERENCE = ["h264enc-striped", "jpeg", "h264enc", "h265enc", "vp8enc", "vp9enc", "av1enc"]
 
 # Records the core's clipboard messages (a push that arrives while the panel
 # is closed) and the server settings payload the dashboard renders from.
@@ -103,26 +100,16 @@ def log_since(mark: int, substr: str, timeout: float = 12) -> bool:
 
 
 def open_settings(page: Any) -> bool:
-    """Open the Wish Settings panel at its video Performance card, whose first
-    slider is the frame rate."""
-    if not TD.open_wish_settings_tab(page, "Video", "Performance"):
+    """Open the toolbar's settings card on its Video tab, whose frame rate
+    slider is what the block drives."""
+    if not TD.open_wish_settings_tab(page, "Video"):
         return False
     deadline = time.time() + 6
     while time.time() < deadline:
-        if page.locator('[data-slot="slider-thumb"]').count() > 0:
+        if page.locator('#framerateSlider').count() > 0:
             return True
         time.sleep(0.3)
     return False
-
-
-def encoder_menu_button(page: Any) -> Any:
-    """The Settings panel's encoder dropdown trigger, labeled with the active
-    encoder; None when no such button is rendered."""
-    for label in ENCODER_BY_LABEL:
-        btn = page.locator(f'button:has-text("{label}")').first
-        if btn.count():
-            return btn
-    return None
 
 
 def app_runner_stub_path() -> str:
@@ -138,11 +125,11 @@ def app_runner_stub_path() -> str:
 
 
 def wish_block(cell: str) -> "H.Results":
-    """One Wish cell: stream, clipboard panel both ways, settings applied
-    server-side, apps panel, gamepad card."""
+    """One toolbar cell: stream, clipboard panel both ways, settings applied
+    server-side, apps panel, gamepads panel."""
     mode, wayland = cell_parts(cell)
     res = H.Results(cell)
-    H.server_start(mode=mode, wayland=wayland, web_root=H.WISH_DIST,
+    H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST, layout="wish",
                    extra_env={"PATH": app_runner_stub_path() + os.pathsep
                               + os.environ.get("PATH", "")})
     with sync_playwright() as pw:
@@ -216,11 +203,11 @@ def wish_block(cell: str) -> "H.Results":
 
             res.check("settings panel opens", open_settings(page))
             mark = len(H.server_log())
-            slider = page.locator('[data-slot="slider-thumb"]').first
-            slider.click(force=True, timeout=3000)
+            slider = page.locator('#framerateSlider').first
+            slider.focus()
             time.sleep(0.2)
             for _ in range(2):
-                page.keyboard.press("ArrowRight")
+                page.keyboard.press("ArrowLeft")
                 time.sleep(0.15)
             line = ("Updated framerate to" if mode == "webrtc"
                     else "Applying video settings for 'primary' live (no restart)")
@@ -231,28 +218,26 @@ def wish_block(cell: str) -> "H.Results":
             # (WebRTC streams h264enc alone, so there it is hidden).
             allowed = page.evaluate(
                 "(window.__serverSettings && window.__serverSettings.encoder || {}).allowed || []")
-            TD.open_wish_settings_tab(page, "Video", "Format")
-            button = encoder_menu_button(page)
+            TD.open_wish_settings_tab(page, "Video")
+            menu = page.locator('#encoderSelect')
             picked = None
             if len(allowed) <= 1:
                 res.check(f"settings: no encoder menu when the server offers one encoder ({allowed})",
-                          button is None)
-            elif button is None:
+                          menu.count() == 0)
+            elif menu.count() == 0:
                 res.check("settings: the encoder menu is rendered", False, f"allowed={allowed}")
             else:
-                current = button.inner_text().strip()
-                button.click(force=True, timeout=3000)
-                time.sleep(0.5)
-                items = page.locator('[role="menu"] [role="menuitem"]')
-                labels = [items.nth(i).inner_text().strip() for i in range(items.count())]
-                for label in ENCODER_BY_LABEL:
-                    if label != current and label in labels:
+                current = menu.input_value()
+                offered = page.evaluate("() => [...document.querySelectorAll('#encoderSelect option')]"
+                                        ".filter((o) => !o.disabled).map((o) => o.value)")
+                for value in ENCODER_PREFERENCE:
+                    if value != current and value in offered:
                         mark = len(H.server_log())
-                        items.nth(labels.index(label)).click(force=True, timeout=3000)
-                        picked = ENCODER_BY_LABEL[label]
+                        menu.select_option(value, timeout=3000)
+                        picked = value
                         break
                 res.check("settings: the encoder menu offers another encoder", picked is not None,
-                          f"current={current} items={labels}")
+                          f"current={current} offered={offered}")
             if picked:
                 line = (f"encoder -> {picked}; restarting screen capture" if mode == "webrtc"
                         else "Video parameters changed for 'primary'. Restarting its capture stream")
@@ -285,11 +270,11 @@ def wish_block(cell: str) -> "H.Results":
 
 
 def gates_block(cell: str) -> "H.Results":
-    """The admin UI gates on one transport/backend for both dashboards."""
+    """The admin UI gates on one transport/backend for both layouts."""
     mode, wayland = cell_parts(cell)
     res = H.Results(cell)
-    for dashboard, dist in (("classic", H.CLASSIC_DIST), ("wish", H.WISH_DIST)):
-        H.server_start(mode=mode, wayland=wayland, web_root=dist,
+    for dashboard in H.LAYOUTS:
+        H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST, layout=dashboard,
                        extra_env={"SELKIES_UI_SHOW_SIDEBAR": "false"})
         with sync_playwright() as pw:
             browser = C.chromium_launch(pw)
@@ -299,12 +284,10 @@ def gates_block(cell: str) -> "H.Results":
             page.goto(H.BASE_URL, wait_until="load")
             res.check(f"{dashboard}: video streams with the sidebar hidden", wait_video(page, mode) is not None)
             time.sleep(2.0)
-            chrome = page.evaluate(
-                """(() => !!document.querySelector('.sidebar, .top-menu, .sidebar-container, WISH_CHROME'))()"""
-                .replace("WISH_CHROME", TD.WISH_CHROME))
+            chrome = page.evaluate("""(() => !!document.querySelector('CHROME'))()""".replace("CHROME", TD.CHROME))
             res.check(f"{dashboard}: ui_show_sidebar=false hides chrome", not chrome, chrome)
             browser.close()
-        H.server_start(mode=mode, wayland=wayland, web_root=dist, extra_env={
+        H.server_start(mode=mode, wayland=wayland, web_root=H.DASHBOARD_DIST, layout=dashboard, extra_env={
             "SELKIES_UI_SIDEBAR_SHOW_SHORTCUTS": "false",
             "SELKIES_UI_SIDEBAR_SHOW_WEBCAM": "false",
             "SELKIES_UI_SIDEBAR_SHOW_GAMEPADS": "false",
@@ -319,7 +302,7 @@ def gates_block(cell: str) -> "H.Results":
             # The gates ride the server settings payload, which follows the
             # stream connection; give it a moment to render.
             time.sleep(3.0)
-            if dashboard == "classic":
+            if dashboard == "default":
                 try:
                     page.locator('.toggle-handle').first.click()
                     time.sleep(0.8)

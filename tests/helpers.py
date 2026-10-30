@@ -326,8 +326,9 @@ PORT = int(os.environ.get("E2E_PORT") or _free_port())
 BASE_URL = f"http://127.0.0.1:{PORT}"
 
 CORE_DIST = os.path.join(REPO, "addons/selkies-web-core/dist")
-CLASSIC_DIST = os.path.join(REPO, "addons/selkies-dashboard/dist")
-WISH_DIST = os.path.join(REPO, "addons/selkies-dashboard-wish/dist")
+DASHBOARD_DIST = os.path.join(REPO, "addons/selkies-dashboard/dist")
+#: The dashboard's layouts, as `ui_layout` names them: the sidebar and the toolbar.
+LAYOUTS = ("default", "wish")
 
 WORKDIR = os.environ.get("E2E_WORKDIR", os.path.join(tempfile.gettempdir(), "selkies-tests"))
 os.makedirs(WORKDIR, exist_ok=True)
@@ -579,7 +580,8 @@ _server_starts = 0
 def server_start(mode: str = "websockets", wayland: bool = False,
                  web_root: str = CORE_DIST,
                  extra_env: Optional[dict] = None,
-                 port: int = PORT, log: str = LOG) -> subprocess.Popen:
+                 port: int = PORT, log: str = LOG,
+                 layout: Optional[str] = None) -> subprocess.Popen:
     """Start a selkies server and wait until /api/status answers.
 
     Any previous server on the port is stopped first; the environment is built
@@ -593,6 +595,8 @@ def server_start(mode: str = "websockets", wayland: bool = False,
         extra_env: Extra environment variables merged over the base set.
         port: HTTP port the server listens on.
         log: File that receives the server's combined stdout/stderr.
+        layout: The dashboard layout the server names alone (`ui_layout`),
+            which locks it so no stored pick moves the page off it.
 
     Returns:
         The server process, already answering on `/api/status`.
@@ -610,6 +614,7 @@ def server_start(mode: str = "websockets", wayland: bool = False,
         "SELKIES_ENABLE_BASIC_AUTH": "false",
         "SELKIES_MODE": mode,
         "SELKIES_WEB_ROOT": web_root,
+        **({"SELKIES_UI_LAYOUT": layout} if layout else {}),
         "SELKIES_WAYLAND": "true" if wayland else "false",
         "SELKIES_ENABLE_HTTPS": "false",
     }

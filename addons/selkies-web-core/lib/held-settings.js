@@ -8,7 +8,7 @@
  * Settings a tab holds in place of its user's picks: what a fallback chose (the
  * WebSockets core's encoder fallbacks and crash ladder), and what a display the
  * page shares with another one streams with (`display_settings`). A held value
- * is stored where the pick is, so the settings payloads and both dashboards
+ * is stored where the pick is, so the settings payloads and the dashboard
  * read it, and the pick it replaces is kept under `<key>_pick` (empty for none);
  * the tab is marked in its own sessionStorage, so its reloads keep the hold,
  * while any other tab or later visit puts the picks back. Both cores name the

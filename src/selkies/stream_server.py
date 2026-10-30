@@ -1177,14 +1177,13 @@ FILE_INDEX_HEADER: str = """<!DOCTYPE html>
     <title>Desktop Files</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <script>
-        /* Mirror the dashboard's stored theme (both front ends are same
-           origin, classic under "theme", wish under "vite-ui-theme"); wish's
+        /* Mirror the dashboard's stored theme (same origin, under "theme");
            "system" and denied storage leave the pick to the media query. */
         (function () {
             var apply = function () {
                 var v = null;
                 try {
-                    v = localStorage.getItem('theme') || localStorage.getItem('vite-ui-theme');
+                    v = localStorage.getItem('theme');
                 } catch (e) { return; }
                 if (v === 'system') { delete document.documentElement.dataset.theme; }
                 else { document.documentElement.dataset.theme = v || 'dark'; }
@@ -1194,10 +1193,10 @@ FILE_INDEX_HEADER: str = """<!DOCTYPE html>
         })();
     </script>
     <style>
-        /* The dashboards' palette and type scale, so the file browser reads as
+        /* The dashboard's palette and type scale, so the file browser reads as
            part of the same session rather than a page from somewhere else.
            The script above stamps the dashboard's stored theme choice; with
-           nothing stored it stamps the dark both dashboards default to. */
+           nothing stored it stamps the dark the dashboard defaults to. */
         :root {
             --accent: #a82a69;
             --accent-text: #a82a69;
@@ -2545,7 +2544,10 @@ class CentralizedStreamServer:
         WebSocket/WebRTC toggle from this early, transport-independent probe:
         serverSettings only arrives once a stream connects, so a WebRTC
         session that never comes up would otherwise strand the user with no
-        way back to WebSockets.
+        way back to WebSockets. `ui_layout` is surfaced for the same reason:
+        the dashboard paints its layout before the stream connects, and a
+        page that painted one and switched to the operator's on connect would
+        flash.
         """
         return {
             "current_mode": self.current_mode,
@@ -2553,6 +2555,7 @@ class CentralizedStreamServer:
             "enable_dual_mode": bool(
                 getattr(self.settings, "enable_dual_mode", (False,))[0]
             ),
+            "ui_layout": getattr(self.settings, "ui_layout", "default"),
         }
 
     @staticmethod

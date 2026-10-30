@@ -4,7 +4,7 @@
  *
  * TypeDoc documents exports alone, which fits a library but not the streaming
  * cores: each exports one function and keeps everything else as closures
- * inside it, and the dashboards keep their handlers inside their components.
+ * inside it, and the dashboard keeps its handlers inside its components.
  * This plugin therefore converts every function that carries a docblock —
  * module-level or nested — into its module's page, so the reference covers
  * what the docblocks cover, as griffe does for the Python modules. A default

@@ -5,12 +5,12 @@
  * Runs after generate-python-docs.mjs from the same predev/prebuild npm hooks
  * and adds one gitignored folder per addon beside the Python modules. TypeDoc
  * reads plain JavaScript through the TypeScript compiler's JSDoc support and
- * TypeScript natively, so one configuration covers selkies-web-core, the
- * dashboard, and the wish dashboard; typedoc-plugin-markdown writes the pages
+ * TypeScript natively, so one configuration covers selkies-web-core and the
+ * dashboard; typedoc-plugin-markdown writes the pages
  * as Markdown (not MDX, so nothing in a comment can be mistaken for JSX) and
  * web-reference-plugin.mjs adds front matter and hides `_`-prefixed members.
  *
- * Third-party types the addons import (Radix, Recharts, ...) are not installed
+ * Third-party types the addons import (Base UI, lucide, ...) are not installed
  * here and render as `any`; React's are, so component signatures resolve.
  * Type errors never fail the build: the addons' own lint and typecheck steps
  * own correctness, this script only documents.
@@ -25,14 +25,12 @@ const repoRoot = join(root, '..');
 const addons = join(repoRoot, 'addons');
 const referenceDir = join(repoRoot, 'docs', 'reference');
 
-// Generated pages that make no sense in a reference: translation tables,
-// the wish dashboard's vendored shadcn/ui primitives, and the built core that
-// selkies-dashboard's copy-core.js drops into its src/ at build time.
+// Generated pages that make no sense in a reference: the translation table
+// and the dashboard's vendored shadcn/ui primitives.
 const EXCLUDE = [
   '**/node_modules/**',
   '**/translations*.{js,ts}',
-  '**/selkies-dashboard-wish/src/components/ui/**',
-  '**/selkies-dashboard/src/selkies-core.js',
+  '**/selkies-dashboard/src/components/ui/**',
 ];
 
 // `source` is the directory module names and "Defined in" paths are relative to.
@@ -44,7 +42,6 @@ const ADDONS = [
     entryPoints: ['selkies-core.js', 'selkies-ws-core.js', 'selkies-wr-core.js', 'clipboard-worker.js', 'lib'],
   },
   { dir: 'dashboard', title: 'Dashboard', source: 'selkies-dashboard/src', entryPoints: ['.'] },
-  { dir: 'dashboard-wish', title: 'Dashboard (Wish)', source: 'selkies-dashboard-wish/src', entryPoints: ['.'] },
 ];
 
 async function generate({ dir, title, source, entryPoints }) {

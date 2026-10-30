@@ -131,7 +131,7 @@ def session(engine: str) -> "H.Results":
         return res
     painter = tone = None
     relay = ws.CutRelay(RELAY_PORT, H.PORT)
-    H.server_start("webrtc", wayland=False, web_root=H.CLASSIC_DIST,
+    H.server_start("webrtc", wayland=False, web_root=H.DASHBOARD_DIST,
                    extra_env={"SELKIES_STUN_HOST": "", "SELKIES_TURN_REST_URI": ""})
     try:
         painter = H.spawn([sys.executable, ws.PAINTER, H.TEST_DISPLAY, str(WIDTH), str(HEIGHT), "60"])

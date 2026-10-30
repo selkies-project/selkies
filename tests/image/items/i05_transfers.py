@@ -111,48 +111,27 @@ def run(cell: Any) -> None:
             f"{where or 'not found'} in {up_secs:.1f} s ({up_rate} MB/s); {ups[-1:] if ups else 'no progress'}")
     os.remove(local)
 
-    # Download: a file of the session's through the Download Files listing.
+    # Download: a file of the session's through the file manager the Download Files button opens.
     down = f"down-{name}"
     folder = os.path.dirname(where) if where else "~/Desktop"
     cell.target.sh(f"head -c {SIZE} /dev/urandom > {folder}/{down}")
     want = cell.target.out(f"sha256sum {folder}/{down} | cut -c1-64")
-    got_sha, down_secs, why, listing = "", None, "", None
+    got_sha, down_secs, why = "", None, ""
     try:
         reveal(page, 'button:has-text("Download Files")')
         page.locator('button:has-text("Download Files")').first.click(timeout=5000)
-        # The modal's own frame, as the user sees it: listed once its links render.
-        frame_el = page.locator(".files-modal iframe").first
-        deadline = time.time() + 45
-        while time.time() < deadline and listing is None:
-            try:
-                fr = frame_el.element_handle(timeout=2000).content_frame()
-                if fr is not None and fr.locator(f'a:has-text("{down}")').count():
-                    listing = fr
-            except Exception:
-                pass
-            time.sleep(0.5)
-        R.check("Download Files opens the session's file listing", listing is not None,
-                page.evaluate("""() => [...document.querySelectorAll('iframe')].map(f =>
-                    [f.getAttribute('src'), f.src, f.offsetParent !== null]).concat(
-                    [!!document.querySelector('.files-modal')])"""))
-        if listing is None:
-            # The listing the modal frames, opened on its own, so the download is still measured.
-            listing = cell.ctx.new_page()
-            listing.goto(f"{cell.target.url}/api/files/", wait_until="load", timeout=30000)
-        anchor = listing.locator(f'a:has-text("{down}")').first
-        anchor.wait_for(timeout=30000)
-        owner = page if listing in page.frames else listing
+        dialog = page.locator('[role="dialog"]:has-text("Files")').first
+        dialog.wait_for(timeout=45000)
+        R.check("Download Files opens the session's file manager", dialog.count() > 0)
         t0 = time.time()
-        with owner.expect_download(timeout=600000) as dl:
-            anchor.click(timeout=10000)
-        path = dl.value.path()
+        found, got_sha = FT.wish_row_download(page, dialog, down, timeout=600)
         down_secs = time.time() - t0
-        with open(path, "rb") as f:
-            got_sha = hashlib.sha256(f.read()).hexdigest()
+        if not found:
+            why = "the manager never listed the file"
     except Exception as e:
         why = f"{type(e).__name__}: {e}"[:160]
     down_rate = round(SIZE / down_secs / 1e6, 1) if down_secs else None
-    R.check(f"a {SIZE >> 20} MiB download through the listing's link arrives byte for byte",
+    R.check(f"a {SIZE >> 20} MiB download through the manager's row arrives byte for byte",
             got_sha == want and bool(want), f"in {down_secs and round(down_secs, 1)} s ({down_rate} MB/s) {why}")
     # The same file fetched by curl: what the server's route gives without a browser.
     t0 = time.time()
